@@ -96,7 +96,7 @@
 #define OFPATCH_SYMMETRY  3
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; its flux is prescribed as U_b . Sf
 #define OFPATCH_WEDGE     7
 
 //- SPEC-LIT 120.3: the tensorial mixed velocity condition of the wall and
@@ -105,11 +105,25 @@
 //  is pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
 #define OFGPU_BC_DIRECTION_MIXED 37
 
+//- SPEC-LIT 120.5: the five pressure-driven velocity inlets
+//  (pressureInletVelocity, pressureInletUniformVelocity,
+//  pressureDirectedInletVelocity, pressureDirectedInletOutletVelocity,
+//  pressureInletOutletParSlipVelocity), whose triple
+//  fldPressureInletValue in cuda/field.cu rewrites from the flux every
+//  outer iteration. Mirrors `BcKind::PressureInletVelocity` ..
+//  `BcKind::PressureInletOutletParSlipVelocity` in src/field.rs and is
+//  pinned by `bc_kind_values_match_the_device` in src/field_ops.rs.
+#define OFGPU_BC_PRESSURE_INLET_FIRST 41
+#define OFGPU_BC_PRESSURE_INLET_LAST  45
+
 //- True when the volumetric flux through this boundary face is fixed by the
 //  velocity boundary condition rather than by the pressure equation.
 //
 //  * empty     - a 2-D front or back; it carries no flux by construction
 //  * symmetry  - the mirror condition removes the normal component exactly
+//  * wedge     - SPEC-LIT 119.2, (119.2e): the flux is prescribed as
+//                U_b . Sf, the swirl through the side, which is not zero -
+//                and no pressure correction may move it
 //  * DirectionMixed velocity (SPEC-LIT 120.3) - the face value is (120.3a),
 //                whose normal part n.(I - F).q the wall condition cancels;
 //                the flux is U_b . Sf, so no pressure correction may move it
@@ -120,6 +134,15 @@
 //  interior face that happens to be stored in the boundary arrays.
 OFGPU_DEV bool momFluxIsPrescribed(oflabel kind, ofscalar fr, oflabel uKind)
 {
+    //- SPEC-LIT 120.5, the flux rule: a pressure-driven velocity inlet owns
+    //  NOTHING - its face value is whatever the mass flux through the face
+    //  makes it, so the pressure correction must reach it whatever its fr,
+    //  including the fr = 1 seed and the Dirichlet inflow half of the two
+    //  switched kinds. Answered first, ahead of every test below.
+    if (uKind >= OFGPU_BC_PRESSURE_INLET_FIRST && uKind <= OFGPU_BC_PRESSURE_INLET_LAST)
+    {
+        return false;
+    }
     return kind == OFPATCH_EMPTY
         || kind == OFPATCH_SYMMETRY
         || kind == OFPATCH_WEDGE

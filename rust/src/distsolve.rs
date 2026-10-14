@@ -81,16 +81,21 @@
 
 use cudarc::driver::PushKernelArg;
 
+use crate::comm::Comm;
 use crate::decompose::Decomposition;
 use crate::device::{cfg_for, DevBuf, Gpu};
 use crate::error::{Error, Result};
 use crate::exactsum::ExactReduction;
-use crate::halo::HaloExchange;
+use crate::halo::{HaloExchange, SpmdHalo};
 use crate::ldu::{GpuLduMatrix, HostLduMatrix};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::precon::MultiColour;
 use crate::solver::{self, LinearSolverKind, Preconditioner, SolverControls, SolverKernels};
 use crate::{Label, Scalar};
+
+pub mod spmd;
+
+pub use spmd::{spmd_pcg, spmd_pbicgstab, spmd_solve, SpmdWorkspace};
 
 // ==========================================================================
 //  Which cross-part reduction
@@ -144,6 +149,10 @@ pub struct DistSystem {
     /// a part's own count, which is the `sum(b)/n` hazard SPEC-LIT §72.7 named
     /// and left open.
     n_global_cells: usize,
+    /// The one part this system is, when [`Self::split_one`] built it;
+    /// `None` from [`Self::split`], which holds every part (SPEC-LIT
+    /// §138.5).
+    part: Option<usize>,
 }
 
 impl DistSystem {
@@ -205,7 +214,85 @@ impl DistSystem {
             n,
             n_local,
             n_global_cells: dec.n_global_cells,
+            part: None,
         })
+    }
+
+    /// Build ONE rank's system: part `comm.rank()` of `dec`, and nothing
+    /// else (SPEC-LIT §138.5).
+    ///
+    /// The rank's mesh and its split matrix are uploaded as [`Self::split`]
+    /// uploads every part's, and the two constraint arrays reach the halo
+    /// through the **exchange** as there: `is_fixed` first and `fixed_value`
+    /// second, here through the [`SpmdHalo`] the rank was built with.
+    /// [`Self::rank_part`] answers `Some(part)` for such a system and `None`
+    /// for one from `split`, which is how [`spmd_pcg`] tells the two apart.
+    pub fn split_one(
+        gpu: &Gpu,
+        halo: &mut SpmdHalo,
+        comm: &dyn Comm,
+        m: &HostMesh,
+        dec: &Decomposition,
+        a: &HostLduMatrix,
+    ) -> Result<Self> {
+        // The refusals, in the table's order, BEFORE anything is uploaded or
+        // exchanged: a failure here is per-rank and leaves no rank waiting
+        // in a collective.
+        if comm.size() != dec.n_parts {
+            return Err(Error::Config(format!(
+                "distsolve: split_one needs one rank per part: the world has \
+                 {} ranks, the decomposition has {} parts",
+                comm.size(),
+                dec.n_parts
+            )));
+        }
+        if halo.n_ranks() != dec.n_parts {
+            return Err(Error::Config(format!(
+                "distsolve: split_one's halo plan was built for {} ranks, \
+                 the decomposition has {} parts",
+                halo.n_ranks(),
+                dec.n_parts
+            )));
+        }
+        if halo.part() != comm.rank() {
+            return Err(Error::Config(format!(
+                "distsolve: split_one's halo plan belongs to part {}, but \
+                 this Comm is rank {}",
+                halo.part(),
+                comm.rank()
+            )));
+        }
+        let p = comm.rank();
+        let part = &dec.parts[p];
+        let mesh = GpuMesh::upload(gpu, &part.mesh)?;
+        let split = dec.split_matrix(m, p, a)?;
+        let mut mat = split.upload(gpu)?;
+
+        // The two constraint arrays are the only matrix state a kernel reads
+        // at a halo index, so they are the only ones the exchange has to
+        // fill - `is_fixed` FIRST and `fixed_value` second, exactly as
+        // `split` fills them.
+        let mut is_fixed = gpu.upload(&split.is_fixed)?;
+        let mut fixed_value = gpu.upload(&split.fixed_value)?;
+        halo.label(gpu, comm, &mut is_fixed)?;
+        halo.scalar(gpu, comm, &mut fixed_value)?;
+        mat.is_fixed = is_fixed;
+        mat.fixed_value = fixed_value;
+
+        Ok(Self {
+            mesh: vec![mesh],
+            a: vec![mat],
+            n: vec![part.mesh.n_cells],
+            n_local: vec![part.n_local()],
+            n_global_cells: dec.n_global_cells,
+            part: Some(p),
+        })
+    }
+
+    /// The part this system is, when [`Self::split_one`] built it - `None`
+    /// for a system [`Self::split`] built, which holds every part.
+    pub fn rank_part(&self) -> Option<usize> {
+        self.part
     }
 
     pub fn n_parts(&self) -> usize {
@@ -313,6 +400,15 @@ impl DistWorkspace {
                 "distsolve: a system with no parts has nothing to solve".to_string(),
             ));
         }
+        if sys.rank_part().is_some() {
+            return Err(Error::Config(
+                "distsolve: this system is one rank's part, which \
+                 DistSystem::split_one built; a DistWorkspace spans every \
+                 part of one process, so a rank's system needs an \
+                 SpmdWorkspace instead (SPEC-LIT 138.5)"
+                    .to_string(),
+            ));
+        }
         Ok(Self {
             n: sys.n.clone(),
             n_local: sys.n_local.clone(),
@@ -396,6 +492,9 @@ impl DistWorkspace {
             // Block-local: the factorisation drops the couplings across every
             // cut, and it is coloured in local order.
             Preconditioner::Dic | Preconditioner::Dilu => false,
+            // The V-cycle runs whole-hierarchy; it reaches a distributed
+            // solve with AMG-07b.
+            Preconditioner::Gamg => false,
         };
         reduction_ok && precon_ok
     }
@@ -420,6 +519,14 @@ impl DistWorkspace {
                     )
                 }
             }
+            Preconditioner::Gamg => crate::io::contract::unsupported(
+                "solvers/<var>/preconditioner",
+                requested.name(),
+                &["none", "diagonal"],
+                "diagonal (Jacobi): GAMG preconditioning of a distributed \
+                 solve arrives with AMG-07b",
+                Preconditioner::Diagonal,
+            ),
         }
     }
 

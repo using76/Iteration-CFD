@@ -101,7 +101,7 @@
 //  the cyclic branch's geometric interpolation of psi[nbr] cannot. And
 //  fvLapNonOrth skips it outright; see the note there.
 #define OFPATCH_INTERFACE 6
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; its flux is prescribed as U_b . Sf
 #define OFPATCH_WEDGE     7
 
 // --------------------------------------------------------------------------

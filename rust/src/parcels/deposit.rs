@@ -67,12 +67,21 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet, BLOCK};
 use crate::error::{Error, Result};
 use crate::mesh::GpuMesh;
-use crate::{Label, Scalar};
+use crate::{Acc, Label, Scalar};
 
 use super::Parcels;
 
 #[cfg(test)]
 mod tests;
+
+/// The build's `Scalar` widened to the f64 accumulator [`Acc`] (SPEC-LIT
+/// 118.9) - the exact widening under `single`, the identity in the f64
+/// build. The host totals accumulate in [`Acc`] and narrow ONCE on return.
+#[allow(clippy::useless_conversion)]
+#[inline]
+fn acc64(x: Scalar) -> Acc {
+    f64::from(x)
+}
 
 /// Items per tile in the scan and the radix sort, mirroring
 /// `OFS_TILE = OFS_BLOCK*OFS_ITEMS` in `cuda/parcelsort.cu`. The parcel pool
@@ -307,24 +316,26 @@ impl DepositSnapshot {
 
     /// `sum_P weight[P]`, summed in ascending cell order so that the answer
     /// is a stated, reproducible one rather than whatever order a `sum()`
-    /// happened to use.
+    /// happened to use. Accumulated in [`Acc`] and narrowed ONCE (SPEC-LIT
+    /// 118.9).
     #[must_use]
     pub fn total_weight(&self) -> Scalar {
-        let mut s = 0.0 as Scalar;
+        let mut s = 0.0 as Acc;
         for &w in &self.weight {
-            s += w;
+            s += acc64(w);
         }
-        s
+        s as Scalar
     }
 
-    /// `sum_P mass[P]`, kg, in ascending cell order.
+    /// `sum_P mass[P]`, kg, in ascending cell order. Accumulated in [`Acc`]
+    /// and narrowed ONCE (SPEC-LIT 118.9).
     #[must_use]
     pub fn total_mass(&self) -> Scalar {
-        let mut s = 0.0 as Scalar;
+        let mut s = 0.0 as Acc;
         for &m in &self.mass {
-            s += m;
+            s += acc64(m);
         }
-        s
+        s as Scalar
     }
 }
 

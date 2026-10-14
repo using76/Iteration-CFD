@@ -68,6 +68,10 @@ use crate::error::{Error, Result};
 use crate::solver::{self, one_block, reduce_geometry, to_label, SolverKernels};
 use crate::{Acc, Scalar};
 
+pub mod spmd;
+
+pub use spmd::SpmdReduction;
+
 // ==========================================================================
 //  The limb layout
 // ==========================================================================

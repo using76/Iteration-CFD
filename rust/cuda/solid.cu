@@ -51,7 +51,7 @@
 #define OFPATCH_CYCLIC    4
 #define OFPATCH_PROCESSOR 5
 #define OFPATCH_INTERFACE 6
-//- SPEC-LIT 119.1: a wedge side; treated as SYMMETRY until BC-04
+//- SPEC-LIT 119.2: a wedge side; treated as SYMMETRY in this module
 #define OFPATCH_WEDGE     7
 
 //- Vec3::normalised stays zero below this magnitude. Paired per precision, SPEC-LIT 112.1.

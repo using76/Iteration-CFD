@@ -43,6 +43,7 @@ use std::path::Path;
 
 use crate::error::{IoContext, Result};
 use crate::mesh::HostMesh;
+use crate::types::to_vec3;
 use crate::{Scalar, Vec3};
 
 // ==========================================================================
@@ -137,7 +138,10 @@ pub fn boundary_surface(m: &HostMesh) -> SurfaceOut {
     let mut patch_faces: Vec<Vec<u32>> = vec![Vec::new(); m.patches.len()];
 
     for bf in 0..n_bf {
-        let c = m.b_cf[bf];
+        // The emitted centroid is the WORLD position (SPEC-LIT 118.7); the
+        // frame below is built from `sf` alone, and a translation moves no
+        // normal, so nothing else here shifts.
+        let c = to_vec3(m.world(m.b_cf[bf]));
         let sf = m.b_sf[bf];
         let mag = m.b_mag_sf.get(bf).copied().unwrap_or_else(|| sf.mag());
         // Degenerate face (zero area): nothing sane to draw, skip it rather

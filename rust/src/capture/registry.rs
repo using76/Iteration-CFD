@@ -99,6 +99,22 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ("src/adapt/rebuild.rs", Stance::Via("src/adapt.rs")),
     ("src/adapt/transfer.rs", Stance::Via("src/adapt.rs")),
     (
+        "src/amg/coarse.rs",
+        Stance::Gate("coarse_solve_replays_under_capture"),
+    ),
+    (
+        "src/amg/cycle.rs",
+        Stance::Gate("vcycle_replays_under_capture"),
+    ),
+    (
+        "src/amg/galerkin.rs",
+        Stance::Gate("galerkin_replays_under_capture"),
+    ),
+    (
+        "src/amg/smooth.rs",
+        Stance::Gate("smoothers_replay_under_capture"),
+    ),
+    (
         "src/chem/device.rs",
         Stance::Gate("chem_device_replays_under_capture"),
     ),
@@ -131,6 +147,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
+    (
+        "src/compressible/exact/riemann.rs",
+        Stance::Outside(
+            "the exact Riemann solution is a host answer key in f64 - a \
+             bisection for the star pressure and a sampler at (x, t) - that a \
+             gate compares a computed field against after the run. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 127.2",
+        ),
+    ),
     ("src/contact_angle.rs", Stance::Via("src/vof.rs")),
     (
         "src/dcmetrics.rs",
@@ -153,13 +179,42 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/distsolve/spmd.rs",
+        Stance::Refused(
+            "the SPMD PCG and PBiCGStab fill their halos through SpmdHalo \
+             and reduce through SpmdReduction, and both copy to the host \
+             and hand the bytes to a Comm on every step - host round trips \
+             by construction; both are refused by name at run time \
+             (an_spmd_pcg_refuses_by_name, an_spmd_pbicgstab_refuses_by_name). \
+             Alternative: dist_pcg or dist_pbicgstab in one process, whose \
+             exchange and gather are device-only, or a fixed sweep count \
+             between exchanges",
+        ),
+    ),
+    (
         "src/energy.rs",
         Stance::Gate("the_energy_correction_replays_bitwise"),
     ),
     ("src/exactsum.rs", Stance::Via("src/distsolve.rs")),
     (
+        "src/exactsum/spmd.rs",
+        Stance::Refused(
+            "the SPMD exact reduction copies the rank's maximum, limbs or \
+             gathered partial to the host and hands the bytes to a \
+             Comm::allgather on EVERY collective - host round trips by \
+             construction; it is refused by name at run time \
+             (an_spmd_reduction_refuses_by_name). Alternative: \
+             ExactReduction, whose gather is a device-to-device copy and \
+             is the one-process form",
+        ),
+    ),
+    (
         "src/fan.rs",
         Stance::Gate("the_fan_source_replays_bitwise"),
+    ),
+    (
+        "src/field/advective.rs",
+        Stance::Via("src/field_ops.rs"),
     ),
     ("src/field_ops.rs", Stance::Via("src/momentum.rs")),
     (
@@ -168,6 +223,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/fv.rs", Stance::Via("src/momentum.rs")),
     ("src/halo.rs", Stance::Via("src/distsolve.rs")),
+    (
+        "src/halo/spmd.rs",
+        Stance::Refused(
+            "the SPMD exchange copies the packed cells to the host, hands \
+             them to a Comm and copies the halo back, synchronising the \
+             stream twice - host round trips by construction; it is refused \
+             by name at run time (an_spmd_halo_refuses_by_name). \
+             Alternative: capture the device work BETWEEN two exchanges, or, \
+             in one process, use HaloExchange, whose pack and copy are \
+             device-only",
+        ),
+    ),
     ("src/ldu_ops.rs", Stance::Via("src/solver.rs")),
     ("src/les.rs", Stance::Via("src/models/les.rs")),
     ("src/marangoni.rs", Stance::Via("src/vof.rs")),
@@ -294,6 +361,14 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/psychro.rs",
         Stance::Gate("the_psychrometric_update_replays_bitwise"),
     ),
+    (
+        "src/radiation/dom.rs",
+        Stance::Gate("dom_replays_under_capture"),
+    ),
+    (
+        "src/radiation/p1.rs",
+        Stance::Gate("p1_solve_replays_under_capture"),
+    ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
     (
         "src/s2s.rs",
@@ -355,6 +430,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              Alternative: a PRESCRIBED nAlphaSubCycles from the case instead \
              of one derived from the flux, which removes the read-back; not \
              implemented",
+        ),
+    ),
+    (
+        "src/vv/rans1d.rs",
+        Stance::Outside(
+            "the 1-D RANS pipe oracle is a host answer key in f64 - its sweeps \
+             are its own fixed-point iteration on the radial cell set, run \
+             before or after a solve for a gate to compare against. It launches \
+             no kernel and no time loop calls it, so there is nothing to \
+             capture or replay. SPEC-LIT 143.1",
         ),
     ),
     ("src/wallfunctions.rs", Stance::Via("src/models/k_epsilon.rs")),

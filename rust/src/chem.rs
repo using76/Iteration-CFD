@@ -17,7 +17,8 @@
 //! minimisation (SPEC-LIT §131) lives in [`equilibrium`]. The stiff
 //! Rosenbrock integrator (SPEC-LIT §132) lives in [`rosenbrock`]. The
 //! constant-pressure reactor (SPEC-LIT §132.4) lives in [`reactor`]. The
-//! device kernels (SPEC-LIT §132.9) live in [`device`].
+//! device kernels (SPEC-LIT §132.9) live in [`device`]. Mixture-averaged
+//! transport (SPEC-LIT §133.4) lives in [`transport`].
 
 mod ck_lexer;
 pub mod device;
@@ -27,6 +28,7 @@ pub mod mechanism;
 pub mod reactor;
 pub mod rosenbrock;
 pub mod thermo;
+pub mod transport;
 #[cfg(test)]
 mod tests_mechanism;
 #[cfg(test)]
@@ -35,5 +37,6 @@ pub use kinetics::{production_rates, production_rates_tpy, rates_of_progress, Pr
 pub use equilibrium::{equilibrate_hp, equilibrate_tp, EqOptions, Equilibrium};
 pub use mechanism::{Arrhenius, Blending, Collider, Falloff, Mechanism, Rational, Reaction, ThirdBody};
 pub use thermo::{ElementTable, Interval, SpeciesThermo, ThermoSet, P_ATM, P_BAR, R_GAS};
+pub use transport::{Lewis, MixtureTransport, SpeciesTransport, TransportFit, TransportSet};
 pub use reactor::{ConstPressureReactor, ReactorOptions, ReactorReport};
 pub use rosenbrock::{integrate, integrate_observed, Method, RosOptions, RosStats};

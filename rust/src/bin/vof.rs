@@ -70,8 +70,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use ofgpu::field_ops::{self, FieldKernels};
 use ofgpu::field_setup::{
-    harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_vector_field,
+    harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_scalar_field_with,
+    setup_vector_field, BcInputs, PrghInputs,
 };
 use ofgpu::io::case::{find_start_time, format_time_name};
 use ofgpu::io::dict::FoamDict;
@@ -496,7 +498,47 @@ fn run(o: &Options) -> Result<()> {
 
     setup_scalar_field(&gpu, vof.alpha_mut(), &raw_alpha, &hm)?;
     setup_vector_field(&gpu, vof.u_mut(), &raw_u, &hm)?;
-    setup_scalar_field(&gpu, vof.p_rgh_mut(), &raw_p, &hm)?;
+
+    // SPEC-LIT 120.7: `p_rgh` is the one field the buoyant pressure family
+    // can be written in, so this driver - and only this driver - honours the
+    // four names, in the ABSOLUTE form: `rho_f` is the face's mixture density
+    // from the initial `alpha`, and `u_b` the initial velocity's boundary
+    // faces. A case naming none of the four takes the plain path it always
+    // took, bit for bit; every other driver refuses the names (its pressure
+    // is not `p_rgh`).
+    const PRGH_NAMES: [&str; 4] = [
+        "prghPressure",
+        "prghTotalPressure",
+        "prghTotalHydrostaticPressure",
+        "uniformDensityHydrostaticPressure",
+    ];
+    if raw_p.boundary.values().any(|s| PRGH_NAMES.contains(&s.type_name.as_str())) {
+        let fk = FieldKernels::new(&gpu)?;
+        let ub = {
+            let u = vof.u_mut();
+            field_ops::correct_boundary_conditions_vector(&gpu, &fk, u, &m)?;
+            gpu.download(&u.bf)?
+        };
+        let rho_b = vof.boundary_density(&gpu)?;
+        let g = vof.properties().g;
+        setup_scalar_field_with(
+            &gpu,
+            vof.p_rgh_mut(),
+            &raw_p,
+            &hm,
+            BcInputs {
+                prgh: Some(PrghInputs {
+                    g,
+                    rho_b: Some(&rho_b),
+                    u_b: Some(&ub),
+                    ph_rgh_b: None,
+                }),
+                ..BcInputs::default()
+            },
+        )?;
+    } else {
+        setup_scalar_field(&gpu, vof.p_rgh_mut(), &raw_p, &hm)?;
+    }
 
     // SPEC-LIT S39: the contact angle, out of the SAME alpha field entries
     // `setup_scalar_field` just read. A case naming neither
@@ -1018,6 +1060,33 @@ mod vof_tests {
             solution_only(run_knob(&k, false, "ca45a")),
             solution_only(run_knob(&k, true, "ca45b")),
             "a 45-degree contact angle wrote the same fields as no model at all"
+        );
+    }
+
+    /// **SPEC-LIT 120.7's driver gate.** The atmosphere is where a VOF case
+    /// names a buoyant pressure condition, and the knob turns the case's own
+    /// `fixedValue` of a static `p uniform 0` into `prghPressure` of the same
+    /// static `p`: (120.7b) writes `p - rho_f (g . x_f)` there, which is NOT
+    /// 0 unless the patch sits on the `g . x = 0` plane - so the two runs'
+    /// `p_rgh` levels differ, and both must run to the end without a refusal.
+    /// The refusals by name are `tests/bc_buoyant_pressure.rs`'s.
+    #[test]
+    fn prgh_pressure_on_the_atmosphere_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let k = Knob {
+            label: "0/p_rgh atmosphere prghPressure",
+            file: "0/p_rgh",
+            from: "    atmosphere\n    {\n        type            fixedValue;\n        value           uniform 0;\n    }",
+            to: "    atmosphere\n    {\n        type            prghPressure;\n        p               uniform 0;\n    }",
+            pre: NO_PRE,
+        };
+        assert_ne!(
+            solution_only(run_knob(&k, false, "prghaa")),
+            solution_only(run_knob(&k, true, "prghab")),
+            "prghPressure on the atmosphere wrote the same run as a plain \
+             fixedValue of the same static pressure"
         );
     }
 

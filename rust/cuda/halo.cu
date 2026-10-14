@@ -41,6 +41,11 @@
   as pack-then-copy because a copy between two allocations is the operation an
   ncclSend/ncclRecv pair replaces without changing anything else, and reading
   another rank's memory is the one thing a distributed run cannot do.
+
+  Four payloads are carried: ofscalar, ofvec3, oftensor and oflabel - one
+  kernel each, all the same gather (SPEC-LIT S71.4). The SPMD form of the
+  exchange, which packs with the same kernels and moves the bytes through a
+  Comm instead of a device-to-device copy, is SPEC-LIT S138.3.
 \*---------------------------------------------------------------------------*/
 #include "ofgpu_device.cuh"
 
@@ -98,6 +103,26 @@ extern "C" __global__ void haloPackLabel
 (
     oflabel* __restrict__ sendBuf,
     const oflabel* __restrict__ psi,
+    const oflabel* __restrict__ sendIndex,
+    oflabel nSend,
+    oflabel nCells
+)
+{
+    const oflabel k = OFGPU_TID;
+    if (k >= nSend) return;
+    const oflabel c = sendIndex[k];
+    if (c < 0 || c >= nCells) return;
+    sendBuf[k] = psi[c];
+}
+
+
+//- The same for a tensor field. Nine doubles moved as one struct, so the
+//  halo of a vector field's gradient costs one exchange rather than nine
+//  (PAR-02).
+extern "C" __global__ void haloPackTensor
+(
+    oftensor* __restrict__ sendBuf,
+    const oftensor* __restrict__ psi,
     const oflabel* __restrict__ sendIndex,
     oflabel nSend,
     oflabel nCells

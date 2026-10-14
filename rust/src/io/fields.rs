@@ -94,6 +94,10 @@ pub struct PatchFieldSpec {
     pub ref_gradient_v: Vec<Vec3>,
     pub inlet_value: Vec<Scalar>,
     pub inlet_value_v: Vec<Vec3>,
+    /// `outletInlet`'s outflow value (SPEC-LIT 120.4, (120.4a)), read and written
+    /// back exactly as `inletValue` is.
+    pub outlet_value: Vec<Scalar>,
+    pub outlet_value_v: Vec<Vec3>,
     /// Scalar even on a vector field: the mixed condition blends every
     /// component with the same fraction, so OpenFOAM stores a `scalarField`
     /// here whatever the field's rank.
@@ -761,8 +765,31 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
             }
             // Always a scalar, even on a vector field.
             "valueFraction" => s.value_fraction = parse_scalar_entry(tz)?,
+            // SPEC-LIT 120.5: on a VECTOR field a `refValue` may be SCALAR -
+            // `uniform <number>` or `nonuniform List<scalar> ...` - which a
+            // vector list cannot hold. `surfaceNormalFixedValue` defines its
+            // velocity through exactly that entry, so the two scalar forms
+            // are kept VERBATIM in `extra`, the same way the symmTensor
+            // `valueFraction` above is kept; every other form parses as the
+            // vector entry it always was, so existing files are byte-
+            // identical on read and on write. On a scalar field every form
+            // is a scalar entry.
+            "refValue" if is_vector => {
+                let scalar_form = (tz.is_word("uniform") && !tz.is_punct_at('(', 1))
+                    || (tz.is_word("nonuniform")
+                        && matches!(tz.peek_at(1), Some(Tok::Word(w)) if w.contains("scalar")));
+                if scalar_form {
+                    let raw = gather_raw(tz)?;
+                    s.extra.insert("refValue".to_string(), raw);
+                } else {
+                    s.ref_value_v = parse_vector_entry(tz)?;
+                }
+            }
             // `refGrad` is the spelling some older cases use for refGradient.
-            "value" | "gradient" | "refValue" | "refGradient" | "refGrad" | "inletValue" => {
+            // `outletValue` is `outletInlet`'s outflow value (SPEC-LIT 120.4,
+            // (120.4a)), read exactly as `inletValue` is.
+            "value" | "gradient" | "refValue" | "refGradient" | "refGrad" | "inletValue"
+            | "outletValue" => {
                 if is_vector {
                     let v = parse_vector_entry(tz)?;
                     match k.as_str() {
@@ -770,6 +797,7 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
                         "gradient" => s.gradient_v = v,
                         "refValue" => s.ref_value_v = v,
                         "inletValue" => s.inlet_value_v = v,
+                        "outletValue" => s.outlet_value_v = v,
                         _ => s.ref_gradient_v = v,
                     }
                 } else {
@@ -779,6 +807,7 @@ fn parse_patch_spec(tz: &mut Tokenizer, s: &mut PatchFieldSpec, is_vector: bool)
                         "gradient" => s.gradient = v,
                         "refValue" => s.ref_value = v,
                         "inletValue" => s.inlet_value = v,
+                        "outletValue" => s.outlet_value = v,
                         _ => s.ref_gradient = v,
                     }
                 }
@@ -1267,6 +1296,9 @@ fn write_boundary_field(
             if !s.inlet_value_v.is_empty() {
                 write_vector_entry(out, "        ", "inletValue", &s.inlet_value_v, p, collapse);
             }
+            if !s.outlet_value_v.is_empty() {
+                write_vector_entry(out, "        ", "outletValue", &s.outlet_value_v, p, collapse);
+            }
             if !s.gradient_v.is_empty() {
                 write_vector_entry(out, "        ", "gradient", &s.gradient_v, p, collapse);
             }
@@ -1292,6 +1324,9 @@ fn write_boundary_field(
             }
             if !s.inlet_value.is_empty() {
                 write_scalar_entry(out, "        ", "inletValue", &s.inlet_value, p, collapse);
+            }
+            if !s.outlet_value.is_empty() {
+                write_scalar_entry(out, "        ", "outletValue", &s.outlet_value, p, collapse);
             }
             if !s.gradient.is_empty() {
                 write_scalar_entry(out, "        ", "gradient", &s.gradient, p, collapse);
@@ -1624,6 +1659,70 @@ boundaryField
         assert_eq!(back.boundary["mixed0"], f.boundary["mixed0"]);
         assert_eq!(back, f);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SPEC-LIT 120.4, (120.4a): `outletInlet`'s `outletValue` - scalar and vector -
+    /// is read and written back exactly as `inletValue` is, so a run that
+    /// rewrites its case carries the condition it was set up with, and a
+    /// read-write-read cycle is the identity.
+    #[test]
+    fn outlet_value_round_trips() {
+        let src = "\
+FoamFile { version 2.0; format ascii; class volScalarField; object p; }
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{
+    outlet
+    {
+        type            outletInlet;
+        outletValue     uniform 3;
+        value           uniform 0;
+    }
+    spread
+    {
+        type            outletInlet;
+        outletValue     nonuniform List<scalar> 2 (3 4.5);
+        value           uniform 0;
+    }
+}
+";
+        let f = read_scalar_str(src, 3).unwrap();
+        assert_eq!(f.boundary["outlet"].outlet_value, vec![3.0]);
+        assert_eq!(f.boundary["spread"].outlet_value, vec![3.0, 4.5]);
+
+        let dir = scratch("outlet_value_rt");
+        let path = dir.join("0").join("p");
+        write_scalar_field(&path, &f, "0").unwrap();
+        let back = read_scalar_field(&path, 3).unwrap();
+        assert_eq!(back, f, "the scalar outletValue must survive the writer");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("outletValue"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let vsrc = "\
+FoamFile { version 2.0; format ascii; class volVectorField; object U; }
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    outlet
+    {
+        type            outletInlet;
+        outletValue     uniform (1 2 3);
+        value           uniform (0 0 0);
+    }
+}
+";
+        let v = read_vector_str(vsrc, 3).unwrap();
+        assert_eq!(v.boundary["outlet"].outlet_value_v, vec![Vec3::new(1.0, 2.0, 3.0)]);
+
+        let dir = scratch("outlet_value_v_rt");
+        let path = dir.join("0").join("U");
+        write_vector_field(&path, &v, "0").unwrap();
+        let back = read_vector_field(&path, 3).unwrap();
+        assert_eq!(back, v, "the vector outletValue must survive the writer");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

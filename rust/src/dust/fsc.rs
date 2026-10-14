@@ -24,7 +24,7 @@
 //!   SPEC-LIT §154.5 - the extended FSC (154.7)
 //!   SPEC-LIT §154.6 - the TFC limit (154.9)
 //!   SPEC-LIT §154.7 - the f32-safe rate constant (154.10), the zero rule
-//!     and the K_b range; §118.7 records why K_b is formed once in f64
+//!     and the K_b range; §118.11 records why K_b is formed once in f64
 //!   SPEC-LIT §154.8 - the implicit split (154.11)
 //!   C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
 //!     (2020) 104237, DOI 10.1016/j.jlp.2020.104237 - eqs. (3)-(7), (15)-(17)
@@ -106,7 +106,7 @@ pub struct FscInputs {
 }
 
 /// The closures' constants, formed once on the host in f64 (§154.7,
-/// §118.7) and handed to the kernels as they are.
+/// §118.11) and handed to the kernels as they are.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FscConstants {
     pub model: CombustionModel,

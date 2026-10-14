@@ -68,7 +68,9 @@
 //! **error** and not a silent success - CG minimises over a Krylov space using
 //! `A`-orthogonality, and on an asymmetric matrix that is not an inner
 //! product, so the method does not converge slowly, it converges to the wrong
-//! thing or not at all.
+//! thing or not at all. `GAMG` runs natively since `SPEC-LIT` 141.5: one
+//! iteration is one V-cycle of [`crate::amg`] ([`solve_gamg`]), and the
+//! same cycle is available as the preconditioner `Preconditioner::Gamg`.
 //!
 //! # Mixed-precision refinement under `single`
 //!
@@ -374,6 +376,12 @@ pub struct SolverWorkspace {
     /// error rather than a quiet downgrade - see [`effective_preconditioner`].
     pub multicolour: Option<MultiColour>,
 
+    /// The native GAMG V-cycle (`SPEC-LIT` 141.5), attached by
+    /// [`SolverWorkspace::set_gamg`]. A `Gamg` preconditioner request on
+    /// a workspace without one is refused by name, as `DIC` without a
+    /// colouring is. `None` in every workspace [`Self::new`] builds.
+    pub gamg: Option<crate::amg::Gamg>,
+
     // ---- reduction scratch -----------------------------------------------
     /// The per-block partials every stage-one reduction writes and every
     /// stage-two combine reads: `Acc` in BOTH builds - f64, so the f32
@@ -504,6 +512,7 @@ impl SolverWorkspace {
             y: gpu.zeros(n)?,
             r_diag: gpu.zeros(n)?,
             multicolour: None,
+            gamg: None,
 
             partials: gpu.zeros(MAX_REDUCE_BLOCKS)?,
             partials_b: gpu.zeros(MAX_REDUCE_BLOCKS)?,
@@ -551,6 +560,27 @@ impl SolverWorkspace {
     #[cfg(feature = "single")]
     pub fn ir_outer_steps(&self) -> usize {
         self.ir.as_ref().map(|i| i.outer_steps).unwrap_or(0)
+    }
+
+    /// Attach a GAMG hierarchy (SPEC-LIT 141.5). It was built for a cell
+    /// count, and a workspace of another size is refused by name rather
+    /// than left to index past the end of something.
+    pub fn set_gamg(&mut self, g: crate::amg::Gamg) -> Result<()> {
+        if g.n_fine() != self.n {
+            return Err(Error::Config(format!(
+                "set_gamg: the hierarchy was built for {} cells but this \
+                 workspace holds {} cells; a mismatch of cells is refused",
+                g.n_fine(),
+                self.n
+            )));
+        }
+        self.gamg = Some(g);
+        Ok(())
+    }
+
+    /// The attached GAMG hierarchy, if any.
+    pub fn gamg(&self) -> Option<&crate::amg::Gamg> {
+        self.gamg.as_ref()
     }
 }
 
@@ -1377,6 +1407,21 @@ pub fn effective_preconditioner(
                 )
             }
         }
+        Preconditioner::Gamg => {
+            if w.gamg.is_some() {
+                Ok(requested)
+            } else {
+                crate::io::contract::unsupported(
+                    "solvers/<var>/preconditioner",
+                    requested.name(),
+                    &["none", "diagonal", "DIC", "DILU"],
+                    "diagonal (Jacobi): this solver workspace has no GAMG \
+                     hierarchy attached; build one with amg::Gamg::new and \
+                     attach it with SolverWorkspace::set_gamg",
+                    Preconditioner::Diagonal,
+                )
+            }
+        }
     }
 }
 
@@ -1406,6 +1451,30 @@ pub fn build_preconditioner(
                 .arg(&a.diag)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
+        }
+        return Ok(());
+    }
+
+    // GAMG launches nothing here: the hierarchy was built and uploaded
+    // when `Gamg::new` ran, and a solve applies it as a cycle. Only the
+    // shape is checked, so a hierarchy of another operator is named
+    // rather than left to index past the end of its levels.
+    if precon == Preconditioner::Gamg {
+        let Some(g) = w.gamg.as_ref() else {
+            return Err(Error::Config(
+                "build_preconditioner: GAMG was selected without a \
+                 hierarchy; effective_preconditioner should have rejected \
+                 this already"
+                    .to_string(),
+            ));
+        };
+        if g.n_fine() != n {
+            return Err(Error::Config(format!(
+                "build_preconditioner: the GAMG hierarchy was built for \
+                 {} cells but the operator has {n} cells; a mismatch of \
+                 cells is refused",
+                g.n_fine()
+            )));
         }
         return Ok(());
     }
@@ -1470,6 +1539,14 @@ pub(crate) fn precondition_parts(
             vec_copy(gpu, k, y, x, n)?;
             mc.apply(gpu, y, r_diag, a, m)
         }
+
+        // Only distributed code reaches this function, and it refuses GAMG
+        // first; reaching here means the refusal was bypassed.
+        Preconditioner::Gamg => Err(Error::Config(
+            "precondition: GAMG reaches this partwise path by no route; a \
+             distributed GAMG preconditioner arrives with AMG-07b"
+                .to_string(),
+        )),
     }
 }
 
@@ -1510,6 +1587,7 @@ fn precondition_ws(
         s_hat,
         r_diag,
         multicolour,
+        gamg,
         ..
     } = w;
 
@@ -1518,6 +1596,20 @@ fn precondition_ws(
         PreconTarget::SHat => (s_hat, s),
         PreconTarget::PHatFromR => (p_hat, r),
     };
+
+    // The V-cycle is not a `precondition_parts` shape: it owns its own
+    // per-level scratch inside the `Gamg`, so it takes the two fields it
+    // needs directly (SPEC-LIT 141.5).
+    if precon == Preconditioner::Gamg {
+        return match gamg {
+            Some(g) => g.precondition(gpu, m, a, dst, src),
+            None => Err(Error::Config(
+                "precondition: GAMG was selected without a hierarchy; \
+                 effective_preconditioner should have rejected this already"
+                    .to_string(),
+            )),
+        };
+    }
 
     precondition_parts(gpu, k, dst, src, r_diag, multicolour.as_ref(), a, m, precon, n)
 }
@@ -2250,6 +2342,26 @@ fn pcg_float(
     }
 
     let precon = effective_preconditioner(ctrl.precon, w)?;
+
+    // A V-cycle with nPreSweeps != nPostSweeps is not a symmetric
+    // operator, and PCG needs one (SPEC-LIT 141.5) - refused before any
+    // launch, exactly as PCG on an asymmetric matrix is.
+    if precon == Preconditioner::Gamg {
+        let g = w.gamg.as_ref();
+        if g.map(|g| !g.is_symmetric_cycle()).unwrap_or(false) {
+            let (n_pre, n_post) = g
+                .map(|g| (g.config().n_pre, g.config().n_post))
+                .unwrap_or((0, 0));
+            return Err(Error::Config(format!(
+                "solve_pcg: GAMG preconditioning with nPreSweeps {n_pre} \
+                 and nPostSweeps {n_post} is not a symmetric operator \
+                 (the cycle is symmetric only when they are equal), and \
+                 conjugate gradients need a symmetric one; make the cycle \
+                 symmetric or use PBiCGStab"
+            )));
+        }
+    }
+
     build_preconditioner(gpu, k, w, a, m, precon)?;
 
     device_norm_factor_rhs(gpu, k, w, &*psi, b, a, m)?;
@@ -2370,6 +2482,177 @@ fn cg_p_update(gpu: &Gpu, k: &SolverKernels, w: &mut SolverWorkspace, n: usize) 
             .launch(cfg_for(n))?;
     }
     Ok(())
+}
+
+// ==========================================================================
+//  Native GAMG - SPEC-LIT 141.5
+// ==========================================================================
+
+/// The algebraic multigrid V-cycle as a solver on its own (SPEC-LIT
+/// 141.5): `psi <- V(psi, b)` per iteration, with the §8.4 residual of
+/// `b - A psi` tested every `check_interval` iterations by the same
+/// kernels as the Krylov solvers. One iteration is one cycle. The
+/// hierarchy comes from the workspace (`SolverWorkspace::set_gamg`); a
+/// request without one is refused by name, and `ctrl.precon` is
+/// ignored - the cycle IS the method here.
+#[cfg(not(feature = "single"))]
+pub fn solve_gamg(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    gamg_float(gpu, k, psi, &a.source, a, m, w, ctrl)
+}
+
+/// [`solve_gamg`], SPEC-LIT §118.4 refined under `single`: the unchanged
+/// float body of [`gamg_float`] inside [`solve_refined`]. A
+/// `fixed_iters` solve and an empty system are NOT refined.
+#[cfg(feature = "single")]
+pub fn solve_gamg(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    if let Some(i) = w.ir.as_mut() {
+        i.outer_steps = 0;
+    }
+    if ctrl.fixed_iters || a.n_cells == 0 {
+        return gamg_float(gpu, k, psi, &a.source, a, m, w, ctrl);
+    }
+    solve_refined(gpu, k, psi, a, m, w, ctrl, gamg_float, "solve_gamg")
+}
+
+/// The unchanged float body against an explicit right-hand side `b`, the
+/// [`pcg_float`] skeleton around one [`crate::amg::Gamg::vcycle`] per
+/// iteration (SPEC-LIT 141.5).
+#[allow(clippy::too_many_arguments)]
+fn gamg_float(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    let n = a.n_cells;
+    let mut perf = SolverPerformance {
+        converged: true,
+        ..Default::default()
+    };
+    if n == 0 {
+        return Ok(perf);
+    }
+    perf.converged = false;
+    refuse_round_trip_in_capture(gpu, ctrl, "solve_gamg")?;
+
+    check_workspace(w, n)?;
+    if psi.len() < n {
+        return Err(Error::Config(format!(
+            "solve_gamg: psi holds {} values, the system has {n} cells",
+            psi.len()
+        )));
+    }
+
+    let Some(gamg) = w.gamg.as_ref() else {
+        return Err(Error::Config(
+            "solve_gamg: solver GAMG was requested, but this workspace has \
+             no GAMG hierarchy attached; build one with amg::Gamg::new and \
+             attach it with SolverWorkspace::set_gamg"
+                .to_string(),
+        ));
+    };
+    if gamg.n_fine() != n {
+        return Err(Error::Config(format!(
+            "solve_gamg: the GAMG hierarchy was built for {} cells but the \
+             operator has {n} cells; a mismatch of cells is refused",
+            gamg.n_fine()
+        )));
+    }
+
+    device_norm_factor_rhs(gpu, k, w, &*psi, b, a, m)?;
+    vec_sub(gpu, k, &mut w.r, b, &w.apsi, n)?;
+
+    device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
+    copy_scalar(gpu, k, &mut w.final_res, &w.initial_res)?;
+
+    gpu.fill_zero(&mut w.flag)?;
+
+    let max_iter = ctrl.max_iter.max(0) as usize;
+    let interval = ctrl.check_interval.max(1) as usize;
+    let checking = !ctrl.fixed_iters;
+
+    if checking {
+        convergence_test(
+            gpu, k, &mut w.flag, &w.initial_res, &w.initial_res, &w.norm_factor, ctrl, 0,
+        )?;
+        perf.converged = read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)?;
+    }
+
+    // The cycle needs `&mut` on the `Gamg` while the convergence test
+    // needs its own vectors, so the workspace is split here the way
+    // `precondition_ws` splits it.
+    let SolverWorkspace {
+        gamg,
+        apsi,
+        r,
+        partials,
+        final_res,
+        flag,
+        flag_host,
+        flag_event,
+        initial_res,
+        norm_factor,
+        ..
+    } = w;
+
+    if !perf.converged {
+        for it in 0..max_iter {
+            let iters = it + 1;
+
+            // One iteration is one cycle, from the current psi.
+            let g = gamg
+                .as_mut()
+                .ok_or_else(|| Error::Config("solve_gamg: the GAMG hierarchy vanished mid-solve".to_string()))?;
+            g.vcycle(gpu, m, a, psi, b)?;
+            perf.n_iterations = iters;
+
+            if checking && iters % interval == 0 {
+                amul(gpu, k, apsi, &*psi, a, m)?;
+                vec_sub(gpu, k, r, b, apsi, n)?;
+                let itl = to_label(iters)?;
+                sum_mag_then_test(
+                    gpu,
+                    k,
+                    final_res,
+                    flag,
+                    r,
+                    initial_res,
+                    norm_factor,
+                    partials,
+                    ctrl,
+                    itl,
+                    n,
+                )?;
+                if read_flag(gpu, flag, flag_host, flag_event)? {
+                    perf.converged = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    finish_solve(gpu, k, psi, b, a, m, w, ctrl, &mut perf)?;
+    Ok(perf)
 }
 
 // ==========================================================================
@@ -2792,7 +3075,7 @@ fn finish_solve(
 /// ```text
 /// PBiCGStab -> solve_pbicgstab
 /// PCG       -> solve_pcg, after checking the matrix really is symmetric
-/// GAMG      -> Error: it is a pressure BACKEND here, not a Krylov method
+/// GAMG      -> solve_gamg, the native V-cycle of SPEC-LIT 141.5
 /// ```
 ///
 /// **PCG on an asymmetric matrix is an error.** Conjugate gradients minimise
@@ -2848,14 +3131,7 @@ pub fn solve(
     match ctrl.solver {
         LinearSolverKind::PBiCGStab => solve_pbicgstab(gpu, k, psi, a, m, w, ctrl),
         LinearSolverKind::PCG => solve_pcg(gpu, k, psi, a, m, w, ctrl),
-        LinearSolverKind::Gamg => Err(Error::Config(
-            "solver GAMG was requested. Algebraic multigrid is not a Krylov \
-             method and is not reimplemented here (SPEC-LIT 8.3): it reaches \
-             ofgpu only as the AMGX pressure backend, which the pressure \
-             equation selects through crate::pressure. For any other equation \
-             use PBiCGStab, or PCG if the system is symmetric."
-                .to_string(),
-        )),
+        LinearSolverKind::Gamg => solve_gamg(gpu, k, psi, a, m, w, ctrl),
     }
 }
 
@@ -4283,7 +4559,7 @@ mod tests {
     }
 
     #[test]
-    fn gamg_is_refused_with_the_reason() {
+    fn gamg_without_a_hierarchy_is_refused_by_name() {
         let Some(st) = structured([4, 3, 3], true) else { return };
         let mut w = SolverWorkspace::for_mesh(&st.gpu, &st.m).expect("workspace");
         let mut x: DevBuf<Scalar> = st.gpu.zeros(st.hm.n_cells).expect("x");
@@ -4292,10 +4568,10 @@ mod tests {
             ..SolverControls::default()
         };
         let e = solve(&st.gpu, &st.k, &mut x, &st.a, &st.m, &mut w, &ctrl)
-            .expect_err("GAMG must be refused outside the pressure backend")
+            .expect_err("a GAMG solve without a hierarchy must be refused")
             .to_string();
         assert!(e.contains("GAMG"), "{e}");
-        assert!(e.contains("AMGX"), "{e}");
+        assert!(e.contains("set_gamg"), "{e}");
     }
 
     /// A mesh-free workspace has no graph to colour, so DIC/DILU is an error

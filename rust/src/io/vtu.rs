@@ -162,7 +162,15 @@ fn build_geometry(m: &HostMesh) -> Geometry {
             let f = m.cf_face[i] as usize;
             let owns = m.cf_own[i] != 0;
             let area = if owns { m.sf[f] } else { -m.sf[f] };
-            emit_face(m.cf[f], area, &mut points, &mut connectivity, &mut cell_faces);
+            // The emitted centroid is the WORLD position (SPEC-LIT 118.7);
+            // the area vector needs no shift - a translation moves no normal.
+            emit_face(
+                to_vec3(m.world(m.cf[f])),
+                area,
+                &mut points,
+                &mut connectivity,
+                &mut cell_faces,
+            );
             n_faces_cell += 1;
         }
 
@@ -170,7 +178,13 @@ fn build_geometry(m: &HostMesh) -> Geometry {
         let bcf_end = m.bcf_offset[c + 1] as usize;
         for i in bcf_start..bcf_end {
             let bf = m.bcf_face[i] as usize;
-            emit_face(m.b_cf[bf], m.b_sf[bf], &mut points, &mut connectivity, &mut cell_faces);
+            emit_face(
+                to_vec3(m.world(m.b_cf[bf])),
+                m.b_sf[bf],
+                &mut points,
+                &mut connectivity,
+                &mut cell_faces,
+            );
             n_faces_cell += 1;
         }
 
@@ -437,8 +451,10 @@ pub fn write_parcels_vtp(
     let mut app = AppendedWriter::default();
 
     let off_points = app.push(Block::f64(
-        live.iter()
-            .flat_map(|&i| [s.x[i].x as f64, s.x[i].y as f64, s.x[i].z as f64]),
+        // SPEC-LIT 118.9: the WORLD positions at f64, exactly as the snapshot
+        // carries them - the f64 build's `x64` is the `Scalar` position, so
+        // the bytes are the bytes this always wrote.
+        live.iter().flat_map(|&i| [s.x64[i].x, s.x64[i].y, s.x64[i].z]),
     ));
     let off_connectivity = app.push(Block::i64((0..n as i64).collect::<Vec<_>>()));
     let off_offsets = app.push(Block::i64((1..=n as i64).collect::<Vec<_>>()));

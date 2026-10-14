@@ -56,6 +56,7 @@ use crate::io::fields::{RawScalarField, RawVectorField};
 use crate::io::output_types::{FieldValues, OutputField};
 use crate::io::{nvdb, usda, vdb, vtu};
 use crate::mesh::HostMesh;
+use crate::types::{to_vec3, DVec3};
 use crate::Scalar;
 
 /// A uniform Cartesian description of the mesh, when one was detected -
@@ -71,12 +72,19 @@ pub type CartesianInfo = nvdb::UniformGrid;
 /// `lo = min(C_P)` this crate's own `cartesian::detect` uses to place the
 /// lattice.
 pub fn cartesian_info(hm: &HostMesh, cart: &crate::pressure::cartesian::CartesianGrid) -> CartesianInfo {
-    let mut lo = hm.c[0];
+    // The lattice is recovered in WORLD coordinates (SPEC-LIT 118.7): the
+    // stored centres are local, so each is widened and shifted once, the min
+    // and the subtraction run in f64, and the `Vec3` the struct stores is
+    // rounded once. The f64 build's `world` is the identity, so the numbers
+    // are HEAD's.
+    let mut lo = hm.world(hm.c[0]);
     for c in &hm.c[..hm.n_cells] {
-        lo = lo.cmpt_min(*c);
+        let w = hm.world(*c);
+        lo = DVec3::new(lo.x.min(w.x), lo.y.min(w.y), lo.z.min(w.z));
     }
-    let spacing = crate::Vec3::new(cart.dx, cart.dy, cart.dz);
-    let origin = lo - spacing * 0.5;
+    let spacing = DVec3::new(f64::from(cart.dx), f64::from(cart.dy), f64::from(cart.dz));
+    let origin = to_vec3(lo - spacing * 0.5);
+    let spacing = to_vec3(spacing);
     CartesianInfo { nx: cart.nx, ny: cart.ny, nz: cart.nz, origin, spacing }
 }
 

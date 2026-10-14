@@ -71,7 +71,7 @@ use crate::device::{DevBuf, Gpu};
 use crate::error::Result;
 use crate::io::contract::{unsupported, unsupported_note};
 use crate::mesh::GpuMesh;
-use crate::{Label, Scalar, Vec3};
+use crate::{Acc, Label, Scalar, Vec3};
 
 /// Which rule regenerates `(fr, ref_value, ref_grad)` each outer iteration.
 ///
@@ -365,6 +365,135 @@ pub enum BcKind {
     /// the device evaluation is
     /// [`direction_mixed_value`](crate::field::direction_mixed_value).
     DirectionMixed = 37,
+
+    /// `outletInlet`, the reverse switch of `inletOutlet` - a fixed value
+    /// where the flow LEAVES, zero-gradient where it comes back in:
+    ///
+    /// ```text
+    /// fr = 1 if phi_b > 0 (outflow), fr = 0 otherwise                    (120.4a)
+    /// refValue = outletValue, refGrad = 0
+    /// ```
+    ///
+    /// Its own kind, OUTSIDE the flux-switched block `[8, 12]` (whose kinds
+    /// are all Dirichlet on INflow), so `fldInletOutletFraction` and its host
+    /// twin `field_setup::update_inlet_outlet` test it by its own value with
+    /// the strict `phi_b > 0` of (120.4a). A face with exactly zero flux is
+    /// zero-gradient under both conditions.
+    OutletInlet = 38,
+
+    /// `advective`, Orlanski's (1976) radiation outlet with the phase speed
+    /// GIVEN rather than estimated: the face relaxes toward a far value along
+    /// the outward normal at the wave speed `w` (120.4b), and `field::advective`
+    /// rewrites the §4 triple from (120.4d) - a Robin face like any other, so
+    /// no evaluation branch of its own. The wave speed and the rate are FACE
+    /// -FIELD inputs, not properties of the kind: CMP-17 passes its own
+    /// `w = u_n + c` and `K = sigma c (1 - M_n^2)/L` of (126.6) to the same
+    /// kernels. `field_setup` refuses the name unless the caller sets
+    /// [`crate::field_setup::BcInputs::advective`], the promise that
+    /// `field::advective` refreshes the condition every step.
+    Advective = 39,
+
+    /// A wedge side (SPEC-LIT 119.2), the rotational self-couple BC-04:
+    /// the cell across the face is the cell itself turned about the axis,
+    /// so on a vector the face value is the chord average
+    ///
+    /// ```text
+    /// U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w                       (119.2c)
+    /// ```
+    ///
+    /// reached with NO new evaluation branch - `cuda/field.cu`'s
+    /// `fldWedgeRefGrad` rewrites `refGrad = Delta_b w` (119.2d) from the
+    /// current cell value before the section-4 evaluation, and the face
+    /// value comes out of the one expression. A scalar is zero-gradient,
+    /// which the seeded triple already is. The flux is prescribed by the
+    /// velocity condition, `phi_b = U_b . Sf` (119.2e) - the swirl through
+    /// the side, which is not zero. The mesh has the last word, as for
+    /// `empty` and `cyclic`: a patch it types `wedge` carries this kind on
+    /// every field, and `type wedge` on a patch it does not is refused by
+    /// name. The host twin of the rewrite is
+    /// [`wedge_ref_grad`](crate::field::wedge_ref_grad).
+    Wedge = 40,
+
+    /// `pressureInletVelocity`, the first of the five pressure-driven
+    /// velocity inlets of SPEC-LIT 120.5: on a patch whose PRESSURE is
+    /// given, the velocity is whatever the mass flux through the face makes
+    /// it (Ferziger & Peric 2002). All five are a section-4 triple with
+    /// `refGrad = 0`, rewritten once per outer iteration from the flux the
+    /// last corrector left, by `fldPressureInletValue` (host twin
+    /// [`pressure_inlet_values`]) before the boundary evaluation:
+    ///
+    /// ```text
+    /// U_b = S_f phi_b/(S_f . S_f),  fr = 1                        (120.5e)
+    /// ```
+    ///
+    /// `momFluxIsPrescribed` answers FALSE for kinds `[41, 45]` whatever
+    /// their `fr`, so the pressure correction reaches the face. A caller
+    /// opts in with [`crate::field_setup::BcInputs::pressure_inlet`]; every
+    /// other setup refuses the name (SPEC-LIT 120.5).
+    PressureInletVelocity = 41,
+
+    /// `pressureInletUniformVelocity` (SPEC-LIT 120.5, (120.5f)): the
+    /// patch-uniform form - `U_b = (S_f/|S_f|) PHI_p/A_p`, the patch sums
+    /// `PHI_p = SUM phi_f` and `A_p = SUM |S_f|` run on one device thread
+    /// per patch head, in `ofacc` face order.
+    PressureInletUniformVelocity = 42,
+
+    /// `pressureDirectedInletVelocity` (SPEC-LIT 120.5, (120.5g)): the flux
+    /// enters along `inletDirection`, `U_b = d_f phi_b/(d_f . S_f)`, with
+    /// the normalised `d_f` per face in the field's `dm` block's first
+    /// three slots.
+    PressureDirectedInletVelocity = 43,
+
+    /// `pressureDirectedInletOutletVelocity` (SPEC-LIT 120.5, (120.5h)):
+    /// (120.5g) where `phi_b < 0` (`fr = 1`), zeroGradient where
+    /// `phi_b >= 0` (`fr = 0`) - switched by `fldInletOutletFraction` on
+    /// the same strict `phi_b < 0` as the flux-switched block `[8, 12]`.
+    PressureDirectedInletOutletVelocity = 44,
+
+    /// `pressureInletOutletParSlipVelocity` (SPEC-LIT 120.5, (120.5i)): the
+    /// parallel-slip inflow - the normal part of (120.5e) plus the
+    /// tangential part of the cell value, `U_b = S_f phi_b/(S_f . S_f) +
+    /// U_P - S_f (S_f . U_P)/(S_f . S_f)` where `phi_b < 0`, zeroGradient
+    /// where `phi_b >= 0`.
+    PressureInletOutletParSlipVelocity = 45,
+
+    /// `fixedMean` (SPEC-LIT 120.6, (120.6a)): the cell profile with one
+    /// constant `s` added, chosen so the area-weighted patch mean is the
+    /// target `meanValue` - `refValue = psi_P + s`, `s = (meanValue A -
+    /// M)/A` from the patch sums `A = SUM |S_f|`, `M = SUM |S_f| psi_P`.
+    /// One rule per patch, rewritten once per outer iteration by
+    /// `fldPatchMeanScalar`/`fldPatchMeanVector` wherever the caller opted
+    /// in with [`crate::field_setup::BcInputs::patch_means`]; host twin
+    /// [`crate::field::patch_mean::patch_mean_values_scalar`].
+    FixedMean = 46,
+
+    /// `fixedMeanOutletInlet` (SPEC-LIT 120.6, (120.6b)): (120.6a)'s mean
+    /// held where the flow LEAVES - `fr = 1` where `phi_f > 0`, zeroGradient
+    /// where it comes back in - so the inflow faces carry `psi_b = psi_P`
+    /// exactly and the patch mean is still `meanValue` whenever any face is
+    /// an outflow.
+    FixedMeanOutletInlet = 47,
+
+    /// `fixedFluxExtrapolatedPressure` (SPEC-LIT 120.6, (120.6f)): a
+    /// fixed-gradient pressure whose gradient is the cell's own `grad p`
+    /// carried onto the face - `refGrad_f = S_f . (grad p)_P/|S_f|`, exact
+    /// for a linear `p`. Scalar only; rewritten once per outer iteration by
+    /// `fldExtrapolatedSnGrad` from the momentum predictor's gradient.
+    FixedFluxExtrapolatedPressure = 48,
+
+    /// `outletMappedUniformInlet` (SPEC-LIT 120.6, (120.6c)): one uniform
+    /// value on every face - `fraction` times the flux-weighted mean over
+    /// the outflow faces of the patch `outletPatch` (its area mean where the
+    /// patch has no outflow), plus `offset`. Fixed point of a loop duct,
+    /// (120.6d): `U = offset/(1 - fraction)`.
+    OutletMappedUniformInlet = 49,
+
+    /// `matchedFlowRateOutletVelocity` (SPEC-LIT 120.6, (120.6e)): the cell
+    /// velocity shifted along the face normal by one constant `c`, chosen so
+    /// the outlet carries out exactly the flow rate entering
+    /// `inletPatch` - `refValue = U_P + c S_f/|S_f|`, `c = (Q - F)/A`.
+    /// Vector only.
+    MatchedFlowRateOutletVelocity = 50,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -376,6 +505,15 @@ pub enum BcKind {
 /// `OFGPU_BC_INLET_OUTLET_*` macros there.
 pub const FLUX_SWITCHED_FIRST: Label = BcKind::InletOutlet as Label;
 pub const FLUX_SWITCHED_LAST: Label = BcKind::PressureInletOutletVelocity as Label;
+
+/// The five pressure-driven velocity inlets, `[PRESSURE_INLET_FIRST,
+/// PRESSURE_INLET_LAST]` (SPEC-LIT 120.5). `momFluxIsPrescribed` in
+/// `cuda/momentum.cu` answers FALSE for every kind in the range whatever its
+/// `fr`, and `fldPressureInletValue` in `cuda/field.cu` rewrites their
+/// `ref_value` from the flux; `bc_kind_values_match_the_device` pins both
+/// numbers to the `OFGPU_BC_PRESSURE_INLET_*` macros there.
+pub const PRESSURE_INLET_FIRST: Label = BcKind::PressureInletVelocity as Label;
+pub const PRESSURE_INLET_LAST: Label = BcKind::PressureInletOutletParSlipVelocity as Label;
 
 /// Every condition [`BcKind::from_name`] accepts, for the diagnostic a
 /// rejected name gets. Kept next to the match so the two cannot drift.
@@ -444,6 +582,37 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "partialSlip",
     "fixedNormalSlip",
     "fixedShearStress",
+    // SPEC-LIT 120.4: the two outlets. `outletInlet` is (120.4a)'s reverse
+    // flux switch; `advective` is (120.4b)-(120.4d)'s Robin outlet, reached
+    // only where a caller refreshes it every step (BcInputs::advective).
+    "outletInlet",
+    "advective",
+    // SPEC-LIT 120.5: the velocity-inlet family. The three fixed-value
+    // profiles ride `BcKind::FixedValue` with a per-face value the setup
+    // computes; the five pressure-driven kinds rewrite their triple from the
+    // flux every outer iteration, where the caller opts in.
+    "surfaceNormalFixedValue",
+    "cylindricalInletVelocity",
+    "swirlFlowRateInletVelocity",
+    "pressureInletVelocity",
+    "pressureInletUniformVelocity",
+    "pressureDirectedInletVelocity",
+    "pressureDirectedInletOutletVelocity",
+    "pressureInletOutletParSlipVelocity",
+    // SPEC-LIT 120.6: the Outlets II family - four patch-mean rewrites and
+    // an extrapolated pressure gradient, refreshed every outer iteration
+    // where the caller opts in with `BcInputs::patch_means`.
+    "fixedMean",
+    "fixedMeanOutletInlet",
+    "fixedFluxExtrapolatedPressure",
+    "outletMappedUniformInlet",
+    "matchedFlowRateOutletVelocity",
+    // SPEC-LIT 120.7: the buoyant pressure family - a static pressure at a
+    // patch, written in the solved `p_rgh` from the caller's `PrghInputs`.
+    "prghPressure",
+    "prghTotalPressure",
+    "prghTotalHydrostaticPressure",
+    "uniformDensityHydrostaticPressure",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -492,6 +661,175 @@ pub fn direction_mixed_value(dm: &[Scalar], u_p: Vec3, delta: Scalar) -> Vec3 {
     Vec3::new(a.x + (qx - b.x), a.y + (qy - b.y), a.z + (qz - b.z))
 }
 
+/// The host twin of `fldWedgeRefGrad` - SPEC-LIT 119.2, (119.2c)-(119.2d).
+///
+/// The wedge condition is a rotational self-couple: the cell across the
+/// face is the cell itself turned about the axis by `sigma theta`
+/// (`sigma = +1` on the front patch, `-1` on the back), so the chord
+/// average is `U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w` and the
+/// condition is the section-4 triple `fr = 0, refValue = 0,
+/// refGrad = Delta_b w` with
+///
+/// ```text
+/// w = ( sigma sin(theta) (a x U_P) - vers(theta) (U_P - a (a . U_P)) ) / 2
+/// ```
+///
+/// `vers_theta` is `vers(theta) = 1 - cos(theta) = 2 sin^2(theta/2)`. The
+/// SAME operation order the kernel runs: `d = a . U_P` summed x, y, z left
+/// to right; `c = a x U_P`; `q = U_P - a d`;
+/// `w = (sigma sin(theta) c - vers(theta) q)/2`; `refGrad = Delta_b w`.
+/// `a`, `sin(theta)` and `vers(theta)` are formed in f64 from 119.1's f64
+/// wedge and cast once (SPEC-LIT 118.2). The device contracts FMA, so host
+/// and device agree to round-off, not bitwise.
+#[inline]
+pub fn wedge_ref_grad(
+    u_p: Vec3,
+    axis: Vec3,
+    sin_theta: Scalar,
+    vers_theta: Scalar,
+    sigma: Scalar,
+    delta: Scalar,
+) -> Vec3 {
+    let d = axis.x * u_p.x + axis.y * u_p.y + axis.z * u_p.z;
+    let c = Vec3::new(
+        axis.y * u_p.z - axis.z * u_p.y,
+        axis.z * u_p.x - axis.x * u_p.z,
+        axis.x * u_p.y - axis.y * u_p.x,
+    );
+    let q = Vec3::new(
+        u_p.x - axis.x * d,
+        u_p.y - axis.y * d,
+        u_p.z - axis.z * d,
+    );
+    let s = sigma * sin_theta;
+    let w = Vec3::new(
+        (s * c.x - vers_theta * q.x) / 2.0,
+        (s * c.y - vers_theta * q.y) / 2.0,
+        (s * c.z - vers_theta * q.z) / 2.0,
+    );
+    Vec3::new(delta * w.x, delta * w.y, delta * w.z)
+}
+
+/// The host twin of `fldPressureInletValue` - SPEC-LIT 120.5,
+/// (120.5e)-(120.5i). Indexed by boundary face; `u_p[i]` is the value of
+/// the cell next to face `i`. Writes `ref_value[i]` only where
+/// `kinds[i]` is one of the five pressure-driven kinds `[41, 45]`; every
+/// other face is untouched, so the whole boundary can be swept.
+///
+/// The SAME operation order the kernel runs: `S.S` summed `x*x + y*y +
+/// z*z` left to right, the flux divided in first and the quotient scaled
+/// onto the vector, (120.5f)'s patch sums run face by face in face order
+/// in `Acc` (f64, both builds) and `PHI_p/A_p` rounded once. The device
+/// contracts FMA, so host and device agree to round-off, not bitwise.
+///
+/// # Panics
+/// Only through the slice bounds: `ref_value`, `b_sf`, `b_mag_sf`,
+/// `phi_b`, `u_p` and `kinds` must each cover the boundary, and `dm` the
+/// 12-entry block of every face the kinds 43/44 read.
+#[allow(clippy::too_many_arguments)]
+pub fn pressure_inlet_values(
+    kinds: &[Label],
+    b_patch: &[Label],
+    phi_b: &[Scalar],
+    b_sf: &[Vec3],
+    b_mag_sf: &[Scalar],
+    dm: &[Scalar],
+    u_p: &[Vec3],
+    ref_value: &mut [Vec3],
+) {
+    let n = ref_value.len();
+    for i in 0..n {
+        let kind = kinds[i];
+        if !(PRESSURE_INLET_FIRST..=PRESSURE_INLET_LAST).contains(&kind) {
+            continue;
+        }
+        let sf = b_sf[i];
+        let phi = phi_b[i];
+        // The patch-uniform form (120.5f): one thread per patch head -
+        // a face whose predecessor is not the same patch carrying the
+        // same kind - sums the patch's phi and |S_f| in face order, then
+        // a second loop writes every face of the patch. Other kind-42
+        // faces are written by their head, never by themselves.
+        if kind == BcKind::PressureInletUniformVelocity as Label {
+            let head = i == 0
+                || b_patch[i - 1] != b_patch[i]
+                || kinds[i - 1] != BcKind::PressureInletUniformVelocity as Label;
+            if !head {
+                continue;
+            }
+            let mut acc_phi: Acc = 0.0;
+            let mut acc_a: Acc = 0.0;
+            let mut j = i;
+            while j < n
+                && b_patch[j] == b_patch[i]
+                && kinds[j] == BcKind::PressureInletUniformVelocity as Label
+            {
+                acc_phi += phi_b[j] as Acc;
+                acc_a += b_mag_sf[j] as Acc;
+                j += 1;
+            }
+            let ubar = if acc_a != 0.0 {
+                (acc_phi / acc_a) as Scalar
+            } else {
+                0.0 as Scalar
+            };
+            for f in i..j {
+                let m = b_mag_sf[f];
+                let k = if m != 0.0 { ubar / m } else { 0.0 };
+                ref_value[f] = Vec3::new(b_sf[f].x * k, b_sf[f].y * k, b_sf[f].z * k);
+            }
+            continue;
+        }
+        let rv = match kind {
+            k if k == BcKind::PressureInletVelocity as Label => {
+                let ss = sf.x * sf.x + sf.y * sf.y + sf.z * sf.z;
+                if ss != 0.0 {
+                    let q = phi / ss;
+                    Vec3::new(sf.x * q, sf.y * q, sf.z * q)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            k if k == BcKind::PressureDirectedInletVelocity as Label
+                || k == BcKind::PressureDirectedInletOutletVelocity as Label =>
+            {
+                let d = Vec3::new(dm[12 * i], dm[12 * i + 1], dm[12 * i + 2]);
+                let ds = d.x * sf.x + d.y * sf.y + d.z * sf.z;
+                if ds != 0.0 {
+                    let q = phi / ds;
+                    Vec3::new(d.x * q, d.y * q, d.z * q)
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            k if k == BcKind::PressureInletOutletParSlipVelocity as Label => {
+                let ss = sf.x * sf.x + sf.y * sf.y + sf.z * sf.z;
+                let d = sf.x * u_p[i].x + sf.y * u_p[i].y + sf.z * u_p[i].z;
+                if ss != 0.0 {
+                    let q = phi / ss;
+                    let t = d / ss;
+                    Vec3::new(
+                        sf.x * q + u_p[i].x - sf.x * t,
+                        sf.y * q + u_p[i].y - sf.y * t,
+                        sf.z * q + u_p[i].z - sf.z * t,
+                    )
+                } else {
+                    Vec3::ZERO
+                }
+            }
+            _ => Vec3::ZERO,
+        };
+        // 44 and 45 hold their Dirichlet form only where the flux comes
+        // IN (`phi_b < 0`, strict); the outflow half is zero-gradient,
+        // whose refValue the section-4 evaluation never reads - the same
+        // strict test `fldInletOutletFraction` switches the fraction by.
+        let inflow = phi < 0.0;
+        let switched = kind == BcKind::PressureDirectedInletOutletVelocity as Label
+            || kind == BcKind::PressureInletOutletParSlipVelocity as Label;
+        ref_value[i] = if switched && !inflow { Vec3::ZERO } else { rv };
+    }
+}
+
 impl BcKind {
     /// Map an OpenFOAM boundary-condition type string, per SPEC-LIT §13.4.
     ///
@@ -517,7 +855,12 @@ impl BcKind {
             // value written by a model and never solved for.
             "calculated" => Self::Calculated,
             "empty" => Self::Empty,
-            "symmetry" | "symmetryPlane" | "slip" | "wedge" => Self::Symmetry,
+            // SPEC-LIT 119.2: `wedge` is its own condition, the rotational
+            // self-couple BC-04 - accepted on any patch by NAME, but a patch
+            // the mesh does not type `wedge` refuses the entry in
+            // `field_setup` (the mesh has the last word, as for `empty`).
+            "symmetry" | "symmetryPlane" | "slip" => Self::Symmetry,
+            "wedge" => Self::Wedge,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
             "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
@@ -547,6 +890,44 @@ impl BcKind {
                 Self::DirectionMixed
             }
             "rotatingWallVelocity" | "translatingWallVelocity" => Self::FixedValue,
+
+            // SPEC-LIT 120.5: the velocity-inlet family. The three
+            // fixed-value profiles ARE a fixedValue - `field_setup` computes
+            // each face's value once from the case's own profile data
+            // ((120.5a)-(120.5c)) and seeds `fr = 1`. The five
+            // pressure-driven kinds keep kinds of their own: their triple is
+            // rewritten from the flux every outer iteration by
+            // `fldPressureInletValue`, and `momFluxIsPrescribed` answers
+            // FALSE for the whole range `[41, 45]` so the pressure
+            // correction reaches the face.
+            "surfaceNormalFixedValue"
+            | "cylindricalInletVelocity"
+            | "swirlFlowRateInletVelocity" => Self::FixedValue,
+            "pressureInletVelocity" => Self::PressureInletVelocity,
+            "pressureInletUniformVelocity" => Self::PressureInletUniformVelocity,
+            "pressureDirectedInletVelocity" => Self::PressureDirectedInletVelocity,
+            "pressureDirectedInletOutletVelocity" => Self::PressureDirectedInletOutletVelocity,
+            "pressureInletOutletParSlipVelocity" => Self::PressureInletOutletParSlipVelocity,
+
+            // SPEC-LIT 120.6: the Outlets II family. Four of them hold a
+            // PATCH INTEGRAL - a mean, a mean carried from another patch, or
+            // a flow rate - and one extrapolates the cell's pressure
+            // gradient onto the face; all five are a section-4 triple with
+            // no new evaluation branch, rewritten once per outer iteration
+            // by the fldPatchMean*/fldExtrapolatedSnGrad kernels wherever
+            // the caller opted in with `BcInputs::patch_means`.
+            "fixedMean" => Self::FixedMean,
+            "fixedMeanOutletInlet" => Self::FixedMeanOutletInlet,
+            "fixedFluxExtrapolatedPressure" => Self::FixedFluxExtrapolatedPressure,
+            "outletMappedUniformInlet" => Self::OutletMappedUniformInlet,
+            "matchedFlowRateOutletVelocity" => Self::MatchedFlowRateOutletVelocity,
+
+            // SPEC-LIT 120.7: the buoyant pressure family. A static pressure
+            // given at a patch, written in the SOLVED `p_rgh` by the setup's
+            // 120.7 block - the two plain names ARE a fixedValue, and the two
+            // total forms ride `TotalPressure`, as `totalPressure` does.
+            "prghPressure" | "uniformDensityHydrostaticPressure" => Self::FixedValue,
+            "prghTotalPressure" | "prghTotalHydrostaticPressure" => Self::TotalPressure,
 
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
@@ -830,16 +1211,16 @@ impl BcKind {
                 Self::ThermalWallFunction
             }
 
-            "outletInlet" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "outletInlet is the REVERSE switch of inletOutlet: a fixed value on OUTflow and zero-gradient on inflow (docs/01-model-catalog.md: valueFraction = pos0(phi_b)), while every flux-switched condition this solver implements is Dirichlet on inflow; it used to be mapped to inletOutlet, which is the opposite condition",
-                    "calculated (a fixed value at whatever the file's `value` entry held)",
-                    Self::Calculated,
-                );
-            }
+            // SPEC-LIT 120.4: its own condition now - (120.4a)'s reverse
+            // switch, fixed on OUTflow, refused until setup by nothing here
+            // (the `outletValue` entry is `field_setup`'s to demand).
+            "outletInlet" => Self::OutletInlet,
+            // SPEC-LIT 120.4: (120.4b)-(120.4d)'s Robin outlet. Accepted as a
+            // kind here; the SETUP paths refuse it unless the caller sets
+            // `BcInputs::advective` - the promise that `field::advective`
+            // refreshes the condition every step - so no driver reaches it
+            // today and the condition is reached through the API.
+            "advective" => Self::Advective,
 
             "cyclicAMI" => {
                 return unsupported_note(
@@ -1151,6 +1532,13 @@ pub struct GpuScalarField {
     pub ref_grad: DevBuf<Scalar>,
     /// `[n_bf]` `BcKind` as `i32`
     pub bc_kind: DevBuf<Label>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built for this field,
+    /// one per patch carrying one of the five names - the kind, the patch's
+    /// face range, the other patch's face range (kinds 49, 50), the target
+    /// or offset, and the fraction. `update_patch_means_scalar` launches one
+    /// kernel per rule once per outer iteration; a field with no rule
+    /// launches nothing.
+    pub mean_rules: Vec<patch_mean::PatchMeanRule>,
 }
 
 impl GpuScalarField {
@@ -1171,6 +1559,7 @@ impl GpuScalarField {
             ref_value: gpu.zeros(m.n_boundary_faces)?,
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
+            mean_rules: Vec::new(),
         })
     }
 
@@ -1225,6 +1614,10 @@ pub struct GpuVectorField {
     /// everywhere a face does not carry one of the four tensorial names
     /// (see [`BcKind::DirectionMixed`]).
     pub dm: DevBuf<Scalar>,
+    /// SPEC-LIT 120.6: the Outlets II rules the setup built for this field,
+    /// as on [`GpuScalarField::mean_rules`] - `update_patch_means_vector`
+    /// launches one kernel per rule once per outer iteration.
+    pub mean_rules: Vec<patch_mean::PatchMeanRule>,
 }
 
 impl GpuVectorField {
@@ -1243,6 +1636,7 @@ impl GpuVectorField {
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
             dm: gpu.zeros(12 * m.n_boundary_faces)?,
+            mean_rules: Vec::new(),
         })
     }
 }
@@ -1280,8 +1674,10 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
         let k = match p.kind {
             PatchKind::Empty => BcKind::Empty,
             PatchKind::Cyclic | PatchKind::Processor => BcKind::Cyclic,
-            // SPEC-LIT 119.1: a wedge side rides with symmetry until BC-04.
-            PatchKind::Symmetry | PatchKind::Wedge => BcKind::Symmetry,
+            // SPEC-LIT 119.2: a wedge patch carries the rotational
+            // self-couple, `BcKind::Wedge`, on every field.
+            PatchKind::Wedge => BcKind::Wedge,
+            PatchKind::Symmetry => BcKind::Symmetry,
             // SPEC-LIT S47.4: an `Interface` patch is topologically coupled
             // but is NOT seeded `Cyclic` - see `topology_override` in
             // `field_setup.rs` for the reasoning. It stays zero-gradient
@@ -1294,6 +1690,19 @@ fn kinds_from_patches(m: &GpuMesh) -> Vec<Label> {
     }
     kinds
 }
+
+/// The `advective` outlet of SPEC-LIT 120.4: the host twin of (120.4d), the
+/// per-face wave-speed state, and the Robin rewrite - see
+/// [`advective::advective_triple`] and [`advective::AdvectiveScalar`].
+pub mod advective;
+
+/// The Outlets II conditions of SPEC-LIT 120.6: the [`PatchMeanRule`] the
+/// setup holds per patch, and the host twins of the `fldPatchMeanScalar`,
+/// `fldPatchMeanVector` and `fldExtrapolatedSnGrad` kernels - see
+/// [`patch_mean::patch_mean_values_scalar`],
+/// [`patch_mean::patch_mean_values_vector`] and
+/// [`patch_mean::extrapolated_sn_grad`].
+pub mod patch_mean;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -1383,37 +1792,29 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. The two names used to be aliases
-    /// to conditions that are NOT what they name: `outletInlet` is the reverse
-    /// switch of `inletOutlet`, and `cyclicAMI` needs interpolation weights
-    /// the solver does not have. (`uniformFixedValue` was the third until
-    /// SPEC-LIT 120.1 made it read its `uniformValue` Function1.) Each is
-    /// refused by name; `-permissive` substitutes the documented fallback and
-    /// warns once per setting.
+    /// SPEC-LIT §13.4 and §13.4.4's audit. `cyclicAMI` used to be an alias
+    /// to a condition that is NOT what it names: it needs interpolation
+    /// weights the solver does not have. (`outletInlet` was the second until
+    /// SPEC-LIT 120.4 made it a condition of its own, and `uniformFixedValue`
+    /// the third until SPEC-LIT 120.1 made it read its `uniformValue`
+    /// Function1.) Refused by name; `-permissive` substitutes the documented
+    /// fallback and warns once per setting.
     #[test]
-    fn the_two_conditions_that_are_not_their_alias_are_refused_by_name() {
+    fn the_condition_that_is_not_its_alias_is_refused_by_name() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
-        for (name, word) in [
-            ("outletInlet", "inletOutlet"),
-            ("cyclicAMI", "cyclic"),
-        ] {
-            let e = BcKind::from_name(name, "U", "inlet")
-                .expect_err(&format!("{name} must be refused by name"));
-            let msg = e.to_string();
-            assert!(msg.contains(name), "{msg}");
-            assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
-            assert!(msg.contains("-permissive"), "{msg}");
-            assert!(msg.contains(word), "{msg}");
-        }
+        let (name, word) = ("cyclicAMI", "cyclic");
+        let e = BcKind::from_name(name, "U", "inlet")
+            .expect_err(&format!("{name} must be refused by name"));
+        let msg = e.to_string();
+        assert!(msg.contains(name), "{msg}");
+        assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
+        assert!(msg.contains("-permissive"), "{msg}");
+        assert!(msg.contains(word), "{msg}");
 
         crate::io::contract::set_permissive(true);
-        assert!(matches!(
-            BcKind::from_name("outletInlet", "U", "inlet").expect("permissive"),
-            BcKind::Calculated
-        ));
         assert!(matches!(
             BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
             BcKind::Cyclic
@@ -1423,6 +1824,30 @@ mod tests {
             "the substitution must be announced"
         );
         crate::io::contract::set_permissive(false);
+    }
+
+    /// SPEC-LIT 120.4: the two outlets are conditions of their OWN, on any
+    /// field - `outletInlet` the reverse flux switch of (120.4a), `advective`
+    /// the Robin outlet of (120.4b)-(120.4d). Neither is in the
+    /// flux-switched block, whose kinds are all Dirichlet on INflow.
+    #[test]
+    fn outlet_inlet_and_advective_are_their_own_kinds() {
+        for field in ["psi", "T", "U", "p", "alpha.water"] {
+            assert_eq!(
+                BcKind::from_name("outletInlet", field, "outlet").expect("outletInlet"),
+                BcKind::OutletInlet
+            );
+            assert_eq!(
+                BcKind::from_name("advective", field, "outlet").expect("advective"),
+                BcKind::Advective
+            );
+        }
+        assert_eq!(BcKind::OutletInlet as Label, 38);
+        assert_eq!(BcKind::Advective as Label, 39);
+        assert!(!(FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST)
+            .contains(&(BcKind::OutletInlet as Label)));
+        assert!(!(FLUX_SWITCHED_FIRST..=FLUX_SWITCHED_LAST)
+            .contains(&(BcKind::Advective as Label)));
     }
 
     // ==================================================================
@@ -1465,7 +1890,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [60, 3, 47, 10, 10], "the per-status counts");
+        assert_eq!(counts, [79, 3, 28, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

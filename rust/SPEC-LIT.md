@@ -727,7 +727,9 @@ pressure equation.
 - **Incomplete Cholesky / ILU(0)**: Saad ch. 10. Inherently sequential; the
   multi-colour reordering that parallelises it is Saad §12.4.
 - **Algebraic multigrid**: Stüben, *J. Comput. Appl. Math.* 128 (2001) 281–309;
-  Ruge & Stüben (1987). Provided here by AMGX (BSD-3-Clause), not reimplemented.
+  Ruge & Stüben (1987). Provided by AMGX (BSD-3-Clause, §141.20) and, since AMG-04a,
+  natively: the aggregation GAMG of §141, as a preconditioner of PCG and PBiCGStab and as a
+  solver (§141.5).
 
 ### 8.4 Residual normalisation
 
@@ -1508,10 +1510,10 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane`, `wedge` → symmetry; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
-| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane`, `wedge` → symmetry; `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
 | JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
 
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
@@ -4062,6 +4064,9 @@ conditions, and the difference is worth enforcing rather than documenting:
   format's too);
 - the mesh's own topology wins, as §4 already specifies for the field
   reader — this only makes the case file able to SAY it.
+
+`wedge` is a third constraint kind; it needs a mesh that has wedge sides, and
+§119.3 holds its rules.
 
 ### 34.2 More than one cyclic pair
 
@@ -15143,11 +15148,17 @@ which dispatches to `cuMemcpyPeerAsync` when the two buffers belong to
 different contexts — so the same loop is what a one-process, several-device run
 will use. **That peer path is untested here: this machine has one GPU.**
 
-Three payloads are carried: `Scalar`, `Vec3` and `Label`. The last is not a
-field in the physical sense — it carries the integer masks a kernel tests at a
-coupled face's *neighbour*. `lduSetValues`'s `isFixed` is the one this tree has
-today, and the gate uses the exchange for it rather than filling it from the
-host's whole-mesh copy, because a distributed build has no such copy.
+Four payloads are carried: `Scalar`, `Vec3`, `Tensor` and `Label`. `Tensor`
+(nine scalars moved as one struct, kernel `haloPackTensor`) was added by PAR-02
+for the gradient of a vector field, whose halo a distributed flow needs. `Label`
+is not a field in the physical sense — it carries the integer masks a kernel
+tests at a coupled face's *neighbour*. `lduSetValues`'s `isFixed` is the one
+this tree has today, and the gate uses the exchange for it rather than filling
+it from the host's whole-mesh copy, because a distributed build has no such copy.
+
+The exchange above is the in-process form: every part in one process. The SPMD
+form, in which a rank holds one part and reaches its neighbours through a
+`Comm`, is §138.3; it uses the same plan and the same pack kernels.
 
 ---
 
@@ -15308,6 +15319,7 @@ cannot be silently inert), and that the field is bit-identical anyway.
 | `splitting_a_field_and_gathering_it_back_is_the_identity` | round trip exact; the halo starts at zero, so a forgotten exchange cannot pass by luck |
 | `an_exchanged_halo_is_bit_for_bit_the_owner` | every ghost value equals its owner's, bit for bit, at `P = 1..4` on a plain and a cyclic mesh |
 | `a_vector_and_a_label_halo_cross_the_cut_too` | the same plan carries `Vec3` and `Label` |
+| `a_tensor_halo_crosses_the_cut_too` | the same plan carries `Tensor`: all nine components of every local cell equal the owner's, bit for bit, at `P = 1..4` under three partitioners on a cyclic mesh |
 | `a_field_buffer_without_room_for_the_halo_is_refused_by_name` | an `n_cells`-long buffer is named, with the length it should have had |
 | `the_other_amul_survives_the_cut_too` | `ldu_ops::amul` — the second implementation of the row sum — agrees bit for bit as well as `solver::amul` |
 | **`a_decomposed_run_is_bitwise_the_undecomposed_run`** | **the gate.** `relax -> set_values -> fold -> 6 Jacobi sweeps` at `P = 1,2,3,4` under three partitioners on a plain and a cyclic mesh: every `diag`, `source`, `upper`, `lower` and boundary coefficient, and every value of the final field, bit-for-bit the whole mesh's |
@@ -37188,9 +37200,12 @@ subsections, by unit:
 - 118.4 — mixed-precision iterative refinement (F32-06)
 - 118.5 — delta-form transients (F32-08)
 - 118.6 — field, phi and restart I/O (F32-09)
-- 118.7 — the FSC rate constant formed once in f64 (DST-03)
+- 118.7 — the local origin (F32-10)
+- 118.8 — moving geometry in f64 on the device (F32-11)
+- 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
+- 118.11 — the FSC rate constant formed once in f64 (DST-03)
 
-and, later, the local origin, moving geometry, parcels and chemistry in
+and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
 
 No GPL-licensed source was consulted.
@@ -37290,7 +37305,7 @@ stored once, and fixing that is iterative refinement (§118.4, F32-06). It
 does not change any tolerance, scheme, iteration count or stopping rule. And
 it does not touch the reductions outside `cuda/solver.cu`, apart from the two
 `cuda/exactsum.cu` anchor kernels above, which share its partials. The
-parcels' reductions (F32-12) still accumulate in the field type. The
+parcels' reductions accumulated in the field type until F32-12 (§118.9). The
 integer-limb accumulator of §72 itself was already exact and is unchanged.
 
 Sources: **Goldberg, D. (1991), "What every computer scientist should know
@@ -37411,7 +37426,8 @@ mesh bit for bit (S82.3)" and "a mesh an adapt built ON THE DEVICE reaches the
 device as the same mesh", with their per-size twins, fail by construction; the
 device-emitted topology row still passes. They are left failing, not
 re-toleranced: F32-11 puts the device sweep in f64 under `single`, and
-restoring these rows bit for bit is its acceptance. In the f64 build all of
+restoring these rows bit for bit is its acceptance. F32-11 landed: see
+§118.8. In the f64 build all of
 them pass, unchanged.
 The host cost: under `single` the shadow holds 4 doubles per cell, 15 per
 internal face and 13 per boundary face (32 B, 120 B and 104 B), about 392 B
@@ -38136,8 +38152,497 @@ not quoted).
 
 No GPL-licensed source was consulted.
 
+### 118.7 The local origin - a mesh stored about a snapped f64 origin
 
-### 118.7 The FSC rate constant is formed once in f64
+Under `--features single` a mesh far from the coordinate axis loses its
+geometry in the device, because the kernels difference ABSOLUTE f32 cell
+centres (`C[n] - C[P]`, `Cf[f] - C[P]`): at 2000 m one f32 ulp is 1.22e-4 m,
+and the second-order reconstructions - the limited weights, linearUpwind,
+the gradient limiters - are built from those differences. F32-10 makes the
+storage frame a choice:
+`build_host_mesh_local` builds the SAME mesh about a LOCAL ORIGIN `O`, an
+f64 vector, so that every stored position (`c`, `cf`, `b_cf` and their f64
+shadow in `geom64`) is `x_world - O`, the subtraction done in f64 before
+the one rounding of §118.2. The kernels are untouched - they keep
+differencing stored positions, which are now small. The f64 build never
+shifts: there `O = 0` always and every code path is bitwise what it was -
+no added arithmetic, not even `+ 0.0`, which would turn `-0.0` into `+0.0`.
+
+The rule (118.7a). Per axis `k`, from the bounding box `[lo, hi]` of the
+points, with `e = hi - lo` and `m = (lo + hi)/2`, all in f64:
+
+```
+O_k = 0  if lo <= 0 <= hi, or e <= 0, or lo/hi not finite;
+O_k = sgn(m) * q * ceil(|m|/q - 1/2)  otherwise                          (118.7a)
+```
+
+with `q` the smallest power of two `>= e`.
+
+`q` is found EXACTLY, from the exponent field of the f64 encoding - no
+`log2().ceil()`, which is off by one exactly at a power of two. A snapped
+origin rather than the plain box centre, for two reasons: `O` is a multiple
+of `q`, so a mesh translated by a multiple of `q` gets the SAME local
+points bit for bit; and an axis whose range contains zero is not shifted at
+all, so no existing case moves.
+
+```
+|m - O_k| <= q/2 < e  =>  |x - O_k| < 3e/2, every point x of the axis   (118.7b)
+x_local = fl32(x_world - O),   x_world = f64(x_local) + O                (118.7c)
+u (|a| + |b|) / |a - b|,  with |a|, |b| < 3e/2 instead of |x_world|     (118.7d)
+```
+
+In (118.7c) the subtraction runs in f64. (118.7d) is the relative error of a
+stored coordinate difference (§118.2, Goldberg 1991 "Cancellation").
+
+API. `HostMesh::origin: DVec3` - the world position of the local origin,
+ZERO in the f64 build and for every mesh built without one; `Default` gives
+ZERO, and `compute` (mesh/geometry.rs) treats it as an INPUT the caller set
+- it never chooses an origin itself. Conversions: `world(p)` / `world64(p)`,
+a local stored position -> world in f64; `local(w)`, world -> local with
+ONE rounding; `local64(w)`, world -> local with none; the f64-build arms do
+no arithmetic. Under `single`, `compute` sweeps a non-zero-origin mesh on
+its points shifted once - `to_dvec3() - m.origin`, monomorphic in `DVec3` -
+and when `origin == ZERO` hands the sweep the caller's points untouched,
+bitwise what every build did before this unit. `build_host_mesh_local` is
+`build_host_mesh` with `origin = geometry::local_origin(&raw.points)` set
+before the geometry - one shared private body, no copy - and
+`snapped_origin_axis` / `local_origin` are pure, compiled in BOTH builds.
+
+Consumers converted (world comparisons in f64): `load_case`'s OpenFOAM
+branch - the JSONC/blockgen branch unchanged - prints ONE line when the
+origin is not zero; `CellSelector::select`'s Box and Sphere, compared
+against `m.world(m.c[c])`; `cartesian_info`'s origin corner; the VTU and
+USDA emitters' centroids; `pointfield`'s point-to-cell weights, the point
+brought to local with `local` before the difference; `field_setup`'s
+`bc_f`, what `fixedProfile` and the rotating wall read, through `world64`;
+`decompose`'s part meshes copy `origin` through.
+
+Refusals. A path not converted yet refuses BY NAME - never runs shifted
+and wrong: when `m.origin != ZERO`, `Error::Config` whose text contains
+`local origin` and the unit - the device geometry sweep
+`gpu_compute_geometry` and `AleMesh::with_cubin` named F32-11 and are
+converted by §118.8 (F32-11 landed: the sweep and the moving mesh now take
+a local origin, shifted to it in f64), and `Parcels::new` no longer refuses
+either (§118.9, F32-12: parcels are stored local and seeded in world
+coordinates), so no path refuses a local origin any more.
+
+**What it does not do.** The JSONC/blockgen path still generates its points
+in `Scalar` and stays unshifted; `build_host_mesh` and every one of its 75
+callers keep building an unshifted mesh; multi-region cases need ONE origin
+for all regions and are not shifted; the device geometry sweep and moving
+geometry are converted by §118.8 (the sweep runs on `x_world - O`, the
+subtraction in f64), parcels by §118.9.
+
+**The measurement.** `tests/f32_local_origin.rs`, seven tests, the same
+assertions in both builds, run by the supervisor on 2026-10-13. The gate of
+docs/17 (F32-10) is a lid-driven cavity at Re = 100 (`nu = 0.01`, lid
+`U = (1, 0, 0)`, `p = 0` pinned on the bottom wall, 500 SIMPLE outer
+iterations) on the unit box and on the same box translated by (2000, 2000, 0),
+judged by `max_c |U_B - U_A| / U_lid <= 1e-5`. Two things about the gate are
+the tree's, not the plan's. On 32x32 cells every coordinate is `2000 + k/64`,
+which f32 holds exactly, so the translated mesh loses nothing and the gate
+cannot fail; the tests use 30x30. And with the default upwind convection on
+an orthogonal mesh no device kernel reads a stored position - the weights,
+areas and delta coefficients are already f64 results (§118.2) - so the
+unshifted translated cavity differs from the origin cavity by 1.192e-7, one
+f32 ulp of the lid velocity, and the gate passed BEFORE this unit; the tests
+use `Gauss linearUpwind`, whose kernels difference `C` and `Cf`. On that
+cavity, under `single`: the translated mesh built WITHOUT a local origin
+misses at 2.769e-4 (docs/17 predicted about 1e-3), and the mesh built by
+`build_host_mesh_local` has origin (2000, 2000, 0), its sixteen geometry
+arrays equal the origin mesh's bit for bit, and its velocity differs by
+exactly 0. In the f64 build both translated meshes differ from the origin
+cavity by 6.892e-12. The last-iteration change of `U` is 1.192e-7 under
+`single` and 6.092e-9 in f64, so the comparison is of two 500-iteration
+trajectories, not of two converged states. The other five tests hold the
+axis rule on fifteen boxes, the bitwise mesh identity and the
+`world`/`local` round trip, the box and sphere selectors (256 cells, the
+same indices stated world or local), the USD surface points and the
+Cartesian corner within 4 ulp(2000) = 4.883e-4 of the world position, and
+the device-sweep refusal. No `.cu` file changed, so the cubins of the f64
+build are the ones it had.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23 (1991) 5-48**
+(open copy <https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html>,
+the section "Cancellation"); **Higham, N. J. (2002), *Accuracy and
+Stability of Numerical Algorithms*, 2nd ed., SIAM**, section 2.2;
+**Sterbenz, P. H. (1974), *Floating-Point Computation*, Prentice-Hall**,
+Theorem 4.3.1 (the difference of two nearby floats is exact).
+
+No GPL-licensed source was consulted.
+
+### 118.8 Moving geometry in f64 on the device - the sweep, the points, V and the swept volumes
+
+What was float. Under `single`, `cuda/meshgeom.cu`'s sweep computed in
+`ofscalar` (float) while the HOST sweep `mesh/geometry.rs::sweep` computed in
+f64 and rounded once (§118.2), and `cuda/ale.cu`'s moving mesh computed the
+swept volume and the mesh flux in float too. Measured at HEAD under
+`single`: Gate 105-A (§105.5) worst SCL 9.266e-7, scheme SCL 9.290e-7
+(euler) / 1.064e-6 (backward), volume drift 1.126e-6, against 1e-12; and
+every "device sweep == host sweep bit for bit" row of sections 82-84 failed.
+In the f64 build the same rows were 1.535e-15, 1.531e-15 / 1.798e-15,
+2.591e-15.
+
+This unit (F32-11) puts the sweep, the points, V, the volume history and the
+swept volumes in f64 ON THE DEVICE under `single`. The equations:
+
+```
+x_dev = f64(x_world) - O                                                  (118.8a)
+G_stored = fl32(G64),  one rounding per component                         (118.8b)
+dV_f = sum_tri (d_xavg + d_a + d_c).(N^n + 4 N^{n+1/2} + N^{n+1}) / 36    (118.8c)
+phi_mesh64,f = aN dV_f^{n+1} - a00 dV_f^n,  phi_mesh,f = fl32(phi_mesh64,f)   (118.8d)
+V64^{n+1}_c - V64^n_c = sum_f s_f dV_f,   |fl32(V) - V| <= u32 |V|        (118.8e)
+```
+
+- (118.8a): the subtraction in f64, no rounding; `O = HostMesh::origin`, and
+  no arithmetic at all when `O = 0`.
+- (118.8b): every array the sweep stores in `GpuMesh` is fl32 of the f64
+  result `G64`, one rounding per component; the sweep's intermediates (face
+  Sf, Cf; cell V, C) are never rounded before they are read.
+- (118.8c): the sum over the fan's triangles of §105.3, every operand and the
+  sum in f64.
+- (118.8d): §105.4's mesh flux; `aN` and `a00` the scheme's `Scalar`
+  coefficients widened exactly, the products and the difference in f64.
+- (118.8e): the discrete space conservation law holds to f64 round-off; the
+  float copies obey it only to `u32 = 2^-24` relative (Higham 2002, section
+  2.2), so a residual assembled from the float copies (the uniform-flow row of
+  Gate 105-A) is a round-off twin (docs/17 section 5.1 rule 4, class R).
+
+The kernels. Each file defines its own geometry type, after the include:
+
+    ofgeo   - double under OFGPU_SINGLE, ofscalar otherwise (a typedef)
+    ofgeo3  - a struct of three doubles {x, y, z} under OFGPU_SINGLE, ofvec3 otherwise (a typedef)
+
+Under OFGPU_SINGLE the sweep's constants are the HOST's f64 ones
+(`mesh/geometry.rs` lines 71, 93, 110 and `f64::MIN_POSITIVE`):
+NON_ORTH_FLOOR 0.05, SKEW_FLOOR 1.0e-9, SMALL 1.0e-150,
+MIN_POSITIVE 2.2250738585072014e-308 (written as the exact hex literal
+`0x1p-1022` in the OFGPU_SINGLE arm, because §112.1's literal audit admits
+the decimal spelling only in the f64 arm) - the float literal 0.05f widened
+is NOT 0.05. Kernel by kernel (names and parameter ORDER unchanged; only
+pointee types change; every expression keeps the association and order it
+has today, which is the host sweep's, line by line):
+
+    meshgeom.cu
+      meshFaceGeometry        fSf, fCf: ofgeo3* out;  points: const ofgeo3*;  all arithmetic in double
+      meshCellGeometry        v: ofgeo* out, cc: ofgeo3* out;  fSf, fCf: const ofgeo3*;  all in double
+      meshInternalFaceMetrics the seven outputs keep their stored types (ofvec3*/ofscalar*);
+                              fSf, fCf, cc: const ofgeo3*;  all arithmetic in double, each stored
+                              component rounded once by the store
+      meshBoundaryFaceMetrics the seven outputs keep their stored types; fSf, fCf, cc: const ofgeo3*;
+                              arithmetic in double, rounded once by the store; an uncoupled face's
+                              bWeights is still left untouched
+      meshNarrowCellGeometry  NEW, compiled ONLY under OFGPU_SINGLE, one thread per cell:
+                              (ofscalar* v, ofvec3* cc, const ofgeo* v64, const ofgeo3* c64, oflabel nCells)
+                              v[c] = fl32(v64[c]), cc[c] = fl32 per component of c64[c]
+
+    ale.cu
+      aleSweptVolume   swept: ofgeo* out;  pointsOld, pointsNew: const ofgeo3*;  (118.8c) all in double
+      aleMeshFlux      gains ONE parameter, only under OFGPU_SINGLE, placed right after phiMeshB:
+                       `ofgeo* phiMesh64` [nInternalFaces + nBoundaryFaces], global face order;
+                       swept, swept0: const ofgeo*;  (118.8d): phiMesh64[f] = the double value,
+                       phiMesh / phiMeshB = its fl32
+      tsDdtGeneralV, tsDdtGeneralRhoV, aleRelativeFlux, aleMovingWallVelocity: NOT converted - the hot
+                       kernels keep reading the float copies (aleMovingWallVelocity's two float
+                       helper calls are renamed aleScaleF/aleZeroF, because aleScale/aleZero now
+                       take ofgeo3; the arithmetic is the same and its SASS does not move)
+
+The unit stays in `FMAD_OFF_UNITS`, both cubins and their `_FMAD` twins
+included.
+
+The host side. `mesh/gpugeom.rs` carries the geometry types and the point
+shift; `points` are WORLD positions exactly as `geometry::compute` takes
+them, and the sweep runs on `geo_points(points, m.origin)`:
+
+    pub type Geo = f64;                       // both builds (in the f64 build it IS Scalar)
+    pub type GeoVec3 = Vec3;                  // f64 build
+    #[repr(C)] pub struct GeoVec3 { pub x: f64, pub y: f64, pub z: f64 }   // single
+    pub fn geo_points<P: GeomPoint>(points: &[P], origin: DVec3) -> Vec<GeoVec3>   // (118.8a)
+
+    MeshGeomKernels gains  #[cfg(feature = "single")] pub narrow_cells: CudaFunction
+
+    GpuGeometry::compute<P: GeomPoint>(gpu, k, m, points: &[P], csr, pair, b_weights_in)
+    gpu_compute_geometry<P: GeomPoint>(..) / gpu_compute_geometry_csr<P: GeomPoint>(..)
+    gpu_geometry_resident<P: GeomPoint>(..) / gpu_geometry_resident_csr<P: GeomPoint>(..)
+
+`GpuGeometry`'s sixteen public fields keep their names and stored types; the
+f64 intermediates are private scratch of `compute`, and `v`/`c` are written
+by `narrow_cells`. `mesh/geometry.rs::validate_csr` is generic over the point
+type like `validate` - it reads only `points.len()`. `mesh/ale.rs`:
+
+    pub points, pub points_old : DevBuf<GeoVec3>   // (118.8a), local frame, f64
+    pub v0, pub v00            : DevBuf<Scalar>    // UNCHANGED - what tsDdtGeneralV reads
+    pub swept, pub swept0      : DevBuf<Geo>       // (118.8c)
+    pub phi_mesh               : GpuSurfaceScalarField  // UNCHANGED - fl32 of (118.8d)
+    pub origin                 : DVec3             // copied from HostMesh::origin
+    private under single: V64^{n+1}, V64^n, V64^{n-1} [gm.v.len()], C64, phi_mesh64 [max(n_faces, 1)]
+
+    AleMesh::new<P: GeomPoint>(gpu, m, gm, points: &[P], csr)      // WORLD points
+    AleMesh::with_cubin<P: GeomPoint>(..) (pub(crate))
+    AleMesh::set_points<P: GeomPoint>(&mut self, gpu, points: &[P]) // WORLD points
+    pub fn volumes64(&self, gpu, gm) -> Vec<f64>        // V^{n+1}
+    pub fn volume_history64(&self, gpu) -> (Vec<f64>, Vec<f64>)  // (V^n, V^{n-1})
+    pub fn swept64(&self, gpu) -> Vec<f64>              // n_faces, global order
+    pub fn mesh_flux64(&self, gpu) -> (Vec<f64>, Vec<f64>)  // (internal, boundary)
+    pub fn host_swept_volumes<P: GeomPoint>(old: &[P], new: &[P], csr) -> Vec<f64>  // (118.8c)
+
+`advance` keeps its order (§105.4) and rotates the V64 history beside the
+float one; nothing downloads, allocates or syncs inside `advance` or
+`recompute_in_place`, and construction seeds the f64 history without writing
+any array of `gm`. `run_scl` measures `worst_scl`, `worst_scheme`,
+`volume_drift`, `min_volume_ratio` and `boundary_flux_max` IN f64 from the
+`*64` accessors and narrows once into `SclRun`; `worst_uniform` stays
+assembled from the float copies, and `history_bitwise` requires BOTH
+histories.
+
+Why the f64 build is bitwise. Every change there is a typedef that IS the
+old type - `ofgeo` IS `ofscalar`, `ofgeo3` IS `ofvec3`, `Geo` IS `Scalar`,
+`GeoVec3` IS `Vec3`, `DVec3` IS `Vec3` - or sits under an `#ifdef
+OFGPU_SINGLE` / `#[cfg(feature = "single")]` arm; the `#else` arms compile
+to the code the f64 build already had (the `gdot3`/`mkgeo`/`gmax_` wrappers
+are `static __device__ __forceinline__`, so nvcc inlines them away), no
+kernel gains or loses a parameter, and no arithmetic is added in f64. The
+SASS of `meshgeom.cubin`, `ale.cubin` and their `_FMAD` twins does not move,
+and neither do the `ofgpu-validate` rows.
+
+**What it does not do.** The hot kernels read the float copies
+(`tsDdtGeneralV`, `tsDdtGeneralRhoV`, `aleRelativeFlux`,
+`aleMovingWallVelocity` and every solver kernel that reads `GpuMesh`), so
+the uniform-flow row of Gate 105-A is still a residual of `fl32` values -
+class R under `single`, tolerance 1e-5 by D-F32-1, not 1e-12. `mesh/
+motion.rs` still produces `Scalar` points and the drivers still hand `Vec3`
+rest points; the widening happens in `geo_points` and `host_swept_volumes`.
+`GpuGeometry` keeps no f64 V - the cell V64 lives in `AleMesh`'s private
+scratch, and a plain rebuild's f64 intermediates live only as long as
+`compute`. Parcels are §118.9 (F32-12).
+
+Sources: **Demirdzic, M. & Peric, M. (1988), "Space conservation law in
+finite volume calculations of fluid flow", Int. J. Numer. Meth. Fluids 8,
+1037-1050**, DOI 10.1002/fld.1650080906 (the space conservation law);
+**Thomas, P. D. & Lombard, C. K. (1979), "Geometric conservation law and its
+application to flow computations on moving grids", AIAA J. 17(10),
+1030-1037**, DOI 10.2514/3.61273 (the geometric conservation law);
+**Goldberg, D. (1991), "What every computer scientist should know about
+floating-point arithmetic", ACM Computing Surveys 23(1), 5-48**, DOI
+10.1145/103162.103163, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (the
+section "Cancellation"); **Higham, N. J. (2002), *Accuracy and Stability of
+Numerical Algorithms*, 2nd ed., SIAM**, DOI 10.1137/1.9780898718027, section
+2.2 (the ulp bound the float copies satisfy).
+
+**The measurement.** Run by the supervisor on 2026-10-13, RTX 5070 Ti
+(sm_120), with two other jobs sharing the card. `tests/f32_moving_geometry.rs`,
+six tests, the same assertions in both builds: 6 passed in each. Gate 105-A
+through the test (and through `ofgpu-validate -sections 4,54`, the same
+numbers): in the f64 build worst SCL 1.535e-15, scheme SCL 1.531e-15 (euler)
+/ 1.798e-15 (backward), uniform 1.770e-15 / 1.997e-15, drift 2.591e-15 -
+HEAD's numbers, unchanged; under `single` worst SCL 1.328e-15, scheme SCL
+1.334e-15 / 1.654e-15, drift 8.635e-16, against 9.266e-7, 9.290e-7 /
+1.064e-6 and 1.126e-6 at HEAD, so the three SCL rows of Gate 105-A pass at
+1e-12 in both builds; history bitwise, boundary phi_mesh 0 and min V/V0
+0.884631 (0.884630 in f64). The uniform-flow row under `single` is 2.593e-7
+(euler) / 3.399e-7 (backward), class R by (118.8e): it passes the test's
+tol32 = 1e-5 and still fails `ofgpu-validate`'s 1e-12, whose tolerance is
+the section 26-51 owner's (F32-14), not changed here. Every "device sweep ==
+host sweep bit for bit" row of sections 82-84 now passes under `single`
+(sections 4 and 54: 44 of 48 checks against 36 of 58 at HEAD; what still
+fails is the adapt's refine-then-coarsen round trip of phi and rho, 2.2e-7
+and 1.3e-7 against 1e-13, which is not geometry). The f64 build: the SASS of
+`meshgeom.cubin`, `ale.cubin` and both `_FMAD` twins is identical to HEAD's
+(`tools/f64_identity.py sass-diff`; the one changed hash, `solidblock.cubin`,
+is the known nvcc flip-flop of an unchanged source), and the 108 rows of
+sections 4 and 54 are identical. The cost, `OFGPU_ALE_COST_N=100` (10^6
+cells): one `AleMesh::advance` 9.845 ms against one steady SIMPLE outer
+iteration of 361.8 ms under `single`, ratio 0.027 (f64 build 9.664 ms /
+309.1 ms, 0.031), inside docs/17's 10 %; at the default 24^3 the ratio is
+0.011 (`single`) and 0.013 (f64).
+
+No GPL-licensed source was consulted.
+
+---
+
+### 118.9 Parcels in f64 - positions, the face-crossing walk and the exchange sums
+
+What was float. Under `single` a parcel's position was a float on the
+device, so `x += dx` lost every displacement below half an ulp of |x|, the
+walk's crossing parameter was formed from float differences, and the
+per-cell sums of the deposition (§67.6) and of the two-way coupling gather
+(§68.3) added in float, as did the host totals the §66-§78 gates read.
+`Parcels::new` refused a mesh stored about a local origin (§118.7) by name.
+Measured at HEAD under `single` (`tests/f32_parcels.rs`, run against HEAD's
+library by the supervisor): a parcel at x = 0.4 moving 1e-9 m per step for
+1000 steps did not move at all (x = 0.40000000596, error 1.0e-6 m against
+the exact 0.400001); 65536 parcels of n_p = 1 + (i mod 1024)/1024 in one
+cell deposited a weight of 98271.5703 against the exact 98272, and the
+deposited mass and `ParcelSnapshot::liquid_mass` were off by 3.9e-6 and
+3.1e-6 relative. In the f64 build the same numbers were 2.7e-14 m, exact,
+1.0e-14 and 0.
+
+This unit (F32-12) keeps the position and the walk in f64 under `single`
+and accumulates the exchange sums in f64:
+
+```
+x^{n+1} = x^n (+)_64 fl32( dt_s/2 (u^n + u^{n+1}) )                      (118.9a)
+lambda_f = ((C_f - x).n_f) / ((t - x).n_f),  x <- x + lambda_min (t - x)  (118.9b)
+x_dev = x_world - O (f64),  x_world = x_dev + O (f64)                     (118.9c)
+S_P = fl32( sum_{k in P} (f64) a_k b_k ),  one rounding per stored sum    (118.9d)
+```
+
+- (118.9a): §66.5's trapezoidal displacement is still formed in float, as
+  it always was, and is ADDED in f64 (the widening is exact). The velocity,
+  diameter, temperature and weight stay float.
+- (118.9b): §66.6's plane test, every operand in f64: `s = t - x`, the
+  denominator, `lambda`, `lambda_min`, the crossing point and the specular
+  reflection of the target. The face centres `C_f` and area vectors `n_f`
+  are the float arrays of `GpuMesh`, widened exactly as they are read, so the
+  two cells of a face still see one plane.
+- (118.9c): §118.7's shift. Seeds and injectors are given in WORLD
+  coordinates and stored LOCAL, the subtraction in f64
+  (`HostMesh::local64`); `ParcelSnapshot::x64` is the WORLD position in f64
+  and `x` is its one rounding, `x = fl32(x64)` bit for bit; neither has any
+  arithmetic when `O = 0`. The host locator is `locate_cell64`, §66.6's
+  half-space test on the f64 `geom64` view (in the f64 build it IS
+  `locate_cell`). A pool pins the origin it was built against and
+  `Parcels::seed` refuses a mesh whose origin differs, by name.
+- (118.9d): `parcelDeposit` (weight, volume fraction, mass) and
+  `parcelCoupleGather` (impulse, exchange rate, heat, heat exchange, vapour
+  mass and enthalpy) sum their cell's parcels in `ofacc` (§118.1), each term
+  formed from operands widened to `ofacc`, and round once at the store. On the
+  host `DepositSnapshot::total_weight` / `total_mass`,
+  `ParcelCoupling::total_impulse` / `total_vapour_mass` /
+  `linearisation_defect`, the five `live_parcel_*` references and
+  `ParcelSnapshot::liquid_mass` / `total_mass_lost` / `dead_mass_lost` /
+  `deposited_mass` / `escaped_mass` / `pool_mass` accumulate in `Acc` and
+  narrow once on return. A float operand is exact in f64 and so is the
+  product of two of them (24 + 24 bits fit in 53), so a two-factor term is
+  exact and a longer one rounds at u64 = 2^-53; the sum's error is Higham's
+  bound for recursive summation at u64 (Higham 2002, section 4.2), far below
+  the one float rounding of the store.
+
+The kernels. `cuda/parcels.cu` defines its own position type after the
+include, as §118.8's files do:
+
+    ofpos   - double under OFGPU_SINGLE, ofscalar otherwise (a typedef)
+    ofpos3  - a struct of three doubles {x, y, z} under OFGPU_SINGLE, ofvec3 otherwise (a typedef)
+
+with `mkpos`, `padd`, `psub`, `pscl`, `pdot3` and the widening `pwiden`; in
+the f64 build each is the float helper it replaces (`vadd`, `vsub`, `vscl`,
+`dot3`), so the cubin cannot move. The device position buffers are
+`DevBuf<GeoVec3>` (§118.8's type: `Vec3` in the f64 build).
+
+**The f64 build is bitwise.** Every new type is an alias there, every
+widening is the identity and every expression keeps its operand order;
+the host sums that were `.sum()` stay `.sum::<Acc>()`, so an empty sum keeps
+its sign bit.
+
+**The measurement.** `tests/f32_parcels.rs`, four tests, the same
+assertions in both builds, run by the supervisor on 2026-10-13 (RTX 5070 Ti,
+shared with two other jobs): 4 passed in each. T1, the 1e-9 m/step parcel:
+`x64` within 1e-12 m of `0.4 + 1000 dt u` (f64 build 2.7e-14 m) and `x`
+within one float ulp. T2, a 4^3 box at (2000, 2000, 0) built by
+`build_host_mesh_local`: the pool is accepted (HEAD refused it), a seed given
+at the world point (2000.375, 2000.5, 0.5) ends within 1e-10 m of its
+straight line in world coordinates, `x = fl32(x64)` bit for bit, and an
+injector at a world point injects into the cell its world position names.
+T3, docs/17's gate: 4096 parcels bouncing elastically for 300 steps on an
+8^3 box whose middle 2^3 block is refined once (568 cells, 2:1 faces): 0
+lost, 0 at a wall, 0 escaped, in both builds. T4: the deposited weight is
+exactly 98272, and the deposited mass and `liquid_mass` are within 2.4e-7
+relative of the f64 sums (four float ulps; one rounding is the claim).
+
+SASS: in the f64 build all 46 cubins are identical to HEAD's
+(`tools/f64_identity.py sass-diff`); under `single` exactly `parcels`,
+`parcelsort` and `parcelcouple` changed. `ofgpu-validate -sections 35-40`
+(the six parcel sections, §66-§78): the 167 rows of the f64 build are
+identical to HEAD's (`tools/f64_identity.py rows`). Under `single` 92 of 111
+checks pass against 91 at HEAD. Two rows now pass that failed, (67.6) the
+deposited mass against the mass carried (2.9e-7 -> 0) and 78-B's stick pool
+against the injector (3.5e-7 -> 0); the rest of the misses move but stay
+misses, among them 66-B the landing position (2.2e-7 -> 8.4e-8), (66.8) the
+discharged mass (1.3e-6 -> 9.7e-8), 68-A momentum (5.9e-7 -> 3.3e-8) and
+77-B the energy ledger (6.5e-4 -> 1.9e-4). One row that passed now misses:
+78-B weber, `liquid + deposited + escaped = pool`, 0 -> 1.06e-7 against
+1e-15. It adds three Scalar totals in `ofgpu-validate` itself; each is now
+one rounding of an f64 sum, and three such roundings need not add to the
+fourth. HEAD's 0 was the float sums happening to agree. The row is a
+round-off twin (docs/17 section 5.1 rule 4, class R: tol32 = 5.4e-7 by
+D-F32-1), and so are the other remaining misses that compare Scalar ledgers
+(68-A energy, 76-C, 77-A, 77.4, 77-C, 67-B against the Scalar host gather);
+classing them, or evaluating the ledgers in f64 as A rows, is the section
+26-51 owner's (F32-14) and was not done here. The misses of 66-A, 76-A,
+76-B and 78-A are not about positions or sums: the parcel ODEs and the
+float gas state carry them.
+
+**What it does not do.** The walk still assumes that the face of the
+smallest crossing parameter is the face crossed. On a 2:1 face of an
+adapted mesh the four sub-faces of one coarse face lie in one plane, so they
+tie, and the walk can step into a fine neighbour that does not contain the
+crossing point: T3 counts 433 of 4096 parcels whose recorded cell is not the
+cell their position is in (the same 433 in both builds; 0 on the unrefined
+8^3 box in the supervisor's probe). Nobody is lost, but the deposition puts their mass in a
+neighbour. The fix is a point-in-face test or §66.6's named barycentric
+tracking, not precision; it would move f64 results and is not this unit.
+The velocity, the parcel ODEs and the per-parcel accumulators stay float;
+the gas state the parcels read is float; `ofgpu-validate` was not edited.
+
+Sources: **Goldberg, D. (1991), "What every computer scientist should know
+about floating-point arithmetic", ACM Computing Surveys 23(1), 5-48**, DOI
+10.1145/103162.103163, open copy
+<https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html> (the
+sections "Errors In Summation" and "Cancellation"); **Higham, N. J. (2002),
+*Accuracy and Stability of Numerical Algorithms*, 2nd ed., SIAM**, DOI
+10.1137/1.9780898718027, sections 2.2 and 4.2; **Macpherson, G. B., Nordin,
+N. & Weller, H. G. (2009)**, *Commun. Numer. Meth. Engng* 25, 263, DOI
+10.1002/cnm.1128 (§66.6's named fix for the walk; cited, the paper only).
+
+No GPL-licensed source was consulted.
+
+
+### 118.10 Chemistry in double - the device step computes in f64 in both builds
+
+**The scope.** This is docs/17 §5.1.6 and CHR-07b. Everything inside
+`cuda/chem.cu` computes in `typedef double ofchem` in both builds:
+
+* the flat mechanism of §132.9 D2;
+* the production rates and the reactor right-hand side;
+* the reactor state `(Y, T)` and the pressure inside the step;
+* the FD Jacobian, the LU factors and the stage vectors;
+* the error norm and the step memory `h` of §132.10 D6.
+
+The typedef lives in `chem.cu` and not in `ofgpu_device.cuh`, so the f32
+build's `ofscalar` is untouched. Only the flow state crosses the boundary as
+`ofscalar`: `T`, `p`, `Y` in, `omega` out (§132.9), and `T`, `Y` out of
+`integrate_fields` (§132.10). Inputs are widened exactly. Each output is
+rounded once.
+
+**Why it is not float.**
+
+* §132.3's Jacobian perturbs column `j` by `δ_j = 2^-26 max(abs(y_j),
+  atol_j)`. That is below float's unit round-off (`2^-24`). In float,
+  `y_j + δ_j` would round back to `y_j`, and the column would be exactly 0.
+  A float δ of `sqrt(eps_32) ≈ 2.4e-4` would make the FD error of an
+  Arrhenius column O(1e-4) relative.
+* The controller works at `rtol = 1e-8` (§132.8's defaults). That is below
+  float's `6e-8` spacing, so `Err` in float would measure the rounding and
+  not the method.
+* The rates are differences of large forward and reverse terms (§132.9's
+  gross-rate measure). In float the net rate near equilibrium is noise.
+
+**The class rule (§5.1.4).** The device-vs-host rows run on the double
+state API, and they are class P in both builds with the same tolerance.
+The f32 build's crossing row is class R. Its inputs are rounded to f32, and
+the host twin is evaluated at the rounded inputs, as for §132.9's omega row.
+The tolerance is `1e-5` relative, the plan's band and the class rule's cap.
+The deviation from the host at the unrounded inputs is reported and not
+gated. It measures how sensitive one flow step is to the input rounding,
+and that is a property of the state, not of the chemistry's precision.
+
+**The cost.** Measured on the RTX 5070 Ti (a GeForce, where double runs at
+a fraction of the float rate), one thread per cell, at 4096 cells: the fixture (10 species, 15 reactions) integrates 498 cells/s over `dt = 1e-6` s, about 4.5 times the host twin on one CPU core, and GRI-Mech 3.0 (53 species, 325 reactions) about 20 cells/s over `dt = 1e-8` s. These are the numbers a reacting run will meet, and a later unit can make them faster. The per-cell `J`, LU factors and stage vectors live in global memory, and with few cells per launch the work is latency-bound. The analytic
+Jacobian and warp-per-cell remain named and not built (docs/17 §2).
+
+### 118.11 The FSC rate constant is formed once in f64
 
 The dust stream's laminar-limit source (154.1) has `exp(−Θ/T)/t_r` in it. For REMBE, t_r ≈ 3e−11 s
 (so 1/t_r ≈ 3e10 s⁻¹), and at the unburned temperature exp(−Θ/T) ≈ 1.9e−32. Below about 227 K
@@ -38165,11 +38670,12 @@ No GPL-licensed source was consulted.
 
 An axisymmetric case is solved on a wedge one cell thick in the
 circumferential direction. This section holds the mesh (119.0, BC-02) and
-the patch kind with its derived pair, axis and angle checks (119.1, BC-03);
-the boundary condition that couples the two wedge faces by a rotation
-(BC-04) adds its subsection when it lands. Until then a `wedge` patch is its
-own kind but every solver path still treats it as `symmetry`, which is the
-stand-in §120's catalogue row names.
+the patch kind with its derived pair, axis and angle checks (119.1, BC-03),
+and the boundary condition that couples the two wedge faces by a rotation
+(119.2, BC-04), and the validation gate with the case-JSON kind
+(119.3, BC-05). Before BC-04 a `wedge` patch was its own kind but every
+solver path treated it as `symmetry`, the stand-in §120's catalogue row
+names; 119.2 replaces that on the field and momentum paths.
 
 ### 119.0 The wedge mesh `blockgen` builds (BC-02)
 
@@ -38270,12 +38776,14 @@ A patch typed `wedge` in `constant/polyMesh/boundary` is `PatchKind::Wedge`
 `symmetry`. The device mirrors the number as `OFPATCH_WEDGE` (`fv.cu`,
 `momentum.cu`, `solid.cu`, `vof.cu`, `marangoni.cu`) and `OFP_PATCH_WEDGE`
 (`parcels.cu`), and `mesh::tests::device_patch_kinds_match_the_host` reads
-the six files to hold them equal. **Until BC-04 (119.2) a wedge side is
+the six files to hold them equal. **Until BC-04 (119.2) a wedge side was
 treated exactly as a symmetry plane on every path:** the field seed and the
 topology override give it `BcKind::Symmetry`, `momFluxIsPrescribed`,
 `vofFluxIsPrescribed` and the restated Marangoni predicate count it as a
 prescribed-flux face, and a parcel that reaches it is reflected. No shipped
-mesh carries a wedge, so no f64 result moves.
+mesh carries a wedge, so no f64 result moves. Since BC-04 the field seed
+and the topology override give it `BcKind::Wedge` (119.2); the flux
+predicates and the parcel reflection are as written here.
 
 **The derivation.** `mesh::wedge::derive_wedge`, called by
 `io::polymesh::build_host_mesh` after the cyclic checks, stores the result
@@ -38362,6 +38870,405 @@ code was taken from them.
 
 No GPL-licensed source was consulted.
 
+### 119.2 The wedge condition: a rotational self-couple (BC-04)
+
+A wedge side is a coupled face whose other cell is the cell itself, turned
+about the axis. In an axisymmetric field the cylindrical components do not
+depend on the angle, so the cell that lies across the front wedge face is
+cell `P` rotated by `+theta` and the one across the back face is `P` rotated
+by `-theta`. With `a` the unit axis of 119.1 (`a = (n_f x n_b)/|n_f x n_b|`,
+so a right-handed turn by `+theta` about `a` carries the mid-plane toward the
+front side), `sigma = +1` on the front patch and `sigma = -1` on the back:
+
+```
+psi_N = psi_P                          a scalar                                   (119.2a)
+U_N   = R(sigma theta) U_P             a vector
+R(phi) v = v + sin(phi) (a x v) - (1 - cos(phi)) (v - a (a . v))                   (119.2b)
+```
+
+(119.2b) is Rodrigues' rotation formula, written as `v` plus an increment so
+that nothing cancels at a small angle.
+
+**The geometry of the couple.** The image of the centroid `C_P` under the
+rotation lies on the line through `C_P` along the face normal, at distance
+`2 r_P sin(theta/2)`, where `r_P` is the distance of `C_P` from the axis; the
+wedge plane cuts that line at its middle. The couple is therefore orthogonal,
+its interpolation weight is 1/2, and its delta coefficient is
+`1/(2 r_P sin(theta/2))`: exactly half of the boundary delta coefficient
+`Delta_b = 1/(n . (C_f - C_P)) = 1/(r_P sin(theta/2))` that §2.4 already
+stores on the face. Nothing new is stored per face.
+
+**The face value and the triple.** Linear interpolation across the couple
+gives
+
+```
+U_b = (U_P + R(sigma theta) U_P)/2 = U_P + w
+w   = [ sigma sin(theta) (a x U_P) - vers(theta) (U_P - a (a . U_P)) ] / 2         (119.2c)
+vers(theta) = 1 - cos(theta) = 2 sin^2(theta/2)
+```
+
+and the condition is the §4 triple
+
+```
+fr = 0,   refValue = 0,   refGrad = Delta_b w                                      (119.2d)
+```
+
+on a vector, and `fr = 0, refGrad = 0` (zero-gradient) on a scalar. There is
+no new evaluation branch: §4's expression `U_b = U_P + refGrad/Delta_b`
+returns (119.2c), and the surface-normal gradient the operators build from
+the triple, `(1 - fr) refGrad = (R U_P - U_P)/(2 r_P sin(theta/2))`, is the
+couple's own central difference. `BcKind::Wedge` (40) marks the faces; the
+kernel `fldWedgeRefGrad` (`cuda/field.cu`) rewrites `refGrad` on them from
+the current `U_P`, and `field_ops::correct_boundary_conditions_vector`
+launches it before the evaluation whenever the mesh carries a wedge
+(`GpuMesh::wedge`), so every driver that evaluates its boundary gets the
+condition. The operation order is fixed, for the kernel and for its host
+twin `field::wedge_ref_grad` alike: `d = a . U_P` summed x, y, z;
+`c = a x U_P`; `q = U_P - a d`; `w = (sigma sin(theta) c - vers(theta) q)/2`;
+`refGrad = Delta_b w`. `a`, `sin(theta)` and `vers(theta) = 2 sin^2(theta/2)`
+are formed in f64 from 119.1's f64 wedge and cast once (§118.2). The device
+contracts FMA, so the two agree to round-off, not bitwise.
+
+The mesh has the last word, as for `empty` and `cyclic`: a patch the mesh
+types `wedge` carries `BcKind::Wedge` on every field whatever the field file
+says, and a field file that writes `type wedge` on a patch the mesh does not
+type `wedge` is refused by name. Before BC-04 that entry was read as
+`symmetry`.
+
+**The flux.** The flux through a wedge face is prescribed by the velocity
+condition,
+
+```
+phi_b = U_b . S_f                                                                  (119.2e)
+```
+
+and no pressure correction moves it: `momFluxIsPrescribed` holds on
+`PatchKind::Wedge`, the pressure sees a zero-gradient face, and the face
+carries no body-force flux. In the plane normal to `a`,
+`(I + R(phi))/2 = cos(phi/2) R(phi/2)`, and the two outward normals are the
+mid-plane normal `m` of 119.1 turned by half the angle,
+`n_f = R(theta/2) m` and `n_b = -R(-theta/2) m`. Hence
+
+```
+U_b . n_f = +cos(theta/2) (U_P . m),    U_b . n_b = -cos(theta/2) (U_P . m)        (119.2f)
+```
+
+The two fluxes of a cell are the swirl velocity `u_theta = U_P . m` times
+`cos(theta/2) A_w`, out through one side and in through the other, and their
+sum is zero for any `U_P`: swirl adds nothing to the cell's mass balance.
+Under a symmetry plane both were zero and the swirl had nowhere to go.
+
+**What the momentum equation gains.** On the wedge of 119.0,
+`A_w = dr dz / cos(theta/2)` and `V = 2 tan(theta/2) r_m dr dz` with
+`r_m = (r_i + r_i+1)/2`, so `A_w/V = 1/(2 r_m sin(theta/2))`. Summed over the
+two wedge faces of a cell, with `e_r` the radial and `e_theta = m` the
+circumferential unit vector at the cell and `U_perp = U_P - a (a . U_P)`:
+
+```
+diffusion    nu sum_b A_w Delta_b w        = -nu V U_perp / (r_m r_P)              (119.2g)
+convection   sum_b phi_b U_b               =  cos^2(theta/2) V (u_theta/r_m) (a x U_P)   (119.2h)
+pressure     sum_b p_b S_b = p_P A_w (n_f + n_b) = -p_P (A_r,i+1 - A_r,i) e_r      (119.2i)
+```
+
+(119.2g) is the hoop term of the vector Laplacian in cylindrical
+coordinates, `-nu u_r/r^2` and `-nu u_theta/r^2`, with `1/r^2` replaced by
+the **hoop-term factor** `1/(r_m r_P)`. It does not depend on `theta`: the
+tangent mesh of 119.0 makes it exact in the angle. `r_P = r_m + dr^2/(12 r_m)`
+on a uniform radial spacing, so the factor is second order in `dr`, and it
+has one exact property: for rigid rotation `u_theta = Omega r` sampled at
+the centroids, the radial face fluxes `nu A_r Omega` leave the cell a net
+`nu Omega (A_r,i+1 - A_r,i) = nu Omega V/r_m`, which is (119.2g) to the last
+digit. A rigidly rotating pipe is a discrete solution, axis prisms included.
+
+(119.2h), moved to the right-hand side, is the centrifugal force
+`+cos^2(theta/2) u_theta^2/r_m` on the radial component and the Coriolis
+term `-cos^2(theta/2) u_r u_theta/r_m` on the circumferential one. The two
+carry the same factor, so the pair does no work on the flow (the vector
+`a x U_P` is normal to `U_P`), which is the consistency the continuum pair
+has. The factor `cos^2(theta/2) = 1 - theta^2/4 + ...` is the condition's
+one consistency error in the angle: the chord average `(U_P + R U_P)/2` is
+shorter than `U_P` by `cos(theta/2)`, once in the flux and once in the
+convected value. It is 1.9e-3 at 5 deg, 4.8e-4 at 2.5 deg, and it scales
+every swirl-driven pressure difference.
+
+(119.2i) is why a scalar is zero-gradient: the two wedge faces return
+exactly the radial area difference, so the Gauss gradient of a scalar is
+`[A_r,i+1 (p_e - p_P) + A_r,i (p_P - p_w)]/V`, with no metric error.
+
+**The reconstruction.** `fv::fvc_reconstruct` returns the cell vector whose
+own face fluxes best match given ones, `min sum_f (U . S_f - phi_f)^2/|S_f|`,
+and the momentum equation takes its cell force from it. The flux of a cell
+vector through a wedge face is (119.2e) with (119.2c), which is the cell
+vector against a ROTATED area:
+
+```
+U_b . S_f = U_P . S'_f,     S'_f = ( S_f + R(-sigma theta) S_f ) / 2               (119.2j)
+```
+
+On 119.0's wedge `S'_f = +cos(theta/2) A_w m` on the front and
+`-cos(theta/2) A_w m` on the back: the face constrains the swirl component
+and nothing else. The reconstruction therefore reads `S'_f` in place of
+`S_f` on the wedge faces, with the weight `1/|S_f|` unchanged.
+`GpuMesh::b_sf_recon` holds the boundary area vectors with (119.2j) applied,
+formed in f64 from 119.1's wedge and cast once; it exists only on a mesh
+with a wedge, the kernel `fvReconstruct` is unchanged, and a mesh without a
+wedge passes its own `b_sf` as before, bit for bit. With the unrotated
+`S_f` the two faces of a cell would also hold down the radial component, by
+the factor `1/(1 + dr sin(theta/2)/(2 r_m))`: an error of first order in the
+angle. Measured before (119.2j) on the gate's flow, the mid-gap pressure
+difference below was off by -9.84e-3, -4.65e-3 and -3.47e-3 at 10, 5 and
+2.5 deg on 32 radial cells, a ratio of successive differences of 4.41, and
+5.04 on 16 cells, against the 3.99 of (119.2h).
+
+**What is lagged.** The triple has `fr = 0`, so the matrix sees a
+zero-gradient face and (119.2g)-(119.2h) enter as explicit sources from the
+last evaluated `U_P`, the same deferred treatment §4 gives a symmetry
+plane's normal component. For the hoop term alone, with `S` its coefficient
+and `D` the diagonal, an outer iteration multiplies an in-plane error by
+`1 - alpha_U (1 + S/D)`. The ratio is largest on an axis prism with uniform
+`dr`, where `S = 3 nu tan(theta/2) dz` against `D >= (9/4) nu tan(theta/2) dz`
+from the one radial face, so `S/D <= 4/3` and the iteration contracts for
+`alpha_U < 6/7`; the default 0.7 is inside. Without relaxation the same
+argument asks `nu dt / r_1^2 < 4/3` of a time step on the axis prism. These
+are estimates for pure diffusion, recorded and not enforced.
+
+**Recorded, not changed by this unit.**
+
+1. The Courant number a driver forms from `sum_f |phi_f|` now counts the
+   swirl flux through the two wedge faces, `u_theta dt / (2 r tan(theta/2))`.
+   That is the Courant number of the one-cell-thick wedge, not of the
+   axisymmetric flow, and it throttles an adaptive time step under swirl.
+2. `GpuMesh::b_sf_recon` is built when the mesh is uploaded. A moving
+   mesh that recomputes its geometry on the device does not refresh it;
+   no moving-mesh path runs on a wedge.
+3. A wall is a zero-flux face in the reconstruction, so the cell force
+   normal to a wall is under-read in the cell beside it and the cell-centre
+   normal velocity there is not zero, though every face flux is. This is
+   the crate's collocated treatment on every mesh, not the wedge's. Under
+   swirl it shows twice. The centrifugal force reaches the pressure through
+   the momentum matrix and not as a face force, so the pressure steps
+   beside a wall are off (measured: +16 % on the first step from the inner
+   wall, -10 % on the last before the outer wall, the same on 32 and 128
+   cells), which makes a wall-to-wall pressure difference first order in
+   `dr`. And that cell velocity enters the Coriolis term of (119.2h), at a
+   size that goes as `(Omega dr^2/nu)^2` against the viscous term, so a
+   rigidly rotating pipe is the discrete solution of (119.2g) but not, to
+   round-off, of the whole loop.
+4. A parcel that reaches a wedge side is still reflected (119.1).
+5. `vof.cu` and `marangoni.cu` keep the wedge in their prescribed-flux
+   predicates; no VOF or Marangoni gate runs on a wedge.
+
+**The gates.** `tests/bc_wedge.rs`, both builds, through the public API.
+The flow is circular Couette flow between an inner cylinder `R_1 = 1`
+turning at `Omega = 1` and an outer cylinder `R_2 = 2` at rest, `nu = 1`,
+on 119.0's annulus one cell deep with `symmetry` end planes, steady SIMPLE
+to a fixed point (the largest change of a velocity component between two
+iterations below 1e-13, at most `4 nr^2 + 200` iterations); the pressure is
+pinned at 0 on the inner wall (§120.3's finding on a pure-Neumann pressure
+under `single`). The Reynolds number is 1 on purpose: recorded item 3 above
+feeds the Coriolis term at a rate that grows as `(Omega dr^2/nu)^2`, and the
+gate measures the condition, not that. The answer key is
+
+```
+u_theta(r) = A r + B/r,   A = -Omega R_1^2/(R_2^2 - R_1^2),   B = Omega R_1^2 R_2^2/(R_2^2 - R_1^2)
+P(r) = A^2 r^2/2 + 2 A B ln(r) - B^2/(2 r^2)
+```
+
+(`dP/dr = u_theta^2/r`), with `P(R_2) - P(R_1) = 0.21720250616893744` here.
+The mid-gap pressure difference is taken between the cell centres
+`i_a = nr/4` and `i_b = 3 nr/4 - 1` and compared with `P(r_b) - P(r_a)` at
+their own centroid radii; the wall-to-wall difference extrapolates each wall
+value linearly from the two cells nearest the wall.
+
+| row | bound | class | f64 | single |
+|---|---|---|---|---|
+| `fldWedgeRefGrad` against `field::wedge_ref_grad`, over `Delta_b max |U|`, on an annulus and a pipe at 1, 5 and 10 deg | 1e-14 | R | 1.8e-15 | 9.5e-7 |
+| the evaluated face value against `(U_P + R(sigma theta) U_P)/2` formed in f64 from the full rotation, over `max |U|`; a scalar's wedge face equals its cell value bitwise | 1e-14 | R | 2.2e-16 | 5.7e-8 |
+| `fvc_reconstruct` returns a constant vector from its (119.2j) fluxes, on the same six meshes; `recon_area` is `+-cos(theta/2) |S_f| m` on all 80 wedge faces to 1e-12 (class A) | 1e-12 | R | 2.2e-16 | 1.3e-7 |
+| `u_theta` at the centroids, `max |u_h - u_theta(r_P)| / (Omega R_1)`, at 5 deg on `nr` = 32, the finest of 8, 16, 32 | 2e-3 | P | 3.1533e-4 | 3.1558e-4 |
+| the observed order of that error over the three meshes, (94.3) | [1.8, 2.2] | P | 1.882 | 1.882 |
+| the mid-gap pressure difference at 5 deg on `nr` = 32, relative to its key | 1e-2 | P | -5.14e-3 | -5.12e-3 |
+| the angle's order `[d(5) - d(10)] / [d(2.5) - d(5)]` of that difference on `nr` = 32, which (119.2h) puts at `(cos^2 2.5 - cos^2 5)/(cos^2 1.25 - cos^2 2.5) = 3.990` | [3.5, 4.5] | P | 3.990 | 4.095 |
+| `|phi_front + phi_back|` of every cell over `max |phi_front|`, and `phi_front = u_theta dr dz` (119.2f) to 1e-10 | 1e-14 | R | 1.5e-16 | 7.9e-8 |
+| a pipe `r` in [0, 1], `nr` = 8, `nu = 1`, whose wall turns at `Omega = 1`: `max |u_theta - Omega r_P| / (Omega R)`, axis prisms included (the plan's `u_theta` bound, on the flow (119.2g) holds exactly) | 2e-3 | P | 1.54e-5 | 1.54e-5 |
+| a field file's `type wedge` on a patch the mesh does not type `wedge` is refused by name; the mesh's wedge patch carries kind 40 whatever the file says | - | D | holds | holds |
+| RECORDED (ignored by default, 12 minutes): the wall-to-wall `p(R_2) - p(R_1)` at 5 deg on `nr` = 128, relative to the key | 1e-2 | P | +7.92e-3 | not run |
+
+Measured 2026-10-13, RTX 5070 Ti: 8 passed, 1 ignored in both builds
+(125 s in f64, 442 s under `single`, where no run reaches the 1e-13 fixed
+point and each goes to its iteration cap). The swirl errors are 4.5562e-3,
+1.2205e-3 and 3.1533e-4 on 8, 16 and 32 cells; a host model of (119.2g)
+with the radial diffusion alone gives 4.5438e-3, 1.2196e-3 and 3.1527e-4.
+
+`taylor_couette_swirl_survives` is the failing-first test. With the wedge
+treated as a symmetry plane the hoop term is absent and the profile is the
+logarithm `1 - ln(r)/ln(2)`: measured on the tree before this unit,
+2.8925e-2 and 2.9274e-2 on 16 and 32 cells against the 2e-3 bound, the
+values the same host model gives without its hoop term.
+
+**Where the gate departs from the letter of docs/17's BC-04 row, and why.**
+The row asks for `p(R_2) - p(R_1)` within 1 % at 5 deg, and for the ratio of
+that error at 5 and 2.5 deg in [3.5, 4.5]. Neither bound is changed.
+
+1. *The wall-to-wall difference is first order in `dr`* (recorded item 3):
+   measured +4.3e-2, +2.9e-2, +1.7e-2 and +7.92e-3 on 16, 32, 64 and 128
+   cells. It meets the 1 % bound on 128 cells, and SIMPLE needs about
+   `2.1 nr^2` outer iterations on this flow (164, 577, 2144, 8054 and 30272
+   on 8 to 128 cells), so that row is the recorded run
+   `taylor_couette_wall_pressure_rise_on_128_cells`, 12 minutes in f64. The
+   default gate holds the same 1 % on the mid-gap difference, which the
+   wall cells do not reach: -5.14e-3 on 32 cells, of which (119.2h)
+   accounts for -1.90e-3.
+2. *The ratio of the two errors reads the angle's order only where the
+   radial error is far below the angle's 4.8e-4 at 2.5 deg.* On 32 cells it
+   is 1.38 for the mid-gap difference; a host model puts the ratio inside
+   the band from about 256 cells, some 140 000 iterations a run. It is NAMED and NOT
+   RUN. The gate takes the ratio of the differences between three angles
+   on one radial mesh instead: the discrete `u_theta` does not depend on the
+   angle (119.2g), the radial error cancels in each difference, and what is
+   left is the angle's order. It came out at 3.990 against (119.2h)'s 3.990.
+
+**Findings for other owners, measured with this gate's flow and not acted
+on here.** With `simplec` on (and `p_relax = 1`) the same flow converges to
+a pressure 41 % too low at every radius, on 16 and on 32 cells. With
+`u_relax = 0.9`, or with `p_relax = 0.7`, the loop goes non-finite within
+130 iterations; the defaults 0.7 and 0.3 converge. Under `single` the loop
+never reaches the 1e-13 fixed point (§120.3 found the same).
+
+Sources: ORIGINAL - the couple is elementary geometry (a rotation about an
+axis, the chord of a circle) applied to this crate's own §4 triple and §2.4
+delta coefficient. Rodrigues' rotation formula:
+<https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula>. The vector
+Laplacian and the convective derivative in cylindrical coordinates, for the
+hoop, centrifugal and Coriolis terms (119.2g)-(119.2h) are compared with:
+<https://en.wikipedia.org/wiki/Del_in_cylindrical_and_spherical_coordinates>.
+Circular Couette flow, the gate's answer key:
+<https://en.wikipedia.org/wiki/Taylor%E2%80%93Couette_flow>, and G. I.
+Taylor, *Phil. Trans. R. Soc. Lond. A* 223 (1923) 289-343, DOI
+`10.1098/rsta.1923.0008`. The patch type name `wedge` is taken by name only
+from the public user guides §120 links; no description, formula or source
+code was taken from them.
+
+No GPL-licensed source was consulted.
+
+---
+
+### 119.3 The wedge in `ofgpu-validate` and in the case JSON (BC-05)
+
+**Gate 119-A** runs two closed forms on the 119.0 mesh at a full angle of
+5 degrees, with the 119.2 condition on `back` and `front`. Both are compared
+in f64 at the cell centroids the mesh reports, `r_i = C_i . e_x` on the
+mid-plane.
+
+*Hagen-Poiseuille through the axis prisms.* A pipe of radius `R = D/2` with
+a no-slip wall, the axis cells the 5-face prisms of 119.0. The flow is
+driven by a kinematic pressure drop `Dp` over the length `L`, so the forcing
+`G = Dp/L` is an input and nothing is tuned. The fully developed solution is
+
+```
+u_z(r) = G (R^2 - r^2)/(4 nu)                                                      (119.3a)
+U_bar  = G R^2/(8 nu),        u_max = u_z(0) = 2 U_bar                             (119.3b)
+f = 2 D G/U_bar^2 (Darcy),    Re = U_bar D/nu,    f Re = 2 D^2 G/(nu U_bar) = 64   (119.3c)
+```
+
+The gate takes `D = 1`, `nu = 0.01`, `L = 1` and `G = 0.32`, for which
+(119.3b) gives `U_bar = 1` and `Re = 100`. `U_bar` is the volume-weighted
+mean of the cell values of `u_z`, `sum(u_i V_i)/sum(V_i)`. No cell centroid
+lies on the axis (the centroid of the axis prism is at `2 dr/3`), so `u_max`
+is the even parabola through the two cells nearest the axis in one axial
+station, evaluated at `r = 0`:
+
+```
+u_max = u_0 + (u_0 - u_1) r_0^2/(r_1^2 - r_0^2)                                    (119.3d)
+```
+
+which returns `u_z(0)` exactly for (119.3a). `f Re` is formed from the
+measured `U_bar` and the input `G` by (119.3c).
+
+*Radial conduction in an annulus.* Between `R_1` and `R_2`, with `T_1` on
+the inner wall and `T_2` on the outer one and no source,
+
+```
+T(r) = T_1 + (T_2 - T_1) ln(r/R_1)/ln(R_2/R_1)                                     (119.3e)
+```
+
+The gate takes `R_1 = 1`, `R_2 = 2`, `T_1 = 0`, `T_2 = 1`.
+
+| row | quantity | bound | class |
+|---|---|---|---|
+| 1 | `abs(u_max/U_bar - 2)/2`, 32 radial cells | 5e-3 | P |
+| 2 | `abs(f Re - 64)/64`, same run | 1e-2 | P |
+| 3 | `max_i abs(T_i - T(r_i))/(T_2 - T_1)`, 32 radial cells | 1e-3 | P |
+| 4 | the pipe mesh carries the derived wedge of 119.1 and one 5-face prism per axial station | yes | D |
+
+Every row has the same bound in both builds (docs/17 §5.1 class P and D). A
+one-dimensional host model of the radial discretisation (centroid-to-centroid
+gradients, the wall gradient over the distance from the last centroid to the
+wall) predicts 9.8e-4, 4.9e-4 and 1.7e-4 for rows 1 to 3; the bounds are the
+plan row's and are not derived from those numbers.
+
+**Measured** (`ofgpu-validate -sections 62`). In f64 the pipe reaches the
+1e-12 fixed point of `U` in 3682 SIMPLE iterations at the default relaxation
+(0.7 and 0.3), with `U_bar = 1.000488`, `u_max = 1.999014`, `Re = 100.05`
+and `f Re = 63.969`: row 1 is 9.80e-4, row 2 is 4.88e-4 and row 3 is
+1.73e-4, the host model's three numbers. Under `single` the loop does not
+reach the 1e-12 fixed point (119.2 and §120.3 record the same of every
+steady f32 SIMPLE run) and stops at its cap of 7400 iterations, twice the
+f64 count; the rows are 9.80e-4, 4.87e-4 and 1.73e-4 against the same
+bounds.
+
+**The `wedge` patch kind in the case JSON.** §34.1 added `empty` and
+`symmetry` as constraint kinds; `wedge` is the third. A JSON case describes
+a wedge with the block it already has: `x` is the radius, `z` is the axis
+through `x = 0, y = 0`, and `y` is the circumferential direction, one cell
+across. The angle is stated once, on the mesh:
+
+```
+"mesh": { "kind": "cartesian",
+          "bounds": { "min": [0, 0, 0], "max": [0.5, 0, 1] }, "cells": [32, 1, 4],
+          "wedge": { "angle": 5 },
+          "boundaries": { "xmin": "axis", "xmax": "wall", "ymin": "back",
+                          "ymax": "front", "zmin": "inlet", "zmax": "outlet" } },
+"patches": [ { "match": "(back|front)", "kind": "wedge" }, ... ]
+```
+
+`mesh.wedge.angle` is the FULL angle in degrees. The reader lowers such a
+case onto 119.0's `WedgeSpec` (`r` from the `x` axis with its grading, `z`
+from the `z` axis, the four remaining patch classes in the order `xmin`,
+`xmax`, `zmin`, `zmax`) and builds 119.0's mesh, with the patches carrying
+the case's own boundary names. With `bounds.min[0] = 0` the mesh is a pipe,
+119.0 writes no patch on the axis, and the `xmin` name stands for no patch.
+
+It is a constraint, and the reader enforces it (each is a §13.4 error that
+names the JSON path and this section):
+
+- a `wedge` rule carrying a per-field condition is refused, naming the
+  field, exactly as for `empty` and `symmetry`;
+- a boundary that resolves to a `wedge` rule on a mesh without `mesh.wedge`
+  is refused: a box has no wedge sides;
+- with `mesh.wedge` present, `ymin` and `ymax` must both resolve to a
+  `wedge` rule, and no other boundary or region may;
+- `cells[1]` must be 1; `bounds.min[1]` and `bounds.max[1]` must both be 0,
+  because the circumferential extent is the angle's and a second statement
+  of it could only disagree; `bounds.min[0]` must be at least 0; the angle
+  must be finite and strictly between 0 and 180 degrees;
+- `mesh.regions`, a `mesh.cyclic` pair on `x` or `y`, and a `motion` block
+  are refused on a wedge mesh. A cyclic pair on `z` is 119.0's own
+  `zmin`/`zmax` pair and is accepted.
+
+A case without `mesh.wedge` lowers exactly as before.
+
+Sources: ORIGINAL arrangement of textbook closed forms. Hagen-Poiseuille
+flow and the Darcy friction factor `f = 64/Re`:
+<https://en.wikipedia.org/wiki/Hagen%E2%80%93Poiseuille_equation> and
+<https://en.wikipedia.org/wiki/Darcy_friction_factor_formulae>; the same
+`f Re = 64` is the circular-duct row of Shah & London, *Laminar Flow Forced
+Convection in Ducts*, Academic Press (1978), which §32 already cites.
+Steady radial conduction through a cylindrical shell:
+<https://en.wikipedia.org/wiki/Thermal_conduction#Cylindrical_shells>.
+
+No GPL-licensed source was consulted.
+
 ---
 
 ## 120. The boundary-condition catalogue - every public type name and its status
@@ -38375,7 +39282,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 60 names of
+accepts it on the field the row is asked on, and it is one of the 79 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -38456,28 +39363,28 @@ row, row for row.
 | wall | `partialSlip` | implemented | — | — | (120.3b), slip length (120.3d) |
 | wall | `fixedNormalSlip` | implemented | — | — | the normal component fixed, the tangential free (§120.3) |
 | wall | `fixedShearStress` | implemented | — | — | laminar `tau/nu` (120.3f); refused naming `nu` where the setup is given none, which is every driver today |
+| outlet | `outletInlet` | implemented | — | — | (120.4a), the reverse switch of `inletOutlet` - fixed on outflow |
+| outlet | `advective` | implemented | — | — | (120.4b)-(120.4d); refused where no time loop refreshes it |
+| velocity inlet | `surfaceNormalFixedValue` | implemented | — | — | (120.5a), a fixedValue at `refValue` along the outward normal |
+| velocity inlet | `cylindricalInletVelocity` | implemented | — | — | (120.5b), axial, radial and rpm components about an axis |
+| velocity inlet | `swirlFlowRateInletVelocity` | implemented | — | — | (120.5c), `-n Q/A` plus a rigid swirl with its normal part removed |
+| velocity inlet | `pressureInletVelocity` | implemented | — | — | (120.5e), `n phi_b/|S_f|`; the flux is the pressure equation's |
+| velocity inlet | `pressureInletUniformVelocity` | implemented | — | — | (120.5f), the patch-mean normal velocity `PHI_p/A_p` |
+| velocity inlet | `pressureDirectedInletVelocity` | implemented | — | — | (120.5g), along `inletDirection` from the flux |
+| velocity inlet | `pressureDirectedInletOutletVelocity` | implemented | — | — | (120.5h), (120.5g) on inflow, zeroGradient on outflow |
+| velocity inlet | `pressureInletOutletParSlipVelocity` | implemented | — | — | (120.5i), normal from the flux and tangential from the cell on inflow |
+| outlet | `fixedMean` | implemented | — | — | (120.6a), the cell values shifted so the area mean is `meanValue` |
+| outlet | `fixedMeanOutletInlet` | implemented | — | — | (120.6b), (120.6a) on outflow faces, zeroGradient on inflow |
+| outlet | `fixedFluxExtrapolatedPressure` | implemented | — | — | (120.6f), the cell's pressure gradient carried onto the face |
+| outlet | `outletMappedUniformInlet` | implemented | — | — | (120.6c), `fraction` times the outlet's mixing-cup mean plus `offset` |
+| outlet | `matchedFlowRateOutletVelocity` | implemented | — | — | (120.6e), the cell velocity plus one normal shift carrying the inlet's rate |
+| buoyant pressure | `prghPressure` | implemented | — | — | (120.7b), the static `p` less `rho gh` of the face |
+| buoyant pressure | `prghTotalPressure` | implemented | — | — | (120.7c), `p0` less the inflow dynamic pressure and `rho gh` |
+| buoyant pressure | `prghTotalHydrostaticPressure` | implemented | — | — | (120.7d), the caller's hydrostatic `ph_rgh` less the inflow dynamic pressure; API only |
+| buoyant pressure | `uniformDensityHydrostaticPressure` | implemented | — | — | (120.7e), `pRefValue + rhoRef g.(x - pRefPoint)` less `rho gh` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| velocity inlet | `surfaceNormalFixedValue` | planned | BC-08 | — | — |
-| velocity inlet | `cylindricalInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `swirlFlowRateInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletUniformVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureDirectedInletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureDirectedInletOutletVelocity` | planned | BC-08 | — | — |
-| velocity inlet | `pressureInletOutletParSlipVelocity` | planned | BC-08 | — | — |
-| outlet | `outletInlet` | planned | BC-09 | — | the reverse switch of `inletOutlet` - fixed on outflow |
-| outlet | `advective` | planned | BC-09 | — | — |
-| outlet | `fixedMean` | planned | BC-10 | — | — |
-| outlet | `fixedMeanOutletInlet` | planned | BC-10 | — | — |
-| outlet | `fixedFluxExtrapolatedPressure` | planned | BC-10 | — | — |
-| outlet | `outletMappedUniformInlet` | planned | BC-10 | — | — |
-| outlet | `matchedFlowRateOutletVelocity` | planned | BC-10 | — | — |
-| buoyant pressure | `prghPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `prghTotalPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `prghTotalHydrostaticPressure` | planned | BC-11 | — | — |
-| buoyant pressure | `uniformDensityHydrostaticPressure` | planned | BC-11 | — | — |
 | thermal | `externalWallHeatFluxTemperature` | planned | BC-12 | — | — |
 | thermal | `turbulentHeatFluxTemperature` | planned | BC-12 | — | — |
 | thermal | `lumpedMassTemperature` | planned | BC-12 | — | — |
@@ -38949,6 +39856,652 @@ finding; both belong to §118's mixed-precision loop, not to this section.
 
 No GPL-licensed source was consulted.
 
+### 120.4 Outlets I - `outletInlet`, and the advective outlet with its wave speed as an input
+
+Two outlet conditions, both §4 triple rewrites with no new evaluation branch.
+The type NAMES are taken from the §120 user guides by name only; the
+conditions below are written from the equations stated here.
+
+**`outletInlet`** is the reverse switch of `inletOutlet`: a fixed value where
+the flow leaves, zero-gradient where it comes back in.
+
+```
+fr = 1  if phi_b > 0 (outflow),   fr = 0  otherwise
+refValue = outletValue ,   refGrad = 0                                    (120.4a)
+```
+
+It is the mirror of the `inletOutlet` rule (`fr = 1` if `phi_b < 0`), and a
+face with exactly zero flux is zero-gradient under both. *DESIGN*, ours.
+`BcKind::OutletInlet` is 38, OUTSIDE the flux-switched block `[8, 12]` (whose
+kinds are all Dirichlet on INflow), so `fldInletOutletFraction` and its host
+twin `field_setup::update_inlet_outlet` test it by its own value. Its setup
+seed is `fr = 0` (zero-gradient until a flux exists). Every driver that
+refreshes `inletOutlet` refreshes `outletInlet` with the same call, so it
+runs wherever `inletOutlet` runs. `outletValue` is required, `uniform` or
+`nonuniform`, read and written back exactly as `inletValue` is.
+
+**`advective`** carries a field out of the domain along the outward normal
+at a given wave speed, relaxed toward a far value:
+
+```
+d phi/dt + w d phi/dn = K (phi_inf - phi)                                 (120.4b)
+w = max(phi_b/|S_f|, 0) ;   K = w/L_inf if lInf is stated, else K = 0
+```
+
+This is Orlanski's (1976) radiation condition with the phase speed GIVEN
+rather than estimated from the interior. The relaxation rate `K = w/L_inf`
+(a disturbance travelling at `w` relaxes toward `fieldInf` over the length
+`lInf`) is *DESIGN*, ours. **The wave speed and the rate are face-field
+inputs** (docs/17 §5.2.3): the generic condition fills them from the flux,
+and CMP-17 passes its own `w = u_n + c` and `K = sigma c (1 - M_n^2)/L` of
+(126.6) to the same kernel.
+
+With `d phi/dn = (phi_b - phi_P) Delta_b` (§2.4) and the time derivative the
+run's own §13.3 coefficients `(a_n, a_0, a_00)`:
+
+```
+a_n phi_b + a_0 phi_b^o + a_00 phi_b^oo + w Delta_b (phi_b - phi_P)
+    = K (phi_inf - phi_b)                                                 (120.4c)
+```
+
+whose solution is the §4 triple
+
+```
+fr       = (a_n + K) / (a_n + w Delta_b + K)
+refValue = (K phi_inf - a_0 phi_b^o - a_00 phi_b^oo) / (a_n + K)          (120.4d)
+refGrad  = 0
+```
+
+Derivation: §4 gives `phi_b = fr refValue + (1 - fr) phi_P`, so
+`(a_n + w Delta_b + K) phi_b = K phi_inf - a_0 phi_b^o - a_00 phi_b^oo +
+w Delta_b phi_P`, which is (120.4c) rearranged - exact. Under Euler,
+`(a_n, a_0, a_00) = (1, -1, 0)/dt` and (120.4d) times `dt` is
+`fr = (1 + K dt)/(1 + alpha + K dt)`, `refValue = (phi_b^o + K dt
+phi_inf)/(1 + K dt)`, `alpha = w dt Delta_b` - §126.5's (126.7). Under
+`backward` the coefficients are §13.3's variable-step BDF2, Euler on the
+first step, exactly as the cell ddt takes them (`DdtScheme::coeffs`).
+Operation order, the same on the host twin and the device: `d = a_n + K`,
+`fr = d/(d + w*Delta_b)`, `refValue = (K*phi_inf - a_0*b_o - a_00*b_oo)/d`;
+the device contracts FMAs, so the two agree to round-off, not bitwise.
+
+Properties. `a_n > 0`, `w >= 0` and `K >= 0` give `0 < fr <= 1`, a Robin
+face like any other. `w = 0` (back-flow or zero flux) and `Delta_b = 0` give
+`fr = 1`: the face holds its own time extrapolation and does not take the
+interior value - a reversing outlet wants `outletInlet` or `inletOutlet`.
+`phi_b^o` and `phi_b^oo` are the face values of the two previous steps, held
+per face by `field::advective`, set to the face values at setup and rotated
+(`oo <- o`, `o <- bf`) once at the START of every time step, the same event
+as `TimeState::advance`. Within a step the triple is rewritten once per
+outer iteration from the current flux; the face value is then the §4
+evaluation. A vector field shares `fr` across its components.
+
+Refusals, by name. `steadyState` and `localEuler` have no physical time,
+and under `CrankNicolson` the theta weighting acts on the spatial operator
+while (120.4c) is defined for `Euler` and `backward` only: all three are
+refused (`Ddt::face_coeffs`). The setup paths refuse `advective` unless the
+caller sets `BcInputs::advective`, the promise that it refreshes the
+condition every step through `field::advective`; NO driver sets it yet, so
+every driver refuses the name today and the condition is reached through
+the API (the gates below). `lInf` must be positive; `fieldInf` is required
+when `lInf` is stated, and `fieldInf` without `lInf` is refused - an entry
+read by nothing (§13.4).
+
+Answer key of the relaxation: with `w`, `K`, `phi_P`, `Delta_b` and `dt`
+frozen, Euler, (120.4c) is a linear recurrence whose closed form is
+
+```
+phi_b^n = phi* + (phi_b^0 - phi*) r^n ,
+phi* = (K phi_inf + w Delta_b phi_P)/(K + w Delta_b) ,  r = 1/(1 + alpha + K dt)   (120.4e)
+```
+
+and `backward` converges to the same `phi*`, since `a_n + a_0 + a_00 = 0`.
+
+**Gates** (`rust/tests/bc_outlets.rs`, both builds, every measured value
+checked finite first). `outlet_inlet_switches_on_the_flux_sign` - faces
+with `phi_b = +1, -1, 0, +2` and `outletValue 3` evaluate to `3`, `phi_P`,
+`phi_P`, `3` bit for bit, swap after the flux reverses, and the host twin's
+fraction equals the device's (class D). `advective_face_relaxes_by_the_
+closed_form` - `w = 2`, `Delta_b = 4`, `K = 0.5`, `dt = 0.125`, `phi_inf =
+1`, `phi_P = 3`, `phi_b^0 = 10`, 20 Euler steps against (120.4e) to 1e-12
+relative (class R: 1e-5 under `single`). `advective_backward_reaches_the_
+fixed_point` - the same face, `backward`, within 1e-12 of `phi*` after 60
+steps, and the device within 1e-13 of the host twin at every step (class R:
+1e-5). `a_gaussian_pulse_leaves_through_advective` - `x` in [0, 1], 200
+cells, `u = 1`, `phi = exp(-(x - 0.5)^2/(2 0.05^2))`, `dt = 0.25 dx`,
+`linear` convection, no diffusion, the inlet `fixedValue 0`: the incident
+peak is `max phi` at `t = 0.4`, the reflected peak `max |phi|` over cells
+with `x < 0.9` at `t = 1.0`. With `advective` the reflected peak is at most
+1 % of the incident one under Euler and `backward` (class P, the same in
+f32); the `zeroGradient` baseline is measured, printed, and must exceed
+1 % so the gate is not vacuous. A scratchpad model of the same discrete
+scheme expects about 9e-5 and 1.9e-4 for `advective` and 2.3e-2 and 3.2e-2
+for `zeroGradient` - an expected magnitude, not an answer key.
+
+* **Orlanski, I.** (1976), "A simple boundary condition for unbounded
+  hyperbolic flows", *J. Comput. Phys.* 21(3):251-269, DOI
+  10.1016/0021-9991(76)90023-1 (checked on Crossref, 2026-10-12). *Not
+  read*: the condition is written from (120.4b) as stated here.
+
+No GPL-licensed source was consulted.
+
+### 120.5 Velocity inlets - three fixed-value profiles, and five velocities the pressure equation drives
+
+BC-08 implements the eight velocity-inlet names of the §120 table. The names
+are taken from the user guides of §120 by name only; every equation below
+is ours (marked DESIGN) or is cited. They split by WHO owns the flux
+through the face.
+
+**Three fixed-value profiles** *(DESIGN - ours)*. `surfaceNormalFixedValue`,
+`cylindricalInletVelocity` and `swirlFlowRateInletVelocity` are a
+`fixedValue` velocity (`BcKind::FixedValue`, `fr = 1`) whose per-face value
+the setup computes once, in f64 from the f64 face centres (world
+coordinates, §118.7) and the f64 unit outward normals `n` (§118.2), and
+rounds once into `Scalar`. Their flux is prescribed, `phi_b = U_b . S_f`
+(`momFluxIsPrescribed`, `cuda/momentum.cu`), so the patch sum of the flux
+IS the patch sum of `U_b . S_f`.
+
+```
+surfaceNormalFixedValue:   U_b = u_n n,  u_n = refValue (signed: > 0 points out
+                           of the domain, < 0 is an inflow)                 (120.5a)
+
+cylindricalInletVelocity:  a = axis/|axis|, d = x_f - origin,
+                           r = d - a (a . d), rho = |r|, e_r = r/rho (0 where rho = 0),
+                           omega = 2 pi rpm/60,
+                           U_b = u_ax a + u_r e_r + omega (a x r)           (120.5b)
+
+swirlFlowRateInletVelocity: w = omega (a x r),
+                           U_b = -n Q/A + w - n (n . w)                     (120.5c)
+```
+
+`u_ax` is `axialVelocity`, `u_r` is `radialVelocity`, `Q` is
+`volumetricFlowRate` (or `flowRate`, or `massFlowRate` read as a volume
+flux because this solver's `rho` is 1, as `flowRateInletVelocity` reads it),
+`A = SUM_f |S_f|` the patch area, and `omega` turns right-handed about `a`.
+(120.5c) is `flowRateInletVelocity`'s `-n Q/A` plus the rigid rotation with
+its face-normal part removed, so its flux is `-Q` on ANY patch, planar or
+not, and the swirl changes nothing the continuity equation sees. Each scalar
+input is read as `rotatingWallVelocity` reads `omega` (§120.3); a
+time-varying Function1 is refused by name, because no driver runs the timed
+path for these names.
+
+The swirl a patch delivers is measured by the momentum-flux form of the
+swirl number of Syred & Beer (1974) - the flux of angular momentum over `R`
+times the flux of axial momentum, the static-pressure term left out:
+
+```
+S = G_theta/(R G_x),  G_theta = SUM_f (-phi_f) rho_f (U_b . e_theta),
+                      G_x     = SUM_f (-phi_f) (U_b . a),
+                      e_theta = a x e_r,  R = max_f rho_f                   (120.5d)
+```
+
+On a planar patch normal to `a`, (120.5c) gives `U_b . a = Q/A` and
+`U_b . e_theta = omega rho_f` at every face, so (120.5d) is exactly
+`S = omega SUM_f rho_f^2 |S_f| / (R Q)` - the discrete answer key of the
+gate, which on a disc of radius `R` tends to `omega R/(2 Q/A)`, the
+solid-body rotation over a uniform axial velocity.
+
+**Five velocities the pressure equation drives** *(DESIGN - ours)*.
+`pressureInletVelocity` (kind 41), `pressureInletUniformVelocity` (42),
+`pressureDirectedInletVelocity` (43), `pressureDirectedInletOutletVelocity`
+(44) and `pressureInletOutletParSlipVelocity` (45) sit on a patch whose
+PRESSURE is given; the flux through the face is the pressure equation's, and
+the velocity follows from it - the treatment of a pressure boundary in
+Ferziger & Peric (2002), where the boundary velocity is whatever the mass
+flux through the face makes it. Each is a §4 triple with `refGrad = 0`,
+rewritten once per outer iteration, from the flux `phi_b` the last corrector
+left, by `fldPressureInletValue` in `cuda/field.cu` (host twin
+`field::pressure_inlet_values`), before the boundary evaluation:
+
+```
+41  U_b = S_f phi_b/(S_f . S_f)                                fr = 1     (120.5e)
+42  U_b = (S_f/|S_f|) PHI_p/A_p,  PHI_p = SUM_{f in p} phi_f,
+                                  A_p   = SUM_{f in p} |S_f|   fr = 1     (120.5f)
+43  U_b = d_f phi_b/(d_f . S_f)                                fr = 1     (120.5g)
+44  (120.5g) where phi_b < 0                                   fr = 1
+    zeroGradient where phi_b >= 0                              fr = 0     (120.5h)
+45  U_b = S_f phi_b/(S_f . S_f) + U_P - S_f (S_f . U_P)/(S_f . S_f)
+    where phi_b < 0                                            fr = 1
+    zeroGradient where phi_b >= 0                              fr = 0     (120.5i)
+```
+
+`d_f` is `inletDirection` (uniform or one vector per face) normalised in
+f64; the setup refuses a face where `d_f . n > -1e-6`, a direction that does
+not point into the domain. The sums of (120.5f) run over the patch's faces in
+face order, in `Acc` (§118.1), and `PHI_p/A_p` is rounded once; one device
+thread per patch head runs them, so the device sum is the host sum. (120.5i)
+holds the normal part from the flux and the tangential part from the cell,
+lagged one outer iteration; at a fixed point it is the parallel-slip inflow.
+The fractions of 44 and 45 are switched by `fldInletOutletFraction` on the
+same strict `phi_b < 0` as the flux-switched block `[8, 12]`.
+
+Each of (120.5e)-(120.5i) satisfies `U_b . S_f = phi_b` on its Dirichlet
+faces (and (120.5f) `SUM_f U_b . S_f = PHI_p`) to round-off, so the face
+value never contradicts the flux. **The flux rule:** `momFluxIsPrescribed`
+answers FALSE for a velocity kind in `[41, 45]` whatever its `fr`, so the
+pressure correction reaches the face; every other kind is answered as
+before, which keeps the f64 build's results bitwise. A caller opts in with
+`BcInputs::pressure_inlet = true`, the promise that its loop runs
+`field_ops::update_pressure_inlet_velocity` every outer iteration and builds
+its flux with `momFluxIsPrescribed` - `Simple::correct_outer` does both, and
+`ofgpu-lowmach` and `ofgpu-buoyant` pass it. Every other setup refuses the
+five names by name: a frozen seed with `fr = 1` would be a fixed-velocity
+inlet under a pressure-inlet name (§13.4). `cuda/vof.cu` and
+`cuda/marangoni.cu` keep their predicates unchanged for that reason - the
+VOF setup cannot reach these kinds.
+
+**The pressure-driven channel** *(gate)*. A plane channel of height `H`,
+length `L`, kinematic pressure `p_in` at the inlet (`fixedValue`), `0` at
+the outlet, `noSlip` walls, `pressureInletVelocity` at the inlet and
+`zeroGradient` at the outlet. The fully developed Poiseuille flow satisfies
+every one of these conditions exactly - the inlet pressure is uniform, the
+tangential velocity is zero, the normal velocity is whatever the flux makes
+it - so it is the solution, with no entrance length, and its rate per unit
+depth `t` is (Batchelor 1967, §4.2)
+
+```
+Q = p_in H^3 t/(12 nu L)                                                   (120.5j)
+```
+
+On `n_y` uniform cells across, the cell-centred discrete solution with the
+half-cell wall gradient of §2.4 is the parabola shifted by `G Delta^2/(8 nu)`
+(`G = p_in/L`, `Delta = H/n_y`), so the discrete fixed point carries
+*(DESIGN - derived here, checked on a scratchpad 1-D solve)*
+
+```
+Q_h = Q (1 + 2/n_y^2)                                                      (120.5k)
+```
+
+1.005 Q at `n_y = 20`, inside the plan's 1 %.
+
+**Gates** (`tests/bc_inlets.rs`, 6 tests, both builds; class per docs/17
+§5.1, D-F32-1). `fixed_value_inlets_carry_their_patch_flux` - a 6^3 box,
+inlet `xMin`: every face value equals (120.5a)-(120.5c) evaluated in the
+test within 1e-14 of `max|U|`, and after three SIMPLE outer iterations the
+device flux through the inlet sums to the prescribed -2.5, -1.5 and -0.8
+within 1e-12 relative (class R; measured exact to 12 digits in f64, and
+-2.499999977648, -1.499999988824, -0.799999836832 under `single`, inside
+1e-5); the swirl number (120.5d) of `swirlFlowRateInletVelocity` (0.8,
+120 rpm, axis `x`) is 4.319469523210 against the discrete answer key
+4.319469523210 (1e-12 relative; `single` 4.319470450617 against
+4.319469548956, 2.1e-7), and `U_b . a = Q/A` at every face.
+`pressure_inlet_refresh_is_its_host_twin` - kinds 41-45 on five faces of a
+4^3 box under a two-signed prescribed flux: the device refresh equals
+`field::pressure_inlet_values` within 1e-14 of `max|U_b|`, `fr` is exactly 1
+or exactly the `phi_b < 0` switch, `U_b . S_f = phi_b` on every Dirichlet
+face and the 42 patch sum equals `PHI_p` within 1e-12 (class R).
+`a_pressure_driven_channel_reaches_the_poiseuille_rate` - `H = 1`, `L = 2`,
+10 x 20 cells, `nu = 1`, `p_in = 24`: (120.5j) gives `Q = 1` and (120.5k)
+`Q_h = 1.005`. Measured `Q = 1.005000000` after 1089 outer iterations,
+`|Q/Q_h - 1| = 4.7e-13`, outlet minus inlet 2.2e-15 (f64); under `single`
+`Q = 1.004999750` with `|Q/Q_h - 1| = 2.5e-7` (class R, 1e-5) - the plan's
+1 % holds in both builds (class P). The run reaches the 5000-iteration cap
+under `single` without meeting the residual control: the f32 SIMPLE floor
+of §120.3's findings, not this condition. Three refusal tests: the five
+pressure kinds without `BcInputs::pressure_inlet`, all eight names on a
+scalar field, and an outward `inletDirection`, a time-varying `rpm` and a
+zero `axis`.
+
+* **Syred, N. & Beer, J. M.** (1974), "Combustion in swirling flows: a
+  review", *Combust. Flame* 23(2):143-201, DOI 10.1016/0010-2180(74)90057-1
+  (checked on Crossref, 2026-10-13). *Not read*: (120.5d) is the
+  momentum-flux ratio as defined here.
+* **Ferziger, J. H. & Peric, M.** *Computational Methods for Fluid
+  Dynamics*, 3rd ed., Springer (2002) - a pressure boundary, where the
+  boundary velocity follows from the mass flux.
+* **Batchelor, G. K.** (1967), *An Introduction to Fluid Dynamics*,
+  Cambridge University Press, §4.2, DOI 10.1017/CBO9780511800955 (checked
+  on doi.org, 2026-10-13) - the steady unidirectional channel flow (120.5j).
+
+No GPL-licensed source was consulted.
+
+### 120.6 Outlets II - four patch-mean rewrites and an extrapolated pressure gradient
+
+BC-10 implements the five Outlets II names of the §120 table. The names are
+taken from the user guides of §120 by name only; every equation below is
+ours (*DESIGN*) or is cited. Four of them hold a PATCH INTEGRAL - a mean, a
+mean carried from another patch, or a flow rate - and one extrapolates the
+pressure gradient of the cell onto the face. All five are §4 triple
+rewrites with no new evaluation branch: `BcKind::FixedMean` (46),
+`FixedMeanOutletInlet` (47), `FixedFluxExtrapolatedPressure` (48),
+`OutletMappedUniformInlet` (49) and `MatchedFlowRateOutletVelocity` (50).
+
+`psi_P,f` is the value of the cell behind face `f`, `|S_f|` the face area,
+`phi_f` the face flux (positive OUT of the domain), and every sum runs over
+the faces of the patch named, in face order.
+
+**`fixedMean`** *(DESIGN - ours)*. The face value is the cell value shifted
+by one constant, chosen so that the area-weighted patch mean is the target
+`psi_bar` (`meanValue`):
+
+```
+A = SUM_f |S_f| ,   M = SUM_f |S_f| psi_P,f ,   s = (psi_bar A - M)/A
+fr = 1 ,   refValue_f = psi_P,f + s ,   refGrad = 0                       (120.6a)
+```
+
+so `SUM_f |S_f| psi_b,f / A = (M + s A)/A = psi_bar` - exact, to round-off.
+The profile across the patch is the interior's (zero-gradient) and only its
+level is fixed.
+
+**`fixedMeanOutletInlet`** *(DESIGN - ours)*. The same mean, held where the
+flow leaves; where it comes back in the face is zero-gradient, as for
+`outletInlet` (120.4a):
+
+```
+fr_f = 1 if phi_f > 0 (outflow),   fr_f = 0 otherwise
+A_D = SUM_{phi_f > 0} |S_f| ,   s = (psi_bar A - M)/A_D   (A_D > 0),   s = 0   (A_D = 0)
+refValue_f = psi_P,f + s ,   refGrad = 0                                  (120.6b)
+```
+
+The inflow faces carry `psi_b,f = psi_P,f` exactly (fr = 0, refGrad = 0), so
+`SUM_f |S_f| psi_b,f / A = (M + s A_D)/A = psi_bar` whenever any face is an
+outflow; a patch with no outflow face is zero-gradient throughout and its
+mean is not held. (120.6a) is (120.6b) with every face Dirichlet.
+
+**`outletMappedUniformInlet`** *(DESIGN - ours)*. The inlet takes one
+uniform value: the mean of the patch `outletPatch` times `fraction` (`f`,
+default 1) plus `offset` (`c`, default 0, of the field's rank). The mean is
+the flux-weighted ("mixing-cup") mean over the outflow faces `g` of that
+patch, which is what carries a scalar's flux around a loop; a patch with no
+outflow falls back to the area mean:
+
+```
+w_g = max(phi_g, 0) ,   W = SUM_g w_g
+psi_out = SUM_g w_g psi_b,g / W                         (W > 0)
+psi_out = SUM_g |S_g| psi_b,g / SUM_g |S_g|             (W = 0)
+fr = 1 ,   refValue_f = f psi_out + c   on every face f ,   refGrad = 0  (120.6c)
+```
+
+`psi_b,g` are the outlet's face values the last boundary evaluation left. On
+a duct whose only inflow is this inlet and only outflow `outletPatch`,
+steady plug flow (slip or symmetry walls) has `U_in = f U_out + c` and, by
+continuity through equal areas, `U_out = U_in`, so its fixed point is
+
+```
+U = c/(1 - f)          (f != 1)                                           (120.6d)
+```
+
+the loop-duct answer key of the gate.
+
+**`matchedFlowRateOutletVelocity`** *(DESIGN - ours, after Versteeg &
+Malalasekera)*. The outlet velocity is the cell velocity plus one normal
+velocity, chosen so that the outlet's flux is the flow rate entering through
+`inletPatch`:
+
+```
+Q = - SUM_{g in inletPatch} phi_g ,   A = SUM_f |S_f| ,   F = SUM_f S_f . U_P,f
+c = (Q - F)/A ,   fr = 1 ,   refValue_f = U_P,f + c S_f/|S_f| ,   refGrad = 0   (120.6e)
+```
+
+so `SUM_f U_b,f . S_f = F + c A = Q` - exact, to round-off, and the flux of
+the face, a fixed value, is `U_b . S_f` (`momFluxIsPrescribed`), so the
+outlet carries `Q` out. Versteeg & Malalasekera correct the extrapolated
+outlet velocities for overall mass conservation by SCALING them with the
+ratio of inflow to outflow; (120.6e) SHIFTS them along the normal instead,
+which also holds when the extrapolated outflow `F` is zero (a run starting
+from rest) - the shift is ours. A vector field only.
+
+**`fixedFluxExtrapolatedPressure`** *(DESIGN - ours)*. A fixed-gradient
+pressure whose gradient is the cell's own pressure gradient carried onto the
+face:
+
+```
+fr = 0 ,   refValue = 0 ,   refGrad_f = S_f . (grad p)_P / |S_f|            (120.6f)
+```
+
+so `p_b = p_P + refGrad/Delta_b` is the linear extrapolation of the cell
+along the face normal - exact for a linear `p` on a mesh whose cell-to-face
+vector is normal to the face. It is meant for faces whose flux the velocity
+condition fixes (a wall, a velocity inlet), as `fixedFluxPressure` is; there
+the pressure enters the run only through its face value in the cell
+gradient, which (120.6f) keeps from bending at the boundary (a hydrostatic
+or a fully developed `p` has no kink in its last cell). Ferziger & Peric
+(2002) extrapolate the boundary pressure from the interior in the same way.
+A scalar field only.
+
+**Evaluation.** One rule per patch, built at setup and held by the field
+(`GpuScalarField::mean_rules`, `GpuVectorField::mean_rules`, type
+`field::patch_mean::PatchMeanRule`): the kind, the patch's face range, the
+other patch's face range (49, 50), the target or offset, and the fraction.
+Once per outer iteration, after the flux switch and before the boundary
+evaluation, `field_ops::update_patch_means_scalar` /
+`update_patch_means_vector` launch one kernel per rule: for 46, 47, 49 and
+50 a single thread runs the rule's sums in face order in `Acc` (§118.1),
+rounds `s`, `psi_out` or `c` once into `Scalar`, and writes every face of
+the patch (`fldPatchMeanScalar`, `fldPatchMeanVector` in `cuda/field.cu`);
+for 48 one thread per face writes (120.6f) from `grad p` (`fldExtrapolatedSnGrad`).
+The host twins are `field::patch_mean::patch_mean_values_scalar`,
+`patch_mean_values_vector` and `extrapolated_sn_grad`, in the same operation
+order; the device contracts FMAs, so the two agree to round-off, not
+bitwise. A field with no rule launches nothing, which keeps every existing
+case's results bitwise. The rewrite is lagged one outer iteration: the cell
+values, the other patch's face values and `grad p` are those the previous
+iteration left, and a fixed point satisfies (120.6a)-(120.6f) exactly.
+
+`Simple::correct_outer` runs it for `U` and for `p` (with the momentum
+predictor's `grad p`). A caller opts in with `BcInputs::patch_means = true`,
+the promise that its loop runs the refresh every outer iteration;
+`ofgpu-lowmach` and `ofgpu-buoyant` pass it for `U` and `p`. Every other
+setup, and every other field of those drivers, refuses the five names by
+name: a seed with nothing to refresh it would freeze the face at its first
+value under a name that promises a patch integral (§13.4). The setup seed is
+the cell value (`fr = 1` for 46, 49, 50; `fr = 0` for 47 and 48) until the
+first refresh.
+
+Inputs and refusals, by name. `meanValue` (46, 47) is required, of the
+field's rank; `outletPatch` (49) and `inletPatch` (50) are required and must
+name another patch of the mesh; `fraction` and `offset` (49) are optional.
+Every number is a CONSTANT: a time-varying Function1 is refused by name,
+because no driver runs the timed path for these names.
+`matchedFlowRateOutletVelocity` on a scalar field and
+`fixedFluxExtrapolatedPressure` on a vector field are refused.
+
+**Gates** (`tests/bc_outlets_ii.rs`, both builds; class per docs/17 §5.1,
+D-F32-1).
+
+`fixed_mean_holds_the_patch_mean` - a 4 x 3 x 2 box on [0,2] x [0,1]^2 with
+`T_c = 1 + x + 2y^2 + 0.5z` and `meanValue 5` on `xMax`: the area mean of
+the face values is 5.000000000000 (1e-12 relative, class R; `single`
+5.000000136870), every face is the cell value plus one shift (1e-14), `fr`
+is exactly 1 and the device triple is its host twin (1e-14); the vector form
+with `U_c = (1 + x, y - z, 2z)` and `meanValue (1 2 3)` holds every component
+(`single` 2.000000009934 on the second).
+`fixed_mean_outlet_inlet_holds_the_mean_on_a_two_signed_flux` - the same
+patch under a flux of alternating sign: `fr` is exactly the `phi > 0`
+switch, the inflow faces are the cell value bit for bit (class D), and the
+area mean is 5.000000000000 (`single` 5.000000017661); an all-inflow patch
+is the cell value on every face. `outlet_mapped_uniform_inlet_takes_the_
+outlet_mean` - `fraction 0.5`, `offset 0.25` from `xMax` under the outflow
+`phi_g = 0.1 (1 + g)|S_g|`: every inlet face is 2.164351851852, the value
+(120.6c) gives from the downloaded outlet faces (1e-12 relative; `single`
+2.164351829781), 2.074074074074 by the area mean when the outlet carries no
+flux, and the vector form per component. `a_loop_duct_closes_on_the_offset`
+- 16 x 4 x 1 cells on [0,4] x [0,1] x [0,0.25], symmetry sides, `U` mapped
+from `xMax` with `fraction 0.5` and `offset (0.5 0 0)`, `p`
+`fixedFluxExtrapolatedPressure` at the inlet and `fixedMean 0` at the
+outlet, through `Simple` with the refresh in `correct_outer`: the f64 run
+reaches its fixed point (no cell of `U` moves by 1e-14) in 112 outer
+iterations, the inlet is (120.6d)'s `0.5/(1 - 0.5) = 1` within 1e-10, `Q =
+0.250000000` against 0.25, the outlet carries `Q` back (1e-12), the inlet
+equals 0.5 times the outlet's mixing-cup mean plus 0.5 (1e-12) and the
+outlet's pressure mean is 0 (1e-12). Under `single` the run reaches its
+3000-iteration cap without the 1e-14 stop - the f32 SIMPLE floor of §120.3's
+findings, not this condition - with `Q = 0.249999970` (class R, 1e-5).
+`matched_flow_rate_outlet_carries_the_inlet_flux` - `inletPatch xMin` under
+`phi_g = -(1 + 0.5 g)|S_g|`, so `Q = 2.25`: the outlet flux `SUM U_b . S_f`
+is 2.250000000000 in both builds, the shift is normal to every face, and it
+is 2.25 again from a velocity field at rest. `fixed_flux_extrapolated_
+pressure_is_exact_on_a_linear_field` - `p_c = 3 + 2x - y + 0.5z` with its
+exact gradient on all six patches: every face value is the linear field at
+the face centre, worst 8.9e-16 (`single` 2.4e-7, class R), `fr` exactly 0,
+and a refresh without `grad p` is refused. `extrapolated_gradient_reaches_a_
+patch_past_the_first_block` - a 16 x 16 x 2 box with the condition on `zMax`
+alone, whose 256 faces start at boundary face 384, beyond the first
+256-thread launch block: every face is reached (the first version indexed
+the kernel by the absolute face and wrote none of them, a 0.03125 gap).
+`outlets_ii_refusals_are_by_name` - the five names without the opt-in, the
+two rank mismatches, an unknown and a self-naming patch, a missing
+`outletPatch`, `inletPatch` and `meanValue`, and a time-varying `meanValue`
+(class D). Eight tests, eight pass in each build.
+
+* **Versteeg, H. K. & Malalasekera, W.** *An Introduction to Computational
+  Fluid Dynamics: The Finite Volume Method*, 2nd ed., Pearson (2007),
+  ISBN 978-0-13-127498-3, chapter 11 (outlet boundary conditions) - the
+  overall-mass-conservation correction of extrapolated outlet velocities.
+  *Not read for this section*: (120.6e) is written as stated here.
+* **Ferziger, J. H. & Peric, M.** *Computational Methods for Fluid
+  Dynamics*, 3rd ed., Springer (2002) - the boundary pressure extrapolated
+  from the interior.
+
+No GPL-licensed source was consulted.
+
+### 120.7 The buoyant pressure family - a static pressure given at a patch, carried onto the solved `p_rgh`
+
+BC-11 implements the four buoyant-pressure names of the §120 table. The names
+are taken from the user guides of §120 by name only; every equation below is
+the hydrostatic decomposition of §20.5 and §9 applied at a boundary face, or
+is ours (*DESIGN*). All four are fixed values of the SOLVED pressure - `fr =
+1`, `refGrad = 0`, a §4 triple with no new evaluation branch and no kernel:
+`prghPressure` and `uniformDensityHydrostaticPressure` ride
+`BcKind::FixedValue`, and the two total forms ride `BcKind::TotalPressure`
+(14), as `totalPressure` does.
+
+**The solved pressure.** A case gives a STATIC pressure `p` at the patch; the
+solvers do not solve for `p`. §20.5 solves for `p_rgh = p - rho (g . x)`, and
+the face value has to be written in that variable. There are two forms:
+
+* *absolute* (`ofgpu-vof`, §20): `p` and `p_rgh` in Pa, and `rho_f` is the
+  mixture density of the boundary face, `rho = alpha rho_1 + (1 - alpha)
+  rho_2` of §20.3 evaluated from the face's `alpha` - the value the solver's
+  own `update_properties` writes on that face.
+* *kinematic* (`ofgpu-buoyant`, §9): the momentum equation carries `-grad p
+  + g (rho/rho_ref - 1)` with `rho/rho_ref = T_ref/T`, and equating it with
+  `(-grad p_s + rho g)/rho_ref` gives `grad p = grad p_s/rho_ref - g`, i.e.
+  `p = (p_s - rho_ref (g . x))/rho_ref` up to a constant the boundary fixes.
+  The solved `p` is `p_rgh` with the REFERENCE density, divided by it. Every
+  pressure and density entry of the four conditions is read divided by
+  `rho_ref` (the convention of a kinematic case), and `rho_f = 1` in every
+  equation below - whatever the face temperature, because the local density
+  enters only the buoyancy term.
+
+With `x_f` the face centre, `O` the mesh's local origin (§118.7; `O = 0` in
+the f64 build), `U_f` the face velocity and `|U_f|^2 = U_x^2 + U_y^2 + U_z^2`:
+
+```
+gh_f    = g . (x_f - O)                                                   (120.7a)
+p_rgh,f = p - rho_f gh_f                                    prghPressure  (120.7b)
+p_rgh,f = p0 - (1/2) rho_f |U_f|^2 - rho_f gh_f   inflow    prghTotalPressure      (120.7c)
+p_rgh,f = p0 - rho_f gh_f                         outflow
+p_rgh,f = ph_rgh,f - (1/2) rho_f |U_f|^2          inflow    prghTotalHydrostaticPressure (120.7d)
+p_rgh,f = ph_rgh,f                                outflow
+p_rgh,f = p_ref + rho_ref g . (x_f - x_ref) - rho_f gh_f   uniformDensityHydrostaticPressure (120.7e)
+```
+
+(120.7a) is taken on the STORED coordinate because the solver's own body
+force is: `vofBodyForceFluxBoundary` reads `m.b_cf`, which is local under `single`
+(§118.7), so a `p_rgh` level written with world coordinates would differ
+from the solver's by `rho g . O`. In (120.7e) both `x_f` and `x_ref`
+(`pRefPoint`) are world positions - only their difference enters. The
+entries: `p` for (120.7b) and `p0` for (120.7c), each a uniform number;
+`rhoRef`, `pRefValue` and `pRefPoint` (a vector) for (120.7e). `ph_rgh,f` is
+the hydrostatic `p_rgh` of a reference state at rest, on every face of the
+patch; this crate solves no such field, so it is an input the caller passes
+(below). Inflow is the `totalPressure` test of `field_setup`: `phi_b < 0`
+where a boundary flux is given, else `U_f . n_f < 0` - the dynamic term is
+the Bernoulli pressure of the fluid coming in, and fluid leaving carries its
+kinetic energy out with it.
+
+*Check (the gate's column).* A column at rest with uniform `rho`,
+`prghPressure` at its top `z_t` with `p = p_0` and `g = (0, 0, -|g|)`:
+(120.7b) gives `p_rgh = p_0 + rho |g| z_t` on the top, the interior at rest
+holds it uniform, and `p = p_rgh + rho (g . x) = p_0 + rho |g| (z_t - z)` -
+the hydrostatic column `p = p_0 + rho g (h_ref - z)` with `h_ref = z_t`. On
+a VERTICAL patch, (120.7e) with `rhoRef = rho` is uniform in `p_rgh` and
+leaves the column at rest, where a uniform static `p` through (120.7b) is
+not, and drives a flow - the control row of the gate.
+
+**Evaluation** *(DESIGN - ours)*. All arithmetic is f64 from the
+`Scalar`-cast inputs and the f64 `geom64` face centres, rounded once into
+`Scalar` (§118.2); the operation order is the order the equations are
+written in, left to right, `g . d = g_x d_x + g_y d_y + g_z d_z`. The four
+are DERIVED conditions in the sense of the `field_setup` module header:
+evaluated once, at setup, from the case's initial fields (`rho_f` from the
+initial `alpha`, `U_f` from the initial velocity), as `totalPressure` is.
+That is exact while the face's phase and velocity do not change - the open
+top of a tank in the light phase, a side opening in one fluid. A face whose
+`alpha` changes during the run keeps its initial `rho_f`; the per-step
+refresh belongs to the VOF family unit (BC-21), which depends on this one.
+
+**Inputs and refusals.** `BcInputs::prgh: Option<PrghInputs>` carries
+`g` (the solver's own gravity), `rho_b` (per flattened boundary face, the
+absolute form; `None` is the kinematic form), `u_b` (the face velocity for
+the two total forms) and `ph_rgh_b` (for (120.7d)). Refused by name, each
+message naming the condition and "SPEC-LIT 120.7": any of the four where
+`BcInputs::prgh` is `None` (a solver with no `p_rgh` - its pressure is not
+the variable these conditions are written in); (120.7c)/(120.7d) without
+`u_b`; (120.7d) without `ph_rgh_b`; any of the four on a vector field; a
+missing `p`, `p0`, `rhoRef`, `pRefValue` or `pRefPoint`; a `rho` entry
+naming any field but `rho`, and a `ph_rgh` entry naming any field but
+`ph_rgh` (the density and the hydrostatic field are the solver's own).
+`ofgpu-buoyant` passes the kinematic form, `ofgpu-vof` the absolute form
+with `rho_b` from `Vof::boundary_density`; both pass `ph_rgh_b = None`, so
+(120.7d) is reached through the API only. Every other driver refuses the
+four names.
+
+**Gates** (`tests/bc_buoyant_pressure.rs`, both builds; class per docs/17
+§5.1, D-F32-1).
+
+`prgh_triples_are_the_closed_forms` - a 4 x 3 x 2 box on [0,2] x [0,1]^2,
+`g = (0.5, -1, -9.81)`, a per-face density, velocity, flux sign and `ph_rgh`:
+every face of the four names, in the absolute and the kinematic form, is
+(120.7b)-(120.7e) in the operation order above bit for bit (class D), `fr`
+exactly 1, `refGrad` exactly 0; with no flux the inflow test falls to
+`PrghInputs::u_b . n` (4 of the 6 `xMin` faces inflow, no `xMax` face) for
+both total forms. `prgh_refusals_are_by_name` - every refusal of the list
+above, each message carrying "SPEC-LIT 120.7" (class D). `a_kinematic_
+column_open_at_the_top_and_side_stays_at_rest` - `Simple` on a 16 x 1 x 16
+box, `T = T_ref` so `b = 0` exactly, `prghPressure p 5` on the top and
+(120.7e) with `rhoRef 1` on the side, both of which write 14.81: after 50
+outer iterations `max |U|` is 2.4e-15 and `p + g . x` is `5 + 9.81 (1 - z)`
+within 1.4e-14 (`single` 4.1e-7 and 8.2e-6, class R); the control - a
+uniform static `p 5` on the side - moves at 4.33. `a_stratified_column_open_
+at_the_top_is_hydrostatic` - THE gate: `Vof` on a 24 x 1 x 24 box, water
+(1000) under air (1) with the interface on a face, `prghPressure p 1000` on
+the top: `rho_f` is exactly 1 on the top and 1000 on the floor, `max |U|`
+after 20 steps is 1.2e-13 and `p = p_rgh + rho (g . x)` is the two-layer
+column `p_0 + rho g (h_ref - z)` (`h_ref` = the top) within 1.1e-12 of 5705.53
+(2.0e-16 relative; `single` 5.6e-6 and 2.1e-7 relative, class R); the
+control - `fixedValue 1000` of the `p_rgh` LEVEL - is off by 9.81 Pa.
+`a_column_open_at_the_side_stays_at_rest` - one fluid at 1000, (120.7e) with
+`rhoRef 1000` on a vertical side: `max |U|` 1.4e-16, `p` within 3.0e-11 of
+10605.6 (`single` 1.4e-7 and 9.2e-8 relative); the control (a uniform
+static `p` through (120.7b)) moves at 0.10. Five tests, five pass in each
+build; the two driver knob tests (`ofgpu-vof` on the dam break's
+atmosphere, `ofgpu-buoyant` on the plume's outlet) run and change what the
+run writes.
+
+Two inputs of the VOF columns are stated because they were measured. Both
+start from the hydrostatic `p_rgh` itself (each layer constant formed once
+in f64), the hydrostatic initialisation a column at rest is: started from
+`p_rgh = 0`, the first pressure solve lifts the column by about 5000 Pa and
+leaves the heavy layer's constant 1.4e-8 Pa off (2.3e-12 relative) in f64,
+the linear solver's floor and not the condition's. And they step at
+`dt = 2.5e-4`. *Finding (f32):* at `dt = 1e-3` the stratified column under
+`single` sits at `max |U|` 1.2e-5 to 1.9e-5 from the first step on, above
+the class-R bound 1e-5 - the f32 round-off of the face force split
+`-grad p_rgh - (g . x) grad rho` at a 1000:1 jump, which reaches the
+velocity through `rAU` and therefore scales with `dt`; at 2.5e-4 it is
+5.6e-6. The fix is an f64 evaluation of that split under `single` (a §118
+numerics change of `vof.cu`), which belongs to the §118 owner.
+
+* **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
+  at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
+  the modified pressure `p - rho (g . x)` of the two-phase momentum
+  equation, and the boundary value it implies for a given static pressure.
+* **Batchelor, G. K.** *An Introduction to Fluid Dynamics*, Cambridge
+  University Press (1967), §3.5 - Bernoulli's total pressure `p + (1/2) rho
+  |U|^2` along a streamline entering through the boundary, and hydrostatic
+  equilibrium `grad p = rho g`.
+
 ### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
 
 `cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
@@ -39206,7 +40759,7 @@ so the pressure system is nonsingular in both builds, and (121.5) still holds fa
 at `1e-14` rather than `1e-12`. With a Dirichlet anchor the stopping residual passes straight into the jumps: at
 `1e-12` the f64 twin measured `9.8e-12` of `max|jump|`, falling in proportion to the tolerance.
 
-Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) adds its rows here when it lands.
+Gate CMP-B (de Vahl Davis with Boussinesq, CMP-04) is section 121.8.
 
 ### 121.6 Buoyancy production of k, ε and ω under Boussinesq (CMP-02)
 
@@ -39354,6 +40907,125 @@ about `0.61 q T`, under 2 K at `q = 0.01`.
 | `ofgpu-buoyant` knob `buoyancy boussinesq` in `every_wired_setting_changes_what_the_run_writes`, and `a_boussinesq_case_past_the_validity_limit_is_refused` | the setting changes what the run writes; the plume at `beta = 1/T_ref` (`delta_B ≈ 3`) is refused before its first iteration | D |
 | `ofgpu-datacentre` `the_buoyancy_form_reaches_the_room_run` | the cold-aisle room, 20 iterations, under each form: the rack inlet temperatures differ | D |
 | `ofgpu-lowmach` `a_boussinesq_case_is_refused_by_name` | refused naming `boussinesq`, `ofgpu-lowmach` and `densityRatio`; `-permissive` substitutes `densityRatio` | D |
+
+### 121.8 Gate CMP-B de Vahl Davis with Boussinesq (CMP-04)
+
+`No GPL-licensed source was consulted.` The gate is a section of `ofgpu-validate`
+(`rust/src/bin/validate.rs`, `check_boussinesq_cavity`; section 61 in run order when it
+landed, a number that moves as gates are added) and runs de Vahl Davis's differentially heated square
+cavity under the Boussinesq force (121.2) at `beta DeltaT = 0.03` - inside the
+validity the approximation is stated for - and asks three things at each Rayleigh
+number: the cold wall's mean Nusselt number sits within 2 % of the published one, the
+two walls carry the same heat, and the field is centro-symmetric. A control run with
+the §9 density-ratio force at the same `DeltaT` is measurably NOT centro-symmetric:
+the two forms agree on Nu to `O(beta DeltaT)` and differ in symmetry at that same
+order - the ordering the validity guard (121.8) bounds.
+
+**Configuration.** The unit square, `L = H = 1`, `d_z = 1/n`; fluid `rho = cp =
+kappa = 1`, `mu = 0.71` (`Pr = 0.71`); hot wall `304.5 K`, cold wall `295.5 K`, so
+`DeltaT = 9 K` about `T_ref = 300 K`; `beta = 1/300` /K, the ideal-gas value, so
+`beta DeltaT = 0.03`; initial `T = 300 K`; validity `delta_B = beta max|T - T_ref| =
+0.015` against the guard's `0.1`. The gravity magnitude follows from Ra's definition,
+
+```
+Ra = g beta DeltaT L^3 / (nu alpha),   with nu = 0.71 and alpha = 1
+```
+
+so `g = 0.71 Ra / 0.03`, printed into the case document at full f64 precision. The
+steady SIMPLE outer loop stops at residual `1e-9`; every other number of the document
+is Gate 59-A's, unchanged. Run 4's mesh is graded two-sided, expansion 4, on x and y -
+a wall mesh, and still centro-symmetric by construction.
+
+**Measures.** With `Q_wall` the heat flowing INTO the cavity through the wall, and
+`k = 1`, `DeltaT = 9`, `d_z = 1/n` on this case:
+
+```
+Nu_wall = |Q_wall| / (k DeltaT d_z)                                    (121.9)
+w   = |Nu_hot - Nu_cold| / Nu_cold                                     (121.10)
+s_T = max_c |(T_c - T_ref) + (T_c' - T_ref)| / DeltaT                  (121.11)
+s_U = max_c max(|u_c + u_c'|, |v_c + v_c'|) / max_c max(|u_c|, |v_c|)  (121.12)
+s   = max(s_T, s_U)
+```
+
+`c'` is the centro-symmetric partner of cell `c`, the cell whose centre is
+`(1 - x_c, 1 - y_c)`. The map is built from the cell centres alone - the distinct x
+and y coordinates are ranked, the partner of ranks `(i, j)` is `(n - 1 - i, n - 1 - j)`
+- and never from the cell index order. If the map is not a bijection of all `n^2`
+cells the run is refused, saying so. All four measures are formed in f64 on the host,
+under `single` too: the measures see the f32 field through f64 arithmetic.
+
+**Why the Boussinesq cavity is centro-symmetric.** Under (121.2) the map
+`(x, y, u, v, T - T_ref) -> (1 - x, 1 - y, -u, -v, -(T - T_ref))` takes every term of
+the steady equations to another term of the same equations - advection and the
+pressure gradient are odd under it, diffusion is even times odd and stays odd, and
+the body force is odd in `T - T_ref` - and it takes the boundary conditions to
+themselves, hot to cold at the mirrored wall with the same `DeltaT` about `T_ref`.
+The solution therefore comes in centro-symmetric pairs, and a symmetric
+discretisation on a symmetric mesh converges to a centro-symmetric field, which is
+what (121.11) and (121.12) measure at round-off. Section 9's force `g (T_ref/T - 1)`
+has an even part in `T - T_ref`, of relative size `(T - T_ref)/T_ref` - exactly the
+part the linearisation drops - so its solution is not centro-symmetric, and the
+control run measures how far from it. Gray & Giorgini (1976), in §121's sources,
+state the property bounds the linearisation lives inside.
+
+**Runs and rows.** The published mean Nusselt numbers are de Vahl Davis (1983),
+*Int. J. Numer. Meth. Fluids* 3 (1983) 249-264, DOI `10.1002/fld.1650030305`
+(paywalled), read from the open secondary Qi et al., *Nanoscale Research Letters* 8
+(2013) 56, Table 3, DOI `10.1186/1556-276X-8-56` - the same secondary Gate 59-A reads
+its Ra = 1e4 number from. Each row's class is docs/17 §5.1.4's; the R-class tolerance
+is `1e-6` in the f64 build and `1e-5` under `single`
+(`tol32 = max(tol64, min(tol64 * 2^29, 1e-5))`, rule D-F32-1). No row's tolerance,
+mesh, `DeltaT` or measure may move to let the row through.
+
+| run | Ra | mesh | grading | form | cap | rows (class, f64 / single tolerance) |
+|---|---|---|---|---|---|---|
+| 1 | 1e3 | 40x40 | none | Boussinesq | 2500 | Nu within 2 % of 1.118 (P, 0.02 both builds); `w <= TOL_R` (R, 1e-6 / 1e-5); `s <= TOL_R` (R, 1e-6 / 1e-5) |
+| 2 | 1e4 | 60x60 | none | Boussinesq | 3500 | the three rows of run 1 against 2.243 - `devahldavis1983`'s number, marked at Gate 59-A and not re-marked |
+| 3 | 1e5 | 80x80 | none | Boussinesq | 5000 | the three rows of run 1 against 4.519 |
+| 4 | 1e6 | 120x120 | two-sided, expansion 4 | Boussinesq | 8000 | the three rows of run 1 against 8.800; NOT run under `single` |
+| 5 | 1e4 | 60x60 | none | density ratio | 5000 | one require row: `s >= 1e-3` (P, both builds) - the density-ratio form at the same `DeltaT` is NOT centro-symmetric |
+
+Under `single`, run 4 is not run (docs/17 §5.3 rule 4, the 10-minute rule, the
+CMP-04 row): in f32 the outer loop does not reach the `1e-9` stopping residual, so
+the run would take all 8000 iterations. It reports one `skip` row saying so, by name.
+
+**Measured** - this tree, `ofgpu-validate -sections 61`, NVIDIA RTX 5070 Ti, f64
+build, every number the run printed:
+
+| run | Nu_cold | against published | iterations | w | s_T | s_U |
+|---|---|---|---|---|---|---|
+| 1 | 1.11865 | +0.06 % | 1683 | 1.9e-13 | 2.5e-13 | 2.4e-13 |
+| 2 | 2.25053 | +0.34 % | 2406 | 8.8e-12 | 3.6e-12 | 3.6e-12 |
+| 3 | 4.54582 | +0.59 % | 3452 | 6.3e-12 | 3.1e-12 | 3.6e-12 |
+| 4 | 8.83870 | +0.44 % | 6059 | 1.2e-14 | 2.0e-13 | 1.9e-13 |
+| 5 | 2.25064 | - | 3509 | 6.6e-7 | 2.98e-3 | 8.7e-3 |
+
+All thirteen f64 rows hold - four Nu rows, four `w` rows, four `s` rows and the
+control's require row - and the control's `s` sits five orders above the Boussinesq
+runs', which is the gate's second claim measured, not assumed.
+
+**Measured under `single`** - the same source built with `--features single`, same section:
+
+| run | Nu_cold | Nu_hot | against published | iterations | w | s_T | s_U |
+|---|---|---|---|---|---|---|---|
+| 1 | 1.12213 | 1.11645 | +0.37 % | 2500, not converged | 5.07e-3 | 1.64e-3 | 1.48e-3 |
+| 2 | 2.24888 | 2.25151 | +0.26 % | 3500, not converged | 1.17e-3 | 7.53e-4 | 8.61e-4 |
+| 3 | 4.54798 | 4.54167 | +0.64 % | 5000, not converged | 1.39e-3 | 7.46e-4 | 1.06e-3 |
+| 4 | - | - | - | `skip` row, not run | - | - | - |
+| 5 | 2.24889 | 2.25138 | - | 5000, not converged | 1.11e-3 | 3.68e-3 | 7.94e-3 |
+
+The three Nu rows sit inside the 2 % band. The six R-class rows - `w` and `s` of runs
+1, 2 and 3 - FAIL, at about `1e-3` against their `1e-5` tolerance. This is a recorded
+f32 finding for the precision stream (§118), and no tolerance is moved for it. What was
+measured: in f32 the steady SIMPLE outer loop does not reach the `1e-9` stopping
+residual (every run takes its full cap and reports `converged false`; a probe of run 1
+measured the same `w` and `s` at 1000 and at 3000 iterations, so more iterations do not
+help), and the field it stays on carries a wall-to-wall heat imbalance and a
+centro-symmetry defect of order `1e-3`. The cause was not isolated here. The control's
+require row holds under `single`, but there it does not separate the two forms: the
+Boussinesq runs' own `s` is of the same order as the control's. The claim that the
+density-ratio form is the asymmetric one therefore rests on the f64 rows. Run 4 is
+skipped under `single` by the 10-minute rule, as the table above states.
 
 ## 122. The compressible gas — the perfect-gas state, the gauge pressure about `p_op`, Sutherland, and the f32 design
 
@@ -42254,6 +43926,128 @@ fixture's CH4 row at the zeroed-O2 states, on the host and the device alike).
 
 No new equation labels.
 
+
+### 132.10 The device integrator as built (CHR-07b, `cuda/chem.cu`, `src/chem/device.rs`)
+
+One kernel, **`chemIntegrate`**, runs one thread per cell over one flow step
+`dt`. Each thread is `ConstPressureReactor::advance` of §132.8, that is
+§132.7's `integrate_observed` with `ros_step`, `lu_factor`, `lu_solve`,
+`fd_jacobian` and `error_norm`, under advance's observer. It computes in
+`typedef double ofchem` in both builds (§132.6, §118.10). The right-hand
+side is §132.9's `chemRhs`, and its arithmetic is unchanged.
+`integrate_fields` is the ofscalar crossing. `chemPackState` widens
+`(T, p, Y)` exactly into a double state, `chemIntegrate` runs on it, and
+`chemUnpackState` rounds the state once on the way out. In the f64 build it
+is bitwise `integrate`.
+
+**Design choices of this unit (ORIGINAL; Sandu et al. and SAND89-8009 give
+only the method and the equations).**
+
+* **D5, one for one.** R1-R4 and R10 are made as the host twin makes them,
+  in its order:
+  * the pivoted LU, first on a tie, with the update skipped when the
+    multiplier is exactly 0;
+  * `lu = (-γ h) J + I`;
+  * the stage sums that skip an exactly-zero `α_ij` or `γ_ij`;
+  * `y_{n+1}` and `Est` in one loop over the stages;
+  * (132.5) over `m = K + 1` components;
+  * the factor `min(fac_max, max(0.1, 0.9 / Err^(1/(p̂+1))))`;
+  * `J` once per accepted point, with `δ_j = 2^-26 max(|y_j|, atol_j)`;
+  * the shortened last step;
+  * the non-finite rejection that divides `h` by 10;
+  * the clip of `Y_k` in `[-atol_y, 0)` to 0 after each accepted step.
+
+  `h_min` is 0, as advance sets it. R11's ignition delay is host-only. The
+  coefficient set and the tolerances reach the kernel as one double control
+  array, which `DeviceReactor::new` builds from `ReactorOptions` and the
+  set's own `Coefficients`, so no constant is spelled twice. Its field list
+  is stated in `src/chem/device.rs` and in `chem.cu`'s header.
+* **D6, the step memory.** `h[c]` goes in as the cell's first trial step
+  (advance's `h0`, clamped as R3 clamps it) and comes out as
+  `RosStats::h_next`, the step the controller proposed after the last
+  accepted step. A caller can carry it to the next flow step. The counts
+  `accepted`, `rejected` and `clipped` come out per cell.
+* **D7, refusals per cell**, extending §132.9 D3. Before the run the checks
+  are, in advance's order:
+  * `1`, the pressure (R7);
+  * `3`, a mass fraction negative or not finite (R9);
+  * `2`, the temperature;
+  * `9`, an `h[c]` that is not finite or not above 0 (R5's `h0`).
+
+  During the run:
+  * any `chemRhs` refusal (2, 4, 5) at `y`, at a perturbed column or at a
+    stage argument ends the cell, as the host's error ends advance;
+  * `6`, a singular `I - γhJ`;
+  * `7`, more step attempts than `max_steps`;
+  * `8`, a `Y_k < -atol_y` after an accepted step (R10).
+
+  A refused cell writes NaN to its whole state column and to `h[c]`. On the
+  host side, `DeviceReactor::new` refuses each of the following, naming it:
+  `rtol`, `atol_y`, `atol_t`, `h_max` (`+inf` allowed) and `max_steps`
+  (1 to `i32::MAX`). `integrate` refuses a `dt` that is not finite or is
+  below 0. `dt = 0` launches nothing.
+* **D8, contraction.** The integrator's own multiplies, adds, subtracts and
+  divides (the LU, the solves, the stage sums, the error norm and the step
+  arithmetic) use the round-to-nearest intrinsics. nvcc therefore does not
+  fuse them, and they are evaluated as the host evaluates them. `chemRhs`
+  keeps D4's default contraction, so the results of §132.9 do not move.
+  This did not change the step-sequence statistics below (622 against 620
+  differing cells), and it is kept because it removes one source of
+  difference at no cost to the gate.
+* **D9, the scratch.** The per-cell vectors live in SoA device scratch with
+  stride `n`, sized at setup (`IntegrateWork`): ten vectors of `m`, `J`, the
+  LU factors and the pivots. The launch allocates nothing and does not sync,
+  so it can be captured.
+
+**The flow step of the gate, and why it is 1e-6 s.** A one-sided FD
+Jacobian with `δ_j = 2^-26 |y_j|` divides a right-hand-side difference by
+`δ_j`. A device-host difference at §132.9's measured level (1.7e-14 of the
+gross rate) therefore moves `J`, and through it `Err`, enough to flip
+accept/reject decisions near `Err = 1`. Once the step sequences differ, the
+two end states differ by an integration error, not by round-off.
+
+The supervisor probed this outside the tree. It ran the host twin against
+itself, with its right-hand side scaled by `1 ± 1e-14` (a fixed hash sign
+per call and component), on the same generator:
+
+| dt | cells | step sequences changed | worst dY | worst dT |
+|---|---|---|---|---|
+| 1e-4 s | 256 | 231 | `1.34e-11` | `1.35e-8` K (33 cells above 1e-9 K) |
+| 1e-6 s | 512 | 414 | `2.47e-12` | `2.98e-10` K |
+
+With a one-ulp scaling at 1e-4 s, the worst dT is `3.9e-10` K. The plan's
+`T 1e-9 K` row is therefore below the problem's own round-off conditioning
+when ignition falls inside the step, and no twin that is not bitwise could
+meet it there. The device itself, measured at 1e-4 s on 4096 cells, gave worst dY `1.75e-11`,
+worst dT `5.95e-8` K, and 620 of 4096 cells with a different step count.
+
+The gate runs at **`dt = 1e-6` s**. That is the flow step at which CHR-09's
+Lie split calls this integrator, and the tolerances are unchanged. This was
+decided by recommendation. A gate across ignition inside one step needs a
+derived bound, and that is the user's decision (docs/17 §11).
+
+**The test population.** SplitMix64 seed 20261013, per cell `c`, with the
+draws in this order: `φ = 0.6 + 0.8u`, `T0 = 1000 + 1000u`,
+`p = 10^(4+2u)` Pa, `r = 10^(-6+3u)`. Even cells are H2-air
+(`2φ : 1 : 3.76`) and odd cells are CH4-air (`φ : 2 : 7.52`), with H, O and
+OH at `r` moles each, except every tenth cell, where they are exactly 0.
+`Y` comes from the TM-4513 molar masses. Every cell starts with
+`h = 1e-10` s and uses the default `ReactorOptions` (RODAS3, `rtol` 1e-8,
+`atol_y` 1e-14, `atol_t` 1e-8 K). The mechanism is §132.8's 15-reaction
+reactor fixture, whose rates are placeholders, and GRI-Mech 3.0 when its
+paths are set (§129.6). JL4 is not in the tree (§129.6).
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `chem_device_integrate_matches_host` | 4096 cells, one `dt = 1e-6` s, f64 state API, device against `advance` | `max abs dY <= 1e-10`, `abs dT <= 1e-9` K; at least 1000 cells with `max abs(Y - Y0) > 1e-6`; no host refusal | P (both builds: the state is double) | both builds alike: dY `6.92e-14` (cell 491, CO), dT `7.64e-10` K (cell 890, 0.76 of the gate: thin, reported as it stands); 3448 cells moved, largest `max abs(Y - Y0)` `1.05e-3`, largest `abs(T - T0)` 3.79 K; 429 cells with a different step count (reported) |
+| `chem_device_integrate_matches_host_gri30` | GRI-Mech 3.0 when its paths are set, 8 cells, `dt = 1e-7` s (the 10-minute rule: one thread per cell is latency-bound, 72 s on the device); a host refusal at the thermo range must be mirrored as status 5 with NaN | Y `<= 1e-10` and the statuses gated; T reported against 1e-9 K, not gated (a supplementary row, not the plan's) | P | dY `4.40e-13`, dT `2.45e-10` K (within); 7 of 8 step counts differ. At `dt = 1e-6` s on 32 cells (measured during this unit): dY `1.35e-11`, dT `3.33e-7` K at a cell that ignites inside the step (`abs(T - T0) = 452` K), 26 of 32 step counts differ: the conditioning limit above, on real rates |
+| `chem_f32_build_matches_f64` | 512 cells through `integrate_fields`: (D) against `integrate` on the widened inputs, rounded once; (R) against the host at the inputs rounded to Scalar | (D) bitwise; (R) `abs dY <= 1e-5`, `abs dT <= 1e-5 T` | D; R in f32 | (D) bitwise in both builds. (R) f64 build: dY `6.92e-14`, relative dT `3.2e-13`; f32 build: dY `7.45e-9`, relative dT `5.37e-8`. Against the host at the UNROUNDED inputs (reported): f32 build dY `2.97e-8`, dT `1.15e-4` K |
+| `chem_device_integrate_refuses_by_status` | statuses 1, 2, 3, 5, 7, 9 with NaN outputs and good neighbours unchanged; the host-side refusals | exact | D | — |
+| `chem_device_replays_under_capture` (§132.9's row, extended) | `integrate_fields` (pack, integrate, unpack) added to the captured iteration, 64 cells at `dt = 1e-6` s | bitwise | D | 7 kernel nodes (§132.9's four, and pack, integrate, unpack), 3 replays bitwise over 11 buffers / 10304 values |
+| throughput (reported, not gated) | cells integrated per second over one `dt`, and accepted substeps per second | — | — | fixture, 4096 cells, `dt = 1e-6` s: 498 cells/s and `1.14e5` substeps/s (f64 build), 357-392 cells/s (f32 build, two runs; the GPU is shared with other work, so runs vary); the host twin on one CPU core: 111 cells/s. GRI-Mech 3.0, 1024 cells, `dt = 1e-8` s: 18.6-21.3 cells/s and 279-319 substeps/s |
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint
@@ -42487,6 +44281,85 @@ Labels: (133.1)-(133.12).
 | Konnov et al. 2018 | 10.1016/j.pecs.2018.05.003 | **closed** (OpenAlex; Lund holds a metadata record and no file) | no | the plan's "open access, to be confirmed": **it is not open**; CHR-00c/CHR-13 need a read copy or name G-FLAME NOT RUN |
 | FDS TRG | firemodels/fds `e14ec3f` | public domain | yes (kinetic theory) | — |
 | Rehm & Baum 1978; Majda & Sethian 1985 | 10.6028/jres.083.019; 10.1080/00102208508960376 | — | §25's sources | DOIs confirmed |
+
+### 133.7 The transport as built (CHR-08, `src/chem/transport.rs`, `cuda/chem.cu`, `src/chem/device.rs`)
+
+**The data.** Route (a)'s pure-species fits are TM-4513 Table IV, read from
+the report as NASA serves it (`ntrs.nasa.gov/citations/19940013151`, sha256
+`6b274fb921918f938b01d4525d8a7b7e8dff50b9990a496886db32354e2c4947`, the copy
+§128.6 read). Eq. (10) is printed on p. 5 as
+
+```
+ln eta, ln lambda, ln eta_ij = A ln T + B/T + C/T^2 + D                       (TM-4513 eq. (10))
+```
+
+with `eta` in micropoise and `lambda` in microwatts per centimetre kelvin,
+so `mu = 1e-7 e^(...)` Pa s and `lambda = 1e-4 e^(...)` W/(m K). Table III
+(p. 74) states the record format: up to three intervals each for `V` and
+`C`. The ten species of `table_II.csv` (N2, O2, CH4, CO2, H2O, CO, H2, OH,
+O, H) are transcribed from the page images of pp. 78-86 (the text layer is
+OCR) into `reference/mcbride-gordon-reno1993/table_IV.csv`, four rows per
+species, digit for digit. Every record is "V2C2 GORDON; NASA TM86885, OCT
+1984", on 300-1000-5000 K. Two checks were made on the transcription. Each
+number was matched against the OCR layer where the OCR is legible, and the
+six numbers it garbles were re-read from higher-resolution crops. Each
+species' two intervals also meet at 1000 K: the largest jump is 0.80 %
+(CH4's conductivity). CO's viscosity rows are printed equal to N2's, and
+are kept as printed.
+
+**Design choices (ORIGINAL).**
+
+* **T1, the interval.** The first fit in increasing order with `t_lo <= T
+  <= t_hi` is used, so 1000 K takes the lower fit. A `T` outside every
+  interval is refused by name (species, property, `T`, range). There is no
+  extrapolation, so a cell below **300 K** is refused (TM-4513's range),
+  and a case at 293.15 K is refused with it. Extending the range is a model
+  change and the user's decision.
+* **T2, the sums.** (133.8) and (133.9) run over the species with `Y_k !=
+  0` in index order: `den = X_i`, then `den += X_j φ_ij` (or `ψ_ij`) for
+  each present `j != i`, then `acc += X_i q_i / den`. A species with `Y_k =
+  0` is not evaluated and its range is not checked, as `cp_mass` does.
+  `X` is computed exactly as `ThermoSet::mole_fractions` computes it
+  (`transport_mixture_reduces_to_pure_species` holds the two bitwise).
+  `ψ_ij` multiplies the viscosity `φ_ij` of (133.10), as RP-1311 (5.6)
+  writes it.
+* **T3, the Lewis route** is two expressions, `λ = (mu cp)/Pr` and `D_m =
+  λ/((ρ cp) Le_m)`, with `Pr` and every `Le_m` refused unless finite and
+  above zero. The second also takes route (a)'s `λ`. With route (b) unbuilt,
+  it is the only source of `D_m`.
+* **T4, route (b)** (`binary_diffusion`, `mixture_diffusivities`) returns
+  `Error::Refused`, naming Neufeld, Janzen & Aziz (1972) as not read and
+  this section, and pointing to the Lewis route.
+* **T5, the device.** Three kernels compute in `ofchem` in both builds:
+  `chemMixtureTransport` (the host's `mixture_ty`, choice for choice),
+  `chemPrandtlConductivity` and `chemLewisDiffusivity`. `T`, `Y`, `ρ`,
+  `cp` and the outputs are `ofscalar`, rounded once. The records go up as
+  one flat array of 40 doubles per species: `W`, `n_v`, three viscosity
+  fits `(t_lo, t_hi, a, b, c, d)`, `n_c`, three conductivity fits, and a
+  pad. The field list is stated in both `device.rs` and `chem.cu`. The
+  per-cell statuses keep §132.9 D3's codes 2-4 in the host's order of
+  checks, and add **10**, a present species' `T` outside its transport
+  range; a refused cell writes NaN. `chem.cu` keeps nvcc's default
+  contraction (§132.9 D4). The SASS of every existing chemistry kernel is
+  unchanged, and only `chem.cubin` changed.
+
+**Gates, measured 2026-10-13 (both builds; the host is f64 in both).** The
+reference is Kadoya's eq. (3)/(5) at 0.1 MPa (§100.4's evaluation, constants
+from `table_7.csv` and `table_11.csv`) at 300-1500 K in 50 K steps, plus
+every printed Table 8/12 value from 300 to 1000 K.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `transport_air_viscosity_vs_kadoya` | (133.8) with (133.10), N2/O2 0.79/0.21 | 2 % | P | worst `9.16e-3`, the printed 1000 K value (equation: `9.04e-3` at 1000 K); `mu_mix(300 K) = 1.8505e-5` Pa s |
+| `transport_air_conductivity_vs_kadoya` | (133.9) with (133.11), the same | 5 % | P | worst `2.24e-2`, the printed 400 K value (equation: `2.23e-2` at 1250 K); `lambda_mix(300 K) = 2.5804e-2` W/(m K) |
+| `transport_route_b_named` | both route-(b) entries | refused by name | D | — |
+| `transport_table_iv_reads` | N2 and O2 at 300 and 1500 K against an independent float64 evaluation | 1e-9 relative | A | `2.4e-11` |
+| `transport_device_matches_host` | 4096 random cells (T 300-3000 K, ten species, every 10th with one Y zeroed): mu, lambda, the Prandtl lambda and the ten D_m | 1e-12 (f64 build); f32 build: host on the inputs as rounded, 1e-5 (D-F32-1) | P; R in f32 | f64 build `1.9e-15`; f32 build `5.9e-8` |
+| `transport_device_refuses_by_status` | statuses 2, 3, 4, 10 and the NaN outputs | exact | D | — |
+| `chem_device_replays_under_capture` | the three transport kernels appended to §132.9's capture row | bitwise | D | 10 kernel nodes, 3 replays bitwise over 16 buffers / 11200 values |
+
+No new equation labels. TM-4513 eq. (10) is quoted above under the report's
+own number.
 
 ---
 
@@ -43045,7 +44918,110 @@ and is not a gate row.
 error on both meshes is at least `1e3` times the f32 unit round-off. CHR-18
 chooses its meshes so that this holds, and prints the ratio.
 
-Labels: (135.1)-(135.11).
+### 135.7 The discrete P1 (CHR-18)
+
+**ORIGINAL.** The discretisation is this crate's own finite-volume assembly -
+no external source was consulted and no new operator is introduced. (135.8)
+is `fv::fvm_laplacian`/`fvm_sp`/`fvm_su` on the existing LDU matrix, (135.10)
+is §4's MIXED triple rewritten on the Marshak faces, and (135.7)'s gradient
+is the existing Green-Gauss `fvc_grad`. Write `γ_f = Γ_f/Δ_f` for the
+internal-face conductance per unit area (`Δ_f` the centre-to-centre distance,
+`Γ_f` the weights-weighted interpolation of `Γ`) and `γ_b = Γ_P y_b` on a
+boundary face (`y_b` the boundary delta coefficient, `1/` the centre-to-face
+distance). With `G_w ≡ 4 σ T_w^4` and `a_b = ε_b/(2(2 - ε_b))`, per cell `P`:
+
+```
+( Σ_f γ_f|S_f| + Σ_b fr_b γ_b|S_b| + κ V_P ) G_P
+    - Σ_f γ_f|S_f| G_N - Σ_b fr_b γ_b|S_b| G_w = 4 κ σ T_P^4 V_P            (135.12)
+
+γ_f = (w_f Γ_own + (1 - w_f) Γ_nbr) / Δ_f,          γ_b = Γ_P y_b           (135.13)
+
+fr_b = a_b / (a_b + γ_b),      G_b = fr_b G_w + (1 - fr_b) G_P              (135.14)
+
+(q·n)_b = a_b (G_b - G_w) = γ_b (G_P - G_b)                                 (135.15)
+
+q_r = - Γ ∇G          (the Green-Gauss gradient, scaled in place by -Γ)     (135.16)
+```
+
+The sums run over all faces: `fr_b` is 0 on every face that is not Marshak,
+so a non-Marshak boundary face contributes nothing and carries no triple.
+(135.14) is §4's MIXED triple derived, not imposed: its `G_b` is the exact
+solution of the two-point problem `-γ_b (G_b - G_P) = a_b (G_b - G_w)` -
+(135.10) with the normal derivative discretised one-sided - since
+`G_b = (a_b G_w + γ_b G_P)/(a_b + γ_b)` solves it exactly. The equality in
+(135.15) is that same equation rearranged: the wall flux read off the triple
+and read off the cell gradient are the same number by construction.
+
+The gate is `tests/radiation_p1.rs`. `p1_slab_closed_form` runs (135.11)'s
+seven cases on two meshes each; the comparison is against (135.11), the exact
+solution of the same equation, so the error is pure discretisation. The
+coarse and fine relative errors of the larger wall (`e_c`, `e_f`), the
+observed order `p`, and §135.6's floor ratio, in f64:
+
+| `ε` | `τ` (`ω = 0`) | meshes | f64 `e_c` | f64 `e_f` | f64 `p` | single `e_c` | single `e_f` | single `p` | `|e_f|/2^-24` |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.1 | 2, 4 | -1.134e-3 | -2.837e-4 | 1.9985 | -1.134e-3 | -2.831e-4 | 2.0025 | 4.7e3 |
+| 1 | 1 | 8, 16 | -3.903e-3 | -9.799e-4 | 1.9937 | -3.903e-3 | -9.801e-4 | 1.9934 | 1.6e4 |
+| 1 | 10 | 40, 80 | -1.064e-2 | -2.704e-3 | 1.9761 | -1.064e-2 | -2.705e-3 | 1.9758 | 4.5e4 |
+| 0.5 | 0.1 | 2, 4 | -9.597e-4 | -2.402e-4 | 1.9987 | -9.601e-4 | -2.357e-4 | 2.0264 | 4.0e3 |
+| 0.5 | 1 | 8, 16 | -2.065e-3 | -5.177e-4 | 1.9957 | -2.065e-3 | -5.177e-4 | 1.9958 | 8.7e3 |
+| 0.5 | 10 | 40, 80 | -5.163e-3 | -1.307e-3 | 1.9820 | -5.163e-3 | -1.308e-3 | 1.9815 | 2.2e4 |
+| 1 | 1, `ω = 0.5`, `A_1 = 0.5` | 8, 16 | -2.341e-3 | -5.866e-4 | 1.9966 | -2.341e-3 | -5.864e-4 | 1.9971 | 9.8e3 |
+
+Every error is negative and shrinks by 4: the discrete `Ψ` sits below
+(135.11) and approaches it from that side on every case, in both builds. The
+two thin cases run on N = 2, 4, and for a reason worth recording: under
+`single` the ASSEMBLED operator carries the build's own f32 unit round-off
+(2^-24), amplified by the operator's condition number, and that floor falls as the
+mesh coarsens (the absorption term that fixes `G`'s level gains on the face
+conductances) while the discretisation error grows - the coarse pair keeps
+the error an order of magnitude above it on BOTH meshes, which is what
+§135.6's class-P rule asks. The slab's cross-section is 0.125, not 0.1, and
+the thin meshes are powers of two, so every geometric quantity is a binary
+fraction: exact under `single`, the f32 geometry IS the f64 geometry, and
+the two builds' errors differ in the fourth digit, as the table shows. The
+fine error clears §135.6's `1e3·2^-24` floor in BOTH builds on every case.
+The method's own error is printed beside it and is not a gate: on the black
+cases P1 reads +8.36 %, +14.46 % and +7.18 % over (135.6), §135.5's table
+again.
+
+`p1_observed_order` reports §94's triplet for `ε = 1`, `τ = 1` on
+N = 32, 16, 8, finest first. In f64:
+`Ψ = 0.893303926189 -> 0.892647499 -> 0.890036011` against (135.11)'s
+`0.893523053720`: `r21 = r32 = 2.0000`, `ratio = 0.2514`, `Monotone`,
+`p = 1.9922`, `gci_fine = 3.084e-4`, and (135.11)'s value sits inside the
+GCI band (`|Ψ_fine - Ψ_P1| = 2.19e-4 <= 3.08e-4`). Under `single`:
+`Ψ = 0.893304288387 -> 0.892647325993 -> 0.890036046505`, `ratio 0.2516`,
+`p = 1.9909`, `gci_fine = 3.090e-4` - the same answer to four digits.
+
+The remaining rows: `p1_marshak_sign` (N = 16, τ = 1, ε = 1 and ½) holds
+(135.15)'s sign both ways - every Marshak face takes flux out of a medium
+hotter than its wall and `q_r` points at the wall in each half; with the
+walls at 2000 K both flip. `p1_energy_source_identity` checks (137.2)'s
+split at `T = T*` per cell against (135.4): the residual is `1.5e-16` in f64
+and `8.1e-8` under `single`, against docs/17 §5.1.4's `tol32` of `1e-5`, and
+`Sp <= 0` in every cell. `p1_refusals` executes §137.2's list: a model that
+is not P1, `wsgg`/`wsggGrey` absorption, a negative or non-finite `κ` or
+`σ_s`, `κ = 0`, `|A_1| > 1`, an emissivity outside `(0, 1]`, a negative or
+non-finite `T_w`, an unknown or `empty` patch, a patch named twice, and no
+Marshak patch at all - each refused BY NAME. `P1::solve` refuses, naming
+itself, a mesh whose cell, internal-face or boundary-face count differs from
+the one `P1::new` was built on.
+
+The Marshak data is paired patch-with-wall, and three gates hold it:
+`p1_wall_order_is_irrelevant` lists the same two walls - `xMin` at `ε = 1`,
+2000 K, `xMax` at `ε = ½`, 0 K - in both orders and holds `G`, the wall
+fluxes and `q_r` BITWISE equal across the listings, the hot `xMin` taking
+flux in and the cold `xMax` letting it out in both; `p1_multi_face_patch`
+carries TWO faces per wall patch (two cells in `y` under plain zeroGradient
+patches, a symmetry plane for `G`) and holds all four Marshak fluxes equal
+to the one-cell-in-y N = 8 slab's `xMin` flux - 1e-10 relative in f64,
+`tol32` under `single`, the `y` direction carrying no gradient;
+`p1_from_field_wall_equals_fixed` reads `T_w` `FromField` off `T.bf = 1500`
+and reproduces the `Fixed(1500)` solve BITWISE, every Marshak flux negative
+into the wall hotter than the medium.
+
+Labels: (135.1)-(135.16).
 
 ---
 
@@ -43385,7 +45361,7 @@ class.
 | `dom_reflection_closure` | every direction's mirror in each axis plane is in the set, bitwise | bitwise | D |
 | `dom_refuses_s12_up` | `quadrature "S12"` and above | refused (LA-3186: negative weights) | D |
 | `dom_refuses_oblique_symmetry` | a symmetry face normal off-axis by more than 1e-12 | refused | D |
-| `dom_slab_exact` | 3-D slab with symmetry sides, `ω = 0`: `Ψ` against (135.6) at `τ` = 0.1, 1, 10 | S8 within 2 % on the fine mesh | P |
+| `dom_slab_exact` | 3-D slab with symmetry sides, `ω = 0`: `Ψ` against (135.6) at `τ` = 0.1, 1, 10 | S8 within 2 % on the fine mesh (`τ = 0.1` MISSED by S8's own angular error, §136.7; the miss was accepted by the user on 2026-10-14) | P |
 | `dom_error_falls_with_order` | the same, S4 then S8 | error non-increasing | P |
 | `dom_scatter_slab` (the plan's `dom_scatter_heaslet_warming`, renamed: Heaslet & Warming is not this case) | `ω = 0.5`, `τ = 1`, `A_1 = 0`, then `±0.5`: against (136.5) solved in the test | S8 within 2 % | P |
 | `scatter_oracle_reduces_to_e3` | (136.5) with `ω = 0` against (135.6) | 1e-12 relative | A |
@@ -43398,7 +45374,289 @@ class.
 | `wsgg_user_file_digest` | the user file's sha256 against §136.4 | known digests accepted silently; an unknown one warned by name | D |
 | `dom_replays_under_capture` | §81 | bitwise | D |
 
-Labels: (136.1)-(136.10).
+### 136.6 The quadrature and the rows as CHR-19 builds them
+
+**Table II as printed.** LA-3186 p. 14, transcribed from the page image
+(the PDF whose digest heads this section). Footnote a of the table: "The
+weights given sum to 0.5. The point weights are those of Fig. 3." A level
+weight is therefore half the sum of the point weights `p` of the octant
+points whose first cosine is `μ_i`.
+
+| `n` | `μ_i` | level weights `w_i` | point weights `p_i` |
+|---|---|---|---|
+| 4 | 0.2958759, 0.9082483 | 0.3333333, 0.1666667 | 0.3333333 |
+| 6 | 0.1838670, 0.6950514, 0.9656013 | 0.2178992, 0.2308682, 0.0512325 | 0.1024651, 0.2308682 |
+| 8 | 0.1422555, 0.5773503, 0.8040087, 0.9795543 | 0.1721829, 0.2101402, 0.0631708, 0.0545061 | 0.1090122, 0.0631708, 0.2939388 |
+
+The `n = 12` block (with its two negative level weights, -0.1410287 and
+-0.0388597) is read and not transcribed further: it is the reason S12 is
+refused. `dom_sets_match_la3186` holds the built sets against this table
+at 1.5e-7; the largest deviation measured against a 40-digit solve is
+1.09e-7 (`n = 6`, `μ_1`).
+
+**The f64 values the generator must reach.** The supervisor's 40-digit solve
+(mpmath, a scratchpad probe), rounded to f64:
+
+| set | `μ` | point weights `w = p π/2` |
+|---|---|---|
+| S6 | 0.18386710903370065, 0.6950513960188804, 0.9656012491868362 | 0.16095181814902973, 0.3626469574492691 |
+| S8 | 0.14225553242324357, 0.5773502691896257, 0.8040087251775606, 0.9795543512179195 | 0.17123590548164405, 0.09922844597572607, 0.46171793449560805 |
+
+S8's `μ_2` is `1/√3`: (136.1) gives `μ_2^2 = μ_1^2 + (1 - 3μ_1^2)/3 = 1/3`
+for any `μ_1`. S2 and S4 are built from their closed forms (§136.1 and
+(136.2)), never by iteration. S6 and S8 are solved by Newton's method in f64
+from Table II's printed values. The iteration stops when every moment
+residual is below 1e-14, and a set that does not get there in 50 iterations
+is an error. The step is not the criterion: at `n = 8` a residual of 1e-17
+still produces an ulp-sized step, which never settles (found by the coder,
+CHR-19). So `dom_sets_match_solution` holds the
+result against the table above at 1e-12 relative. The Jacobian's condition
+number is about 2e3 at `n = 8` (measured by the probe), so an f64 Newton
+solution carries up to about 4e-13; the probe's own f64 Newton landed within
+4.3e-15. The moments are met far more tightly than the unknowns, because
+they are the equations the iteration drives to zero.
+
+**Direction order (DESIGN).** With `N_o` points per octant (1, 3, 6, 10 for
+S2-S8), direction `l = o N_o + q`. The octant `o = 0 … 7` gives the signs:
+bit 0 set makes `Ω_x` negative, bit 1 `Ω_y`, bit 2 `Ω_z`. The point
+`q = 0 … N_o - 1` runs over the triples `(i, j, k)` of §136.1's table in
+ascending lexicographic order, with `Ω = (±μ_i, ±μ_j, ±μ_k)`. The mirror of
+`l` in the plane normal to axis `a` is then `(o XOR 2^a) N_o + q`, and its
+components are the same f64 values with one sign flipped. That is the
+bitwise reflection closure of §136.1.
+
+**The row on the crate's operators (DESIGN).** (136.3) is the first-order
+upwind convection of `I^l` by the face flux `φ_f = Ω_l·S_f`, plus the
+implicit sink `β V_P` and the explicit source. The crate's Gauss convection
+with upwind weights writes exactly (136.3)'s coefficients: for a face owned
+by `P`, the neighbour's coefficient in `P`'s row is `min(φ_f, 0)` and `P`'s
+coefficient in the neighbour's row is `-max(φ_f, 0)`. No new discretisation
+is added. A boundary face enters through §4's triple, rewritten for each
+direction:
+
+```
+f = 1, refValue = I_b^l, refGrad = 0      where Ω_l·S_b < 0   (into the medium)
+f = 0,                   refGrad = 0      where Ω_l·S_b >= 0  (out of it: the face value is I_P^l)
+```
+
+`I_b^l` is §136.2's boundary intensity, and it is stored for every
+direction, incoming or not: the wall's `I_w` and the open boundary's
+`σ T_∞^4/π` do not depend on `l`, and the symmetry face stores
+`I_P^(l')` of the mirror direction. An `empty` face stores 0 and
+contributes nothing. The reflection sum of the wall row runs over the
+directions with `Ω_l'·n > 0`, with `n = S_b/|S_b|`, and uses the current
+cell intensities: the boundary values are lagged one sweep behind the rows,
+as the in-scattering sum is.
+
+**Who must be named.** Every boundary patch that is not `empty` and has at
+least one face must carry exactly one of the three conditions of §136.2. An
+unnamed patch has no incoming intensity, so it is refused by name and never
+defaulted. A cyclic, processor or conjugate-interface patch is refused by
+name in v1 (DESIGN): the coupled face would need the neighbour's intensity
+of the same direction, which is named and not built. Until CHR-21 lands the
+in-scattering sum, a medium with `σ_s ≠ 0` is refused by name by the row
+builder: a row with `β = κ + σ_s` and no in-scattering source would be pure
+extinction, which is a different medium.
+
+**The isothermal enclosure (the row's own identity).** Let every cell and
+every wall be at one temperature `T`, every open boundary have `T_∞ = T`,
+and every direction carry `I^l = I_b = σT^4/π`. The wall row of §136.2 then
+gives `I_w = ε I_b + (1 - ε) I_b (1/π) Σ_{Ω·n>0} w |Ω·n|`. That equals `I_b`
+exactly when the half-range moment is π, which holds for S4-S8 on an
+axis-aligned wall (§136.1) and for any set when `ε = 1`. With `I_b` on every
+boundary, (136.3) reduces to `I_b Σ_f Ω·S_f + κ V I_b = κ I_b V`, which holds
+because `Σ_f Ω·S_f = 0` on a closed cell. So the assembled row has zero
+residual at `I = I_b`, in every cell and for every direction. S2 with
+`ε < 1` misses it by `(1 - ε)(2/√3 - 1)`, which is 15.5 % of the reflected
+part. This is the discrete statement of the choice §136.1 made.
+
+**CHR-19's added rows** (same classes as §136.5; R rows use `tol32` under
+`single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `dom_sets_match_solution` | S6 and S8 against the f64 table above | 1e-12 relative | A |
+| `dom_direction_order` | the count per set (8, 24, 48, 80), the order above, and `mirror` as the XOR | exact | D |
+| `dom_row_isothermal_equilibrium` | the residual of every row at `I = I_b`, S4-S8 with `ε = 0.5`, S2 with `ε = 1`, relative to `diag · I_b` | 1e-12 | R |
+| `dom_s2_grey_wall_misses_equilibrium` | S2, `ε = 0.5`: `I_w / I_b - 1` against `(1 - ε)(2/√3 - 1)` | 1e-12 | R |
+| `dom_row_matches_formula` | every coefficient and source of every direction against (136.3) evaluated in f64 in the test, on a 4 x 2 x 1 block with one wall, one open and four symmetry patches and non-uniform intensities | 1e-12: coefficients relative to the row's diagonal; the source and the boundary intensities relative to their own value (the source is an intensity times an area, so the diagonal is not its scale) | R |
+| `dom_row_is_an_m_matrix` | off-diagonals non-positive, and the diagonal at least the sum of their magnitudes plus `κV` | 1e-12 relative | R |
+| `dom_refuses_unnamed_patch`, `dom_refuses_coupled_patch`, `dom_refuses_scattering_until_chr21` | the three refusals above | refused by name | D |
+| `dom_replays_under_capture` | the boundary update and the assembly of every direction, §81 (CHR-20 extends it to the solve) | bitwise | D |
+
+### 136.7 The solve, `G` and `q`, and the slab gate (CHR-20)
+
+**ORIGINAL.** The loop is this crate's own. It adds no discretisation: each
+direction is §136.6's row, solved by the crate's own Krylov solver.
+
+**One sweep (DESIGN).** A sweep runs in four steps:
+
+1. `DomRows::update_boundaries` from the current intensities.
+2. Every direction `l` in order: assemble (136.3), fold the boundary pair
+   (`ldu_ops::add_boundary_contributions`), and solve into `I^l` on the
+   device with the linear controls. The rows are asymmetric (upwind), so
+   `PCG` and the `DIC` preconditioner are refused by name. `GAMG` is named
+   and not built for these rows.
+3. Accumulate `G`, `q` and the wall flux (136.4) over the directions in
+   `ofacc` (f64 in both builds, §118.1), and round each once into `Scalar`.
+4. The wall flux reads the boundary intensities the rows were assembled with
+   in step 2, not fresh ones.
+
+Step 4 makes the discrete energy balance hold in every sweep. Multiply
+(136.3) by `w_l` and sum over `l` and over all cells. The internal faces
+cancel. `Σ_l w_l = 4π` turns the emission into `4κσT^4 V`, and the boundary
+faces give (136.4) times `|S_b|`:
+
+```
+Σ_b (q_w·n)_b |S_b| = Σ_P κ V_P (4 σ T_P^4 - G_P)                               (136.11)
+```
+
+The sum runs over every boundary face, symmetry faces included. Their net
+flux is zero only once the mirror lag has converged. (136.11) is exact for
+the rows' solution, so the only defect is the linear solve's residual.
+
+**Convergence (DESIGN).** The loop stops when
+
+`change = max_P |G_P - G_P^prev| / max_P |G_P| < tol`.
+
+`change` is 0 when both maxima are 0, and the first sweep starts from
+`G = 0`. These are §136.2's `scatterTol` and `maxScatterIterations`, and
+CHR-21 adds the in-scattering sum to the same loop.
+
+* `tol` defaults to 1e-8. Under `single` it defaults to 1e-5, the D-F32-1
+  `tol32` of 1e-8, because an f32 `G` cannot resolve a change of 1e-8.
+* The sweep cap defaults to 200.
+* A solve that reaches the cap returns `converged = false` with the sweep
+  count, the last `change`, and the number of direction solves in the last
+  sweep that did not report convergence. It also prints one line. It is
+  never silently accepted.
+* A solve that stops on `change` while some direction solve of the last
+  sweep did not report convergence returns `converged = true` with that
+  count, and prints one line too.
+* `DomSolve::sweep` is launches only when the linear controls are
+  `fixed_iters` (§113.2), so it captures (§81). `DomSolve::solve` reads `G`
+  back after every sweep, so it is refused inside a capture.
+
+**The slab on a 3-D mesh: the step scheme in closed form.** The mesh has
+`x ∈ [0, 1]` with `N` cells and `y, z ∈ [0, 1]` with one cell each.
+`xMin` and `xMax` are black (`ε = 1`) at 0 K, and the four sides are
+symmetry planes. The medium has `κ = τ` and `T = 1000 K`.
+
+At the rows' fixed point, each symmetry face's mirror intensity equals the
+cell's own, because the mirror has the same `Ω_x`. (136.3) then reduces to
+`I_k = (μ I_(k-1) + κ Δx I_b)/(μ + κ Δx)` with `I_0 = 0`, `μ = |Ω_x|` and
+`Δx = 1/N`. Writing `Ω_x < 0` for the directions into `xMin`:
+
+```
+Ψ_N  = (1/π) Σ_{Ω_x<0} w |Ω_x| [ 1 - (1 + τ/(N |Ω_x|))^(-N) ]                    (136.12)
+Ψ_Sn = (1/π) Σ_{Ω_x<0} w |Ω_x| [ 1 - exp(-τ/|Ω_x|) ]        (N → ∞)              (136.13)
+```
+
+`(1 + x/N)^(-N)` decreases in `N` toward `e^(-x)`. So `Ψ_N < Ψ_Sn`, and `Ψ_N`
+increases toward it: on this slab the step scheme approaches the set's own
+angular value from below. Two errors follow:
+
+* (136.13) against (135.6) is the quadrature's angular error.
+* (136.12) against (136.13) is the step scheme's spatial error.
+
+Evaluate (136.12) as `-expm1(-N ln1p(τ/(N|Ω_x|)))`. The plain power loses 13
+digits at `τ = 0.1`.
+
+**The test's `E_3`.** No crate in the tree evaluates `E_n`, so the test
+computes (135.6) itself in f64. `E_1(x)` is the series
+
+```
+E_1(x) = -γ - ln x - Σ_{k>=1} (-1)^k x^k / (k k!)          (x <= 1)
+```
+
+and, for `x > 1`, the continued fraction
+`E_1(x) = e^(-x) / (x + 1/(1 + 1/(x + 2/(1 + 2/(x + ...)))))`, evaluated
+backward from 200 levels. Then `E_(n+1)(x) = (e^(-x) - x E_n(x))/n` twice
+gives `E_3`. The test checks `1 - 2E_3` against the table of §135 to 1e-11
+before it uses it. **Abramowitz, M. & Stegun, I. A. (1964), Handbook of
+Mathematical Functions, NBS AMS 55, 5.1.11, 5.1.14 and 5.1.22**, open scan
+<https://personal.math.ubc.ca/~cbm/aands/>.
+
+The supervisor's probe gives these values in f64, as relative errors against
+(135.6). The step recurrence and (136.12) agree to 1e-13.
+
+| `τ` | (135.6) | S4, N = 256 | S8, N = 32 | S8, N = 256 | S4 limit (136.13) | S8 limit (136.13) |
+|---|---|---|---|---|---|---|
+| 0.1 | 0.167417084183 | +5.2408e-2 | +1.8393e-2 | +2.1713e-2 | +5.2860e-2 | +2.2191e-2 |
+| 1 | 0.780616065604 | +4.9007e-3 | -1.1231e-2 | -3.7409e-3 | +5.8953e-3 | -2.6598e-3 |
+| 10 | 0.999992902475 | -5.5037e-6 | -2.9230e-5 | -3.6032e-6 | -2.9127e-6 | -1.5922e-6 |
+
+**`dom_slab_exact` is MISSED at `τ = 0.1`.** S8's own angular limit (136.13)
+lies +2.219 % above (135.6), so no mesh brings S8 within 2 % at `τ = 0.1`.
+
+* The fine mesh, `N = 256`, gives +2.171 %.
+* The coarse `N = 32` gives +1.839 %, which is inside 2 %. That is the
+  spatial error cancelling part of the angular one, and it is not a pass.
+* The tolerance is not widened, and the mesh is not coarsened to pass
+  (docs/17 §5.3).
+
+The test asserts the miss and its cause: `e_32 < e_256 <= e_limit` and
+`e_limit > 2 %`. It prints the row as MISSED. The miss was accepted by the user on 2026-10-14,
+with the 2 % tolerance and the `N = 256` mesh kept as they are.
+At `τ = 1` and `τ = 10` the row holds at 2 % with a wide margin.
+
+**Under `single` the `N = 256` slab rows are MISSED by the linear solve
+(measured by CHR-20).** The rows of one direction on the 256-cell chain are
+upwind, so with Jacobi scaling the matrix is the identity minus a nilpotent
+part, and BiCGStab needs about `N` to `1.5 N` iterations on it. The crate's
+float PBiCGStab, inside the §118.4 refinement, does not survive that in f32:
+
+* With `diagonal` or `none`, it converges on some directions at `N = 64`,
+  fails on every sampled direction from `N = 128`, and at `N = 256` it
+  spends all 5000 iterations and ends in NaN on every direction.
+* With `DILU` (multi-colour, §21) it diverges after about `N` iterations.
+
+`DomSolve` reports this: every direction solve of the sweep is counted as
+unconverged, and `solve` prints the count. Nothing is accepted silently.
+Under `single`, `dom_slab_exact` and `dom_error_falls_with_order` therefore
+assert this miss (`unconverged_solves > 0` after one sweep) and print it as
+MISSED. The f64 build holds the gate, and the `N = 32` rows, mesh B's rows
+and the capture row hold in both builds. The cure is a solver numerics
+change, which is the user's decision (docs/17 §11). One candidate is a
+sweep in upwind order, which solves the step scheme's row exactly in one
+pass. Another is a different f32 Krylov method. Neither is built.
+
+**Why `N = 256`.** `dom_error_falls_with_order` compares two angular errors,
+so the step scheme's own error must sit below their difference. At `τ = 1`,
+S4's spatial and angular errors cancel on coarse meshes. At `N = 128`,
+`|e_S4| = 3.91e-3` against `|e_S8| = 4.82e-3`, and the order turns only between
+`N = 160` and `N = 192`. At `N = 256`, S8 leads by 1.16e-3. The margins of
+`|e_S4| - |e_S8|` at `N = 256` are:
+
+* 3.07e-2 at `τ = 0.1`;
+* 1.16e-3 at `τ = 1`;
+* 1.90e-6 at `τ = 10`, about 30 f32 ulps of `Ψ ≈ 1`.
+
+`N = 256 = 2^8` makes `Δx` a binary fraction, so the geometry is exact under
+`single`. The 1 × 1 cross-section keeps the side faces small against the
+`x` faces (`Δx` against 1). The lagged mirror coupling still takes tens of
+sweeps at the f64 test's sweep `tol` of 1e-12 (measured by CHR-20's tests):
+S8 at `N = 256` takes 55, 46 and 21 sweeps at `τ` = 0.1, 1 and 10, and
+mesh B's case takes 56.
+
+**S6 is not ordered.** At `τ = 1`, `N = 256`, S6 reads -5.93e-3, worse than
+both S4 and S8. At `τ = 10` it is the best of the three (-1.15e-6). The row
+compares S4 with S8, as §136.5 states. S6's place is measured here and is not
+gated.
+
+**CHR-20's rows** (same classes as §136.5; R rows use `tol32` under `single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `dom_slab_exact` | S8, `N = 256`, both walls, against (135.6) at `τ` = 0.1, 1, 10 | 2 %; `τ = 0.1` MISSED, asserted as above, accepted by the user on 2026-10-14; under `single` the f32 solve MISSED, asserted as above | P |
+| `dom_error_falls_with_order` | S4 then S8, `N = 256`, the same three `τ` | `\|e_S8\| <= \|e_S4\|`; under `single` the f32 solve MISSED, asserted as above | P |
+| `dom_slab_is_the_step_recurrence` | the device `Ψ` against (136.12), S4 and S8, `N = 32`, three `τ` (also asserted on every slab solve) | 1e-10 relative | R |
+| `dom_sums_match_formula` | the device `G`, `q` and (136.4) wall flux against f64 sums of the downloaded `I^l` and `I_b^l`, on mesh B | 1e-12 against each quantity's scale | R |
+| `dom_energy_balance` | (136.11) on mesh B, non-uniform `T`, grey wall, open boundary | 1e-10 relative to `Σ κ V 4σT^4` | R |
+| `dom_sweep_cap_is_reported` | `max_sweeps = 1` on mesh B | `converged = false`, one sweep, `change` reported | D |
+| `dom_replays_under_capture` | extended to one `DomSolve::sweep` | bitwise | D |
+
+Labels: (136.1)-(136.13).
 
 ---
 
@@ -43888,6 +46146,412 @@ The values were computed by an independent Python oracle before the Rust ran.
 * No MPI implementation's source was consulted. No GPL-licensed source was
   consulted.
 
+### 138.3 The SPMD halo exchange
+
+(§138.2 is reserved for the MPI transport, PAR-06.) ORIGINAL: this project's
+own design, with no external source. It defines no equation.
+
+§71.4's exchange has every part in one process and moves the packed cells with
+a device-to-device copy. In an SPMD run a rank holds **one** part and cannot
+read another rank's memory, so the move goes through the host and a `Comm`.
+`src/halo/spmd.rs` holds `SpmdHalo`, built from one `PartMesh` and the number
+of ranks. Rank r holds part r. One exchange of one field is five steps:
+
+```
+1. pack     sendBuf[k] = psi[sendIndex[k]]        the kernel of §71.4, unchanged
+2. D2H      sendBuf -> a page-locked host buffer; then the stream is synchronised
+3. Comm     exchange(HALO_TAG, sends, recvs):
+              to   nbr[i]: the bytes of host send slice [send_offset[i], send_offset[i+1])
+              from nbr[i]: the bytes of host receive slice [recv_offset[i], recv_offset[i+1])
+4. H2D      the whole host receive buffer -> psi[n_cells .. n_cells + n_halo], ONE copy
+5. sync     the stream is synchronised; on return no copy is pending
+```
+
+* **Still no unpack and no arithmetic.** The halo is ordered by (owning part,
+  global cell id), so the neighbours' runs, in `nbr` order, are the halo itself:
+  the receive buffer is the halo and step 4 is one contiguous copy. Steps 2-4
+  are the identity on every byte and step 1 is a gather, so a ghost cell holds
+  its owner's value bit for bit, on any transport that keeps §138.1's contract.
+* **No handshake.** The lengths come from the plan (§71.4): what r sends to s is
+  as long as what s expects from r. Every neighbour is in both lists, an empty
+  slice included, so the two sides always post matching envelopes. R5 turns a
+  plan that disagrees into a named error instead of mixed bytes.
+* **One tag.** `HALO_TAG` = 71. Messages are FIFO within an envelope (R3) and
+  every rank runs the same program, so consecutive exchanges of different
+  fields under one tag cannot overtake each other.
+* **Why two synchronisations.** This crate runs cudarc with event tracking off
+  (`Gpu::new`), so a page-locked buffer does not wait for the copy that fills
+  it. The copy of step 2 is asynchronous and the host must not read the bytes
+  before it ends; the copy of step 4 reads the host buffer asynchronously, and
+  the next exchange must not overwrite that buffer before it ends. Both waits
+  are explicit. The page-locked buffers come from cudarc's `alloc_pinned`,
+  which sets the write-combined flag: cudarc 0.19.9, the version `Cargo.lock`
+  pins, offers no other. Write-combined memory is slow for the host to read,
+  and the host reads the send buffer once, front to back, in step 3. That
+  costs time and changes no byte. `alloc_pinned_with_flags` arrives in cudarc
+  0.19.10; the send buffer moves to it when the lock file does, and PAR-16's
+  measured exchange latency says how much it matters.
+* **Not capturable.** Steps 2-5 are host round trips, so an SPMD exchange
+  inside `Gpu::capture` is refused by name (§81.3). A captured region lies
+  between two exchanges.
+* Four payloads, as §71.4: `Scalar`, `Vec3`, `Tensor` and `Label`. A payload's
+  bytes are its in-memory representation; all four are `#[repr(C)]` without
+  padding (`types::tests::layout_matches_device`). Each payload has its own
+  device send buffer and its own two host buffers, allocated once in `new`; an
+  exchange allocates nothing on the device.
+
+**Refused by name.** Every failure is `Error::Config` and its message starts
+`halo: `.
+
+| case | the message names |
+|---|---|
+| `new`: the part's number is not below the rank count | the part and the rank count, e.g. `part 2` and `2 ranks` |
+| `new`: a neighbour is not below the rank count | the neighbour and the rank count |
+| `new`: the offsets do not fit the neighbour list, or the send list's length is not where its offsets end | the lengths, as §71.4's in-process form does |
+| `new`: the send or the receive offsets do not start at 0, or decrease, or the receive offsets do not end at `n_halo` | which list (`send offsets` or `receive offsets`), and `start at 0`, or `decrease` with the two entries, or where they end and the `halo cells` count |
+| an exchange inside a capture | `capture` |
+| `comm.size()` differs from the rank count given to `new` | both numbers and `ranks` |
+| `comm.rank()` is not the part | `rank r` and `part p` |
+| a field buffer shorter than `n_cells + n_halo` | the buffer's length, `n_cells`, `n_halo` (as `halo cells`) and the length it `must be` |
+
+The checks run in that order and before anything is launched or sent.
+
+**What must hold.** Class D: bytes. `tests/halo_spmd.rs` runs in both builds;
+each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_halo_is_bit_for_bit_the_in_process_halo`** | **the gate.** Two `blockgen` boxes (`Big` 5×4×3 and 12×10×8), `P = 1..4`, three partitioners (Hilbert, linear, round robin), four payloads: every local cell of every rank, owned and ghost, equals bit for bit the in-process `HaloExchange` result and the owner's value. For `P > 1` every part has a halo, and the number of ghost cells compared is counted and positive |
+| `two_spmd_exchanges_back_to_back_do_not_share_bytes` | two different scalar fields exchanged one after the other with no synchronisation in between, `P = 4`, round robin, 12×10×8: each field's ghosts hold that field's owner values |
+| `an_spmd_halo_refuses_by_name` | the eight rows of the table above |
+| `an_spmd_halo_crosses_a_cut_cyclic_couple` (library, f64 build) | a cyclic 5×4×3 box, `P = 2..4`, three partitioners, `Scalar` and `Tensor`: ghosts equal the owner's values and the in-process result; at least one of the cuts splits a cyclic couple |
+
+**What this does not establish.** The ranks are threads of one process sharing
+one device, so nothing here measures an exchange's latency (PAR-16) and nothing
+runs over MPI (PAR-06). The first solver that calls `SpmdHalo` is §138.5's
+`spmd_pcg`.
+
+### 138.4 The SPMD exact reduction
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation: the limb decomposition is §72.2's, unchanged.
+
+§72's `ExactReduction` holds every part in one process and gathers the per-part
+results with a device-to-device copy (§72.4, step 1). In an SPMD run a rank
+holds **one** part, so the gather goes through the host and `Comm::allgather`.
+`src/exactsum/spmd.rs` holds `SpmdReduction`, built on one rank from a `Comm`
+and the number of terms `n` the rank owns. The kernels are §72's own, and so is
+the order of the gathered values: slot q of a gathered buffer is rank q's
+value, as slot q was part q's.
+
+```
+set-up   new(gpu, comm, n):  allgather of the term counts (8 bytes each)
+
+an exact reduction (sum, sum_mag, dot, norm_factor) on every rank:
+1. the rank's own maximum of |t|          the stage-one and stage-two kernels of §72, unchanged
+2. allgather  8 bytes: that maximum, widened to a double
+3. solMaxStage2 over the P gathered maxima -> the global anchor      (§72.3)
+4. the rank's own limbs against the global anchor; exCombine over its blocks
+5. allgather  40 bytes: the rank's five limb words (i64)
+6. exCombine over the P gathered limb sets, then exToScalar          (§72.4)
+
+max_mag:        steps 1-3, and the anchor is the answer
+gathered_*:     the rank's own two-stage partial, one allgather of 8 bytes,
+                then solSumStage2 over the P gathered partials       (§72.5)
+```
+
+* **The collective is still a gather.** Steps 2 and 5 move bytes and do no
+  arithmetic. Every combine runs on every rank, on the same P values in the
+  same rank order, with the kernel the in-process form uses. So every rank
+  holds the same answer, and it is the in-process answer bit for bit: for the
+  exact reductions whatever part each rank holds, for `gathered_*` when rank q
+  holds what part q held.
+* **Two collectives for an exact reduction, one for a maximum or a gathered
+  partial.** §72.3 shows why the anchor cannot ride with the limbs: the limbs
+  are cut against the anchor, so the anchor must be global first.
+  `n_allgathers()` counts the calls a handle has made, the one in `new`
+  included.
+* **The wire.** A value's bytes are its in-memory representation. The count is
+  a `u64`. The maximum and the gathered partial travel as a double in both
+  builds (§118.1): the rank's stage two stores a `Scalar`, and the host widens
+  it, which is exact because every float is a double. The limbs travel as five
+  `i64`: §72.2's four value limbs and the count of non-finite terms.
+* **A rank that owns nothing** contributes a zero maximum, zero limbs and a
+  zero partial, as an empty part does in §72.
+* **The counts are checked once, by every rank alike.** `new` gathers the
+  counts first and checks them afterwards, so every rank reaches the same
+  refusal and none is left waiting in a collective. `counts()` returns them in
+  rank order.
+* **Host round trips.** Each collective is one device-to-host copy and one
+  host-to-device copy of at most 40 bytes per rank. Both go through pageable
+  memory, which the driver completes before the call returns, so there is no
+  separate wait as in §138.3. A reduction allocates nothing on the device.
+* **Not capturable.** A reduction inside `Gpu::capture` is refused by name
+  (§81.3). In one process `ExactReduction` stays the capturable form.
+
+**Refused by name.** Every failure is `Error::Config` and its message starts
+`exactsum: `.
+
+| case | the message names |
+|---|---|
+| `new`: a rank's count does not fit a `Label` | `rank q` and its count, on every rank |
+| `new`: the counts sum to more than `EXACT_MAX_TERMS` | the sum and the limit (§72.2), on every rank |
+| a reduction inside a capture | `capture` |
+| `comm.size()` differs from the rank count seen by `new` | both numbers and `ranks` |
+| `comm.rank()` is not the rank `new` ran on | both ranks |
+| a buffer shorter than `n` | the buffer's name and length, and `n` |
+
+The last four are checked in that order, before anything is launched or sent.
+A short buffer is one rank's fault and the other ranks cannot see it: after
+any `Err` the world is spent (R10).
+
+**What must hold.** Class D: bytes. `tests/exactsum_spmd.rs` runs in both
+builds; each rank is a `ThreadComm` thread with its own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`spmd_exact_reduction_is_the_in_process_one`** | **the gate.** 20,011 terms of full mantissa spread over 100 binades, `P = 1..4`, four dealings (contiguous, round robin, shuffled, and one with an empty part), every rotation of the rank labels (rank r holds part (r + k) mod P): on every rank `sum`, `sum_mag`, `dot`, `norm_factor` and `max_mag` equal the in-process `ExactReduction` by bits, by limbs and by anchor, and equal the one-part answer; `gathered_sum`, `gathered_dot`, `gathered_sum_mag` and `gathered_norm_factor` equal the in-process gathered answer for the same part order. 1,071 answers are compared, and each handle has made 14 allgathers |
+| `an_spmd_reduction_counts_a_non_finite_term_on_every_rank` | one NaN and one infinity on different ranks, `P = 3`: `sum` is NaN on every rank and `non_finite_terms` is 2 on every rank |
+| `an_spmd_reduction_refuses_by_name` | the six rows of the table above |
+
+**What this does not establish.** Nothing here measures the latency of an
+allgather (PAR-16) and nothing runs over MPI (PAR-06). The first solver that
+calls `SpmdReduction` is §138.5's `spmd_pcg`.
+
+### 138.5 The SPMD PCG
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation: the recurrence is §73.2's (Hestenes & Stiefel 1952, as §8 cites it),
+unchanged.
+
+§73's `dist_pcg` holds every part in one process. In an SPMD run a rank holds
+**one** part, so the solve is the same program on every rank with §73's two
+cross-part steps moved onto the transports of §138.3 and §138.4.
+`src/distsolve/spmd.rs` holds it:
+
+* `DistSystem::split_one(gpu, halo, comm, m, dec, a)` builds the rank's
+  one-part system: part `comm.rank()` of `dec`, its mesh and its split matrix
+  (§71.6), uploaded. As in `DistSystem::split`, the two constraint arrays reach
+  the halo through the exchange, `is_fixed` first and `fixed_value` second, here
+  through `SpmdHalo`. `rank_part()` answers `Some(part)` for such a system and
+  `None` for one from `split`.
+* `SpmdWorkspace::new(gpu, comm, sys, reduce)` allocates the rank's Krylov
+  vectors, each `n_cells + n_halo` long, and its `SpmdReduction`. It is a
+  collective (§138.4's count allgather), so every rank builds it at the same
+  point of the program.
+* `spmd_pcg(gpu, sol, comm, psi, sys, halo, w, ctrl)` runs the solve and
+  returns §73's `DistPerformance`.
+
+```
+the same program on every rank r, on its own part:
+  r = b - A psi ;  z = M^-1 r ;  p = z ;  rho = (r,z)
+  repeat
+      SpmdHalo::scalar(p) ;  q = A p              the one exchange (§73.2, §138.3)
+      alpha  = rho / (p,q)                        SpmdReduction (§138.4)
+      psi   += alpha p ;  r -= alpha q
+      [ sum|r| ; convergence test ; read the flag ; vote ]
+      z      = M^-1 r
+      rho'   = (r,z) ;  beta = rho'/rho ;  p = z + beta p ;  rho = rho'
+```
+
+* **The kernels and their order are `dist_pcg`'s for one part.** Every launch
+  on a rank is the launch `dist_pcg` makes for that part, with the same
+  arguments and the same launch geometry; the exchange is `SpmdHalo::scalar`
+  where `dist_pcg` calls `HaloExchange::scalar`, and each reduction is the
+  `SpmdReduction` method where `dist_pcg` calls the `ExactReduction` one. §138.3
+  and §138.4 make those two bit for bit the in-process forms, so every rank's
+  field is bit for bit `dist_pcg`'s field for its part, and with the exact
+  reduction and `Diagonal` or `None` it is the one-part field, hence the serial
+  solver's (§73.8).
+* **The mean still divides by the whole mesh's cell count** (§73.4), which the
+  system carries from the decomposition.
+* **Every rank decides alone, and every rank decides alike.** The residual sum
+  and the normalisation factor are global values with the same bits on every
+  rank, and the convergence test is one kernel on those values, so every rank's
+  flag is the same and no rank has to be told to stop. The **flag vote** checks
+  this instead of trusting it: after each read of the flag, the ranks allgather
+  one byte each (the rank's flag, 0 or 1), and a rank that sees two different
+  votes refuses by name. The vote is a collective, so every rank must have it
+  switched the same way. It is on by default in a debug build and off in a
+  release build (`SpmdWorkspace::set_flag_vote`); `n_flag_votes()` counts the
+  votes taken. A solve to a tolerance that stops after `k` iterations with
+  `check_interval` 1 takes `k + 1` votes. A `fixed_iters` solve reads no flag
+  and takes none.
+* **The counts are §73.8's.** At `k` fixed iterations a rank makes `k + 3`
+  exchanges and `2k + 5` reductions. With the exact reduction each reduction is
+  two allgathers and with the gathered one it is one (§138.4), so the handle
+  counts `1 + 2 (2k + 5)` or `1 + (2k + 5)` allgathers, `new`'s included. A
+  vote is one more allgather on the `Comm` and is counted by `n_flag_votes()`
+  alone.
+* **Both reductions.** `DistReduce::Exact` is partition-invariant.
+  `DistReduce::Gathered` is `dist_pcg`'s gathered answer when rank q holds part
+  q, and is run-invariant only (§72.5).
+  `SpmdWorkspace::partition_invariant` answers as
+  `DistWorkspace::partition_invariant` does.
+* **Preconditioners.** `Diagonal` and `None`, and, once the workspace is
+  coloured, the block-local `Dic` and `Dilu` of §138.6. On an uncoloured
+  workspace `Dic` and `Dilu` are refused by name.
+* **Not capturable.** Every exchange and every collective is a host round trip
+  (§138.3, §138.4), so `spmd_pcg` inside `Gpu::capture` is refused by name
+  (§81.3).
+
+**Refused by name.** A failure of `split_one`, of `SpmdWorkspace::new` or of
+`DistWorkspace::new` is `Error::Config` starting `distsolve: `. A failure of
+`spmd_pcg` is `Error::Config` starting `spmd_pcg: `, except the last row,
+which is §13.4's `Error::Refused`.
+
+| case | the message names |
+|---|---|
+| `split_one`: `comm.size()` differs from the decomposition's part count | both numbers and `ranks` |
+| `split_one`: the halo plan is not this rank's part, or was built for another rank count | `rank r` and `part p`, or both rank counts |
+| `SpmdWorkspace::new`: the system is not from `split_one` | `DistSystem::split_one` |
+| `SpmdWorkspace::new`: `comm.rank()` is not the system's part | `rank r` and `part p` |
+| `DistWorkspace::new`: the system is from `split_one` | `SpmdWorkspace` |
+| `spmd_pcg` inside a capture | `capture` |
+| `spmd_pcg`: the system is not from `split_one` | `DistSystem::split_one` |
+| `spmd_pcg`: `comm.size()` differs from the rank count the workspace saw | both numbers and `ranks` |
+| `spmd_pcg`: `comm.rank()` is not the system's part | `rank r` and `part p` |
+| `spmd_pcg`: the workspace was built for another system | the owned and halo cell counts of both |
+| `spmd_pcg`: the halo plan's cell counts are not the system's | the owned and halo cell counts of both |
+| `spmd_pcg`: a solution buffer shorter than `n_cells + n_halo` | the buffer's length, the length it must have, the owned and the halo cell counts, and `lduAmul` |
+| `spmd_pcg`: the flag vote disagrees | `flag` and every rank's vote in rank order, on every rank |
+| `spmd_pcg`: `Dic` or `Dilu` on an uncoloured workspace | the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
+
+The `spmd_pcg` rows are checked in that order, the vote excepted, and before
+anything is launched or sent. A refusal that only one rank can see leaves the
+other ranks waiting in a collective: after any `Err` the world is spent (R10).
+
+**What must hold.** Class D: bytes. Each rank is a `ThreadComm` thread with its
+own `Gpu` on device 0.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_pcg_is_the_in_process_pcg`** (library, f64 build) | **the gate.** §73.8's 5×4×3 box, plain and with a cyclic couple, `P = 1..4`, three partitioners (Hilbert, linear, round robin; linear alone at `P = 1`), `Diagonal` and `None`, the exact reduction, solved to `1e-12` with the flag vote on: on every rank every owned cell equals bit for bit `dist_pcg`'s field for that part and the one-part field, and the iteration count, the exchange count, the reduction count, the two residuals' bits and `converged` equal `dist_pcg`'s. Every rank took `n_iterations + 1` votes and none disagreed. 112 rank results and 2,400 cells are compared |
+| `an_spmd_pcg_is_the_in_process_pcg_in_both_builds` (`tests/distsolve_spmd.rs`) | the same comparison in both precisions on two `blockgen` boxes (`Big` 5×4×3 and 8×6×5), `Diagonal` and `None`, the exact reduction, and, on the 5×4×3 box with `Diagonal` at `P = 2..4`, the gathered reduction against `dist_pcg`'s gathered answer for the same parts. 139 rank results and 6,540 cells are compared. The solver tolerance is `1e-12` in the f64 build and `1e-5` in the f32 build; it is a solver control and not a gate tolerance, and every comparison is exact |
+| `an_spmd_pcg_counts_its_exchanges_and_collectives` | 5 fixed iterations, `P = 3`: every rank makes 8 exchanges, 15 reductions and no vote; the handle counts 31 allgathers with the exact reduction and 16 with the gathered one |
+| `an_spmd_flag_vote_names_a_disagreement` | `P = 2`, one rank given a tolerance it meets at once: both ranks are refused with `flag` and both votes |
+| `an_spmd_pcg_refuses_by_name` | the other rows of the table above |
+
+**What this does not establish.** The ranks are threads of one process sharing
+one device, so nothing here is a speed-up (PAR-16) and nothing runs over MPI
+(PAR-06). PBiCGStab and the block-local `Dic`/`Dilu` on a rank are §138.6.
+`split_one` still cuts a matrix assembled on the whole mesh, on the host; a
+rank that assembles its own part is PAR-10's.
+
+### 138.6 The SPMD PBiCGStab, and the block-local DIC and DILU on a rank
+
+ORIGINAL: this project's own design, with no external source. It defines no
+equation. The recurrence is §73's `dist_pbicgstab` (van der Vorst 1992, as §8
+cites it), and the factorisation is §21's, applied to one part's own
+submatrix as §73.5 describes. Both are unchanged.
+
+§138.5 put `dist_pcg` on a rank. This section does the same for the two things
+§138.5 left out. `src/distsolve/spmd.rs` holds them:
+
+* `spmd_pbicgstab(gpu, sol, comm, psi, sys, halo, w, ctrl)` runs
+  `dist_pbicgstab` for the rank's one part and returns §73's
+  `DistPerformance`. It takes the system, the halo plan and the workspace
+  `spmd_pcg` takes.
+* `SpmdWorkspace::colour(gpu, sys)` colours the rank's own part, so that `Dic`
+  and `Dilu` become available to both solvers. `colours()` gives the colour
+  count, and 0 before `colour`.
+* `SpmdWorkspace::effective_preconditioner(requested)` answers as
+  `DistWorkspace::effective_preconditioner` does (§13.4).
+* `spmd_solve(gpu, sol, comm, psi, sys, halo, w, ctrl)` dispatches on
+  `ctrl.solver` as `dist_solve` does. `GAMG` is refused by name, with
+  `PBiCGStab` as the alternative.
+
+```
+the same program on every rank r, on its own part:
+  r = b - A psi ;  r0 = r ;  p = 0 ;  v = 0 ;  rho_old = alpha = omega = 1
+  repeat
+      rho   = (r0,r)                              SpmdReduction (§138.4)
+      beta  = (rho/rho_old)(alpha/omega)
+      p     = r + beta (p - omega v)
+      pHat  = M^-1 p
+      SpmdHalo::scalar(pHat) ;  v = A pHat        exchange 1 (§73.2, §138.3)
+      alpha = rho / (r0,v)                        SpmdReduction
+      s     = r - alpha v
+      sHat  = M^-1 s
+      SpmdHalo::scalar(sHat) ;  t = A sHat        exchange 2
+      omega = (t,s) / (t,t)                       two SpmdReductions
+      psi  += alpha pHat + omega sHat ;  r = s - omega t ;  rho_old = rho
+      [ sum|r| ; convergence test ; read the flag ; vote ]
+```
+
+* **The kernels and their order are `dist_pbicgstab`'s for one part.** The
+  rule is §138.5's: every launch on a rank is the launch `dist_pbicgstab`
+  makes for that part, with the same arguments and the same launch geometry.
+  The exchange is `SpmdHalo::scalar` and each reduction is the `SpmdReduction`
+  method of the same name. So every rank's field is bit for bit
+  `dist_pbicgstab`'s field for its part. With the exact reduction and
+  `Diagonal` or `None` it is also the one-part field, and the ranks stop on
+  the one-part iteration (§73.8).
+* **`(t,s)` and `(t,t)` stay two reductions**, as in `dist_pbicgstab`
+  (§73.8's first row is the proof that this equals the serial solver's fused
+  pair).
+* **The mean, the flag and the vote are §138.5's.** The mean divides by the
+  whole mesh's cell count. Every rank reads its own flag, and the flag vote,
+  when it is on, follows each read. A solve that stops after `k` iterations
+  with `check_interval` 1 takes `k + 1` votes.
+* **The counts are §73.8's.** At `k` fixed iterations a rank makes `2k + 3`
+  exchanges and `4k + 4` reductions with PBiCGStab, and `k + 3` and `2k + 5`
+  with PCG. The handle counts `1 + 2 (4k + 4)` allgathers with the exact
+  reduction and `1 + (4k + 4)` with the gathered one, `new`'s included. A
+  preconditioner changes none of these numbers, because no preconditioner
+  here exchanges or reduces.
+* **Block-local `Dic` and `Dilu`.** `SpmdWorkspace::colour` builds
+  `MultiColour::new` on the rank's part mesh, which is what
+  `DistWorkspace::colour` builds for that part. The colouring is greedy in the
+  part's local cell order, so it is the same colouring. The factorisation and
+  the two sweeps then walk the part's own faces only, and a cut face is absent
+  from them (§73.5). So a rank's factorisation is bit for bit the in-process
+  block-local one for its part, and the solve that uses it is bit for bit
+  `dist_pcg`'s or `dist_pbicgstab`'s with the same preconditioner.
+* **It is still not partition-invariant.** The preconditioner is a different
+  one for every cut (§73.5), so `SpmdWorkspace::partition_invariant` answers
+  `false` for `Dic` and `Dilu`, and the answer is not the one-part answer.
+* **Every rank must colour alike.** `colour` is local: it sends nothing. A
+  world in which only some ranks coloured would refuse on the others, and
+  after any `Err` the world is spent (§138.5).
+* **Not capturable**, for §138.5's reason: `spmd_pbicgstab` and `spmd_solve`
+  inside `Gpu::capture` are refused by name (§81.3).
+
+**Refused by name.** `spmd_pbicgstab` checks §138.5's `spmd_pcg` rows, in the
+same order and before anything is launched or sent, and its messages start
+`spmd_pbicgstab: `. The flag vote's refusal starts with the name of the solver
+that took the vote. The rows that are new or changed:
+
+| case | the message names |
+|---|---|
+| `SpmdWorkspace::colour`: the system is not from `split_one` | starts `distsolve: `; `DistSystem::split_one` |
+| `SpmdWorkspace::colour`: the system's part is not the workspace's rank | starts `distsolve: `; `rank r` and `part p` |
+| `SpmdWorkspace::colour`: the system's cell counts are not the workspace's | starts `distsolve: `; the owned and halo cell counts of both |
+| `spmd_pcg` or `spmd_pbicgstab`: `Dic` or `Dilu` on an uncoloured workspace | §13.4's `Error::Refused`: the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
+| `spmd_solve`: `GAMG` | §13.4's `Error::Refused`: the setting, `GAMG` and `PBiCGStab` |
+
+**What must hold.** Class D: bytes and counts. Each rank is a `ThreadComm`
+thread with its own `Gpu` on device 0. The solver tolerance is `1e-12` in the
+f64 build and `1e-5` in the f32 build; it is a solver control and not a gate
+tolerance, and every comparison is exact.
+
+| test | what it asserts |
+|---|---|
+| **`an_spmd_pbicgstab_is_the_in_process_pbicgstab`** (library, f64 build) | **the gate.** §138.5's gate with `spmd_pbicgstab` against `dist_pbicgstab`: the 5×4×3 box, plain and cyclic, `P = 1..4`, three partitioners, `Diagonal` and `None`, the exact reduction, the flag vote on. Every owned cell equals bit for bit the in-process part's and the one-part field's; the iteration, exchange and reduction counts, both residuals' bits and `converged` equal the in-process solve's; every rank took `n_iterations + 1` votes. 112 rank results and 2,400 cells are compared |
+| `an_spmd_block_local_factorisation_is_the_in_process_one` (library, f64 build) | the same boxes and cuts with PCG + `Dic` and PBiCGStab + `Dilu`, both sides coloured: every owned cell, every counter and both residuals' bits equal the in-process block-local solve's, each rank's colour count equals the in-process part's, and `partition_invariant` is `false` on every rank. 112 rank results and 2,400 cells are compared |
+| `an_spmd_pbicgstab_is_the_in_process_pbicgstab_in_both_builds` (`tests/distsolve_spmd.rs`) | §138.5's both-builds comparison with PBiCGStab, the gathered leg included. 139 rank results and 6,540 cells are compared |
+| `an_spmd_block_local_factorisation_is_the_in_process_one_in_both_builds` | the two `blockgen` boxes, PCG + `Dic` and PBiCGStab + `Dilu`, `P = 1..4`, the exact reduction: the comparison of the library test, in both precisions. 112 rank results and 6,000 cells are compared. On the 8×6×5 box at `P >= 2` with `Dic`, at least one rank's field differs from the one-part `Dic` field, so "not partition-invariant" is measured and not assumed |
+| `an_spmd_pbicgstab_counts_its_exchanges_and_collectives` | 5 fixed iterations, `P = 3`. PBiCGStab with `Diagonal` and with `Dilu`: 13 exchanges, 24 reductions, no vote, and 49 allgathers with the exact reduction or 25 with the gathered one. PCG with `Dic`: 8 exchanges, 15 reductions, 31 or 16 allgathers |
+| `an_spmd_flag_vote_names_a_disagreement` | extended to both solvers: each message starts with its solver's name |
+| `an_spmd_pbicgstab_refuses_by_name` | the `spmd_pcg` rows of §138.5 with the `spmd_pbicgstab: ` prefix, and the three `colour` rows |
+| `an_spmd_solve_dispatches_and_refuses_gamg` | 3 fixed iterations in a one-rank world: `spmd_solve` makes 6 exchanges for PCG and 9 for PBiCGStab, and refuses `GAMG` with the setting, the value and `PBiCGStab` |
+
+**What this does not establish.** §138.5's limits hold: threads of one process
+on one device, no speed-up, no MPI. The block-local iteration counts on the
+shipped meshes are §73.5's and are not re-measured here, because a rank's
+solve is the in-process solve bit for bit. No pressure backend runs on a rank
+yet (PAR-10b).
+
 ---
 
 ## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library
@@ -43896,8 +46560,8 @@ The values were computed by an independent Python oracle before the Rust ran.
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Nothing in the crate calls the aggregation yet, so no existing solve, case
-or SASS moves.
+AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
+before AMG-04b.
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -44033,9 +46697,10 @@ face of the finest level is FOLDED into the coarse LDU.
 
 The members of each aggregate are also stored as a CSR (`agg_offset[n_c + 1]` and
 `agg_cells[n]`, ascending inside each aggregate), the aggregate-sorted order that
-AMG-02's gather-form restriction reads. Folding the fine diagonals, the fine
-`internal_coeffs` and the INTERIOR entries into the coarse diagonal is AMG-02's
-Galerkin product. This subsection only says where each entry goes.
+AMG-02's gather-form restriction reads. Folding the fine diagonals and the INTERIOR
+entries into the coarse diagonal is AMG-02's Galerkin product (§141.2, which reads
+`diag` as `amul` does, with `internal_coeffs` already folded in). This subsection
+only says where each entry goes.
 
 **Refused by name** (§13.4 style, an `Err` and no partial result):
 
@@ -44087,6 +46752,632 @@ results; an x-strong anisotropic block (16×4×4, x coefficients 1, y and z coef
 `2^-7`) gives 64 aggregates of 4 cells, each inside one x-line; and the coarse entries
 placed by the table above sum to the dense `P^T A P` exactly on the two 7×5×3 and two
 6×5×4 meshes.
+
+### 141.2 The Galerkin coarse operator and the transfers (AMG-02)
+
+`No GPL-licensed source was consulted.` `src/amg/galerkin.rs` holds the gather lists,
+their host twin and the device driver; `cuda/amg.cu` holds the four kernels. The
+tests are `tests/amg_galerkin.rs`, an integration test that runs in both builds
+(§118), and one library test, the capture gate of §81. Nothing in the crate calls
+this yet, so no existing solve, case or SASS moves.
+
+Sources: **Notay (2010)**, the paper of §141.1 (open full text, read again on
+2026-10-13): his (2.1), "the coarse grid matrix is computed from the Galerkin formula
+`A_c = P^T A P`", with "the restriction equal to the transpose of the prolongation";
+his (2.2), `P_ij = 1 if i ∈ G_j, 0 otherwise`; and his (2.3), "there is no need to
+explicitly form P, and the coarse grid matrix (2.1) is in practice computed by
+`(A_c)_ij = Σ_{k∈G_i} Σ_{l∈G_j} a_kl`". **Stüben, K. (2001), "A review of algebraic
+multigrid", *J. Comput. Appl. Math.* 128(1-2), 281-309,
+doi:10.1016/S0377-0427(00)00516-1** (title, volume and pages checked against Crossref
+on 2026-10-13, which lists it under Elsevier's open archive since 2013), named by
+docs/17 for the AMG-02 row; it was not opened, and no formula below is taken from
+it. No multigrid code of any licence was read for this subsection.
+
+**The operator.** `A` is the matrix that `ldu_ops::amul` applies: the off-diagonal
+entries of (141.1) and (141.2), and the diagonal
+
+```
+a_cc = diag[c]                                                           (141.10)
+```
+
+`diag` is read as `amul` reads it, that is AFTER `add_boundary_contributions` has
+folded `internal_coeffs` into it, which is the state of every matrix a solve
+receives. *DESIGN*: this subsection never reads `internal_coeffs`. A caller that holds
+an unfolded matrix folds it first, as it must before any `amul`. A coarse level is the
+same with no boundary faces.
+
+**The transfers** (Notay 2010, (2.2), with the aggregates `G_I` of §141.1, which
+partition the cells, so `P` has exactly one 1 per row):
+
+```
+prolong:      (P e_c)_c  = e_c[agg(c)]                                   (141.11)
+prolong-add:  x_c       += e_c[agg(c)]                                   (141.12)
+restrict:     (P^T r)_I  = Σ_{c ∈ G_I} r_c                               (141.13)
+```
+
+(141.13) is a segmented sum over the aggregate-sorted members
+`agg_cells[agg_offset[I] .. agg_offset[I+1]]`, in ascending cell order. One thread
+owns one coarse cell and gathers, so there is no atomic. The sum is accumulated in
+`ofacc` (f64 in both builds, §118.1) and rounded once to `ofscalar`. (141.11) and
+(141.12) are one thread per fine cell and one gather each.
+
+**The coarse operator** (Notay 2010, (2.3)), written on the LDU arrays through the
+fold table of §141.1. The coarse matrix has `n_c + 2 n_cf` slots, in this order: the
+`n_c` diagonals, the `n_cf` uppers, the `n_cf` lowers. `upper_c[F]` is
+`(A_c)_{IJ}` and `lower_c[F]` is `(A_c)_{JI}` for the coarse face `F = (I, J)`,
+`I < J`. Each slot is the sum of a list of fine entries:
+
+```
+diag_c[I]  = Σ_{c ∈ G_I} diag[c]
+           + Σ_{f INTERIOR in I} ( upper[f] + lower[f] )
+           + Σ_{bf INTERIOR in I} ( -boundary_coeffs[bf] )               (141.14)
+upper_c[F] = Σ_{f -> F, not flipped} upper[f] + Σ_{f -> F, flipped} lower[f]
+           + Σ_{bf -> F, not flipped} ( -boundary_coeffs[bf] )           (141.15)
+lower_c[F] = Σ_{f -> F, not flipped} lower[f] + Σ_{f -> F, flipped} upper[f]
+           + Σ_{bf -> F, flipped} ( -boundary_coeffs[bf] )               (141.16)
+```
+
+"`f` INTERIOR in `I`" means `face_coarse[f] = INTERIOR` and `agg(owner[f]) = I`;
+"`bf` INTERIOR in `I`" means `bface_coarse[bf] = INTERIOR` and
+`agg(b_face_cells[bf]) = I`; "`f -> F`" means `face_coarse[f] = F`. Uncoupled boundary
+faces appear nowhere. Every fine entry (each `diag[c]`, each `upper[f]`, each
+`lower[f]`, each coupled `boundary_coeffs[bf]`) is in exactly one list, exactly once,
+which is a gate: the lists hold `n + 2 n_f + n_coupled` sources.
+
+**The order of a list** (*DESIGN*; it is what makes the device sum the host sum, bit
+for bit):
+
+- a diagonal slot: the members' `diag[c]` in ascending `c`; then the INTERIOR internal
+  faces in ascending `f`, each giving `upper[f]` and then `lower[f]`; then the INTERIOR
+  coupled faces in ascending `bf`;
+- an upper or lower slot: the internal faces in ascending `f`, then the coupled faces
+  in ascending `bf`.
+
+**The lists on the device.** One CSR over the slots: `slot_offset[n_c + 2 n_cf + 1]`
+and `slot_src[n + 2 n_f + n_coupled]`. A source is one `Label`,
+
+```
+code = 4 * index + kind,   kind: 0 = diag, 1 = upper, 2 = lower, 3 = boundary   (141.17)
+```
+
+and kind 3 enters with the sign of (141.2), `-boundary_coeffs[index]`. The lists
+depend only on the aggregation and the addressing, so they are built once per
+hierarchy on the host and the coefficients are re-gathered on the device whenever the
+matrix changes (AMG-05). A level with `2^29` or more cells, faces or boundary faces
+does not fit (141.17) and is refused by name.
+
+One thread owns one slot, sums its list in list order in `ofacc` and rounds once to
+`ofscalar`. There is no atomic, no allocation and no synchronisation, so the product
+and the three transfers capture into a CUDA graph (§81). The sums hold no product, so
+`-fmad` has nothing to contract; `amg.cu` was left out of `build.rs`'s `-fmad=false`
+list for them, and joined it with AMG-03a's smoothers (§141.3), which do multiply. The host twin runs the same lists in the same order with an f64 accumulator and
+one rounding, so the two agree bit for bit in both builds.
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows and the
+"run twice" row are class D: bitwise in both builds. The row against the dense
+`P^T A P` is class R: the dense product is formed in f64 from the build's own
+coefficients in a different order, the f64 tolerance is `1e-14` of `max |(A_c)_ij|`,
+and under `single` it is `tol32 = max(tol64, min(tol64·2^29, 1e-5)) = 5.36870912e-6`
+(D-F32-1), which is tighter than the `1e-5` docs/17 printed for this row. `P^T` of
+the constant 1 is exact in both builds, because an aggregate has at most 4 members.
+
+**Refused by name** (an `Err`, no partial result; every message starts with
+`amg::galerkin: `): an addressing array whose length disagrees with the aggregation;
+a level too large for (141.17); a coefficient or field buffer shorter than the level
+it is used on; a plan with boundary sources given no `boundary_coeffs`; a coarse
+level whose shape is not the plan's, or whose buffers are shorter than its counts.
+A plan with no boundary source takes the matrix's own `boundary_coeffs` (every face
+uncoupled, never read) or none, on the host and on the device alike.
+
+#### 141.2.1 The gates
+
+The non-dyadic matrix of the tolerance rows is, for an edge `a < b` and a cell `c`,
+
+```
+a_ab = -(1/10 + ((11 a + 3 b) mod 7) / 3),   a_ba = -(1/10 + ((5 a + b) mod 3) / 7),
+diag[c] = 20 + c / 9                                                     (141.18)
+```
+
+each evaluated in f64 and then cast to the build's `Scalar`. On a coupled face
+`boundary_coeffs[bf] = -a_cd`.
+
+| test (`tests/amg_galerkin.rs` unless marked) | what | class |
+|---|---|---|
+| `the_plan_lists_every_fine_entry_exactly_once` | on the four small meshes of §141.1.1 and the two 6^3 meshes: the CSR is well formed and holds each fine entry once. Pinned from §141.1.1's table: 7×5×3 weighted, 593 sources (287 diagonal, 153 upper, 153 lower); 7×5×3 unit, 593 (295, 149, 149); 6×5×4 cyclic weighted, 840 (360 diagonal, 480 upper and lower together); 6×5×4 cyclic unit, 840 (360, 480) | D |
+| `the_list_order_is_the_one_spec_lit_states` | the order rule above, slot by slot, on the weighted cyclic 6×5×4 | D |
+| `the_host_coarse_matrix_is_the_dense_galerkin_product` | (141.14)-(141.16) against a dense `P^T A P` built from `cell_agg` alone, on 6^3 with (141.18), 6^3 cyclic on x, y and z with (141.18), and the §2 laplacian on a graded 6^3: `<= 1e-14` of `max |(A_c)_ij|` (tol32 under `single`), and nothing outside the coarse pattern; exactly equal on the two weighted meshes of §141.1.1 | R, D |
+| `a_second_level_is_the_product_of_both_prolongations` | coarsening the coarse level again gives `(P_1 P_2)^T A (P_1 P_2)` to the same tolerance, 6^3 with (141.18) | R |
+| `restricting_the_constant_gives_the_aggregate_sizes_exactly` | host and device, the six meshes of §141.1.1 | D |
+| `the_transfers_are_adjoint_and_restrict_prolong_scales_by_size` | `P^T P e_c = size · e_c` and `(P e_c)·r = e_c·(P^T r)` exactly, on small-integer fields | D |
+| `the_device_coarse_matrix_is_bitwise_its_host_twin` | the three 6^3 matrices and the §2 laplacian on 32^3, level 1; and level 2 from the device's own level 1 | D |
+| `the_device_transfers_are_bitwise_their_host_twins` | restrict, prolong, prolong-add on a non-trivial field, the same four matrices | D |
+| `running_twice_gives_identical_bytes` | two plans, two device products, the same bytes; a second product into the same level changes nothing | D |
+| `one_aggregate_has_no_coarse_faces` | 2×2×1 unit weights: one aggregate, no coarse face, `diag_c[0] = 4·100 − 8 = 392` exactly, host and device | D |
+| `a_mismatched_input_is_refused_by_name` | every refusal above | D |
+| `the_host_twin_takes_the_matrix_boundary_array_when_no_face_is_coupled` | 7×5×3 weighted: the full uncoupled `boundary_coeffs` and the empty slice give the same level; any other length is refused | D |
+| `amg::galerkin::tests::galerkin_replays_under_capture` (library) | the product and the three transfers capture into a graph and replay bitwise (§81) | D |
+
+### 141.3 The hierarchy and the smoothers (AMG-03a)
+
+`No GPL-licensed source was consulted.` `src/amg/hierarchy.rs` stacks the coarsenings of
+§141.1 and §141.2 into a hierarchy; `src/amg/smooth.rs` holds the three smoothers, their
+setup, their host twins and their device driver; `cuda/amg.cu` gains three kernels. The
+tests are `tests/amg_hierarchy.rs`, an integration test that runs in both builds (§118),
+and one library test, the capture gate of §81. Nothing in the crate calls this yet, so
+no existing solve, case or SASS outside `amg.cubin` moves.
+
+Sources: **Baker, A. H., Falgout, R. D., Kolev, T. V. & Yang, U. M. (2011), "Multigrid
+smoothers for ultraparallel computing", *SIAM J. Sci. Comput.* 33(5) 2864-2887,
+doi:10.1137/100798806** (title, volume, issue and pages checked against Crossref on
+2026-10-13), named by docs/17 for the AMG-03a row; the journal text was not opened.
+Its authors' companion report **"Multigrid Smoothers for Ultra-Parallel Computing:
+Additional Theory and Discussion", LLNL-TR-489114 (2011)** is open at
+<https://www.osti.gov/servlets/purl/1122232> and was read on 2026-10-13; every smoother
+formula below is quoted from the report: its (2.2), the error propagator `I - M^{-1} A`
+and "the smoother is convergent (in energy norm ‖·‖_A), i.e. assume that `M^T + M - A`
+is SPD"; its (4.1)-(4.3), the Chebyshev polynomial `q` on `[α, β]` and "−1 < q(x) < 1
+for x ∈ (0, β]"; its §4.1, "we set α by estimating λ_max with several iterations of CG
+and set α = aβ ... We use a = 0.3", the 1-D value `α/β = 1/2` of its (4.4), and the
+remark that Adams et al. use `a = 1/30`; its (6.1)-(6.2) and §6.1, the ℓ1 point Jacobi
+`M = D + D^{ℓ1}`, "always convergent". **Adams, M., Brezina, M., Hu, J. & Tuminaro, R.
+(2003), "Parallel multigrid smoothing: polynomial versus Gauss-Seidel", *J. Comput.
+Phys.* 188(2) 593-610, doi:10.1016/S0021-9991(03)00194-3** (checked against Crossref on
+2026-10-13; no open copy was found), named by docs/17 for the Chebyshev row; it was not
+opened, and nothing below is taken from it except through the report's citation of it.
+**Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (§8; the
+author's open copy, read on 2026-10-13): Algorithm 6.15 (Lanczos) and Algorithm 12.1
+(Chebyshev acceleration). **PETSc** (BSD-2-Clause), the manual page of
+`KSPChebyshevEstEigSet` (read on 2026-10-13), for the documented default bound
+`1.1 λ_est` on the largest eigenvalue; no PETSc source was read. No multigrid code of
+any licence was read for this subsection.
+
+**The hierarchy.** Level 0 is the fine matrix as a solve receives it (§141.2: `diag`
+after the boundary fold). Level `l + 1` is the Galerkin product (§141.2) of level `l`
+through the aggregation of §141.1 (`aggregate` on level 0, `aggregate_level` above it).
+With `n_l` the cell count of level `l`, `N_c = n_cells_coarsest` and `L_max = max_levels`
+(the largest number of levels, the finest included):
+
+```
+coarsen level l  while  n_l > N_c  and  l + 1 < L_max                  (141.3.1)
+stop without adding a level  if  n_{l+1} >= n_l   (the aggregation made no progress)
+```
+
+*DESIGN* defaults: `N_c = 64` (docs/17's AMG-03a gate), `L_max = 50`. `N_c = 0` and
+`L_max = 0` are refused by name. "The level count" is the number of coarse levels, so
+docs/17's gate `ceil(log4(n / 64)) ± 1` reads 6 ± 1 on 64^3.
+
+**The smoothers.** For a level, `a_cc` its diagonal, `a_cj` (`j != c`) the off-diagonal
+entries of row `c` as `amul` applies them (the internal faces and, on level 0, the
+coupled boundary faces with the sign of (141.2)), and `σ` the sign of `Σ_c a_cc`
+(141.3). Every smoother needs `σ a_cc > 0` and finite in every row, or it is refused by
+name. One sweep of a point smoother with smoothing diagonal `m` is
+
+```
+x_c  <-  x_c + (b_c - (A x)_c) / m_c                                    (141.3.2)
+```
+
+with (Baker et al., LLNL-TR-489114, (6.1) with blocks of size one, and §6.1)
+
+```
+l1-Jacobi:        m_c = a_cc + σ Σ_{j != c} |a_cj|                       (141.3.3)
+weighted Jacobi:  m_c = a_cc / ω,   0 < ω < 2                            (141.3.4)
+```
+
+(141.3.3) is `D + D^{ℓ1}` for `σ = +1` and the same smoother on `-A` for `σ = -1`. By the
+report's (6.2), `σ <A v, v> <= <σ M v, v>`, so `M^T + M - A` is definite and the error's
+energy `σ e^T A e` strictly decreases in every sweep for every SPD (or, with `σ = -1`,
+negative definite) `A`. That is the gate. `ω >= 2` is refused because the average
+eigenvalue of `D^{-1} A` is 1, so `λ_max >= 1` and (141.3.4) does not converge for any
+such `A`. *DESIGN* default `ω = 2/3`: it is the degree-1 member of (141.3.6) on the 1-D
+interval `[1, 2]` of the report's (4.4), so weighted Jacobi is Chebyshev of degree 1
+there, and the high-frequency half of a 1-D Poisson matrix is damped by `1/3`.
+
+**Chebyshev** (report (4.3), applied to `D^{-1} A` with `D = diag(a_cc)`; Saad
+Algorithm 12.1 with the residual preconditioned by `D`). A sweep of degree `ν` is `ν`
+steps `k = 0 .. ν-1`, each with one product:
+
+```
+z = D^{-1} (b - A x_k);   d = c2_0 z  (k = 0),   d = c1_k d + c2_k z  (k >= 1);
+x_{k+1} = x_k + d                                                        (141.3.5)
+θ = (β + α)/2,  δ = (β - α)/2,  s = θ/δ,  ρ_0 = 1/s,  c2_0 = 1/θ,
+ρ_k = 1/(2 s - ρ_{k-1}),  c1_k = ρ_k ρ_{k-1},  c2_k = 2 ρ_k / δ   (k >= 1)
+```
+
+so that the error after a sweep is `q(D^{-1} A) e_0` with
+
+```
+q(λ) = T_ν((β + α - 2λ)/(β - α)) / T_ν((β + α)/(β - α)),
+|q(λ)| <= 1 / T_ν((β + α)/(β - α))  for λ ∈ [α, β]                       (141.3.6)
+```
+
+The coefficients are formed in f64 and rounded once to `Scalar`. *DESIGN*: `ν = 2`,
+`1 <= ν <= 16`; `α = a β` with `a = 0.3` (the report's §4.1), `0 < a < 1`.
+
+**The interval** (*DESIGN*, ORIGINAL in combination):
+
+```
+β = min(1.1 θ_10, g),   g = max_c (|a_cc| + Σ_{j != c} |a_cj|) / |a_cc|         (141.3.7)
+```
+
+`g` is Gershgorin's bound on the spectrum of `D^{-1} A`, so `β` never exceeds a proven
+upper bound; `1.1` is PETSc's documented default factor. `θ_10` is the largest Ritz
+value of 10 steps of Lanczos (Saad Algorithm 6.15) on `S = σ |D|^{-1/2} A |D|^{-1/2}`,
+which has the spectrum of `D^{-1} A`. Lanczos runs on the host in f64 from the level's
+coefficients, at setup:
+
+- start `v_1 = u / ‖u‖`, `u_c = frac((c + 1) · 0.6180339887498949) - 0.5` (deterministic,
+  not symmetric, so it is not orthogonal to an antisymmetric top eigenvector);
+- `β_1 = 0`, `v_0 = 0`; for `j = 1 .. min(10, n)`: `w = S v_j - β_j v_{j-1}`,
+  `α_j = (w, v_j)`, `w -= α_j v_j`, `β_{j+1} = ‖w‖`; stop after step `j` when `j = min(10, n)`
+  or `β_{j+1} <= 1e-10 t_j`, `t_j = max(|α_1|..|α_j|, β_2..β_j)` (an invariant subspace);
+  else `v_{j+1} = w / β_{j+1}`;
+- `θ_10` = the largest eigenvalue of the tridiagonal `T` (diagonal `α_1..α_j`, off-diagonal
+  `β_2..β_j`), by bisection on the Sturm count inside Gershgorin's interval of `T`, until
+  the bracket is `<= 2^-50 max(|lo|, |hi|, f64::MIN_POSITIVE)` wide.
+
+On the 1-D Poisson matrix `tridiag(-1, 2, -1)` with 64 cells, `θ_10 = 1.980404662538769`
+(the supervisor's oracle), `1.1 θ_10 > g = 2`, so `β = 2` and, with `a = 1/2`, `α = 1`:
+`[α, β]` is exactly the high-frequency half `λ_k = 1 - cos(kπ/65) >= 1`, `k = 33 .. 64`,
+and (141.3.6) gives the bound `1/T_2(3) = 1/17`.
+
+**The device.** A coarse level gets a row map (*DESIGN*, §70.2's convention): for each
+cell, its faces in ascending face id, flagged `RF_OWNS` (1) on the owner side, so one
+thread per cell gathers its row with no atomic. Three kernels, one thread per cell:
+`amgAmul` (`y_c = a_cc x_c`, then `+= upper[f] x[neighbour[f]]` on an owned face and
+`+= lower[f] x[owner[f]]` otherwise, in row-map order, in `ofscalar`), `amgJacobi`
+(141.3.2) and `amgChebyshev` (one step of (141.3.5); step 0 does not read `d`). Level 0
+takes its product from `ldu_ops::amul` (§70) and its smoothing from the same two update
+kernels. The smoothing diagonal `m`, `σ`, `g`, `θ_10` and the coefficients are set up on
+the host from the host level and uploaded; a matrix that changes afterwards needs a new
+setup (AMG-05). The kernels hold products, and they are held bit for bit against host
+twins written in `Scalar` in the same order, so `amg.cu` joins `build.rs`'s `-fmad=false`
+list (§82.4). A sweep only launches kernels, so it captures into a graph (§81).
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows are class D,
+bitwise in both builds; the energy row is class P (strict decrease, both builds); the
+factor rows are class R, `tol64 = 1e-12` of `‖x_0‖`, `tol32 = 1e-5` (D-F32-1); Lanczos,
+`g` and the interval are host f64 and class A, `1e-12` relative in both builds; the level
+sizes are class D.
+
+**Refused by name** (an `Err`, no partial result; messages start `amg::smooth: ` or
+`amg::hierarchy: `): a row whose `σ a_cc` is not positive and finite (`diagonal`); a
+non-finite coefficient (`finite`); `ω` outside `(0, 2)` (`omega`); `ν` outside `1 ..= 16`
+(`degree`); `a` outside `(0, 1)` (`fraction`); an interval that is not positive and finite;
+a level or field whose size is not the setup's (`cells`, `length`); a level-0 coupled
+face whose neighbour is a halo cell (`halo`, as §141.1); `N_c = 0`
+(`n_cells_coarsest`); `L_max = 0` (`max_levels`).
+
+#### 141.3.1 The gates
+
+`K4` is the complete graph on 4 cells (faces `(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)`)
+with `a_cc = 2` and every off-diagonal `+1`: SPD (eigenvalues 1, 1, 1, 5), with
+`D^{-1} A` eigenvalues 0.5, 0.5, 0.5, 2.5, so plain Jacobi diverges on it, while
+l1-Jacobi (`m_c = 5`) has `M^{-1} A` eigenvalues 0.2, 0.2, 0.2, 1. `P1D` is
+`tridiag(-1, 2, -1)` on 64 cells with eigenvectors `v_k[i] = sin(kπ(i+1)/65)`. `SYM` is the
+6^3 box with the symmetric (141.18), `a_ab = a_ba = -(1/10 + ((11a + 3b) mod 7)/3)` for an
+edge `a < b` and `a_cc = 20 + c/9`.
+
+The supervisor's oracle (Notay's Algorithms 2.1 and 2.2 on the strength graph, in Python) used unit strengths, which is what the unit-weight matrix gives exactly on every level in both builds, so its sizes are pinned. The §2 laplacian is not pinned: in f64 its `|S_f| δ_f` on the uniform box differ in the last bits from face to face, which moves the tie-breaks of (141.5)-(141.8) near the walls, and the coarsening measured 262144, 65546, 16412, 4116, 1031, 258, 65, 17 (7 coarse levels); under `single` the rounding restores the ties and it is the unit-weight list (6). Both are inside docs/17's `6 ± 1`. That is §141.1's "a different input, not a defect".
+
+| test (`tests/amg_hierarchy.rs` unless marked) | what | class |
+|---|---|---|
+| `the_level_sizes_on_64_cubed_are_ceil_log4_of_n_over_64` | the unit-weight matrix of §141.1.1 (`a_ab = a_ba = -1`, `a_cc = 100`) on the 64^3 box: sizes 262144, 65536, 16384, 4096, 1024, 256, 64 (the oracle's), 6 coarse levels = `ceil(log4(262144/64))`; the §2 laplacian on the same box: 6 ± 1 coarse levels, each at most 4 times smaller than the one above, the last `<= 64` | D |
+| `the_level_sizes_on_32_cubed_and_the_limits` | the unit-weight 32^3: 32768, 8192, 2048, 512, 128, 32; `L_max` 1 and 3, `N_c` 32768, 8192, 100000 cut it as (141.3.1) says | D |
+| `a_level_that_does_not_coarsen_ends_the_hierarchy` | 4^3 with no off-diagonal and `N_c = 1`: one level | D |
+| `the_device_hierarchy_is_bitwise_the_host_hierarchy` | 32^3 laplacian and 6×5×4 cyclic (141.18): every device level equals its host level bit for bit, twice | D |
+| `the_level_amul_is_bitwise_its_host_twin` | `SYM` and the device level 1 of the 32^3 laplacian; the row map is ascending and complete | D |
+| `l1_jacobi_reduces_the_energy_every_sweep` | `K4`, `P1D`, `SYM`, the graded 6^3 laplacian and a 6×5×4 laplacian cyclic on x (level 0, through `amul`), the 32^3 level 1: 20 sweeps, `σ x^T A x` strictly decreasing; `K4` from `(1,1,1,1)` is exactly 0 after one sweep | P, D |
+| `plain_jacobi_grows_the_energy_where_l1_does_not` | `K4`, `ω = 1`, from `(1,0,0,0)`: the energy grows | P |
+| `weighted_jacobi_two_thirds_damps_the_high_half_by_a_third` | `P1D`, `ω = 2/3`: the factor on `v_k` is `|1 - 2λ_k/3|`, at most `1/3` for `k >= 33` | R |
+| `chebyshev_degree_two_meets_its_bound_on_the_high_half` | `P1D`, `ν = 2`, `a = 1/2`: `g = 2`, `β = 2`, `α = 1` exactly; the factor on `v_k` is `|T_2(3 - 2λ_k)|/17`, at most `1/17` for `k >= 33` | A, R |
+| `chebyshev_degree_one_is_weighted_jacobi_two_thirds` | `P1D`, `ν = 1`, `a = 1/2` against `ω = 2/3` | R |
+| `lanczos_estimates_lambda_max_from_below` | `tridiag(-1, 2, -1)` of order 10: `2 - 2cos(10π/11)`; `P1D`: `θ_10 = 1.980404662538769 <= λ_max`; `K4`: 2 steps, `θ = 2.5` | A |
+| `the_device_smoothers_are_bitwise_their_host_twins` | every kind on `SYM` and on the 32^3 level 1, 3 sweeps with a source, twice | D |
+| `a_bad_smoother_input_is_refused_by_name` and `a_bad_hierarchy_config_is_refused_by_name` | every refusal above | D |
+| `amg::smooth::tests::smoothers_replay_under_capture` (library) | every kind on a coarse level and l1-Jacobi on level 0 capture into a graph and replay bitwise (§81) | D |
+
+### 141.4 The coarsest-level solve (AMG-03b)
+
+`No GPL-licensed source was consulted.` `src/amg/coarse.rs` solves the coarsest level of
+the hierarchy of §141.3 exactly: a dense Cholesky factor formed on the host in f64 at setup,
+and one device kernel, `amgCoarseSolve` in `cuda/amg.cu`, that runs the two triangular
+solves in a single thread block. The tests are `tests/amg_coarse.rs`, an integration test
+that runs in both builds (§118), and one library test, the capture gate of §81. Nothing
+in the crate calls this yet (AMG-04a's cycle will), so no existing solve, case or SASS
+outside `amg.cubin` moves.
+
+Sources: **LAPACK** (BSD-3-Clause), the documentation comment of `DPOTRF` (its Purpose and INFO
+paragraphs on the LAPACK 3.9.0 documentation pages, read on 2026-10-13; the routine's code was not read): "the Cholesky
+factorization of a real symmetric positive definite matrix A ... A = L * L**T", and
+"INFO > 0: if INFO = i, the leading minor of order i is not positive definite, and the
+factorization could not be completed". The entrywise recurrence (Cholesky-Banachiewicz)
+and the forward and back substitutions `L y = b`, `L^T x = y` as the open article
+"Cholesky decomposition" of Wikipedia states them (read on 2026-10-13). Bochev &
+Lehoucq, *SIAM Rev.* 47(1) (2005) 50-66, doi:10.1137/S0036144503426074, treat the pure
+Neumann problem; no open copy was found and it was not opened, so the projection and the
+pin below are *DESIGN*, derived here, not taken from it. No multigrid or dense
+linear-algebra code of any licence was read for this subsection.
+
+**The matrix.** The coarsest level arrives as its rows (`HostRows` of §141.3: `a_cc` and the
+off-diagonal entries of row `c` in `amul`'s order, so a coarse level and a level 0 with
+coupled faces are read alike). With `σ` the sign of `Σ_c a_cc` (141.3), the dense matrix
+in f64 is
+
+```
+Â_cc = σ a_cc,   Â_cj = σ Σ (the entries of row c with column j)   (j != c)     (141.4.1)
+```
+
+summed in the row's entry order. It must be symmetric bit for bit, `Â_ij == Â_ji` for
+every `i < j`; a Galerkin product of a symmetric matrix is (§141.2 sums upper and lower
+slots alike).
+
+**Singular levels** (*DESIGN*). The level is singular with the constant null vector when
+every row sums to zero within the precision's rounding:
+
+```
+|a_cc + Σ_{j != c} a_cj|  <=  τ_s (|a_cc| + Σ_{j != c} |a_cj|)   for every c,
+τ_s = 1024 ε,   ε = the machine epsilon of Scalar                               (141.4.2)
+```
+
+(`2.3e-13` in f64, `1.2e-4` under `single`). A pure-Neumann laplacian and every Galerkin
+product of it pass (141.4.2) exactly in exact arithmetic (`P^T A P 1_c = P^T A 1 = 0`);
+`1024 ε` covers the rounding of the sums. For a symmetric singular `Â` with null vector
+`1`, `range(Â) = {v : 1^T v = 0}`, so `Â x = b` is solvable only after the projection
+
+```
+b' = b - mean(b) 1,   mean(b) = (Σ_c b_c) / n                                    (141.4.3)
+```
+
+and its solutions differ by a constant. The level is pinned at its last cell `p = n - 1`:
+the leading `(n-1) × (n-1)` block of `Â` is factored and solved with `b'_0 .. b'_{n-2}`,
+`x_p = 0`; then
+
+```
+x <- x - mean(x) 1                                                              (141.4.4)
+```
+
+so the coarse correction has zero mean. When the graph of `Â` is connected, the leading
+block is the matrix with row and column `p` deleted and is SPD (the null space of a
+connected symmetric semidefinite matrix with zero row sums is the constants only), and
+the pinned `x` satisfies the deleted equation too, since its residual is
+`-(sum of the others)` and `1^T b' = 0`. A disconnected singular level has a singular
+leading block, and the factorisation below refuses it at the pivot.
+
+**The factor** (host, f64, at setup). `m = n` (regular) or `m = n - 1` (pinned). For
+`i = 0 .. m-1`, `j = 0 .. i`, with `k` ascending:
+
+```
+s = Â_ij - Σ_{k<j} L_ik L_jk;   L_ii = sqrt(s)  (j = i),   L_ij = s / L_jj  (j < i)   (141.4.5)
+```
+
+and a pivot `s` that is not finite or not `> τ_p Â_ii`, `τ_p = 1e-13` (*DESIGN*), refuses
+the level as not SPD (LAPACK's "the leading minor of order i is not positive definite").
+`L` is stored packed by rows, `L_ij` at `i(i+1)/2 + j`, in f64 (`ofacc`) in both builds.
+
+**The solve** (device, one block of 256 threads, everything in `ofacc` and rounded once):
+
+```
+w_c = b_c;   if pinned: w_c <- w_c - (Σ_{c ascending} w_c) / n;   w_c <- σ w_c
+forward:  for j = 0 .. m-1:  w_j <- w_j / L_jj;  then  w_i <- w_i - L_ij w_j  (i > j)
+back:     for j = m-1 .. 0:  w_j <- w_j / L_jj;  then  w_i <- w_i - L_ji w_j  (i < j)
+if pinned: w_p <- 0;  w_c <- w_c - (Σ_{c ascending} w_c) / n
+x_c = (Scalar) w_c                                                              (141.4.6)
+```
+
+Each `w_i` is updated by one thread, `j` in the order shown, with a block barrier between
+the steps of `j`, so the device solve is its host twin bit for bit (`amg.cu` is on
+`build.rs`'s `-fmad=false` list since §141.3). The two sums are taken by one thread in
+ascending `c`. A solve only launches (one kernel), so it captures into a graph (§81).
+
+**Size.** The dense factor needs `n(n+1)/2` doubles and `n^3/6` host operations, so a level
+of more than `1024` cells (*DESIGN*, 4 MB) is refused by name; the remedy is a larger
+`max_levels` or a smaller `n_cells_coarsest` (§141.3).
+
+**Not SPD** (refused by name, an `Error::Refused` whose message starts `amg::coarse: ` and
+names `-permissive`): a level that is not symmetric (`symmetric`, naming the first pair
+`i < j`) or whose factorisation meets a bad pivot (`pivot`, naming its index). Under
+`-permissive` (the caller passes the flag) such a level is solved instead by `50` sweeps
+of l1-Jacobi (141.3.3) from `x = 0`, through the smoother of §141.3; the substitution is
+announced once on stderr (`io::contract::warn_once`) and kept on the setup
+(`announcement`), and it is not an exact solve. The other refusals are strict
+(`Error::Config`, `amg::coarse: `): a non-finite coefficient (`finite`), `Σ_c a_cc` zero or
+not finite (`diagonal`), more than 1024 cells (`cells`), a field shorter than the level or an
+operator whose cell count is not the setup's (`length`, `cells`).
+
+**Precision** (§118, docs/17 §5.1.4). The device-against-host-twin rows are class D,
+bitwise in both builds. The residual rows are class R: `‖b - A x‖_2 <= tol ‖b‖_2` with
+`tol64 = 1e-12`, `tol32 = 1e-5` (D-F32-1); the zero-mean row is `|mean(x)| <= 1e-14
+max|x|` in f64 and `1e-5 max|x|` under `single`; the hand-computed solutions are class A,
+`1e-15` relative in f64 and `1e-6` under `single`.
+
+#### 141.4.1 The gates
+
+`K4` and `SYM` are §141.3.1's. `NEU(m)` is the pure-Neumann §2 laplacian on the box `m`:
+`upper = lower = |S_f| δ_f` on the internal faces, the diagonal minus the same sum at both
+cells, no boundary coefficient (every wall zero-gradient), so `σ = -1`.
+
+| test (`tests/amg_coarse.rs` unless marked) | what | class |
+|---|---|---|
+| `the_cholesky_factor_and_solution_of_small_matrices` | `[[4, -1], [-1, 3]]`, `b = (1, 2)`: `L = (2; -0.5, sqrt(2.75))`, `x = (5/11, 9/11)`; `K4`, `b = 1`: `x = 0.2` each; the negated `[[4, -1], [-1, 3]]`: `σ = -1`, the same `L`, `x = -(5/11, 9/11)` | A |
+| `the_coarse_solve_residual_is_below_tol_on_spd` | `SYM`, `-SYM` and the coarsest level of the 32^3 §2 laplacian (Dirichlet walls) of §141.3: relative residual `<= 1e-12` (f64) / `1e-5` (f32) | R |
+| `a_pure_neumann_level_is_projected_and_pinned` | `[[1, -1], [-1, 1]]`, `b = (1, 0)`: `x = (0.25, -0.25)`; the 3-cell path `[[1,-1,0],[-1,2,-1],[0,-1,1]]`, `b = (1, 0, 0)`: `x = (5/9, -1/9, -4/9)`; `NEU` on the uniform 8^3 and the graded 6^3 boxes and the coarsest level of `NEU` on the uniform 16^3: method `PinnedCholesky`, `‖b' - A x‖ <= tol ‖b'‖`, `|mean(x)| <= 1e-14 max|x|` (f64) / `1e-5` (f32) | A, R |
+| `the_v_cycle_on_pure_neumann_stays_bounded_over_100_cycles` | `NEU` on the uniform 8^3 box, `b` of zero mean, 100 host V(1,1) cycles with l1-Jacobi: the energy `J = σ(x^T A x / 2 - x^T b)` never rises by more than `tol |J*|`, every iterate's spread and mean stay within `10 ‖x*‖_∞` (`x*` the pinned dense solve of the 512-cell level), `‖r_100‖ <= ‖r_0‖`, and every coarse correction has zero mean as above | P, R |
+| `the_device_coarse_solve_is_bitwise_its_host_twin` | regular, pinned and the `-permissive` fallback on coarse levels, regular and pinned on level 0, twice; the fallback on level 0 has no bitwise twin, because its product is `ldu_ops::amul` (§70) and `ldu.cu` is not on the `-fmad=false` list | D |
+| `a_non_spd_coarse_level_is_refused_by_name` | an asymmetric level (`symmetric`), the 3-cell `[[1,-2,0],[-2,1,-2],[0,-2,1]]` (`pivot` at 1), two disconnected Neumann blocks (`pivot`); under `-permissive` the same levels give `JacobiFallback`, the announcement, and exactly 50 l1-Jacobi sweeps from zero; every strict refusal above | D |
+| `amg::coarse::tests::coarse_solve_replays_under_capture` (library) | a regular, a pinned and a fallback solve capture into a graph and replay bitwise (§81) | D |
+
+### 141.5 The V-cycle, GAMG as a preconditioner and as a solver (AMG-04a)
+
+`No GPL-licensed source was consulted.` `src/amg/cycle.rs` runs the hierarchy of §141.3 and
+the coarsest solve of §141.4 as a V-cycle; `src/solver.rs` uses it as the preconditioner
+`Preconditioner::Gamg` of PCG and PBiCGStab and, for `LinearSolverKind::Gamg`, as a solver
+on its own, so `solver::solve` no longer refuses `GAMG` (§8.3 is amended). `src/amg/coarse.rs`
+gains a dense LU factor for an asymmetric coarsest level, because the Galerkin product of an
+asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda/amg.cu` gains
+two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
+integration test (both builds; the iteration gates are f64 and wait for AMG-06a under
+`single`), and one library test, the capture gate of §81. No existing solve, case or SASS
+outside `amg.cubin` moves: a case cannot ask for GAMG yet (AMG-04b), the pressure backend
+still refuses it (AMG-04b, AMG-05), and every other preconditioner and solver path is unchanged.
+
+Sources: **Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (the author's
+open copy, read again on 2026-10-13), §13.4.3, Algorithm 13.3 `uh = V-cycle(Ah, uh0, fh)`:
+"1. Pre-smooth ... 2. Get residual: rh = fh - Ah uh ... 3. Coarsen: rH = IhH rh ... 5. Solve:
+AH δH = rH ... 7. Recursion: δH = V-cycle(AH, 0, rH) ... 9. Correct: uh := uh + IHh δH ... 10.
+Post-smooth", with the coarsest level solved "exactly (typically using a direct solver)".
+**Notay (2010)**, the paper of §141.1, eq. (2.1): the restriction is the transpose of the
+prolongation. For the LU factor: the **LAPACK `DGETRF` documentation comment** (BSD-3-Clause, its
+Purpose paragraph, read on 2026-10-13: "The factorization has the form A = P * L * U where P
+is a permutation matrix, L is lower triangular with unit diagonal elements ... and U is upper
+triangular"; here `P = I`, no pivoting; the routine's code was not read) and the open article **"Diagonally dominant matrix", Wikipedia** (read on 2026-10-13):
+"No (partial) pivoting is necessary for a strictly column diagonally dominant matrix" and "A
+strictly diagonally dominant matrix (or an irreducibly diagonally dominant matrix) is
+non-singular"; the Doolittle recurrence below is the textbook one and is written out here. No
+multigrid or dense linear-algebra code of any licence was read for this subsection; OpenFOAM's
+GAMG, AGMG, hypre and ML were not opened.
+
+**The cycle** (Saad Algorithm 13.3 on the levels `0 .. L` of §141.3, `L` the number of coarse
+levels, `A_0` the fine matrix as the solve receives it, `A_l` coarse level `l`, `P_l` the
+aggregation of level `l` to `l + 1` with (141.11)-(141.13), `S_l^ν` `ν` sweeps of the level's
+smoother of §141.3, `C` the coarsest solve of §141.4 or (141.5.4)):
+
+```
+V(x_0, b_0):                                                             (141.5.1)
+  for l = 0 .. L-1:   x_l <- S_l^{ν1}(x_l, b_l);   r_l = b_l - A_l x_l;
+                      b_{l+1} = P_l^T r_l;          x_{l+1} = 0
+  x_L = C(b_L)
+  for l = L-1 .. 0:   x_l <- x_l + P_l x_{l+1};     x_l <- S_l^{ν2}(x_l, b_l)
+```
+
+With `L = 0` (the fine level is already at most `n_cells_coarsest`, or `max_levels = 1`) the
+cycle is the coarsest solve on the fine matrix, `x_0 = C(b_0)`, through
+`CoarseOperator::Fine`. Level 0's products are `ldu_ops::amul` (§70) and its smoothing
+`GpuSmoother::smooth_fine`; a coarse level's are `amgAmul` and `smooth_level`.
+`amgResidual` is `r_c = b_c - y_c`, one thread per cell. *DESIGN* defaults: `ν1 = ν2 = 2`, the
+Chebyshev smoother of (141.3.5) at §141.3's degree `ν = 2` and fraction `a = 0.3`,
+`n_cells_coarsest = 64`, `max_levels = 50` (§141.3); `ν1 + ν2 = 0` is refused by name
+(`sweeps`). The smoother is a measured choice: with l1-Jacobi (§141.3's hierarchy default, which
+is unchanged) V(2,2) took 62 GAMG-PCG iterations on `POI(128)` against DIC-PCG's 155, outside
+the gate's third, and Chebyshev takes 38 (the table below). On an asymmetric level Chebyshev
+keeps the interval of (141.3.7), which Gershgorin caps; on `CD(n)` the spectrum of `D^{-1} A`
+is real, because `A` is diagonally similar to a symmetric matrix (each 1-D factor of the box is
+tridiagonal with off-diagonal products `> 0`) and `D` commutes with that similarity.
+
+**As a preconditioner** `z = M^{-1} r` is `z = 0; V(z, r)`: a fixed linear operator of `r`.
+**Symmetry** (*DESIGN*, derived here). Every smoother of §141.3 is a polynomial in `D^{-1} A`
+or an update `x + M^{-1}(b - A x)` with a diagonal `M`, so its error propagator `E` satisfies
+`A E = E^T A`. Then `V(ν, ν)` from zero is a symmetric operator when `A` is symmetric, and PCG
+may use it; with `ν1 != ν2` it is not, and `PCG` with `Preconditioner::Gamg` and `ν1 != ν2` is
+refused by name (`nPreSweeps`, `nPostSweeps`, "symmetric"), as §8.2 refuses PCG on an asymmetric
+matrix. PBiCGStab takes any `ν1, ν2`. The hierarchy is formed once, on the host, from the
+matrix given to `Gamg::new`, and its device levels are uploaded from the host levels (bitwise
+the device Galerkin chain of §141.3); a matrix whose values change afterwards needs a new
+`Gamg` (AMG-05 caches the aggregation and re-gathers). The preconditioner is attached to the
+workspace (`SolverWorkspace::set_gamg`); a `Gamg` request on a workspace without one is
+refused by name, naming `set_gamg`, as `DIC` without a colouring is (§21).
+
+**As a solver** (`LinearSolverKind::Gamg`): `psi <- V(psi, b)` per iteration, with the §8.4
+residual of `b - A psi` tested every `check_interval` iterations by the same kernels as the
+Krylov solvers, the same `fixed_iters` and `report_residuals` rules (§113), and, under `single`,
+the same §118.4 refinement around the float body. One iteration is one cycle.
+
+**The asymmetric coarsest level** (*DESIGN* in combination). When the dense `Â = σ A` of
+(141.4.1) is not symmetric bit for bit, `CoarseSetup::general` factors it as `Â = L U`, `L` unit
+lower triangular, without pivoting (Doolittle), in f64 at setup, `s` ascending in every sum:
+
+```
+for k = 0 .. n-1:                                                        (141.5.2)
+  U_kj = Â_kj - Σ_{s<k} L_ks U_sj                    (j = k .. n-1)
+  refuse (pivot k) unless U_kk finite and |U_kk| > τ_p |Â_kk|,  τ_p = 1e-13
+  L_ik = (Â_ik - Σ_{s<k} L_is U_sk) / U_kk           (i = k+1 .. n-1)
+```
+
+stored dense by rows in `ofacc`, `L_ij` (`i > j`) and `U_ij` (`i <= j`) at `i n + j`. A level
+that passes (141.4.2) and is asymmetric is refused by name (`singular`): its left null vector
+is not the constant one, so the projection (141.4.3) does not apply. No pivoting is needed for
+the levels this subsection meets: an upwind convection-diffusion matrix is an M-matrix whose
+columns are diagonally dominant, strictly at an outflow or Dirichlet wall, and an aggregation
+Galerkin product of such a matrix keeps every off-diagonal non-positive and every column's
+excess `Â_jj - Σ_{i != j} |Â_ij|` as the sum of its members' excesses, so it is again column
+dominant; the pivot test refuses anything else. A pivot refusal takes §141.4's path (an
+`Error::Refused` naming `-permissive`, or under `-permissive` the announced 50 l1-Jacobi sweeps).
+The solve, one block of 256 threads, everything in `ofacc` and rounded once:
+
+```
+w_c = σ b_c                                                              (141.5.3)
+forward:  for j = 0 .. n-2:   w_i <- w_i - L_ij w_j   (i > j)
+back:     for j = n-1 .. 0:   w_j <- w_j / U_jj;  then  w_i <- w_i - U_ij w_j   (i < j)
+x_c = (Scalar) w_c
+```
+
+each `w_i` by one thread, `j` in the order shown, a block barrier between the steps of `j`, so
+the device solve is its host twin bit for bit (`amg.cu` is on the `-fmad=false` list). A
+symmetric level takes `CoarseSetup::new` unchanged (§141.4). `C` of (141.5.1) is
+
+```
+C = Cholesky, pinned Cholesky (§141.4) or LU (141.5.2)-(141.5.3)          (141.5.4)
+```
+
+**Distributed solves** (`distsolve`, SPMD) refuse `Preconditioner::Gamg` by name until
+AMG-07b, and `partition_invariant(Gamg)` is `false`.
+
+**Precision** (§118, docs/17 §5.1.4). The LU rows are class A (hand values, `1e-15` relative
+in f64, `1e-6` under `single`), R (residual `1e-12` / `1e-5`) and D (device against host twin,
+bitwise in both builds). The device cycle against its host twin is class R, `1e-12` of `‖x‖_2`
+(f64) / `1e-5` (`single`), because level 0's product is `ldu_ops::amul` and `ldu.cu` is not on
+the `-fmad=false` list. The iteration gates are f64 rows; under `single` they wait for AMG-06a.
+
+**The matrices.** `POI(n)`: the uniform `n^3` box of unit cells, every wall Dirichlet, the §2
+laplacian negated so that `σ = +1`: `upper = lower = -|S_f| δ_f` on the internal faces, the
+diagonal the sum of `|S_f| δ_f` over the cell's internal faces plus `|S_b| δ_b` over its wall
+faces (the boundary fold), `b = 1`. `CD(n)`: the same box with the upwind convection of the
+velocity `u = (Pe, 0, 0)`, `Pe = 10` the cell Péclet number (`Γ = 1`, `h = 1`), the face flux
+`F_f = Pe S_f·x̂` from owner to neighbour and `F_b = Pe S_b·x̂` out of the wall:
+
+```
+upper[f] = -(D_f + max(-F_f, 0)),   lower[f] = -(D_f + max(F_f, 0)),     (141.5.5)
+diag[o] += D_f + max(F_f, 0),       diag[n] += D_f + max(-F_f, 0),
+diag[c] += D_b + max(F_b, 0)        (each wall face b of cell c),
+D_f = |S_f| δ_f,  D_b = |S_b| δ_b,  b = 1
+```
+
+an M-matrix, asymmetric, column diagonally dominant.
+
+#### 141.5.1 The gates
+
+`tol = 1e-8` is the §8.4 residual; "iterations" is `SolverPerformance::n_iterations`.
+
+| test (`tests/amg_cycle.rs` unless marked) | what | class |
+|---|---|---|
+| `the_device_v_cycle_matches_its_host_twin` | `POI(16)` with `n_cells_coarsest = 16`, V(2,2) and V(1,3) with l1-Jacobi and V(1,1) with Chebyshev, from `x = 0` and `b = test field`: device against a host twin in `Scalar` written in the test; and `POI(4)` (64 cells, `L = 0`): the cycle is the exact solve, residual `<= 1e-12` | R |
+| `the_lu_factor_and_solution_of_small_asymmetric_matrices` | `[[4, -1], [-2, 3]]`, `b = (1, 2)`: `L_10 = -0.5`, `U = (4, -1; 2.5)`, `x = (0.5, 1)`; its negation: `σ = -1`, the same factor, `x = -(0.5, 1)`; device bitwise the host twin; `general` on `K4` and `SYM` is `new` bit for bit | A, D |
+| `the_lu_coarse_solve_on_the_convection_diffusion_coarsest_level` | the one coarse level of `CD(8)` with `max_levels = 2` (128 cells): its largest `|Â_ij - Â_ji|` is `>= 1` (measured 10, `Pe D` of an x-coupling, in both builds), method `Lu` in both builds, residual `<= 1e-12` (f64) / `1e-5` (f32), device bitwise the host twin, twice | R, D |
+| `an_asymmetric_level_that_cannot_be_factored_is_refused_by_name` | `[[1, 2], [3, 6]]`: `pivot` at 1 (`Error::Refused`, naming `-permissive`), and under `-permissive` `JacobiFallback`; `[[1, -1], [-2, 2]]`: `singular` | D |
+| `gamg_on_dirichlet_poisson_32_64_128` (f64) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
+| `gamg_pbicgstab_on_convection_diffusion` (f64) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
+| `a_gamg_request_that_cannot_be_served_is_refused_by_name` | `solver GAMG` and `preconditioner GAMG` on a workspace without a hierarchy (`set_gamg`); PCG with V(1,2) (`nPreSweeps`); `set_gamg` with another cell count (`cells`); `ν1 = ν2 = 0` (`sweeps`); `dist_solve` with `Preconditioner::Gamg` (`AMG-07b`) | D |
+| `amg::cycle::tests::vcycle_replays_under_capture` (library) | the preconditioner on `POI(8)` with one coarse level and more, captured into a graph and replayed bitwise (§81) | D |
+
+**Why the full-depth `CD` coarsest level is not the LU gate.** The strength of `CD(n)` is 6 along
+x and 1 across it, so the aggregates grow along x, and by the coarsest level of a full hierarchy
+every x-coupling lies inside an aggregate: only the symmetric y and z couplings are left and the
+level is symmetric to the last bits (bitwise symmetric under `single`, where it takes Cholesky).
+The LU row therefore stops `CD(8)` after one coarsening, where the x-couplings remain.
+
+**Measured** (supervisor's run of `tests/amg_cycle.rs`, f64, 2026-10-13; default config, tol
+`1e-8`; "GAMG" is the standalone solver, one iteration one cycle):
+
+| `n^3` | level sizes | DIC-PCG | GAMG-PCG | GAMG | GAMG-PCG vs Jacobi-PBiCGStab at `1e-8` |
+|---|---|---|---|---|---|
+| 32^3 | 32768, 8195, 2054, 516, 130, 33 | 39 | 16 | 67 | 1.86e-9 |
+| 64^3 | 262144, 65546, 16412, 4116, 1031, 258, 65, 17 | 78 | 24 | 151 | 2.68e-9 |
+| 128^3 | 2097152, 524306, 131244, 32879, 8227, 2059, 516, 129, 33 | 155 | 38 | 343 | 5.33e-9 |
+
+At `1e-12` the two 128^3 answers differ by 2.02e-13. With l1-Jacobi instead of Chebyshev the
+GAMG-PCG counts were 26, 40, 62 and the standalone 154, 357, 810. The iteration growth
+32^3 -> 128^3 is 2.4x for GAMG-PCG and 5.1x for the standalone V-cycle: the h-dependence
+of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle is to
+remove. `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

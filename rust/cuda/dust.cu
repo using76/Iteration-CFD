@@ -17,7 +17,7 @@
     ofgpu SPEC-LIT.md §154.5 - the extended FSC (154.7)
     ofgpu SPEC-LIT.md §154.6 - the TFC limit (154.9)
     ofgpu SPEC-LIT.md §154.7 - the f32-safe rate constant (154.10) and its
-      zero rule; §118.7 - why K_b is formed once in f64
+      zero rule; §118.11 - why K_b is formed once in f64
     C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
       (2020) 104237, DOI 10.1016/j.jlp.2020.104237 - eqs. (3)-(7), (15)-(17)
     C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75

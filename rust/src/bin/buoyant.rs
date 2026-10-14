@@ -120,8 +120,9 @@ use ofgpu::field::{BcKind, GpuSurfaceScalarField, GpuVectorField};
 use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
 use ofgpu::field_setup::{
     compute_phi_from_u, harvest_scalar_field, harvest_surface_scalar_field,
-    harvest_vector_field, les_nut_wall_faces, max_div_phi,
-    setup_scalar_field, setup_vector_field, update_inlet_outlet, NutRoughness, WallFaces,
+    harvest_vector_field, les_nut_wall_faces, max_div_phi, setup_scalar_field,
+    setup_scalar_field_with, setup_vector_field_with, update_inlet_outlet, BcInputs,
+    NutRoughness, PrghInputs, WallFaces,
 };
 use ofgpu::io::case::{
     find_start_time, format_time_name, model_coeff, read_case_controls, CaseControls,
@@ -2064,7 +2065,23 @@ fn run(o: &Options) -> Result<()> {
     // `solve_potential_flow` wants `phi` and `U` mutably at once and `Simple`
     // owns both. Two host round trips, at setup, once.
     let mut seed_u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
-    setup_vector_field(&gpu, &mut seed_u, &raw_u, &hm)?;
+    // SPEC-LIT 120.5: U carries the pressure-inlet opt-in - the promise that
+    // the loop runs update_pressure_inlet_velocity every outer iteration and
+    // builds its flux with momFluxIsPrescribed. Identical for every other
+    // condition.
+    setup_vector_field_with(
+        &gpu,
+        &mut seed_u,
+        &raw_u,
+        &hm,
+        BcInputs {
+            pressure_inlet: true,
+            // SPEC-LIT 120.6: the same opt-in the loop's own setup below
+            // carries, so the seed accepts the Outlets II names too.
+            patch_means: true,
+            ..BcInputs::default()
+        },
+    )?;
     correct_boundary_conditions_vector(&gpu, &fk, &mut seed_u, &mesh)?;
 
     let mut seed_phi = GpuSurfaceScalarField::zeros(&gpu, &mesh, "phi")?;
@@ -2118,8 +2135,46 @@ fn run(o: &Options) -> Result<()> {
         s.set_residual_control(cc.residual_control.clone());
     }
 
-    setup_vector_field(&gpu, s.u_mut(), &raw_u, &hm)?;
-    setup_scalar_field(&gpu, s.p_mut(), &raw_p, &hm)?;
+    // SPEC-LIT 120.5: the pressure-inlet opt-in, as for the seed above.
+    setup_vector_field_with(
+        &gpu,
+        s.u_mut(),
+        &raw_u,
+        &hm,
+        BcInputs {
+            pressure_inlet: true,
+            // SPEC-LIT 120.6: this loop runs update_patch_means_* every
+            // outer iteration (Simple::correct_outer), so U may carry the
+            // Outlets II conditions.
+            patch_means: true,
+            ..BcInputs::default()
+        },
+    )?;
+    // SPEC-LIT 120.6: p carries the opt-in too - its kind-48 patches read
+    // the momentum predictor's grad p in the same refresh.
+    //
+    // SPEC-LIT 120.7: the buoyant pressure family, in the KINEMATIC form -
+    // this solver's p is `p_rgh` with the reference density, divided by it,
+    // so `rho_f = 1` whatever the face temperature. `u_b` is the seed
+    // velocity's boundary faces, corrected above; (120.7c)'s inflow test
+    // reads it where the case gives no phi.
+    let ub = gpu.download(&seed_u.bf)?;
+    setup_scalar_field_with(
+        &gpu,
+        s.p_mut(),
+        &raw_p,
+        &hm,
+        BcInputs {
+            patch_means: true,
+            prgh: Some(PrghInputs {
+                g: buoy.g,
+                rho_b: None,
+                u_b: Some(&ub),
+                ph_rgh_b: None,
+            }),
+            ..BcInputs::default()
+        },
+    )?;
 
     {
         // `seed_u` still holds the file's velocity unless potential flow
@@ -3290,5 +3345,33 @@ mod buoyant_tests {
             assert!(e.contains(w), "{w:?} not in: {e}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **SPEC-LIT 120.7's driver gate.** The outlet is where a buoyant case
+    /// names a pressure, and the knob turns the case's own `fixedValue` of a
+    /// static `p uniform 0` into `prghPressure` of the same static `p`:
+    /// (120.7b) writes `p - rho_f (g . x_f)` there, which is NOT 0 unless the
+    /// patch sits on the `g . x = 0` plane - so the two runs' `p` levels
+    /// differ, and both must run to the end without a refusal, in the
+    /// kinematic form this driver passes (`rho_b = None`). The refusals by
+    /// name are `tests/bc_buoyant_pressure.rs`'s.
+    #[test]
+    fn prgh_pressure_on_the_outlet_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let k = Knob {
+            label: "0/p outlet prghPressure",
+            file: "0/p",
+            from: "    outlet\n    {\n        type            fixedValue;\n        value           uniform 0;\n    }",
+            to: "    outlet\n    {\n        type            prghPressure;\n        p               uniform 0;\n    }",
+            pre: NO_PRE,
+        };
+        assert_ne!(
+            run_knob(&k, false, "prghoa"),
+            run_knob(&k, true, "prghob"),
+            "prghPressure on the outlet wrote the same run as a plain \
+             fixedValue of the same static pressure"
+        );
     }
 }
