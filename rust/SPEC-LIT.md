@@ -2920,6 +2920,20 @@ the molecular resistance the resolved mesh already provides.
 | flat channel, fixed-T walls, y+ ≈ 30 vs y+ ≈ 1 (lowRe) | wall heat flux agrees between the two meshes to a stated tolerance — the whole point of the model |
 | energy budget | wall heat extracted = domain enthalpy change + outflow, closed |
 
+**Note - the y+ report as a file (AUT-15, docs/15 AR-1).** Whenever the
+turbulence model carries a `k`, `ofgpu-lowmach` writes the per-patch
+first-cell `y+ = C_mu^{1/4} y sqrt(k_P) / nu` of every `wall`-kind patch, the
+numbers its `y+ at <patch>: min | mean | max` lines print in the integrated
+wall heat flux block, to `yPlus.json` in the output root (the case directory,
+or `<stem>_jsonc` beside a JSONC case): `solver`, `turbulence`, `definition`
+and `patches[]` of `{patch, faces, min, mean, max}`, `mean` being the
+face-count mean as printed. The file holds the same doubles in shortest
+round-trip form; the line is their `%g`. Without a `k` (laminar, LES) no file
+is written, and one left by an earlier run is removed. Output only: no field,
+residual or printed line changes. Gate: `tests/lowmach_yplus_json.rs` runs the
+shipped `cases/channelPeriodicFluxWF.jsonc` (20 iterations) as the binary and
+requires `%g` of each JSON value to equal the printed token on both walls.
+
 ---
 
 ## 30. The LES wall model, and turbulence selection in the coupled solvers
