@@ -34765,12 +34765,18 @@ contraction 0.33) against the segregated loop's 22 outer iterations
 plane strain - span `l` along `x`, depth `2c = 0.2`, one cell through the
 thickness with symmetry planes on both faces, the closed form's parabolic
 shear on the free end and its own displacement on the built-in end, `E = 200`
-GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on three meshes
-of cubic cells with `n_y = 4, 8, 16` through the depth. Per ratio: the loop
+GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on four meshes
+of cubic cells with `n_y = 4, 8, 16, 32` through the depth. Per ratio: the loop
 converges on every mesh, the observed order of the cell-centre displacement
-error is at least 1.9, that of the cell-centre stress error at least 0.9, and
-the finest mesh's tip deflection is within 5 % of the closed form; §94's
-study of the tip deflection is its uncertainty. The measured table is §109.7's.
+error on the finest pair (`n_y` 16 -> 32) is at least 1.9, that of the
+cell-centre stress error at least 0.9, and the finest mesh's tip deflection is
+within 5 % of the closed form; §94's study of the tip deflection on the finest
+three meshes (`n_y = 8, 16, 32`) is its uncertainty. The coarsest mesh is still
+run and printed, and held to "converges"; if it does not, it fails by name. The
+fourth mesh is the user's decision D-VAL-6 (docs/17, VAL-12), taken after
+§142.1 found the slender beams read before their asymptotic range; the bars
+are unchanged, and the precedent is Gate 95-G LE10's fourth mesh (§95.11). The
+measured table is §109.7's.
 
 ### 109.7 Gate 95-A, measured
 
@@ -34786,13 +34792,24 @@ stress errors volume-weighted rms against `P l c / I`).
 | 2.5:1 | 4 | 40 | 93 | 0.641 | 1663 | 2.71e-2 | 2.75e-2 | 1.44e-2 | 1.34e-2 |
 | 2.5:1 | 8 | 160 | 33 | 0.545 | 1203 | 4.02e-3 | 4.05e-3 | 3.91e-3 | 4.88e-3 |
 | 2.5:1 | 16 | 640 | 31 | 0.479 | 2363 | 6.73e-4 | 6.97e-4 | 1.35e-3 | 1.74e-3 |
+| 2.5:1 | 32 | 2560 | 33 | 0.574 | 4485 | 1.24e-4 | 1.37e-4 | 4.89e-4 | 6.19e-4 |
 | 5:1 | 4 | 80 | diverged at 673 | - | - | - | - | - | - |
 | 5:1 | 8 | 320 | 200 | 0.682 | 10198 | 1.98e-5 | 5.78e-4 | 3.76e-3 | 3.44e-3 |
 | 5:1 | 16 | 1280 | 52 | 0.553 | 6124 | 2.59e-4 | 2.63e-4 | 1.34e-3 | 1.23e-3 |
+| 5:1 | 32 | 5120 | 65 | 0.739 | 13180 | 9.76e-5 | 9.81e-5 | 4.86e-4 | 4.35e-4 |
 | 10:1 | 4 | 160 | 1000, not converged | 0.992 | 68571 | - | - | - | - |
 | 10:1 | 8 | 640 | 730 | 0.826 | 84432 | 1.40e-3 | 1.40e-3 | 3.66e-3 | 2.43e-3 |
 | 10:1 | 16 | 2560 | 200 | 0.626 | 43339 | 5.66e-4 | 5.66e-4 | 1.32e-3 | 8.64e-4 |
+| 10:1 | 32 | 10240 | 518 | 0.599 | 141094 | 1.52e-4 | 1.52e-4 | 4.86e-4 | 3.06e-4 |
 
+The `n_y = 32` rows are VAL-12's (2026-10-14, the same controls; the whole
+Gate 95-A section, all twelve meshes, took 68 s and 93 s in two runs on a GPU
+shared with other jobs). The rows of `n_y = 4, 8, 16` printed the same digits
+with the fourth mesh in place. The
+next paragraph is the gate as first measured, on three meshes; the one after
+it is the gate as it now stands.
+
+**On three meshes** (`n_y = 4, 8, 16`, the orders on 8 -> 16).
 **2.5:1 holds**: converged on all three meshes, `p_u = 2.54`, `p_sigma =
 1.49`, the finest tip 0.07 % off the closed form; §94's study of the tip is
 monotone with `p = 2.79` and `U_fine = 2.6e-7` (0.78 % of the tip).
@@ -34803,6 +34820,28 @@ tip is 0.026 % off. **10:1 misses**: the coarsest mesh stalls at `q_obs =
 0.992` to the cap, and `p_u = 1.31`; `p_sigma = 1.47`, the finest tip 0.057 %
 off. The two studies of 5:1 and 10:1 read nothing, because their coarse level
 is not a converged solve.
+
+**On four meshes** (VAL-12: the orders on 16 -> 32, §94's study on
+`n_y = 8, 16, 32`). Every order pair is printed; a pair with a mesh that is
+not a converged solve prints no order.
+
+| ratio | `p_u` 8→16 | `p_u` 16→32 | `p_sigma` 16→32 | tip study (8, 16, 32) | `U_fine` / tip | finest tip | Gate 95-A |
+|---|---|---|---|---|---|---|---|
+| 2.5:1 | 2.539 | 2.348 | 1.466 | monotone, `p = 2.608` | 0.11 % | 0.012 % | **holds** |
+| 5:1 | 1.136 | **1.423** | 1.458 | oscillatory | 0.079 % | 0.010 % | misses: `n_y = 4` diverges, `p_u` |
+| 10:1 | 1.308 | **1.896** | 1.445 | monotone, `p = 1.015` | 0.051 % | 0.015 % | misses: `n_y = 4` stalls, `p_u` |
+
+The two slender beams still miss, now each for the same two named reasons:
+the coarsest mesh is not a converged solve (the loop's half of §142.1, which
+VAL-11's GMRES outer iteration is for), and the displacement order on the
+finest pair is short of 1.9 - by 0.48 at 5:1 and by 0.004 at 10:1. The fourth
+mesh moves both orders toward 2 (5:1 from 1.14 to 1.42, 10:1 from 1.31 to
+1.90). Neither settles near 1: both rise with the fourth mesh, which is
+§142.1's reading of a pre-asymptotic range, so on this measurement the D-VAL-7
+trigger for §109.4's implicit tangential stencil (VAL-13) does not fire. Three
+levels per ratio past the coarsest still cannot say where the 5:1 order
+settles. The stress order holds at 1.44-1.47 on every beam, and the finest tip is within 0.015 % of the closed
+form on all three. No bar moved.
 
 What the block solve changes, read beside the segregated loop on the same
 `n_y = 8` beams with the same controls (the ignored measurement

@@ -3486,7 +3486,7 @@ fn run(c: &mut Checks) -> Result<()> {
     c.leave_gate();
     }
 
-    if c.section("Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (three meshes each, SPEC-LIT 109.6)") {
+    if c.section("Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (four meshes each, the tip study on the finest three, SPEC-LIT 109.6)") {
     c.enter_gate("Gate 95-A cantilever");
     check_cantilever(c, &gpu)?;
     c.leave_gate();
@@ -23568,13 +23568,24 @@ buoyancy_constant 0.935
 //  Gate 95-A (SPEC-LIT 109.6) - the end-loaded cantilever, block-coupled
 // ==========================================================================
 
+/// Gate 95-A's meshes, `n_y` through the depth, coarsest first, each the
+/// one before it halved (SPEC-LIT 109.6). The fourth is the user's decision
+/// D-VAL-6 (docs/17 VAL-12), after SPEC-LIT 142.1 found the slender beams
+/// read before their asymptotic range; the orders are read on the finest
+/// pair and the coarsest mesh is still run and held to "converged".
+const CANTILEVER_NY: [usize; 4] = [4, 8, 16, 32];
+
+/// How many of `CANTILEVER_NY`'s finest meshes SPEC-LIT 94's study takes.
+const CANTILEVER_STUDY_LEVELS: usize = 3;
+
 /// The block-coupled outer loop of `src/solid/coupled.rs` on the
 /// end-loaded cantilever of Timoshenko & Goodier ch. 3 (§109.6), at three
-/// slendernesses, three meshes each: the loop converges on every mesh, the
-/// displacement error's observed order is at least 1.9, the stress error's
-/// at least 0.9, and the finest mesh's tip deflection is within 5 % of the
-/// closed form; §94's study of the tip deflection is a miss's uncertainty.
-/// A ratio whose rows all pass registers nothing.
+/// slendernesses, the four `CANTILEVER_NY` meshes each: the loop converges
+/// on every mesh, the displacement error's observed order on the finest
+/// pair is at least 1.9, the stress error's at least 0.9, and the finest
+/// mesh's tip deflection is within 5 % of the closed form; §94's study of
+/// the tip deflection on the `CANTILEVER_STUDY_LEVELS` finest is a miss's
+/// uncertainty. A ratio whose rows all pass registers nothing.
 fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::solid::coupled;
     use ofgpu::solid::fixtures;
@@ -23609,19 +23620,21 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             fixtures::CANTILEVER_P,
         );
         let tip = exact.tip();
-        let mut e_us = [0.0 as Scalar; 3];
-        let mut e_xxs = [0.0 as Scalar; 3];
-        let mut e_xys = [0.0 as Scalar; 3];
-        let mut e_tips = [0.0 as Scalar; 3];
-        let mut v_hs = [0.0 as Scalar; 3];
-        let mut converged = [false; 3];
-        let mut outer_its = [0usize; 3];
-        let mut obs = [0.0 as Scalar; 3];
-        let mut lins = [0usize; 3];
+        const M: usize = CANTILEVER_NY.len();
+        let fine = M - 1;
+        let mut e_us = [0.0 as Scalar; M];
+        let mut e_xxs = [0.0 as Scalar; M];
+        let mut e_xys = [0.0 as Scalar; M];
+        let mut e_tips = [0.0 as Scalar; M];
+        let mut v_hs = [0.0 as Scalar; M];
+        let mut converged = [false; M];
+        let mut outer_its = [0usize; M];
+        let mut obs = [0.0 as Scalar; M];
+        let mut lins = [0usize; M];
         let mut levels: Vec<vv::Level> = Vec::new();
         let mut detail: Vec<String> = Vec::new();
 
-        for (idx, n_y) in [4usize, 8, 16].into_iter().enumerate() {
+        for (idx, n_y) in CANTILEVER_NY.into_iter().enumerate() {
             let n_x = (l * n_y as Scalar / 0.2).round() as usize;
             let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C)?;
             let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
@@ -23682,21 +23695,61 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         }
 
         let ln2 = (2.0 as Scalar).ln();
-        let p_u = (e_us[1] / e_us[2]).ln() / ln2;
-        let p_sigma = ((e_xxs[1] / e_xxs[2]).ln().min((e_xys[1] / e_xys[2]).ln())) / ln2;
-        c.check(&format!("Gate 95-A {label}: displacement order, 1.9 - p_u"), 1.9 - p_u, 0.0);
-        c.check(&format!("Gate 95-A {label}: stress order, 0.9 - p_sigma"), 0.9 - p_sigma, 0.0);
+        // Every pair's orders are printed; the bars read the finest pair.
+        let pair = |k: usize| {
+            let p_u = (e_us[k - 1] / e_us[k]).ln() / ln2;
+            let p_s = ((e_xxs[k - 1] / e_xxs[k]).ln().min((e_xys[k - 1] / e_xys[k]).ln())) / ln2;
+            (p_u, p_s)
+        };
+        for k in 1..M {
+            let (a, b) = (CANTILEVER_NY[k - 1], CANTILEVER_NY[k]);
+            if converged[k - 1] && converged[k] {
+                let (pu, ps) = pair(k);
+                c.note(&format!("  n_y {a} -> {b}: p_u = {pu:.3}, p_sigma = {ps:.3}"));
+            } else {
+                c.note(&format!("  n_y {a} -> {b}: no order, a mesh of the pair is not a converged solve"));
+            }
+        }
+        let (p_u, p_sigma) = pair(fine);
+        let (ny_c, ny_f) = (CANTILEVER_NY[fine - 1], CANTILEVER_NY[fine]);
         c.check(
-            &format!("Gate 95-A {label}: tip deflection on the finest mesh, rel"),
-            e_tips[2],
+            &format!("Gate 95-A {label}: displacement order, n_y {ny_c} -> {ny_f}, 1.9 - p_u"),
+            1.9 - p_u,
+            0.0,
+        );
+        c.check(
+            &format!("Gate 95-A {label}: stress order, n_y {ny_c} -> {ny_f}, 0.9 - p_sigma"),
+            0.9 - p_sigma,
+            0.0,
+        );
+        c.check(
+            &format!("Gate 95-A {label}: tip deflection on the finest mesh (n_y = {ny_f}), rel"),
+            e_tips[fine],
             0.05,
         );
-        c.note(&format!("  displacement error order p_u = {p_u:.3}, stress error order p_sigma = {p_sigma:.3}"));
-        // The study reads the FINEST level first.
-        levels.reverse();
-        let study = vv::grid_study(&levels)?;
+        c.note(&format!(
+            "  finest pair: displacement error order p_u = {p_u:.3}, stress error order p_sigma = {p_sigma:.3}"
+        ));
+        // The study takes the finest CANTILEVER_STUDY_LEVELS and reads the
+        // FINEST level first; the coarser meshes are run and printed above.
+        let mut tail = levels.split_off(levels.len() - CANTILEVER_STUDY_LEVELS);
+        tail.reverse();
+        c.note(&format!(
+            "  {label}: the tip study takes n_y = {}; n_y = {} is run and printed",
+            CANTILEVER_NY[M - CANTILEVER_STUDY_LEVELS..]
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            CANTILEVER_NY[..M - CANTILEVER_STUDY_LEVELS]
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        let study = vv::grid_study(&tail)?;
         c.note(&format!("  tip deflection: {}", study.one_line()));
-        let val = vv::validation(v_hs[2], tip, study.u_fine, 0.0, 0.0);
+        let val = vv::validation(v_hs[fine], tip, study.u_fine, 0.0, 0.0);
         c.note(&format!("  {}", val.one_line("tip deflection, finest mesh")));
 
         let ok = converged.iter().all(|&cv| cv)
@@ -23704,18 +23757,19 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             && (1.9 - p_u).is_finite()
             && (0.9 - p_sigma) <= 0.0
             && (0.9 - p_sigma).is_finite()
-            && e_tips[2] <= 0.05
-            && e_tips[2].is_finite();
+            && e_tips[fine] <= 0.05
+            && e_tips[fine].is_finite();
         if !ok {
             c.report(GateReport {
                 verdict: Verdict::Misses,
                 how: How::Live,
                 gate: "Gate 95-A cantilever",
-                against: "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), three meshes r = 2",
+                against: "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, \
+                          orders on the finest pair, the tip study on the finest three",
                 headline: format!(
-                    "{label}: converged {}/3, p_u {p_u:.2}, p_sigma {p_sigma:.2}, finest tip {:.2e}",
+                    "{label}: converged {}/{M}, p_u {p_u:.2}, p_sigma {p_sigma:.2} (n_y {ny_c} -> {ny_f}), finest tip {:.2e}",
                     converged.iter().filter(|&&cv| cv).count(),
-                    e_tips[2]
+                    e_tips[fine]
                 ),
                 detail,
                 uncertainty: Some(Uncertainty::Study(study)),
@@ -23723,6 +23777,35 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cantilever_refine {
+    use super::*;
+
+    /// SPEC-LIT 109.6: Gate 95-A's four meshes per ratio are one refinement
+    /// by two apart, the first three are the n_y = 4, 8, 16 of §109.7, the
+    /// tip study takes the finest three, and the finest 10:1 beam - the
+    /// largest mesh the gate runs - builds with cubic cells.
+    #[test]
+    fn cantilever_gate_runs_four_meshes_per_ratio() {
+        assert_eq!(CANTILEVER_NY, [4, 8, 16, 32], "four meshes, n_y = 32 the fourth");
+        assert_eq!(&CANTILEVER_NY[..3], &[4, 8, 16], "the first three are §109.7's");
+        for w in CANTILEVER_NY.windows(2) {
+            assert_eq!(w[1], 2 * w[0], "halved: {w:?}");
+        }
+        assert_eq!(CANTILEVER_STUDY_LEVELS, 3, "the study takes three");
+        let (l, n_y) = (2.0 as Scalar, CANTILEVER_NY[CANTILEVER_NY.len() - 1]);
+        let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+        assert_eq!(n_x, 320);
+        let hm = ofgpu::solid::fixtures::cantilever_mesh(n_x, n_y, l, ofgpu::solid::fixtures::CANTILEVER_C)
+            .expect("the finest 10:1 beam builds");
+        assert_eq!(hm.n_cells, 10_240);
+        let h = 2.0 * ofgpu::solid::fixtures::CANTILEVER_C / n_y as Scalar;
+        let r = hm.check();
+        assert!(r.min_volume > 0.0, "positive volumes");
+        assert!((r.min_volume - h * h * h).abs() <= 1e-6 * h * h * h, "cubic cells: {} vs h^3 {}", r.min_volume, h * h * h);
+    }
 }
 
 // ==========================================================================

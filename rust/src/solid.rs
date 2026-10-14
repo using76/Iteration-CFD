@@ -436,7 +436,7 @@ pub fn slenderness(m: &HostMesh) -> Scalar {
 /// A. Ivanković, *Comput. Struct.* 175 (2016) 100-122, DOI
 /// 10.1016/j.compstruc.2016.07.004. It is built as `crate::solid::coupled`
 /// (§109), a second matrix format beside SPEC-LIT §1's LDU storage, and
-/// Gate 95-A measured it: it converges the 10:1 beam on the two finer meshes,
+/// Gate 95-A measured it: it converges the 10:1 beam on every mesh but the coarsest,
 /// and misses the gate at 5:1 and 10:1 (§109.7), so this refusal is unchanged.
 pub fn refuse_bending_dominated_slender_body(m: &HostMesh) -> Result<()> {
     let s = slenderness(m);
