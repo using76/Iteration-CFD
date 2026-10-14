@@ -18,16 +18,23 @@
   wall reflection sum, the boundary intensity of every direction
   (SPEC-LIT §136.2's table), the per-direction boundary triple, and the
   emission kappa sigma T^4/pi of (136.3).
+
+  The solve's sums (CHR-20, SPEC-LIT §136.7): (136.4)'s G, q and wall flux,
+  one direction per launch into ofacc accumulators, then one rounding into
+  the ofscalar outputs (§118.1) - the only kernels here that do not read
+  and write ofscalar alone.
   ==========================================================================
 
-  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6
+  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6, §136.7
   No GPL-licensed source was consulted. Provenance: see PROVENANCE.md.
 
-  Every kernel is ofscalar in, ofscalar out - the crate's solve precision,
-  both builds. No atomics, no allocation, no sync: each thread touches only
-  its own cell or face, so a launch is pure device work and the whole P1
+  Every kernel but the solve's sums is ofscalar in, ofscalar out - the
+  crate's solve precision, both builds. No atomics, no allocation, no
+  sync: each thread touches only its own cell or face, so a launch is pure
+  device work and the whole P1
   step of src/radiation/p1.rs and the fvDOM boundary update and row
-  assembly of src/radiation/dom.rs capture into a CUDA graph (SPEC-LIT 81).
+  assembly and sweep of src/radiation/dom.rs capture into a CUDA graph
+  (SPEC-LIT 81).
   The Stefan-Boltzmann constant arrives as an argument (sigma) rather than
   being spelled here, so no constant is written twice - the same rule the
   flat mechanism's R_GAS follows in chem.cu.
@@ -386,5 +393,104 @@ extern "C" __global__ void domEmission
     su[c] = kappa*sigma*t4/pi;
 }
 
+// ==========================================================================
+//  The fvDOM solve's sums (CHR-20, SPEC-LIT §136.7 step 3): (136.4)'s G, q
+//  and wall flux, one direction per launch, accumulated in ofacc (f64 in
+//  both builds, §118.1) and rounded ONCE into the ofscalar outputs. Each
+//  thread touches only its own cell or face, so the launches are pure
+//  device work and DomSolve::sweep captures (SPEC-LIT 81).
+// ==========================================================================
 
+//- (136.4)'s cell sums, one direction: gAcc[c] += w I_P, qAcc[3c + a] +=
+//  w Omega_a I_P - every ofscalar operand widened to ofacc first. The
+//  caller zeroes both accumulators before the first direction. -
+extern "C" __global__ void domAccumCells
+(
+    ofacc* __restrict__ gAcc,
+    ofacc* __restrict__ qAcc,
+    const ofscalar* __restrict__ inten,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    ofscalar w,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const ofacc wi = (ofacc)w*(ofacc)inten[c];
+    const long long j = 3LL*(long long)c;
+    gAcc[c] += wi;
+    qAcc[j]     += wi*(ofacc)ox;
+    qAcc[j + 1] += wi*(ofacc)oy;
+    qAcc[j + 2] += wi*(ofacc)oz;
+}
 
+//- (136.4)'s wall flux, one direction: q_w.n += w (Omega.n) I_P where
+//  Omega . Sb > 0 (out of the medium) and w (Omega.n) I_b^l where
+//  Omega . Sb < 0 (into it), n = Sb/|Sb|. Omega . Sb is the SAME ofscalar
+//  product domFluxBoundary gave the rows, so the sign split is the one the
+//  rows were assembled with and (136.11) balances; ib is the boundary
+//  buffer of that assembly (§136.7 step 4). Empty faces (condKind 3, as in
+//  domBoundaryIntensity) stay 0. -
+extern "C" __global__ void domAccumWall
+(
+    ofacc* __restrict__ wfAcc,
+    const ofscalar* __restrict__ inten,
+    const ofscalar* __restrict__ ib,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ condKind,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    ofscalar w,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (condKind[i] == (oflabel)3) return;
+    const ofvec3 s = bSf[i];
+    const ofscalar dot = ox*s.x + oy*s.y + oz*s.z;
+    const ofacc on = (ofacc)dot/(ofacc)bMagSf[i];
+    if (dot > (ofscalar)0)
+    {
+        wfAcc[i] += (ofacc)w*on*(ofacc)inten[bFaceCells[i]];
+    }
+    else if (dot < (ofscalar)0)
+    {
+        wfAcc[i] += (ofacc)w*on*(ofacc)ib[i];
+    }
+}
+
+//- The one rounding of the cell sums into the ofscalar outputs (§118.1). -
+extern "C" __global__ void domRoundCells
+(
+    ofscalar* __restrict__ g,
+    ofvec3* __restrict__ q,
+    const ofacc* __restrict__ gAcc,
+    const ofacc* __restrict__ qAcc,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const long long j = 3LL*(long long)c;
+    g[c] = (ofscalar)gAcc[c];
+    q[c] = mkvec((ofscalar)qAcc[j], (ofscalar)qAcc[j + 1], (ofscalar)qAcc[j + 2]);
+}
+
+//- The one rounding of the wall flux into its ofscalar output (§118.1). -
+extern "C" __global__ void domRoundFaces
+(
+    ofscalar* __restrict__ wf,
+    const ofacc* __restrict__ wfAcc,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    wf[i] = (ofscalar)wfAcc[i];
+}

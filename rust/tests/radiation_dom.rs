@@ -10,9 +10,14 @@
 //! against LA-3186's Table II, the direction order and its bitwise
 //! reflection closure, the per-direction row against (136.3) evaluated in
 //! f64 in the test, the isothermal enclosure's zero residual at `I = I_b`,
-//! the M-matrix property of the step scheme, and every refusal. The SAME
-//! assertions in BOTH builds - the quadrature rows are f64 in both, the
-//! device rows run at the R class of §136.5 (`tol32` under `single`).
+//! the M-matrix property of the step scheme, and every refusal. CHR-20's
+//! gates for the solve (SPEC-LIT §136.7): the slab against (135.6) with
+//! the tau = 0.1 S8 miss asserted (`dom_slab_exact`), the error falling
+//! from S4 to S8, the slab as the step recurrence (136.12), `G`/`q`/wall
+//! flux against f64 sums, the energy balance (136.11) and the reported
+//! sweep cap. The SAME assertions in BOTH builds - the quadrature rows are
+//! f64 in both, the device rows run at the R class of §136.5 (`tol32` under
+//! `single`).
 //!
 //! An integration test, because the library's own test target does not
 //! compile under `single`; an integration test links the normal library,
@@ -20,18 +25,23 @@
 //! the convention of `tests/radiation_p1.rs`.
 //!
 //! Provenance: ORIGINAL - the meshes, the oracles and the assertions are
-//! this tree's own construction, run against (136.1)-(136.4) and LA-3186
-//! (Lathrop & Carlson, OSTI 4666281, US Government work) via SPEC-LIT §136.
+//! this tree's own construction, run against (136.1)-(136.4),
+//! (136.11)-(136.13), (135.6) with Abramowitz & Stegun 5.1.11, 5.1.14 and
+//! 5.1.22 for `E_3`, and LA-3186 (Lathrop & Carlson, OSTI 4666281, US
+//! Government work) via SPEC-LIT §136.
 //! No GPL-licensed source was consulted.
 
 use ofgpu::blockgen::{self, BlockSpec, GradedAxis};
 use ofgpu::ldu::GpuLduMatrix;
 use ofgpu::ldu_ops::LduKernels;
-use ofgpu::radiation::dom::{DomCondition, DomMedium, DomPatch, DomRows};
+use ofgpu::radiation::dom::{
+    DomCondition, DomControls, DomMedium, DomPatch, DomRows, DomSolve,
+};
 use ofgpu::radiation::dom_quad::{symmetry_axis, Quadrature, SnOrder};
 use ofgpu::radiation::p1::WallTemperature;
 use ofgpu::radiation::props::{Absorption, ParticipatingConfig, Scatter};
 use ofgpu::radiation::{RadiationModel, SIGMA_SB};
+use ofgpu::solver::{LinearSolverKind, Preconditioner, SolverControls};
 use ofgpu::{Gpu, GpuMesh, GpuScalarField, HostMesh, Result, Scalar};
 
 /// The R-class tolerance of docs/17 §5.1 D-F32-1: `tol32 = max(tol64,
@@ -1244,3 +1254,423 @@ fn dom_refusals_ranges(g: &Gpu, quad: &Quadrature) -> Result<()> {
     Ok(())
 }
 
+
+// --------------------------------------------------------------------------
+//  3. The solve - CHR-20 (SPEC-LIT §136.7)
+// --------------------------------------------------------------------------
+
+/// The R-class tolerance of the 1e-10 rows (§136.7's table): `tol32` under
+/// `single`, as `TOL` is for the 1e-12 rows.
+const TOL_R10: f64 = if cfg!(feature = "single") { 1e-5 } else { 1e-10 };
+
+/// The sweep tolerance of every test solve: 1e-12 in f64 - well below the
+/// 1e-10 rows - and §136.7's `tol32` of 1e-5 under `single`.
+const SWEEP_TOL: f64 = if cfg!(feature = "single") { 1e-5 } else { 1e-12 };
+
+/// Every test solve's controls: PBiCGStab + diagonal at 1e-12 absolute, in
+/// BOTH builds (under `single` the solve is §118.4-refined, as P1's tests),
+/// the sweep at `SWEEP_TOL`, 200 sweeps at most.
+fn dom_controls() -> DomControls {
+    DomControls {
+        linear: SolverControls {
+            solver: LinearSolverKind::PBiCGStab,
+            precon: Preconditioner::Diagonal,
+            tolerance: 1e-12,
+            rel_tol: 0.0,
+            max_iter: 5000,
+            ..SolverControls::default()
+        },
+        tol: SWEEP_TOL,
+        max_sweeps: 200,
+    }
+}
+
+/// `E_1(x)`, x > 0: Abramowitz & Stegun 5.1.11's series for x <= 1, the
+/// continued fraction 5.1.22 (evaluated backward, 200 levels) for x > 1.
+fn e1(x: f64) -> f64 {
+    if x <= 1.0 {
+        let euler = 0.577_215_664_901_532_9_f64;
+        let (mut sum, mut term) = (0.0f64, 1.0f64);
+        for k in 1..60 {
+            let kf = k as f64;
+            term *= -x / kf; // (-x)^k / k!
+            sum -= term / kf; // + (-1)^(k+1) x^k / (k k!)
+        }
+        -euler - x.ln() + sum
+    } else {
+        let mut f = x;
+        for k in (1..=200).rev() {
+            let kf = k as f64;
+            f = x + kf / (1.0 + kf / f);
+        }
+        (-x).exp() / f
+    }
+}
+
+/// `E_3(x)` by A&S 5.1.14 twice: `E_(n+1) = (e^-x - x E_n)/n`.
+fn e3(x: f64) -> f64 {
+    let ex = (-x).exp();
+    let e2 = ex - x * e1(x);
+    (ex - x * e2) / 2.0
+}
+
+/// (135.6): the exact slab's wall flux over `sigma T^4`, `1 - 2 E_3(tau)`.
+fn psi_exact(tau: f64) -> f64 {
+    1.0 - 2.0 * e3(tau)
+}
+
+/// (136.12): the step scheme's slab on `n` cells with this set, in f64,
+/// over the directions into xMin; `-expm1(-n ln1p(.))` (§136.7).
+fn psi_n(quad: &Quadrature, tau: f64, n: usize) -> f64 {
+    let nf = n as f64;
+    let mut s = 0.0f64;
+    for (l, d) in quad.dirs().iter().enumerate() {
+        if d[0] < 0.0 {
+            let mu = -d[0];
+            s += quad.weights()[l] * mu * -(-nf * (tau / (nf * mu)).ln_1p()).exp_m1();
+        }
+    }
+    s / PI
+}
+
+/// (136.13): the set's own spatially converged slab value.
+fn psi_limit(quad: &Quadrature, tau: f64) -> f64 {
+    let mut s = 0.0f64;
+    for (l, d) in quad.dirs().iter().enumerate() {
+        if d[0] < 0.0 {
+            let mu = -d[0];
+            s += quad.weights()[l] * mu * -(-tau / mu).exp_m1();
+        }
+    }
+    s / PI
+}
+
+/// The slab of §136.7: x in [0, 1] with `n` cells, y and z in [0, 1] with
+/// one each; xMin and xMax walls, the four sides symmetry planes.
+fn slab(g: &Gpu, n: usize) -> Result<(HostMesh, GpuMesh)> {
+    let axis = |n: usize| GradedAxis {
+        lo: 0.0 as Scalar,
+        hi: 1.0 as Scalar,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let spec = BlockSpec {
+        x: axis(n),
+        y: axis(1),
+        z: axis(1),
+        patch_name: BlockSpec::default().patch_name,
+        patch_type: ["wall", "wall", "symmetry", "symmetry", "symmetry", "symmetry"]
+            .map(String::from),
+        windows: Vec::new(),
+        cyclic: Vec::new(),
+    };
+    let hm = blockgen::build_mesh(&spec)?;
+    let m = GpuMesh::upload(g, &hm)?;
+    Ok((hm, m))
+}
+
+/// One patch's mean wall flux over `sigma T^4` - `Psi` of (135.6).
+fn patch_psi(hm: &HostMesh, wf: &[Scalar], name: &str, sigma_t4: f64) -> f64 {
+    let p = hm.patches.iter().find(|p| p.name == name).expect("the slab names its walls");
+    let sum: f64 = wf[p.start..p.start + p.size].iter().map(|&v| w64(v)).sum();
+    sum / p.size as f64 / sigma_t4
+}
+
+/// Solve §136.7's slab with `order` at `tau` on `n` cells: black walls at
+/// 0 K, `kappa = tau`, T = 1000 K. Every solve must converge with every
+/// direction solve converged, and BOTH walls must be the step recurrence
+/// (136.12) at `TOL_R10`. Returns `(Psi_xMin, Psi_xMax, sweeps)`.
+fn slab_psi(g: &Gpu, order: SnOrder, tau: f64, n: usize) -> Result<(f64, f64, usize)> {
+    let (hm, m, t, mut dom) = slab_case(g, order, tau, n, dom_controls())?;
+    let quad = dom.rows().quadrature().clone();
+    let rep = dom.solve(g, &m, &t)?;
+    let what = format!("{order:?} tau {tau} N {n}");
+    assert!(rep.converged, "{what}: the sweeps must converge: {rep:?}");
+    assert_eq!(rep.unconverged_solves, 0, "{what}: every direction solve must converge");
+    let wf = g.download(dom.wall_flux())?;
+    let sigma_t4 = SIGMA_SB as f64 * 1000f64.powi(4);
+    let lo = patch_psi(&hm, &wf, "xMin", sigma_t4);
+    let hi = patch_psi(&hm, &wf, "xMax", sigma_t4);
+    let want = psi_n(&quad, tau, n);
+    for (wall, v) in [("xMin", lo), ("xMax", hi)] {
+        let r = (v / want - 1.0).abs();
+        assert!(r <= TOL_R10, "{what} {wall}: Psi {v:.12} against (136.12) {want:.12}, r = {r:e}");
+    }
+    Ok((lo, hi, rep.sweeps))
+}
+
+/// Under `single` the N = 256 slab rows are the recorded f32 MISS of
+/// §136.7: the crate's float PBiCGStab breaks down on the 256-cell upwind
+/// chain (BiCGStab needs about N iterations on it, and in f32 it ends in
+/// NaN or diverges from N = 64 up), so the direction solves report no
+/// convergence. One sweep shows it; the test asserts the miss and prints
+/// it, and the f64 build holds the gate. If this assertion ever fails, the
+/// f32 solve has been fixed and the gate must be restored in both builds.
+fn slab_f32_miss(g: &Gpu, order: SnOrder, tau: f64) -> Result<()> {
+    let ctrl = DomControls { max_sweeps: 1, ..dom_controls() };
+    let (_hm, m, t, mut dom) = slab_case(g, order, tau, 256, ctrl)?;
+    let rep = dom.solve(g, &m, &t)?;
+    println!(
+        "  {order:?} tau {tau} N 256 under single: MISSED - {} of {} direction solves \
+         unconverged in one sweep: the f32 PBiCGStab breaks down on the 256-cell upwind \
+         chain (SPEC-LIT 136.7; the gate holds in the f64 build)",
+        rep.unconverged_solves,
+        dom.rows().n_dirs()
+    );
+    assert!(
+        rep.unconverged_solves > 0,
+        "{order:?} tau {tau}: the f32 miss of SPEC-LIT 136.7 is gone - restore the N = 256 gate \
+         under single"
+    );
+    Ok(())
+}
+
+/// §136.7's slab as a [`DomSolve`] with `ctrl`: black walls at 0 K,
+/// `kappa = tau`, T = 1000 K.
+fn slab_case(
+    g: &Gpu,
+    order: SnOrder,
+    tau: f64,
+    n: usize,
+    ctrl: DomControls,
+) -> Result<(HostMesh, GpuMesh, GpuScalarField, DomSolve)> {
+    let (hm, m) = slab(g, n)?;
+    let quad = Quadrature::new(order)?;
+    let black = || DomCondition::GreyDiffuse {
+        emissivity: 1.0,
+        temperature: WallTemperature::Fixed(0.0),
+    };
+    let ps = vec![
+        DomPatch { patch: "xMin".into(), condition: black() },
+        DomPatch { patch: "xMax".into(), condition: black() },
+        DomPatch { patch: "yMin".into(), condition: DomCondition::Symmetry },
+        DomPatch { patch: "yMax".into(), condition: DomCondition::Symmetry },
+        DomPatch { patch: "zMin".into(), condition: DomCondition::Symmetry },
+        DomPatch { patch: "zMax".into(), condition: DomCondition::Symmetry },
+    ];
+    let t = uniform_t(g, &m, 1000.0)?;
+    let dom = DomSolve::new(g, &hm, &m, &medium(tau), &quad, &ps, ctrl)?;
+    Ok((hm, m, t, dom))
+}
+
+/// `dom_slab_exact` (§136.7, class P): S8 on N = 256 within 2 % of (135.6)
+/// at tau = 1 and 10, both walls. tau = 0.1 is the recorded MISS: S8's own
+/// angular limit (136.13) lies above 2 %, so the test asserts the miss and
+/// its cause - `e_32 < e_256 <= e_limit` and `e_limit > 2 %` - and prints
+/// the row as MISSED (accepted by the user on 2026-10-14, §136.7). Under
+/// `single` the N = 256 solve itself is the recorded f32 miss
+/// ([`slab_f32_miss`]).
+#[test]
+fn dom_slab_exact() -> Result<()> {
+    // The E_3 oracle's own check (§136.7's table, column (135.6)).
+    for (tau, want) in [(0.1, 0.167417084183), (1.0, 0.780616065604), (10.0, 0.999992902475)] {
+        let v = psi_exact(tau);
+        assert!((v - want).abs() <= 1e-11, "1 - 2E3({tau}) = {v:.12}, want {want}");
+    }
+    let Some(g) = gpu() else { return Ok(()) };
+    if cfg!(feature = "single") {
+        for tau in [0.1, 1.0, 10.0] {
+            slab_f32_miss(&g, SnOrder::S8, tau)?;
+        }
+        return Ok(());
+    }
+    let quad = Quadrature::new(SnOrder::S8)?;
+    for tau in [1.0, 10.0] {
+        let (lo, hi, sweeps) = slab_psi(&g, SnOrder::S8, tau, 256)?;
+        let ex = psi_exact(tau);
+        for (wall, v) in [("xMin", lo), ("xMax", hi)] {
+            let e = v / ex - 1.0;
+            println!("  dom_slab_exact S8 N 256 tau {tau} {wall}: Psi {v:.12}, e {e:+.4e}, {sweeps} sweeps");
+            assert!(e.abs() <= 0.02, "S8 tau {tau} {wall}: e {e:+.4e} outside 2 %");
+        }
+    }
+    // tau = 0.1: the MISS, asserted with its cause.
+    let tau = 0.1;
+    let ex = psi_exact(tau);
+    let (lo256, hi256, s256) = slab_psi(&g, SnOrder::S8, tau, 256)?;
+    let (lo32, hi32, s32) = slab_psi(&g, SnOrder::S8, tau, 32)?;
+    let e_lim = psi_limit(&quad, tau) / ex - 1.0;
+    for (wall, v256, v32) in [("xMin", lo256, lo32), ("xMax", hi256, hi32)] {
+        let (e256, e32) = (v256 / ex - 1.0, v32 / ex - 1.0);
+        println!(
+            "  dom_slab_exact S8 tau 0.1 {wall}: MISSED - e_256 {e256:+.4e} ({s256} sweeps), \
+             e_32 {e32:+.4e} ({s32} sweeps), e_limit (136.13) {e_lim:+.4e}: S8's angular \
+             error alone exceeds 2 % (SPEC-LIT 136.7; accepted by the user on 2026-10-14)"
+        );
+        assert!(e_lim > 0.02, "the cause: S8's limit e {e_lim:+.4e} must exceed 2 %");
+        assert!(e256 > 0.02, "{wall}: e_256 {e256:+.4e} is the recorded miss");
+        assert!(e32 < e256, "{wall}: the step scheme approaches the limit from below");
+        assert!(e256 <= e_lim, "{wall}: e_256 {e256:+.4e} must not pass e_limit {e_lim:+.4e}");
+    }
+    Ok(())
+}
+
+/// `dom_error_falls_with_order` (§136.7, class P): on N = 256, at each tau,
+/// S8's error against (135.6) is no larger than S4's, both walls. Under
+/// `single` the N = 256 solve itself is the recorded f32 miss
+/// ([`slab_f32_miss`]).
+#[test]
+fn dom_error_falls_with_order() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    if cfg!(feature = "single") {
+        for order in [SnOrder::S4, SnOrder::S8] {
+            slab_f32_miss(&g, order, 1.0)?;
+        }
+        return Ok(());
+    }
+    for tau in [0.1, 1.0, 10.0] {
+        let ex = psi_exact(tau);
+        let (lo4, hi4, _) = slab_psi(&g, SnOrder::S4, tau, 256)?;
+        let (lo8, hi8, _) = slab_psi(&g, SnOrder::S8, tau, 256)?;
+        for (wall, v4, v8) in [("xMin", lo4, lo8), ("xMax", hi4, hi8)] {
+            let (e4, e8) = (v4 / ex - 1.0, v8 / ex - 1.0);
+            println!("  dom_error_falls_with_order tau {tau} {wall}: e_S4 {e4:+.4e}, e_S8 {e8:+.4e}");
+            assert!(e8.abs() <= e4.abs(), "tau {tau} {wall}: |e_S8| {e8:e} > |e_S4| {e4:e}");
+        }
+    }
+    Ok(())
+}
+
+/// `dom_slab_is_the_step_recurrence` (§136.7, class R): the device slab is
+/// (136.12) at 1e-10 (`tol32` under `single`), S4 and S8, N = 32, three
+/// tau - the assertion lives in `slab_psi`, which every slab solve runs.
+#[test]
+fn dom_slab_is_the_step_recurrence() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    for order in [SnOrder::S4, SnOrder::S8] {
+        for tau in [0.1, 1.0, 10.0] {
+            let (lo, hi, sweeps) = slab_psi(&g, order, tau, 32)?;
+            println!("  step recurrence {order:?} tau {tau} N 32: Psi {lo:.12} / {hi:.12}, {sweeps} sweeps");
+        }
+    }
+    Ok(())
+}
+
+/// Mesh B's non-uniform case of §136.7's R and D rows: S4, kappa = 2, a
+/// grey wall at eps = 0.5 and 900 K, an open boundary at 500 K, cell
+/// T = 600 + 50 c, face T = 700.
+fn mesh_b_case(g: &Gpu, ctrl: DomControls) -> Result<(HostMesh, GpuMesh, GpuScalarField, DomSolve)> {
+    let (hm, m) = mesh_b(g)?;
+    let quad = Quadrature::new(SnOrder::S4)?;
+    let ps = patches_b(0.5, WallTemperature::Fixed(900.0), 500.0);
+    let mut t = GpuScalarField::zeros(g, &m, "T")?;
+    let tc: Vec<Scalar> = (0..hm.n_cells).map(|c| (600.0 + 50.0 * c as f64) as Scalar).collect();
+    g.write(&mut t.f, &tc)?;
+    g.write(&mut t.bf, &vec![700.0 as Scalar; hm.n_boundary_faces])?;
+    let dom = DomSolve::new(g, &hm, &m, &medium(2.0), &quad, &ps, ctrl)?;
+    Ok((hm, m, t, dom))
+}
+
+/// `dom_sums_match_formula` (§136.7, class R): the device `G`, `q` and
+/// (136.4) wall flux against f64 sums of the downloaded `I^l` and `I_b^l`,
+/// each at `TOL` against its own scale.
+#[test]
+fn dom_sums_match_formula() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let (hm, m, t, mut dom) = mesh_b_case(&g, dom_controls())?;
+    let rep = dom.solve(&g, &m, &t)?;
+    assert!(rep.converged && rep.unconverged_solves == 0, "{rep:?}");
+    let quad = dom.rows().quadrature().clone();
+    let inten: Vec<Vec<f64>> = (0..quad.len())
+        .map(|l| Ok(g.download(&dom.rows().intensity(l).f)?.into_iter().map(w64).collect()))
+        .collect::<Result<_>>()?;
+    let ib: Vec<Vec<f64>> = (0..quad.len())
+        .map(|l| Ok(g.download(dom.rows().boundary_intensity(l))?.into_iter().map(w64).collect()))
+        .collect::<Result<_>>()?;
+    let gd = g.download(dom.g())?;
+    let qd = g.download(dom.q())?;
+    let wfd = g.download(dom.wall_flux())?;
+    for c in 0..hm.n_cells {
+        let (mut gh, mut qh) = (0.0f64, [0.0f64; 3]);
+        for (l, d) in quad.dirs().iter().enumerate() {
+            let wi = quad.weights()[l] * inten[l][c];
+            gh += wi;
+            for a in 0..3 {
+                qh[a] += wi * d[a];
+            }
+        }
+        let r = (w64(gd[c]) - gh).abs();
+        assert!(r <= TOL * gh, "cell {c}: G {} against {gh:e}", w64(gd[c]));
+        for (a, qv) in [qd[c].x, qd[c].y, qd[c].z].into_iter().enumerate() {
+            let r = (w64(qv) - qh[a]).abs();
+            assert!(r <= TOL * gh, "cell {c}: q[{a}] {} against {:e}", w64(qv), qh[a]);
+        }
+    }
+    for bf in 0..hm.n_boundary_faces {
+        let s = hm.b_sf[bf];
+        let (sx, sy, sz) = (w64(s.x), w64(s.y), w64(s.z));
+        let mag = w64(hm.b_mag_sf[bf]);
+        let cell = hm.b_face_cells[bf] as usize;
+        let (mut fh, mut scale) = (0.0f64, 0.0f64);
+        for (l, d) in quad.dirs().iter().enumerate() {
+            let dot = d[0] * sx + d[1] * sy + d[2] * sz;
+            let on = dot / mag;
+            let w = quad.weights()[l];
+            if dot > 0.0 {
+                fh += w * on * inten[l][cell];
+            } else if dot < 0.0 {
+                fh += w * on * ib[l][bf];
+            }
+            scale += w * on.abs() * (inten[l][cell] + ib[l][bf]);
+        }
+        let r = (w64(wfd[bf]) - fh).abs();
+        assert!(r <= TOL * scale, "face {bf}: q_w.n {} against {fh:e} (scale {scale:e})", w64(wfd[bf]));
+    }
+    Ok(())
+}
+
+/// `dom_energy_balance` (§136.7, class R): (136.11) - the boundary faces'
+/// net flux against the medium's net emission - at 1e-10 of the emission.
+#[test]
+fn dom_energy_balance() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let (hm, m, t, mut dom) = mesh_b_case(&g, dom_controls())?;
+    let rep = dom.solve(&g, &m, &t)?;
+    assert!(rep.converged && rep.unconverged_solves == 0, "{rep:?}");
+    let gd = g.download(dom.g())?;
+    let wfd = g.download(dom.wall_flux())?;
+    let tc = g.download(&t.f)?;
+    let kappa = 2.0f64;
+    let sigma = SIGMA_SB as f64;
+    let wall: f64 = (0..hm.n_boundary_faces).map(|b| w64(wfd[b]) * w64(hm.b_mag_sf[b])).sum();
+    let (mut net, mut emit) = (0.0f64, 0.0f64);
+    for c in 0..hm.n_cells {
+        let v = w64(hm.v[c]);
+        let e = 4.0 * sigma * w64(tc[c]).powi(4);
+        net += kappa * v * (e - w64(gd[c]));
+        emit += kappa * v * e;
+    }
+    let r = (wall - net).abs() / emit;
+    println!("  dom_energy_balance: wall {wall:.12e}, medium {net:.12e}, r = {r:e}, {} sweeps", rep.sweeps);
+    assert!(r <= TOL_R10, "(136.11): wall {wall:e} against medium {net:e}, r = {r:e}");
+    Ok(())
+}
+
+/// `dom_sweep_cap_is_reported` (§136.7, class D): one sweep allowed is Ok,
+/// unconverged, one sweep, `change` finite and above `tol`; and every
+/// refusal of `DomSolve::new` by name.
+#[test]
+fn dom_sweep_cap_is_reported() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let ctrl = DomControls { max_sweeps: 1, ..dom_controls() };
+    let (_hm, m, t, mut dom) = mesh_b_case(&g, ctrl)?;
+    let rep = dom.solve(&g, &m, &t)?;
+    assert!(!rep.converged, "{rep:?}");
+    assert_eq!(rep.sweeps, 1, "{rep:?}");
+    assert!(rep.change.is_finite() && rep.change > ctrl.tol, "{rep:?}");
+
+    let with = |f: &dyn Fn(&mut DomControls)| {
+        let mut c = dom_controls();
+        f(&mut c);
+        mesh_b_case(&g, c).map(|_| ())
+    };
+    refused("PCG", with(&|c| c.linear.solver = LinearSolverKind::PCG));
+    refused("DIC", with(&|c| c.linear.precon = Preconditioner::Dic));
+    refused("GAMG", with(&|c| c.linear.solver = LinearSolverKind::Gamg));
+    refused("GAMG", with(&|c| c.linear.precon = Preconditioner::Gamg));
+    refused("tol", with(&|c| c.tol = 0.0));
+    refused("tol", with(&|c| c.tol = f64::NAN));
+    refused("max_sweeps", with(&|c| c.max_sweeps = 0));
+    Ok(())
+}

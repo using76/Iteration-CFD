@@ -30,6 +30,15 @@
 //! both capture into a CUDA graph (SPEC-LIT §81); the gate is
 //! [`tests::dom_replays_under_capture`].
 //!
+//! [`DomSolve`] (CHR-20, SPEC-LIT §136.7) solves the rows: one sweep updates
+//! the boundary intensities, assembles and solves every direction with the
+//! crate's own Krylov solver (PBiCGStab; PCG and DIC are refused, the rows
+//! being asymmetric), and sums (136.4)'s `G`, `q` and wall flux in `ofacc`
+//! (§118.1); [`DomSolve::solve`] repeats the sweep until `G` stops changing
+//! by `tol` or the sweep cap is met, which is reported, never accepted
+//! silently. [`DomSolve::sweep`] is launches only under `fixed_iters`
+//! controls, so it captures too (the same gate).
+//!
 //! Provenance: ORIGINAL - the row, the boundary table and the refusals are
 //! this project's own, built on the FDS Technical Reference Guide's
 //! radiation chapter (McGrattan et al., NIST SP 1018, US Government work)
@@ -41,9 +50,13 @@ use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuSurfaceScalarField};
 use crate::fv::{self, DivScheme, FvKernels};
 use crate::ldu::GpuLduMatrix;
+use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
 use crate::radiation::{RadiationModel, SIGMA_SB};
-use crate::{Label, Scalar};
+use crate::solver::{
+    self, LinearSolverKind, Preconditioner, SolverControls, SolverKernels, SolverWorkspace,
+};
+use crate::{Acc, Label, Scalar, Vec3};
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use super::dom_quad::{symmetry_axis, Quadrature};
@@ -750,8 +763,8 @@ impl DomRows {
     }
 
     /// Overwrite direction `l`'s cell intensities. Setup only - a host
-    /// write, never called inside a capture or the time loop (a real sweep
-    /// writes `I^l` on the device, which is CHR-20's business).
+    /// write, never called inside a capture or the time loop ([`DomSolve`]'s
+    /// sweep writes `I^l` on the device, SPEC-LIT §136.7).
     pub fn set_intensity(&mut self, gpu: &Gpu, l: usize, cells: &[Scalar]) -> Result<()> {
         gpu.write(&mut self.intensities[l].f, cells)
     }
@@ -760,6 +773,370 @@ impl DomRows {
     /// [`DomRows::update_boundaries`].
     pub fn boundary_intensity(&self, l: usize) -> &DevBuf<Scalar> {
         &self.boundary[l]
+    }
+}
+
+// ==========================================================================
+//  The solve (CHR-20)
+// ==========================================================================
+
+/// SPEC-LIT §136.7's default sweep tolerance on `change`: 1e-8 in f64, its
+/// D-F32-1 `tol32` of 1e-5 under `single` - an f32 `G` cannot resolve a
+/// change of 1e-8.
+pub const DEFAULT_SWEEP_TOL: f64 = if cfg!(feature = "single") { 1e-5 } else { 1e-8 };
+
+/// SPEC-LIT §136.7's default sweep cap (§136.2's `maxScatterIterations`).
+pub const DEFAULT_MAX_SWEEPS: usize = 200;
+
+/// The controls of one [`DomSolve`]: the per-direction linear solve, and the
+/// sweep loop's tolerance on `change` and its cap (SPEC-LIT §136.7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DomControls {
+    pub linear: SolverControls,
+    pub tol: f64,
+    pub max_sweeps: usize,
+}
+
+impl Default for DomControls {
+    fn default() -> Self {
+        Self {
+            linear: SolverControls::default(),
+            tol: DEFAULT_SWEEP_TOL,
+            max_sweeps: DEFAULT_MAX_SWEEPS,
+        }
+    }
+}
+
+/// What [`DomSolve::solve`] did (SPEC-LIT §136.7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DomReport {
+    /// Sweeps run, at least 1.
+    pub sweeps: usize,
+    /// The last sweep's `max_P |G_P - G_P^prev| / max_P |G_P|`.
+    pub change: f64,
+    /// `change < tol`.
+    pub converged: bool,
+    /// The direction solves of the LAST sweep whose
+    /// [`solver::SolverPerformance::converged`] is false.
+    pub unconverged_solves: usize,
+}
+
+/// The solve's four sum kernels of `cuda/radiation.cu` (§136.7 step 3).
+struct DomSolveKernels {
+    accum_cells: CudaFunction,
+    accum_wall: CudaFunction,
+    round_cells: CudaFunction,
+    round_faces: CudaFunction,
+}
+
+impl DomSolveKernels {
+    fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::RADIATION)?;
+        Ok(Self {
+            accum_cells: k.func("domAccumCells")?,
+            accum_wall: k.func("domAccumWall")?,
+            round_cells: k.func("domRoundCells")?,
+            round_faces: k.func("domRoundFaces")?,
+        })
+    }
+}
+
+/// The fvDOM solve of a non-scattering grey medium (SPEC-LIT §136.7): the
+/// rows of [`DomRows`], one matrix reused by every direction, the linear
+/// solver's workspace, and (136.4)'s outputs `G`, `q` and wall flux with
+/// their `ofacc` accumulators - every buffer allocated in [`DomSolve::new`],
+/// so a sweep is launches only.
+pub struct DomSolve {
+    rows: DomRows,
+    a: GpuLduMatrix,
+    ws: SolverWorkspace,
+    lduk: LduKernels,
+    solk: SolverKernels,
+    k: DomSolveKernels,
+    ctrl: DomControls,
+
+    /// `[n_cells]` `G_P` of (136.4), rounded once per sweep.
+    g: DevBuf<Scalar>,
+    /// `[n_cells]` `q_P` of (136.4).
+    q: DevBuf<Vec3>,
+    /// `[n_bf]` `q_w . n` of (136.4); 0 on empty faces.
+    wall_flux: DevBuf<Scalar>,
+    /// The `ofacc` accumulators: `[n_cells]`, `[3 n_cells]` (x, y, z per
+    /// cell) and `[n_bf]` (§118.1).
+    g_acc: DevBuf<Acc>,
+    q_acc: DevBuf<Acc>,
+    wf_acc: DevBuf<Acc>,
+}
+
+impl DomSolve {
+    /// Build the rows ([`DomRows::new`], with all its refusals) and the
+    /// solve around them. The linear controls are refused by name when they
+    /// name `PCG` or the `DIC` preconditioner - the step-scheme rows are
+    /// asymmetric (SPEC-LIT §136.2) - or `GAMG` as solver or preconditioner
+    /// (named and not built for these rows, §136.7); so are a `tol` that is
+    /// not finite and positive and a zero sweep cap.
+    pub fn new(
+        gpu: &Gpu,
+        hm: &HostMesh,
+        m: &GpuMesh,
+        medium: &DomMedium,
+        quad: &Quadrature,
+        patches: &[DomPatch],
+        ctrl: DomControls,
+    ) -> Result<Self> {
+        match ctrl.linear.solver {
+            LinearSolverKind::PCG => {
+                return Err(Error::Config(
+                    "DomSolve: solver PCG is refused - the step-scheme rows are \
+                     asymmetric (upwind), and conjugate gradients need a \
+                     symmetric matrix (SPEC-LIT §136.2); use PBiCGStab"
+                        .into(),
+                ));
+            }
+            LinearSolverKind::Gamg => {
+                return Err(Error::Config(
+                    "DomSolve: solver GAMG is named and not built for the fvDOM \
+                     rows (SPEC-LIT §136.7); use PBiCGStab"
+                        .into(),
+                ));
+            }
+            LinearSolverKind::PBiCGStab => {}
+        }
+        match ctrl.linear.precon {
+            Preconditioner::Dic => {
+                return Err(Error::Config(
+                    "DomSolve: preconditioner DIC is refused - the step-scheme \
+                     rows are asymmetric (upwind) and have no Cholesky factor \
+                     (SPEC-LIT §136.2); use diagonal or DILU"
+                        .into(),
+                ));
+            }
+            Preconditioner::Gamg => {
+                return Err(Error::Config(
+                    "DomSolve: preconditioner GAMG is named and not built for \
+                     the fvDOM rows (SPEC-LIT §136.7)"
+                        .into(),
+                ));
+            }
+            Preconditioner::None | Preconditioner::Diagonal | Preconditioner::Dilu => {}
+        }
+        if !ctrl.tol.is_finite() || ctrl.tol <= 0.0 {
+            return Err(Error::Config(format!(
+                "DomSolve: sweep tol {} is refused - the tolerance on change \
+                 must be finite and positive (SPEC-LIT §136.7)",
+                ctrl.tol
+            )));
+        }
+        if ctrl.max_sweeps == 0 {
+            return Err(Error::Config(
+                "DomSolve: max_sweeps 0 is refused - the loop runs at least \
+                 one sweep (SPEC-LIT §136.7)"
+                    .into(),
+            ));
+        }
+        let rows = DomRows::new(gpu, hm, m, medium, quad, patches)?;
+        let n = hm.n_cells;
+        let n_bf = hm.n_boundary_faces;
+        Ok(Self {
+            rows,
+            a: GpuLduMatrix::new(gpu, m)?,
+            ws: SolverWorkspace::for_mesh(gpu, m)?,
+            lduk: LduKernels::new(gpu)?,
+            solk: SolverKernels::new(gpu)?,
+            k: DomSolveKernels::new(gpu)?,
+            ctrl,
+            g: gpu.zeros(n)?,
+            q: gpu.zeros(n)?,
+            wall_flux: gpu.zeros(n_bf)?,
+            g_acc: gpu.zeros(n)?,
+            q_acc: gpu.zeros(3 * n)?,
+            wf_acc: gpu.zeros(n_bf)?,
+        })
+    }
+
+    /// One sweep, SPEC-LIT §136.7 steps 1-4: the boundary intensities from
+    /// the current `I^l`; every direction assembled, folded and solved into
+    /// `I^l` (warm-started from it); then (136.4)'s `G`, `q` and wall flux
+    /// summed in `ofacc` from the boundary values the rows were assembled
+    /// with, and rounded once. Returns the number of direction solves that
+    /// did not report convergence. Launches only - no host read or write -
+    /// when the linear controls are `fixed_iters`, so it captures (§81).
+    pub fn sweep(&mut self, gpu: &Gpu, m: &GpuMesh, t: &GpuScalarField) -> Result<usize> {
+        let (n, n_if, n_bf) = (self.rows.n_cells, self.rows.n_internal_faces, self.rows.n_bf);
+        DomRows::check_mesh(m, n, n_if, n_bf, "DomSolve::sweep")?;
+        // Step 1.
+        self.rows.update_boundaries(gpu, m, t)?;
+        // Step 2.
+        let mut unconverged = 0usize;
+        for l in 0..self.rows.n_dirs {
+            self.rows.assemble(gpu, m, t, l, &mut self.a)?;
+            ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
+            let perf = solver::solve(
+                gpu,
+                &self.solk,
+                &mut self.rows.intensities[l].f,
+                &self.a,
+                m,
+                &mut self.ws,
+                &self.ctrl.linear,
+            )?;
+            if !perf.converged {
+                unconverged += 1;
+            }
+        }
+        // Steps 3 and 4: (136.4) over the directions, in ofacc.
+        gpu.fill_zero(&mut self.g_acc)?;
+        gpu.fill_zero(&mut self.q_acc)?;
+        gpu.fill_zero(&mut self.wf_acc)?;
+        let nl = n as Label;
+        let nbl = n_bf as Label;
+        for l in 0..self.rows.n_dirs {
+            let [ox, oy, oz] = self.rows.omega_host[l];
+            let w = self.rows.weight_host[l];
+            if n > 0 {
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&self.k.accum_cells)
+                        .arg(&mut self.g_acc)
+                        .arg(&mut self.q_acc)
+                        .arg(&self.rows.intensities[l].f)
+                        .arg(&ox)
+                        .arg(&oy)
+                        .arg(&oz)
+                        .arg(&w)
+                        .arg(&nl)
+                        .launch(cfg_for(n))?;
+                }
+            }
+            if n_bf > 0 {
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&self.k.accum_wall)
+                        .arg(&mut self.wf_acc)
+                        .arg(&self.rows.intensities[l].f)
+                        .arg(&self.rows.boundary[l])
+                        .arg(&m.b_sf)
+                        .arg(&m.b_mag_sf)
+                        .arg(&m.b_face_cells)
+                        .arg(&self.rows.cond_kind)
+                        .arg(&ox)
+                        .arg(&oy)
+                        .arg(&oz)
+                        .arg(&w)
+                        .arg(&nbl)
+                        .launch(cfg_for(n_bf))?;
+                }
+            }
+        }
+        if n > 0 {
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&self.k.round_cells)
+                    .arg(&mut self.g)
+                    .arg(&mut self.q)
+                    .arg(&self.g_acc)
+                    .arg(&self.q_acc)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            }
+        }
+        if n_bf > 0 {
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&self.k.round_faces)
+                    .arg(&mut self.wall_flux)
+                    .arg(&self.wf_acc)
+                    .arg(&nbl)
+                    .launch(cfg_for(n_bf))?;
+            }
+        }
+        Ok(unconverged)
+    }
+
+    /// Sweep until `change = max_P |G_P - G_P^prev| / max_P |G_P| < tol`
+    /// (0 when both maxima are 0; the first sweep starts from `G = 0`), or
+    /// until `max_sweeps` (SPEC-LIT §136.7). Reaching the cap prints one
+    /// line and returns `converged: false` - never an `Err`, never silent;
+    /// stopping on `change` while some direction solve of the last sweep
+    /// did not report convergence prints one line too.
+    /// It reads `G` back after every sweep, so it is refused inside a
+    /// capture; capture [`DomSolve::sweep`] instead.
+    pub fn solve(&mut self, gpu: &Gpu, m: &GpuMesh, t: &GpuScalarField) -> Result<DomReport> {
+        if gpu.is_capturing() {
+            return Err(Error::Config(
+                "DomSolve::solve reads G back after every sweep and is refused \
+                 inside a capture - use DomSolve::sweep, SPEC-LIT §81"
+                    .into(),
+            ));
+        }
+        let (n, n_if, n_bf) = (self.rows.n_cells, self.rows.n_internal_faces, self.rows.n_bf);
+        DomRows::check_mesh(m, n, n_if, n_bf, "DomSolve::solve")?;
+        let mut prev = vec![0.0f64; n];
+        let mut report =
+            DomReport { sweeps: 0, change: f64::INFINITY, converged: false, unconverged_solves: 0 };
+        while report.sweeps < self.ctrl.max_sweeps {
+            report.unconverged_solves = self.sweep(gpu, m, t)?;
+            report.sweeps += 1;
+            let g = gpu.download(&self.g)?;
+            let mut d_max = 0.0f64;
+            let mut g_max = 0.0f64;
+            for (p, gv) in prev.iter_mut().zip(g.iter()) {
+                let v = f64::from(*gv);
+                d_max = d_max.max((v - *p).abs());
+                g_max = g_max.max(v.abs());
+                *p = v;
+            }
+            report.change = if d_max == 0.0 && g_max == 0.0 { 0.0 } else { d_max / g_max };
+            if report.change < self.ctrl.tol {
+                report.converged = true;
+                if report.unconverged_solves > 0 {
+                    eprintln!(
+                        "DomSolve: G stopped changing (change {:e} < tol {:e}) after {} \
+                         sweeps, but {} direction solve(s) of the last sweep did not \
+                         report convergence (SPEC-LIT §136.7)",
+                        report.change, self.ctrl.tol, report.sweeps, report.unconverged_solves
+                    );
+                }
+                return Ok(report);
+            }
+        }
+        eprintln!(
+            "DomSolve: the sweep cap was reached - {} sweeps, change {:e} against tol {:e}, \
+             {} direction solve(s) of the last sweep unconverged (SPEC-LIT §136.7)",
+            report.sweeps, report.change, self.ctrl.tol, report.unconverged_solves
+        );
+        Ok(report)
+    }
+
+    /// `[n_cells]` `G_P` of (136.4), from the last sweep.
+    pub fn g(&self) -> &DevBuf<Scalar> {
+        &self.g
+    }
+
+    /// `[n_cells]` `q_P` of (136.4), from the last sweep.
+    pub fn q(&self) -> &DevBuf<Vec3> {
+        &self.q
+    }
+
+    /// `[n_bf]` `q_w . n` of (136.4), `n = S_b/|S_b|` outward from the
+    /// medium; 0 on empty faces.
+    pub fn wall_flux(&self) -> &DevBuf<Scalar> {
+        &self.wall_flux
+    }
+
+    /// The rows the solve owns.
+    pub fn rows(&self) -> &DomRows {
+        &self.rows
+    }
+
+    /// The rows, mutably - setup only ([`DomRows::set_intensity`]).
+    pub fn rows_mut(&mut self) -> &mut DomRows {
+        &mut self.rows
+    }
+
+    /// The controls the solve was built with.
+    pub fn controls(&self) -> &DomControls {
+        &self.ctrl
     }
 }
 
@@ -834,12 +1211,14 @@ mod tests {
     }
 
     /// The registry's gate (`src/capture/registry.rs`, row
-    /// `src/radiation/dom.rs`): the boundary update and the assembly of
-    /// EVERY direction of S4 - one matrix per direction, so the compared
-    /// state covers every direction's boundary intensities and every
-    /// direction's assembled diag/upper/lower/source/internal_coeffs/
-    /// boundary_coeffs - capture into a CUDA graph and replay bitwise
-    /// against the per-launch path, on mesh B with non-uniform intensities.
+    /// `src/radiation/dom.rs`), in two captures. First, the boundary update
+    /// and the assembly of EVERY direction of S4 - one matrix per
+    /// direction, so the compared state covers every direction's boundary
+    /// intensities and every direction's assembled diag/upper/lower/source/
+    /// internal_coeffs/boundary_coeffs - capture into a CUDA graph and
+    /// replay bitwise against the per-launch path, on mesh B with
+    /// non-uniform intensities. Second, one whole [`DomSolve::sweep`] with
+    /// fixed-iteration linear controls (SPEC-LIT §136.7).
     #[test]
     fn dom_replays_under_capture() {
         let Some(gpu) = gpu() else { return };
@@ -928,6 +1307,71 @@ mod tests {
         .expect("SPEC-LIT 81.7: the fvDOM boundary update and row assembly \
                  must capture and replay bitwise");
         println!("  DOM: {report}");
+
+        // CHR-20 (SPEC-LIT §136.7): one whole DomSolve::sweep - boundary
+        // update, every direction's assembly and fixed-iteration PBiCGStab
+        // solve, and the ofacc sums of (136.4) - captures and replays
+        // bitwise. The compared state is every I^l, every I_b^l, G, q and
+        // the wall flux.
+        let report = crate::capture::capture_replays_bitwise(
+            &gpu,
+            "the fvDOM sweep, its solves and the (136.4) sums (SPEC-LIT 136.7)",
+            || {
+                let (hm, m) = mesh_b(&gpu)?;
+                let quad = Quadrature::new(SnOrder::S4)?;
+                let ctrl = DomControls {
+                    linear: SolverControls {
+                        solver: LinearSolverKind::PBiCGStab,
+                        precon: Preconditioner::Diagonal,
+                        fixed_iters: true,
+                        report_residuals: false,
+                        max_iter: 20,
+                        ..SolverControls::default()
+                    },
+                    ..DomControls::default()
+                };
+                let mut dom = DomSolve::new(
+                    &gpu,
+                    &hm,
+                    &m,
+                    &medium(),
+                    &quad,
+                    &patches_b(0.5, WallTemperature::Fixed(1000.0), 1000.0),
+                    ctrl,
+                )?;
+                for l in 0..dom.rows().n_dirs() {
+                    let cells: Vec<Scalar> = (0..hm.n_cells)
+                        .map(|c| (500.0 + 37.0 * l as f64 + 11.0 * c as f64) as Scalar)
+                        .collect();
+                    dom.rows_mut().set_intensity(&gpu, l, &cells)?;
+                }
+                let t = uniform_t(&gpu, &m, 1000.0)?;
+                Ok((dom, m, t))
+            },
+            |(dom, m, t): &mut (DomSolve, GpuMesh, GpuScalarField)| {
+                dom.sweep(&gpu, m, t)?;
+                Ok(())
+            },
+            |(dom, _m, _t): &(DomSolve, GpuMesh, GpuScalarField)| {
+                let mut state: crate::capture::Snapshot = Vec::new();
+                let (mut inten, mut bnd) = (Vec::new(), Vec::new());
+                for l in 0..dom.rows().n_dirs() {
+                    inten.extend(gpu.download(&dom.rows().intensity(l).f)?);
+                    bnd.extend(gpu.download(dom.rows().boundary_intensity(l))?);
+                }
+                state.push(("dom sweep intensities", inten));
+                state.push(("dom sweep boundary intensities", bnd));
+                state.push(("dom sweep G", gpu.download(dom.g())?));
+                let q = gpu.download(dom.q())?;
+                state.push(("dom sweep q x", q.iter().map(|v| v.x).collect()));
+                state.push(("dom sweep q y", q.iter().map(|v| v.y).collect()));
+                state.push(("dom sweep q z", q.iter().map(|v| v.z).collect()));
+                state.push(("dom sweep wall flux", gpu.download(dom.wall_flux())?));
+                Ok(state)
+            },
+        )
+        .expect("SPEC-LIT 81.7: the fvDOM sweep must capture and replay bitwise");
+        println!("  DOM sweep: {report}");
     }
 }
 

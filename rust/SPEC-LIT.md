@@ -45330,7 +45330,7 @@ class.
 | `dom_reflection_closure` | every direction's mirror in each axis plane is in the set, bitwise | bitwise | D |
 | `dom_refuses_s12_up` | `quadrature "S12"` and above | refused (LA-3186: negative weights) | D |
 | `dom_refuses_oblique_symmetry` | a symmetry face normal off-axis by more than 1e-12 | refused | D |
-| `dom_slab_exact` | 3-D slab with symmetry sides, `ω = 0`: `Ψ` against (135.6) at `τ` = 0.1, 1, 10 | S8 within 2 % on the fine mesh | P |
+| `dom_slab_exact` | 3-D slab with symmetry sides, `ω = 0`: `Ψ` against (135.6) at `τ` = 0.1, 1, 10 | S8 within 2 % on the fine mesh (`τ = 0.1` MISSED by S8's own angular error, §136.7; the miss was accepted by the user on 2026-10-14) | P |
 | `dom_error_falls_with_order` | the same, S4 then S8 | error non-increasing | P |
 | `dom_scatter_slab` (the plan's `dom_scatter_heaslet_warming`, renamed: Heaslet & Warming is not this case) | `ω = 0.5`, `τ = 1`, `A_1 = 0`, then `±0.5`: against (136.5) solved in the test | S8 within 2 % | P |
 | `scatter_oracle_reduces_to_e3` | (136.5) with `ω = 0` against (135.6) | 1e-12 relative | A |
@@ -45453,7 +45453,179 @@ part. This is the discrete statement of the choice §136.1 made.
 | `dom_refuses_unnamed_patch`, `dom_refuses_coupled_patch`, `dom_refuses_scattering_until_chr21` | the three refusals above | refused by name | D |
 | `dom_replays_under_capture` | the boundary update and the assembly of every direction, §81 (CHR-20 extends it to the solve) | bitwise | D |
 
-Labels: (136.1)-(136.10).
+### 136.7 The solve, `G` and `q`, and the slab gate (CHR-20)
+
+**ORIGINAL.** The loop is this crate's own. It adds no discretisation: each
+direction is §136.6's row, solved by the crate's own Krylov solver.
+
+**One sweep (DESIGN).** A sweep runs in four steps:
+
+1. `DomRows::update_boundaries` from the current intensities.
+2. Every direction `l` in order: assemble (136.3), fold the boundary pair
+   (`ldu_ops::add_boundary_contributions`), and solve into `I^l` on the
+   device with the linear controls. The rows are asymmetric (upwind), so
+   `PCG` and the `DIC` preconditioner are refused by name. `GAMG` is named
+   and not built for these rows.
+3. Accumulate `G`, `q` and the wall flux (136.4) over the directions in
+   `ofacc` (f64 in both builds, §118.1), and round each once into `Scalar`.
+4. The wall flux reads the boundary intensities the rows were assembled with
+   in step 2, not fresh ones.
+
+Step 4 makes the discrete energy balance hold in every sweep. Multiply
+(136.3) by `w_l` and sum over `l` and over all cells. The internal faces
+cancel. `Σ_l w_l = 4π` turns the emission into `4κσT^4 V`, and the boundary
+faces give (136.4) times `|S_b|`:
+
+```
+Σ_b (q_w·n)_b |S_b| = Σ_P κ V_P (4 σ T_P^4 - G_P)                               (136.11)
+```
+
+The sum runs over every boundary face, symmetry faces included. Their net
+flux is zero only once the mirror lag has converged. (136.11) is exact for
+the rows' solution, so the only defect is the linear solve's residual.
+
+**Convergence (DESIGN).** The loop stops when
+
+`change = max_P |G_P - G_P^prev| / max_P |G_P| < tol`.
+
+`change` is 0 when both maxima are 0, and the first sweep starts from
+`G = 0`. These are §136.2's `scatterTol` and `maxScatterIterations`, and
+CHR-21 adds the in-scattering sum to the same loop.
+
+* `tol` defaults to 1e-8. Under `single` it defaults to 1e-5, the D-F32-1
+  `tol32` of 1e-8, because an f32 `G` cannot resolve a change of 1e-8.
+* The sweep cap defaults to 200.
+* A solve that reaches the cap returns `converged = false` with the sweep
+  count, the last `change`, and the number of direction solves in the last
+  sweep that did not report convergence. It also prints one line. It is
+  never silently accepted.
+* A solve that stops on `change` while some direction solve of the last
+  sweep did not report convergence returns `converged = true` with that
+  count, and prints one line too.
+* `DomSolve::sweep` is launches only when the linear controls are
+  `fixed_iters` (§113.2), so it captures (§81). `DomSolve::solve` reads `G`
+  back after every sweep, so it is refused inside a capture.
+
+**The slab on a 3-D mesh: the step scheme in closed form.** The mesh has
+`x ∈ [0, 1]` with `N` cells and `y, z ∈ [0, 1]` with one cell each.
+`xMin` and `xMax` are black (`ε = 1`) at 0 K, and the four sides are
+symmetry planes. The medium has `κ = τ` and `T = 1000 K`.
+
+At the rows' fixed point, each symmetry face's mirror intensity equals the
+cell's own, because the mirror has the same `Ω_x`. (136.3) then reduces to
+`I_k = (μ I_(k-1) + κ Δx I_b)/(μ + κ Δx)` with `I_0 = 0`, `μ = |Ω_x|` and
+`Δx = 1/N`. Writing `Ω_x < 0` for the directions into `xMin`:
+
+```
+Ψ_N  = (1/π) Σ_{Ω_x<0} w |Ω_x| [ 1 - (1 + τ/(N |Ω_x|))^(-N) ]                    (136.12)
+Ψ_Sn = (1/π) Σ_{Ω_x<0} w |Ω_x| [ 1 - exp(-τ/|Ω_x|) ]        (N → ∞)              (136.13)
+```
+
+`(1 + x/N)^(-N)` decreases in `N` toward `e^(-x)`. So `Ψ_N < Ψ_Sn`, and `Ψ_N`
+increases toward it: on this slab the step scheme approaches the set's own
+angular value from below. Two errors follow:
+
+* (136.13) against (135.6) is the quadrature's angular error.
+* (136.12) against (136.13) is the step scheme's spatial error.
+
+Evaluate (136.12) as `-expm1(-N ln1p(τ/(N|Ω_x|)))`. The plain power loses 13
+digits at `τ = 0.1`.
+
+**The test's `E_3`.** No crate in the tree evaluates `E_n`, so the test
+computes (135.6) itself in f64. `E_1(x)` is the series
+
+```
+E_1(x) = -γ - ln x - Σ_{k>=1} (-1)^k x^k / (k k!)          (x <= 1)
+```
+
+and, for `x > 1`, the continued fraction
+`E_1(x) = e^(-x) / (x + 1/(1 + 1/(x + 2/(1 + 2/(x + ...)))))`, evaluated
+backward from 200 levels. Then `E_(n+1)(x) = (e^(-x) - x E_n(x))/n` twice
+gives `E_3`. The test checks `1 - 2E_3` against the table of §135 to 1e-11
+before it uses it. **Abramowitz, M. & Stegun, I. A. (1964), Handbook of
+Mathematical Functions, NBS AMS 55, 5.1.11, 5.1.14 and 5.1.22**, open scan
+<https://personal.math.ubc.ca/~cbm/aands/>.
+
+The supervisor's probe gives these values in f64, as relative errors against
+(135.6). The step recurrence and (136.12) agree to 1e-13.
+
+| `τ` | (135.6) | S4, N = 256 | S8, N = 32 | S8, N = 256 | S4 limit (136.13) | S8 limit (136.13) |
+|---|---|---|---|---|---|---|
+| 0.1 | 0.167417084183 | +5.2408e-2 | +1.8393e-2 | +2.1713e-2 | +5.2860e-2 | +2.2191e-2 |
+| 1 | 0.780616065604 | +4.9007e-3 | -1.1231e-2 | -3.7409e-3 | +5.8953e-3 | -2.6598e-3 |
+| 10 | 0.999992902475 | -5.5037e-6 | -2.9230e-5 | -3.6032e-6 | -2.9127e-6 | -1.5922e-6 |
+
+**`dom_slab_exact` is MISSED at `τ = 0.1`.** S8's own angular limit (136.13)
+lies +2.219 % above (135.6), so no mesh brings S8 within 2 % at `τ = 0.1`.
+
+* The fine mesh, `N = 256`, gives +2.171 %.
+* The coarse `N = 32` gives +1.839 %, which is inside 2 %. That is the
+  spatial error cancelling part of the angular one, and it is not a pass.
+* The tolerance is not widened, and the mesh is not coarsened to pass
+  (docs/17 §5.3).
+
+The test asserts the miss and its cause: `e_32 < e_256 <= e_limit` and
+`e_limit > 2 %`. It prints the row as MISSED. The miss was accepted by the user on 2026-10-14,
+with the 2 % tolerance and the `N = 256` mesh kept as they are.
+At `τ = 1` and `τ = 10` the row holds at 2 % with a wide margin.
+
+**Under `single` the `N = 256` slab rows are MISSED by the linear solve
+(measured by CHR-20).** The rows of one direction on the 256-cell chain are
+upwind, so with Jacobi scaling the matrix is the identity minus a nilpotent
+part, and BiCGStab needs about `N` to `1.5 N` iterations on it. The crate's
+float PBiCGStab, inside the §118.4 refinement, does not survive that in f32:
+
+* With `diagonal` or `none`, it converges on some directions at `N = 64`,
+  fails on every sampled direction from `N = 128`, and at `N = 256` it
+  spends all 5000 iterations and ends in NaN on every direction.
+* With `DILU` (multi-colour, §21) it diverges after about `N` iterations.
+
+`DomSolve` reports this: every direction solve of the sweep is counted as
+unconverged, and `solve` prints the count. Nothing is accepted silently.
+Under `single`, `dom_slab_exact` and `dom_error_falls_with_order` therefore
+assert this miss (`unconverged_solves > 0` after one sweep) and print it as
+MISSED. The f64 build holds the gate, and the `N = 32` rows, mesh B's rows
+and the capture row hold in both builds. The cure is a solver numerics
+change, which is the user's decision (docs/17 §11). One candidate is a
+sweep in upwind order, which solves the step scheme's row exactly in one
+pass. Another is a different f32 Krylov method. Neither is built.
+
+**Why `N = 256`.** `dom_error_falls_with_order` compares two angular errors,
+so the step scheme's own error must sit below their difference. At `τ = 1`,
+S4's spatial and angular errors cancel on coarse meshes. At `N = 128`,
+`|e_S4| = 3.91e-3` against `|e_S8| = 4.82e-3`, and the order turns only between
+`N = 160` and `N = 192`. At `N = 256`, S8 leads by 1.16e-3. The margins of
+`|e_S4| - |e_S8|` at `N = 256` are:
+
+* 3.07e-2 at `τ = 0.1`;
+* 1.16e-3 at `τ = 1`;
+* 1.90e-6 at `τ = 10`, about 30 f32 ulps of `Ψ ≈ 1`.
+
+`N = 256 = 2^8` makes `Δx` a binary fraction, so the geometry is exact under
+`single`. The 1 × 1 cross-section keeps the side faces small against the
+`x` faces (`Δx` against 1). The lagged mirror coupling still takes tens of
+sweeps at the f64 test's sweep `tol` of 1e-12 (measured by CHR-20's tests):
+S8 at `N = 256` takes 55, 46 and 21 sweeps at `τ` = 0.1, 1 and 10, and
+mesh B's case takes 56.
+
+**S6 is not ordered.** At `τ = 1`, `N = 256`, S6 reads -5.93e-3, worse than
+both S4 and S8. At `τ = 10` it is the best of the three (-1.15e-6). The row
+compares S4 with S8, as §136.5 states. S6's place is measured here and is not
+gated.
+
+**CHR-20's rows** (same classes as §136.5; R rows use `tol32` under `single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `dom_slab_exact` | S8, `N = 256`, both walls, against (135.6) at `τ` = 0.1, 1, 10 | 2 %; `τ = 0.1` MISSED, asserted as above, accepted by the user on 2026-10-14; under `single` the f32 solve MISSED, asserted as above | P |
+| `dom_error_falls_with_order` | S4 then S8, `N = 256`, the same three `τ` | `\|e_S8\| <= \|e_S4\|`; under `single` the f32 solve MISSED, asserted as above | P |
+| `dom_slab_is_the_step_recurrence` | the device `Ψ` against (136.12), S4 and S8, `N = 32`, three `τ` (also asserted on every slab solve) | 1e-10 relative | R |
+| `dom_sums_match_formula` | the device `G`, `q` and (136.4) wall flux against f64 sums of the downloaded `I^l` and `I_b^l`, on mesh B | 1e-12 against each quantity's scale | R |
+| `dom_energy_balance` | (136.11) on mesh B, non-uniform `T`, grey wall, open boundary | 1e-10 relative to `Σ κ V 4σT^4` | R |
+| `dom_sweep_cap_is_reported` | `max_sweeps = 1` on mesh B | `converged = false`, one sweep, `change` reported | D |
+| `dom_replays_under_capture` | extended to one `DomSolve::sweep` | bitwise | D |
+
+Labels: (136.1)-(136.13).
 
 ---
 
