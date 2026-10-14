@@ -12,7 +12,9 @@
 //! the sources of (155.3), the ignition bracket of (155.4), the
 //! flame-Courant number (155.9), the Reynolds mean (155.2) and the bounds
 //! counter; their host twins are in [`crate::dust::progress`],
-//! [`crate::dust::ignition`] and [`crate::dust::courant`]. A launcher only
+//! [`crate::dust::ignition`] and [`crate::dust::courant`]. DST-12 adds the
+//! reacting-parcel step of `cuda/dustparticle.cu` (SPEC-LIT §159), whose
+//! host twin is [`crate::dust::particle::step`]. A launcher only
 //! launches - no sync, no download, no allocation - so a captured region
 //! can hold it; a counter is a one-element `u64` buffer the caller zeroes,
 //! and the kernels add to it.
@@ -22,14 +24,16 @@
 //!     evaluate; §154.9 - the gates
 //!   SPEC-LIT §155.1-§155.6 - (155.2)-(155.4), (155.9) and the bounds
 //!     counter; §154.8 - the implicit split (154.11)
+//!   SPEC-LIT §159.1-§159.4, §159.7 - the reacting parcel (DST-12)
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::dust::fsc::FscConstants;
+use crate::dust::particle::ParticleProps;
 use crate::error::{Error, Result};
-use crate::{Label, Scalar, Vec3};
+use crate::{Acc, Label, Scalar, Vec3};
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 /// The two kernels of `cuda/dust.cu`, loaded from the `DUST` module.
@@ -398,6 +402,161 @@ pub fn count_out_of_bounds(
     Ok(())
 }
 
+
+/// The reacting-parcel kernel of `cuda/dustparticle.cu` (SPEC-LIT §159,
+/// docs/17 DST-12), loaded from the `DUSTPARTICLE` module. Its host twin is
+/// [`crate::dust::particle::step`].
+pub struct ParticleKernels {
+    step: CudaFunction,
+}
+
+impl ParticleKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::DUSTPARTICLE)?;
+        Ok(Self { step: k.func("dustParticleStep")? })
+    }
+}
+
+/// One particle of each parcel: the four masses (kg), T_p (K) and d_p (m).
+/// DST-12 writes m_w, m_v and T_p; char, ash and the diameter are read.
+pub struct ParticleFields<'a> {
+    pub m_w: &'a mut DevBuf<Scalar>,
+    pub m_v: &'a mut DevBuf<Scalar>,
+    pub m_c: &'a DevBuf<Scalar>,
+    pub m_a: &'a DevBuf<Scalar>,
+    pub t: &'a mut DevBuf<Scalar>,
+    pub d: &'a DevBuf<Scalar>,
+}
+
+/// The six per-parcel accumulators of §159.7, in `Acc` in both builds; the
+/// kernel adds one particle's step to each and the caller zeroes them.
+pub struct ExchangeFields<'a> {
+    pub m_w: &'a mut DevBuf<Acc>,
+    pub m_v: &'a mut DevBuf<Acc>,
+    pub mt_w: &'a mut DevBuf<Acc>,
+    pub mt_v: &'a mut DevBuf<Acc>,
+    pub q_conv: &'a mut DevBuf<Acc>,
+    pub q_rad: &'a mut DevBuf<Acc>,
+}
+
+/// The gas the parcels see: each parcel's cell and |u_p - u|, and the cell
+/// fields T, Y_H2O, rho and the incident radiation G (`n_cells` each).
+pub struct ParticleGasDev<'a> {
+    pub cell: &'a DevBuf<Label>,
+    pub u_rel: &'a DevBuf<Scalar>,
+    pub t: &'a DevBuf<Scalar>,
+    pub y_w: &'a DevBuf<Scalar>,
+    pub rho: &'a DevBuf<Scalar>,
+    pub g: &'a DevBuf<Scalar>,
+    pub n_cells: usize,
+}
+
+/// `dustParticleStep` over `n` parcels for one step of `dt` seconds in the
+/// frozen gas (§159.7). Refused: a short buffer, `dt` not finite and > 0,
+/// and parcels with no cell to sit in. Every `cell[i] < n_cells` is the
+/// caller's contract (the launcher reads nothing back). A parcel with no
+/// mass or no diameter is left as it is.
+#[allow(clippy::too_many_arguments)]
+pub fn particle_step(
+    gpu: &Gpu,
+    k: &ParticleKernels,
+    p: &ParticleProps,
+    f: ParticleFields<'_>,
+    ex: ExchangeFields<'_>,
+    gas: ParticleGasDev<'_>,
+    dt: f64,
+    n: usize,
+) -> Result<()> {
+    if !(dt.is_finite() && dt > 0.0) {
+        return Err(Error::Refused(format!(
+            "dust::device::particle_step: dt = {dt} must be finite and > 0"
+        )));
+    }
+    for (name, len) in [
+        ("m_w", f.m_w.len()),
+        ("m_v", f.m_v.len()),
+        ("m_c", f.m_c.len()),
+        ("m_a", f.m_a.len()),
+        ("t", f.t.len()),
+        ("d", f.d.len()),
+        ("acc m_w", ex.m_w.len()),
+        ("acc m_v", ex.m_v.len()),
+        ("acc mt_w", ex.mt_w.len()),
+        ("acc mt_v", ex.mt_v.len()),
+        ("acc q_conv", ex.q_conv.len()),
+        ("acc q_rad", ex.q_rad.len()),
+        ("cell", gas.cell.len()),
+        ("u_rel", gas.u_rel.len()),
+    ] {
+        check_len("particle_step", name, len, n)?;
+    }
+    for (name, len) in [
+        ("gas t", gas.t.len()),
+        ("gas y_w", gas.y_w.len()),
+        ("gas rho", gas.rho.len()),
+        ("gas g", gas.g.len()),
+    ] {
+        check_len("particle_step", name, len, gas.n_cells)?;
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    if gas.n_cells == 0 {
+        return Err(Error::Refused(format!(
+            "dust::device::particle_step: {n} parcels and no gas cell to sit in"
+        )));
+    }
+    let nl = n as Label;
+    let dr = &p.drying;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.step)
+            .arg(&mut *f.m_w)
+            .arg(&mut *f.m_v)
+            .arg(f.m_c)
+            .arg(f.m_a)
+            .arg(&mut *f.t)
+            .arg(f.d)
+            .arg(&mut *ex.m_w)
+            .arg(&mut *ex.m_v)
+            .arg(&mut *ex.mt_w)
+            .arg(&mut *ex.mt_v)
+            .arg(&mut *ex.q_conv)
+            .arg(&mut *ex.q_rad)
+            .arg(gas.cell)
+            .arg(gas.u_rel)
+            .arg(gas.t)
+            .arg(gas.y_w)
+            .arg(gas.rho)
+            .arg(gas.g)
+            .arg(&nl)
+            .arg(&dt)
+            .arg(&p.cp)
+            .arg(&p.emissivity)
+            .arg(&p.devol_a)
+            .arg(&p.theta)
+            .arg(&p.devol_dh)
+            .arg(&p.cp_volatile)
+            .arg(&p.mu)
+            .arg(&p.k_g)
+            .arg(&p.cbrt_pr)
+            .arg(&dr.w_vap)
+            .arg(&dr.t_boil)
+            .arg(&dr.p_boil)
+            .arg(&dr.h_v_boil)
+            .arg(&dr.t_crit)
+            .arg(&dr.d_vap)
+            .arg(&dr.t_ref_d)
+            .arg(&dr.d_exp)
+            .arg(&dr.cp_vap)
+            .arg(&dr.w_carrier)
+            .arg(&dr.p_amb)
+            .arg(&dr.t_boil_p)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +720,91 @@ mod tests {
         )
         .expect("SPEC-LIT 155: the dust progress kernels must capture and replay bitwise");
         println!("  dust progress kernels: {report}");
+    }
+
+    /// DST-12's reacting-parcel step (SPEC-LIT §159) under §81.6's protocol:
+    /// each step moves T_p, the masses and the accumulators, so a replay
+    /// that skipped the kernel cannot reproduce the state.
+    #[test]
+    fn dust_particle_step_replays_under_capture() {
+        use crate::dust::particle::{Drying, ParticleInputs};
+        struct S {
+            k: ParticleKernels,
+            st: Vec<DevBuf<Scalar>>,
+            acc: Vec<DevBuf<Acc>>,
+            cell: DevBuf<Label>,
+            gas: Vec<DevBuf<Scalar>>,
+        }
+        let Some(g) = gpu() else { return };
+        let n = 64;
+        let p = ParticleProps::new(&ParticleInputs {
+            cp: 1500.0,
+            emissivity: 0.9,
+            devol_a: 1000.0,
+            devol_e_a: 3.0e4,
+            devol_dh: 1.0e5,
+            cp_volatile: 1100.0,
+            drying: Drying::water(101_325.0).expect("water"),
+            mu: 1.8e-5,
+            k_g: 0.06,
+            cp_g: 1100.0,
+        })
+        .expect("props");
+        let m = 1500.0 * std::f64::consts::PI * 1.25e-13 / 6.0;
+        let col = |f: &dyn Fn(usize) -> f64| (0..n).map(|i| f(i) as Scalar).collect::<Vec<Scalar>>();
+        let init = [
+            col(&|i| if i % 2 == 0 { 0.1 * m } else { 0.0 }),
+            col(&|_| 0.5 * m),
+            col(&|_| 0.3 * m),
+            col(&|_| 0.1 * m),
+            col(&|i| 300.0 + 10.0 * i as f64),
+            col(&|_| 50.0e-6),
+            col(&|i| 0.05 * i as f64),
+            col(&|i| 900.0 + 15.0 * i as f64),
+            col(&|_| 0.005),
+            col(&|_| 0.3),
+            col(&|_| 4.0 * 5.670_374_419e-8 * 1.6e12),
+        ];
+        let cells: Vec<Label> = (0..n as Label).collect();
+        let report = capture_replays_bitwise(
+            &g,
+            "the dust reacting-parcel step (SPEC-LIT 159)",
+            || {
+                Ok(S {
+                    k: ParticleKernels::new(&g)?,
+                    st: init[..7].iter().map(|v| g.upload(v)).collect::<Result<Vec<_>>>()?,
+                    acc: (0..6).map(|_| g.zeros::<Acc>(n)).collect::<Result<Vec<_>>>()?,
+                    cell: g.upload(&cells)?,
+                    gas: init[7..].iter().map(|v| g.upload(v)).collect::<Result<Vec<_>>>()?,
+                })
+            },
+            |s| {
+                let [w, v, c, a, t, d, u] = &mut s.st[..] else { unreachable!() };
+                let [a0, a1, a2, a3, a4, a5] = &mut s.acc[..] else { unreachable!() };
+                let [tg, yw, rho, gr] = &s.gas[..] else { unreachable!() };
+                particle_step(
+                    &g,
+                    &s.k,
+                    &p,
+                    ParticleFields { m_w: w, m_v: v, m_c: c, m_a: a, t, d },
+                    ExchangeFields { m_w: a0, m_v: a1, mt_w: a2, mt_v: a3, q_conv: a4, q_rad: a5 },
+                    ParticleGasDev { cell: &s.cell, u_rel: u, t: tg, y_w: yw, rho, g: gr, n_cells: n },
+                    1.0e-4,
+                    n,
+                )
+            },
+            |s| {
+                let mut out = Vec::new();
+                for (name, b) in ["m_w", "m_v", "t"].iter().zip([&s.st[0], &s.st[1], &s.st[4]]) {
+                    out.push((*name, g.download(b)?));
+                }
+                for (name, b) in ["acc m_w", "acc m_v", "acc q_conv"].iter().zip([&s.acc[0], &s.acc[1], &s.acc[4]]) {
+                    out.push((*name, g.download(b)?.iter().map(|&x| x as Scalar).collect()));
+                }
+                Ok(out)
+            },
+        )
+        .expect("SPEC-LIT 159: the dust reacting-parcel step must capture and replay bitwise");
+        println!("  dust reacting-parcel step: {report}");
     }
 }

@@ -51496,6 +51496,95 @@ DST-13: `src/dust/char.rs`, `cuda/dustparticle.cu`, `src/dust/tests_char.rs`; �
   radiation off is bitwise unchanged (D). Tests `dust::particle::tests::{thin_cloud_emission,
   uniform_field_heating, radiation_energy_closes, radiation_off_bitwise}`.
 
+### 159.7 What DST-12 landed
+
+`No GPL-licensed source was consulted.` `src/dust/particle.rs` (the module `dust::particle`:
+`ParticleInputs`/`ParticleProps`, `ParticleState`, `GasAtParcel`, `Exchange` and the host twin
+`step`), the kernel `dustParticleStep` in the new `cuda/dustparticle.cu` with its launcher
+`particle_step` (`ParticleKernels`) in `src/dust/device.rs`, and `dustparticle.cu` in build.rs's
+`KERNEL_UNITS` and, as the fifth unit, `FMAD_OFF_UNITS`. The tests are written once in
+`tests/shared/dust_particle_cases.rs` and included as the lib tests `dust::particle::tests` and
+by `tests/dust_particle.rs` in the default and the `single` build. The launcher is gated under
+capture by `dust_particle_step_replays_under_capture` in `src/dust/device.rs`. Nothing outside
+`dust/` calls it yet: DST-14 to DST-18 (lane S) seed the cloud, deposit the accumulators and
+couple the radiation. Positions and the walk are not touched.
+
+**The step.** One call advances one particle of each parcel by Δt in a gas frozen over the step
+(the cell's T_g, water vapour Y_w, ρ_g and incident radiation G, and the parcel's |u_p − u|;
+μ, k_g and c_p,g are constants, as §76's `GasState` holds them). d_p is held fixed through drying
+and devolatilisation (the swelling or shrinking of a devolatilising particle is not modelled);
+DST-13's char stage shrinks it at constant ρ_p as (159.6) states. C_p is one value for the whole
+particle and m_p = m_w + m_v + m_c + m_a. The step is at most eight segments, taken in stage order:
+
+1. **Moisture**, while m_w > 0. Below the boiling point T_b(p) (the root of Hyland-Wexler's
+   (S54.3) at p_amb; 373.124 K at 1 atm) the loss rate is (76.1)'s Ranz-Marshall rung,
+   `ṁ = π d ρ_f D_f Sh (Y_s − Y_g)`, with §76.4's film (the 1/3 rule, ρ_f = ρ_g T_g/T_f,
+   D_f = D_ref (T_f/T_ref)^2.072 p_boil/p_amb), Watson's h_v(T_p) and §76.5's Y_s; it is
+   floored at 0, because a dust particle does not take water up. ΔH of (159.1) is h_v(T_p). The
+   segment ends when the moisture is gone (m_w is set to exactly 0), when T_p reaches T_b, or at
+   the end of the step. A particle at T_b whose net heat at T_b,
+   `Q_b = π d k_g Nu f_B (T_g − T_b) + π d² ε_0 (G/4 − σ_SB T_b⁴)`, is positive boils as in (76.9):
+   T_p is held at T_b and `ṁ = Q_b/h_v`. **[derived]** The boiling branch closes Bird's factor
+   by its convective part: with `ṁ = π d k_g Nu f(β) (T_g − T_b)/h_v` and β of (159.3),
+   `β = B f(β)` with `B = c_p,v (T_g − T_b)/h_v`, so `e^β − 1 = B`, `β = ln(1 + B)` and
+   `f_B = ln(1 + B)/B`, the Spalding factor §76.9's branch already uses; no iteration is needed.
+2. **Volatiles**, once m_w = 0 and while m_v > 0, for the rest of the step: (159.4) at the
+   frozen T_p, `Δm_v = m_v (1 − e^{−kΔt})` exactly (as `−expm1`). The stage ends when what is
+   left is at most `1e−6` of the parcel's remaining mass; the remnant leaves in that step, with
+   its ΔH. ṁ in (159.3) and the source of (159.1) are the segment's mean `Δm_v/Δt`.
+3. **Char and ash**: inert in DST-12, heated and radiating only; DST-13 adds (159.5).
+
+**[derived] The segment integrator.** Over a segment of length t the rates are frozen at its
+start: the conductance `a = π d k_g Nu f(β)`, the source `s = −ṁ ΔH`, and the radiation
+linearised about T_0, `rad(T) ≈ rad_0 − b (T − T_0)` with `rad_0 = π d² ε_0 (G/4 − σ_SB T_0⁴)`
+and `b = 4 π d² ε_0 σ_SB T_0³`. (159.1) is then linear in T and is integrated exactly:
+
+```
+  num = a (T_g − T_0) + rad_0 + s ,   λ = a + b ,   x = λ t/(m C)
+  T(t) = T_0 + num (t/(m C)) φ1(x)
+  Q_conv = a [ (T_g − T_0) t − num t² g2(x)/(m C) ] ,    Q_rad = rad_0 t − b num t² g2(x)/(m C)
+  φ1(x) = (1 − e^{−x})/x ,   g2(x) = (x − 1 + e^{−x})/x²                                       (159.9)
+```
+
+so that `m C (T(t) − T_0) = Q_conv + Q_rad + s t` identically. φ1 and g2 are their series
+`Σ (−x)^j/(j+1)!` and `Σ (−x)^j/(j+2)!` below x = 1 (stopped at a term below 1e−17 of the sum,
+at most 30 terms) and their closed forms above, where g2's cancellation costs at most a factor
+2.7; both are finite at λ = 0. The sub-cooled segment ends at T_b at
+`t_hit = −ln(1 − r) m C/λ`, `r = λ (T_b − T_0)/num`, when num > 0 and r < 1. For an ash particle
+at rest with no radiation this is the heat-up form of (159.6) to round-off in one segment per
+step.
+
+**The accumulators.** Each parcel carries six `Acc` (f64 in both builds) sums the kernel adds to
+and the caller zeroes: the water and the volatile mass given, each times the end-of-step T_p as
+the state stores it (77.5), `Q_conv` (the heat the gas gave by convection; the gas loses it) and
+`Q_rad` (the net radiation absorbed; DST-17 takes it from G's equation). As §77.4 says, the
+latent and devolatilisation heats are inside `Q_conv` and are not a second sink.
+
+**The device.** One thread per parcel; every intermediate is double in both builds and each state
+word is rounded once at its store, the DST-03 rule. The unit is compiled with `-fmad=false`, so
+the kernel rounds every product as the host twin does, and what is left between them is the last
+bit of exp, expm1, log, log1p, pow and cbrt. The host twin is f64 in both builds; its one contact
+with the build's precision is the stored end-of-step T_p of (77.5).
+
+**Measured** (RTX 5070 Ti, tests/dust_particle.rs). Isothermal devolatilisation over k t = 3 in
+40 steps: host 5.1e−16, device 3.9e−16 in f64 and 1.5e−7 under `single` (bar 1e−10; 1e−5 under
+`single` by D-F32-1). Heat-up over 3 τ_T in 40 steps: host 2.5e−16 of |T_0 − T_g| with the
+convective heat equal to `m C ΔT` exactly; device 2.5e−16, and 1.6e−7 under `single`. Bird: the
+factor is within 1.4e−15 of `1 − β/2 + β²/12` for |β| ≤ 1e−3 and exactly `1/(e − 1)` at β = 1.
+Stage order: the 100 µm parcel passes moisture, volatiles and char once each, in order, on the
+host and the device. **Device against host**, one 2 ms step of 4096 random parcels in 1024 cells
+(555 end their moisture inside the step, 320 boil): the ulps are counted at each word's operand
+scale - a mass at the mass it came from, T_p at itself, `m T` at `m_in T_out`, a heat at the
+step's integrand `(a_0 |ΔT| + ε_0 π d² (G/4 + σ_SB T⁴)) Δt` - because a mass left when a stage ends
+inside the step is a difference, and its own ulps count the cancellation, not the arithmetic. The
+3838 parcels that do not reach T_b in the step are within 3 ulp in f64 and 3 ulp under `single`
+(bar 4). **The 258 parcels that reach T_b in the step are MISSED in f64 at 6 ulp** (m_w and its
+accumulator; 3 ulp under `single`): t_hit moves by `1/(1 − r)` times any change in r, so as
+T_eq approaches T_b from above the crossing time, and with it the split of the drying between
+the two rates, is ill-conditioned in the model itself, and a 1-ulp difference in a transcendental
+becomes a few ulp of the moisture. The row reports the miss and asserts the crossing parcels stay
+within 16 × 4 ulp, far below what a branch taken differently would give.
+
 ---
 
 ## 160. The flame-age option and the studio surface

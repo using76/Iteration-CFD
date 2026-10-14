@@ -147,6 +147,15 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("dust_fsc_replays_under_capture"),
     ),
     (
+        "src/dust/particle.rs",
+        Stance::Outside(
+            "the reacting dust parcel's step is the f64 host twin of SPEC-LIT \
+             159.7; it launches nothing, and its device counterpart \
+             particle_step in src/dust/device.rs is gated there by \
+             dust_particle_step_replays_under_capture",
+        ),
+    ),
+    (
         "src/dust/progress.rs",
         Stance::Refused(
             "`ProgressEquation::solve` is one outer iteration of the c~ equation \
