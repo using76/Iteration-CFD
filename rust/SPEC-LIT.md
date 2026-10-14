@@ -48136,7 +48136,7 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
+AMG-04a, and the K-cycle of §141.6, AMG-04c). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
 before AMG-04b.
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
@@ -48952,8 +48952,143 @@ The LU row therefore stops `CD(8)` after one coarsening, where the x-couplings r
 At `1e-12` the two 128^3 answers differ by 2.02e-13. With l1-Jacobi instead of Chebyshev the
 GAMG-PCG counts were 26, 40, 62 and the standalone 154, 357, 810. The iteration growth
 32^3 -> 128^3 is 2.4x for GAMG-PCG and 5.1x for the standalone V-cycle: the h-dependence
-of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle is to
-remove. `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
+of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle
+removes (§141.6: 13, 13 and 14 K-cycle FCG iterations). `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
+
+### 141.6 The K-cycle and the flexible conjugate gradient (AMG-04c)
+
+`No GPL-licensed source was consulted.` `src/amg/cycle.rs` gains the K-cycle, selected on a
+built hierarchy by `Gamg::set_cycle(gpu, CycleKind::K { threshold })` (*DESIGN* default
+`DEFAULT_K_THRESHOLD = 0.25`); `src/solver.rs` gains the flexible conjugate gradient FCG(1),
+`solver::solve_fcg`, that takes it. `cuda/amg.cu` gains two vector kernels, `amgAxpy` and
+`amgCombine`. `Gamg::new` still builds the V-cycle of §141.5, and `Gamg::vcycle`, the cycle a
+capture replays, launches exactly what it launched before (the §141.5.1 rows and the V-cycle's
+host-twin and capture gates are unchanged). No case can ask for either yet: `LinearSolverKind`
+and the case keys live in `io/case.rs`, a lane-S file in this wave (docs/17 §7.4), so FCG is
+reached through `solve_fcg` and the K-cycle through `set_cycle`; the case key is a follow-up.
+
+Sources: **Notay (2010)**, the paper of §141.1 (open full text, read again on 2026-10-14),
+§3, p. 132: "We use multigrid as a preconditioner in a main iteration routine, which is based
+on the flexible conjugate gradient method (FCG), if the matrix is symmetric positive definite.
+More precisely, we use FCG(1) from [29] ... This method is similar to the standard conjugate
+gradient method, except that scalar coefficients are computed in a slightly different way, at
+the expense of one more inner product computation per iteration. This modification enhances
+the stability of the method in the presence of variable preconditioning. It is needed here,
+because use of the K-cycle induces slight variations in the multigrid preconditioning."
+Algorithm 3.2 (p. 133), "Multigrid as a preconditioner at level k", step 4, the K-cycle's FCG
+branch: "Perform 1 or 2 iterations with multigrid prec.: c = MGprec(r, k-1); v = A c;
+ρ1 = cᵀv; α1 = cᵀr; r̃ = r - (α1/ρ1) v; if ‖r̃‖ ≤ t ‖r‖, then x = (α1/ρ1) c; else d =
+MGprec(r̃, k-1); w = A d; γ = dᵀv; β = dᵀw; α2 = dᵀr̃; ρ2 = β - γ²/ρ1; x = (α1/ρ1 -
+γα2/(ρ1ρ2)) c + (α2/ρ2) d" (subscripts `k-1` dropped; the Greek letters were lost by the PDF's
+text layer and are re-checked below by the paper's own orthogonality argument), and p. 134:
+"at most 2 iterations are allowed, and the second one is skipped if the relative residual
+error is below the threshold t after the first step. In practice ... we use t = 0.25", and
+"the computed solution is the linear combination of c and d which minimizes the A-norm of the
+error in case of FCG". [29] is **Notay, Y. (2000), "Flexible conjugate gradients", *SIAM J.
+Sci. Comput.* 22(4) 1444-1460, doi:10.1137/S1064827599362314**; [31], "the conclusions from
+[31]" behind the two-iteration rule, is **Notay, Y. & Vassilevski, P. S. (2008), "Recursive
+Krylov-based multigrid cycles", *Numer. Linear Algebra Appl.* 15(5) 473-487,
+doi:10.1002/nla.542** (both checked against Crossref on 2026-10-14; Crossref dates the second's
+online issue 2007). Both are named by docs/17 for this row; neither was opened (paywalled), and
+no formula below is taken from them: FCG(1) is written out and derived here. No multigrid or
+Krylov code of any licence was read; OpenFOAM's GAMG, AGMG, hypre, ML, PETSc and PSBLAS were
+not opened.
+
+**The K-cycle** (Notay Algorithm 3.2 step 4 on the levels of (141.5.1)). The descent and the
+ascent of (141.5.1) are unchanged; what changes is how the coarse problem `A_m x_m = b_m` of a
+level `1 <= m < L` is solved. The V-cycle runs one cycle of level `m` from `x_m = 0`; the
+K-cycle runs one or two FCG iterations on it, each preconditioned by one cycle of level `m`,
+`B_m(r) = cycle_m(0, r)` (itself a K-cycle below). The coarsest level `L` keeps its exact
+solve, so a hierarchy with `L <= 1` cycles exactly as the V-cycle does. With `r = b_m`:
+
+```
+c = B_m(r);  v = A_m c;  ρ1 = (c, v);  α1 = (c, r);  r̃ = r - (α1/ρ1) v        (141.6.1)
+if (r̃, r̃) <= t² (r, r):   x_m = (α1/ρ1) c
+else:  d = B_m(r̃);  w = A_m d;  γ = (d, v);  β = (d, w);  α2 = (d, r̃);
+       ρ2 = β - γ²/ρ1;   x_m = (α1/ρ1 - γ α2/(ρ1 ρ2)) c + (α2/ρ2) d
+```
+
+The test `‖r̃‖ <= t‖r‖` is taken on squares. **Check of the second step** (derived here, the
+paper's p. 134 argument): FCG from `x = 0` takes `x1 = (α1/ρ1) c`, `r1 = r̃`; its second
+direction is `d' = d - (γ/ρ1) c` (A-orthogonal to `c`), with `(d', A d') = β - 2γ²/ρ1 + γ²/ρ1 =
+ρ2` and `(d', r̃) = (d, r̃) - (γ/ρ1)(c, r̃) = α2`, because `(c, r̃) = α1 - (α1/ρ1) ρ1 = 0`; so
+`x2 = x1 + (α2/ρ2) d'`, which is (141.6.1)'s second line. In exact arithmetic `ρ1 > 0` for an
+SPD level and preconditioner, and `ρ1 ρ2 = ρ1 β - γ² >= 0` by Cauchy-Schwarz in the `A`-inner
+product. *DESIGN* guards: `ρ1 = 0` (a zero residual, so `c = 0`) gives `x_m = 0`; `ρ1 < 0` or
+not finite is refused by name ("not positive"); `ρ2 <= 0` (no new `A`-direction) takes the
+one-iteration answer; `ρ2` not finite is refused by name. Every scalar is formed on the host in
+f64 from the device inner products (`solver::device_dot`, summed in `Acc` and rounded once to
+`Scalar`, §118.1); `amgAxpy` forms `r̃` in place of `b_m` (no caller reads `b_m` again), and
+`amgCombine`, `x = a c + b x`, forms both answers (`b = 0` for the first, `x` holding `d` for
+the second). `amg.cu` stays on the `-fmad=false` list, so the device K-cycle repeats a host
+twin's products and sums in the same order.
+
+**Cost and capture.** A level `m` is visited at most `2^(m-1)` times per top-level cycle; with
+the coarsening ratio near 4 of §141.1 the work stays a bounded multiple of the fine level's
+(Notay p. 135, (3.2)-(3.3)). The K-cycle reads its scalars back to the host and the threshold
+is a host decision, so a K-cycle cannot be recorded into a CUDA graph: inside a capture
+`Gamg::cycle` refuses it by name ("K-cycle", "capture"), and `Gamg::vcycle` remains the
+captured path (§81, `amg::cycle::tests::vcycle_replays_under_capture`).
+
+**FCG(1)** (*DESIGN* in the scalar forms; the method is Notay's FCG(1), whose text was not
+read). With `z_i = M_i^{-1} r_i` the preconditioner's answer at step `i`, `q = A d`:
+
+```
+r_0 = b - A ψ_0;  z_0 = M_0^{-1} r_0;  d_0 = z_0                                (141.6.2)
+step i:  q_i = A d_i;  α_i = (r_i, z_i) / (d_i, q_i);
+         ψ_{i+1} = ψ_i + α_i d_i;  r_{i+1} = r_i - α_i q_i;
+         z_{i+1} = M_{i+1}^{-1} r_{i+1};
+         β_{i+1} = (z_{i+1}, q_i) / (d_i, q_i);   d_{i+1} = z_{i+1} - β_{i+1} d_i
+```
+
+`β` makes `d_{i+1}` A-orthogonal to `d_i` whatever `M_{i+1}` was: `(d_{i+1}, q_i) = (z_{i+1},
+q_i) - β_{i+1} (d_i, q_i) = 0`. The inner products per step are `(d, q)`, `(r, z)` and `(z, q)`,
+one more than CG's two, as Notay's §3 states. For a fixed SPD `M`, `(z_{i+1}, q_i) = -(z_{i+1},
+r_{i+1})/α_i` (from `r_{i+1} - r_i = -α_i q_i` and `(z_{i+1}, r_i) = 0`), so `β_{i+1} =
+-(r_{i+1}, z_{i+1})/(r_i, z_i)` and `d_{i+1}` is PCG's `z + β p` direction: FCG(1) is PCG in exact
+arithmetic, and `fcg_with_a_fixed_preconditioner_agrees_with_pcg` measures it. The numerator of
+`α` is PCG's `(r, z)` (equal to `(d, r)` in exact arithmetic, because `(d_{i-1}, r_i) = 0`).
+`solve_fcg` is `pcg_float`'s skeleton - the §8.4 residual, the convergence test every
+`check_interval`, `fixed_iters` and `report_residuals` (§113), and under `single` the §118.4
+refinement around the float body - with `β` from (141.6.2): `w.v` still holds `q_i` and
+`w.den` still holds `(d_i, q_i)` when `z_{i+1}` is formed, and the new direction is built in
+`p_hat` by `solAxmy` and copied to `p`. It takes every preconditioner PCG takes, and symmetric
+positive definite systems only (§8.2). **Refusals:** PCG and PBiCGStab with a K-cycle `Gamg`
+preconditioner are refused by name ("variable", naming `solve_fcg` and `set_cycle`), since
+both assume a fixed preconditioner; `solve_gamg` (one iteration one cycle) runs the selected
+cycle, the K-cycle included.
+
+**Precision** (§118, docs/17 §5.1.4). The device K-cycle against its host twin is class R, as
+the V-cycle's (§141.5): `1e-12` of `‖x‖_2` (f64) / `1e-5` (`single`), level 0's product being
+`ldu_ops::amul`. The iteration gate and the agreement rows are f64 rows; under `single` they
+wait for AMG-06a, as §141.5.1's do.
+
+#### 141.6.1 The gates
+
+`tol = 1e-8` is the §8.4 residual; "iterations" is `SolverPerformance::n_iterations`.
+
+| test (`tests/amg_cycle.rs`) | what | class |
+|---|---|---|
+| `the_device_k_cycle_matches_its_host_twin` | `POI(16)` with `n_cells_coarsest = 16` (at least three coarse levels), K(2,2) Chebyshev at `t = 0.25` and `t = 0`, K(1,1) l1-Jacobi at `t = 0.25`, `z = 0; K(z, b)` with `b` = the test field: device against a host twin in `Scalar` written in the test; `t = 0` takes the second iteration every time, and the three take both branches | R |
+| `k_cycle_fcg_on_dirichlet_poisson_32_64_128` (f64) | docs/17's AMG-04c gate: `POI(32)`, `POI(64)`, `POI(128)`, default config with the K-cycle at `t = 0.25`, FCG(1), tol `1e-8`: converges at every size and the iteration growth 32^3 -> 128^3 is `<= 1.3x`; at every size its answer is within `1e-8 ‖x_b‖_2` of Jacobi-PBiCGStab's (§141.5.1's agreement row) | P, R |
+| `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (f64) | `POI(32)` with DIC, tol `1e-8`: DIC-FCG and DIC-PCG converge and agree to `1e-8` of `‖x‖_2` | R |
+| `the_k_cycle_refusals_are_named` | thresholds `1`, `-0.1`, NaN, ∞ (`threshold`; the V-cycle is kept); a K-cycle inside a capture (`K-cycle`, `capture`); PCG and PBiCGStab with a K-cycle preconditioner (`variable`, `solve_fcg`) | D |
+
+**Measured** (supervisor's run of `tests/amg_cycle.rs`, f64, 2026-10-14, RTX 5070 Ti; default
+config: K(2,2) with Chebyshev, `n_cells_coarsest = 64`, `t = 0.25`; the level
+sizes are §141.5's):
+
+| `n^3` | GAMG-PCG, V-cycle (§141.5) | K-cycle FCG | K-cycle FCG vs Jacobi-PBiCGStab at `1e-8` | set-up / solve |
+|---|---|---|---|---|
+| 32^3 | 16 | 13 | 1.61e-9 | 0.05 s / 0.04 s |
+| 64^3 | 24 | 13 | 2.48e-9 | 0.50 s / 0.10 s |
+| 128^3 | 38 | 14 | 5.38e-9 | 5.1 s / 0.41 s |
+
+The iteration growth 32^3 -> 128^3 is 14/13 = 1.08x for the K-cycle, inside the 1.3x gate, and
+2.4x for the V-cycle: the h-dependence §141.5 measured is removed. DIC-FCG and DIC-PCG on
+`POI(32)` both take 39 iterations and agree to 3.5e-16. The host twin agrees to 9.4e-16
+(K(2,2), `t = 0.25`: 4 one-step and 0 two-step inner solves), 1.0e-15 (`t = 0`: 15 two-step)
+and 2.9e-16 (K(1,1) l1-Jacobi: 8 one-step, 5 two-step).
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

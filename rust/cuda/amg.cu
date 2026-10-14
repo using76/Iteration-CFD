@@ -18,10 +18,11 @@
   (141.3.5) are the smoother updates of SPEC-LIT 141.3. amgCoarseSolve
   is the coarsest-level solve of SPEC-LIT 141.4: the two triangular
   substitutions of the packed Cholesky factor, with the projection and
-  pin of a singular level, in one thread block.
+  pin of a singular level, in one thread block. amgAxpy and amgCombine
+  are the K-cycle's two vector updates of SPEC-LIT 141.6 (AMG-04c).
   ==========================================================================
 
-  Written from: SPEC-LIT.md 141.1, 141.2, 141.3; Notay, ETNA 37 (2010)
+  Written from: SPEC-LIT.md 141.1, 141.2, 141.3, 141.6; Notay, ETNA 37 (2010)
   123-146, eqs. (2.1)-(2.3); Baker, Falgout, Kolev & Yang, LLNL-TR-489114
   (2011), eqs. 2.2, 4.1-4.3, 6.1-6.2; Saad (2003) Algorithms 6.15
   and 12.1
@@ -370,6 +371,40 @@ extern "C" __global__ void amgResidual
     const oflabel c = OFGPU_TID;
     if (c >= n) return;
     r[c] = b[c] - y[c];
+}
+
+//- The K-cycle's update of the inner residual, SPEC-LIT (141.6.1):
+//  y[c] = y[c] + a*x[c], a by value. One thread per cell, no atomics,
+//  no allocation, no sync. -
+extern "C" __global__ void amgAxpy
+(
+    ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ x,
+    ofscalar a,
+    int n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    y[c] = y[c] + a*x[c];
+}
+
+//- The K-cycle's coarse correction, SPEC-LIT (141.6.1):
+//  x[c] = a*cv[c] + b*x[c], a and b by value; the product a*cv[c] is
+//  rounded, then b*x[c], then the sum (-fmad=false). One thread per
+//  cell, no atomics, no allocation, no sync. -
+extern "C" __global__ void amgCombine
+(
+    ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ cv,
+    ofscalar a,
+    ofscalar b,
+    int n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    x[c] = a*cv[c] + b*x[c];
 }
 
 //- The LU coarsest-level solve of an asymmetric level, (141.5.3): ONE

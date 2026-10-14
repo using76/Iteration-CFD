@@ -13,19 +13,27 @@
 //! device LU solves are bitwise (class D); the iteration gates are f64
 //! rows and wait for AMG-06a under `single`.
 //!
+//! AMG-04c adds the K-cycle and FCG(1) of SPEC-LIT §141.6: the device
+//! K-cycle against its host twin (class R, as the V-cycle's), the gate
+//! of its h-independence on `POI(32)` to `POI(128)` (an f64 row, AMG-06a
+//! under `single`), FCG against PCG with a fixed preconditioner, and the
+//! K-cycle's refusals by name.
+//!
 //! An integration test, so the SAME assertions run in both builds (§118).
 //! A machine without a card passes the device rows vacuously, the
 //! convention of `tests/amg_coarse.rs`.
 //!
 //! Provenance: ORIGINAL - the fixtures, the hand-computed solutions and
-//! the assertions are this tree's own construction, run against Saad
+//! the assertions are this tree's own construction, run against Notay,
+//! ETNA 37 (2010) Algorithm 3.2 (the K-cycle, SPEC-LIT §141.6), Saad
 //! (2003) §13.4.3 Algorithm 13.3, the LAPACK `DGETRF` documentation
 //! comment and the open article "Diagonally dominant matrix", via
 //! SPEC-LIT §141.5. OpenFOAM's GAMG, AGMG, hypre and ML were not
 //! opened. No GPL-licensed source was consulted.
 
 use ofgpu::amg::{
-    CoarseMethod, CoarseOperator, CoarseSetup, Gamg, GamgConfig, GpuCoarse, GpuLevelRows,
+    CoarseMethod, CoarseOperator, CoarseSetup, CycleKind, DEFAULT_K_THRESHOLD, Gamg,
+    GamgConfig, GpuCoarse, GpuLevelRows,
     HostHierarchy, HostLevel, HostRows, HierarchyConfig, LevelRows, SmootherKind,
     level_amul_host, smooth_level_host,
 };
@@ -37,7 +45,7 @@ use ofgpu::halo::HaloExchange;
 use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls};
 use ofgpu::ldu::{GpuLduMatrix, HostLduMatrix};
 use ofgpu::mesh::{GpuMesh, HostMesh};
-use ofgpu::solver::{SolverPerformance, SolverWorkspace, solve};
+use ofgpu::solver::{SolverPerformance, SolverWorkspace, solve, solve_fcg};
 use ofgpu::{Gpu, Scalar};
 
 /// The class-R tolerance: `1e-12` of the field's norm in f64, `1e-5`
@@ -974,3 +982,370 @@ fn a_gamg_request_that_cannot_be_served_is_refused_by_name() {
     assert!(!dw.partition_invariant(Preconditioner::Gamg));
 }
 
+// ==========================================================================
+//  AMG-04c: the K-cycle and FCG(1), SPEC-LIT §141.6
+// ==========================================================================
+
+/// `(a, b)` as the device forms it: summed in f64, rounded once to the
+/// build's Scalar (§118.1), read back as f64.
+fn sdot(a: &[Scalar], b: &[Scalar]) -> f64 {
+    let mut s = 0.0f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        s += *x as f64 * *y as f64;
+    }
+    sc(s) as f64
+}
+
+/// How often the host K twin took one inner iteration and how often two.
+#[derive(Default)]
+struct KBranches {
+    one: usize,
+    two: usize,
+}
+
+/// The host twin of `Gamg::cycle` on level `l` with the K-cycle of
+/// (141.6.1) and threshold `t`, in Scalar, in the kernels' order: the
+/// shape of `host_vcycle`, with every coarse level that is not the
+/// coarsest solved by `host_k_inner`.
+#[allow(clippy::too_many_arguments)]
+fn host_kcycle(
+    v: &Vc<'_>,
+    l: usize,
+    nu1: usize,
+    nu2: usize,
+    t: f64,
+    b: &[Scalar],
+    x: &mut [Scalar],
+    br: &mut KBranches,
+) -> Result<()> {
+    let n = if l == 0 {
+        v.level0.n_cells
+    } else {
+        v.h.levels[l - 1].n_cells
+    };
+    let (level, rows) = if l == 0 {
+        (v.level0, v.rows0)
+    } else {
+        (&v.h.levels[l - 1], &v.h.rows[l - 1])
+    };
+    let smoother = &v.h.smoothers[l];
+    smooth_level_host(level, rows, smoother, x, b, nu1)?;
+    let ax = level_amul_host(level, rows, x)?;
+    let r: Vec<Scalar> = (0..n).map(|c| b[c] - ax[c]).collect();
+    let rc = v.h.plans[l].restrict_host(&r)?;
+    let m = l + 1;
+    let xc = if m == v.h.levels.len() {
+        v.coarse.solve_host(&rc, None)?
+    } else {
+        host_k_inner(v, m, nu1, nu2, t, &rc, br)?
+    };
+    v.h.plans[l].prolong_add_host(&xc, x)?;
+    smooth_level_host(level, rows, smoother, x, b, nu2)?;
+    Ok(())
+}
+
+/// (141.6.1) on level `m`, the host twin of `Parts::k_inner`.
+#[allow(clippy::too_many_arguments)]
+fn host_k_inner(
+    v: &Vc<'_>,
+    m: usize,
+    nu1: usize,
+    nu2: usize,
+    t: f64,
+    r: &[Scalar],
+    br: &mut KBranches,
+) -> Result<Vec<Scalar>> {
+    let (level, rows) = (&v.h.levels[m - 1], &v.h.rows[m - 1]);
+    let nm = level.n_cells;
+    let rr = sdot(r, r);
+    let mut c = vec![0 as Scalar; nm];
+    host_kcycle(v, m, nu1, nu2, t, r, &mut c, br)?;
+    let av = level_amul_host(level, rows, &c)?;
+    let rho1 = sdot(&c, &av);
+    let alpha1 = sdot(&c, r);
+    assert!(rho1 > 0.0, "host K twin: (c, A c) = {rho1:e} on level {m}");
+    let a1 = alpha1 / rho1;
+    let ma1 = sc(-a1);
+    let rt: Vec<Scalar> = (0..nm).map(|i| r[i] + ma1 * av[i]).collect();
+    let tt = sdot(&rt, &rt);
+    let (s1, z) = (sc(a1), 0 as Scalar);
+    if tt <= t * t * rr {
+        br.one += 1;
+        return Ok((0..nm).map(|i| s1 * c[i] + z * c[i]).collect());
+    }
+    br.two += 1;
+    let mut d = vec![0 as Scalar; nm];
+    host_kcycle(v, m, nu1, nu2, t, &rt, &mut d, br)?;
+    let wv = level_amul_host(level, rows, &d)?;
+    let gamma = sdot(&d, &av);
+    let beta = sdot(&d, &wv);
+    let alpha2 = sdot(&d, &rt);
+    let rho2 = beta - gamma * gamma / rho1;
+    assert!(rho2 > 0.0, "host K twin: rho2 = {rho2:e} on level {m}");
+    let (sc_, sd) = (sc(a1 - gamma * alpha2 / (rho1 * rho2)), sc(alpha2 / rho2));
+    Ok((0..nm).map(|i| sc_ * c[i] + sd * d[i]).collect())
+}
+
+/// `POI(16)` with `n_cells_coarsest = 16` (four coarse levels, so the
+/// K-cycle runs on levels 1 to 3): K(2,2) Chebyshev at `t = 0.25` and at
+/// `t = 0` (always two), and K(1,1) l1-Jacobi at `t = 0.25`, from
+/// `x = 0` against the test field: device against its host twin, class R
+/// (SPEC-LIT 141.6.1); between them the twin took both branches.
+#[test]
+fn the_device_k_cycle_matches_its_host_twin() {
+    let Some(gpu) = gpu() else { return };
+    let m = box_mesh(16, 16, 16);
+    let a = poi(&m);
+    let n = m.n_cells;
+    let b = test_field(n);
+    let cheb = HierarchyConfig {
+        n_cells_coarsest: 16,
+        ..GamgConfig::default().hierarchy
+    };
+    let jac = HierarchyConfig {
+        n_cells_coarsest: 16,
+        ..HierarchyConfig::default()
+    };
+    let cfgs: [(&str, GamgConfig, f64); 3] = [
+        ("K(2,2) Chebyshev t=0.25", GamgConfig { hierarchy: cheb, ..GamgConfig::default() }, 0.25),
+        ("K(2,2) Chebyshev t=0", GamgConfig { hierarchy: cheb, ..GamgConfig::default() }, 0.0),
+        (
+            "K(1,1) l1-Jacobi t=0.25",
+            GamgConfig { hierarchy: jac, n_pre: 1, n_post: 1 },
+            0.25,
+        ),
+    ];
+    let mut total = KBranches::default();
+    for (name, cfg, t) in cfgs {
+        let h = HostHierarchy::build(&m, &a, &cfg.hierarchy).expect("hierarchy");
+        assert!(h.levels.len() >= 3, "{name}: {} coarse levels, the K-cycle needs >= 3", h.levels.len());
+        let level0 = HostLevel {
+            n_cells: n,
+            owner: m.owner.clone(),
+            neighbour: m.neighbour.clone(),
+            diag: a.diag.clone(),
+            upper: a.upper.clone(),
+            lower: a.lower.clone(),
+        };
+        let rows0 = LevelRows::of_level(&level0).expect("rows0");
+        let last = h.levels.last().expect("coarsest level");
+        let coarse = CoarseSetup::general(&HostRows::of_level(last).expect("coarsest rows"), false)
+            .expect("coarse setup");
+        let v = Vc { level0: &level0, rows0: &rows0, h: &h, coarse: &coarse };
+        let mut br = KBranches::default();
+        let mut xh = vec![0 as Scalar; n];
+        host_kcycle(&v, 0, cfg.n_pre, cfg.n_post, t, &b, &mut xh, &mut br).expect("host kcycle");
+
+        let (mesh, mat) = upload_fine(&gpu, &m, &a).expect("upload");
+        let mut gamg = Gamg::new(&gpu, &m, &a, &cfg, false).expect("gamg");
+        gamg.set_cycle(&gpu, CycleKind::K { threshold: t }).expect("K-cycle");
+        assert!(gamg.is_variable(), "{name}: a K-cycle is a variable preconditioner");
+        let mut x = gpu.zeros(n).expect("x");
+        let bd = gpu.upload(&b).expect("b");
+        gamg.precondition(&gpu, &mesh, &mat, &mut x, &bd).expect("kcycle");
+        let xd = gpu.download(&x).expect("download");
+        let d = rel_l2(&xd, &xh);
+        eprintln!(
+            "{name}: device vs host rel L2 {d:.3e}; inner iterations: {} one, {} two",
+            br.one, br.two
+        );
+        assert!(d <= TOL_R, "{name}: device vs host rel L2 {d:e} > {TOL_R:e}");
+        if t == 0.0 {
+            assert_eq!(br.one, 0, "{name}: t = 0 must always take the second iteration");
+        }
+        total.one += br.one;
+        total.two += br.two;
+    }
+    assert!(
+        total.one > 0 && total.two > 0,
+        "the three cycles must take both branches: {} one, {} two",
+        total.one,
+        total.two
+    );
+}
+
+/// One FCG solve of `A psi = b` from `psi = 0`, its own workspace.
+fn one_fcg(
+    gpu: &Gpu,
+    k: &ofgpu::solver::SolverKernels,
+    mesh: &GpuMesh,
+    mat: &GpuLduMatrix,
+    gamg: Option<Gamg>,
+    ctrl: &SolverControls,
+) -> Result<(SolverPerformance, Vec<Scalar>)> {
+    let n = mesh.n_cells;
+    let mut w = SolverWorkspace::for_mesh(gpu, mesh)?;
+    if let Some(g) = gamg {
+        w.set_gamg(g)?;
+    }
+    let mut psi = gpu.zeros(n)?;
+    let p = solve_fcg(gpu, k, &mut psi, mat, mesh, &mut w, ctrl)?;
+    let x = gpu.download(&psi)?;
+    Ok((p, x))
+}
+
+/// The AMG-04c gate (docs/17 §12.3, SPEC-LIT 141.6.1): `POI(32)`,
+/// `POI(64)`, `POI(128)`, tol `1e-8`, default config with the K-cycle at
+/// `t = 0.25`, FCG(1): it converges at every size and its iteration count
+/// grows `<= 1.3x` from 32^3 to 128^3 (class P); at every size its answer
+/// is within `1e-8` of Jacobi-PBiCGStab's (AMG-04a's agreement row,
+/// class R). f64 rows; under `single` they wait for AMG-06a, as the
+/// V-cycle's do.
+#[test]
+#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
+fn k_cycle_fcg_on_dirichlet_poisson_32_64_128() {
+    let Some(gpu) = gpu() else { return };
+    let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
+    let mut its = Vec::new();
+    for n in [32usize, 64, 128] {
+        let m = box_mesh(n, n, n);
+        let a = poi(&m);
+        let (mesh, mat) = upload_fine(&gpu, &m, &a).expect("upload");
+        let base = SolverControls {
+            tolerance: 1e-8,
+            rel_tol: 0.0,
+            max_iter: 5000,
+            check_interval: 1,
+            ..SolverControls::default()
+        };
+        let t0 = std::time::Instant::now();
+        let mut gamg = Gamg::new(&gpu, &m, &a, &GamgConfig::default(), false).expect("gamg");
+        gamg.set_cycle(&gpu, CycleKind::K { threshold: DEFAULT_K_THRESHOLD })
+            .expect("K-cycle");
+        let sizes = gamg.sizes();
+        let setup = t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let (p, x_k) = one_fcg(
+            &gpu,
+            &k,
+            &mesh,
+            &mat,
+            Some(gamg),
+            &SolverControls {
+                solver: LinearSolverKind::PCG,
+                precon: Preconditioner::Gamg,
+                ..base
+            },
+        )
+        .expect("K-cycle FCG");
+        let solve_s = t1.elapsed().as_secs_f64();
+        assert!(p.converged, "K-cycle FCG must converge on POI({n})");
+        let (_, x_jac) = one_solve(
+            &gpu,
+            &k,
+            &mesh,
+            &mat,
+            None,
+            &SolverControls {
+                solver: LinearSolverKind::PBiCGStab,
+                precon: Preconditioner::Diagonal,
+                ..base
+            },
+        )
+        .expect("Jacobi-PBiCGStab");
+        let d = rel_l2(&x_k, &x_jac);
+        eprintln!(
+            "POI({n}): sizes {} | K-cycle FCG {} it | vs Jacobi-PBiCGStab @1e-8 rel L2 \
+             {d:.3e} | setup {setup:.2} s, solve {solve_s:.2} s",
+            sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("->"),
+            p.n_iterations,
+        );
+        assert!(d <= 1e-8, "POI({n}): the 1e-8 answers differ by {d:.3e} > 1e-8");
+        its.push(p.n_iterations);
+    }
+    let growth = its[2] as f64 / its[0] as f64;
+    eprintln!("K-cycle FCG iterations {its:?}: growth 32^3 -> 128^3 {growth:.3}x");
+    assert!(
+        10 * its[2] <= 13 * its[0],
+        "K-cycle FCG iteration growth 32^3 -> 128^3 is {growth:.3}x ({} -> {}), over 1.3x",
+        its[0],
+        its[2]
+    );
+}
+
+/// FCG(1) with a FIXED preconditioner is PCG in exact arithmetic
+/// ((141.6.2) of SPEC-LIT 141.6): on `POI(32)` with DIC, tol `1e-8`, both converge
+/// and their answers agree to `1e-8` of `norm(x)` (class R, the
+/// agreement row of 141.5.1). f64; AMG-06a under `single`.
+#[test]
+#[cfg_attr(feature = "single", ignore = "AMG-06a: GAMG under single")]
+fn fcg_with_a_fixed_preconditioner_agrees_with_pcg() {
+    let Some(gpu) = gpu() else { return };
+    let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
+    let m = box_mesh(32, 32, 32);
+    let a = poi(&m);
+    let (mesh, mat) = upload_fine(&gpu, &m, &a).expect("upload");
+    let ctrl = SolverControls {
+        solver: LinearSolverKind::PCG,
+        precon: Preconditioner::Dic,
+        tolerance: 1e-8,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        check_interval: 1,
+        ..SolverControls::default()
+    };
+    let (p_cg, x_cg) = one_solve(&gpu, &k, &mesh, &mat, None, &ctrl).expect("DIC-PCG");
+    let (p_f, x_f) = one_fcg(&gpu, &k, &mesh, &mat, None, &ctrl).expect("DIC-FCG");
+    assert!(p_cg.converged && p_f.converged, "both must converge");
+    let d = rel_l2(&x_f, &x_cg);
+    eprintln!(
+        "POI(32) DIC: PCG {} it, FCG {} it, rel L2 {d:.3e}",
+        p_cg.n_iterations, p_f.n_iterations
+    );
+    assert!(d <= 1e-8, "DIC-FCG vs DIC-PCG rel L2 {d:.3e} > 1e-8");
+}
+
+/// The K-cycle's refusals, by name (SPEC-LIT 141.6, class D): a
+/// threshold outside `[0, 1)` (`threshold`); PCG and PBiCGStab with a
+/// K-cycle preconditioner (`variable`, `solve_fcg`); a K-cycle inside a
+/// CUDA-graph capture (`K-cycle`, `capture`).
+#[test]
+fn the_k_cycle_refusals_are_named() {
+    let Some(gpu) = gpu() else { return };
+    let k = ofgpu::solver::SolverKernels::new(&gpu).expect("solver kernels");
+    let m = box_mesh(8, 8, 8);
+    let a = poi(&m);
+    let (mesh, mat) = upload_fine(&gpu, &m, &a).expect("upload");
+    let mut g = Gamg::new(&gpu, &m, &a, &GamgConfig::default(), false).expect("gamg");
+    for t in [1.0, -0.1, f64::NAN, f64::INFINITY] {
+        let e = g
+            .set_cycle(&gpu, CycleKind::K { threshold: t })
+            .expect_err("a threshold outside [0, 1) must be refused")
+            .to_string();
+        assert!(e.contains("threshold"), "{e}");
+    }
+    assert_eq!(g.cycle_kind(), CycleKind::V, "a refused selection keeps the V-cycle");
+    g.set_cycle(&gpu, CycleKind::K { threshold: 0.25 }).expect("K-cycle");
+
+    // Inside a capture.
+    let mut z = gpu.zeros(m.n_cells).expect("z");
+    let r = gpu.upload(&test_field(m.n_cells)).expect("r");
+    let Err(e) = gpu.capture(|_| g.precondition(&gpu, &mesh, &mat, &mut z, &r)) else {
+        panic!("a K-cycle must be refused inside a capture");
+    };
+    let e = e.to_string();
+    assert!(e.contains("K-cycle") && e.contains("capture"), "{e}");
+
+    // PCG and PBiCGStab take only a fixed preconditioner.
+    let mut w = SolverWorkspace::for_mesh(&gpu, &mesh).expect("ws");
+    w.set_gamg(g).expect("attach");
+    let mut psi = gpu.zeros(m.n_cells).expect("psi");
+    for solver in [LinearSolverKind::PCG, LinearSolverKind::PBiCGStab] {
+        let e = solve(
+            &gpu,
+            &k,
+            &mut psi,
+            &mat,
+            &mesh,
+            &mut w,
+            &SolverControls {
+                solver,
+                precon: Preconditioner::Gamg,
+                ..SolverControls::default()
+            },
+        )
+        .expect_err("a variable preconditioner must be refused")
+        .to_string();
+        assert!(e.contains("variable") && e.contains("solve_fcg"), "{solver:?}: {e}");
+    }
+}
