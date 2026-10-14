@@ -356,8 +356,8 @@ export type UserContext = z.infer<typeof UserContextSchema>
 // projection of the screen changes.
 // ---------------------------------------------------------------------------
 
-/** The boundary editor's type select, as the GUI's PATCH_PRESETS spell it. */
-export const PATCH_PRESET_IDS = ['velocity-inlet', 'pressure-outlet', 'no-slip-wall', 'fixed-temperature-wall', 'heat-flux-wall', 'slip-wall', 'symmetry', 'empty'] as const
+/** The boundary editor's type select. `wedge` is offered only on a wedge mesh's ymin/ymax sides (server/src/tools/guiBoundary.ts). */
+export const PATCH_PRESET_IDS = ['velocity-inlet', 'pressure-outlet', 'no-slip-wall', 'fixed-temperature-wall', 'heat-flux-wall', 'slip-wall', 'symmetry', 'empty', 'wedge'] as const
 export const PatchPresetIdSchema = z.enum(PATCH_PRESET_IDS)
 export type PatchPresetId = z.infer<typeof PatchPresetIdSchema>
 /** The fields a patch rule may carry a condition for, in schema order. */

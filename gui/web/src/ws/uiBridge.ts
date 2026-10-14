@@ -561,6 +561,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
         return unsupported(cmd.type, 'gui_control applies this on the server through case_create / case_validate; this window should not receive it')
       case 'start_mesh':
         return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
+      case 'set_patch':
+        return unsupported(cmd.type, 'gui_control applies this on the server through case_edit; this window should not receive it')
       case 'open_mesh_dialog':
         // The server keeps the draft (guiMesh.ts); the dialog shows what it sent.
         u.showMeshDialog(meshDraftOf(cmd, u.meshDialog?.draft ?? null))

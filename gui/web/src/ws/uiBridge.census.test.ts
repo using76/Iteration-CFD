@@ -159,7 +159,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  set_patch: 'STU-07a',
   open_boundary_editor: 'STU-07b',
   select_step: 'STU-08b',
   set_centerline: 'STU-09',
