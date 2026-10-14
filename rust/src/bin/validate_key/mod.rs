@@ -150,15 +150,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 // --------------------------------------------------------------- manifest --
 
-/// Whether a key is a tracked file under `reference/`, a `fetched` file its
-/// host grants no redistribution of, or a literal still typed into a source
-/// file.
+/// Whether a key is a tracked file under `reference/`, a `fetched` file whose
+/// host grants no redistribution this repository's licence can carry, or a
+/// literal still typed into a source file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     /// A tracked file under `reference/`.
     File,
     /// A file under `reference/` that is NOT tracked: its host grants no
-    /// redistribution, the row pins its digest, and
+    /// redistribution this repository can use (none at all, or a
+    /// non-commercial licence), the row pins its digest, and
     /// `tools/keys/fetch_answer_keys.py fetch` fetches it.
     Fetched,
     /// A literal still typed into a source file.
@@ -581,6 +582,133 @@ pub fn ghia_1982() -> Result<Ghia> {
     })
 }
 
+// --------------------------------------------------------- ERCOFTAC T3A --
+
+/// The manifest id of the T3A summary table (SPEC-LIT §144.1).
+pub const T3A_ID: &str = "ercoftac-t3a";
+
+/// The nine column names of the T3A summary table, in the file's order.
+const T3A_COLUMNS: [&str; 9] = [
+    "RUN", "X", "REX", "UO", "CF", "H", "RETHETA", "DELTA", "TUFS",
+];
+
+/// One station of the ERCOFTAC T3A summary table (`t3ay.dat`), as printed:
+/// the single-wire run id, the axial position `x` from the leading edge in
+/// mm, `Re_x = x U0 / nu`, the free-stream velocity `U0` in m/s, the skin
+/// friction coefficient `Cf`, the shape factor `H`, `Re_theta`, the 99 %
+/// thickness in mm and the free-stream turbulence intensity `Tu` in %.
+#[derive(Clone, Debug, PartialEq)]
+pub struct T3aStation {
+    pub run: String,
+    pub x_mm: f64,
+    pub re_x: f64,
+    pub u0: f64,
+    pub cf: f64,
+    pub h: f64,
+    pub re_theta: f64,
+    pub delta_mm: f64,
+    pub tu_pct: f64,
+}
+
+/// The T3A key: every station in file order and the key's digest line
+/// ([`KeyFile::digest_line`]'s shape).
+#[derive(Debug)]
+pub struct T3a {
+    pub stations: Vec<T3aStation>,
+    pub digest_line: String,
+}
+
+/// Parse the T3A summary table (SPEC-LIT §144.1). The column header is the
+/// first line whose whitespace-separated fields are exactly
+/// `RUN X REX UO CF H RETHETA DELTA TUFS`; lines before it are the file's
+/// title and key and are skipped. Every later non-empty line is a station:
+/// nine fields, the run id then eight numbers. Refuses by name
+/// (`Error::Parse`, `msg` naming `ercoftac-t3a`): no header line; a station
+/// line with another field count (line number); a cell that does not parse
+/// as `f64` (line number, cell text); a non-finite cell, or an `X`, `REX`,
+/// `UO`, `CF` or `TUFS` that is not positive (line number, column); no
+/// station at all.
+pub fn parse_t3ay(path: &str, text: &str) -> Result<Vec<T3aStation>> {
+    let refuse = |msg: String| Error::Parse {
+        path: path.to_string(),
+        msg: format!("answer key \"{T3A_ID}\": {msg}"),
+    };
+    let mut lines = text.lines().enumerate();
+    lines
+        .by_ref()
+        .find(|(_, l)| l.split_whitespace().eq(T3A_COLUMNS.iter().copied()))
+        .ok_or_else(|| {
+            refuse(format!(
+                "no column header line \"{}\"",
+                T3A_COLUMNS.join(" ")
+            ))
+        })?;
+    let mut stations = Vec::new();
+    for (i, line) in lines {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.is_empty() {
+            continue;
+        }
+        let n = i + 1;
+        if fields.len() != T3A_COLUMNS.len() {
+            return Err(refuse(format!(
+                "line {n} has {} fields, expected {}",
+                fields.len(),
+                T3A_COLUMNS.len()
+            )));
+        }
+        let mut v = [0.0f64; 8];
+        for (k, cell) in fields[1..].iter().enumerate() {
+            let x: f64 = cell
+                .parse()
+                .map_err(|_| refuse(format!("line {n}: the cell \"{cell}\" is not a number")))?;
+            let positive = matches!(k, 0..=3 | 7);
+            if !x.is_finite() || (positive && x <= 0.0) {
+                return Err(refuse(format!(
+                    "line {n}: {} = {cell} is not a {} number",
+                    T3A_COLUMNS[k + 1],
+                    if positive { "positive finite" } else { "finite" }
+                )));
+            }
+            v[k] = x;
+        }
+        stations.push(T3aStation {
+            run: fields[0].to_string(),
+            x_mm: v[0],
+            re_x: v[1],
+            u0: v[2],
+            cf: v[3],
+            h: v[4],
+            re_theta: v[5],
+            delta_mm: v[6],
+            tu_pct: v[7],
+        });
+    }
+    if stations.is_empty() {
+        return Err(refuse("the table holds no station".to_string()));
+    }
+    Ok(stations)
+}
+
+/// `ercoftac_t3a_from(&Manifest::load()?, &reference_dir())`.
+pub fn ercoftac_t3a() -> Result<T3a> {
+    ercoftac_t3a_from(&Manifest::load()?, &reference_dir())
+}
+
+/// The T3A key through `manifest`, its file under `dir`: [`load_text_from`]'s
+/// refusals (an absent file is `Error::Io` with `NotFound`, the key being
+/// `fetched` and git-ignored), then [`parse_t3ay`]'s.
+pub fn ercoftac_t3a_from(manifest: &Manifest, dir: &Path) -> Result<T3a> {
+    // answer-key: ercoftac-t3a
+    let (digest_line, text) = load_text_from(manifest, dir, T3A_ID)?;
+    let file = manifest.row(T3A_ID).map(|r| r.file.clone()).unwrap_or_default();
+    let stations = parse_t3ay(&display_path(&dir.join(file)), &text)?;
+    Ok(T3a {
+        stations,
+        digest_line,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,7 +944,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 42, "forty-two markers, found {markers:?}");
+        assert_eq!(markers.len(), 43, "forty-three markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -864,7 +992,7 @@ mod tests {
             .collect();
         assert_eq!(
             fetched_ids,
-            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590"]
+            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590", "ercoftac-t3a"]
         );
         for row in &m.rows {
             assert!(!row.source.is_empty(), "{}: an empty source cell", row.id);
@@ -891,7 +1019,7 @@ mod tests {
     /// The `fetched` rows' files are git-ignored, so their presence is a
     /// property of the TREE, not of the manifest: one that is present must
     /// carry exactly the digest its row pins, and one that is absent must be
-    /// plainly absent (NotFound) - on a clean clone all three are.
+    /// plainly absent (NotFound) - on a clean clone all four are.
     #[test]
     fn every_fetched_key_that_is_present_matches_its_manifest_digest() {
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
@@ -902,8 +1030,8 @@ mod tests {
             .collect();
         assert_eq!(
             fetched.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590"],
-            "exactly the three fetched rows, in manifest order"
+            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590", "ercoftac-t3a"],
+            "exactly the four fetched rows, in manifest order"
         );
         let mut present = 0usize;
         for row in &fetched {
@@ -921,7 +1049,7 @@ mod tests {
                 ),
             }
         }
-        println!("  [answer-key] fetched keys present on this tree: {present}/3");
+        println!("  [answer-key] fetched keys present on this tree: {present}/4");
     }
 
     /// A `fetched` row reads exactly as a `file` row through
@@ -951,6 +1079,109 @@ mod tests {
         ));
         assert!(refused.contains("\"f\""), "{refused}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------------- ERCOFTAC T3A --
+
+    /// A synthetic summary in the T3A file's layout - invented numbers, not
+    /// the ERCOFTAC data, which is not distributed (SPEC-LIT §144.1).
+    const T3A_SYNTHETIC: &str = "TITLE\n\nKEY : RUN  THE RUN NUMBER\n      X    THE POSITION\n\n   \
+        RUN         X          REX          UO        CF          H      RETHETA    DELTA      TUFS\n \
+        1W00001      10.0     1.000E+04      5.00    0.006000     2.600      50.0      1.00     3.000\n \
+        1W00002      20.0     2.000E+04      5.01    0.004000     2.500      70.5      1.50     2.500\n";
+
+    /// [`parse_t3ay`] reads the file's layout to the printed digit and
+    /// refuses by name a table that is not that layout.
+    #[test]
+    fn t3ay_parser_reads_a_synthetic_summary_and_refuses_by_name() {
+        let s = parse_t3ay("t.dat", T3A_SYNTHETIC).expect("the synthetic summary parses");
+        assert_eq!(
+            s,
+            [
+                T3aStation {
+                    run: "1W00001".into(),
+                    x_mm: 10.0,
+                    re_x: 1.0e4,
+                    u0: 5.0,
+                    cf: 0.006,
+                    h: 2.6,
+                    re_theta: 50.0,
+                    delta_mm: 1.0,
+                    tu_pct: 3.0,
+                },
+                T3aStation {
+                    run: "1W00002".into(),
+                    x_mm: 20.0,
+                    re_x: 2.0e4,
+                    u0: 5.01,
+                    cf: 0.004,
+                    h: 2.5,
+                    re_theta: 70.5,
+                    delta_mm: 1.5,
+                    tu_pct: 2.5,
+                },
+            ]
+        );
+        let row2 = " 1W00002      20.0     2.000E+04      5.01    0.004000     2.500      70.5      1.50     2.500";
+        let cases: [(String, &str); 7] = [
+            (T3A_SYNTHETIC.replace("RETHETA", "RE_THETA"), "no column header line"),
+            (T3A_SYNTHETIC.replace(row2, " 1W00002  20.0  2.000E+04"), "line 8 has 3 fields"),
+            (T3A_SYNTHETIC.replace("0.004000", "0.0O4"), "line 8: the cell \"0.0O4\""),
+            (T3A_SYNTHETIC.replace("0.004000", "0.0"), "line 8: CF = 0.0 is not a positive"),
+            (T3A_SYNTHETIC.replace("0.004000", "-0.004"), "line 8: CF = -0.004"),
+            (T3A_SYNTHETIC.replace("70.5", "NaN"), "line 8: RETHETA = NaN is not a finite"),
+            (T3A_SYNTHETIC.split(" 1W00001").next().unwrap().to_string(), "no station"),
+        ];
+        for (text, want) in &cases {
+            let got = text_of(parse_t3ay("t.dat", text));
+            assert!(got.contains("\"ercoftac-t3a\""), "{got}");
+            assert!(got.contains(want), "expected '{want}' in: {got}");
+        }
+    }
+
+    /// The fetched T3A key on this tree: placed, it reads sixteen stations
+    /// from x = 45 to 1495 mm with x and Re_x increasing and every Cf and Tu
+    /// positive and finite; absent (a clean clone), it is plainly NotFound
+    /// and the missing-key line names the id and the file, as VAL-01's keys.
+    #[test]
+    fn ercoftac_t3a_key_reads_sixteen_stations_or_is_missing_by_name() {
+        match ercoftac_t3a() {
+            Ok(t) => {
+                let s = &t.stations;
+                assert_eq!(s.len(), 16, "sixteen stations");
+                assert_eq!((s[0].x_mm, s[15].x_mm), (45.0, 1495.0));
+                for w in s.windows(2) {
+                    assert!(w[1].x_mm > w[0].x_mm && w[1].re_x > w[0].re_x, "{w:?}");
+                }
+                for st in s {
+                    assert!(st.cf.is_finite() && st.cf > 0.0, "{st:?}");
+                    assert!(st.tu_pct.is_finite() && st.tu_pct > 0.0, "{st:?}");
+                }
+                assert!(
+                    t.digest_line.starts_with(
+                        "answer key ercoftac-t3a: reference/ercoftac_t3a/t3ay.dat sha256 "
+                    ),
+                    "{}",
+                    t.digest_line
+                );
+                println!("  [answer-key] {} ({} stations)", t.digest_line, s.len());
+            }
+            Err(e) => {
+                assert!(
+                    matches!(&e, Error::Io { source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound),
+                    "an absent fetched key is NotFound, got: {e}"
+                );
+                let line = crate::answer_key_missing_line(T3A_ID, "ercoftac_t3a/t3ay.dat", &e);
+                assert!(
+                    line.starts_with(
+                        "answer key ercoftac-t3a missing: reference/ercoftac_t3a/t3ay.dat "
+                    ),
+                    "{line}"
+                );
+                println!("  [answer-key] {line}");
+            }
+        }
     }
 
     // ------------------------------------------------- chemistry answer keys --

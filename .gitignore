@@ -26,6 +26,8 @@ reference/*
 # ignored by reference/* above and tools/keys/fetch_answer_keys.py fetches it.
 !reference/driver_seegmiller_1985/
 !reference/mccaffrey_1979/
+# docs/17 VAL-04 (decision D-VAL-2): the ERCOFTAC T3A summary table is CC BY-NC-SA,
+# so reference/ercoftac_t3a/ stays ignored by reference/* and is fetched (SPEC-LIT 144.1).
 # docs/17 DST-00: the dust stream's answer keys (SPEC-LIT 151.6), digitised from the
 # two open Huang et al. papers and H22's Table 1 as printed; small and tracked.
 !reference/huang2020-leeds/

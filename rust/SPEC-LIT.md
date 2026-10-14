@@ -48271,6 +48271,89 @@ a measurement of the intercept.
 that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
 only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
 
+## 144. The flat-plate harness, Blasius, T3A leg 4 and the ZPG plate
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
+VAL-30 to VAL-34, and §12's rows place the T3A key here as §144.1 (VAL-04). §144.2 (the
+Blasius harness, VAL-31), §144.3 (the T3A case, VAL-32), §144.4 (leg 4, VAL-33) and §144.5
+(the ZPG plate, VAL-34) are not yet written. §88.10 and §90.10 name the T3A rig's open legs:
+"no published digit-level onset `Re_x` for T3A was found to compare against". This section's
+first part is the measured key leg 4 will be held against. No solver, gate or test that
+existed before it changes.
+
+### 144.1 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
+
+**Source.** The ERCOFTAC Classic Collection, case 020, "Flat Plate Transitional Boundary
+Layers - Experiments by Coupland" (<http://cfd.mace.manchester.ac.uk/ercoftac/doku.php?id=cases:case020>,
+read 2026-10-14). The page cites **P. E. Roach and D. H. Brierley, "The influence of a
+turbulent free stream on zero pressure gradient transitional boundary layer development.
+Part 1: testcases T3A and T3B"**, in *Numerical Simulation of Unsteady Flows and Transition to
+Turbulence* (eds. Pironneau, Rodi, Ryhming), with the year of the 1990 ERCOFTAC workshop; the
+proceedings volume is Cambridge University Press (1992), the year docs/17 quotes. The paper
+itself was not read. The numbers are the host's data file, measured with hot wires in the
+Rolls-Royce Applied Science Laboratory tunnel on a flat plate with a 0.75 mm leading-edge
+radius, the T3A grid giving an upstream `U0 = 5.4 m/s` and `Tu = 3.0 %` (the page's table).
+
+**The file.** `reference/ercoftac_t3a/t3ay.dat` is the case's summary table for T3A exactly as
+the host serves it
+(<http://cfd.mace.manchester.ac.uk/ercoftac/lib/exe/fetch.php?media=cdata:case020:t3ay.dat>):
+2181 bytes, LF line endings, sha256
+`61b15b27511fb940409bab20b67c4776c170f2a1679e4a369a6536ab9043e8cc` (fetched twice on
+2026-10-14 with the same digest). After a title and a column key, one header line
+`RUN X REX UO CF H RETHETA DELTA TUFS` precedes sixteen stations, one per single-wire
+traverse, from `x = 45` to `1495 mm`. The columns are the run number, the axial position `x`
+from the leading edge (mm), the Reynolds number on `x` and `U0`,
+
+```
+  Re_x = x U0 / nu                                                                  (144.1)
+```
+
+the local free-stream velocity `U0` (m/s), the skin-friction coefficient `Cf`, the shape
+factor `H`, `Re_theta`, the 99 % thickness `delta` (mm), and the free-stream turbulence
+intensity `Tu` (%). One file therefore carries both measured series docs/17 names: `Cf(Re_x)`
+and the free-stream decay `Tu(x)`.
+
+**What Cf is.** The case page states it: the law of the wall (Karman and offset constants
+0.41 and 5.20), a Preston tube and the momentum balance agreed to within 2 % in turbulent
+layers; heated-film and razor-blade calibrations failed, so the momentum balance was used in
+the laminar and transitional zones. It agreed with the wall slope to better than 1 % in a
+laminar layer at negligible free-stream turbulence. Leg 4's `u_D` (VAL-33) starts from these
+two figures. The page does not say which of the three agreeing methods the turbulent stations
+print.
+
+**Licence: fetched, never tracked (docs/17 decision D-VAL-2).** The Classic Collection is
+published under CC BY-NC-SA 4.0 (the site footer). A non-commercial share-alike licence does
+not fit this repository's licence, so the file is a `fetched` row of `reference/PROVENANCE.md`
+(row `ercoftac-t3a`), as the MKM files of §110.2 are. `reference/*` in `.gitignore` keeps
+`reference/ercoftac_t3a/` out of the tree. `tools/keys/fetch_answer_keys.py fetch` downloads
+it from the URL above, or takes `t3ay.dat` from a folder with `--from DIR`. It keeps the bytes
+only when their digest is the row's. When the download fails it prints the manual placement:
+the case page to download `t3ay.dat` from, and the `--from` command that checks and places
+it. No number of the file is copied into this section, a test or a source file. Tests
+assert the file's shape and signs, and the digest pins every byte.
+
+**The loader.** `key::ercoftac_t3a()` in `src/bin/validate_key/mod.rs` reads the file through
+the manifest (`load_text_from`: the digest, then the text) and `key::parse_t3ay` parses it.
+The header is the first line whose whitespace fields are exactly the nine names above. Every
+later non-empty line is one station of nine fields, the run id then eight numbers. The parser
+refuses by name (`answer key "ercoftac-t3a": ...`, with the line number) a missing header, a
+station with another field count, a cell that is not a number, a non-finite cell, and an `X`,
+`REX`, `UO`, `CF` or `TUFS` that is not positive. It also refuses a table with no station. An
+absent file is `Error::Io` with `NotFound`. A gate prints `answer key ercoftac-t3a missing:
+reference/ercoftac_t3a/t3ay.dat ...` (§110.1's line) and reports open, never passed.
+
+**Tests** (`key::tests`, the validate binary). `t3ay_parser_reads_a_synthetic_summary_and_refuses_by_name`
+parses an invented two-station table in the file's layout to the printed digit, then each
+refusal. `ercoftac_t3a_key_reads_sixteen_stations_or_is_missing_by_name` holds the tree's key.
+Placed, it must read 16 stations from `x = 45` to `1495 mm`, with `x` and `Re_x` strictly
+increasing and every `Cf` and `Tu` positive and finite. Absent, it must be `NotFound` and the
+missing line must name the id and the file. The census test counts 43 markers and four
+`fetched` rows.
+
+**Not claimed.** No gate reads the key yet: leg 4 is VAL-33's, and its verdict word against a
+measurement is `MISSES` (measurement), as VAL-33's row states. Nothing here judges the
+quality of the measurement beyond what the host page states.
+
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the

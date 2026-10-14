@@ -237,8 +237,10 @@ Neither of these is redistributed in this repository. What `reference/` DOES
 carry is the answer keys `ofgpu-validate` is held against - small tables of
 published numbers, each named in `reference/PROVENANCE.md` with its source,
 DOI or URL, licence and SHA-256; those files are tracked, except the three
-Moser-Kim-Mansour channel DNS profiles (manifest kind `fetched`), whose host
-states no redistribution terms: a user downloads them with
+Moser-Kim-Mansour channel DNS profiles, whose host states no redistribution
+terms, and the ERCOFTAC Classic Collection's T3A summary table (case 020,
+t3ay.dat), which is published under CC BY-NC-SA 4.0 (manifest kind
+`fetched`, both): a user downloads them with
 `tools/keys/fetch_answer_keys.py fetch`, which checks each against its pinned
 digest. Everything else under `reference/` is git-ignored and must be cloned
 separately; nothing in the build depends on it.
