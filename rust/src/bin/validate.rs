@@ -3629,6 +3629,13 @@ fn run(c: &mut Checks) -> Result<()> {
     validate_gates::martin_moyce::check_martin_moyce(c, &gpu)?;
     c.leave_gate();
     }
+    // SPEC-LIT 146.2 - Gate 78-D's measured leg: each splash criterion of
+    // SPEC-LIT 78.4 against Riboux & Gordillo's (2014) threshold speeds,
+    // host only (src/bin/validate_gates/splash.rs); it opens one gate scope
+    // per criterion itself.
+    if c.section("Gate 78-D measured leg: the two splash criteria against Riboux & Gordillo 2014's threshold speeds, eight liquids (SPEC-LIT 146.2)") {
+    validate_gates::splash::check_splash_thresholds(c)?;
+    }
 
     Ok(())
 }

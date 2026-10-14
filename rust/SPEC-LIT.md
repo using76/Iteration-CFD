@@ -19340,6 +19340,18 @@ is what gate 78-A does, to `10^-8` — is a transcription check, and calling it 
 validation would be exactly the confusion §69 exists to prevent. §78.12 names
 it.
 
+**Addendum (VAL-70, §146.2): both criteria are now measured, against another
+experiment.** The measurement is Riboux & Gordillo's (2014) splash threshold
+speeds for millimetric drops of eight liquids on smooth glass (§146.1). Each
+criterion, at its shipped default, predicts each row's threshold through
+(78.4c), and the band is ±20 % per row with at least 6 of the 8 liquids inside
+(146.5)-(146.6). Mundo is low on every row (`e` from −0.73 to −0.21, no liquid
+inside). Bai & Gosman crosses the data near ethanol (one liquid inside, `e`
+from −0.40 to +0.69). Both are registered `MISSES`, each under its own name.
+Mundo's own droplet-wall data are still not transcribed, so the paragraph
+above still holds for them. The 4.78 comparison in the table above is
+unchanged and stays `OPEN`.
+
 **Why `mundo` is the default** is not a physical argument and is not presented
 as one: it is the threshold the design note prescribes, and (78.4b) makes its
 decision polynomial and therefore bit-stable where `La^(-0.18)` is not (§38.6).
@@ -50094,7 +50106,7 @@ transcribed, so they are not gated.
 ## 146. Riboux & Gordillo's splash threshold — the measured key for Gate 78-D
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §146 to VAL-05 (§146.1, the
-answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D, not yet written). §78.10 says
+answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D). §78.10 says
 that neither splash criterion of §78.4 is measured against an experiment here, because Mundo's
 boundary is a figure and nothing in this repository transcribes it. This section is the key
 that closes that gap with a different experiment. No solver, gate or test that existed before
@@ -50229,6 +50241,76 @@ that stays inside the print's own precision is not caught. `R = 1.34` read as `1
 `μ = 1.3 cP`, or water's `0.95 cP` read as `0.9`, both pass. The re-reading of the page is the
 only guard against them. A misread `V*` away from Fig. 1's row is caught only by check (b)
 above, which is not a test.
+
+### 146.2 Gate 78-D's measured leg: each criterion against the measured threshold
+
+`src/bin/validate_gates/splash.rs`, `check_splash_thresholds`, the section titled "Gate 78-D
+measured leg" in `ofgpu-validate`. Host only: no mesh and no device. It runs in well under a
+second.
+
+**What is predicted.** For every row of §146.1's key, each criterion of §78.4 gives the lowest
+normal speed at which the impact map returns `Splash`. That speed is the closed-form inverse
+(78.4c), taken from the crate's own `WallImpactControls::boundary_speed`, so the leg measures the
+criterion the parcel kernel decides with. The inputs are the row's printed `ρ`, `σ` and `μ`,
+with `σ` held constant (`SurfaceTension::Constant`) and the diameter `d = 2R` of (146.2). The
+constants are the shipped defaults, `K_crit = 57.7` for Mundo and `A = 2630` (the smooth, dry
+end) for Bai & Gosman. Nothing is fitted to the key.
+
+**The band, stated before the run.** With `V_c,i` the criterion's speed for row `i` and `V*_i`
+the key's measured one,
+
+```
+  e_i = (V_c,i − V*_i) / V*_i,     row i is inside when  |e_i| <= 0.20                  (146.5)
+```
+
+Docs/17's row allows the paper's own error bar where one is printed. None is. Fig. 1's bracket
+(`2.01 < 2.19 < 2.28 m/s`) is the two neighbouring impacts of one series and not an error bar,
+and at −8.2 % and +4.1 % it is narrower than the band anyway. So every row has the same ±20 %.
+A NaN is never inside.
+
+**How a liquid counts.** The key has 17 rows for eight liquids, and docs/17 counts liquids.
+
+```
+  liquid L is inside when every one of its rows is inside (146.5);
+  a criterion holds when at least 6 of the 8 liquids are inside                         (146.6)
+```
+
+No averaging over a liquid's radii can then hide a row that misses. A criterion that holds
+passes a check row. A criterion that does not is registered as `MISSES` under its own gate name,
+`SPEC-LIT 146.2 Gate 78-D measured leg, mundo` or `…, baiGosman`, each reported inside its own
+scope (§69.4). The `78-D` row of §78.10, the 4.78 between the two criteria, is untouched and
+stays `OPEN`.
+
+**Precision.** The band is a physics band, class P (docs/17 §5.1.4): the same in both builds.
+The key and `e_i` are `f64`. `boundary_speed` runs in `Scalar`, and under `single` its relative
+error, of order `1e-6`, is far below the nearest row's distance from the band edge (`2.3e-3` in
+`e`).
+
+**The viscosity's printed digits.** §146.1 found the table's `μ` printed to one or two
+significant figures. The leg is also run with `μ_Oh = Oh (ρ σ R)^(1/2)`, the viscosity that
+reproduces the printed `Oh`. That run is printed as a note and decides nothing. It moves `V_c`
+by at most 2.2 % (Mundo) and 2.0 % (Bai & Gosman), on acetone, and changes no liquid's count.
+
+**What was measured, on this machine** (`-sections 64`, both builds the same to the printed
+digits).
+
+| criterion | rows inside (146.5) | liquids inside (146.6) | `e` from | to | verdict |
+|---|---|---|---|---|---|
+| Mundo, `K_crit = 57.7` | 0 of 17 | 0 of 8 | −0.734 (water, `R = 1.96 mm`) | −0.214 (PDMS, `R = 0.89 mm`) | `MISSES` |
+| Bai & Gosman, `A = 2630` | 3 of 17 | 1 of 8 (ethanol) | −0.396 (water, `R = 1.96 mm`) | +0.690 (PDMS, `R = 0.89 mm`) | `MISSES` |
+
+Mundo predicts splash at 0.27 to 0.79 of the measured speed on every row: it is low everywhere.
+Bai & Gosman is low on the three thin liquids (acetone, water and methanol, −0.22 to −0.40) and
+high on the four silicone liquids (+0.15 to +0.69). It crosses the measurements near ethanol,
+whose two rows and the larger decamethyltetrasiloxane drop are the three inside. Bai & Gosman's
+dodecamethylpentasiloxane row at `R = 1.37 mm` sits at `e = +0.2023`, outside by 0.0023. The
+band is not moved for it.
+
+**What the leg does not say.** It does not say why. Both criteria come from other experiments. Neither contains a gas property, and Riboux & Gordillo's own model of `V*` does (their
+Table II's mean free path, gas viscosity and density). The leg cannot separate that from the
+other differences: drop size, the surface, and how each paper defines the onset of splash. Mundo's
+own droplet-wall data are still not transcribed (§78.10), so this leg measures the criteria on
+millimetric drops on glass, which is a different experiment from the one either was fitted to.
 
 ---
 
