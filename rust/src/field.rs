@@ -553,6 +553,7 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "cyclic",
     "cyclicSlip",
     "processor",
+    "cyclicAMI",
     "inletOutlet",
     "turbulentIntensityKineticEnergyInlet",
     "turbulentMixingLengthDissipationRateInlet",
@@ -919,6 +920,11 @@ impl BcKind {
             "symmetry" | "symmetryPlane" | "slip" => Self::Symmetry,
             "wedge" => Self::Wedge,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
+            // SPEC-LIT 120.13: a static arbitrary mesh interface. The polyMesh
+            // reader imprints its two patches into one conformal pair
+            // (SPEC-LIT 120.18), so on the field it IS the conformal cyclic;
+            // a moving mesh refuses it by name (`HostMesh::refuse_a_moving_cyclic_ami`).
+            "cyclicAMI" => Self::Cyclic,
             "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
             "turbulentIntensityKineticEnergyInlet" => {
@@ -1355,17 +1361,6 @@ impl BcKind {
             // today and the condition is reached through the API.
             "advective" => Self::Advective,
 
-            "cyclicAMI" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "an arbitrary mesh interface couples two NON-conformal patches through interpolation weights, which this solver does not have; its cyclic couples two conformal patches face by face by position (SPEC-LIT 31.1); write cyclic when the two patches are conformal",
-                    "cyclic, paired face by face by position with no AMI weights (wrong unless the two patches are conformal)",
-                    Self::Cyclic,
-                );
-            }
-
             // SPEC-LIT §120: the permanent refusals. Each of these names is
             // catalogue row `refused`: it cannot be made meaningful by any
             // unit of the completion plan, so instead of the generic menu it
@@ -1390,7 +1385,7 @@ impl BcKind {
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
                     &["cyclic"],
-                    "cyclicACMI couples two patches that only partly overlap and turns the uncovered part into a wall face by face; this solver couples conformal faces only, and a static, fully overlapping interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "cyclicACMI couples two patches that only partly overlap and turns the uncovered part into a wall face by face; this solver couples conformal faces only, and a static, fully overlapping interface is cyclicAMI, which the polyMesh reader imprints into a conformal cyclic (SPEC-LIT 120.13)",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
                 );
@@ -1412,7 +1407,7 @@ impl BcKind {
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
                     &["cyclic"],
-                    "the non-conformal coupled patch family intersects its two sides while the case runs, moving meshes included; this solver couples conformal faces only, and a static non-conformal interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "the non-conformal coupled patch family intersects its two sides while the case runs, moving meshes included; this solver couples conformal faces only, and a static non-conformal interface is cyclicAMI, which the polyMesh reader imprints into a conformal cyclic (SPEC-LIT 120.13)",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
                 );
@@ -1992,38 +1987,26 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. `cyclicAMI` used to be an alias
-    /// to a condition that is NOT what it names: it needs interpolation
-    /// weights the solver does not have. (`outletInlet` was the second until
-    /// SPEC-LIT 120.4 made it a condition of its own, and `uniformFixedValue`
-    /// the third until SPEC-LIT 120.1 made it read its `uniformValue`
-    /// Function1.) Refused by name; `-permissive` substitutes the documented
-    /// fallback and warns once per setting.
+    /// SPEC-LIT 120.13 (and §13.4.4's audit): `cyclicAMI` was refused by
+    /// name, because pairing a NON-conformal interface by position is not
+    /// what it names. The polyMesh reader now imprints the pair into a
+    /// conformal one (SPEC-LIT 120.18), so the field name IS the conformal
+    /// cyclic, accepted with no warning and no `-permissive`.
     #[test]
-    fn the_condition_that_is_not_its_alias_is_refused_by_name() {
+    fn cyclic_ami_is_the_conformal_cyclic_its_imprint_makes() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
-        let (name, word) = ("cyclicAMI", "cyclic");
-        let e = BcKind::from_name(name, "U", "inlet")
-            .expect_err(&format!("{name} must be refused by name"));
-        let msg = e.to_string();
-        assert!(msg.contains(name), "{msg}");
-        assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
-        assert!(msg.contains("-permissive"), "{msg}");
-        assert!(msg.contains(word), "{msg}");
-
-        crate::io::contract::set_permissive(true);
         assert!(matches!(
-            BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
+            BcKind::from_name("cyclicAMI", "U", "inlet").expect("accepted"),
             BcKind::Cyclic
         ));
+        assert!(IMPLEMENTED_BC_NAMES.contains(&"cyclicAMI"));
         assert!(
-            crate::io::contract::warned("U: boundaryField/inlet/type"),
-            "the substitution must be announced"
+            !crate::io::contract::warned("U: boundaryField/inlet/type"),
+            "an implemented name is not a substitution"
         );
-        crate::io::contract::set_permissive(false);
     }
 
     /// SPEC-LIT 120.4: the two outlets are conditions of their OWN, on any
@@ -2090,7 +2073,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [97, 5, 8, 10, 10], "the per-status counts");
+        assert_eq!(counts, [98, 5, 7, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

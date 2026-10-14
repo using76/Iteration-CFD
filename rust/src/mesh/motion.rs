@@ -166,6 +166,7 @@ impl MeshMotion {
         faces: &[Vec<Label>],
         rules: &[(&str, PatchMotion)],
     ) -> Result<Self> {
+        m.refuse_a_moving_cyclic_ami("MeshMotion::new")?;
         if m.n_points != 0 && rest.len() != m.n_points {
             return Err(Error::Mesh(format!(
                 "MeshMotion::new: {} rest points for a mesh of {} points",

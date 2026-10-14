@@ -1510,10 +1510,10 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `cyclicAMI` → cyclic, its two patches imprinted conformal as the polyMesh is read (§120.13); `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`) | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::cyclic_ami_is_the_conformal_cyclic_its_imprint_makes`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
-| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; a `cyclicAMI` pair is imprinted into a conformal one by `io::polymesh` first (§120.13) | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
 | JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
 
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
@@ -39890,7 +39890,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 97 names of
+accepts it on the field the row is asked on, and it is one of the 98 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -40013,7 +40013,7 @@ row, row for row.
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
 | synthetic inflow | `turbulentDFSEMInlet` | implemented | — | — | (120.12g)-(120.12k), divergence-free spherical eddies of radius `sigma` convected at `Ubulk`, intensities from `R`; vector fields only |
 | synthetic inflow | `turbulentDigitalFilterInlet` | implemented | — | — | (120.12c)-(120.12f), Klein's Gaussian filter over a random lattice on `planeDivisions` and in time, lengths `L`, Lund's transformation to `R`; vector fields only |
-| coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
+| coupled | `cyclicAMI` | implemented | — | — | static: the polyMesh reader imprints its two sides into a conformal cyclic (§120.13); a moving mesh refuses it by name |
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
 | compressible | `fixedPressureCompressibleDensity` | planned | BC-20 | — | — |
@@ -40054,8 +40054,8 @@ existing behaviour, recorded here and not changed by this unit.
 uncovered part into wall faces face by face; this solver couples conformal
 faces only, so a partly overlapping interface cannot be answered truthfully.
 Mesh the two sides so they match and write `cyclic`. A static interface whose
-two sides overlap FULLY is `cyclicAMI`, which is planned (BC-19, by imprint)
-rather than refused; the partial overlap stays refused.
+two sides overlap FULLY is `cyclicAMI`, which is implemented by imprint
+(§120.13) rather than refused; the partial overlap stays refused.
 
 `cyclicRepeatAMI` maps a patch onto copies of another one repeated around a
 sector; it needs interpolation weights and a repeat transform this solver
@@ -40064,8 +40064,8 @@ does not have. A conformal cyclic pair written as `cyclic` is what stands.
 The `nonConformal*` family (`nonConformalCyclic`, `nonConformalError`,
 `nonConformalMappedWall`) intersects its two coupled sides while the case
 runs, moving meshes included - the mesh topology changing under the solver,
-which this solver never does. A static non-conformal interface is `cyclicAMI`
-and is refused until its faces are imprinted; a conformal one is `cyclic`.
+which this solver never does. A static non-conformal interface is `cyclicAMI`,
+imprinted as the polyMesh is read (§120.13); a conformal one is `cyclic`.
 
 `v2WallFunction` and `fWallFunction` are the wall functions of the v2-f
 turbulence model, which this solver does not have - the model registry
@@ -40095,8 +40095,8 @@ the fallback that refusal names (§13.4): `calculated` for the generic refusal
 of a name outside the catalogue and for every permanent refusal except
 `compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
 fallback `coupledTemperature` (the conjugate coupling without the radiative
-term, §50.8); the planned name refused by its own arm today keeps its own
-(`cyclicAMI` a position-paired `cyclic`).
+term, §50.8). No planned name has an arm of its own any more: `cyclicAMI`,
+the last one, is implemented (§120.13).
 
 ### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
 
@@ -42162,10 +42162,118 @@ not a length, and their two-point correlation is what (120.12g) makes of it.
 
 No GPL-licensed source was consulted.
 
+### 120.13 `cyclicAMI` - a static arbitrary mesh interface, imprinted into a conformal cyclic as the mesh is read (BC-19)
+
+A `cyclicAMI` pair couples two patches that cover the same surface with
+faces that do not match. This solver has no interpolation weights; instead
+`io::polymesh::read_poly_mesh` imprints every such pair with §120.18's
+`mesh::imprint::imprint` before anything else sees the mesh, so the pair
+leaves the reader as two conformal patches written face for face, which is
+what every cyclic is downstream (§31.1): `PatchKind::Cyclic`, the
+`nbr_patch` index, `cyclic_pairing` by position, the §31.1 invariants in
+`build_host_mesh`, and every coupled kernel branch, none of them changed.
+The field name `cyclicAMI` is `BcKind::Cyclic` (it is in
+`IMPLEMENTED_BC_NAMES`, catalogue row implemented). The patch keeps its
+type string `cyclicAMI` verbatim. The type names `cyclicAMI`,
+`neighbourPatch` and `transform rotational` are taken by name only from the
+public user guides of §120; no AMI code was opened.
+
+**The reader.** For each `cyclicAMI` patch `k` whose `neighbourPatch` names
+patch `j`: `j` must be `cyclicAMI` and must name `k` back, else the boundary
+file is refused by name; a `transform rotational` on either side is refused
+by name, because a cyclic pair here maps one side onto the other by a
+translation only (§31.1); the patch that comes first in the file is `A`. A
+missing or unknown `neighbourPatch` falls to §31.1's own refusal. An imprint
+refusal (§120.18: a partial overlap is `cyclicACMI`, a non-planar face, ...)
+is reported with the boundary file's path and the pair. Reading the written
+imprint again re-imprints a matching pair: no new point, the same face and
+patch counts.
+
+**The map handed to the imprint** ((120.18.1) with `R = I`). With `X_P` the
+area centroid of patch `P` (each face fanned into triangles about its vertex
+mean, each triangle at the mean of its three points with area `|Newell|/2`),
+`S_A` the summed area vector of `A` and `n_A = S_A/|S_A|`:
+
+```
+t = 0            if |(y - X_A) . n_A| <= tau for every point y of B   (120.13a)
+t = X_A - X_B    otherwise
+```
+
+with §120.18's `tau`. Two blocks that meet are coplanar and get the identity
+exactly, so an in-plane offset stays an offset and is refused by the
+coverage rule (120.18.5) as `cyclicACMI`; a periodic pair is translated by
+the centroid difference, the translation §31.1's invariant check recovers.
+The stated limit: an in-plane offset of a PERIODIC pair is read as part of
+its translation.
+
+**A moving mesh.** The imprint is made once, from the points at rest.
+`HostMesh::refuse_a_moving_cyclic_ami(who)` refuses any mesh with a
+`cyclicAMI` patch by name, naming `who` and the patch, and both moving-mesh
+entry points call it first: `MeshMotion::new` (§105.9) and `AleMesh::new`.
+
+**The coupled separation.** `mesh/geometry.rs` measures a coupled face
+through both halves, `d = (Cf_own - C_P) + (C_N - Cf_nbr)`, and stores
+`Delta = 1/(n . d)` and `k = n - d Delta` (§2.4). The device least-squares
+gradient (§3.5, `fvGradScalarLeastSquares`, `boundarySeparation` in
+`cuda/fv.cu`) uses for a coupled face
+
+```
+d_dev = Sf / (|Sf| Delta) = n (n . d) = d + k / Delta                 (120.13b)
+```
+
+the normal projection of `d`, which is `d` itself only where the couple is
+orthogonal. On an imprinted 3:2 interface the sub-face pairs are skewed, so
+the fit (§3.5, `w = 1/|d|^2`)
+
+```
+G = sum_f w d d^T,   b = sum_f w d (psi_N - psi_P),   grad = G^-1 b   (120.13c)
+```
+
+with `d_dev` in place of `d` is not exact for a linear field there. This
+unit does not change it: the cure (`d = d_dev - k/Delta` in the kernel) moves
+the coupled least-squares result of every non-orthogonal cyclic, an existing
+path, and is the user's decision (docs/17 §5.3.4).
+
+**The gate (`tests/bc_cyclic_ami.rs`, both builds).** Block A is
+`[0,1] x [0,1]` with 8 x 12 cells, block B `[1,2] x [0,1]` with 8 x 8 (the 3:2
+interface `amiA`/`amiB` at `x = 1`) or 8 x 12 (a conformal one); the ends
+`perA`/`perB` are a second 3:2 `cyclicAMI` pair, translated by 2. Each mesh
+is written by `write_poly_mesh_raw` and read back by `read_poly_mesh`. The
+channel is laminar, `nu = 0.01`, driven by the body force `0.12` along `x`
+(bulk 1, Re 100), `p = 0` on `lowA`, SIMPLE to a cell change below `1e-14`
+(4000 at most); the single blocks are §31.1 periodic channels of 16 x 12 and
+16 x 8 cells over `[0,2] x [0,1]`. `tol(t)` is `t` in f64 and D-F32-1's
+`max(t, min(t 2^29, 1e-5))` under `single`.
+
+| row | claim | class | f64 | single |
+|---|---|---|---|---|
+| pairs | each 3:2 pair 16 + 16 sub-faces on one layer, mutual `nbr_patch`, kind cyclic, type `cyclicAMI`, area 0.1 to `tol(1e-12)`; 160 cells; a second read keeps the counts | D, R | pass | pass |
+| refusals | `transform rotational`; a `cyclicAMI` facing a `cyclic`; B lifted 0.1 (`cyclicACMI`, through the reader); a moving mesh at both entry points | D | pass | pass |
+| oracle | (120.13c) with `d` over the coupled stencil, `psi = (1.7, -0.9, 0.35) . x + 0.42`, two layers: `max |g - a|/|a| <= 1e-11` | A | 2.4e-15 | 2.4e-15 |
+| device LS, off the interface | `<= tol(1e-11)` | R | 2.4e-15 | 9.8e-7 |
+| device LS, at the interface | `<= 1e-11` - **MISSED** 5.1e-2; the device equals its (120.13b) twin to `tol(1e-11)` (2.4e-16 / 1.6e-7), which is the cause | R | MISSED | MISSED |
+| flux | each pair, `max |phi_A + phi_B| <= tol(1e-14) max |phi_A|` | R | 1.5e-16, 4.2e-15 of max | 0 |
+| conformal AMI | both block columns against the 16 x 12 single block, `<= tol(1e-12)` of the peak | R | 3.0e-16 | 2.4e-7 |
+| 3:2 channel | each block's middle column (`x = 0.4375`, `1.5625`) against the single block of its own `ny`, `<= 0.5 %` of the peak - **MISSED** 6.7 % and 7.5 % | P | MISSED | MISSED |
+
+The 3:2 channel's bulk is 0.959 and 0.963 against the single blocks' 1.014
+(ny 12) and 1.031 (ny 8), whose own departures from Poiseuille
+`1.5 (1 - (2y - 1)^2)` are 0.69 % and 1.56 % of the peak. The conformal AMI
+pair matching the single block to round-off through the same reader,
+imprint, field name and coupling says the miss is the discretisation of a
+skewed coupled face, not the wiring: the face value is the linear
+interpolation along `d` with no skewness correction, and the gradients its
+non-orthogonal correction reads are not exact across it ((120.13b)). Under
+`single` every SIMPLE loop stops on the 4000 cap (the f32 SIMPLE floor of
+the BC-07 family); the f64 loops stop on the change after 1439 (3:2), 1786
+(conformal, ny 12) and 1623 (ny 8) iterations.
+
+No GPL-licensed source was consulted.
+
 ### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
 
-`cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
-operation BC-19 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
+`cyclicAMI` is accepted on it since BC-19 (§120.13); this subsection is the
+mesh operation §120.13 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
 `PolyMeshRaw` and two of its patches, `A` and `B`, whose faces cover the same
 surface but do not match, and returns a new `PolyMeshRaw` in which both
 patches are replaced by SUB-FACES: every overlapping pair `(a, b)` of an `A`

@@ -145,6 +145,8 @@ impl PatchKind {
             "empty" => Self::Empty,
             "symmetry" | "symmetryPlane" => Self::Symmetry,
             "wedge" => Self::Wedge,
+            // SPEC-LIT 120.13: `cyclicAMI` reaches here already imprinted
+            // conformal by the polyMesh reader.
             "cyclic" | "cyclicAMI" | "cyclicSlip" => Self::Cyclic,
             "processor" | "processorCyclic" => Self::Processor,
             _ => Self::Generic,
@@ -356,6 +358,25 @@ pub struct MeshReport {
 }
 
 impl HostMesh {
+    /// SPEC-LIT 120.13: a `cyclicAMI` pair is imprinted ONCE, from the mesh
+    /// at rest, as the polyMesh is read; a mesh whose points move would need
+    /// the two sides intersected again at every step, which this solver does
+    /// not do. Every moving-mesh entry point (`MeshMotion::new`,
+    /// `AleMesh::new`) calls this first, and it refuses by name, naming
+    /// `who` and the patch.
+    pub fn refuse_a_moving_cyclic_ami(&self, who: &str) -> Result<()> {
+        match self.patches.iter().find(|p| p.type_name == "cyclicAMI") {
+            Some(p) => Err(Error::Mesh(format!(
+                "{who}: patch '{}' is cyclicAMI, a static interface imprinted once from the \
+                 mesh at rest; on a moving mesh its two sides would have to be intersected \
+                 again at every step, which this solver does not do. Mesh the interface \
+                 conformal and write cyclic, or keep the mesh still (SPEC-LIT 120.13)",
+                p.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// Invert `owner`/`neighbour` into the two CSR maps, and build the merged
     /// global-face-ordered row map on top of them.
     ///

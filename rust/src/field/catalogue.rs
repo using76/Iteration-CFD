@@ -186,7 +186,7 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     // ---- planned (10), by unit --------------------------------------------
     Entry { family: "synthetic inflow", name: "turbulentDFSEMInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "synthetic inflow", name: "turbulentDigitalFilterInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "coupled", name: "cyclicAMI", status: Status::Planned { unit: "BC-19" }, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "coupled", name: "cyclicAMI", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "compressible", name: "inletOutletTotalTemperature", status: Status::Planned { unit: "BC-20" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "compressible", name: "supersonicFreestream", status: Status::Planned { unit: "BC-20" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "compressible", name: "fixedPressureCompressibleDensity", status: Status::Planned { unit: "BC-20" }, field: "psi", extended_by: &[], probes: &[] },
