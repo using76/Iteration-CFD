@@ -151,6 +151,10 @@ pub struct BoundaryTriple<T> {
     /// SPEC-LIT 120.10: the `turbulentInlet` rules, one per patch; drawn
     /// every time step through `field_ops::advance_turbulent_inlet_*`.
     pub turbulent_rules: Vec<TurbulentInletRule>,
+    /// SPEC-LIT 120.12: the synthetic LES inflow rules, one per patch of a
+    /// vector field; drawn every time step through
+    /// `field_ops::advance_synthetic_inlet_vector`.
+    pub synthetic_rules: Vec<crate::field::synthetic::SyntheticRule>,
     /// SPEC-LIT 120.11: the `timeVaryingMappedFixedValue` rules, one per
     /// patch, each with its face values per time folder; uploaded into the
     /// [`TimedBcs`] the `*_timed` setup returns and applied after each
@@ -181,6 +185,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             mean_rules: Vec::new(),
             mapped_rules: Vec::new(),
             turbulent_rules: Vec::new(),
+            synthetic_rules: Vec::new(),
             tv_rules: Vec::new(),
             jump: vec![0.0; n],
             jump_rules: Vec::new(),
@@ -285,7 +290,10 @@ pub struct BcInputs<'a> {
     /// `Simple::begin_time_step` does, for `U`. False - the default, which
     /// every driver passes today - refuses the name: a frozen draw would be
     /// a fixed, randomly perturbed value under a name that promises a
-    /// fluctuation (SPEC-LIT 13.4).
+    /// fluctuation (SPEC-LIT 13.4). The same opt-in covers SPEC-LIT 120.12's
+    /// `turbulentDigitalFilterInlet` and `turbulentDFSEMInlet` on a vector
+    /// field, drawn through `field_ops::advance_synthetic_inlet_vector` -
+    /// which `Simple::begin_time_step` also calls.
     pub turbulent_inlet: bool,
     /// SPEC-LIT 120.7: what the four buoyant pressure names are evaluated
     /// from. `None` - the default, which every setup that solves no `p_rgh`
@@ -1915,6 +1923,8 @@ fn scalar_patch(
             | "pressureDirectedInletOutletVelocity"
             | "pressureInletOutletParSlipVelocity"
             | "atmBoundaryLayerInletVelocity"
+            | "turbulentDigitalFilterInlet"
+            | "turbulentDFSEMInlet"
     ) {
         return Err(Error::Field {
             field: field.to_string(),
@@ -3600,6 +3610,52 @@ fn recycled_inflow(
     })
 }
 
+/// The names of SPEC-LIT 120.12's synthetic LES inflow.
+fn is_synthetic_inflow(name: &str) -> bool {
+    matches!(name, "turbulentDigitalFilterInlet" | "turbulentDFSEMInlet")
+}
+
+/// SPEC-LIT 120.12: one synthetic-inflow patch of a vector field - the
+/// opt-in, the patch frame (120.12b), the entries and the seed, each
+/// refusal by name. The patch occupies `at..at + n` of the boundary.
+fn synthetic_inflow(
+    spec: &PatchFieldSpec,
+    n: usize,
+    at: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+) -> Result<(crate::field::synthetic::SyntheticRule, Vec<Vec3>)> {
+    use crate::field::synthetic::{self, SyntheticRule};
+    let name = spec.type_name.as_str();
+    let base = format!("{field}: boundaryField/{patch}");
+    if !aux.inputs.turbulent_inlet {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}: `{name}` is refused - its fluctuation must be drawn once per \
+                 time step through advance_synthetic_inlet_vector, and this setup was \
+                 given BcInputs::turbulent_inlet = false, so nothing would (SPEC-LIT 120.12)"
+            ),
+        });
+    }
+    let entries = crate::function1::patch_entries(spec, &base)?;
+    let frame = synthetic::patch_frame(
+        &aux.bc_f_local[..n],
+        &aux.normal64[..n],
+        &aux.mag64[..n],
+        field,
+        &base,
+    )?;
+    if name == "turbulentDigitalFilterInlet" {
+        let (rule, seed) = synthetic::build_digital_filter(&entries, &frame, at, field, &base)?;
+        Ok((SyntheticRule::DigitalFilter(rule), seed))
+    } else {
+        let (rule, seed) = synthetic::build_dfsem(&entries, &frame, at, field, &base)?;
+        Ok((SyntheticRule::Dfsem(rule), seed))
+    }
+}
+
 /// SPEC-LIT 120.10's `turbulentInlet` entries and its seed (120.10g).
 fn turbulent_inlet_seed(
     spec: &PatchFieldSpec,
@@ -4578,6 +4634,23 @@ fn vector_patch(
         _ => {}
     }
 
+    // SPEC-LIT 120.12: the synthetic LES inflow, before the static arms for
+    // the same reason - both names map to `FixedValue`. The face is a fixed
+    // value whose refValue the caller's per-time-step draw rewrites
+    // (BcInputs::turbulent_inlet); the seed is the rule's own.
+    if is_synthetic_inflow(spec.type_name.as_str()) {
+        let (rule, seed) = synthetic_inflow(spec, n, at, patch, field, aux)?;
+        for i in 0..n {
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = seed[i];
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = seed[i];
+        }
+        out.synthetic_rules.push(rule);
+        return Ok(());
+    }
+
     // SPEC-LIT 120.10: the recycled inflow, before the static arms - all
     // three names map to `FixedValue` and would be read as a plain fixed
     // value at the `value` entry there. The face is a fixed value whose
@@ -5212,6 +5285,7 @@ pub fn upload_vector(
         mean_rules: b.mean_rules,
         mapped: crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?,
         turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
+        synthetic: crate::field::synthetic::upload_synthetic(gpu, b.synthetic_rules)?,
     })
 }
 
@@ -5342,6 +5416,8 @@ pub fn setup_vector_field_with(
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
+    // SPEC-LIT 120.12: the synthetic LES inflow rules, with their state.
+    f.synthetic = crate::field::synthetic::upload_synthetic(gpu, b.synthetic_rules)?;
     Ok(())
 }
 
@@ -5369,6 +5445,8 @@ pub fn setup_vector_field(
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
+    // SPEC-LIT 120.12: the synthetic LES inflow rules, with their state.
+    f.synthetic = crate::field::synthetic::upload_synthetic(gpu, b.synthetic_rules)?;
     Ok(())
 }
 
@@ -5434,6 +5512,8 @@ pub fn setup_vector_field_timed(
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
+    // SPEC-LIT 120.12: the synthetic LES inflow rules, with their state.
+    f.synthetic = crate::field::synthetic::upload_synthetic(gpu, b.synthetic_rules)?;
     // SPEC-LIT 120.11: the inflow-database patches ride the same clock.
     TimedBcs::upload_with_tv(gpu, &timed, &b.tv_rules)
 }

@@ -655,6 +655,12 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "mapped",
     "mappedFixedValue",
     "turbulentInlet",
+    // SPEC-LIT 120.12: the synthetic LES inflow. Both ride
+    // `BcKind::FixedValue` on a vector field; their refValue is rewritten by
+    // `fldDigitalFilterInlet` / `fldDfsemInlet` every time step
+    // (BcInputs::turbulent_inlet).
+    "turbulentDigitalFilterInlet",
+    "turbulentDFSEMInlet",
     // SPEC-LIT 120.11: the inflow database. A `FixedValue` whose refValue
     // the `TimedBcs` of the `*_timed` setup rewrites after each clock step.
     "timeVaryingMappedFixedValue",
@@ -1026,6 +1032,11 @@ impl BcKind {
             // fluctuation - so all three names are this kind; `field_setup`
             // builds the rule and refuses where no caller refreshes it.
             "mapped" | "mappedFixedValue" | "turbulentInlet" => Self::FixedValue,
+            // SPEC-LIT 120.12: the synthetic LES inflow, a fixedValue whose
+            // refValue the digital filter or the eddies rewrite every time
+            // step; `field_setup` builds the rule and refuses it where no
+            // caller draws it.
+            "turbulentDigitalFilterInlet" | "turbulentDFSEMInlet" => Self::FixedValue,
             // SPEC-LIT 120.11: a fixedValue read from
             // `constant/boundaryData/<patch>`, interpolated in space at setup
             // and in time on the device; `field_setup` builds the rule and
@@ -1777,6 +1788,10 @@ pub struct GpuVectorField {
     /// SPEC-LIT 120.10: as [`GpuScalarField::turbulent`], advanced by
     /// `advance_turbulent_inlet_vector`.
     pub turbulent: Vec<mapped::GpuTurbulentInlet>,
+    /// SPEC-LIT 120.12: the synthetic LES inflow patches, each with its
+    /// parameters and its state on the device, drawn once per TIME step by
+    /// `advance_synthetic_inlet_vector`; none, nothing.
+    pub synthetic: Vec<synthetic::GpuSynthetic>,
 }
 
 impl GpuVectorField {
@@ -1798,6 +1813,7 @@ impl GpuVectorField {
             mean_rules: Vec::new(),
             mapped: Vec::new(),
             turbulent: Vec::new(),
+            synthetic: Vec::new(),
         })
     }
 }
@@ -1881,6 +1897,12 @@ pub mod cyclic_jump;
 /// planar Delaunay triangulation, barycentric face weights and per-time face
 /// slabs - see [`tvmapped::build_rule`] and [`tvmapped::TvMappedRule`].
 pub mod tvmapped;
+
+/// The synthetic LES inflow of SPEC-LIT 120.12: the digital filter and the
+/// divergence-free eddies, their rules, their host twins of the
+/// `fldDigitalFilterInlet` / `fldDfsemInlet` kernels and their device state -
+/// see [`synthetic::df_values`] and [`synthetic::dfsem_values`].
+pub mod synthetic;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -2068,7 +2090,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [95, 5, 10, 10, 10], "the per-status counts");
+        assert_eq!(counts, [97, 5, 8, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

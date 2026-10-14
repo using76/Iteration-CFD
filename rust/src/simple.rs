@@ -757,6 +757,8 @@ impl<'m> Simple<'m> {
         // SPEC-LIT 120.10: a turbulentInlet on U draws its next fluctuation
         // once per time step (BcInputs::turbulent_inlet); no rule, no launch.
         field_ops::advance_turbulent_inlet_vector(gpu, &self.fldk, &mut self.u)?;
+        // SPEC-LIT 120.12: so does a synthetic LES inflow, with this dt.
+        field_ops::advance_synthetic_inlet_vector(gpu, &self.fldk, &mut self.u, dt)?;
         self.momentum.ddt.advance(dt);
         Ok(())
     }

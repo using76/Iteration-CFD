@@ -39890,7 +39890,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 95 names of
+accepts it on the field the row is asked on, and it is one of the 97 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -40011,8 +40011,8 @@ row, row for row.
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
-| synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
+| synthetic inflow | `turbulentDFSEMInlet` | implemented | — | — | (120.12g)-(120.12k), divergence-free spherical eddies of radius `sigma` convected at `Ubulk`, intensities from `R`; vector fields only |
+| synthetic inflow | `turbulentDigitalFilterInlet` | implemented | — | — | (120.12c)-(120.12f), Klein's Gaussian filter over a random lattice on `planeDivisions` and in time, lengths `L`, Lund's transformation to `R`; vector fields only |
 | coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
@@ -41935,6 +41935,230 @@ of `function1.cubin` are SASS-identical in both builds; two are added.
 * **Andrew, A. M.** Another efficient algorithm for convex hulls in two
   dimensions. *Inf. Process. Lett.* 9 (1979) 216-219,
   doi:10.1016/0020-0190(79)90072-3 - the monotone chain of the net check.
+
+No GPL-licensed source was consulted.
+
+### 120.12 The synthetic LES inflow - a digital filter and divergence-free eddies with a prescribed Reynolds stress
+
+BC-16 implements the two synthetic-inflow names of the §120 table,
+`turbulentDigitalFilterInlet` and `turbulentDFSEMInlet`. The names are taken
+from the user guides of §120 by name only; every equation below is cited, or
+is ours and marked DESIGN.
+
+Both are a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`, `refGrad = 0`) on
+a VECTOR field whose `refValue` a kernel rewrites once per TIME step - no new
+evaluation branch (§5.2 of the completion plan). On a scalar field both names
+are refused as vector conditions. The face value is the mean velocity `UMean`
+plus a fluctuation `u'` whose one-point covariance is the prescribed Reynolds
+stress `R`. Both draws are counter-based, so a run with the same `seed` draws
+the same inflow, and a captured graph advances them (§81): the rule's state
+`[n, X]` - the last step drawn and the distance convected - lives on the
+device and is moved on by a one-thread kernel after the per-face one.
+
+**The opt-in.** It is `BcInputs::turbulent_inlet`, the one `turbulentInlet`
+uses (§120.10): the caller draws once per time step, through
+`field_ops::advance_synthetic_inlet_vector(gpu, k, U, dt)`, which
+`Simple::begin_time_step` calls with its `dt`. No driver passes the opt-in
+today - the steady modes of `ofgpu-lowmach` and `ofgpu-buoyant` call
+`begin_time_step` every outer iteration, which would redraw the inflow every
+iteration - so every driver refuses both names by name, as BC-14 recorded for
+`turbulentInlet`. A transient driver path that passes `turbulent_inlet = true`
+makes them usable in a run.
+
+**The draw** *(DESIGN - ours)*. With `mix` the SplitMix64 finaliser of
+`z + 0x9E3779B97F4A7C15` (Steele, Lea & Flood 2014) and `w_0 = 0x243F6A8885A308D3`:
+
+```
+h = mix(seed ^ w_0); h = mix(h ^ t); h = mix(h ^ a); h = mix(h ^ b);
+h = mix(h ^ c); h = mix(h ^ d);   u = (h >> 11) / 2^53,
+eps(t, a, b, c, d) = sqrt(3) (2u - 1)                                 (120.12a)
+```
+
+zero mean and unit variance; the digital filter uses the tag `t = 1`, the
+eddies `t = 2`. Signed integers enter as their two's-complement words.
+
+**The patch frame** *(DESIGN - ours)*. With the f64 face centres `x_f`, unit
+outward normals `n_f` and areas `|S_f|` (§118.2):
+
+```
+nin = -SUM |S_f| n_f / |SUM |S_f| n_f|,   x0 = mean of x_f,
+e_y = the global axis (x, y, z order) other than the one most aligned with
+      nin, projected on the plane and normalised;  e_z = nin x e_y,
+eta_f = e_y . (x_f - x0),   zeta_f = e_z . (x_f - x0)                 (120.12b)
+```
+
+and the patch must be planar: every `|nin . (x_f - x0)|` at most `1e-6` of
+the patch diagonal in `(eta, zeta)`, or the name is refused. A face normal
+to `x` gives `e_y = y`, `e_z = z`.
+
+**The digital filter** (Klein, Sadiki & Janicka 2003). The plane carries a
+lattice of `ny x nz` nodes (`planeDivisions`) spanning the face centres'
+`(eta, zeta)` range, spacing `Delta_y = (eta_max - eta_min)/(ny - 1)` (zero
+when `ny = 1`) and the same in `z`; each face takes its nearest node. Time is
+the third lattice direction through Taylor's hypothesis, spacing
+`Delta_x = Ubulk dt`. For a length `L` and spacing `Delta`, Klein's filter:
+
+```
+n = L/Delta,   N = ceil(2n),   b~_k = exp(-pi k^2 / (2 n^2)),
+b_k = b~_k / sqrt(SUM_{j=-N}^{N} b~_j^2),   k = -N..N                 (120.12c)
+```
+
+(`n = 0` gives `b_0 = 1`). Component `c` of the filtered field at step `n`,
+node `(j, k)`, is the separable sum over a random lattice:
+
+```
+u'_c = SUM_a bt_a SUM_b by_b SUM_d bz_d eps(1, n + a, j + b, k + d, c)  (120.12d)
+```
+
+each filter of (120.12c) with component `c`'s length in that direction -
+`L` is component-major, `(L_ux L_uy L_uz L_vx ... L_wz)`, its direction index
+`x` the streamwise `nin`, `y` and `z` the frame's `e_y` and `e_z`; the
+components are the global ones. `u'` has zero mean and unit variance per
+component (`SUM b^2 = 1` in each direction). The prescribed stress follows
+from Lund, Wu & Squires (1998)'s transformation:
+
+```
+u = UMean + a u',   a = the lower Cholesky factor of R:
+a11 = sqrt(R11), a21 = R21/a11, a22 = sqrt(R22 - a21^2), a31 = R31/a11,
+a32 = (R32 - a21 a31)/a22, a33 = sqrt(R33 - a31^2 - a32^2)            (120.12e)
+```
+
+so `E[(u - UMean)(u - UMean)^T] = a a^T = R`. A zero pivot whose column is
+zero gives a zero column (a stress with a vanishing component); an `R` that
+is not positive semi-definite is refused by name. The correlation of `u'_c`
+at a lag of `k` lattice cells in one direction is `rho(k) = SUM_j b_j b_{j+k}`,
+and by the Poisson sum `SUM_k rho(k) = (SUM_j b_j)^2 = 2n` to within
+`exp(-2 pi)` truncation, so the one-sided integral length is
+
+```
+Delta (rho(0)/2 + SUM_{k>=1} rho(k)) = n Delta = L                   (120.12f)
+```
+
+- the prescribed length, for every component the Cholesky mixing leaves
+unmixed (`a_cj = 0` for `j < c`), and a mixture of lengths otherwise. The
+first time step's `dt` sets the time filter, so the setup's seed face value
+is `UMean`; each launch re-forms the time filter from its own `dt` (a change
+of `dt` changes the time correlation from that step on). A filter half-width
+above 128 cells, or more than `2^22` taps of one component a face, is refused
+by name (at setup for the plane, at the launch for time).
+
+**The divergence-free eddies** (the idea is Poletto, Craft & Revell 2013: a
+sum of eddies, each a radial shape times `r x alpha`, divergence-free by
+construction, with intensities from the Reynolds stress; the spherical shape,
+its constant and the intensity rule below are *DESIGN - ours*). With `N`
+eddies of radius `sigma` in a box of volume `V_B`:
+
+```
+u'(x) = sqrt(V_B / (N sigma^3)) SUM_k F(|r_k|^2) (r_k x alpha_k),
+r_k = (x - x_k)/sigma,   F(q) = (1 - q)^2 for q < 1, 0 otherwise    (120.12g)
+```
+
+`F` and `F'` vanish at `q = 1`, so `u'` is C1. Each term is divergence-free:
+with `d = r_k`, `div (F(|d|^2) d x alpha) = 2 F'(q) d . (d x alpha)/sigma +
+F div(d x alpha) = 0`, both terms zero for any `alpha`:
+
+```
+div u' = SUM_k 2 F'(|r_k|^2) r_k . (r_k x alpha_k) / sigma = 0        (120.12h)
+```
+
+exactly, because the shape is radial and `sigma` is one number per eddy (an
+eddy stretched differently per direction would lose this). With the eddy
+centres uniform in a box that holds every face's support ball, independent
+`alpha_k` of zero mean and covariance `A`, and
+`eps_ijl eps_mjp = delta_lp delta_im - delta_lm delta_ip`:
+
+```
+E[u' u'^T] = G (tr A I - A),
+G = (1/3) INT F(|r|^2)^2 |r|^2 d^3r = (4 pi/3) INT_0^1 r^4 (1 - r^2)^4 dr
+  = (4 pi/3)(128/15015) = 512 pi/45045 = 0.0357082...                 (120.12i)
+```
+
+(the sum `1/5 - 4/7 + 6/9 - 4/11 + 1/13 = 128/15015`). Inverting,
+`tr R = 2 G tr A`, so
+
+```
+A = (tr R/2 I - R) / G,   alpha_k = C eps_k,   C = chol(A)            (120.12j)
+```
+
+with `eps_k` three draws of (120.12a). `A` is positive semi-definite exactly
+when every principal stress is at most the sum of the other two,
+`lambda_i <= lambda_j + lambda_k`; an `R` outside that set - for example the
+strongly one-component stress near a wall - is refused by name, naming
+(120.12j). The limit is this design's own, derived here; Poletto, Craft &
+Revell's abstract says their method reproduces almost all states of
+anisotropy, and their own intensity rule is not used.
+The box and the convection:
+
+```
+s in [-sigma, sigma),  eta in [eta_min - sigma, eta_max + sigma),
+zeta in [zeta_min - sigma, zeta_max + sigma),  V_B = 2 sigma W_eta W_zeta;
+eddy k:  s0_k = -sigma + 2 sigma u(2, k, 0, 0, 0),  w = s0_k + sigma + X,
+g = floor(w / (2 sigma)),  s_k = -sigma + (w - 2 sigma g),
+eta_k, zeta_k from u(2, k, g, 1|2, 0),  eps_k from eps(2, k, g, 3..5, 0),
+x_k = x0 + s_k nin + eta_k e_y + zeta_k e_z,
+X^n = fma(Ubulk, dt, X^(n-1))                                         (120.12k)
+```
+
+so an eddy is carried downstream at `Ubulk` and, on leaving at `s = sigma`,
+re-enters at `s = -sigma` with a new place across the plane and a new
+`alpha`: the streamwise positions stay uniform and the field is stationary.
+`nEddy` defaults to `ceil(V_B / sigma^3)` (about four eddies over a point)
+and is capped at `2^20`. The setup's seed is (120.12g) at `X = 0`.
+
+**Entries** (this solver's own names; each constant, refused by name when
+missing, not finite or of the wrong length). Both: `R` `(xx xy xz yy yz zz)`,
+`UMean` (a vector), `Ubulk` (optional, `UMean . nin` when absent; it must be
+positive), `seed` (optional, 0). The filter: `L` (nine lengths) and
+`planeDivisions` `(ny nz)`. The eddies: `sigma` (positive) and `nEddy`
+(optional). Profiles of `R` or `UMean` are not built.
+
+**Precision.** Everything is f64 in both builds - the draw, the filter sums,
+the eddy sums and the state - and each face value rounds once into `Scalar`
+(§118). The host twins `field::synthetic::df_values` and `dfsem_values` run
+in the device kernels' operation order; the device contracts FMAs and its
+`exp` is not the host's, so the two agree to round-off.
+
+**Tests** (`tests/bc_synthetic.rs`, both builds; the statistics run on the f64
+host twins and are class P, the device rows class R; [brackets] are the
+single build).
+`digital_filter_reproduces_r_and_l` - a 40 x 40 lattice of unit cells,
+400 steps of `Ubulk dt = 1`, `R = (1 0.3 0 0.5 0 0.25)`, lengths `u (2, 1.5,
+2.5)`, `v 1.5`, `w (1.5, 2.5, 1.5)`: every `R_ij` within 0.56 % [0.56 %] of
+`sqrt(R_ii R_jj)` (band 5 %); the integral lengths of `u` and `w` in time,
+`e_y` and `e_z` within 0.78-2.48 % [the same] (band 10 %).
+`dfsem_reproduces_r` - a 2 x 2 plane of 32 x 32 faces, `sigma = 0.25`, 191
+eddies, 6000 steps of `Ubulk dt = 0.05`, `R = (0.8 0.1 0.05 0.6 0.05 0.5)`:
+every `R_ij` within 0.44 % [0.44 %] (band 5 %).
+`dfsem_is_divergence_free` - at 1979 points over 20 convected distances,
+`|div u'| / max|grad u'|` at most 6.5e-16 [6.5e-16] (bound 1e-10), and the
+analytic gradient equals central differences of the velocity to 6.3e-10
+[6.3e-10] of `max|grad u'|` (bound 1e-5).
+`synthetic_device_matches_host` - an 8 x 8 inlet, 6 steps of `dt = 0.025`:
+the filter's device faces equal the twin to 3.3e-16 [0] of `max|u'|`,
+the eddies' to 6.9e-16 [0] (<= 1e-12, class R; the single build rounds both to the same f32); the seeds are `UMean`
+and the `X = 0` field, bit for bit.
+`synthetic_refusals_name_their_reason` - no opt-in, a scalar field, an
+unrealisable `R` for the eddies (accepted by the filter), an `R` that is not
+positive semi-definite, a missing `L`, a bulk velocity out of the domain.
+The correlation-length gate is the filter's: the eddies prescribe a radius,
+not a length, and their two-point correlation is what (120.12g) makes of it.
+
+* **Klein, M., Sadiki, A. & Janicka, J.** A digital filter based generation
+  of inflow data for spatially developing direct numerical or large eddy
+  simulations. *J. Comput. Phys.* 186 (2003) 652-665,
+  doi:10.1016/S0021-9991(03)00090-1 - the Gaussian filter (120.12c) and the
+  filtered random lattice in space and, through Taylor's hypothesis, time.
+* **Lund, T. S., Wu, X. & Squires, K. D.** Generation of turbulent inflow data
+  for spatially-developing boundary layer simulations. *J. Comput. Phys.* 140
+  (1998) 233-258, doi:10.1006/jcph.1998.5882 - the Cholesky transformation
+  (120.12e).
+* **Poletto, R., Craft, T. & Revell, A.** A new divergence free synthetic
+  eddy method for the reproduction of inlet flow conditions for LES. *Flow
+  Turbul. Combust.* 91 (2013) 519-539, doi:10.1007/s10494-013-9488-2 - the
+  divergence-free eddy idea.
+* **Steele, G. L., Lea, D. & Flood, C. H.** Fast splittable pseudorandom
+  number generators. *OOPSLA 2014*, doi:10.1145/2660193.2660195 - the
+  SplitMix64 finaliser of (120.12a).
 
 No GPL-licensed source was consulted.
 

@@ -184,8 +184,8 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "thermal", name: "alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
     // ---- planned (10), by unit --------------------------------------------
-    Entry { family: "synthetic inflow", name: "turbulentDFSEMInlet", status: Status::Planned { unit: "BC-16" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "synthetic inflow", name: "turbulentDigitalFilterInlet", status: Status::Planned { unit: "BC-16" }, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "synthetic inflow", name: "turbulentDFSEMInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "synthetic inflow", name: "turbulentDigitalFilterInlet", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "coupled", name: "cyclicAMI", status: Status::Planned { unit: "BC-19" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "compressible", name: "inletOutletTotalTemperature", status: Status::Planned { unit: "BC-20" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "compressible", name: "supersonicFreestream", status: Status::Planned { unit: "BC-20" }, field: "psi", extended_by: &[], probes: &[] },
