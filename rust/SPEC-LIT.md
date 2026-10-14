@@ -40421,6 +40421,22 @@ velocity through `rAU` and therefore scales with `dt`; at 2.5e-4 it is
 5.6e-6. The fix is an f64 evaluation of that split under `single` (a §118
 numerics change of `vof.cu`), which belongs to the §118 owner.
 
+**`forceSplitDouble`** *(DESIGN - ours; the user's decision of 2026-10-14
+to offer the f64 split as a choice)*. `ofgpu-vof -forceSplitDouble`
+(`VofControls::force_split_double`) is off by default, and off the `single`
+path is the one above, bit for bit. On, under `single`, `Vof::update_force`
+forms the internal-face force in f64 from the stored f32 inputs,
+`-(g . x)_f deltaCoeffs (rho_N - rho_P) |Sf| + sigma kappa_f |Sf|
+snGrad(alpha) - |Sf| deltaCoeffs (p_N - p_P) - c_f` with `c_f` the
+non-orthogonal correction of `|Sf| snGrad(p_rgh)` alone, and rounds once
+(`vofForceFluxSplit64`, compiled only under `single`), so the gravity and
+pressure terms cancel before any f32 rounding; it costs one extra pass over
+the faces. The boundary faces (`momForceFluxBoundary`), the face flux `phi`
+and `phi_HbyA` keep their f32 split, and a run with the §87 Marangoni model
+(`sigma` a field) keeps the f32 path. In the f64 build the setting does
+nothing: the split is already double. Its effect on the column is not
+measured here; the user ruled out further tests of this item.
+
 * **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
   at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
   the modified pressure `p - rho (g . x)` of the two-phase momentum
