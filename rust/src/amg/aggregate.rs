@@ -94,6 +94,40 @@ impl Aggregation {
     pub fn size(&self, agg: usize) -> usize {
         (self.agg_offset[agg + 1] - self.agg_offset[agg]) as usize
     }
+
+    /// The aggregation a given cell-to-aggregate map defines on `l`: the
+    /// members CSR and the coarse addressing of the fold table, built by the
+    /// code `aggregate_level` ends with, with no pass run (`n_pass1 = 0`).
+    /// The map must already be numbered by (141.8), every id `0..n_c` used,
+    /// and `l` passes the checks of §141.1. This is how the union of the
+    /// block-local aggregations of the parts becomes one whole-level
+    /// aggregation (SPEC-LIT §141.10).
+    pub fn from_map(l: &LevelView, cell_agg: Vec<Label>) -> Result<Self> {
+        check_level(l)?;
+        if cell_agg.len() != l.n_cells {
+            return Err(Error::Mesh(format!(
+                "amg::aggregate: length mismatch: the map has {} entries, n_cells is {}",
+                cell_agg.len(),
+                l.n_cells
+            )));
+        }
+        // (141.8): scanning the cells in order, each aggregate id first
+        // appears in the order 0, 1, 2, ...
+        let mut n_c: Label = 0;
+        for (c, &g) in cell_agg.iter().enumerate() {
+            if g < 0 || g > n_c {
+                return Err(Error::Mesh(format!(
+                    "amg::aggregate: the map is not numbered by (141.8): cell {} has aggregate {} \
+                     where at most {} may appear",
+                    c, g, n_c
+                )));
+            }
+            if g == n_c {
+                n_c += 1;
+            }
+        }
+        addressing(l, cell_agg, 0, n_c as usize)
+    }
 }
 
 /// The finest level: addressing and boundary faces from `m`, coefficients
@@ -143,6 +177,120 @@ pub fn aggregate(m: &HostMesh, a: &HostLduMatrix) -> Result<Aggregation> {
 /// Aggregate one level: both passes, the (141.8) numbering and the coarse
 /// addressing of the fold table (SPEC-LIT §141.1).
 pub fn aggregate_level(l: &LevelView) -> Result<Aggregation> {
+    check_level(l)?;
+    let n = l.n_cells;
+    let nf = l.owner.len();
+    let nbf = l.b_face_cells.len();
+
+    // The sign (141.3), summed in f64 in cell order.
+    let mut dsum = 0.0f64;
+    for c in 0..n {
+        dsum += l.diag[c] as f64;
+    }
+    if !dsum.is_finite() || dsum == 0.0 {
+        return Err(Error::Config(format!(
+            "amg::aggregate: diagonal sum is {}, so the sign of the operator (141.3) is undefined",
+            dsum
+        )));
+    }
+    let sigma = if dsum > 0.0 { 1.0 } else { -1.0 };
+
+    // The ordered entries of (141.1)/(141.2), internal faces ascending then
+    // boundary faces ascending. Key = min * n + max; side 0 holds the
+    // (min, max) entry, side 1 the (max, min) entry.
+    let mut ent: Vec<(usize, u8, f64)> = Vec::with_capacity(2 * nf + nbf);
+    for f in 0..nf {
+        let (o, nb) = (l.owner[f] as usize, l.neighbour[f] as usize);
+        let (key, a_lo, a_hi) = if o < nb {
+            (o * n + nb, l.upper[f] as f64, l.lower[f] as f64)
+        } else {
+            (nb * n + o, l.lower[f] as f64, l.upper[f] as f64)
+        };
+        ent.push((key, 0, a_lo));
+        ent.push((key, 1, a_hi));
+    }
+    for bf in 0..nbf {
+        let d = l.b_nbr_cell[bf];
+        if d < 0 {
+            continue; // (141.2) covers coupled faces only
+        }
+        let (c, d) = (l.b_face_cells[bf] as usize, d as usize);
+        let v = -(l.boundary_coeffs[bf] as f64);
+        if c < d {
+            ent.push((c * n + d, 0, v));
+        } else {
+            ent.push((d * n + c, 1, v));
+        }
+    }
+    // Stable: face order survives inside each side of a pair.
+    ent.sort_by_key(|e| e.0);
+
+    // One strength per unordered pair (141.4); the edges come out ascending
+    // by (min, max), which is also the summation order (141.7) needs.
+    let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(ent.len() / 2);
+    let mut t = 0usize;
+    while t < ent.len() {
+        let key = ent[t].0;
+        let (mut a_lo, mut a_hi) = (0.0f64, 0.0f64);
+        while t < ent.len() && ent[t].0 == key {
+            if ent[t].1 == 0 {
+                a_lo += ent[t].2;
+            } else {
+                a_hi += ent[t].2;
+            }
+            t += 1;
+        }
+        let s = -sigma * (a_lo + a_hi) / 2.0;
+        edges.push((key / n, key % n, s));
+    }
+
+    // Pass 1 on the fine graph (Notay's Algorithm 2.1), its aggregates
+    // numbered by (141.8).
+    let pass1 = one_two_passes(n, &edges)?;
+    let n1 = pass1.len();
+    let p1 = pass_map(n, &pass1);
+
+    // Pass 2 (Notay's Algorithm 2.2) on the pass-1 aggregates: the strength
+    // s1_IJ of (141.7), summed in ascending fine-edge order - `edges`
+    // already is in that order.
+    let mut ent2: Vec<(usize, f64)> = Vec::with_capacity(edges.len());
+    for &(lo, hi, s) in edges.iter() {
+        let (a, b) = (p1[lo] as usize, p1[hi] as usize);
+        if a == b {
+            continue;
+        }
+        let key = if a < b { a * n1 + b } else { b * n1 + a };
+        ent2.push((key, s));
+    }
+    ent2.sort_by_key(|e| e.0);
+    let mut edges2: Vec<(usize, usize, f64)> = Vec::with_capacity(ent2.len());
+    let mut t2 = 0usize;
+    while t2 < ent2.len() {
+        let key = ent2[t2].0;
+        let mut s1 = 0.0f64;
+        while t2 < ent2.len() && ent2[t2].0 == key {
+            s1 += ent2[t2].1;
+            t2 += 1;
+        }
+        edges2.push((key / n1, key % n1, s1));
+    }
+    let pass2 = one_two_passes(n1, &edges2)?;
+    let n2 = pass2.len();
+    let p2 = pass_map(n1, &pass2);
+
+    // The final aggregate of a cell is its pass-2 aggregate.
+    let mut cell_agg = vec![0 as Label; n];
+    for i in 0..n {
+        cell_agg[i] = p2[p1[i] as usize];
+    }
+
+    addressing(l, cell_agg, n1, n2)
+}
+
+/// The checks every level passes before it is aggregated or addressed:
+/// the lengths, the finite coefficients and the addressing, each refused
+/// by name (SPEC-LIT §141.1).
+fn check_level(l: &LevelView) -> Result<()> {
     let n = l.n_cells;
     let nf = l.owner.len();
     let nbf = l.b_face_cells.len();
@@ -273,108 +421,15 @@ pub fn aggregate_level(l: &LevelView) -> Result<Aggregation> {
             )));
         }
     }
+    Ok(())
+}
 
-    // The sign (141.3), summed in f64 in cell order.
-    let mut dsum = 0.0f64;
-    for c in 0..n {
-        dsum += l.diag[c] as f64;
-    }
-    if !dsum.is_finite() || dsum == 0.0 {
-        return Err(Error::Config(format!(
-            "amg::aggregate: diagonal sum is {}, so the sign of the operator (141.3) is undefined",
-            dsum
-        )));
-    }
-    let sigma = if dsum > 0.0 { 1.0 } else { -1.0 };
-
-    // The ordered entries of (141.1)/(141.2), internal faces ascending then
-    // boundary faces ascending. Key = min * n + max; side 0 holds the
-    // (min, max) entry, side 1 the (max, min) entry.
-    let mut ent: Vec<(usize, u8, f64)> = Vec::with_capacity(2 * nf + nbf);
-    for f in 0..nf {
-        let (o, nb) = (l.owner[f] as usize, l.neighbour[f] as usize);
-        let (key, a_lo, a_hi) = if o < nb {
-            (o * n + nb, l.upper[f] as f64, l.lower[f] as f64)
-        } else {
-            (nb * n + o, l.lower[f] as f64, l.upper[f] as f64)
-        };
-        ent.push((key, 0, a_lo));
-        ent.push((key, 1, a_hi));
-    }
-    for bf in 0..nbf {
-        let d = l.b_nbr_cell[bf];
-        if d < 0 {
-            continue; // (141.2) covers coupled faces only
-        }
-        let (c, d) = (l.b_face_cells[bf] as usize, d as usize);
-        let v = -(l.boundary_coeffs[bf] as f64);
-        if c < d {
-            ent.push((c * n + d, 0, v));
-        } else {
-            ent.push((d * n + c, 1, v));
-        }
-    }
-    // Stable: face order survives inside each side of a pair.
-    ent.sort_by_key(|e| e.0);
-
-    // One strength per unordered pair (141.4); the edges come out ascending
-    // by (min, max), which is also the summation order (141.7) needs.
-    let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(ent.len() / 2);
-    let mut t = 0usize;
-    while t < ent.len() {
-        let key = ent[t].0;
-        let (mut a_lo, mut a_hi) = (0.0f64, 0.0f64);
-        while t < ent.len() && ent[t].0 == key {
-            if ent[t].1 == 0 {
-                a_lo += ent[t].2;
-            } else {
-                a_hi += ent[t].2;
-            }
-            t += 1;
-        }
-        let s = -sigma * (a_lo + a_hi) / 2.0;
-        edges.push((key / n, key % n, s));
-    }
-
-    // Pass 1 on the fine graph (Notay's Algorithm 2.1), its aggregates
-    // numbered by (141.8).
-    let pass1 = one_two_passes(n, &edges)?;
-    let n1 = pass1.len();
-    let p1 = pass_map(n, &pass1);
-
-    // Pass 2 (Notay's Algorithm 2.2) on the pass-1 aggregates: the strength
-    // s1_IJ of (141.7), summed in ascending fine-edge order - `edges`
-    // already is in that order.
-    let mut ent2: Vec<(usize, f64)> = Vec::with_capacity(edges.len());
-    for &(lo, hi, s) in edges.iter() {
-        let (a, b) = (p1[lo] as usize, p1[hi] as usize);
-        if a == b {
-            continue;
-        }
-        let key = if a < b { a * n1 + b } else { b * n1 + a };
-        ent2.push((key, s));
-    }
-    ent2.sort_by_key(|e| e.0);
-    let mut edges2: Vec<(usize, usize, f64)> = Vec::with_capacity(ent2.len());
-    let mut t2 = 0usize;
-    while t2 < ent2.len() {
-        let key = ent2[t2].0;
-        let mut s1 = 0.0f64;
-        while t2 < ent2.len() && ent2[t2].0 == key {
-            s1 += ent2[t2].1;
-            t2 += 1;
-        }
-        edges2.push((key / n1, key % n1, s1));
-    }
-    let pass2 = one_two_passes(n1, &edges2)?;
-    let n2 = pass2.len();
-    let p2 = pass_map(n1, &pass2);
-
-    // The final aggregate of a cell is its pass-2 aggregate.
-    let mut cell_agg = vec![0 as Label; n];
-    for i in 0..n {
-        cell_agg[i] = p2[p1[i] as usize];
-    }
+/// The members CSR and the coarse addressing of the fold table, from a
+/// final cell-to-aggregate map numbered by (141.8) (SPEC-LIT §141.1).
+fn addressing(l: &LevelView, cell_agg: Vec<Label>, n1: usize, n2: usize) -> Result<Aggregation> {
+    let n = l.n_cells;
+    let nf = l.owner.len();
+    let nbf = l.b_face_cells.len();
 
     // The members as a CSR, ascending inside each aggregate (SPEC-LIT
     // §141.1) - the aggregate-sorted order AMG-02's restriction reads.

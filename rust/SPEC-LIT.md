@@ -48136,7 +48136,7 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a, and the K-cycle of §141.6, AMG-04c). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
+AMG-04a, the K-cycle of §141.6, AMG-04c, and the decomposed levels of §141.10, AMG-07a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
 before AMG-04b.
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
@@ -49089,6 +49089,117 @@ The iteration growth 32^3 -> 128^3 is 14/13 = 1.08x for the K-cycle, inside the 
 `POI(32)` both take 39 iterations and agree to 3.5e-16. The host twin agrees to 9.4e-16
 (K(2,2), `t = 0.25`: 4 one-step and 0 two-step inner solves), 1.0e-15 (`t = 0`: 15 two-step)
 and 2.9e-16 (K(1,1) l1-Jacobi: 8 one-step, 5 two-step).
+
+### 141.10 Decomposed levels: block-local aggregation, coarse processor faces and coarse halos (AMG-07a)
+
+`No GPL-licensed source was consulted.` `src/amg/dist.rs` holds the decomposed levels, host
+code only; `src/halo.rs` gains `LevelHalo`, the exchange plan of one level, from which
+`HaloExchange::from_levels` and `SpmdHalo::from_level` build the in-process and the SPMD
+exchange (§71.4, §138.3) exactly as `new` builds them from a `PartMesh`, which they now
+delegate to. `Aggregation::from_map` (§141.1) builds the members CSR and the fold table of a
+given (141.8)-numbered map with the code that ends `aggregate_level`, moved and not changed.
+The tests are `tests/amg_dist.rs`, an integration test that runs in both builds (§118).
+Nothing in the solve path calls this yet; the distributed cycle is AMG-07b's, so no existing
+solve, case or SASS moves. Multi-GPU runs are deferred by the user: every rank is a
+`ThreadComm` thread on device 0 (§138.7). Sources: Notay (2010) of §141.1 for the aggregation
+and the Galerkin product; the decomposition into blocks is this project's own design, and no
+multigrid code of any licence was read for this subsection.
+
+**A decomposed level** is one part's LDU level (§1, §71): owned cells `0..n`, ghosts
+`n..n+n_h`, internal faces among owned cells, and boundary faces. A boundary face with
+`b_nbr_cell >= n` is a **processor face**: its coefficient enters the operator as
+`-boundary_coeffs · psi[b_nbr_cell]`, the sign of (141.2) and of `split_matrix` (§71.6). The
+finest level is the part's mesh with its split and folded matrix; a coarse level has only
+processor faces.
+
+**Block-local aggregation** (*DESIGN*, docs/17 AMG-07a). Each part runs §141.1 on its own
+cells, with every processor face read as uncoupled. A cyclic couple inside the part stays an
+edge. So every aggregate lies inside one part, and no aggregate spans a cut, which is a gate.
+`σ` of (141.3) is the part's own; §141.1 gives `A` and `-A` the same aggregation, so a part
+whose diagonal sum differs in sign from the whole matrix's would only be an indefinite input.
+
+**Keys** (*DESIGN*; they are what makes the parts' sums the serial sums, bit for bit). Every
+local cell and every boundary face carries a global key:
+
+```
+fine cell c:            key(c)  = global cell id
+fine boundary face bf:  key(bf) = (global face slot, -1)   (f, or n_if + bf of the whole mesh)
+aggregate I:            key(I)  = min_{c in I} key(c)        (its root)
+coarse processor face:  key(I, H) = (min(key I, key H), max(key I, key H))      (141.40)
+```
+
+A part's owned cells are ascending in global id (§71.4), so the (141.8) numbering inside a
+part is ascending in root, and the union of the parts' aggregations, numbered by root, is
+numbered by (141.8) on the whole level. By induction the same holds at every level. The
+halo of every level is ordered by (owning part, key), as the fine halo is (§71.4).
+
+**The coarse level of a part.** Its own cells and faces are §141.2 on the part, unchanged: a
+`GalerkinPlan` of the block-local aggregation, its sums (141.14)-(141.16), and its list order.
+That order is the serial one, because the part's cells, internal faces and inherited boundary
+faces are each ascending in their global ids. Its processor faces are new:
+
+```
+coarse halo:  the distinct (q, R) over the fine processor faces, q the ghost's owning part,
+              R the ghost's aggregate on q (its local id), ascending in (q, R)
+send to q:    the distinct own aggregates I joined to q by a fine processor face, ascending
+coarse face:  every distinct (I, h_c), I own, h_c a coarse ghost, ascending, with
+    a_{I,H} = round( Σ_{bf -> (I, h_c), ascending in key(bf)} -boundary_coeffs[bf] )
+    boundary_coeffs_c = -a_{I,H}                                          (141.41)
+```
+
+summed in an f64 accumulator (`ofacc`'s width in both builds) and rounded once, as the host
+twin of §141.2 sums. IEEE negation is exact, so (141.41) stores the bits the serial sum
+produces. A part receives from `q` exactly the aggregates `q` sends, in the same order,
+because every cut face is a processor face on both sides (§71.6) and `q`'s local order is
+its key order; no extra message settles the plan. The ghost's `R` and root come from the
+owner: in one process by a key lookup in the owner's level (`halo_aggregates`), and SPMD by
+two label exchanges over the level's own plan (`spmd_halo_aggregates`).
+
+**Why the gathered level is the serial product.** For a coarse face `(I, J)` with `I` on part
+`p` and `J` on part `q`, every fine entry in its two slots crosses the cut, so its upper slot
+`(A_c)_{IJ}` is exactly the sum `p` forms for `(I, H = J)`, and its lower slot is the one `q`
+forms. A fine cut face gives `p` the coefficient `-upper[g]` or `-lower[g]` (§71.6), so
+`-boundary_coeffs` is the serial term. The serial list order is internal faces ascending,
+then coupled faces ascending (§141.2); a fine key is the face's global slot, internal before
+boundary, so the key order is that order. At a coarse level the gathered level has no
+boundary faces and its faces are ascending by `(owner, neighbour)` in global numbering, which
+is the order of (141.40). The diagonal slots never see a processor face, because no
+aggregate spans parts.
+
+**The hierarchy.** `DistHierarchy::build_in_process` and the collective
+`DistHierarchy::build_spmd` stop by §141.3's rule on the WHOLE level: at `n_cells_coarsest`
+or `max_levels`, dropping a coarsening that does not shrink the whole level. Every part
+therefore has the same number of levels. SPMD, the counts travel in one allgather per step,
+which is also a vote, so a step refused on one rank is refused on every rank before the next
+collective. `gather_level` puts the parts' coarse levels into one `HostLevel`, numbered by
+key; AMG-07b is to use it for the coarsest level.
+
+**Refused by name** (`Error::Config`, every message starts with `amg::dist: `): array
+lengths that disagree with the level; a halo plan of another part or cell count; owned keys
+not strictly ascending, or a halo group's keys not strictly ascending; a `b_nbr_cell` past the
+halo; halo aggregates or roots of the wrong length; an aggregate that arrives with two keys
+or out of key order; two processor faces with one key; `gather_level` given a level with a
+non-processor boundary face, or with an entry from two places or one side only;
+`n_cells_coarsest = 0` or `max_levels = 0`. `Aggregation::from_map` refuses a map not
+numbered by (141.8) (`amg::aggregate: `), and a level plan that sends a cell it does not
+own is refused by both exchanges (`halo: `).
+
+**Precision.** Every row is class D (docs/17 §5.1.4): bitwise in both builds. The f32
+matrices aggregate differently from their f64 parents (§141.1, rounded coefficients), so the
+level counts differ between the builds; the gate holds in each.
+
+#### 141.10.1 The gates
+
+The meshes are boxes with every patch a wall: 9×7×5 with (141.18), 8×6×5 cyclic on x, y and
+z with (141.18), and 12×10×8 with the folded §2 laplacian. The partitions are Hilbert,
+linear, and blocks of three cells dealt round robin; `n_cells_coarsest = 4`.
+
+| test (`tests/amg_dist.rs`) | what | class |
+|---|---|---|
+| `gathered_coarse_levels_are_the_galerkin_product_of_the_gathered_fine_level` | **the AMG-07a gate.** The three meshes, `P = 2, 3, 4`, the three partitions: the fine level gathered from the parts is the whole matrix bit for bit; then at every level, the union of the block-local aggregations is a (141.8) map in which no aggregate spans parts, and the parts' next level, gathered, is bit for bit `GalerkinPlan(from_map(union), gathered level).coarse_host`. Measured: 95 levels (f64) and 94 (`single`), 5319 and 4761 cross-part coarse faces, 3584 and 3500 of their slots summing three or more sources. Summing the processor sources in reverse key order fails it (checked in f64) | D |
+| `one_part_is_the_serial_hierarchy` | `P = 1` on the three meshes: aggregations, plans and levels equal `HostHierarchy::build`'s | D |
+| `an_spmd_build_is_the_in_process_build_and_its_coarse_halos_carry_the_owners_value` | the first two meshes, Hilbert, `P = 2, 3, 4`: `build_spmd` on `ThreadComm` ranks (device 0) equals the in-process build; at every level `HaloExchange::from_levels` and `SpmdHalo::from_level` bring every ghost its owner's value `1 + key/2` (3588 ghosts in f64, 3632 in `single`) | D |
+| `a_malformed_decomposed_level_is_refused_by_name` | the refusals above | D |
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

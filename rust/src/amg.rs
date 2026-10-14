@@ -19,7 +19,9 @@
 //! solver `LinearSolverKind::Gamg`, with the LU factor an asymmetric
 //! coarsest level takes instead of the Cholesky. AMG-04c (§141.6)
 //! contributes the K-cycle, `Gamg::set_cycle(CycleKind::K)`, and the
-//! flexible conjugate gradient `solver::solve_fcg` that takes it.
+//! flexible conjugate gradient `solver::solve_fcg` that takes it. AMG-07a
+//! (§141.10) contributes the decomposed levels in `dist`: block-local
+//! aggregation, coarse processor faces and coarse halo plans.
 //!
 //! Provenance: ORIGINAL - written from Notay, ETNA 37 (2010) 123-146,
 //! Algorithms 2.1 and 2.2 (SPEC-LIT §141.1). No GPL-licensed source was
@@ -28,6 +30,7 @@
 pub mod aggregate;
 pub mod coarse;
 pub mod cycle;
+pub mod dist;
 pub mod galerkin;
 pub mod hierarchy;
 pub mod smooth;
@@ -41,6 +44,10 @@ pub use coarse::{
 };
 pub use cycle::{
     CycleKind, DEFAULT_K_THRESHOLD, DEFAULT_N_POST, DEFAULT_N_PRE, Gamg, GamgConfig,
+};
+pub use dist::{
+    gather_level, halo_aggregates, spmd_halo_aggregates, BlockAggregation, DistCoarsening,
+    DistHierarchy, DistLevel, NO_KEY,
 };
 pub use galerkin::{
     GalerkinPlan, GpuGalerkin, GpuLevel, HostLevel, KIND_BOUNDARY, KIND_DIAG, KIND_LOWER,

@@ -48,7 +48,7 @@
 
 use cudarc::driver::{CudaFunction, DeviceRepr, PushKernelArg};
 
-use crate::decompose::Decomposition;
+use crate::decompose::{Decomposition, PartMesh};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::{Label, Scalar, Tensor, Vec3};
@@ -56,6 +56,92 @@ use crate::{Label, Scalar, Tensor, Vec3};
 pub mod spmd;
 
 pub use spmd::{SpmdHalo, HALO_TAG};
+
+/// One part's exchange plan for one level, host side: the fields of
+/// [`PartMesh`] the exchange reads, without the mesh.
+///
+/// A fine level's plan is [`Self::of_part`]. A coarse level of the
+/// distributed GAMG builds its own (`amg::dist`, SPEC-LIT §141.10) in the
+/// same form: owned cells `0..n_cells`, then the halo `n_cells ..
+/// n_cells + n_halo`, grouped by owning part in `nbr_parts` order, and the
+/// cells sent to `nbr_parts[i]` at `send_index[send_offset[i] ..
+/// send_offset[i+1]]`, in the order that part's halo receives them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelHalo {
+    /// Which part this is.
+    pub part: usize,
+    /// Owned cells of the level.
+    pub n_cells: usize,
+    /// Ghost cells of the level.
+    pub n_halo: usize,
+    /// The parts this one exchanges with, ascending.
+    pub nbr_parts: Vec<Label>,
+    /// `[nbr_parts.len() + 1]` CSR over [`Self::send_index`].
+    pub send_offset: Vec<Label>,
+    /// Local owned-cell index of every cell sent.
+    pub send_index: Vec<Label>,
+    /// `[nbr_parts.len() + 1]` halo-relative receive slices.
+    pub recv_offset: Vec<Label>,
+}
+
+impl LevelHalo {
+    /// The fine level's plan, copied from the part.
+    pub fn of_part(part: &PartMesh) -> Self {
+        Self {
+            part: part.part,
+            n_cells: part.mesh.n_cells,
+            n_halo: part.n_halo,
+            nbr_parts: part.nbr_parts.clone(),
+            send_offset: part.send_offset.clone(),
+            send_index: part.send_index.clone(),
+            recv_offset: part.recv_offset.clone(),
+        }
+    }
+
+    /// Length every field buffer of this level must have.
+    #[inline]
+    pub fn n_local(&self) -> usize {
+        self.n_cells + self.n_halo
+    }
+
+    /// The owning part of every halo slot, `[n_halo]`, read off
+    /// `recv_offset`. Refused by name when the offsets do not cover the halo.
+    pub fn halo_parts(&self) -> Result<Vec<Label>> {
+        let nn = self.nbr_parts.len();
+        if self.recv_offset.len() != nn + 1
+            || self.recv_offset[0] != 0
+            || self.recv_offset[nn] != self.n_halo as Label
+            || self.recv_offset.windows(2).any(|w| w[1] < w[0])
+        {
+            return Err(Error::Config(format!(
+                "halo: part {}'s receive offsets {:?} do not cover its {} halo cells \
+                 over {nn} neighbours",
+                self.part, self.recv_offset, self.n_halo
+            )));
+        }
+        let mut out = Vec::with_capacity(self.n_halo);
+        for i in 0..nn {
+            for _ in self.recv_offset[i]..self.recv_offset[i + 1] {
+                out.push(self.nbr_parts[i]);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every sent cell is an owned cell of the level; an index outside
+    /// would be read past the field on the device, so it is refused here.
+    pub(crate) fn check_send_index(&self) -> Result<()> {
+        for (k, &c) in self.send_index.iter().enumerate() {
+            if c < 0 || c as usize >= self.n_cells {
+                return Err(Error::Config(format!(
+                    "halo: part {}'s send_index[{k}] = {c} is not an owned cell (0..{})",
+                    self.part, self.n_cells
+                )));
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Entry points of `cuda/halo.cu`, resolved once.
 struct HaloKernels {
@@ -100,6 +186,23 @@ pub struct HaloExchange {
 
 impl HaloExchange {
     pub fn new(gpu: &Gpu, dec: &Decomposition) -> Result<Self> {
+        let levels: Vec<LevelHalo> = dec.parts.iter().map(LevelHalo::of_part).collect();
+        Self::from_levels(gpu, &levels)
+    }
+
+    /// The exchange of one level of every part: `levels[p]` is part `p`'s
+    /// plan, a fine level's ([`LevelHalo::of_part`]) or a coarse level's
+    /// (SPEC-LIT §141.10). [`Self::new`] is this on the fine level.
+    pub fn from_levels(gpu: &Gpu, levels: &[LevelHalo]) -> Result<Self> {
+        for (p, part) in levels.iter().enumerate() {
+            if part.part != p {
+                return Err(Error::Config(format!(
+                    "halo: plan {p} is part {}'s; the plans must be in part order",
+                    part.part
+                )));
+            }
+            part.check_send_index()?;
+        }
         let ks = KernelSet::new(gpu, crate::kernels::HALO)?;
         let k = HaloKernels {
             pack_scalar: ks.func("haloPackScalar")?,
@@ -108,13 +211,14 @@ impl HaloExchange {
             pack_label: ks.func("haloPackLabel")?,
         };
 
-        let mut plans = Vec::with_capacity(dec.n_parts);
-        let mut buf_scalar = Vec::with_capacity(dec.n_parts);
-        let mut buf_vector = Vec::with_capacity(dec.n_parts);
-        let mut buf_tensor = Vec::with_capacity(dec.n_parts);
-        let mut buf_label = Vec::with_capacity(dec.n_parts);
+        let n_parts = levels.len();
+        let mut plans = Vec::with_capacity(n_parts);
+        let mut buf_scalar = Vec::with_capacity(n_parts);
+        let mut buf_vector = Vec::with_capacity(n_parts);
+        let mut buf_tensor = Vec::with_capacity(n_parts);
+        let mut buf_label = Vec::with_capacity(n_parts);
 
-        for part in &dec.parts {
+        for part in levels {
             let nn = part.nbr_parts.len();
             if part.send_offset.len() != nn + 1 || part.recv_offset.len() != nn + 1 {
                 return Err(Error::Config(format!(
@@ -139,7 +243,13 @@ impl HaloExchange {
             let mut back = Vec::with_capacity(nn);
             for &q in &part.nbr_parts {
                 let qi = q as usize;
-                let pos = dec.parts[qi]
+                if q < 0 || qi >= n_parts {
+                    return Err(Error::Config(format!(
+                        "halo: part {}'s neighbour {q} is not below the {n_parts} parts",
+                        part.part
+                    )));
+                }
+                let pos = levels[qi]
                     .nbr_parts
                     .iter()
                     .position(|&r| r as usize == part.part)
@@ -163,7 +273,7 @@ impl HaloExchange {
             buf_label.push(gpu.zeros::<Label>(alloc)?);
 
             plans.push(HaloPlan {
-                n_cells: part.mesh.n_cells,
+                n_cells: part.n_cells,
                 n_halo: part.n_halo,
                 nbr: part.nbr_parts.clone(),
                 send_offset: part.send_offset.iter().map(|&x| x as usize).collect(),
@@ -176,6 +286,28 @@ impl HaloExchange {
                 n_send,
                 back,
             });
+        }
+
+        // What part p sends to q is what q receives from p, cell for cell:
+        // a plan that disagrees would copy past a halo on the device.
+        for (p, plan) in plans.iter().enumerate() {
+            if plan.recv_offset.last().copied().unwrap_or(0) != plan.n_halo {
+                return Err(Error::Config(format!(
+                    "halo: part {p}'s receive offsets end at {}, but the part has {} halo cells",
+                    plan.recv_offset.last().copied().unwrap_or(0),
+                    plan.n_halo
+                )));
+            }
+            for (i, &q) in plan.nbr.iter().enumerate() {
+                let (qp, j) = (&plans[q as usize], plan.back[i]);
+                let sent = plan.send_offset[i + 1] - plan.send_offset[i];
+                let got = qp.recv_offset[j + 1] - qp.recv_offset[j];
+                if sent != got {
+                    return Err(Error::Config(format!(
+                        "halo: part {p} sends {sent} cells to part {q}, which receives {got}"
+                    )));
+                }
+            }
         }
 
         Ok(Self {
