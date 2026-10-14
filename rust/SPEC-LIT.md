@@ -42629,6 +42629,71 @@ gate captures 5 kernel nodes (the three kernels and the two field operations tha
 feed `M` back into `T`) and replays three times bitwise over 7 buffers and 1792
 values. The 46 cubins that existed before are unchanged in SASS in both builds.
 
+### 122.6 The case input (CMP-14)
+
+`No GPL-licensed source was consulted.` The dictionary keyword NAMES and the unit of
+`molWeight` are from the OpenFOAM *User Guide* v12, "Thermophysical models",
+<https://doc.cfd.direct/openfoam/user-guide-v12/thermophysical> (DOCUMENTATION,
+**read** 2026-10-14). No OpenFOAM source file was opened.
+
+A compressible case states the gas of §122.1 in one of two ways, and both end in the
+same `compressible::thermo::PerfectGas`, validated by `PerfectGas::validate`.
+
+**JSONC** (`src/io/case_json.rs`): `physics.compressible { gamma, W, cp, Pr,
+viscosity, pOperating }`. `gamma` and `W` (kg/mol) are required. `cp` is optional
+and is only checked: §122.1's `1e-6` relative rule refuses a disagreeing value by name
+(`physics.compressible.cp`), and `-permissive` warns and keeps the derived `c_p`.
+`Pr` defaults to 0.71. `viscosity` is `{ "model": "sutherland", "As", "Ts" }`, which
+is (122.6), or `{ "model": "const", "mu" }`. `pOperating` is §122.2's `p_op` in Pa,
+with no default. `Pr_t` is §122.1's 0.85, and neither route has a key for it. Every
+object is `deny_unknown_fields`, so an unknown key is refused with its JSON path. Two
+patch kinds read a `freestream { U, p, T }`: `p` is gauge in the datum of the `p`
+field (§122.2) and `T` is in kelvin.
+
+* `supersonicInlet` (§126.2) lowers `U`, `p` and `T` to `fixedValue` at that state.
+* `farfield` (§126.6) lowers all three to `characteristicFarfield`, with the free stream
+  as each field's `value`. CMP-18 registers and implements the kind.
+
+Both kinds are refused in a case without `physics.compressible`, without a
+`freestream`, or with a `U`, `p` or `T` entry of their own, because the preset decides
+all three. They are also refused when the free stream has no gas-law state: `T <= 0`,
+`p + p_op <= 0` or a non-finite value (§122.3). A `freestream` on any other kind is
+refused, and so is a compressible case without `initial.T`.
+
+**OpenFOAM** (`src/io/thermo_dict.rs`, `constant/thermophysicalProperties`): one
+`thermoType` with `type` `hePsiThermo` or `heRhoThermo`, `mixture pureMixture`,
+`transport` `sutherland` or `const`, `thermo hConst`, `equationOfState perfectGas`,
+`specie specie` and `energy` `sensibleEnthalpy` or `sensibleInternalEnergy`. Every
+one of the seven is required, and any other model is refused with the menu. The
+`mixture` block holds `specie { molWeight; nMoles }`, `thermodynamics { Cp; Hf }` and
+`transport { As; Ts; Pr }` (sutherland) or `transport { mu; Pr }` (const). The file
+also has a top-level `pOperating`, which is required. Any other key, at any of these
+levels, is refused by name with the keys that are read, through §13.4's `unsupported`.
+The dictionary states `molWeight` in g/mol and `Cp` rather than `gamma`, so the gas
+follows from (122.2) and (122.5) solved for `gamma` (derived):
+
+```
+W = molWeight / 1000 ,   gamma = c_p / (c_p - R_s) ,   R_s = R / W                   (122.14)
+```
+
+`c_p <= R_s` has no `gamma` above 1 and is refused by name. With constant `c_p`, the
+two `energy` forms describe the same state; the form is kept for CMP-15's driver.
+`Hf` must be 0, because (122.5) fixes `h(0 K) = 0` and a formation enthalpy matters
+only to a reacting mixture. `nMoles` must be 1. `Pr` is read under both transport
+models and defaults to 0.71 when absent. The User Guide lists no `Pr` for
+`sutherland`, but this solver's conductivity is (122.7) under both models, so it needs
+one. The oracle gives `molWeight 28.9647` with `Cp 1004.692579691832` as `W = 0.0289647`,
+`R_s = 287.0550227690948` and `gamma = 1.4000000000000001`, which is §122.1's air to
+one ulp. `ThermoDict::to_text` writes the subset back in Rust's shortest round-trip
+form, so a read, a write and a second read agree bit for bit
+(`thermophysical_subset_round_trips`).
+
+**Landed (CMP-14).** Tests: `io::thermo_dict::tests::{thermophysical_subset_round_trips,
+unknown_thermo_key_is_refused_by_name}`, `io::case_json::tests::jsonc_compressible_lowers`,
+and the schema sync test `the_shipped_schema_is_the_generated_one` on the regenerated
+`docs/schema/case-1.json`. No driver reads either route yet: `ofgpu-compressible`
+(CMP-15) is the first.
+
 ---
 
 ## 123. Momentum in conservative form — the mass flux, the full Newtonian stress, and Rhie-Chow with a density

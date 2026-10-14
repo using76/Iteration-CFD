@@ -190,6 +190,50 @@
         "max"
       ]
     },
+    "JsonCompressible": {
+      "description": "`physics.compressible` - SPEC-LIT §122.6, the JSONC statement of §122.1's\ngas: `gamma` and `W` state it, a stated `cp` must agree with (122.5) to\n`1e-6` relative, `Pr` defaults to 0.71, and `pOperating` (§122.2's\n`p_op`, Pa) has no default.",
+      "type": "object",
+      "properties": {
+        "Pr": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "W": {
+          "description": "Molar mass, kg/mol.",
+          "type": "number",
+          "format": "double"
+        },
+        "cp": {
+          "description": "J/(kg K); checked against (122.5), never used in its place.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "gamma": {
+          "type": "number",
+          "format": "double"
+        },
+        "pOperating": {
+          "type": "number",
+          "format": "double"
+        },
+        "viscosity": {
+          "$ref": "#/$defs/JsonViscosity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gamma",
+        "W",
+        "viscosity",
+        "pOperating"
+      ]
+    },
     "JsonCyclicPair": {
       "description": "One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six\n`mesh.boundaries` values, and must name the two opposite slots of one\naxis (`xmin`/`xmax`, `ymin`/`ymax` or `zmin`/`zmax`) - `build_block`\nchecks that, not this type.\n\n`transform` takes only `\"translate\"` - the transform\n[`crate::blockgen::BlockSpec::set_cyclic_axis`] knows how to build a\npairing from, implied by the block's own extent along that axis. A\nrotational pair (`\"rotate\"`, with an axis and an angle) needs a different\nface-matching search and a vector transform on `Sf` that nothing here\nimplements yet, so it deserialises fine (it is a *known* setting) and is\nrefused in `build_block` with a SPEC-LIT §13.4 error naming `translate` -\nexactly like any other recognised-but-unimplemented setting, not a parse\nfailure.",
       "type": "object",
@@ -348,6 +392,35 @@
         "Pr",
         "Prt",
         "TRef"
+      ]
+    },
+    "JsonFreestream": {
+      "description": "A `farfield` or `supersonicInlet` rule's stated state (SPEC-LIT §122.6):\n`p` is GAUGE, in the `p` field's datum (§122.2), `T` in kelvin.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "type": "number",
+          "format": "double"
+        },
+        "U": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "p": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "U",
+        "p",
+        "T"
       ]
     },
     "JsonGrading": {
@@ -771,6 +844,17 @@
             }
           ]
         },
+        "freestream": {
+          "description": "SPEC-LIT §122.6: the state a `farfield` or `supersonicInlet` rule\nstates, required there and refused on every other kind.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonFreestream"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "k": {
           "description": "`k`'s own condition. Only required when `initial.k` is given (this\ncase solves `k`) - see [`turb_field_spec`].",
           "anyOf": [
@@ -870,6 +954,17 @@
       "properties": {
         "buoyancy": {
           "$ref": "#/$defs/BuoyancyModel"
+        },
+        "compressible": {
+          "description": "SPEC-LIT §122.6: the perfect gas of §122.1. Absent (the default) is\nevery case this reader has ever built; present, it lowers to\n[`LoweredCase::compressible`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCompressible"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "fluid": {
           "$ref": "#/$defs/JsonFluid"
@@ -1283,6 +1378,52 @@
         "wallFunctions"
       ]
     },
+    "JsonViscosity": {
+      "description": "`physics.compressible.viscosity` - (122.6) or a constant `mu`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "As": {
+              "type": "number",
+              "format": "double"
+            },
+            "Ts": {
+              "type": "number",
+              "format": "double"
+            },
+            "model": {
+              "type": "string",
+              "const": "sutherland"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "As",
+            "Ts"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "const": "const"
+            },
+            "mu": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "mu"
+          ]
+        }
+      ]
+    },
     "JsonVisualisation": {
       "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
       "type": "object",
@@ -1389,6 +1530,16 @@
           "description": "SPEC-LIT 119.3: `PatchKind::Wedge` - the third CONSTRAINT kind. Needs\na mesh that has wedge sides (`mesh.wedge`, the 119.0 block): the\nreader refuses a `wedge` rule on a mesh without one, and on a wedge\nmesh holds `ymin`/`ymax` to a `wedge` rule and every other slot away\nfrom one. Same per-field refusal as [`Self::Empty`] and\n[`Self::Symmetry`] - the constraint decides every field,\nturbulence fields included - and 119.2's `BcKind::Wedge` is what the\nfield seed and `field_setup::topology_override` force on its faces.",
           "type": "string",
           "const": "wedge"
+        },
+        {
+          "description": "SPEC-LIT §122.6 and §126.6: the characteristic far field. Its rule\nstates the free stream (`freestream`), and `U`, `p` and `T` all lower\nto `characteristicFarfield` at that state; only in a case with\n`physics.compressible`.",
+          "type": "string",
+          "const": "farfield"
+        },
+        {
+          "description": "SPEC-LIT §122.6 and §126.2: supersonic inflow, `p`, `U` and `T` all\n`fixedValue` at the rule's `freestream`; only in a case with\n`physics.compressible`.",
+          "type": "string",
+          "const": "supersonicInlet"
         }
       ]
     },

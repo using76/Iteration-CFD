@@ -611,6 +611,80 @@ pub struct JsonPhysics {
     pub gravity: [f64; 3],
     pub fluid: JsonFluid,
     pub buoyancy: BuoyancyModel,
+    /// SPEC-LIT §122.6: the perfect gas of §122.1. Absent (the default) is
+    /// every case this reader has ever built; present, it lowers to
+    /// [`LoweredCase::compressible`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compressible: Option<JsonCompressible>,
+}
+
+/// `physics.compressible` - SPEC-LIT §122.6, the JSONC statement of §122.1's
+/// gas: `gamma` and `W` state it, a stated `cp` must agree with (122.5) to
+/// `1e-6` relative, `Pr` defaults to 0.71, and `pOperating` (§122.2's
+/// `p_op`, Pa) has no default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonCompressible {
+    pub gamma: f64,
+    /// Molar mass, kg/mol.
+    #[serde(rename = "W")]
+    pub w: f64,
+    /// J/(kg K); checked against (122.5), never used in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp: Option<f64>,
+    #[serde(rename = "Pr", default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<f64>,
+    pub viscosity: JsonViscosity,
+    #[serde(rename = "pOperating")]
+    pub p_operating: f64,
+}
+
+/// `physics.compressible.viscosity` - (122.6) or a constant `mu`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "model", deny_unknown_fields)]
+pub enum JsonViscosity {
+    #[serde(rename = "sutherland")]
+    Sutherland {
+        #[serde(rename = "As")]
+        a_s: f64,
+        #[serde(rename = "Ts")]
+        t_s: f64,
+    },
+    #[serde(rename = "const")]
+    Const { mu: f64 },
+}
+
+impl JsonCompressible {
+    /// The gas, validated, with the `cp` check of §122.1 (`-permissive`
+    /// warns and keeps the derived `c_p`).
+    pub fn gas(&self) -> Result<crate::compressible::thermo::PerfectGas> {
+        use crate::compressible::thermo::{PerfectGas, Viscosity};
+        let g = PerfectGas {
+            gamma: self.gamma,
+            w: self.w,
+            pr: self.pr.unwrap_or(crate::io::thermo_dict::PR_DEFAULT),
+            pr_t: crate::io::thermo_dict::PR_T_DEFAULT,
+            viscosity: match self.viscosity {
+                JsonViscosity::Sutherland { a_s, t_s } => Viscosity::Sutherland { a_s, t_s },
+                JsonViscosity::Const { mu } => Viscosity::Constant { mu },
+            },
+            p_op: self.p_operating,
+        };
+        g.validate()
+            .map_err(|e| Error::Config(format!("physics.compressible: {e}")))?;
+        if let Some(cp) = self.cp {
+            if let Err(e) = g.check_stated_cp(cp) {
+                if !crate::io::contract::permissive() {
+                    return Err(e);
+                }
+                crate::io::contract::warn_once(
+                    "physics.compressible.cp",
+                    &format!("-permissive: {e}\n  using the derived c_p {}", g.cp()),
+                );
+            }
+        }
+        Ok(g)
+    }
 }
 
 // ---- turbulence ------------------------------------------------------
@@ -714,6 +788,28 @@ pub enum PatchPresetKind {
     /// turbulence fields included - and 119.2's `BcKind::Wedge` is what the
     /// field seed and `field_setup::topology_override` force on its faces.
     Wedge,
+    /// SPEC-LIT §122.6 and §126.6: the characteristic far field. Its rule
+    /// states the free stream (`freestream`), and `U`, `p` and `T` all lower
+    /// to `characteristicFarfield` at that state; only in a case with
+    /// `physics.compressible`.
+    Farfield,
+    /// SPEC-LIT §122.6 and §126.2: supersonic inflow, `p`, `U` and `T` all
+    /// `fixedValue` at the rule's `freestream`; only in a case with
+    /// `physics.compressible`.
+    #[serde(rename = "supersonicInlet")]
+    SupersonicInlet,
+}
+
+/// A `farfield` or `supersonicInlet` rule's stated state (SPEC-LIT §122.6):
+/// `p` is GAUGE, in the `p` field's datum (§122.2), `T` in kelvin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonFreestream {
+    #[serde(rename = "U")]
+    pub u: [f64; 3],
+    pub p: f64,
+    #[serde(rename = "T")]
+    pub t: f64,
 }
 
 /// One `{"type": "fixedValue", "value": ...}`-shaped scalar boundary
@@ -873,6 +969,10 @@ pub struct JsonPatchRule {
     /// sand") when `Ks` is given and this is not.
     #[serde(rename = "Cs", default, skip_serializing_if = "Option::is_none")]
     pub cs: Option<f64>,
+    /// SPEC-LIT §122.6: the state a `farfield` or `supersonicInlet` rule
+    /// states, required there and refused on every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freestream: Option<JsonFreestream>,
 }
 
 // ---- initial -----------------------------------------------------------
@@ -1445,6 +1545,10 @@ pub struct LoweredCase {
     /// `mesh.wedge` - [`Self::build_host_mesh`] then builds exactly what
     /// `crate::blockgen::build_mesh(&self.block)` always built.
     pub wedge: Option<crate::blockgen::WedgeSpec>,
+    /// SPEC-LIT §122.6: `physics.compressible`, lowered onto §122.1's gas and
+    /// validated (the `cp` check included). `None` for every case without
+    /// the block.
+    pub compressible: Option<crate::compressible::thermo::PerfectGas>,
 }
 
 impl LoweredCase {
@@ -1658,6 +1762,8 @@ fn patch_class(kind: PatchPresetKind) -> &'static str {
     match kind {
         PatchPresetKind::Wall => "wall",
         PatchPresetKind::Inlet | PatchPresetKind::Open => "patch",
+        // SPEC-LIT §122.6: open boundaries of OpenFOAM's generic class.
+        PatchPresetKind::Farfield | PatchPresetKind::SupersonicInlet => "patch",
         // SPEC-LIT §34.1: these two are recognised by `PatchKind::from_type`
         // (`src/mesh.rs`) directly, so the JSON kind name and the OpenFOAM
         // type string this reader writes into `BlockSpec.patch_type` are the
@@ -2216,6 +2322,9 @@ fn vector_bc_spec(bc: &VectorBc) -> PatchFieldSpec {
 /// velocity is a case error, not a default - so that is a §13.4-shaped error
 /// naming the rule.
 fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
+    if let Some(s) = freestream_spec(rule, "U")? {
+        return Ok(s);
+    }
     if let Some(bc) = &rule.u {
         return Ok(vector_bc_spec(bc));
     }
@@ -2247,7 +2356,118 @@ fn u_spec_for(rule: &JsonPatchRule) -> Result<PatchFieldSpec> {
         PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge => {
             Ok(spec(patch_class(rule.kind)))
         }
+        // Answered by `freestream_spec` above, which errs when the rule has
+        // no `freestream`.
+        PatchPresetKind::Farfield | PatchPresetKind::SupersonicInlet => {
+            unreachable!("freestream_spec answers the compressible presets")
+        }
     }
+}
+
+/// SPEC-LIT §122.6: `field` (`U`, `p` or `T`) on a `farfield` or
+/// `supersonicInlet` rule - `characteristicFarfield` (§126.6) or
+/// `fixedValue` (§126.2) at the rule's `freestream`. `None` on every other
+/// kind; an error naming the rule when the state is missing.
+fn freestream_spec(rule: &JsonPatchRule, field: &str) -> Result<Option<PatchFieldSpec>> {
+    let type_name = match rule.kind {
+        PatchPresetKind::Farfield => "characteristicFarfield",
+        PatchPresetKind::SupersonicInlet => "fixedValue",
+        _ => return Ok(None),
+    };
+    let Some(fs) = &rule.freestream else {
+        return Err(Error::Config(format!(
+            "patches: rule \"{}\" has kind \"{}\" but no \"freestream\" \
+             {{ U, p, T }}; the preset sets U, p and T from it (SPEC-LIT §122.6)",
+            rule.pattern,
+            freestream_kind_name(rule.kind)
+        )));
+    };
+    let mut s = spec(type_name);
+    match field {
+        "U" => s.value_v = vec![to_vec3(fs.u)],
+        "p" => s.value = vec![fs.p as Scalar],
+        "T" => s.value = vec![fs.t as Scalar],
+        _ => unreachable!("freestream_spec is called for U, p and T only"),
+    }
+    Ok(Some(s))
+}
+
+/// The JSONC spelling of the two compressible presets, for messages.
+fn freestream_kind_name(kind: PatchPresetKind) -> &'static str {
+    match kind {
+        PatchPresetKind::Farfield => "farfield",
+        PatchPresetKind::SupersonicInlet => "supersonicInlet",
+        _ => patch_class(kind),
+    }
+}
+
+/// SPEC-LIT §122.6's refusals, checked before any field is lowered: a
+/// `farfield`/`supersonicInlet` rule needs `physics.compressible` and a
+/// `freestream` whose `T` and `p + pOperating` give the gas law a state
+/// (§122.3), and may not also name `U`, `p` or `T` (the preset decides all
+/// three); a `freestream` on any other kind is refused; and a compressible
+/// case states `initial.T`.
+fn validate_freestream_rules(
+    patches: &[JsonPatchRule],
+    gas: Option<&crate::compressible::thermo::PerfectGas>,
+    initial_t: Option<f64>,
+) -> Result<()> {
+    if gas.is_some() && initial_t.is_none() {
+        return Err(Error::Config(
+            "physics.compressible needs initial.T: the gas law has no state without a \
+             temperature (SPEC-LIT §122.6)"
+                .to_string(),
+        ));
+    }
+    for rule in patches {
+        let preset = matches!(
+            rule.kind,
+            PatchPresetKind::Farfield | PatchPresetKind::SupersonicInlet
+        );
+        if !preset {
+            if rule.freestream.is_some() {
+                return Err(Error::Config(format!(
+                    "patches: rule \"{}\" sets \"freestream\", which only a \"farfield\" \
+                     or \"supersonicInlet\" rule reads (SPEC-LIT §122.6)",
+                    rule.pattern
+                )));
+            }
+            continue;
+        }
+        let kind = freestream_kind_name(rule.kind);
+        let Some(g) = gas else {
+            return Err(Error::Config(format!(
+                "patches: rule \"{}\" has kind \"{kind}\", which needs \
+                 physics.compressible (SPEC-LIT §122.6)",
+                rule.pattern
+            )));
+        };
+        for (field, set) in [("U", rule.u.is_some()), ("p", rule.p.is_some()), ("T", rule.t.is_some())] {
+            if set {
+                return Err(Error::Config(format!(
+                    "patches: rule \"{}\" has kind \"{kind}\", which sets U, p and T from \
+                     its freestream, but also sets \"{field}\"; remove the \"{field}\" \
+                     entry (SPEC-LIT §122.6)",
+                    rule.pattern
+                )));
+            }
+        }
+        let Some(fs) = &rule.freestream else {
+            freestream_spec(rule, "U")?;
+            continue;
+        };
+        let p_abs = fs.p + g.p_op;
+        let finite = fs.u.iter().all(|v| v.is_finite()) && fs.p.is_finite();
+        if !(finite && fs.t.is_finite() && fs.t > 0.0 && p_abs > 0.0) {
+            return Err(Error::Config(format!(
+                "patches: rule \"{}\" freestream needs a finite U, T above 0 K and \
+                 p + pOperating above 0 Pa, got U {:?}, T {}, p + pOperating {p_abs} \
+                 (SPEC-LIT §122.3, §122.6)",
+                rule.pattern, fs.u, fs.t
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `p` at one resolved rule: the rule's own `p` if given, otherwise
@@ -2262,6 +2482,13 @@ fn p_spec_for(rule: &JsonPatchRule) -> PatchFieldSpec {
     // on the patch's faces regardless of what this says.
     if rule.kind == PatchPresetKind::Wedge {
         return spec(patch_class(rule.kind));
+    }
+    // SPEC-LIT §122.6: `validate_freestream_rules` has already required the
+    // `freestream` of a `farfield`/`supersonicInlet` rule, so `Err` cannot
+    // happen here; were it to, `zeroGradient` below is not reached silently
+    // because `u_spec_for` on the same rule returns that error first.
+    if let Ok(Some(s)) = freestream_spec(rule, "p") {
+        return s;
     }
     match &rule.p {
         Some(bc) => scalar_bc_spec(bc),
@@ -2285,6 +2512,9 @@ fn t_spec_for(
     ambient: Scalar,
     wall_treatment: crate::io::case::WallTreatment,
 ) -> Result<PatchFieldSpec> {
+    if let Some(s) = freestream_spec(rule, "T")? {
+        return Ok(s);
+    }
     if let Some(bc) = &rule.t {
         return Ok(scalar_bc_spec(bc));
     }
@@ -2305,6 +2535,11 @@ fn t_spec_for(
         // mesh's own topology at field-build time regardless.
         PatchPresetKind::Empty | PatchPresetKind::Symmetry | PatchPresetKind::Wedge => {
             Ok(spec(patch_class(rule.kind)))
+        }
+        // Answered by `freestream_spec` above, which errs when the rule has
+        // no `freestream`.
+        PatchPresetKind::Farfield | PatchPresetKind::SupersonicInlet => {
+            unreachable!("freestream_spec answers the compressible presets")
         }
     }
 }
@@ -2704,6 +2939,11 @@ impl JsonCase {
         };
 
         // ---- fields ---------------------------------------------------
+        // SPEC-LIT §122.6: the gas, then the compressible presets' refusals,
+        // before any field is lowered.
+        let compressible = self.physics.compressible.as_ref().map(|c| c.gas()).transpose()?;
+        validate_freestream_rules(&self.patches, compressible.as_ref(), self.initial.t)?;
+
         let mut names = mesh_patch_names(&block);
         // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
         // mesh writes no patch on the axis - the `xmin` name stands for no
@@ -2971,6 +3211,7 @@ impl JsonCase {
             sources,
             motion,
             wedge,
+            compressible,
         })
     }
 }
@@ -3822,6 +4063,139 @@ mod tests {
         );
     }
 
+    /// SPEC-LIT §122.6: `physics.compressible` lowers onto §122.1's gas
+    /// exactly, the two compressible presets lower to their §126.2 and
+    /// §126.6 types at the stated free stream, and every refusal names what
+    /// it refuses.
+    #[test]
+    fn jsonc_compressible_lowers() {
+        use crate::compressible::thermo::{PerfectGas, Viscosity};
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+
+        const GAS: &str = r#""compressible": {
+            "gamma": 1.4, "W": 0.0289647, "cp": 1004.692579691832,
+            "viscosity": { "model": "sutherland", "As": 1.458e-6, "Ts": 110.4 },
+            "pOperating": 1e5
+        }"#;
+        const PATCHES: &str = r#"[
+            { "match": "xa", "kind": "supersonicInlet",
+              "freestream": { "U": [694.4, 0, 0], "p": 0.0, "T": 300.0 } },
+            { "match": "xb", "kind": "farfield",
+              "freestream": { "U": [347.2, 1.5, 0], "p": -250.0, "T": 288.15 } },
+            { "match": ".*", "kind": "wall" }
+        ]"#;
+        let text = |physics_extra: &str, patches: &str, initial_t: &str| {
+            format!(
+                r#"{{
+                "name": "compressibleTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,1,1] }},
+                    "cells": [4, 6, 8],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0,0,0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+                    "buoyancy": "densityRatio"{physics_extra}
+                }},
+                "patches": {patches},
+                "initial": {{ "U": [0,0,0], "p": 0.0{initial_t} }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "SIMPLE" }},
+                    "ddt": "steadyState",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1.0, "deltaT": 1.0 }}
+            }}"#
+            )
+        };
+        let lower = |t: String| read_case_jsonc_str(&t, "compressibleTest").and_then(|c| c.lower());
+        let gas_block = format!(",\n{GAS}");
+        let t300 = ", \"T\": 300.0";
+
+        let l = lower(text(&gas_block, PATCHES, t300)).expect("the compressible case lowers");
+        let gas = l.compressible.expect("physics.compressible lowers to a gas");
+        assert_eq!(
+            gas,
+            PerfectGas {
+                gamma: 1.4,
+                w: 0.0289647,
+                pr: 0.71,
+                pr_t: 0.85,
+                viscosity: Viscosity::Sutherland { a_s: 1.458e-6, t_s: 110.4 },
+                p_op: 1e5,
+            }
+        );
+        assert_eq!(gas, PerfectGas::air(1e5));
+
+        // §126.2: everything fixedValue at the stated state.
+        let u = &l.u_field.boundary["xa"];
+        assert_eq!(u.type_name, "fixedValue");
+        assert_eq!(u.value_v, vec![Vec3::new(694.4 as Scalar, 0.0, 0.0)]);
+        let p = &l.p_field.boundary["xa"];
+        assert_eq!((p.type_name.as_str(), p.value.clone()), ("fixedValue", vec![0.0 as Scalar]));
+        let tf = l.t_field.as_ref().expect("initial.T is given");
+        assert_eq!(tf.boundary["xa"].type_name, "fixedValue");
+        assert_eq!(tf.boundary["xa"].value, vec![300.0 as Scalar]);
+
+        // §126.6: characteristicFarfield on all three, carrying u_o, p_o, T_o.
+        let u = &l.u_field.boundary["xb"];
+        assert_eq!(u.type_name, "characteristicFarfield");
+        assert_eq!(u.value_v, vec![Vec3::new(347.2 as Scalar, 1.5 as Scalar, 0.0)]);
+        assert_eq!(l.p_field.boundary["xb"].type_name, "characteristicFarfield");
+        assert_eq!(l.p_field.boundary["xb"].value, vec![-250.0 as Scalar]);
+        assert_eq!(tf.boundary["xb"].type_name, "characteristicFarfield");
+        assert_eq!(tf.boundary["xb"].value, vec![288.15 as Scalar]);
+        // An ordinary wall is untouched by the presets.
+        assert_eq!(l.u_field.boundary["ya"].type_name, "noSlip");
+
+        // Constant viscosity with its Pr, and no stated cp.
+        let const_gas = r#",
+        "compressible": { "gamma": 1.3, "W": 0.044, "Pr": 0.75,
+            "viscosity": { "model": "const", "mu": 1.5e-5 }, "pOperating": 101325 }"#;
+        let g = lower(text(const_gas, PATCHES, t300)).unwrap().compressible.unwrap();
+        assert_eq!(g.viscosity, Viscosity::Constant { mu: 1.5e-5 });
+        assert_eq!((g.gamma, g.w, g.pr, g.p_op), (1.3, 0.044, 0.75, 101325.0));
+
+        // A case without the block lowers to no gas.
+        let walls = r#"[ { "match": ".*", "kind": "wall" } ]"#;
+        assert!(lower(text("", walls, "")).unwrap().compressible.is_none());
+
+        let refused = |physics_extra: &str, patches: &str, initial_t: &str, needle: &str| {
+            let msg = match lower(text(physics_extra, patches, initial_t)) {
+                Ok(_) => panic!("expected a refusal naming {needle}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains(needle), "expected the message to name {needle}: {msg}");
+        };
+        // §122.1: a stated cp off (122.5) by more than 1e-6 relative.
+        refused(&gas_block.replace("1004.692579691832", "1006"), PATCHES, t300, "physics.compressible.cp");
+        // Unknown keys, by their path and name.
+        refused(&gas_block.replace("\"gamma\"", "\"Prt\": 0.9, \"gamma\""), PATCHES, t300, "Prt");
+        refused(&gas_block.replace("\"Ts\": 110.4", "\"Ts\": 110.4, \"mu\": 1"), PATCHES, t300, "mu");
+        refused(&gas_block.replace("sutherland", "janaf"), PATCHES, t300, "janaf");
+        // §122.2: pOperating has no default.
+        refused(&gas_block.replace(",\n            \"pOperating\": 1e5", ""), PATCHES, t300, "pOperating");
+        // validate(): gamma at or below 1.
+        refused(&gas_block.replace("1.4", "1.0"), walls, t300, "gamma");
+        // The presets need the gas, a freestream, and no U/p/T of their own.
+        refused("", PATCHES, t300, "physics.compressible");
+        refused(&gas_block, &PATCHES.replace(r#""freestream": { "U": [694.4, 0, 0], "p": 0.0, "T": 300.0 }"#, r#""p": { "type": "zeroGradient" }"#), t300, "\"p\"");
+        refused(&gas_block, r#"[ { "match": "xb", "kind": "farfield" }, { "match": ".*", "kind": "wall" } ]"#, t300, "freestream");
+        refused(&gas_block, r#"[ { "match": ".*", "kind": "wall", "freestream": { "U": [0,0,0], "p": 0, "T": 300 } } ]"#, t300, "freestream");
+        refused(&gas_block, &PATCHES.replace("\"T\": 288.15", "\"T\": 0"), t300, "freestream");
+        // A compressible case states initial.T.
+        refused(&gas_block, walls, "", "initial.T");
+    }
+
     #[test]
     fn schema_documents_the_grading_block() {
         let text = emit_schema();
@@ -4644,6 +5018,7 @@ mod tests {
                 wall_treatment: None,
                 ks: None,
                 cs: None,
+                freestream: None,
             },
             JsonPatchRule {
                 pattern: ".*".to_string(),
@@ -4659,6 +5034,7 @@ mod tests {
                 wall_treatment: None,
                 ks: None,
                 cs: None,
+                freestream: None,
             },
         ];
 
