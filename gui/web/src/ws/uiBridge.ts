@@ -5,7 +5,7 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
+import type { ClientMsg, MeshDraft, MetricRecord, OpenMeshDialog, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
 import { ViewerCommandSchema } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
@@ -61,6 +61,38 @@ const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }>
 /** The four geometry edit ui.commands this screen applies through the
  *  geometry studio store (E1). */
 type GeometryUiCommand = Extract<UiCommand, { type: 'geometry_part' | 'geometry_transform' | 'geometry_boolean' | 'geometry_save' }>
+
+// ---- open_mesh_dialog / open_mesh_view (STU-06b) ---------------------------
+
+/** An empty draft, as the server's guiMesh.ts starts one. */
+const EMPTY_MESH_DRAFT: MeshDraft = { mode: 'preset', preset: null, cells: null, outputDir: null, config: null, layoutDir: null, check: null, dryRun: false }
+
+/** open_mesh_dialog -> the whole draft the Mesh dialog shows. The server sends
+ *  its whole draft; a field a command leaves out keeps the shown draft's value,
+ *  one cell count fills three axes, and an absent mode follows the given form
+ *  as guiMesh.ts infers it. Pure. */
+export function meshDraftOf(cmd: OpenMeshDialog, prev: MeshDraft | null): MeshDraft {
+  const d: MeshDraft = { ...(prev ?? EMPTY_MESH_DRAFT) }
+  if (cmd.preset != null) d.preset = cmd.preset
+  if (cmd.outputDir != null) d.outputDir = cmd.outputDir
+  if (cmd.config != null) d.config = cmd.config
+  if (cmd.layoutDir != null) d.layoutDir = cmd.layoutDir
+  if (cmd.check != null) d.check = cmd.check
+  if (cmd.dryRun != null) d.dryRun = cmd.dryRun
+  if (cmd.cells != null) d.cells = typeof cmd.cells === 'number' ? [cmd.cells, cmd.cells, cmd.cells] : [cmd.cells[0], cmd.cells[1], cmd.cells[2]]
+  else if (d.cells) d.cells = [d.cells[0], d.cells[1], d.cells[2]]
+  d.mode = cmd.mode ?? (cmd.layoutDir != null ? 'regions' : cmd.config != null ? 'automesher' : cmd.preset != null ? 'preset' : d.mode)
+  return d
+}
+
+/** The directory a draft's mesh lands in, for open_mesh_view: the preset form's
+ *  outputDir, the automesher's -check case, the regions form's layout root; null
+ *  when the draft names none. */
+export function meshOutputOf(d: MeshDraft | null): string | null {
+  if (!d) return null
+  const p = d.mode === 'regions' ? d.layoutDir : d.mode === 'automesher' ? d.check : d.outputDir
+  return p && p.trim() ? p.trim() : null
+}
 
 // ---- add_layer / remove_layer (STU-04) -------------------------------------
 // A weaker model names layers loosely ("iso-surface", "ARROWS") and packs its
@@ -529,6 +561,22 @@ export function createUiBridge(deps: UiBridgeDeps) {
         return unsupported(cmd.type, 'gui_control applies this on the server through case_create / case_validate; this window should not receive it')
       case 'start_mesh':
         return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
+      case 'open_mesh_dialog':
+        // The server keeps the draft (guiMesh.ts); the dialog shows what it sent.
+        u.showMeshDialog(meshDraftOf(cmd, u.meshDialog?.draft ?? null))
+        return { ok: true }
+      case 'open_mesh_view': {
+        // The mesh the dialog's draft made, else the open case's own mesh.
+        const path = meshOutputOf(u.meshDialog?.draft ?? null) ?? activeCasePath()
+        if (path === null)
+          return { ok: false, error: 'NO_MESH (open_mesh_view): no mesh to open: the Mesh dialog shows no draft with an output directory and no case is open; open_mesh_dialog or open_case first' }
+        u.openViewerTab()
+        const v = getViewerApi()
+        const loaded = await v.execute({ type: 'load', path, timeIndex: 'last', field: 'none', region: null })
+        if (!loaded.ok) return { ok: false, error: loaded.error?.message ?? `the mesh at ${path} could not be opened` }
+        const r = await v.execute({ type: 'setRepresentation', mode: cmd.representation ?? 'surfaceEdges', opacity: null, patches: cmd.patches ?? null })
+        return r.ok ? { ok: true } : { ok: false, error: r.error?.message ?? 'the viewer refused the representation' }
+      }
       case 'set_locale':
         u.setLocale(cmd.locale)
         actions.setSettings({ locale: cmd.locale })

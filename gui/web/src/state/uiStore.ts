@@ -1,7 +1,7 @@
 // Layout and preference state, persisted to localStorage (versioned).
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Locale, ViewId } from '@cfd/shared'
+import type { Locale, MeshDraft, ViewId } from '@cfd/shared'
 import { tx } from '../i18n/extra'
 
 export type Theme = 'light' | 'dark'
@@ -28,6 +28,21 @@ export type Tab =
   | { id: string; kind: 'campaign'; path: string }
 
 export type PanelLayout = Record<string, number>
+
+/** The answer the server gave the Mesh dialog's last mesh.draft / mesh.start. */
+export interface MeshStatus {
+  action: 'draft' | 'start'
+  ok: boolean
+  code: string | null
+  error: string | null
+}
+
+/** The Mesh dialog on screen (STU-06b): the session's draft as the server last sent it, the mesh run Start began, and the last answer. */
+export interface MeshDialogState {
+  draft: MeshDraft
+  runId: string | null
+  status: MeshStatus | null
+}
 
 export interface UiState {
   theme: Theme
@@ -62,6 +77,8 @@ export interface UiState {
   metricSlots: [string | null, string | null]
   /** metrics or the sweeps view of the same chart. */
   metricMode: MetricMode
+  /** The Mesh dialog; null when it is closed. Transient: the draft lives on the server. */
+  meshDialog: MeshDialogState | null
 }
 
 export interface UiActions {
@@ -108,6 +125,11 @@ export interface UiActions {
   setSettingsOpen(open: boolean): void
   setCursor(cursor: { line: number; col: number } | null): void
   prefillComposer(text: string): void
+  /** Opens the Mesh dialog on a draft, or shows a new draft in the open one (its run and answer stay). */
+  showMeshDialog(draft: MeshDraft): void
+  closeMeshDialog(): void
+  /** Records the server's mesh.status; a start that began a run points the dialog's log at it. */
+  setMeshStatus(status: MeshStatus, runId: string | null): void
 }
 
 export type UiStore = UiState & UiActions
@@ -146,6 +168,7 @@ const INITIAL: UiState = {
   logFilter: { text: '', streams: ['stdout', 'stderr', 'system'], follow: true },
   metricSlots: [null, null],
   metricMode: 'metrics',
+  meshDialog: null,
 }
 
 export function fileTabId(path: string): string {
@@ -407,6 +430,15 @@ export const useUiStore = create<UiStore>()(
       },
       prefillComposer(text) {
         set((s) => ({ composerPrefill: { text, nonce: (s.composerPrefill?.nonce ?? 0) + 1 } }))
+      },
+      showMeshDialog(draft) {
+        set((s) => ({ meshDialog: { draft, runId: s.meshDialog?.runId ?? null, status: s.meshDialog?.status ?? null } }))
+      },
+      closeMeshDialog() {
+        set({ meshDialog: null })
+      },
+      setMeshStatus(status, runId) {
+        set((s) => (s.meshDialog ? { meshDialog: { ...s.meshDialog, status, runId: runId ?? s.meshDialog.runId } } : {}))
       },
     }),
     {

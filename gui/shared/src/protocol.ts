@@ -386,6 +386,27 @@ export type PatchBc = z.infer<typeof PatchBcSchema>
 export const ViewIdSchema = z.enum(['A', 'B'])
 export type ViewId = z.infer<typeof ViewIdSchema>
 
+/** open_mesh_dialog: an edit of the session's mesh draft. gui_control sends it, and so does the
+ *  studio's Mesh dialog (ClientMsg mesh.draft); a field left out keeps its value. */
+export const OpenMeshDialogSchema = z.object({
+  type: z.literal('open_mesh_dialog'),
+  mode: z.enum(['preset', 'automesher', 'regions']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config/layoutDir is given'),
+  preset: z.string().nullish().describe('Mesh preset kind, e.g. "channel"'),
+  // One number fills all three axes, which is wrong for every 2-D preset
+  // (channel, cavity, step, damBreak run one cell deep): [nx, ny, nz] says
+  // it exactly.
+  cells: z
+    .union([z.coerce.number().int(), z.tuple([z.coerce.number().int(), z.coerce.number().int(), z.coerce.number().int()])])
+    .nullish()
+    .describe('Cells: one number for every direction, or [nx, ny, nz]'),
+  outputDir: z.string().nullish().describe('Workspace-relative output directory'),
+  config: z.string().nullish().describe('Automesher form: workspace-relative AutomeshConfig JSONC'),
+  layoutDir: z.string().nullish().describe('Regions form: workspace-relative layout directory the region meshes write into (regions.json + <region>/polyMesh)'),
+  check: z.string().nullish().describe('Automesher form: -check this existing case directory instead of meshing'),
+  dryRun: Boolish.nullish().describe('Automesher form: -dryRun (read the config and report the plan, mesh nothing)'),
+})
+export type OpenMeshDialog = z.infer<typeof OpenMeshDialogSchema>
+
 export const UiCommandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('select_tab'), tab: z.string().describe('Tab id or label, e.g. "velocity" or "Residuals"') }),
   z.object({ type: z.literal('show_field'), field: z.enum(['Temperature', 'Velocity', 'Pressure']) }),
@@ -440,23 +461,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('follow_run'),
     runId: z.string().describe('Run to follow: subscribe to its log and point the Log tab, the charts and the status bar at it'),
   }),
-  z.object({
-    type: z.literal('open_mesh_dialog'),
-    mode: z.enum(['preset', 'automesher', 'regions']).nullish().describe('Which half of the dialog to open; the default follows whichever of preset/config/layoutDir is given'),
-    preset: z.string().nullish().describe('Mesh preset kind, e.g. "channel"'),
-    // One number fills all three axes, which is wrong for every 2-D preset
-    // (channel, cavity, step, damBreak run one cell deep): [nx, ny, nz] says
-    // it exactly.
-    cells: z
-      .union([z.coerce.number().int(), z.tuple([z.coerce.number().int(), z.coerce.number().int(), z.coerce.number().int()])])
-      .nullish()
-      .describe('Cells: one number for every direction, or [nx, ny, nz]'),
-    outputDir: z.string().nullish().describe('Workspace-relative output directory'),
-    config: z.string().nullish().describe('Automesher form: workspace-relative AutomeshConfig JSONC'),
-    layoutDir: z.string().nullish().describe('Regions form: workspace-relative layout directory the region meshes write into (regions.json + <region>/polyMesh)'),
-    check: z.string().nullish().describe('Automesher form: -check this existing case directory instead of meshing'),
-    dryRun: Boolish.nullish().describe('Automesher form: -dryRun (read the config and report the plan, mesh nothing)'),
-  }),
+  OpenMeshDialogSchema,
   z.object({ type: z.literal('start_mesh') }),
   z.object({
     type: z.literal('show_chart'),
@@ -800,6 +805,10 @@ export const ClientMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('run.stop'), runId: z.string() }),
   z.object({ t: z.literal('quick'), sessionId: z.string(), action: QuickActionSchema, casePath: z.string().nullable(), runId: z.string().nullable() }),
   z.object({ t: z.literal('settings.set'), sessionId: z.string(), patch: SessionSettingsSchema.partial() }),
+  // The studio's Mesh dialog: the operator's edit of the session's mesh draft
+  // (applied as gui_control's open_mesh_dialog is) and its Start press (as start_mesh).
+  z.object({ t: z.literal('mesh.draft'), sessionId: z.string(), edit: OpenMeshDialogSchema }),
+  z.object({ t: z.literal('mesh.start'), sessionId: z.string() }),
 ])
 export type ClientMsg = z.infer<typeof ClientMsgSchema>
 
@@ -863,6 +872,16 @@ export const ServerMsgSchema = z.discriminatedUnion('t', [
   z.object({ t: z.literal('gpu'), gpu: GpuStateSchema }),
   z.object({ t: z.literal('host'), host: HostStateSchema }),
   z.object({ t: z.literal('output'), level: z.enum(['info', 'warning', 'error']), text: z.string(), ts: z.number() }),
+  // The answer to one mesh.draft / mesh.start: a refusal's code and message, or the mesh run's id.
+  z.object({
+    t: z.literal('mesh.status'),
+    sessionId: z.string(),
+    action: z.enum(['draft', 'start']),
+    ok: z.boolean(),
+    code: z.string().nullable(),
+    error: z.string().nullable(),
+    runId: z.string().nullable(),
+  }),
 ])
 export type ServerMsg = z.infer<typeof ServerMsgSchema>
 export type ServerMsgOf<T extends ServerMsg['t']> = Extract<ServerMsg, { t: T }>

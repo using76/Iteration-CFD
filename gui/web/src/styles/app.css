@@ -106,6 +106,24 @@ a { color: var(--accent); }
 .palette-item.active, .palette-item:hover { background: var(--accent-soft); }
 .palette-item .hint { margin-left: auto; color: var(--fg-faint); font-size: var(--fs-xs); }
 
+/* ---- mesh dialog (STU-06b) ------------------------------------------------- */
+.mesh-dialog { width: 560px; max-width: 92vw; background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-xl); box-shadow: var(--shadow-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.mesh-head { display: flex; align-items: center; gap: 12px; }
+.mesh-tabs { display: inline-flex; gap: 2px; margin-left: 6px; }
+.mesh-tabs button { padding: 3px 10px; border-radius: var(--radius-md); font-size: var(--fs-sm); color: var(--fg-muted); }
+.mesh-tabs button.active { background: var(--accent-soft); color: var(--fg); font-weight: 600; }
+.mesh-close { margin-left: auto; font-size: 18px; line-height: 1; padding: 2px 6px; color: var(--fg-muted); }
+.mesh-form { display: flex; flex-direction: column; gap: 8px; }
+.mesh-row { display: grid; grid-template-columns: 170px 1fr; align-items: center; gap: 10px; font-size: var(--fs-sm); }
+.mesh-row input, .mesh-row select { height: 28px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-input); color: var(--fg); min-width: 0; }
+.mesh-check { grid-template-columns: auto 1fr; }
+.mesh-check input { height: auto; }
+.mesh-cells { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.mesh-status.error { color: var(--danger); font-size: var(--fs-sm); }
+.mesh-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.mesh-log .mesh-run { text-transform: none; font-weight: 400; letter-spacing: 0; }
+.mesh-log pre { margin: 0; max-height: 220px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; }
+
 /* ---- settings popover ----------------------------------------------------- */
 .settings-pop { right: 12px; top: 44px; width: 300px; padding: 12px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: var(--fs-sm); }

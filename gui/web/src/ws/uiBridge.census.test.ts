@@ -91,6 +91,8 @@ function makeUi() {
     setOverlay: vi.fn(),
     closeTab: vi.fn(),
     activateTab: vi.fn(),
+    meshDialog: null,
+    showMeshDialog: vi.fn(),
   }
 }
 
@@ -157,9 +159,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  // STU-06a moved the mesh draft to the server; the dialog that shows it is STU-06b's.
-  open_mesh_dialog: 'STU-06b',
-  open_mesh_view: 'STU-06b',
   set_patch: 'STU-07a',
   open_boundary_editor: 'STU-07b',
   select_step: 'STU-08b',

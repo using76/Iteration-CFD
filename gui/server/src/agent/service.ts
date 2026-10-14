@@ -14,6 +14,8 @@ import type { DatasetService } from '../datasets/types.js'
 import type { Logger } from '../log.js'
 import type { RunManager } from '../runs/types.js'
 import { loadCustomTools } from '../tools/custom.js'
+import type { ToolContext } from '../tools/context.js'
+import { applyMeshDialog, guiStartMesh } from '../tools/guiMesh.js'
 import { mergeTools } from '../tools/defaults.js'
 import { ontologyHandle, ontologyPreviewFor } from '../ontology/handle.js'
 import type { Hub, ClientConn } from '../ws/types.js'
@@ -67,7 +69,7 @@ interface SessionRuntime {
   context: UserContext | null
 }
 
-const AGENT_FRAMES = new Set<ClientMsg['t']>(['session.open', 'session.new', 'session.list', 'session.delete', 'session.rename', 'user.message', 'turn.cancel', 'tool.approve', 'tool.deny', 'quick', 'settings.set'])
+const AGENT_FRAMES = new Set<ClientMsg['t']>(['session.open', 'session.new', 'session.list', 'session.delete', 'session.rename', 'user.message', 'turn.cancel', 'tool.approve', 'tool.deny', 'quick', 'settings.set', 'mesh.draft', 'mesh.start'])
 
 export function createAgentService(deps: AgentServiceDeps): AgentService {
   const { config, hub, runs, datasets } = deps
@@ -330,6 +332,37 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
     }
   }
 
+  /** The studio Mesh dialog's frames: the operator's draft edit and Start press,
+   *  applied as gui_control's open_mesh_dialog / start_mesh are (guiMesh.ts) and
+   *  answered with one mesh.status. Start is the operator's own press on the
+   *  draft the dialog shows, so it asks no second approval - POST /api/runs starts
+   *  an operator's run the same way. */
+  async function meshFrame(client: ClientConn, msg: ClientMsgOf<'mesh.draft'> | ClientMsgOf<'mesh.start'>): Promise<void> {
+    const rec = store.get(msg.sessionId)
+    if (!rec) return client.send({ t: 'error', message: `no session ${msg.sessionId}`, fatal: false })
+    const ctx: ToolContext = {
+      config,
+      hub,
+      runs,
+      datasets,
+      sessionId: rec.id,
+      signal: new AbortController().signal,
+      workspaceRoot: config.workspaceRoot,
+      settings: rec.settings,
+      toolUseId: `mesh_dialog_${Date.now().toString(36)}`,
+    }
+    const r = msg.t === 'mesh.draft' ? await applyMeshDialog(msg.edit, ctx) : await guiStartMesh(ctx)
+    client.send({
+      t: 'mesh.status',
+      sessionId: rec.id,
+      action: msg.t === 'mesh.draft' ? 'draft' : 'start',
+      ok: r.ok,
+      code: r.ok ? null : (r.error?.code ?? 'ERROR'),
+      error: r.ok ? null : (r.error?.message ?? 'the mesh request failed'),
+      runId: r.runId ?? null,
+    })
+  }
+
   async function handleClientMessage(client: ClientConn, msg: ClientMsg): Promise<boolean> {
     if (!AGENT_FRAMES.has(msg.t)) return false
     switch (msg.t) {
@@ -388,6 +421,10 @@ export function createAgentService(deps: AgentServiceDeps): AgentService {
         return true
       case 'quick':
         await quick(client, msg)
+        return true
+      case 'mesh.draft':
+      case 'mesh.start':
+        await meshFrame(client, msg)
         return true
       case 'turn.cancel': {
         const rec = store.get(msg.sessionId)

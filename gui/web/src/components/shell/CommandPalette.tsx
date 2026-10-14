@@ -91,6 +91,8 @@ export function CommandPalette() {
           if (target) s.openGeometryTab(target)
         },
       },
+      // The server holds the mesh draft: an empty edit makes or fetches it and opens the dialog on it.
+      { id: 'c:mesh', group: 'commands', label: t('meshDialog.open'), icon: 'mesh', hint: online ? undefined : t('conn.offline'), run: () => actions.meshDraft({ type: 'open_mesh_dialog' }) },
       { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Alt+N', run: () => actions.newSession() },
       ...(['mesh', 'run', 'postprocess', 'validate', 'export'] as QuickAction[]).map<Item>((a) => ({
         id: `q:${a}`,

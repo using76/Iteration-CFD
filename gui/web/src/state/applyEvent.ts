@@ -358,6 +358,8 @@ export function applyEvent(state: SessionData, msg: ServerMsg, now: number = Dat
     // shell, not by this studio web app: the frames are accepted so the
     // switch stays exhaustive, and change nothing here.
     case 'ui.command':
+    // The socket hands mesh.status to the ui store (client.ts) before the batcher.
+    case 'mesh.status':
       return { state, effects: NO_EFFECTS }
     case 'host':
       return { state, effects: NO_EFFECTS }
