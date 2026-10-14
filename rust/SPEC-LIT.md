@@ -48604,6 +48604,119 @@ above, which is not a test.
 
 ---
 
+## 148. Studio post-processing on unstructured meshes
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §148 to the studio's
+post-processing on a polyMesh that is not a lattice: STU-12a (§148.1, the exact plane cut),
+STU-14 (the iso-surface, not yet written) and STU-15 (not yet written). The code lives in the
+studio's server, `gui/server/src/formats/`. No solver, gate or test that existed before this
+section changes.
+
+### 148.1 The exact plane cut of a polyhedral polyMesh
+
+`gui/server/src/formats/polycut.ts`, `cutPolyMesh(mesh, {origin, normal})`. It cuts every cell
+of any polyMesh (any face count, any vertex count per face) by one plane. It returns, per cell,
+the section polygons, their triangles and the cell id of each, and the total section area.
+
+**Source.** I. E. Sutherland and G. W. Hodgman, "Reentrant polygon clipping", *Commun. ACM*
+17(1) (1974) 32–42, doi:10.1145/360767.360802. The paper is paywalled and was not read for this
+section. What is used is its per-edge rule in its standard textbook form: walk a polygon's
+edges, and where an edge crosses the clipping plane, output the crossing point. Ear clipping
+rests on the two-ears theorem (G. H. Meisters, "Polygons have ears", *Amer. Math. Monthly*
+82(6) (1975) 648–651, doi:10.2307/2319703), also not read. The sign rule, the pairing along the
+cut line, the chaining by edge key and the degenerate-loop rule below are house-original.
+
+**Signed distance and the sign rule.** With `n̂ = n/|n|` and the plane through `o`,
+
+    d_i = n̂ · (x_i − o)                                                            (148.1)
+
+is computed once per mesh point as `n̂_x (x − o_x) + n̂_y (y − o_y) + n̂_z (z − o_z)`, so a
+point equal to `o`, or one sharing `o`'s coordinate on an axis-aligned plane, gets exactly 0.
+**A point with `d_i ≥ 0` is on the + side; a zero counts as +.** Every vertex therefore has a
+strict side, and the plane never passes through a vertex in the classification.
+
+**Crossing points.** An edge whose ends are on opposite sides, `+` end `u` and `−` end `v`,
+crosses at
+
+    t = d_u / (d_u − d_v),   x = x_u + t (x_v − x_u)                                 (148.2)
+
+always evaluated from the `+` end. The point is computed once per directed edge `(u, v)` and
+keyed by it, so every face and both cells that share the edge use the same bits. `t = 0`
+(`d_u = 0`) puts the point exactly on `u`.
+
+**Cap segments.** For each face with vertices on both sides, walk its vertices in the owner's
+outward order (OpenFOAM's convention: the normal points from owner to neighbour). An edge from
+`+` to `−` is an `X_in`, an edge from `−` to `+` an `X_out`. The owner's cap, which is the
+section polygon oriented counter-clockwise about `n̂` (the outward normal of the cell's `−`
+part), gets the segment from each `X_in` to the `X_out` that precedes it in the walk. This is
+the reverse of the Sutherland–Hodgman output edge `X_out → X_in`. The neighbour gets the same
+segments reversed. A face crossed four or more times (a non-convex face) is paired along the
+cut line instead. The crossings are sorted by `σ s`, where `s = (n̂ × N_f) · x` with `N_f` the
+face's Newell normal and `σ = sign Σ (s_out − s_in)`. That sum is the same for every pairing.
+Coincident crossings (a `+` vertex with `d = 0`) are ordered `X_in` first, and if the list then
+does not alternate, `X_out` first. The sorted list is paired `X_in → X_out`, two at a time. A
+face whose sorted crossings alternate in neither order (a warped face) keeps the
+Sutherland–Hodgman pairs.
+Walk order alone joins the two pieces of a face whose `−` part is disconnected, across the gap
+between them. The test case for this is the U prism with `n̂ = −y`.
+
+**Loops.** A cell's segments are chained into closed loops by their crossing keys. In a closed
+cell surface each crossing edge lies in exactly two of the cell's faces, which walk it in
+opposite directions. Each crossing is therefore the end of one segment and the start of one,
+and the segments form disjoint cycles. A chain that does not close (an open cell surface) is
+dropped, and `openCells` counts the cells that had one. Consecutive points at the same `+`
+vertex (`t = 0`) are merged. **A loop with fewer than 3 distinct points is dropped.** A contact
+at a vertex or along an edge gives no polygon.
+
+**Consequences of the sign rule.**
+
+1. A face lying in the plane is reported once, by the cell on its `−` side. On that side the
+   face's vertices are `+` and the cell's other vertices are `−`. The cell on the `+` side has
+   no `−` vertex and is not cut. No face is counted twice, and none is missed.
+2. A plane through a vertex or an edge gives the section of the plane displaced infinitesimally
+   to the `−` side, in the limit. Its area is the area of the exact section.
+3. A boundary face lying in the plane is reported only when the domain is on its `−` side. The
+   plane `z = 0` with `n̂ = +z` gives area 0 on the unit cube. `z = 1` gives 1. To see a
+   boundary face, the caller orients `n̂` away from the domain.
+
+**Triangles.** Each loop is triangulated in its own orientation. A loop with no turn below
+`−10⁻¹²` of its squared in-plane extent is convex and gets a fan from its first point; this
+admits collinear points from split coplanar faces. Any other loop is ear-clipped in in-plane
+coordinates. The section area is
+
+    A = Σ_triangles ½ ((b − a) × (c − a)) · n̂                                       (148.3)
+
+Every triangle is counter-clockwise about `n̂`. A cell with a through-hole, whose section has
+an inner loop, gets the inner loop triangulated on its own with negative area. `A` stays the
+exact signed area, but such a hole is not cut out of the outer loop's triangles.
+
+**Exactness.** For cells with planar faces the section is the exact plane ∩ cell. A warped
+face's section follows its edges: the crossing points are exact, and the cap between them is
+straight.
+
+**Gates (STU-12a, `gui/server/src/formats/polycut.test.ts`, 9 tests).** The mixed unit cube
+has 9 cells: 5 tets, 1 prism, 1 pyramid, 1 hex, and 1 merged polyhedron with 10 faces and 12
+points. The merged polyhedron is two stacked hexes, its middle ring at the uneven heights 0.1,
+0.13, 0.08 and 0.11. The cell volumes are positive and sum to 1 within 1e-14. Every internal
+face is shared by exactly two cells (10 internal faces), and every boundary face lies on the
+cube.
+
+| case | gate | measured |
+|---|---|---|
+| `z = 0.37` | area 1 to 1e-12 relative, triangle centroids in their cells (half-space, 1e-12) | −1.1e-16, 4 cells, 6 triangles |
+| faces `z = 0.2`, `0.3`; vertices `z = 0.1`, `0.13`, `0.6`, `0.62`, `y = 0.45`; boundary `z = 1`, `x = 1` | area 1 ± 1e-12, no cell in two polygons, no polygon of zero area | worst −1.1e-16; `z = 0.2` reports only G, `z = 0.3` only H |
+| oblique through `p`; through edge `a–a'` | the independent area to 1e-12 | −1.1e-16, 0 |
+| 200 random planes (seeded) | the independent convex plane ∩ cube polygon area to 1e-10 | worst 4.4e-16, all 200 non-empty |
+| U voxel cell (5 voxels), `z = 0.5`; `y = 1.5` | area 5, ear-clipped triangles inside the U; two polygons of area 1 | pass |
+| U prism, single non-convex top and bottom faces, `y = 1.5`, `n̂ = ±y` | two 4-point polygons of area 1 | pass; pairing each `X_in` with the next `X_out` fails `+y`, the Sutherland–Hodgman pairs alone fail `−y` |
+| notch prism, its reflex vertex on `y = 1`, `n̂ = ±y` | area 3 ± 1e-12, every loop closed, no polygon of zero area | pass |
+| 1 M cells (100³ hexes), oblique plane | the independent area to 1e-10 | −8.4e-14, 19 999 cut cells, 39 999 triangles, **89–127 ms** for the cut (Node 22, 4-CPU host shared by three build lanes; mesh build not timed) |
+
+The independent oracle intersects the plane with the cube's 12 edges, sorts the points by
+angle about their mean, and takes the shoelace area. It shares no code with `polycut.ts`.
+
+---
+
 ## 151. The dust stream — scope, the clean room, the stated inputs, the recorded inconsistencies, the answer keys and the gates
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §151-§160 to the dust stream
