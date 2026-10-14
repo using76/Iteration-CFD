@@ -5,9 +5,12 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! Conforming boundary recovery of SPEC-LIT §116.11, the edge half
+//! Conforming boundary recovery of SPEC-LIT §116.11. The edge half
 //! (TET-07a): every edge of a closed surface triangulation becomes a chain
-//! of Delaunay edges after Steiner points are placed on it.
+//! of Delaunay edges after Steiner points are placed on it. The face half
+//! (TET-07b): every surface triangle becomes a union of Delaunay faces after
+//! Steiner points are placed on its edges and inside it, so every Steiner
+//! point lies on the piecewise-linear surface.
 //!
 //! The steps, as §116.11 writes them in (116.15a)-(116.15e):
 //!
@@ -31,6 +34,14 @@
 //!    missing subsegment at the cap is a refusal by name, never a silent
 //!    pass. A subsegment that is present but encroached (116.15) is counted
 //!    and reported, not split; §116.11 records why.
+//! 5. The face half, (116.15f)-(116.15h): each input triangle is its own
+//!    facet. Its corners, chain points and facet points are triangulated in
+//!    its plane frame (Lawson flips with the exact 2D predicates lifted to
+//!    §116.4's 3D ones). A pass with no missing subsegment places, for each
+//!    subtriangle that is not a Delaunay face, its circumcentre, or splits
+//!    the subsegments of the triangle that point would encroach, or (the
+//!    circumcentre outside and encroaching none) places the centroid. Both
+//!    halves share the cap; a present encroached subtriangle is counted.
 //!
 //! Every coordinate is `[f64; 3]` in both builds (§116.2); the Delaunay
 //! decisions are the exact predicates of §116.4-§116.5.
@@ -39,16 +50,20 @@
 //! 86-95 (the encroachment rule), Murphy, Mount & Gable (2001), Int. J.
 //! Comput. Geom. Appl. 11(6):669-682 and Cohen-Steiner, Colin de Verdière &
 //! Yvinec (2004), Comput. Geom. 28(2-3):217-233 (protecting balls and
-//! concentric shells); the choices are derived in SPEC-LIT §116.11. No
+//! concentric shells), Lawson (1977), Mathematical Software III 161-194
+//! (the flips), Ruppert (1995), J. Algorithms 18(3):548-585 (the
+//! circumcentre split) and Schönhardt (1928), Math. Ann. 98:309-312 (the
+//! twisted prism); the choices are derived in SPEC-LIT §116.11. No
 //! GPL-licensed source was consulted.
 
 use super::delaunay::Delaunay;
+use super::predicates::{insphere, orient3d};
 use super::remesh::Remeshed;
 use super::sizefield::point_triangle_distance;
 use super::surfprep::TetSurface;
 use super::{Point, TetRecoverSpec};
 use crate::error::{Error, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 fn sub(a: Point, b: Point) -> Point {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -579,6 +594,693 @@ pub fn recover_remeshed(r: &Remeshed, spec: &TetRecoverSpec) -> Result<EdgeRecov
     recover_edges(&r.surface, &r.feature_edges, spec)
 }
 
+// ---------------------------------------------------------------------
+// The face half (TET-07b): every surface triangle a union of Delaunay faces.
+
+/// Where a Steiner point lies (SPEC-LIT §116.11).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SteinerSite {
+    /// On `edges[edge]` at parameter `t` from its first end, (116.15d) or
+    /// (116.15e).
+    Edge { edge: u32, t: f64 },
+    /// Inside input triangle `tri = (a, b, c)`, at `a + u (b - a) + v (c - a)`
+    /// (116.15f)-(116.15g).
+    Facet { tri: u32, u: f64, v: f64 },
+}
+
+/// What the face recovery built (SPEC-LIT §116.11): the edge recovery's
+/// points and chains carried on, the facet points added, and the split
+/// surface whose every triangle is a face of `delaunay`.
+#[derive(Debug)]
+pub struct FaceRecovery {
+    /// The input points bit for bit, then the Steiner points in creation order.
+    pub points: Vec<Point>,
+    /// The input triangles, as given.
+    pub tris: Vec<[u32; 3]>,
+    /// The surface edges, each `[min, max]` in the input numbering, ascending.
+    pub edges: Vec<[u32; 2]>,
+    /// Beside `edges`: the edge's chain of point ids, in increasing parameter.
+    pub chains: Vec<Vec<u32>>,
+    /// Steiner point `k` (point id `n_input + k`) lies at `sites[k]`.
+    pub sites: Vec<SteinerSite>,
+    /// The protected vertices of the edge half, ascending.
+    pub protected: Vec<u32>,
+    /// Steiner points on ball surfaces (116.15d).
+    pub ball_steiner: usize,
+    /// Passes of the edge half, its last triangulation included.
+    pub edge_passes: usize,
+    /// Steiner points from missing-subsegment splits (116.15e), both halves.
+    pub split_steiner: usize,
+    /// Steiner points from subsegment splits a facet point would encroach (116.15g).
+    pub encroach_split_steiner: usize,
+    /// Steiner points inside triangles (116.15g), the centroids included.
+    pub facet_steiner: usize,
+    /// Of `facet_steiner`, the centroids placed when a circumcentre fell
+    /// outside its triangle and encroached no subsegment of it.
+    pub centroid_steiner: usize,
+    /// Delaunay triangulations built, both halves, the last one included.
+    pub passes: usize,
+    /// The split surface: every triangle wound as its parent input triangle.
+    pub subtris: Vec<[u32; 3]>,
+    /// Beside `subtris`: the index of the parent input triangle.
+    pub sub_parent: Vec<u32>,
+    /// Subsegments present at the end but encroached (116.15): counted.
+    pub encroached: usize,
+    /// Subtriangles present at the end but encroached (116.15): counted.
+    pub encroached_faces: usize,
+    /// The Delaunay triangulation of `points` holding every subsegment and
+    /// every subtriangle.
+    pub delaunay: Delaunay,
+}
+
+impl FaceRecovery {
+    /// The number of Steiner points.
+    pub fn steiner(&self) -> usize {
+        self.sites.len()
+    }
+
+    /// Every subsegment, `[min, max]`, in chain order.
+    pub fn subsegments(&self) -> Vec<[u32; 2]> {
+        let mut out = Vec::new();
+        for ch in &self.chains {
+            for w in ch.windows(2) {
+                let (a, b) = key(w[0], w[1]);
+                out.push([a, b]);
+            }
+        }
+        out
+    }
+
+    /// The input triangles each point lies on: a corner's incident
+    /// triangles, an edge point's two (or more) triangles of its edge, a
+    /// facet point's own triangle.
+    pub fn point_tris(&self) -> Vec<Vec<u32>> {
+        let n_in = self.points.len() - self.sites.len();
+        let mut on: Vec<Vec<u32>> = vec![Vec::new(); self.points.len()];
+        let mut edge_tris: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for (ti, t) in self.tris.iter().enumerate() {
+            for k in 0..3 {
+                on[t[k] as usize].push(ti as u32);
+                edge_tris.entry(key(t[k], t[(k + 1) % 3])).or_default().push(ti as u32);
+            }
+        }
+        for (k, s) in self.sites.iter().enumerate() {
+            on[n_in + k] = match *s {
+                SteinerSite::Edge { edge, .. } => {
+                    let e = self.edges[edge as usize];
+                    edge_tris[&(e[0], e[1])].clone()
+                }
+                SteinerSite::Facet { tri, .. } => vec![tri],
+            };
+        }
+        on
+    }
+
+    /// The boundary face set: every face of `delaunay`'s finite tets whose
+    /// three vertices lie on one common input triangle, each sorted
+    /// ascending, the list sorted.
+    pub fn surface_faces(&self) -> Vec<[u32; 3]> {
+        let on = self.point_tris();
+        let mut out: Vec<[u32; 3]> = delaunay_faces(&self.delaunay)
+            .into_iter()
+            .filter(|f| {
+                on[f[0] as usize].iter().any(|t| {
+                    on[f[1] as usize].contains(t) && on[f[2] as usize].contains(t)
+                })
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// `(present, total)`: the subtriangles that are faces of `delaunay`.
+    pub fn recovered(&self) -> (usize, usize) {
+        let df = delaunay_faces(&self.delaunay);
+        let present = self.subtris.iter().filter(|t| df.contains(&sorted3(**t))).count();
+        (present, self.subtris.len())
+    }
+}
+
+fn sorted3(mut f: [u32; 3]) -> [u32; 3] {
+    f.sort_unstable();
+    f
+}
+
+/// Every face of the finite tets of `d`, sorted ascending.
+pub fn delaunay_faces(d: &Delaunay) -> HashSet<[u32; 3]> {
+    let mut out = HashSet::new();
+    for t in d.finite_tets() {
+        for skip in 0..4 {
+            let mut f = [0u32; 3];
+            let mut m = 0;
+            for (i, &v) in t.iter().enumerate() {
+                if i != skip {
+                    f[m] = v;
+                    m += 1;
+                }
+            }
+            out.insert(sorted3(f));
+        }
+    }
+    out
+}
+
+/// The plane point under every 2D predicate: `orient3d(a, b, c, LIFT) > 0`
+/// for `a, b, c` counter-clockwise on `z = 0` (116.15f).
+const LIFT: Point = [0.0, 0.0, -1.0];
+
+fn on_plane(a: [f64; 2]) -> Point {
+    [a[0], a[1], 0.0]
+}
+
+/// The exact 2D orientation, positive when `a, b, c` turn counter-clockwise:
+/// (116.1) of the three points on `z = 0` and `(0, 0, -1)`, whose
+/// determinant is the 2D one exactly.
+fn orient2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    orient3d(&on_plane(a), &on_plane(b), &on_plane(c), &LIFT)
+}
+
+/// The exact 2D in-circle sign, positive when `p` lies strictly inside the
+/// circle through the counter-clockwise `a, b, c`: (116.3) of the sphere
+/// through them and `(0, 0, -1)`, which meets `z = 0` in that circle.
+fn incircle2(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> f64 {
+    insphere(&on_plane(a), &on_plane(b), &on_plane(c), &LIFT, &on_plane(p))
+}
+
+/// The plane frame of input triangle `(a, b, c)` (116.15f).
+struct Frame {
+    a: Point,
+    e1: Point,
+    e2: Point,
+    /// The corners in the plane: `(0, 0)`, `(|e1|, 0)`, `(e2 . e1 / |e1|, |e1 x e2| / |e1|)`.
+    c2: [[f64; 2]; 3],
+}
+
+impl Frame {
+    fn new(p: [Point; 3]) -> Frame {
+        let e1 = sub(p[1], p[0]);
+        let e2 = sub(p[2], p[0]);
+        let l = norm(e1);
+        Frame {
+            a: p[0],
+            e1,
+            e2,
+            c2: [[0.0, 0.0], [l, 0.0], [dot(e2, e1) / l, norm(cross(e1, e2)) / l]],
+        }
+    }
+
+    fn at2(&self, u: f64, v: f64) -> [f64; 2] {
+        [u * self.c2[1][0] + v * self.c2[2][0], v * self.c2[2][1]]
+    }
+
+    fn uv(&self, x: [f64; 2]) -> (f64, f64) {
+        let v = x[1] / self.c2[2][1];
+        ((x[0] - v * self.c2[2][0]) / self.c2[1][0], v)
+    }
+
+    fn at3(&self, u: f64, v: f64) -> Point {
+        [
+            self.a[0] + u * self.e1[0] + v * self.e2[0],
+            self.a[1] + u * self.e1[1] + v * self.e2[1],
+            self.a[2] + u * self.e1[2] + v * self.e2[2],
+        ]
+    }
+}
+
+/// One input triangle's points in its plane frame: the boundary cycle
+/// first (corner `a`, the chain to `b`, `b`, the chain to `c`, `c`, the
+/// chain back), then its interior points; `side[k]` is the
+/// `(edge, reversed)` of side `k` and `start[k]` its corner's position.
+struct FacetPoints {
+    ids: Vec<u32>,
+    xy: Vec<[f64; 2]>,
+    nb: usize,
+    start: [usize; 3],
+    side: [(usize, bool); 3],
+}
+
+/// The 2D triangulation of (116.15f): boundary points by edge splits,
+/// interior points by location, then Lawson flips of every non-boundary
+/// edge that fails the exact in-circle test. Counter-clockwise local
+/// triangles, or `None` when a point cannot be placed.
+fn triangulate_facet(fp: &FacetPoints) -> Option<Vec<[usize; 3]>> {
+    let xy = &fp.xy;
+    let nb = fp.nb;
+    let n = xy.len();
+    let mut tris: Vec<[usize; 3]> = vec![[fp.start[0], fp.start[1], fp.start[2]]];
+    // The boundary points, side by side, each splitting the boundary edge
+    // that holds it.
+    for k in 0..3 {
+        let end = fp.start[(k + 1) % 3];
+        let last = if k == 2 { nb } else { end };
+        let mut prev = fp.start[k];
+        for j in fp.start[k] + 1..last {
+            let (ti, r) = tris.iter().enumerate().find_map(|(ti, t)| {
+                (0..3).find_map(|m| {
+                    (t[m] == prev && t[(m + 1) % 3] == end).then_some((ti, t[(m + 2) % 3]))
+                })
+            })?;
+            tris[ti] = [prev, j, r];
+            tris.push([j, end, r]);
+            prev = j;
+        }
+    }
+    // The interior points by location.
+    for j in nb..n {
+        let x = xy[j];
+        let mut placed = false;
+        for ti in 0..tris.len() {
+            let t = tris[ti];
+            let o = [
+                orient2(xy[t[1]], xy[t[2]], x),
+                orient2(xy[t[2]], xy[t[0]], x),
+                orient2(xy[t[0]], xy[t[1]], x),
+            ];
+            if o.iter().any(|&s| s < 0.0) {
+                continue;
+            }
+            let zeros: Vec<usize> = (0..3).filter(|&m| o[m] == 0.0).collect();
+            match zeros.len() {
+                0 => {
+                    tris[ti] = [t[0], t[1], j];
+                    tris.push([t[1], t[2], j]);
+                    tris.push([t[2], t[0], j]);
+                }
+                1 => {
+                    let m = zeros[0];
+                    let (p, q, r) = (t[(m + 1) % 3], t[(m + 2) % 3], t[m]);
+                    let (tj, s) = tris.iter().enumerate().find_map(|(tj, u)| {
+                        (0..3).find_map(|w| {
+                            (u[w] == q && u[(w + 1) % 3] == p).then_some((tj, u[(w + 2) % 3]))
+                        })
+                    })?;
+                    tris[ti] = [p, j, r];
+                    tris[tj] = [q, j, s];
+                    tris.push([j, q, r]);
+                    tris.push([j, p, s]);
+                }
+                _ => return None,
+            }
+            placed = true;
+            break;
+        }
+        if !placed {
+            return None;
+        }
+    }
+    // Lawson flips until every interior edge is locally Delaunay.
+    let mut sweeps = 0usize;
+    loop {
+        sweeps += 1;
+        if sweeps > n * n + 10 {
+            return None;
+        }
+        let mut owner: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+        for (ti, t) in tris.iter().enumerate() {
+            for m in 0..3 {
+                owner.insert((t[(m + 1) % 3], t[(m + 2) % 3]), (ti, m));
+            }
+        }
+        let mut touched = vec![false; tris.len()];
+        let mut flips = 0usize;
+        for ti in 0..tris.len() {
+            for m in 0..3 {
+                if touched[ti] {
+                    break;
+                }
+                let t = tris[ti];
+                let (p, q, r) = (t[(m + 1) % 3], t[(m + 2) % 3], t[m]);
+                let Some(&(tj, w)) = owner.get(&(q, p)) else { continue };
+                if touched[tj] {
+                    continue;
+                }
+                let s = tris[tj][w];
+                if incircle2(xy[p], xy[q], xy[r], xy[s]) <= 0.0 {
+                    continue;
+                }
+                if orient2(xy[p], xy[s], xy[r]) <= 0.0 || orient2(xy[s], xy[q], xy[r]) <= 0.0 {
+                    continue;
+                }
+                tris[ti] = [p, s, r];
+                tris[tj] = [s, q, r];
+                touched[ti] = true;
+                touched[tj] = true;
+                flips += 1;
+            }
+        }
+        if flips == 0 {
+            break;
+        }
+    }
+    let ok = tris.len() + 2 == nb + 2 * (n - nb)
+        && tris.iter().all(|t| orient2(xy[t[0]], xy[t[1]], xy[t[2]]) > 0.0);
+    ok.then_some(tris)
+}
+
+/// The 2D circumcentre of `p, q, r`.
+fn circumcentre2(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> [f64; 2] {
+    let (bx, by) = (q[0] - p[0], q[1] - p[1]);
+    let (cx, cy) = (r[0] - p[0], r[1] - p[1]);
+    let d = 2.0 * (bx * cy - by * cx);
+    let (b2, c2) = (bx * bx + by * by, cx * cx + cy * cy);
+    [p[0] + (cy * b2 - by * c2) / d, p[1] + (bx * c2 - cx * b2) / d]
+}
+
+/// The 3D circumcentre and circumradius of a triangle.
+fn circumsphere3(a: Point, b: Point, c: Point) -> (Point, f64) {
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let n = cross(ab, ac);
+    let n2 = dot(n, n);
+    let t1 = cross(n, ab);
+    let t2 = cross(ac, n);
+    let (lb, lc) = (dot(ab, ab), dot(ac, ac));
+    let off = [
+        (lc * t1[0] + lb * t2[0]) / (2.0 * n2),
+        (lc * t1[1] + lb * t2[1]) / (2.0 * n2),
+        (lc * t1[2] + lb * t2[2]) / (2.0 * n2),
+    ];
+    ([a[0] + off[0], a[1] + off[1], a[2] + off[2]], norm(off))
+}
+
+/// The subtriangles present in `d` whose diametral ball holds a vertex
+/// strictly inside (116.15). A Delaunay face's diametral ball lies in the
+/// pencil of spheres through its circumcircle, between or beyond its two
+/// tets' empty circumspheres, so it is empty iff it holds neither apex.
+fn count_encroached_faces(points: &[Point], subs: &[[u32; 3]], d: &Delaunay) -> usize {
+    let set: HashSet<[u32; 3]> = subs.iter().map(|t| sorted3(*t)).collect();
+    let mut hit: HashSet<[u32; 3]> = HashSet::new();
+    for t in d.finite_tets() {
+        for skip in 0..4 {
+            let f = sorted3([t[(skip + 1) % 4], t[(skip + 2) % 4], t[(skip + 3) % 4]]);
+            if !set.contains(&f) || hit.contains(&f) {
+                continue;
+            }
+            let (c, r) = circumsphere3(
+                points[f[0] as usize],
+                points[f[1] as usize],
+                points[f[2] as usize],
+            );
+            if norm(sub(points[t[skip] as usize], c)) < r {
+                hit.insert(f);
+            }
+        }
+    }
+    hit.len()
+}
+
+/// Recovers every edge and then every triangle of `surf` (SPEC-LIT
+/// §116.11, (116.15a)-(116.15h)): [`recover_edges`] first, then passes
+/// that split each missing subsegment (116.15e) or, with none missing,
+/// each missing subtriangle at its circumcentre in its plane, or the
+/// subsegments of its triangle that point would encroach. The passes of
+/// both halves share `spec.max_passes`. Refuses by name what
+/// [`recover_edges`] refuses, a triangle that cannot be triangulated in
+/// its plane (`recover/facet`) and a subsegment or subtriangle still
+/// missing at the cap (`recover/cap`).
+pub fn recover_faces(
+    surf: &TetSurface,
+    feature_edges: &[[u32; 2]],
+    spec: &TetRecoverSpec,
+) -> Result<FaceRecovery> {
+    let er = recover_edges(surf, feature_edges, spec)?;
+    let n_in = surf.points.len();
+    let EdgeRecovery {
+        mut points,
+        edges,
+        chains: id_chains,
+        steiner_edge,
+        steiner_t,
+        protected,
+        ball_steiner,
+        mut split_steiner,
+        passes: edge_passes,
+        delaunay,
+        ..
+    } = er;
+    let mut sites: Vec<SteinerSite> = steiner_edge
+        .iter()
+        .zip(&steiner_t)
+        .map(|(&edge, &t)| SteinerSite::Edge { edge, t })
+        .collect();
+    let mut chains: Vec<Vec<(u32, f64)>> = id_chains
+        .iter()
+        .enumerate()
+        .map(|(e, ch)| {
+            ch.iter()
+                .map(|&id| {
+                    let t = if (id as usize) < n_in {
+                        if id == edges[e][0] { 0.0 } else { 1.0 }
+                    } else {
+                        steiner_t[id as usize - n_in]
+                    };
+                    (id, t)
+                })
+                .collect()
+        })
+        .collect();
+    let eidx: HashMap<(u32, u32), usize> =
+        edges.iter().enumerate().map(|(e, ed)| ((ed[0], ed[1]), e)).collect();
+    let tris = surf.tris.clone();
+    let frames: Vec<Frame> = tris
+        .iter()
+        .map(|t| Frame::new([0, 1, 2].map(|k| surf.points[t[k] as usize])))
+        .collect();
+    for (ti, f) in frames.iter().enumerate() {
+        if !(f.c2[2][1] > 0.0 && f.c2[2][1].is_finite()) {
+            return Err(Error::Refused(format!("recover/input: triangle {ti} has no area")));
+        }
+    }
+    let mut interior: Vec<Vec<(u32, f64, f64)>> = vec![Vec::new(); tris.len()];
+    let mut encroach_split_steiner = 0usize;
+    let mut facet_steiner = 0usize;
+    let mut centroid_steiner = 0usize;
+    let mut d = delaunay;
+    let mut passes = edge_passes;
+    loop {
+        // The pass's subsegments and subtriangles against `d`.
+        let de = delaunay_edges(&d);
+        let mut missing_seg: Vec<(usize, usize)> = Vec::new();
+        for (e, ch) in chains.iter().enumerate() {
+            for i in 0..ch.len() - 1 {
+                if !de.contains(&key(ch[i].0, ch[i + 1].0)) {
+                    missing_seg.push((e, i));
+                }
+            }
+        }
+        let df = delaunay_faces(&d);
+        let mut facets: Vec<(FacetPoints, Vec<[usize; 3]>)> = Vec::with_capacity(tris.len());
+        let mut missing_tri: Vec<(usize, usize)> = Vec::new();
+        for (ti, t) in tris.iter().enumerate() {
+            let f = &frames[ti];
+            let mut fp = FacetPoints {
+                ids: Vec::new(),
+                xy: Vec::new(),
+                nb: 0,
+                start: [0; 3],
+                side: [(0, false); 3],
+            };
+            for k in 0..3 {
+                let (p, q) = (t[k], t[(k + 1) % 3]);
+                let e = eidx[&key(p, q)];
+                let rev = edges[e][0] != p;
+                let (ka, kb) = if rev { ((k + 1) % 3, k) } else { (k, (k + 1) % 3) };
+                let (p2, q2) = (f.c2[ka], f.c2[kb]);
+                fp.start[k] = fp.ids.len();
+                fp.side[k] = (e, rev);
+                let ch = &chains[e];
+                let m = ch.len();
+                for j in 0..m - 1 {
+                    let (id, tt) = if rev { ch[m - 1 - j] } else { ch[j] };
+                    fp.ids.push(id);
+                    fp.xy.push(if j == 0 {
+                        f.c2[k]
+                    } else {
+                        [p2[0] + tt * (q2[0] - p2[0]), p2[1] + tt * (q2[1] - p2[1])]
+                    });
+                }
+            }
+            fp.nb = fp.ids.len();
+            for &(id, u, v) in &interior[ti] {
+                fp.ids.push(id);
+                fp.xy.push(f.at2(u, v));
+            }
+            let Some(local) = triangulate_facet(&fp) else {
+                return Err(Error::Refused(format!(
+                    "recover/facet: triangle {ti} [{}, {}, {}] cannot be triangulated in its plane",
+                    t[0], t[1], t[2]
+                )));
+            };
+            for (li, lt) in local.iter().enumerate() {
+                if !df.contains(&sorted3(lt.map(|x| fp.ids[x]))) {
+                    missing_tri.push((ti, li));
+                }
+            }
+            facets.push((fp, local));
+        }
+        if missing_seg.is_empty() && missing_tri.is_empty() {
+            let mut subtris: Vec<[u32; 3]> = Vec::new();
+            let mut sub_parent: Vec<u32> = Vec::new();
+            for (ti, (fp, local)) in facets.iter().enumerate() {
+                for lt in local {
+                    subtris.push(lt.map(|x| fp.ids[x]));
+                    sub_parent.push(ti as u32);
+                }
+            }
+            let chains: Vec<Vec<u32>> =
+                chains.iter().map(|c| c.iter().map(|&(id, _)| id).collect()).collect();
+            let mut subs: Vec<[u32; 2]> = Vec::new();
+            for ch in &chains {
+                for w in ch.windows(2) {
+                    let (a, b) = key(w[0], w[1]);
+                    subs.push([a, b]);
+                }
+            }
+            let encroached = count_encroached(&points, &subs, &d);
+            let encroached_faces = count_encroached_faces(&points, &subtris, &d);
+            return Ok(FaceRecovery {
+                points,
+                tris,
+                edges,
+                chains,
+                sites,
+                protected,
+                ball_steiner,
+                edge_passes,
+                split_steiner,
+                encroach_split_steiner,
+                facet_steiner,
+                centroid_steiner,
+                passes,
+                subtris,
+                sub_parent,
+                encroached,
+                encroached_faces,
+                delaunay: d,
+            });
+        }
+        if passes >= spec.max_passes {
+            let ns: usize = chains.iter().map(|c| c.len() - 1).sum();
+            let nf: usize = facets.iter().map(|(_, l)| l.len()).sum();
+            let first = if let Some(&(e, i)) = missing_seg.first() {
+                let (a, b) = key(chains[e][i].0, chains[e][i + 1].0);
+                format!("subsegment [{a}, {b}]")
+            } else {
+                let (ti, li) = missing_tri[0];
+                let (fp, local) = &facets[ti];
+                let s = local[li].map(|x| fp.ids[x]);
+                format!("subtriangle [{}, {}, {}] of triangle {ti}", s[0], s[1], s[2])
+            };
+            return Err(Error::Refused(format!(
+                "recover/cap: {} of {} subsegments and {} of {} subtriangles missing after {} passes, first {}",
+                missing_seg.len(),
+                ns,
+                missing_tri.len(),
+                nf,
+                passes,
+                first
+            )));
+        }
+        // The splits of this pass: subsegments (edge, position) and facet
+        // points (triangle, u, v).
+        let mut seg_split: BTreeSet<(usize, usize)> = BTreeSet::new();
+        let mut facet_new: Vec<(usize, f64, f64, bool)> = Vec::new();
+        if !missing_seg.is_empty() {
+            seg_split.extend(missing_seg.iter().copied());
+        } else {
+            let mut taken: Vec<Vec<([f64; 2], f64)>> = vec![Vec::new(); tris.len()];
+            for &(ti, li) in &missing_tri {
+                let f = &frames[ti];
+                let (fp, local) = &facets[ti];
+                let lt = local[li];
+                let (p, q, r) = (fp.xy[lt[0]], fp.xy[lt[1]], fp.xy[lt[2]]);
+                let c2 = circumcentre2(p, q, r);
+                let rad = ((c2[0] - p[0]).powi(2) + (c2[1] - p[1]).powi(2)).sqrt();
+                let inside = orient2(f.c2[0], f.c2[1], c2) > 0.0
+                    && orient2(f.c2[1], f.c2[2], c2) > 0.0
+                    && orient2(f.c2[2], f.c2[0], c2) > 0.0;
+                let (u, v) = f.uv(c2);
+                let x = f.at3(u, v);
+                let mut enc: Vec<(usize, usize)> = Vec::new();
+                for &(e, _) in &fp.side {
+                    let ch = &chains[e];
+                    for i in 0..ch.len() - 1 {
+                        let (a, b) = (points[ch[i].0 as usize], points[ch[i + 1].0 as usize]);
+                        if dot(sub(x, a), sub(x, b)) < 0.0 {
+                            enc.push((e, i));
+                        }
+                    }
+                }
+                if !enc.is_empty() {
+                    seg_split.extend(enc);
+                    continue;
+                }
+                let (pick, rr, centroid) = if inside {
+                    (c2, rad, false)
+                } else {
+                    let g = [(p[0] + q[0] + r[0]) / 3.0, (p[1] + q[1] + r[1]) / 3.0];
+                    (g, rad, true)
+                };
+                let near = taken[ti].iter().any(|&(y, ry)| {
+                    let dd = ((y[0] - pick[0]).powi(2) + (y[1] - pick[1]).powi(2)).sqrt();
+                    dd < 1e-6 * rr.min(ry)
+                });
+                if near {
+                    continue;
+                }
+                taken[ti].push((pick, rr));
+                let (u, v) = f.uv(pick);
+                facet_new.push((ti, u, v, centroid));
+            }
+        }
+        // Subsegment splits in (edge, position) order, inserted back to
+        // front; then the facet points in (triangle, candidate) order.
+        let mut new: Vec<(usize, usize, u32, f64)> = Vec::with_capacity(seg_split.len());
+        for &(e, i) in &seg_split {
+            let (ta, tb) = (chains[e][i].1, chains[e][i + 1].1);
+            let t = 0.5 * (ta + tb);
+            if !(t > ta && t < tb) {
+                let (a, b) = key(chains[e][i].0, chains[e][i + 1].0);
+                return Err(Error::Refused(format!(
+                    "recover/split: subsegment [{a}, {b}] of edge [{}, {}] is too short to split",
+                    edges[e][0], edges[e][1]
+                )));
+            }
+            let ed = edges[e];
+            let id = points.len() as u32;
+            points.push(lerp(points[ed[0] as usize], points[ed[1] as usize], t));
+            sites.push(SteinerSite::Edge { edge: e as u32, t });
+            new.push((e, i, id, t));
+        }
+        if missing_seg.is_empty() {
+            encroach_split_steiner += new.len();
+        } else {
+            split_steiner += new.len();
+        }
+        for &(e, i, id, t) in new.iter().rev() {
+            chains[e].insert(i + 1, (id, t));
+        }
+        for &(ti, u, v, centroid) in &facet_new {
+            let id = points.len() as u32;
+            points.push(frames[ti].at3(u, v));
+            sites.push(SteinerSite::Facet { tri: ti as u32, u, v });
+            interior[ti].push((id, u, v));
+            facet_steiner += 1;
+            if centroid {
+                centroid_steiner += 1;
+            }
+        }
+        passes += 1;
+        d = Delaunay::build_brio(&points)?;
+    }
+}
+
+/// [`recover_faces`] on a remesh's output, its feature edges as the input
+/// features.
+pub fn recover_remeshed_faces(r: &Remeshed, spec: &TetRecoverSpec) -> Result<FaceRecovery> {
+    recover_faces(&r.surface, &r.feature_edges, spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::remesh::{remesh, RemeshOptions};
@@ -962,5 +1664,277 @@ mod tests {
         let bad = TetRecoverSpec { protect_angle_deg: 90.0, max_passes: 0 };
         let e = recover_edges(&s, &[], &bad).unwrap_err().to_string();
         assert!(e.contains("tet.recover.max_passes: must be >= 1, got 0"), "{e}");
+    }
+
+    // -----------------------------------------------------------------
+    // TET-07b: the face half.
+
+    /// Schönhardt's twisted prism (1928): the bottom `a_i` at 120 i
+    /// degrees on the unit circle at `z = 0`, the top `b_i` at 120 i + 30
+    /// degrees at `z = 1`, each side quad split along its reflex diagonal
+    /// `a_i b_(i+1)`, wound outward.
+    fn schonhardt_prism() -> TetSurface {
+        let mut points: Vec<Point> = Vec::new();
+        for (z, twist) in [(0.0, 0.0), (1.0, 30.0)] {
+            for i in 0..3 {
+                let a = (120.0 * i as f64 + twist).to_radians();
+                points.push([a.cos(), a.sin(), z]);
+            }
+        }
+        let mut tris: Vec<[u32; 3]> = vec![[0, 2, 1], [3, 4, 5]];
+        for i in 0..3u32 {
+            let j = (i + 1) % 3;
+            tris.push([i, j, 3 + j]);
+            tris.push([i, 3 + j, 3 + i]);
+        }
+        TetSurface {
+            points,
+            tris,
+            tri_patch: vec![0; 8],
+            patch_names: vec!["schonhardt".to_string()],
+        }
+    }
+
+    /// The icosphere at `level` subdivisions on the unit sphere, outward.
+    fn ico(level: u32) -> TetSurface {
+        let t = (1.0 + 5.0f64.sqrt()) / 2.0;
+        let v: [Point; 12] = [
+            [-1.0, t, 0.0],
+            [1.0, t, 0.0],
+            [-1.0, -t, 0.0],
+            [1.0, -t, 0.0],
+            [0.0, -1.0, t],
+            [0.0, 1.0, t],
+            [0.0, -1.0, -t],
+            [0.0, 1.0, -t],
+            [t, 0.0, -1.0],
+            [t, 0.0, 1.0],
+            [-t, 0.0, -1.0],
+            [-t, 0.0, 1.0],
+        ];
+        let f: [[u32; 3]; 20] = [
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ];
+        let unit = |p: Point| {
+            let n = norm(p);
+            [p[0] / n, p[1] / n, p[2] / n]
+        };
+        let mut pts: Vec<Point> = v.iter().map(|&p| unit(p)).collect();
+        let mut tris: Vec<[u32; 3]> = f.to_vec();
+        for _ in 0..level {
+            let mut cache: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut next = Vec::with_capacity(tris.len() * 4);
+            for [a, b, c] in tris {
+                let mut mid = |x: u32, y: u32| -> u32 {
+                    *cache.entry(key(x, y)).or_insert_with(|| {
+                        let (p, q) = (pts[x as usize], pts[y as usize]);
+                        pts.push(unit(lerp(p, q, 0.5)));
+                        pts.len() as u32 - 1
+                    })
+                };
+                let (ab, bc, ca) = (mid(a, b), mid(b, c), mid(c, a));
+                next.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+            }
+            tris = next;
+        }
+        let n = tris.len();
+        TetSurface {
+            points: pts,
+            tris,
+            tri_patch: vec![0; n],
+            patch_names: vec!["sphere".to_string()],
+        }
+    }
+
+    fn tri_area(a: Point, b: Point, c: Point) -> f64 {
+        0.5 * norm(cross(sub(b, a), sub(c, a)))
+    }
+
+    /// The face gate (§116.18 TET-07b), counted from the final
+    /// triangulation independently of the pass loop: every subsegment an
+    /// edge and every subtriangle a face of it; each input triangle tiled
+    /// by its subtriangles (relative 1e-12); each Steiner point within
+    /// `1e-12 h` of every input triangle it lies on, `h` that triangle's
+    /// longest edge, a facet point strictly inside its triangle. With
+    /// `exact`, the boundary face set equals the split surface; without,
+    /// it holds the split surface and every face beyond it is a face of a
+    /// tetrahedron flat to rounding (`6 V <= 1e-12 L^3`, `L` its longest
+    /// edge). Returns the faces beyond the split surface.
+    fn face_gate(name: &str, r: &FaceRecovery, n_input: usize, exact: bool) -> usize {
+        assert_eq!(r.points.len(), n_input + r.steiner());
+        assert_eq!(r.delaunay.points(), &r.points[..]);
+        r.delaunay.check().unwrap();
+        assert!(r.passes < 64, "{name}: cap reached ({} passes)", r.passes);
+        let (present, total) = r.recovered();
+        assert_eq!(present, total, "{name}: {present} of {total} subtriangles");
+        let de = delaunay_edges(&r.delaunay);
+        let subs = r.subsegments();
+        assert!(subs.iter().all(|s| de.contains(&(s[0], s[1]))), "{name}: subsegments");
+        let mut split: Vec<[u32; 3]> = r.subtris.iter().map(|t| sorted3(*t)).collect();
+        split.sort_unstable();
+        let n_split = split.len();
+        split.dedup();
+        assert_eq!(split.len(), n_split, "{name}: a repeated subtriangle");
+        let faces = r.surface_faces();
+        let in_split: HashSet<[u32; 3]> = split.iter().copied().collect();
+        assert!(split.iter().all(|f| faces.binary_search(f).is_ok()), "{name}: split surface");
+        let extra: Vec<[u32; 3]> = faces.iter().filter(|f| !in_split.contains(*f)).copied().collect();
+        if exact {
+            assert_eq!(faces, split, "{name}: the boundary face set");
+        } else {
+            let mut flat: HashSet<[u32; 3]> = HashSet::new();
+            for t in r.delaunay.finite_tets() {
+                let p = t.map(|k| r.points[k as usize]);
+                let six = dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0]))).abs();
+                let mut l = 0.0f64;
+                for i in 0..4 {
+                    for j in i + 1..4 {
+                        l = l.max(norm(sub(p[j], p[i])));
+                    }
+                }
+                if six <= 1e-12 * l * l * l {
+                    for skip in 0..4 {
+                        flat.insert(sorted3([t[(skip + 1) % 4], t[(skip + 2) % 4], t[(skip + 3) % 4]]));
+                    }
+                }
+            }
+            assert!(extra.iter().all(|f| flat.contains(f)), "{name}: a face beyond the split surface");
+        }
+        let mut tiled = vec![0.0f64; r.tris.len()];
+        for (t, &p) in r.subtris.iter().zip(&r.sub_parent) {
+            let [a, b, c] = t.map(|k| r.points[k as usize]);
+            tiled[p as usize] += tri_area(a, b, c);
+        }
+        for (ti, t) in r.tris.iter().enumerate() {
+            let [a, b, c] = t.map(|k| r.points[k as usize]);
+            let want = tri_area(a, b, c);
+            assert!((tiled[ti] - want).abs() <= 1e-12 * want, "{name}: triangle {ti} tiled {}", tiled[ti]);
+        }
+        let on = r.point_tris();
+        let mut worst = 0.0f64;
+        for k in 0..r.steiner() {
+            let x = r.points[n_input + k];
+            assert!(!on[n_input + k].is_empty(), "{name}: Steiner {k} on no triangle");
+            for &ti in &on[n_input + k] {
+                let tri = r.tris[ti as usize].map(|v| r.points[v as usize]);
+                let h = (0..3).map(|m| norm(sub(tri[(m + 1) % 3], tri[m]))).fold(0.0, f64::max);
+                let off = point_triangle_distance(x, &tri) / h;
+                worst = worst.max(off);
+                assert!(off <= 1e-12, "{name}: Steiner {k} off triangle {ti} by {off} h");
+            }
+            if let SteinerSite::Facet { u, v, .. } = r.sites[k] {
+                assert!(u > 0.0 && v > 0.0 && u + v < 1.0, "{name}: Steiner {k} at ({u}, {v})");
+            }
+        }
+        assert_eq!(
+            r.steiner(),
+            r.ball_steiner + r.split_steiner + r.encroach_split_steiner + r.facet_steiner
+        );
+        println!(
+            "{name}: {} triangles -> {} subtriangles, {} subsegments, Steiner {} (ball {}, split {}, encroach-split {}, facet {} with {} centroids), passes {} (edge {}), encroached {} subsegments and {} subtriangles, {} faces beyond the split surface, worst off-surface {worst:.3e} h",
+            r.tris.len(),
+            r.subtris.len(),
+            subs.len(),
+            r.steiner(),
+            r.ball_steiner,
+            r.split_steiner,
+            r.encroach_split_steiner,
+            r.facet_steiner,
+            r.centroid_steiner,
+            r.passes,
+            r.edge_passes,
+            r.encroached,
+            r.encroached_faces,
+            extra.len()
+        );
+        extra.len()
+    }
+
+    #[test]
+    fn schonhardt() {
+        let s = schonhardt_prism();
+        // Not vacuous: the input points' own triangulation misses a
+        // surface edge or triangle.
+        let d = Delaunay::build_brio(&s.points).unwrap();
+        let (de, df) = (delaunay_edges(&d), delaunay_faces(&d));
+        let have = s.tris.iter().all(|t| {
+            df.contains(&sorted3(*t)) && (0..3).all(|k| de.contains(&key(t[k], t[(k + 1) % 3])))
+        });
+        assert!(!have, "the six points alone recover the prism");
+        let r = recover_faces(&s, &[], &TetRecoverSpec::default()).unwrap();
+        assert!(r.steiner() >= 1, "Schönhardt needs a Steiner point");
+        let reflex: Vec<(u32, u32)> = (0..3u32).map(|i| key(i, 3 + (i + 1) % 3)).collect();
+        for s in &r.sites {
+            let SteinerSite::Edge { edge, .. } = *s else { panic!("a facet point: {s:?}") };
+            let e = r.edges[edge as usize];
+            assert!(reflex.contains(&(e[0], e[1])), "a Steiner point on edge {e:?}");
+        }
+        face_gate("schonhardt", &r, 6, true);
+    }
+
+    #[test]
+    fn faces_exact_sphere() {
+        let spec = TetRecoverSpec::default();
+        let out = remeshed(&ico(3), 0.15);
+        let r = recover_remeshed_faces(&out, &spec).unwrap();
+        face_gate("sphere h 0.15", &r, out.surface.points.len(), true);
+        for h in [0.1, 0.05] {
+            let out = remeshed(&cube6(), h);
+            let r = recover_remeshed_faces(&out, &spec).unwrap();
+            face_gate(&format!("cube h {h}"), &r, out.surface.points.len(), true);
+        }
+    }
+
+    #[test]
+    fn steiner_on_surface() {
+        let spec = TetRecoverSpec::default();
+        let r = recover_faces(&schonhardt_prism(), &[], &spec).unwrap();
+        face_gate("schonhardt", &r, 6, true);
+        for (name, s, h) in [
+            ("wedge", wedge(), 0.1),
+            ("spike", spike(), 0.1),
+            ("lprism", lprism(), 0.2),
+        ] {
+            let out = remeshed(&s, h);
+            let r = recover_remeshed_faces(&out, &spec).unwrap();
+            face_gate(name, &r, out.surface.points.len(), false);
+            if name != "lprism" {
+                assert!(r.facet_steiner >= 1, "{name}: the face half placed no point");
+            }
+        }
+    }
+
+    #[test]
+    fn faces_cap_is_exact() {
+        let out = remeshed(&wedge(), 0.1);
+        let spec = TetRecoverSpec::default();
+        let r = recover_remeshed_faces(&out, &spec).unwrap();
+        assert!(r.passes > r.edge_passes, "the wedge needs face passes");
+        let at = TetRecoverSpec { max_passes: r.passes, ..spec.clone() };
+        assert_eq!(recover_remeshed_faces(&out, &at).unwrap().points, r.points);
+        let below = TetRecoverSpec { max_passes: r.passes - 1, ..spec };
+        let e = recover_remeshed_faces(&out, &below).unwrap_err().to_string();
+        let tail = format!("subtriangles missing after {} passes, first ", r.passes - 1);
+        assert!(e.contains("recover/cap: ") && e.contains(&tail), "{e}");
+        println!("faces cap: {e}");
     }
 }

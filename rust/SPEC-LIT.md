@@ -36284,7 +36284,9 @@ p encroaches triangle t       iff   | p - c_t | < r_t           (c_t, r_t: circu
 A missing segment is split; a segment that is present but encroached is counted, and TET-09
 splits it before it inserts interior points (changed by TET-07a, see "The edge recovery, as
 TET-07a builds it" below). An encroached or missing triangle is split at its circumcentre,
-unless that point would encroach a segment, in which case the segment is split instead.
+unless that point would encroach a segment, in which case the segment is split instead. A
+triangle that is present but encroached is counted, not split (changed by TET-07b, see "The face
+recovery, as TET-07b builds it" below).
 
 **Small angles.** Where two input segments, or a segment and a facet, meet at an angle below
 `recover.protect_angle_deg`, the shared vertex `v` gets a protecting ball (Cohen-Steiner,
@@ -36300,7 +36302,8 @@ termination test asserts that the cap is never reached on its fixtures.
 
 **Schönhardt's twisted prism** (Schönhardt 1928) cannot be tetrahedralised without a new
 point. TET-07b's gate is that it recovers with at least one Steiner point. Every Steiner point
-lies on its facet within `1e-12 h`.
+lies on its facet within `1e-12 h`, where the facet is the input triangle the point lies on and `h` is
+that triangle's longest edge (TET-07b).
 
 **The edge recovery, as TET-07a builds it.** The input is a closed triangulated surface (the
 remesh of §116.10) and its feature edges. The **segments** are every undirected edge of its
@@ -36400,6 +36403,101 @@ The gate definitions (TET-07a):
   triangulation. With `max_passes = 2` the one Steiner point is `(0, 0, 0)` and 10 of 10
   subsegments are present. `recover/protect`, `recover/input` and the two spec bounds are
   refused by name.
+
+**The face recovery, as TET-07b builds it.** `recover::recover_faces(surface, feature_edges,
+spec)` runs the edge recovery above and then carries its points, chains and last triangulation
+on. Each **input triangle** `T = (a, b, c)` is its own planar facet, so a Steiner point is placed
+only on an input edge or inside an input triangle, on the piecewise-linear surface. The points
+of `T` are its corners, the chain points of its three edges and its own facet points. They are
+laid out in `T`'s plane frame:
+
+```
+e1 = b - a,   e2 = c - a,   A = (0, 0),   B = (|e1|, 0),   C = (e2 . e1 / |e1|, |e1 x e2| / |e1|)
+an edge point at t on [p, q]:  P + t (Q - P)          a facet point (u, v):  u B + v C,   in 3D  a + u e1 + v e2   (116.15f)
+```
+
+`P` and `Q` are the frame corners of the edge's ends, and `t` is the chain parameter of (116.15e).
+`T` is triangulated in that frame. The boundary points are placed first, each one splitting the
+boundary edge that holds it. The facet points are then placed by location: a point inside a
+triangle splits it into three, and a point on an interior edge splits the two triangles beside it
+into four. Last, every interior edge that fails the in-circle test is flipped (Lawson 1977) until
+none does. The 2D predicates are §116.4's exact 3D ones, lifted:
+
+```
+orient2d(a, b, c)     = orient3d(a', b', c', (0, 0, -1))
+incircle(a, b, c, p)  = insphere(a', b', c', (0, 0, -1), p'),     x' = (x_1, x_2, 0)                    (116.15g)
+```
+
+`(0, 0, -1)` lies below `z = 0`, so the first is the 2D determinant exactly. The sphere through
+`a', b', c'` and `(0, 0, -1)` meets `z = 0` in the circle through `a, b, c`, so the second has
+the in-circle sign exactly. The flips therefore terminate, and a cocircular quad is not flipped.
+A triangulation with a non-positive triangle, or with a count other than `n_b + 2 n_i - 2` (`n_b`
+boundary points, `n_i` facet points), is the refusal `recover/facet`. The **subtriangles** keep
+`T`'s winding. Together they are the **split surface**.
+
+A face pass first splits every missing subsegment by (116.15e), exactly as an edge pass does.
+When no subsegment is missing, it takes each subtriangle that is not a face of the
+triangulation's finite tetrahedra, with circumcentre `c` and circumradius `r` in `T`'s frame:
+
+```
+(u, v) solves c = u B + v C,   x = a + u e1 + v e2
+x is placed            iff  orient2d(A, B, c) > 0, orient2d(B, C, c) > 0, orient2d(C, A, c) > 0,
+                            and (x - s0) . (x - s1) >= 0 for every subsegment [s0, s1] of T's sides
+otherwise every subsegment of T's sides that x encroaches (116.15) is split by (116.15e);
+if x encroaches none, the subtriangle's centroid is placed                                              (116.15h)
+```
+
+This is the DESIGN rule above ("split at its circumcentre, unless that point would encroach a
+segment"). Ruppert (1995) shows that, when no boundary segment is encroached, a triangle's circumcentre
+lies inside the domain. Here a present subsegment may still be encroached (it is counted, not
+split), so that lemma does not apply, and the centroid is the fallback that always lies inside `T`.
+Within a pass, a point closer than `1e-6 r` to an earlier point of the same triangle is dropped:
+the two subtriangles of a cocircular quad share a circumcentre. The new subsegment points are
+numbered in (edge, position) order, then the facet points in (triangle, subtriangle) order.
+
+The passes of the two halves share `recover.max_passes`. A pass at the cap that still finds a
+missing subsegment or subtriangle is the refusal `recover/cap: m of n subsegments and m' of n'
+subtriangles missing after k passes, first ...`. The cap is exact, as in the edge half.
+
+**Changed by TET-07b:** a subtriangle that is present but encroached (116.15) is **counted, not
+split**. TET-09 splits it, for the same reason and with the same handoff as a present encroached
+subsegment. A Delaunay face's diametral ball lies in the pencil of spheres through its
+circumcircle, and the two tetrahedra on the face have empty circumspheres in the same pencil.
+So the diametral ball is empty iff it holds neither of the two apexes, and the count tests only
+those.
+
+`FaceRecovery` returns the points (the input's bit for bit, then the Steiner points), the input
+triangles, the edges and chains, each Steiner point's site (an edge and its parameter, or a
+triangle and its `(u, v)`), the protected vertices, the ball, missing-split, encroachment-split
+and facet Steiner counts (with the centroids among the facet points), the passes of the edge
+half and of both halves, the subtriangles with their parent triangles, the encroached subsegment
+and subtriangle counts, and the final triangulation. `recover_remeshed_faces` takes a `Remeshed`.
+
+The gate definitions (TET-07b), counted from the final triangulation independently of the pass
+loop:
+
+- **recovered**: every subsegment is an edge, and every subtriangle a face, of the finite
+  tetrahedra: 100 %. Each input triangle's subtriangles sum to its area within relative 1e-12;
+- **boundary face set**: the faces of the finite tetrahedra whose three vertices lie on one
+  common input triangle. On the remeshed sphere and the cube it **equals the split surface
+  exactly**. On a slanted planar face with Steiner points (the wedge, the spike) it also holds
+  faces of tetrahedra that are flat to rounding,
+
+  ```
+  6 |V| <= 1e-12 L^3,     L the tetrahedron's longest edge                                            (116.15i)
+  ```
+
+  A Steiner point computed in f64 on a slanted plane lies off it by rounding. Where it falls
+  just inside the convex hull, the hull face passes over it, and the triangulation keeps a flat
+  tetrahedron between that face and the subtriangles. Every face beyond the split surface must be
+  a face of such a tetrahedron. TET-08 therefore floods across every face that is not in the
+  split surface, never across the boundary face set as such;
+- **on its facet**: each Steiner point lies within `1e-12 h` of every input triangle it is on,
+  with `h` that triangle's longest edge and the distance `sizefield::point_triangle_distance`. A
+  facet point has `u > 0`, `v > 0` and `u + v < 1`;
+- **Schönhardt**: the six points' own Delaunay triangulation misses a surface edge or triangle,
+  and the recovery places at least one Steiner point;
+- **cap**: `passes` is below 64, and the cap is exact on the wedge at `h = 0.1`.
 
 ### 116.12 Carving
 
@@ -36714,6 +36812,12 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-07a | the first build's one failure | (116.15b) took the cosine as `norm(d_p) / norm(d)`, whose rounding protected 4 of the cube's 8 corners after the remesh; `edges_cube` caught it, and the cosine is now `sqrt(1 - sin^2)` | the TET-07a commit |
 | TET-07a | the f32 arm | `rust/tests/tetmesh_recover.rs`, 3 tests (the `Scalar` width; cube, wedge, spike and prism; the two cap refusals) pass under `--features single` with every printed number identical to the f64 build | the TET-07a commit |
 | TET-07a | the whole `tetmesh::` test filter, release | 100 tests in 43.7 s with 2 threads, and the 10^6 run ignored | the TET-07a commit |
+| TET-07b | §116.11, changed by this unit | the DESIGN sentence "An encroached or missing triangle is split at its circumcentre" now splits a missing subtriangle and counts a present encroached one, for TET-09 to split; the paragraph "The face recovery, as TET-07b builds it", (116.15f)-(116.15i) and the gate definitions were added; the facet of "on its facet within `1e-12 h`" is the input triangle and `h` its longest edge | the TET-07b commit |
+| TET-07b | Schönhardt's twisted prism (top turned 30 degrees, reflex diagonals `a_i b_(i+1)`), no feature edges | the six points' own triangulation misses part of the prism; 8 triangles become 14 subtriangles and 15 subsegments after 3 passes (all of the edge half), with 3 Steiner points, one on each reflex diagonal; the boundary face set equals the split surface; 12 subsegments and 2 subtriangles present but encroached | the TET-07b commit |
+| TET-07b | the cube with a patch per face at `h = 0.1` and `h = 0.05`, and the level-3 icosphere remeshed at `h = 0.15` (1 280 triangles) | the boundary face set equals the split surface exactly in all three. Cube `h = 0.1`: 1 378 triangles, 0 Steiner points, 1 pass. Cube `h = 0.05`: 5 408 triangles become 5 432 subtriangles, 12 split Steiner points, 3 passes, the worst 1.5e-15 `h` off its triangle. Sphere: 0 Steiner points, 1 pass. The sphere at `h` = 0.1, 0.2, 0.3 and 0.5, the raw icospheres of levels 1-3, the same stretched 3 times in `x` and a dented level-3 icosphere also needed no Steiner point (not plan gates) | the TET-07b commit |
+| TET-07b | the 30 degree wedge, the 10 degree spike (both `h = 0.1`) and the L-shaped prism (`h = 0.2`), default spec | wedge: 682 triangles become 766 subtriangles, 42 Steiner points (34 ball, 1 split, 5 encroachment splits, 2 facet points), 5 passes (2 of the edge half), 25 boundary faces beyond the split surface, all on flat tetrahedra (116.15i). Spike: 88 become 142, 27 Steiner points (18 ball, 6 split, 2 encroachment splits, 1 facet point, a centroid), 4 passes, 44 faces beyond. Prism: 782 become 790, 4 split Steiner points, 3 passes, none beyond. The worst Steiner point of the three is 4.4e-16 `h` off its triangle, against the bar of 1e-12 | the TET-07b commit |
+| TET-07b | the cap on the wedge at `h = 0.1`, which needs 5 passes | `max_passes = 5` gives the same points; 4 is the refusal `recover/cap: 0 of 1063 subsegments and 4 of 762 subtriangles missing after 4 passes, first subtriangle [378, 380, 381] of triangle 0` | the TET-07b commit |
+| TET-07b | termination at `h = 0.05` and `h = 0.2` for the cube, wedge, spike and prism, not a plan gate | every run 100 %; at most 11 passes (the prism at `h = 0.05`, 8 of them the edge half) against the cap of 64; the faces beyond the split surface number 0 on the cube and prism and up to 81 on the spike, all on flat tetrahedra with `6 V / L^3` at most 1.2e-15 | the TET-07b commit |
 
 ### 116.19 References
 
@@ -36748,6 +36852,8 @@ Crossref metadata was checked against the title, authors, year and pages given h
   `10.2514/3.13063`.
 - Labelle, F. & Shewchuk, J. R. (2007). Isosurface stuffing. *ACM Trans. Graph.* 26(3), 57.
   DOI `10.1145/1276377.1276448`.
+- Lawson, C. L. (1977). Software for C1 surface interpolation. In J. R. Rice (ed.),
+  *Mathematical Software III*, Academic Press, New York, 161-194.
 - Lévy, B. (2016). Robustness and efficiency of geometric programs: the Predicate Construction
   Kit (PCK). *Comput.-Aided Des.* 72, 3-12. DOI `10.1016/j.cad.2015.10.004`.
 - Luke, E., Collins, E. & Blades, E. (2012). A fast mesh deformation method using explicit
@@ -36759,6 +36865,8 @@ Crossref metadata was checked against the title, authors, year and pages given h
   `10.1142/S0218195901000699`.
 - Persson, P.-O. (2006). Mesh size functions for implicit geometries and PDE-based gradient
   limiting. *Eng. Comput.* 22(2), 95-109. DOI `10.1007/s00366-006-0014-1`.
+- Ruppert, J. (1995). A Delaunay refinement algorithm for quality 2-dimensional mesh
+  generation. *J. Algorithms* 18(3), 548-585. DOI `10.1006/jagm.1995.1021`.
 - Schönhardt, E. (1928). Über die Zerlegung von Dreieckspolyedern in Tetraeder. *Math. Ann.*
   98, 309-312. DOI `10.1007/BF01451597`.
 - Skilling, J. (2004). Programming the Hilbert curve. *AIP Conf. Proc.* 707, 381-387. DOI
