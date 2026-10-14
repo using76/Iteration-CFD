@@ -30249,7 +30249,7 @@ are runtime refusals, proved with the driver.
 | 14 | `"mode": "stress"` with no region carrying `mechanics`; `mechanics` present with `"mode": "thermal"` - both directions (§13.4.1) |
 | 15 | `"mode": "stress"` with a fluid region - the fluid side of a thermo-elastic run is docs/10's address 106 (WF-B) |
 | 16 | `"mode": "stress"` on a transient case - the §93 verdict is a steady residual; time in a stress run is docs/10's address 103 |
-| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
+| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once, and `output.visualisation` in `vdb`/`nvdb`, one file per region on the region's own lattice (§117.12, VIO-05b); refused: `visualisation.usdScene` (no multi-region scene), a lattice that cannot be laid on some region (named), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
 | 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
 | 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
 | 22 | `mechanics.solver.coupled: true` with `materials` - §109's block operator carries one material per region; the bond face as a 3x3 block is not built |
@@ -37532,9 +37532,30 @@ box; the copy is dropped once the map is built. Item 4 of §117.2 is met this wa
 driver's mesh is stored about a local origin (F32-10's OpenFOAM route under `single`), the map is
 built on a world `HostMesh` built from the same polyMesh, so it is the f64 build's map bit for bit
 (item 1). A moving mesh is refused before this point (§105.12), as the last row of the table
-requires. `ofgpu-lowmach` and `ofgpu-k-omega` are wired. `ofgpu-k-epsilon` and `ofgpu-cht` keep
-their refusals until VIO-05b. The report is printed and not copied into a run summary, because
-neither driver writes a summary file.
+requires. `ofgpu-lowmach` and `ofgpu-k-omega` are wired. The report is printed and not copied
+into a run summary, because neither driver writes a summary file.
+
+**Every driver (VIO-05b).** `ofgpu-k-epsilon` reads the case block and is wired as
+`ofgpu-lowmach` is: its own refusal ("lays no output.visualisation.lattice") and its
+`drop_volume_formats_on_a_non_cartesian_mesh` call are gone, and that function and its test went
+with its last caller. `ofgpu-sa`, `ofgpu-vof` and `ofgpu-buoyant` read their polyMesh themselves
+and have no `output` block. Each calls `common::command_line_volume` once, after the mesh is read
+and before the loop: the 117.3 defaults, `drop_volume_formats_without_a_lattice`, and the target
+whose `cart()`/`vox()` every write passes. Before VIO-05b these three met only the writers' late
+refusal, at the first write. `ofgpu-cht` lays the lattice **per region**, which is the default
+box of §117.3 in a CHT case. `io::case_cht` accepts `output.visualisation` in `vdb` and `nvdb`
+and refuses `usdScene`, because a multi-region `.usda` scene is not built. Its `fields` are checked against the
+cell fields of the region VTU (`T`, plus `u, sigma, vonMises, sigmaPrincipal, magU` in a stress
+run), and a positive `interval` is refused as the exact interval is. The case's lattice is
+checked on every region that `cartesian::detect` refuses, and the first region with no lattice
+is refused by name (`region '<name>': <reason>`). The driver builds one `volume_target` per
+region before the solve, from `LoweredChtCase.raw[r]` and `meshes[r]`, and prints each report
+under the region's name. After the solve it writes `<root>/VDB/<region>_000000.vdb` (or
+`.nvdb`) for each region. Each file holds that region's cell fields, in the selection's order and
+restricted to the names the region has. A region with none of them writes no file and says so.
+The region VTU belongs to `output.exact`, so a block that names only `visualisation` writes the
+volume files alone.
+The flow path of a CHT case still refuses any `output` block (§96.3 row 17).
 
 ### 117.13 Gates, their precision classes, and what has been measured
 

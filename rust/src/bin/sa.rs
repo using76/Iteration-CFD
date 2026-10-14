@@ -200,6 +200,15 @@ fn run(o: &Options) -> Result<()> {
 
     println!("mesh uploaded in {} s", g(t0.elapsed().as_secs_f64()));
 
+    // ---- volume output (SPEC-LIT 117.6 / 117.12, VIO-05b) -----------------
+    //
+    // `-output vdb`/`nvdb` sample onto the cells of a uniform Cartesian box,
+    // or else onto the lattice of 117.3 on its defaults, laid once, here,
+    // before a kernel runs; a lattice that cannot be laid is refused here
+    // rather than at the final write, and `-permissive` drops only the
+    // volume formats.
+    let (output, cart, volume) = common::command_line_volume(&raw_mesh, &hm, &o.output, o.do_write)?;
+
     // ---- controls ---------------------------------------------------------
     let mut cc = read_case_controls(&o.case_dir)?;
 
@@ -472,23 +481,20 @@ fn run(o: &Options) -> Result<()> {
             ofgpu::io::OutputField::scalar("nuTilda", &out_nt.internal),
             ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
         ];
-        let cart = ofgpu::pressure::cartesian::detect(&hm)
-            .ok()
-            .map(|c| ofgpu::io::cartesian_info(&hm, &c));
         let ctx = ofgpu::io::WriteCtx {
             time: 0.0,
             step: done as usize,
             name: &wt,
             mesh: &hm,
             cart: cart.as_ref(),
-            vox: None,
+            vox: volume.as_ref().and_then(|v| v.vox()),
             fields: &vis_fields,
             foam: &foam_fields,
         };
         let mut writers = build_writers(
             &o.case_dir,
             "SpalartAllmaras",
-            &o.output,
+            &output,
             ofgpu::io::nvdb::Precision::F32,
         )?;
         for w in &mut writers {

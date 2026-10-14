@@ -129,6 +129,44 @@ pub fn case_raw_mesh(case_path: &Path, lowered: Option<&LoweredCase>) -> Result<
     }
 }
 
+/// SPEC-LIT 117.12 on the command-line route of a driver that reads its
+/// polyMesh itself and has no `output` block (`ofgpu-sa`, `ofgpu-vof`,
+/// `ofgpu-buoyant`; VIO-05b): what `-output` writes and what the volume
+/// writers sample onto, decided once, after the mesh is read and before the
+/// time loop. The command line states no lattice, so the 117.3 defaults
+/// apply.
+///
+/// Returns `(formats, cart, volume)`: `formats` is `output` with `vdb`/`nvdb`
+/// dropped under `-permissive` when no lattice can be laid (strict: the
+/// refusal of `drop_volume_formats_without_a_lattice`); `cart` is
+/// `cartesian::detect` as a `CartesianInfo` (`None` off a uniform box), the
+/// `WriteCtx.cart` of every write; `volume` is `Some` only when a volume
+/// format is written, and its `vox()` is every write's `WriteCtx.vox`.
+pub fn command_line_volume(
+    raw: &PolyMeshRaw,
+    hm: &HostMesh,
+    output: &[OutputFormat],
+    do_write: bool,
+) -> Result<(Vec<OutputFormat>, Option<ofgpu::io::CartesianInfo>, Option<ofgpu::io::VolumeTarget>)> {
+    let defaults = ofgpu::io::voxelmap::LatticeSpec::default();
+    let cart = ofgpu::pressure::cartesian::detect(hm).ok().map(|c| ofgpu::io::cartesian_info(hm, &c));
+    let mut formats = output.to_vec();
+    if do_write && cart.is_none() && ofgpu::io::has_volume_format(&formats) {
+        let no_lattice = ofgpu::io::voxelmap::lattice_shape(raw, hm, &defaults).err().map(|e| e.to_string());
+        formats = ofgpu::io::output_plan::drop_volume_formats_without_a_lattice(&formats, no_lattice.as_deref())?;
+    }
+    let volume = if do_write && ofgpu::io::has_volume_format(&formats) {
+        let t = ofgpu::io::volume_target(Some(raw), hm, cart, &defaults)?;
+        for line in t.report_lines() {
+            println!("{line}");
+        }
+        Some(t)
+    } else {
+        None
+    };
+    Ok((formats, cart, volume))
+}
+
 // ==========================================================================
 //  The numerics seam - SPEC-LIT 13.4.1
 // ==========================================================================

@@ -49,7 +49,11 @@ use ofgpu::cht::flow::{run_flow_case, ChtFlowSolution};
 use ofgpu::cht::{run_case, ChtSolution};
 use ofgpu::error::{IoContext, Result};
 use ofgpu::io::case_cht::{read_cht_case, LoweredBc, LoweredChtCase};
-use ofgpu::solid::case::{banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu};
+use ofgpu::io::output_plan::{build_writers, has_volume_format, volume_target, FieldSelection, VolumeTarget};
+use ofgpu::io::{cartesian_info, OutputField, WriteCtx};
+use ofgpu::solid::case::{
+    banner_lines, run_stress, summary_lines, thermal_converged, write_region_vtu, RegionStress,
+};
 use ofgpu::{Gpu, Scalar};
 
 fn main() -> ExitCode {
@@ -271,6 +275,11 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
+    // SPEC-LIT 117.3 / 117.12 (VIO-05b): what each region's `.vdb`/`.nvdb`
+    // samples onto, laid ONCE, before the solve, and only when the case's
+    // output.visualisation names a volume format.
+    let volumes = region_volume_targets(&low)?;
+
     let sol = run_case(&gpu, &low)?;
     report(&low, &sol);
 
@@ -287,17 +296,107 @@ fn run(case_path: &Path, csv: Option<&Path>) -> Result<()> {
         None
     };
 
-    if low.output.is_some() {
+    // The region VTU is output.exact's. A block that names only
+    // `visualisation` asked for the volume files alone (VIO-05b); any other
+    // block keeps the VTU it always wrote.
+    if low.output.as_ref().is_some_and(|p| p.exact.is_some() || p.vis.is_none()) {
         let dir = output_root(case_path).join("VTK");
         let paths = write_region_vtu(&dir, &low, &sol, stress.as_deref().unwrap_or(&[]))?;
         for p in &paths {
             println!("  wrote {}", p.display());
         }
     }
+    if !volumes.is_empty() {
+        write_region_volumes(&output_root(case_path), &low, &volumes, &sol, stress.as_deref().unwrap_or(&[]))?;
+    }
 
     if let Some(path) = csv {
         write_csv(path, &sol)?;
         println!("  wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 117.3 per region (VIO-05b): one [`VolumeTarget`] per region
+/// when the case's `output.visualisation` writes `vdb`/`nvdb`, else none.
+/// A uniform Cartesian region's cells are its voxels (117.6); any other
+/// region gets the lattice of `output.visualisation.lattice` laid on that
+/// region alone, so the default box is the region's own bounding box.
+/// Lowering already refused a region on which no lattice can be laid
+/// (`io::case_cht`), so `volume_target` only builds here. Each region's
+/// report of 117.7 is printed under its name.
+fn region_volume_targets(low: &LoweredChtCase) -> Result<Vec<VolumeTarget>> {
+    let Some(vis) = low.output.as_ref().and_then(|p| p.vis.as_ref()) else { return Ok(Vec::new()) };
+    if !has_volume_format(&vis.formats) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(low.meshes.len());
+    for (r, hm) in low.meshes.iter().enumerate() {
+        let cart = ofgpu::pressure::cartesian::detect(hm).ok().map(|c| cartesian_info(hm, &c));
+        let t = volume_target(Some(&low.raw[r]), hm, cart, &vis.lattice)?;
+        for line in t.report_lines() {
+            println!("  region '{}': {line}", low.region_names[r]);
+        }
+        out.push(t);
+    }
+    Ok(out)
+}
+
+/// One `.vdb`/`.nvdb` per region and format, `<root>/VDB/<region>_000000.*`,
+/// of the cell fields [`write_region_vtu`] writes for that region: `T`, and
+/// in a stress run on a region with `mechanics` also `u, sigma, vonMises,
+/// sigmaPrincipal, magU`. `output.visualisation.fields` was checked at
+/// lowering against that menu (SPEC-LIT 44.2); a region keeps the selected
+/// names it has, in the selection's order, and a region with none of them
+/// writes no volume file and says so.
+fn write_region_volumes(
+    root: &Path,
+    low: &LoweredChtCase,
+    volumes: &[VolumeTarget],
+    sol: &ChtSolution,
+    stress: &[RegionStress],
+) -> Result<()> {
+    let Some(vis) = low.output.as_ref().and_then(|p| p.vis.as_ref()) else { return Ok(()) };
+    for (r, target) in volumes.iter().enumerate() {
+        let name = &low.region_names[r];
+        let t_c: Vec<Scalar> = sol.t[sol.mesh.regions[r].cells()].to_vec();
+        let mut fields = vec![OutputField::scalar("T", &t_c)];
+        if let Some(s) = stress.iter().find(|s| s.region == r) {
+            fields.extend([
+                OutputField::vector("u", &s.u),
+                OutputField::tensor("sigma", &s.sigma),
+                OutputField::scalar("vonMises", &s.von_mises),
+                OutputField::vector("sigmaPrincipal", &s.principal),
+                OutputField::scalar("magU", &s.mag_u),
+            ]);
+        }
+        let selection = match &vis.fields {
+            FieldSelection::All => FieldSelection::All,
+            FieldSelection::Named(names) => FieldSelection::Named(
+                names.iter().filter(|n| fields.iter().any(|f| f.name == n.as_str())).cloned().collect(),
+            ),
+        };
+        let selected = selection.apply(&fields)?;
+        if selected.is_empty() {
+            println!("  region '{name}': none of output.visualisation.fields is a field of this region; no volume file");
+            continue;
+        }
+        let ctx = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "0",
+            mesh: &low.meshes[r],
+            cart: target.cart(),
+            vox: target.vox(),
+            fields: &selected,
+            foam: &[],
+        };
+        for w in &mut build_writers(root, name, &vis.formats, vis.precision)? {
+            w.write_step(&ctx)?;
+        }
+        for f in &vis.formats {
+            println!("  wrote {}", root.join("VDB").join(format!("{name}_000000.{}", f.name())).display());
+        }
     }
     Ok(())
 }

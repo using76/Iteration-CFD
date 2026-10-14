@@ -70,6 +70,7 @@ use ofgpu::field_setup::{
 };
 use ofgpu::io::case::{find_start_time, model_coeff};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
+use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::models::{
     realizable_ke_coeffs, rng_ke_coeffs, select_turbulence_model, KEpsilon, KEpsilonCoeffs,
     RasModel, RealizableKe, RealizableKeCoeffs, RngKe, RngKeCoeffs,
@@ -280,6 +281,20 @@ fn run(o: &Options) -> Result<()> {
             output_plan = None;
         }
     }
+    // SPEC-LIT 117.4: the lattice is laid from the polyMesh, which
+    // `load_case` does not keep. It is read again (rebuilt from the lowering
+    // on a JSONC case) only when vdb/nvdb are asked for on a mesh that is
+    // not a uniform Cartesian box, and dropped once the map is built.
+    let wants_volume = ofgpu::io::has_volume_format(&o.output)
+        || output_plan
+            .as_ref()
+            .and_then(|p| p.vis.as_ref())
+            .is_some_and(|v| ofgpu::io::has_volume_format(&v.formats));
+    let raw_mesh = if wants_volume && ofgpu::pressure::cartesian::detect(&hm).is_err() {
+        Some(common::case_raw_mesh(&o.case_dir, json.as_ref())?)
+    } else {
+        None
+    };
     if let Some(plan) = &mut output_plan {
         // §44.4: this driver advances an iteration counter, not a clock.
         plan.refuse_interval_when_steady(
@@ -292,14 +307,15 @@ fn run(o: &Options) -> Result<()> {
             "ofgpu-k-epsilon",
             "ofgpu-lowmach, ofgpu-buoyant and ofgpu-vof do write .mcr checkpoints, and ofgpu-lowmach honours output.restart",
         )?;
-        // SPEC-LIT 117.12: this driver lays no output.visualisation.lattice,
-        // so a mesh that is not a uniform Cartesian box has no lattice.
-        plan.refuse_visualisation_without_a_lattice(
-            ofgpu::pressure::cartesian::detect(&hm)
-                .err()
-                .map(|why| format!("ofgpu-k-epsilon lays no output.visualisation.lattice, and this mesh is not a uniform Cartesian box ({why})"))
-                .as_deref(),
-        )?;
+        // SPEC-LIT 117.12: on a mesh that is not a uniform Cartesian box
+        // this driver lays the case's output.visualisation.lattice
+        // (VIO-05b), so only a lattice that cannot be laid is refused here,
+        // by its own reason, before a kernel runs.
+        let no_lattice = match (plan.vis.as_ref(), raw_mesh.as_ref()) {
+            (Some(v), Some(raw)) if ofgpu::io::has_volume_format(&v.formats) => v.lattice_refusal(raw, &hm),
+            _ => None,
+        };
+        plan.refuse_visualisation_without_a_lattice(no_lattice.as_deref())?;
         // §44.2's early half. This driver's cell fields are these three and
         // only these three; `phi` is a SURFACE field and goes only to the
         // OpenFOAM writer, which is why it is not on the menu.
@@ -309,16 +325,41 @@ fn run(o: &Options) -> Result<()> {
         }
     }
 
-    // SPEC-LIT §44.1 on the command-line route: the same early refusal the
-    // case block gets above, with `cartesian::detect`'s own reason in it.
-    // Consulted only when the command line drives (§44.6).
+    // SPEC-LIT 117.12 on the command-line route: the same early refusal the
+    // case block gets above, on the 117.3 defaults - the command line states
+    // no lattice. Consulted only when the command line drives (§44.6).
     let cli_output: Vec<OutputFormat> = match &output_plan {
         Some(_) => o.output.clone(),
-        None => ofgpu::io::output_plan::drop_volume_formats_on_a_non_cartesian_mesh(
-            &o.output,
-            ofgpu::pressure::cartesian::detect(&hm).err().as_deref(),
-        )?,
+        None => {
+            let no_lattice = match raw_mesh.as_ref() {
+                Some(raw) if ofgpu::io::has_volume_format(&o.output) => {
+                    ofgpu::io::voxelmap::lattice_shape(raw, &hm, &LatticeSpec::default()).err().map(|e| e.to_string())
+                }
+                _ => None,
+            };
+            ofgpu::io::output_plan::drop_volume_formats_without_a_lattice(&o.output, no_lattice.as_deref())?
+        }
     };
+
+    // SPEC-LIT 117.6 / 117.3: what the volume writers sample onto, laid
+    // ONCE, before the iterations, and only when vdb/nvdb are written.
+    let (volume_formats, volume_spec) = match output_plan.as_ref().and_then(|p| p.vis.as_ref()) {
+        Some(v) => (v.formats.clone(), v.lattice.clone()),
+        None if output_plan.is_none() => (cli_output.clone(), LatticeSpec::default()),
+        None => (Vec::new(), LatticeSpec::default()),
+    };
+    let cart = ofgpu::pressure::cartesian::detect(&hm).ok().map(|c| ofgpu::io::cartesian_info(&hm, &c));
+    let volume: Option<ofgpu::io::VolumeTarget> = if o.do_write && ofgpu::io::has_volume_format(&volume_formats) {
+        let t = ofgpu::io::volume_target(raw_mesh.as_ref(), &hm, cart, &volume_spec)?;
+        for line in t.report_lines() {
+            println!("{line}");
+        }
+        Some(t)
+    } else {
+        None
+    };
+    // The raw mesh was for the map; the run never reads it again.
+    drop(raw_mesh);
 
     if let Some(l) = &json {
         println!(
@@ -717,16 +758,13 @@ kappa implied by these coefficients {} (S41.3)",
             ofgpu::io::OutputField::scalar("epsilon", &out_e.internal),
             ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
         ];
-        let cart = ofgpu::pressure::cartesian::detect(&hm)
-            .ok()
-            .map(|c| ofgpu::io::cartesian_info(&hm, &c));
         let ctx = ofgpu::io::WriteCtx {
             time: 0.0,
             step: done as usize,
             name: &wt,
             mesh: &hm,
             cart: cart.as_ref(),
-            vox: None,
+            vox: volume.as_ref().and_then(|v| v.vox()),
             fields: &vis_fields,
             foam: &foam_fields,
         };

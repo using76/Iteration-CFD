@@ -937,6 +937,13 @@ struct FieldWriter<'a> {
     raw_turb: &'a [(&'static str, RawScalarField)],
     raw_t: &'a RawScalarField,
     output: &'a [OutputFormat],
+    /// `WriteCtx.cart` of every write: `cartesian::detect` as a
+    /// `CartesianInfo`, `None` off a uniform Cartesian box.
+    cart: Option<ofgpu::io::CartesianInfo>,
+    /// What the volume writers sample onto off a uniform box (SPEC-LIT
+    /// 117.12), laid once before the loop; `None` when no `vdb`/`nvdb` is
+    /// written.
+    volume: Option<&'a ofgpu::io::VolumeTarget>,
 }
 
 /// The dimensions SPEC-LIT's own field list gives each turbulence quantity -
@@ -1040,16 +1047,13 @@ impl FieldWriter<'_> {
             vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
         }
         vis_fields.push(ofgpu::io::OutputField::scalar("T", &out_t.internal));
-        let cart = ofgpu::pressure::cartesian::detect(hm)
-            .ok()
-            .map(|c| ofgpu::io::cartesian_info(hm, &c));
         let ctx = ofgpu::io::WriteCtx {
             time,
             step,
             name,
             mesh: hm,
-            cart: cart.as_ref(),
-            vox: None,
+            cart: self.cart.as_ref(),
+            vox: self.volume.and_then(|v| v.vox()),
             fields: &vis_fields,
             foam: &foam_fields,
         };
@@ -1841,6 +1845,15 @@ fn run(o: &Options) -> Result<()> {
         );
     }
 
+    // ---- volume output (SPEC-LIT 117.6 / 117.12, VIO-05b) -----------------
+    //
+    // `-output vdb`/`nvdb` sample onto the cells of a uniform Cartesian box,
+    // or else onto the lattice of 117.3 on its defaults, laid once, here,
+    // before a kernel runs; a lattice that cannot be laid is refused here
+    // rather than at the first write, and `-permissive` drops only the
+    // volume formats.
+    let (output, cart, volume) = common::command_line_volume(&raw_mesh, &hm, &o.output, o.do_write)?;
+
     // ---- controls ---------------------------------------------------------
     let mut cc = read_case_controls(&o.case_dir)?;
 
@@ -2465,7 +2478,9 @@ fn run(o: &Options) -> Result<()> {
         raw_p: &raw_p,
         raw_turb: &raw_turb,
         raw_t: &raw_t,
-        output: &o.output,
+        output: &output,
+        cart,
+        volume: volume.as_ref(),
     };
 
     // ---- what will actually run --------------------------------------------

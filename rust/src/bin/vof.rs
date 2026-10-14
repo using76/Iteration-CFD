@@ -395,6 +395,15 @@ fn run(o: &Options) -> Result<()> {
         );
     }
 
+    // ---- volume output (SPEC-LIT 117.6 / 117.12, VIO-05b) -----------------
+    //
+    // `-output vdb`/`nvdb` sample onto the cells of a uniform Cartesian box,
+    // or else onto the lattice of 117.3 on its defaults, laid once, here,
+    // before a kernel runs; a lattice that cannot be laid is refused here
+    // rather than at the first write, and `-permissive` drops only the
+    // volume formats.
+    let (output, cart, volume) = common::command_line_volume(&raw, &hm, &o.output, o.do_write)?;
+
     // ---- the case ---------------------------------------------------------
     let names = phase_names(case)?;
     let props = VofProperties::from_case(case)?;
@@ -755,8 +764,8 @@ fn run(o: &Options) -> Result<()> {
 
         if o.do_write && t + 1e-12 >= next_write {
             write_time(
-                &gpu, &vof, &hm, case, t, &o.output, &alpha_name, &mut raw_alpha, &mut raw_u,
-                &mut raw_p,
+                &gpu, &vof, &hm, case, t, &output, cart.as_ref(), volume.as_ref(), &alpha_name,
+                &mut raw_alpha, &mut raw_u, &mut raw_p,
             )?;
             next_write += write_interval;
         }
@@ -789,8 +798,8 @@ fn run(o: &Options) -> Result<()> {
 
     if o.do_write {
         write_time(
-            &gpu, &vof, &hm, case, t, &o.output, &alpha_name, &mut raw_alpha, &mut raw_u,
-            &mut raw_p,
+            &gpu, &vof, &hm, case, t, &output, cart.as_ref(), volume.as_ref(), &alpha_name,
+            &mut raw_alpha, &mut raw_u, &mut raw_p,
         )?;
     }
 
@@ -861,6 +870,8 @@ fn write_time(
     case: &Path,
     t: Scalar,
     output: &[OutputFormat],
+    cart: Option<&ofgpu::io::CartesianInfo>,
+    volume: Option<&ofgpu::io::VolumeTarget>,
     alpha_name: &str,
     raw_alpha: &mut ofgpu::io::fields::RawScalarField,
     raw_u: &mut ofgpu::io::fields::RawVectorField,
@@ -884,16 +895,13 @@ fn write_time(
         ofgpu::io::OutputField::vector("U", &raw_u.internal),
         ofgpu::io::OutputField::scalar("p_rgh", &raw_p.internal),
     ];
-    let cart = ofgpu::pressure::cartesian::detect(hm)
-        .ok()
-        .map(|c| ofgpu::io::cartesian_info(hm, &c));
     let ctx = ofgpu::io::WriteCtx {
         time: t,
         step: 0,
         name: &name,
         mesh: hm,
-        cart: cart.as_ref(),
-        vox: None,
+        cart,
+        vox: volume.and_then(|v| v.vox()),
         fields: &vis_fields,
         foam: &foam_fields,
     };

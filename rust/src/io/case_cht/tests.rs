@@ -2479,18 +2479,53 @@ fn an_unknown_run_mode_is_refused_listing_both() {
     assert!(msg.contains("stress"), "{msg}");
 }
 
-/// Row 17: the `output` block on this format accepts exactly
-/// `exact.format: "vtu"`, once - four sub-cases, the fourth in both
-/// steady and transient dress.
+/// Row 17: the `output` block on this format accepts `exact.format:
+/// "vtu"` once, and `visualisation` in `vdb`/`nvdb`, one file per region
+/// (SPEC-LIT 117.3, VIO-05b) - the refusals in four sub-cases, the fourth in
+/// both steady and transient dress.
 #[test]
 fn the_output_block_on_cht_accepts_exactly_vtu_once() {
-    // (1) `output.visualisation` - a multi-region mesh is not one Cartesian
-    // lattice, so there is no voxel grid to sample onto.
+    // Every refusal below is strict; a test elsewhere that turns
+    // `-permissive` on holds this guard while it does.
+    let _guard = crate::io::contract::permissive_test_guard();
+    crate::io::contract::set_permissive(false);
+    // (1a) `output.visualisation` in vdb lowers: every region gets its own
+    // target, and on these block regions the default lattice is always laid.
     let vis = with_output(&default_stress(), r#"{ "visualisation": { "format": "vdb" } }"#);
-    let e = read(&vis).expect("parse").lower().expect_err("must refuse");
+    let low = read(&vis).expect("parse").lower().expect("vdb per region lowers");
+    let plan = low.output.expect("the plan");
+    assert_eq!(plan.vis.expect("vis").formats, vec![OutputFormat::Vdb]);
+
+    // (1b) a graded region is not a uniform box, so its lattice is laid on
+    // it alone, and an explicit voxel the budget would coarsen past s = 16
+    // (117.3) is refused before the run, naming the region.
+    let graded = default_slab().replace(
+        r#""cells": [12, 1, 1],"#,
+        r#""cells": [12, 1, 1], "grading": { "x": { "expansion": 4.0 } },"#,
+    );
+    assert_ne!(graded, default_slab(), "the grading slot must exist");
+    let fine = with_output(
+        &graded,
+        r#"{ "visualisation": { "format": "vdb", "lattice": { "voxel": 1e-5, "maxVoxels": 1000 } } }"#,
+    );
+    let e = read(&fine).expect("parse").lower().expect_err("must refuse");
     let msg = e.to_string();
     assert!(msg.contains("visualisation"), "{msg}");
-    assert!(msg.contains("Cartesian"), "{msg}");
+    assert!(msg.contains("region 'insulation'"), "{msg}");
+    assert!(msg.contains("16"), "{msg}");
+    let ok = with_output(&graded, r#"{ "visualisation": { "format": "nvdb" } }"#);
+    assert!(read(&ok).expect("parse").lower().is_ok(), "the 117.3 defaults always lay a lattice");
+
+    // (1c) the usda scene (`usdScene: true` adds the scene writer) is
+    // refused by name, and so is a field this run does not have (SPEC-LIT
+    // 44.2).
+    let usda = with_output(&default_stress(), r#"{ "visualisation": { "format": "vdb", "usdScene": true } }"#);
+    let msg = read(&usda).expect("parse").lower().expect_err("must refuse").to_string();
+    assert!(msg.contains("output/visualisation/format"), "{msg}");
+    assert!(msg.contains("`usda`"), "{msg}");
+    let p = with_output(&default_slab(), r#"{ "visualisation": { "format": "vdb", "fields": ["p"] } }"#);
+    let msg = read(&p).expect("parse").lower().expect_err("must refuse").to_string();
+    assert!(msg.contains("output.visualisation.fields"), "{msg}");
 
     // (2) `output.restart` - the driver writes no checkpoint of any kind.
     let restart = with_output(&default_stress(), r#"{ "restart": { "keep": 2 } }"#);
@@ -2525,6 +2560,11 @@ fn the_output_block_on_cht_accepts_exactly_vtu_once() {
     let text = with_output(&transient, r#"{ "exact": { "format": "vtu", "interval": 2.0 } }"#);
     let e = read(&text).expect("parse").lower().expect_err("must refuse");
     let msg = e.to_string();
+    assert!(msg.contains("one state"), "{msg}");
+    // ... and the visualisation interval the same way, by its own key.
+    let text = with_output(&transient, r#"{ "visualisation": { "format": "vdb", "interval": 2.0 } }"#);
+    let msg = read(&text).expect("parse").lower().expect_err("must refuse").to_string();
+    assert!(msg.contains("output/visualisation/interval"), "{msg}");
     assert!(msg.contains("one state"), "{msg}");
 }
 
