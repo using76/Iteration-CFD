@@ -65,6 +65,9 @@
 //!     wall model selected under `simulationType LES;`; the law itself is
 //!     `crate::wallfunctions`' ([`crate::wallfunctions::WernerWengleData`]),
 //!     this file only names the condition
+//!   ofgpu `SPEC-LIT.md` §120.8 - the thermal family: the three `Mixed`-kind
+//!     names and `turbulentHeatFluxTemperature` below, and the two
+//!     `alphat`-only aliases
 //! No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
@@ -613,6 +616,14 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "prghTotalPressure",
     "prghTotalHydrostaticPressure",
     "uniformDensityHydrostaticPressure",
+    // SPEC-LIT 120.8: the thermal family - three Robin triples `Energy`
+    // rewrites from the face's current conductance every outer iteration,
+    // and `turbulentHeatFluxTemperature`, which rides `fixedFluxTemperature`
+    // as it is.
+    "externalWallHeatFluxTemperature",
+    "turbulentHeatFluxTemperature",
+    "lumpedMassTemperature",
+    "totalFlowRateAdvectiveDiffusive",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -1179,18 +1190,20 @@ impl BcKind {
                 Self::PorousJumpPressure
             }
 
-            // SPEC-LIT 47.9: an external heat-transfer-coefficient/ambient
-            // wall. Not implemented; the two conditions that ARE are named.
-            "externalWallHeatFluxTemperature" => {
-                return unsupported(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    &["fixedFluxTemperature", "coupledTemperature"],
-                    "fixedFluxTemperature (a prescribed wall heat flux) or \
-                     coupledTemperature (a real conjugate solid region)",
-                    Self::FixedFluxTemperature,
-                );
-            }
+            // SPEC-LIT 120.8: the thermal family. Three of the names ride
+            // `Mixed` - their triple is rewritten every outer iteration from
+            // the face's CURRENT conductance by `crate::energy::Energy`'s
+            // thermal-wall kernel, and `field_setup` refuses them unless the
+            // caller's `BcInputs::thermal` promises that wiring.
+            // `turbulentHeatFluxTemperature` rides §32.2's
+            // `FixedFluxTemperature` as it is: its flux goes through the
+            // EFFECTIVE conductivity, which is exactly what that kernel
+            // already writes - only the `refValue = q` seed differs, which
+            // `field_setup`'s 120.8 block computes.
+            "externalWallHeatFluxTemperature"
+            | "lumpedMassTemperature"
+            | "totalFlowRateAdvectiveDiffusive" => Self::Mixed,
+            "turbulentHeatFluxTemperature" => Self::FixedFluxTemperature,
 
             // SPEC-LIT 29.3: OpenFOAM spells the Jayatilleke thermal wall
             // function on `alphat`, a field this solver does not carry (its
@@ -1209,6 +1222,37 @@ impl BcKind {
                     ),
                 );
                 Self::ThermalWallFunction
+            }
+
+            // SPEC-LIT 120.8: the two alphat aliases. This solver carries no
+            // `alphat` field - `k_eff,b` already holds `rho cp nu_t,b/Pr_t`
+            // with `nu_t,b` from `nut`'s own wall function (S26) - so on a
+            // field named `alphat` the names are read as `calculated`, with
+            // the mapping printed once; on any other field they are refused,
+            // naming `alphat`.
+            "alphatWallFunction" | "compressible::alphatWallFunction" => {
+                if field == "alphat" {
+                    crate::io::contract::warn_once(
+                        &format!("{field}: {name}"),
+                        &format!(
+                            "{field}: boundaryField/{patch}/type `{name}` (OpenFOAM's \
+                             alphat wall function; this solver has no alphat field) \
+                             mapped to `calculated`"
+                        ),
+                    );
+                    Self::Calculated
+                } else {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["calculated"],
+                        "calculated - but note that this name belongs on the `alphat` \
+                         field, which this solver does not carry: its energy equation \
+                         applies the turbulent thermal diffusivity to `k_eff` directly \
+                         (SPEC-LIT 120.8)",
+                        Self::Calculated,
+                    );
+                }
             }
 
             // SPEC-LIT 120.4: its own condition now - (120.4a)'s reverse
@@ -1890,7 +1934,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [79, 3, 28, 10, 10], "the per-status counts");
+        assert_eq!(counts, [83, 5, 22, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

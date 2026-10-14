@@ -6976,7 +6976,7 @@ face — the exact shape the mesh already carries for a cyclic patch.
 | `thermalContactResistance` | the same condition with a non-zero `Rc`; accepted as its own spelling |
 | `compressible::turbulentTemperatureCoupledBaffleMixed` | accepted as an **alias**, printed once by `contract::warn_once`, exactly as `compressible::alphatJayatillekeWallFunction` is |
 | `compressible::turbulentTemperatureRadCoupledMixed` | **§13.4 error** naming `coupledTemperature` AND `greyDiffusiveRadiationViewFactor` — a face carries one or the other, never both, because they rewrite the same triple (§47.10, §50.8) |
-| `externalWallHeatFluxTemperature` | **§13.4 error** naming `fixedFluxTemperature` and `coupledTemperature` |
+| `externalWallHeatFluxTemperature` | implemented by §120.8 on a fluid wall (it was a **§13.4 error** naming `fixedFluxTemperature` and `coupledTemperature` until then); on an interface it is refused, a face carries one condition |
 | `coupledTemperature` on a field that is not a temperature | **§13.4 error** naming `T`, exactly as `constantAlphaContactAngle` on a non-`alpha` field is |
 | interface entries | `Rc` (m^2 K/W), or `thicknessLayers` + `kappaLayers` which are summed by (S47.11); both `>= 0` |
 
@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 79 names of
+accepts it on the field the row is asked on, and it is one of the 83 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39107,15 +39107,15 @@ row, row for row.
 | buoyant pressure | `prghTotalPressure` | implemented | — | — | (120.7c), `p0` less the inflow dynamic pressure and `rho gh` |
 | buoyant pressure | `prghTotalHydrostaticPressure` | implemented | — | — | (120.7d), the caller's hydrostatic `ph_rgh` less the inflow dynamic pressure; API only |
 | buoyant pressure | `uniformDensityHydrostaticPressure` | implemented | — | — | (120.7e), `pRefValue + rhoRef g.(x - pRefPoint)` less `rho gh` |
+| thermal | `externalWallHeatFluxTemperature` | implemented | — | — | (120.8f), `flux`, `power` or `coefficient` with layers (120.8a) and a radiating outer surface (120.8d) |
+| thermal | `turbulentHeatFluxTemperature` | implemented | — | — | §32.2's `fixedFluxTemperature` through `k_eff`, `heatSource` `flux` or `power` |
+| thermal | `lumpedMassTemperature` | implemented | — | — | (120.8g), a lumped mass behind the wall stepped by the energy equation's own ddt row |
+| thermal | `totalFlowRateAdvectiveDiffusive` | implemented | — | — | (120.8h), Danckwerts' inlet: the total heat flow in is the advected `inletValue` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
-| thermal | `externalWallHeatFluxTemperature` | planned | BC-12 | — | — |
-| thermal | `turbulentHeatFluxTemperature` | planned | BC-12 | — | — |
-| thermal | `lumpedMassTemperature` | planned | BC-12 | — | — |
-| thermal | `totalFlowRateAdvectiveDiffusive` | planned | BC-12 | — | — |
-| thermal | `alphatWallFunction` | planned | BC-12 | — | — |
-| thermal | `compressible::alphatWallFunction` | planned | BC-12 | — | — |
+| thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
+| thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
 | atmospheric | `atmBoundaryLayerInletVelocity` | planned | BC-13 | — | — |
 | atmospheric | `atmBoundaryLayerInletK` | planned | BC-13 | — | — |
 | atmospheric | `atmBoundaryLayerInletEpsilon` | planned | BC-13 | — | — |
@@ -39214,8 +39214,7 @@ of a name outside the catalogue and for every permanent refusal except
 fallback `coupledTemperature` (the conjugate coupling without the radiative
 term, §50.8); the planned names refused by their own arm today keep theirs
 (`cyclicAMI` a position-paired
-`cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`,
-`externalWallHeatFluxTemperature` `fixedFluxTemperature`).
+`cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`).
 
 ### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
 
@@ -40226,6 +40225,197 @@ numerics change of `vof.cu`), which belongs to the §118 owner.
   University Press (1967), §3.5 - Bernoulli's total pressure `p + (1/2) rho
   |U|^2` along a streamline entering through the boundary, and hydrostatic
   equilibrium `grad p = rho g`.
+
+No GPL-licensed source was consulted.
+
+### 120.8 The thermal family - an outer wall, a prescribed heat, a lumped mass and Danckwerts' inlet
+
+BC-12 implements the six thermal names of the §120 table. The names are
+taken from the user guides of §120 by name only; the entry keys and every
+equation below are ours (*DESIGN*) or the textbook law each cites. All of
+them are §4's triple with no new evaluation branch: `turbulentHeatFluxTemperature`
+rides `BcKind::FixedFluxTemperature` (§32.2) as it is, and the other three
+ride `BcKind::Mixed`, whose triple `crate::energy::Energy` rewrites every
+outer iteration from the face's CURRENT conductance - the §98 ambient
+triple (S98.1)-(S98.3) carried from the conjugate path onto any fluid wall
+the energy equation solves.
+
+**The outer side of a face.** Let `C_b = k_eff,b Delta_b` be the face's
+cell-to-face conductance per area (S47.4; `k_eff,b` is `Energy`'s
+boundary `k_eff`, molecular plus `rho cp nu_t/Pr_t`), `T_P` the owner
+cell's and `T_b` the face's current value. A face loses `H (T_b - T_ref)`
+to its outside and receives a prescribed `q_in` (W/m^2, positive INTO the
+domain, the §32.2 sign); with `n` wall layers of thickness `t_i` and
+conductivity `kappa_i` between the face and an outer surface at `T_o` that
+convects at `h` to an ambient `Ta` and radiates grey at `eps` to a surround
+at the same `Ta`:
+
+```
+R_l    = sum_i t_i/kappa_i                                                   (120.8a)
+q_c    = C_b (T_P - T_b)                                                     (120.8b)
+T_o*   = T_b - R_l q_c                                                       (120.8c)
+b = 4 eps sigma T_o*^3,   a = eps sigma (T_o*^4 - Ta^4) - b T_o*,
+H_o = h + b,   T_ref = (h Ta - a)/H_o          (eps = 0: H_o = h, T_ref = Ta)   (120.8d)
+H      = H_o/(1 + R_l H_o)                                                   (120.8e)
+fr = H/(H + C_b),     refValue = T_ref,     refGrad = q_in/k_eff,b           (120.8f)
+```
+
+(120.8a) is the plane wall's series resistance and (120.8e) puts it in
+series with the outer film, `(T_b - T_ref)/(R_l + 1/H_o)`; (120.8d) is
+(S98.2)-(S98.3)'s tangent of the quartic, taken about the OUTER surface's
+temperature. (120.8b) is the heat the last solve conducted from the cell to
+the face, which a converged face also passes through the layers, so
+(120.8c) is the outer temperature that iterate implies; the first pass, from
+a seed with `q_c = 0`, linearises about `T_b`. *Proof of the identity.* §4
+gives `T_b = fr T_ref + (1 - fr)(T_P + refGrad/Delta_b)`, and with
+`C_b fr = H (1 - fr)` this is `C_b (T_P - T_b) = H (T_b - T_ref) - q_in`:
+the heat the cell conducts to the face is the heat the face loses outside
+less the heat it is given, **at every iterate**, not at convergence. With
+`H = 0`: `fr = 0` and `refGrad = q_in/k_eff,b`, §32.2's fixed flux in
+every bit. The face is left untouched while `k_eff,b` or `C_b` is not
+positive (before the first `update_k_eff`) or, on a radiating face, while
+`T_o*` is not, the convention of `energyFixedFluxTemperature`.
+
+**`externalWallHeatFluxTemperature`.** `mode` is required: `flux` reads `q`
+(W/m^2) and is `H = 0`, `q_in = q`; `power` reads `Q` (W) and is `H = 0`,
+`q_in = Q/A` with `A` the patch area summed in f64; `coefficient` reads `h`
+(> 0, W/(m^2 K)), `Ta` (> 0, K), optionally `thicknessLayers` and
+`kappaLayers` (two lists of one length, summed by `cht::layered_resistance`,
+§47.9) and `emissivity` in `[0, 1]` (default 0), with `q_in = 0`.
+**`turbulentHeatFluxTemperature`** reads `heatSource` (`flux` or `power`)
+and `q` (W/m^2, or W spread by area): the flux through the EFFECTIVE
+conductivity, which is what §32.2's kernel already writes, so it is that
+condition with `refValue = q` or `q/A`.
+
+**`lumpedMassTemperature`.** A mass `m` (kg, `mass`) of specific heat `c_p`
+(J/(kg K), `Cp`) behind the patch at one temperature `T_m`, from the
+lumped-capacitance balance `m c_p dT_m/dt = -Q` (`Q` the heat the wall
+conducts into the domain). It is stepped with the energy equation's OWN ddt
+row `a_n T^{n+1} + a_0 T^n + a_00 T^{n-1}` (`timescheme::DdtCoeffs`; Euler,
+or `backward` from its Euler first step, §105.16-§105.17), shared out over
+the patch by area:
+
+```
+H = m c_p a_n / A,   T_ref = -(a_0 T_m^n + a_00 T_m^{n-1})/a_n,   q_in = 0
+T_m^{n+1} = sum_f T_b,f |S_f| / A                                            (120.8g)
+```
+
+Summed over the patch, (120.8f)'s identity is `m c_p (a_n T_m^{n+1} + a_0
+T_m^n + a_00 T_m^{n-1}) = -Q^{n+1}` exactly, with `T_m^{n+1}` the area
+mean: the lump's energy balance holds whole and implicit. What is not
+lumped is the spread WITHIN a step: a face whose cell is warmer holds a
+warmer share, and all faces return to one `T_m` at the next step. On a
+patch whose faces see the same cell temperature the two are the same thing.
+`T_m^0` is the area mean of the patch's `value`, which is required. The
+condition is refused on a steady run (no `a_n`) and by `ofgpu-lowmach` on a
+restart (the lump's levels are not in the checkpoint).
+
+**`totalFlowRateAdvectiveDiffusive`.** Danckwerts' inlet condition: the
+total heat flow entering - advected plus conducted - is the advected heat of
+the incoming stream at `inletValue`. With `phi_conv,b = cp rho_f phi_b`
+(`Energy`'s mass flux times `cp`, positive out):
+
+```
+H = max(-phi_conv,b, 0)/|S_f|,   T_ref = T_in,   q_in = 0                     (120.8h)
+```
+
+so `(-phi_conv,b/|S_f|) T_b + C_b (T_b - T_P) = (-phi_conv,b/|S_f|) T_in` on
+an inflow face, the 1-D `u c_in = u c - D dc/dx` of Danckwerts, and an
+outflow face is zero-gradient (`fr = 0`, `refGrad = 0`).
+
+**The alphat aliases.** `alphatWallFunction` and `compressible::alphatWallFunction`
+set a wall's turbulent thermal diffusivity from its eddy viscosity. This
+solver carries no `alphat` field: `k_eff,b` already holds `rho cp
+nu_t,b/Pr_t` with `nu_t,b` from `nut`'s own wall function (S26). On a field
+named `alphat` the two names are read as `calculated`, with the mapping
+printed once (`contract::warn_once`); on any other field they are refused,
+naming `alphat`.
+
+**Evaluation** *(DESIGN - ours)*. `Energy::set_thermal_walls` takes the
+faces and lumps `field_setup::thermal_walls` reads from `T`'s field, and
+holds the per-face `h`, `Ta`, `eps`, `R_l` and `q_in` in f64 buffers in both
+builds. The kernel `energyThermalWall` (`cuda/energy.cu`) evaluates
+(120.8b)-(120.8f) and (120.8h) in `ofacc` from the widened inputs, in the
+order written, with `sigma` the `Scalar` constant widened, and rounds once
+per stored value (§118.2); `cht::ambient::ThermalFace::triple` is its host
+twin. It runs in `Energy::prepare_coefficients` after the §32.2 rewrite and
+again in `correct` right after the convective flux is built, so (120.8h)
+reads the flux it is assembled with; both launches sit inside `correct`,
+the captured region of `the_energy_correction_replays_bitwise`.
+`Energy::advance_lumped_masses` is the one host round trip: once per time
+step, after the step is opened and before its first `correct`, it records
+`T_m` by (120.8g), rotates the lump's two f64 levels and uploads the step's
+`H` and `T_ref`; `correct` refuses a lump whose coefficients were never set.
+
+**Inputs and refusals.** `BcInputs::thermal` is the caller's promise that
+`Energy::set_thermal_walls` and `Energy::advance_lumped_masses` are wired;
+`ofgpu-lowmach` passes it for `T`. Refused by name, each message naming the
+condition and "SPEC-LIT 120.8": the three `Mixed`-kind names where
+`BcInputs::thermal` is false (every other setup: a seed with nothing to
+rewrite it would freeze the face); a missing or unknown `mode` or
+`heatSource`; a missing `q`, `Q`, `h`, `Ta`, `mass`, `Cp`, `value` (lump)
+or `inletValue`; `h`, `Ta`, `mass` or `Cp` not finite and positive;
+`emissivity` outside `[0, 1]`; layer lists of two lengths or a layer
+refused by (S47.11)'s rule; an entry the mode does not read (`h`, `Ta`,
+`emissivity` or the layers under `flux`/`power`, `q` or `Q` under
+`coefficient`); any of the six on a vector field; and, in `Energy`, a lump
+on a steady scheme, a lump face that is not one of the set's faces (a
+lump names its faces by boundary-face index, mapped once to their places
+in the face list), and a thermal face on an interface (§47.6).
+
+**Gates** (`tests/bc_thermal.rs`, both builds; class per docs/17 §5.1,
+D-F32-1; the tolerance is `t` in f64 and `max(t, min(t 2^29, 1e-5))` under
+`single`; f64 numbers first, `single` in brackets).
+
+`coefficient_mode_slab_is_the_series_resistance_closed_form` - THE gate,
+row 1. A 4 x 1 x 1 slab on [0, 0.1] (`k = 0.05`, xMin `fixedValue 400`),
+xMax `mode coefficient; h 10; Ta 300;` with `thicknessLayers (0.01 0.02);
+kappaLayers (0.5 2.0);`, steady: the measured `q_m = C_b (T_P - T_b)` is
+`q = 100/(0.1/0.05 + 0.03 + 0.1) = 46.948356807511736` within 1.6e-15
+[2.7e-7] on xMax and 6.0e-15 [2.4e-6] on xMin, and `T_b = 306.1032863849765`
+within 0 [5.1e-8], all held to tol(1e-10), after 2 passes; the control
+without the layers is `100/2.1` within 2.9e-15 [3.2e-6]. `a_radiating_outer_
+surface_is_the_root_of_the_quartic` - xMin 600, `emissivity 0.8`: `T_b`
+lands on the quartic's root 309.59128377473974 within 1.1e-15 [1.8e-8], and
+with the two layers on 313.7498487803651 within 1.6e-15 [4.4e-9] (tol(1e-10)),
+in 4 [3] tangent passes each (<= 50 asserted). `the_device_triple_is_its_
+host_twin` - three passes into the layered radiating case, the kernel's
+`fr`, `refValue`, `refGrad` equal `ThermalFace::triple` on the downloaded
+state within tol(1e-14) relative, a zero exactly (class R).
+`flux_and_power_are_the_fixed_flux_condition` - 20 passes with `q -50`:
+`externalWallHeatFluxTemperature mode flux` and `turbulentHeatFluxTemperature
+heatSource flux` give `T` on every cell and face bit for bit the
+`fixedFluxTemperature` run (class D); `mode power` and `heatSource power`
+with `-50 A` deviate by 0 [0] (tol(1e-12)). `a_lumped_mass_decays_
+exponentially_at_second_order` - THE gate, row 2: xMin `fixedValue 300`,
+xMax `lumpedMassTemperature mass 12; Cp 1000; value uniform 400;`,
+`tau = m c_p L/(k A) = 2.4e8 s`, `backward`, one `correct` per step to
+`t = tau`: `|T_m - (300 + 100 e^-1)|/100` is 6.21e-5 [6.67e-5] at N = 50
+(<= 1e-4), 2.52e-4 [2.55e-4] at N = 25, a ratio of 4.06 [3.82] (in [3.5,
+4.5], second order); the Euler control at N = 50 is 3.65e-3 [3.65e-3]
+(> 1e-3). `danckwerts_inlet_carries_the_advected_heat` - a 16 x 1 x 1
+channel on [0, 1], `k = 12`, plug `phi = 0.01 |S_f|`: (a) `inletValue 310`
+with xMax `zeroGradient` fills every cell with 310 within 4.7e-15 [7.9e-7]
+(tol(1e-10)); (b) `inletValue 301` against xMax `fixedValue 300` holds
+`a T_b + C_b (T_b - T_P) = a T_in` at every pass within 6.7e-15 [3.4e-6]
+(tol(1e-12)), the converged inlet face sits at 300.616732045547
+[300.616882324219] below `T_in` while the `fixedValue 301` control pins
+301 exactly, and the heat leaving xMax equals the advected inflow within
+2.0e-14 [2.0e-7] (tol(1e-10)); (c) on an outflow face `fr` and `refGrad`
+are exactly 0. `thermal_refusals_are_by_name` - every refusal of the list
+above (class D), including a lump on a steady `Energy`, a lump face that is
+not one of the set's faces, and `correct` before `advance_lumped_masses`.
+`the_alphat_aliases_read_as_calculated_on_alphat_only` - both names are
+`calculated` on `alphat` and refused naming `alphat` on `T`. 8 of 8 in each
+build.
+
+* **Incropera, F. P., DeWitt, D. P.** *Fundamentals of Heat and Mass
+  Transfer*, Wiley - ch. 3, the plane wall and its thermal resistances in
+  series, `q = (T_1 - T_inf)/(L/k + 1/h)`; ch. 5, the lumped capacitance
+  method, `T - T_inf = (T_0 - T_inf) exp(-t/tau)`, `tau = rho V c/(h A)`.
+* **Danckwerts, P. V.** Continuous flow systems: distribution of residence
+  times. *Chem. Eng. Sci.* 2(1) (1953) 1-13, doi:10.1016/0009-2509(53)80001-1
+  - the inlet condition of a flow with axial dispersion.
 
 No GPL-licensed source was consulted.
 

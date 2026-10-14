@@ -175,8 +175,8 @@ use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField};
 use ofgpu::field_ops::{update_inlet_outlet_scalar, FieldKernels};
 use ofgpu::field_setup::{
     faces_where, harvest_scalar_field, harvest_vector_field, les_nut_wall_faces,
-    setup_scalar_field, setup_scalar_field_with, setup_vector_field_with, validate_wall_rows,
-    wall_coeffs_from_case,
+    setup_scalar_field, setup_scalar_field_with, setup_vector_field_with, thermal_walls,
+    validate_wall_rows, wall_coeffs_from_case,
     BcInputs, NutRoughness, WallFaces,
 };
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
@@ -1980,7 +1980,21 @@ fn run(o: &Options) -> Result<RunEnd> {
     // ---- energy / gas state ----------------------------------------------
     let energy_ctrl = ctrls.energy;
     let mut energy = Energy::new(&gpu, &mesh, energy_ctrl, gas_props)?;
-    setup_scalar_field(&gpu, energy.field_mut(), &fields.t, &hm)?;
+    // SPEC-LIT 120.8: T carries the thermal opt-in - the promise that this
+    // driver wires Energy::set_thermal_walls with thermal_walls(T) below and
+    // calls Energy::advance_lumped_masses once per transient step. Every
+    // other field keeps the default, which refuses the three Mixed-kind
+    // names.
+    setup_scalar_field_with(
+        &gpu,
+        energy.field_mut(),
+        &fields.t,
+        &hm,
+        BcInputs {
+            thermal: true,
+            ..BcInputs::default()
+        },
+    )?;
     energy.initialise(&gpu)?;
 
     // SPEC-LIT §29.3: the Jayatilleke thermal wall function, on whichever
@@ -2014,6 +2028,20 @@ fn run(o: &Options) -> Result<RunEnd> {
     // reasoning as that call: an empty face list is a no-op every iteration.
     let t_fixed_flux_faces = faces_where(&fields.t, &hm, BcKind::is_fixed_flux_temperature)?;
     energy.set_fixed_flux_walls(&gpu, &t_fixed_flux_faces)?;
+
+    // SPEC-LIT 120.8: the thermal family, out of T's OWN patch types -
+    // called after every conjugate attach (this driver attaches none) and
+    // before the first correct, and refused on a restart: the lump's two
+    // f64 levels are not in the checkpoint, so a resumed run would decay
+    // from the wrong `T_m`.
+    let t_thermal_walls = thermal_walls(&fields.t, &hm)?;
+    if restart_data.is_some() && !t_thermal_walls.lumps.is_empty() {
+        return Err(Error::Config(format!(
+            "ofgpu-lowmach: `lumpedMassTemperature` on a restart is refused - the \
+             lump's levels are not in the restart checkpoint (SPEC-LIT 120.8)"
+        )));
+    }
+    energy.set_thermal_walls(&gpu, &t_thermal_walls)?;
 
     if let Some(rd) = &restart_data {
         // Same reasoning as `U`/`p`/`phi` above, gathered here because both
@@ -2439,6 +2467,11 @@ fn run(o: &Options) -> Result<RunEnd> {
             // step on, opening one rotates `T`'s levels too, ahead of the
             // unit of work's `update_density`.
             open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step)?;
+            // SPEC-LIT 120.8: the one host round trip per time step - the
+            // lump's (120.8g) level, its two rotated f64 levels, and the
+            // step's area-shared H and T_ref - before the step's first
+            // correct.
+            energy.advance_lumped_masses(&gpu)?;
             t_phys += f64::from(dt);
         } else {
             // SPEC-LIT §44.9: a steady run's clock is its iteration counter -

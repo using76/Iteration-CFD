@@ -24,6 +24,15 @@
 //!     read; its coefficients come from the restatement above
 //!   ofgpu `SPEC-LIT.md` §4, §47.2, §98
 //!
+//! SPEC-LIT 120.8 extends the same triple onto any fluid wall the energy
+//! equation solves: [`ThermalFace`] is one boundary face whose `(fr,
+//! refValue, refGrad)` `crate::energy::Energy` rewrites every outer
+//! iteration from the face's CURRENT conductance - (120.8b)-(120.8f)'s
+//! outer wall with its layers and radiation, (120.8h)'s Danckwerts inlet -
+//! and [`LumpedMass`] / [`ThermalWalls`] carry the lumped
+//! `lumpedMassTemperature` patch and the whole set. [`lump_coefficients`]
+//! is (120.8g)'s area-shared film coefficient and reference temperature.
+//!
 //! OpenFOAM's `externalWallHeatFluxTemperature` is GPL and was not opened.
 //! No GPL-licensed source was consulted.
 
@@ -121,6 +130,151 @@ impl ExternalFace {
     pub fn triple(&self) -> (Scalar, Scalar, Scalar) {
         self.loss.triple(self.c_b, self.t_star)
     }
+}
+
+/// SPEC-LIT 120.8: one boundary face whose `T` triple `crate::energy::Energy`
+/// rewrites every outer iteration. `q_in` is positive INTO the domain (the
+/// sign of SPEC-LIT 32.2's `q`); `r_layers` is (120.8a)'s series resistance
+/// `sum_i t_i/kappa_i`; in flux/power modes `h` is 0 and `q_in` carries the
+/// prescribed heat, in the coefficient mode it is the other way round, and on
+/// a Danckwerts face `advective` is set and `t_inf` is the inlet value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalFace {
+    /// Flattened boundary-face index.
+    pub bf: usize,
+    /// Outer film coefficient, W/(m^2 K); a lump's `m cp a_n / A`; 0 in the
+    /// flux and power modes.
+    pub h: f64,
+    /// `Ta`, K; a lump's `T_ref` of (120.8g) (rewritten every step); a
+    /// Danckwerts face's `T_in`.
+    pub t_inf: f64,
+    /// Grey emissivity to a surround at `Ta`; 0 = no radiation.
+    pub emissivity: f64,
+    /// (120.8a): the wall layers' series resistance, m^2 K/W.
+    pub r_layers: f64,
+    /// W/m^2 into the domain (the flux and power modes), else 0.
+    pub q_in: f64,
+    /// `totalFlowRateAdvectiveDiffusive`: `H` comes from (120.8h), off
+    /// `phi_conv`, not off `h`.
+    pub advective: bool,
+}
+
+impl ThermalFace {
+    /// (120.8b)-(120.8f) and (120.8h): `Some((fr, refValue, refGrad))`, or
+    /// `None` = leave the face untouched (the guard: `k_eff` or `C_b` not
+    /// positive, a radiating face's `T_o*` not positive, or a Danckwerts
+    /// face with no area). `c` is the face conductance `k_eff Delta_b`,
+    /// `t_b`/`t_p` the face and owner-cell temperatures, `phi_conv` the
+    /// face's `cp rho_f phi` (positive out) and `mag_sf` its area. The
+    /// operation order here is the kernel's; both round once per stored
+    /// value (SPEC-LIT 118.2). Arithmetic in f64 - the widened build's own
+    /// precision, and the kernel widens every input to `ofacc`.
+    pub fn triple(
+        &self,
+        k_eff: f64,
+        delta: f64,
+        t_b: f64,
+        t_p: f64,
+        phi_conv: f64,
+        mag_sf: f64,
+    ) -> Option<(f64, f64, f64)> {
+        if !(k_eff > 0.0) {
+            return None;
+        }
+        let c = k_eff * delta;
+        if !(c > 0.0) {
+            return None;
+        }
+        let sigma = SIGMA_SB as f64;
+        let (mut hh, t_ref);
+        if self.advective {
+            // (120.8h): the advected heat of the incoming stream. `phi_conv`
+            // is positive out, so an INFLOW face has `phi_conv < 0` and
+            // carries `H = -phi_conv/|S_f|`; an outflow face is
+            // zero-gradient (`hh = 0` -> `fr = 0` below).
+            if !(mag_sf > 0.0) {
+                return None;
+            }
+            hh = if phi_conv < 0.0 { -phi_conv / mag_sf } else { 0.0 };
+            t_ref = self.t_inf;
+        } else {
+            // (120.8b): the heat the last solve conducted from the cell to
+            // the face - which a converged face also passes through the
+            // layers, so (120.8c) is the outer temperature that iterate
+            // implies.
+            let q_c = c * (t_p - t_b);
+            let t_o = t_b - self.r_layers * q_c;
+            if self.emissivity > 0.0 {
+                if !(t_o > 0.0) {
+                    return None;
+                }
+                // (120.8d): (S98.2)'s tangent of the quartic, taken about
+                // the OUTER surface's temperature.
+                let es = self.emissivity * sigma;
+                let b = 4.0 * es * t_o * t_o * t_o;
+                let a = es * (t_o * t_o * t_o * t_o - self.t_inf * self.t_inf
+                    * self.t_inf * self.t_inf)
+                    - b * t_o;
+                let ho = self.h + b;
+                t_ref = (self.h * self.t_inf - a) / ho;
+                hh = ho;
+            } else {
+                // Taken, not computed - (S98.1) in every bit.
+                hh = self.h;
+                t_ref = self.t_inf;
+            }
+            // (120.8e): the layers in series with the outer film.
+            hh = hh / (1.0 + self.r_layers * hh);
+        }
+        // (120.8f), the identity `C_b (T_P - T_b) = H (T_b - T_ref) - q_in`
+        // at every iterate.
+        let fr = hh / (hh + c);
+        Some((fr, t_ref, self.q_in / k_eff))
+    }
+}
+
+/// SPEC-LIT 120.8 (120.8g): one `lumpedMassTemperature` patch - a mass
+/// `mass` of specific heat `Cp` behind the patch at one temperature. Each of
+/// its `faces` is a flattened boundary-face index that is ALSO the `bf` of
+/// one entry of `ThermalWalls::faces`, where the per-step film the
+/// coefficients give is written; `Energy::set_thermal_walls` refuses a lump
+/// face that is not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LumpedMass {
+    pub patch: String,
+    /// The lump's faces, as flattened boundary-face indices, in face order.
+    pub faces: Vec<usize>,
+    /// Each face's area, f64, in the same order - (120.8g)'s area mean.
+    pub area: Vec<f64>,
+    /// `mass * Cp`, J/K.
+    pub mass_cp: f64,
+    /// The file's `value`, area-meaned once: `T_m^0`.
+    pub t0: f64,
+}
+
+/// SPEC-LIT 120.8: the thermal faces and lumps `field_setup::thermal_walls`
+/// reads from `T`'s field and `Energy::set_thermal_walls` takes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThermalWalls {
+    pub faces: Vec<ThermalFace>,
+    pub lumps: Vec<LumpedMass>,
+}
+
+/// (120.8g)'s area-shared pair `(H, T_ref)` for one lump this step:
+/// `H = mass_cp a_n / A` and `T_ref = -(a_0 T_m^n + a_00 T_m^{n-1})/a_n`,
+/// from the energy equation's OWN ddt row, shared out over the patch by
+/// area. `a_n` is never zero on a transient step - the caller refuses that
+/// by name.
+pub fn lump_coefficients(
+    mass_cp: f64,
+    area: f64,
+    a_n: f64,
+    a_0: f64,
+    a_00: f64,
+    t_n: f64,
+    t_nm1: f64,
+) -> (f64, f64) {
+    (mass_cp * a_n / area, -(a_0 * t_n + a_00 * t_nm1) / a_n)
 }
 
 /// §98.3's criterion: a pass is the last when `max_f |T_b - T*|` is at most
