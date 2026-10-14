@@ -584,7 +584,7 @@ pub fn ghia_1982() -> Result<Ghia> {
 
 // --------------------------------------------------------- ERCOFTAC T3A --
 
-/// The manifest id of the T3A summary table (SPEC-LIT §144.1).
+/// The manifest id of the T3A summary table (SPEC-LIT §144.6).
 pub const T3A_ID: &str = "ercoftac-t3a";
 
 /// The nine column names of the T3A summary table, in the file's order.
@@ -618,7 +618,7 @@ pub struct T3a {
     pub digest_line: String,
 }
 
-/// Parse the T3A summary table (SPEC-LIT §144.1). The column header is the
+/// Parse the T3A summary table (SPEC-LIT §144.6). The column header is the
 /// first line whose whitespace-separated fields are exactly
 /// `RUN X REX UO CF H RETHETA DELTA TUFS`; lines before it are the file's
 /// title and key and are skipped. Every later non-empty line is a station:
@@ -1084,7 +1084,7 @@ mod tests {
     // ------------------------------------------------------- ERCOFTAC T3A --
 
     /// A synthetic summary in the T3A file's layout - invented numbers, not
-    /// the ERCOFTAC data, which is not distributed (SPEC-LIT §144.1).
+    /// the ERCOFTAC data, which is not distributed (SPEC-LIT §144.6).
     const T3A_SYNTHETIC: &str = "TITLE\n\nKEY : RUN  THE RUN NUMBER\n      X    THE POSITION\n\n   \
         RUN         X          REX          UO        CF          H      RETHETA    DELTA      TUFS\n \
         1W00001      10.0     1.000E+04      5.00    0.006000     2.600      50.0      1.00     3.000\n \

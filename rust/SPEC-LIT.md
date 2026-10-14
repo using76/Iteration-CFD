@@ -2177,6 +2177,65 @@ non-closed surface (SPEC-LIT §13.4 contract; `-permissive` downgrades to a
 warning and uses parity voting, §23.3). Degenerate triangles (zero area at
 f64) are dropped with a count.
 
+#### 23.2.1 Filling a hole (`tools/geom/stl_repair.py`, AUT-02c)
+
+The reader never edits a surface; the repair tool writes a NEW file and fills
+a boundary loop v_0 … v_{n-1} (walk order along the open edges, n ≤
+`--max-hole-edges`, default 64) as follows. A 3-edge loop is one triangle. A
+planar loop of 4 to 32 edges — every v_i within the weld tolerance of the plane
+through the loop's mean point orthogonal to its Newell normal — is ear-clipped
+in that plane (Meisters's two-ears theorem), exactly as before AUT-02c. Every
+other loop, and a planar one in which no ear is found, is filled by the
+minimum-weight triangulation and refinement of P. Liepa, "Filling Holes in
+Meshes", Proc. Eurographics Symposium on Geometry Processing 2003, 200–206
+(DOI 10.2312/SGP/SGP03/200-206), then faired:
+
+```
+1. minimum-weight triangulation (dynamic programme over the loop):
+     W(i, i+1) = (0, 0)
+     W(i, k)   = min_{i<m<k} W(i, m) ⊕ W(m, k) ⊕ Ω(i, m, k)
+     (a, A) ⊕ (b, B) = (max(a, b), A + B), compared lexicographically
+     Ω(i, m, k) = (largest dihedral angle between triangle (v_i, v_m, v_k)
+                   and its neighbours, area(v_i, v_m, v_k))
+   the neighbours are the triangles W(i, m) and W(m, k) chose on the edges
+   (i, m) and (m, k), or the surface triangle on a loop edge, and at the root
+   (0, n-1) also the surface triangle on the closing edge; the dihedral angle
+   is the angle between the two normals, 0 for a flat continuation.
+2. refinement, α = √2:
+     σ(v_i) = the mean length of v_i's surface edges
+     for each patch triangle (v_i, v_j, v_k) with centroid v_c,
+       σ(v_c) = (σ(v_i) + σ(v_j) + σ(v_k)) / 3;
+       if α‖v_c − v_m‖ > σ(v_c) and α‖v_c − v_m‖ > σ(v_m) for every
+       m ∈ {i, j, k}: split it into (v_c, v_j, v_k), (v_i, v_c, v_k),
+       (v_i, v_j, v_c) and relax its three edges
+     stop when a pass splits nothing; otherwise relax every interior patch edge
+     and repeat
+   relax (v_a, v_b), shared by (v_a, v_b, v_c) and (v_b, v_a, v_d): swap it for
+   (v_c, v_d) when v_d lies strictly inside the sphere whose equator is the
+   circumcircle of (v_a, v_b, v_c)
+3. fairing: the inserted points solve the membrane U(v) = 0 with the
+   scale-dependent umbrella
+     U(v) = (2/E) Σ_j (v_j − v) / |e_j|,   E = Σ_j |e_j|
+   over v's patch neighbours v_j, the lengths taken before the solve and the
+   loop held fixed (M. Desbrun, M. Meyer, P. Schröder, A. H. Barr, "Implicit
+   fairing of irregular meshes using diffusion and curvature flow", SIGGRAPH
+   1999, 317–324)
+```
+
+Patch triangles take the reversed walk winding, so each loop edge is used once
+each way. *DESIGN*, beyond the paper: a chord that is already a surface edge,
+and a zero-area triangle, are never chosen; a swap is not made when its new
+edge already exists, a new triangle would have zero area, or a new triangle's
+normal would turn against the pair's; refinement stops after 32 passes and a
+relaxation after 64 sweeps. The fairing operator is this tool's choice. The
+thin-plate form U²(v) = 0, which also holds the surface's ring around the hole
+for tangent continuity, was measured and rejected: on the three tuning hole
+rows where refinement inserts a point (G-1-060, G-1-090, G-1-114) it moved
+that point 0.72–3.3 h_f off the parent surface, with the same umbrella, while
+the membrane keeps it within 0.002 h_f (h_f = base_size / 2^max_level of the
+setup rules). A fill that would give an edge a third use or hold a zero-area
+triangle is refused whole and named in the report.
+
 ### 23.3 Inside/outside classification
 
 Column-parity ray casting, the standard voxelizer construction:
@@ -29985,7 +30044,8 @@ form (Timoshenko & Goodier ch. 4):
 ```
 
 and it is read with (S95.27) at `P = (r_in, 0, L/2)`, where on the symmetry
-plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10.
+plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10,
+and since VAL-14 a fourth, `nr = 96` (the ring's fourth mesh, below).
 Held: the point value within `1 %` of (S95.28) on the finest mesh, and the
 observed order of its error between the two finest meshes at `p >= 0.9` -
 the bar docs/09's risk 2 wrote for exactly this read-out.
@@ -30010,7 +30070,7 @@ nearest cell's value and both relative errors; per body, its slenderness
 (`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
 not the primary, whose headline carries the finest point value and its
 error, and whose uncertainty is §94's study of the point value over the
-three meshes (LE10: its three finest) - or, when three values cannot form
+three meshes (the ring and LE10: their three finest) - or, when three values cannot form
 one, §94.3's single-mesh declaration saying so. The three targets are
 answer keys `nafems-le1`, `nafems-le10` and `nafems-le11` of
 `reference/PROVENANCE.md`, `literal` rows that name the restatement as their
@@ -30097,6 +30157,47 @@ modelling choice, not the restated condition; nothing measured here separates th
 The full run: `ofgpu-validate` 1021/1026, its five failing rows Gate 95-A's four at 5:1 and
 10:1 and the ring's order row; every row outside LE10's scope is digit-identical to the run of
 2026-09-26 (§105.14), and the registry's gates with the verdict of a shortfall fall from 6 to 5.
+
+**The ring's fourth mesh, the user's decision D-VAL-6 (VAL-14).** The ring's order row was the
+one shortfall of Gate 95-G left, its point error falling at `p = 0.842` between `nr = 24` and
+`nr = 48`. The user decided, as for LE10, to add a finer mesh and measure again, the gate's
+definition and both bars unchanged. The mesh added is `nr = 96`, `annulus(96, 192, 2)`, 36,864
+cells: the third mesh halved in `r` and `theta`, the two layers in `z` kept, as every ring mesh
+has them. The meshes are `LAME_RING_NR = [12, 24, 48, 96]` in `ofgpu-validate`, next to the gate
+as `LE10_MESHES` is; `lame_ring(nr)` takes any `nr >= 2` and did not change. The bar on the
+point value is read on `nr = 96`. The order row is read on the finest pair, `nr = 48 -> 96`.
+§94's study takes the three finest, `nr = 24, 48, 96`, finest first, under §94.3's four-mesh
+declaration when they cannot form one, and `nr = 12` is run and printed beside them. Nothing else
+moved: the segregated loop and its controls, the fit (S95.27), its `2 x 2 x 2` corner stencil,
+the closed form (S95.28) and the `1 %` and `p >= 0.9` bars. The ring's scope grows from 5 rows
+to 6, one converged row at `nr = 96`, and its two bar rows name `nr = 96` and `nr 48 -> 96`.
+`ofgpu-validate` gains one host test, `ring_gate_runs_four_meshes`, that pins the four meshes and
+builds the finest ring.
+
+**Gate 95-G ring, measured on four meshes** on 2026-10-14 on the machine of record (one RTX
+5070 Ti, f64; other workflows were compiling on the CPU), with the meshes and controls above and
+nothing tuned:
+
+```text
+                          nr = 12       nr = 24       nr = 48       nr = 96     finest    bar
+  ring sigma_tt(bore)   1.701161e6    1.688910e6    1.679071e6    1.673195e6    0.39 %    1 %    holds
+       order of its error, nr 48 -> 96:  p = 0.926                                     0.9    holds
+```
+
+The loop converged on every mesh: 23, 24, 24 and 22 outer iterations (16,521 linear at
+`nr = 96`). The first three columns are digit-identical to the run before this unit, and so is
+every LE1, LE10 and LE11 row. The point error falls at `p = 0.633` from 12 to 24, `0.842` from
+24 to 48 and `0.926` from 48 to 96. §94's study over the finest three is monotone, `p = 0.743`,
+`phi_ext = 1.664479e6`, `U_fine = 1.090e4` (Fs 1.25, power series). The nearest cell's own value
+is 0.52 % off at `nr = 96`, where the fit is 0.39 %. Gate 95-G's section is 28/28 rows in 58 s,
+and it registers nothing.
+
+What this says, and what it does not. The order of the point error rises with each refinement,
+and the bar of docs/09's risk 2 holds on the finest pair. The order measured over the three finest values
+themselves (0.743) is lower than that pair's 0.926, so the ring is not yet in a clean asymptotic
+range, and the bar is held on one pair. The study's extrapolation stops 0.13 % below (S95.28), and
+the band `phi_fine +- U_fine`, 1.662295e6 to 1.684095e6, contains the closed form. Gate 95-D's
+cell-centre hoop-stress order (§95.10, 0.848 on `nr = 24, 48`) was not re-measured on `nr = 96`.
 
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
@@ -34733,12 +34834,18 @@ contraction 0.33) against the segregated loop's 22 outer iterations
 plane strain - span `l` along `x`, depth `2c = 0.2`, one cell through the
 thickness with symmetry planes on both faces, the closed form's parabolic
 shear on the free end and its own displacement on the built-in end, `E = 200`
-GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on three meshes
-of cubic cells with `n_y = 4, 8, 16` through the depth. Per ratio: the loop
+GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on four meshes
+of cubic cells with `n_y = 4, 8, 16, 32` through the depth. Per ratio: the loop
 converges on every mesh, the observed order of the cell-centre displacement
-error is at least 1.9, that of the cell-centre stress error at least 0.9, and
-the finest mesh's tip deflection is within 5 % of the closed form; §94's
-study of the tip deflection is its uncertainty. The measured table is §109.7's.
+error on the finest pair (`n_y` 16 -> 32) is at least 1.9, that of the
+cell-centre stress error at least 0.9, and the finest mesh's tip deflection is
+within 5 % of the closed form; §94's study of the tip deflection on the finest
+three meshes (`n_y = 8, 16, 32`) is its uncertainty. The coarsest mesh is still
+run and printed, and held to "converges"; if it does not, it fails by name. The
+fourth mesh is the user's decision D-VAL-6 (docs/17, VAL-12), taken after
+§142.1 found the slender beams read before their asymptotic range; the bars
+are unchanged, and the precedent is Gate 95-G LE10's fourth mesh (§95.11). The
+measured table is §109.7's.
 
 ### 109.7 Gate 95-A, measured
 
@@ -34754,13 +34861,24 @@ stress errors volume-weighted rms against `P l c / I`).
 | 2.5:1 | 4 | 40 | 93 | 0.641 | 1663 | 2.71e-2 | 2.75e-2 | 1.44e-2 | 1.34e-2 |
 | 2.5:1 | 8 | 160 | 33 | 0.545 | 1203 | 4.02e-3 | 4.05e-3 | 3.91e-3 | 4.88e-3 |
 | 2.5:1 | 16 | 640 | 31 | 0.479 | 2363 | 6.73e-4 | 6.97e-4 | 1.35e-3 | 1.74e-3 |
+| 2.5:1 | 32 | 2560 | 33 | 0.574 | 4485 | 1.24e-4 | 1.37e-4 | 4.89e-4 | 6.19e-4 |
 | 5:1 | 4 | 80 | diverged at 673 | - | - | - | - | - | - |
 | 5:1 | 8 | 320 | 200 | 0.682 | 10198 | 1.98e-5 | 5.78e-4 | 3.76e-3 | 3.44e-3 |
 | 5:1 | 16 | 1280 | 52 | 0.553 | 6124 | 2.59e-4 | 2.63e-4 | 1.34e-3 | 1.23e-3 |
+| 5:1 | 32 | 5120 | 65 | 0.739 | 13180 | 9.76e-5 | 9.81e-5 | 4.86e-4 | 4.35e-4 |
 | 10:1 | 4 | 160 | 1000, not converged | 0.992 | 68571 | - | - | - | - |
 | 10:1 | 8 | 640 | 730 | 0.826 | 84432 | 1.40e-3 | 1.40e-3 | 3.66e-3 | 2.43e-3 |
 | 10:1 | 16 | 2560 | 200 | 0.626 | 43339 | 5.66e-4 | 5.66e-4 | 1.32e-3 | 8.64e-4 |
+| 10:1 | 32 | 10240 | 518 | 0.599 | 141094 | 1.52e-4 | 1.52e-4 | 4.86e-4 | 3.06e-4 |
 
+The `n_y = 32` rows are VAL-12's (2026-10-14, the same controls; the whole
+Gate 95-A section, all twelve meshes, took 68 s and 93 s in two runs on a GPU
+shared with other jobs). The rows of `n_y = 4, 8, 16` printed the same digits
+with the fourth mesh in place. The
+next paragraph is the gate as first measured, on three meshes; the one after
+it is the gate as it now stands.
+
+**On three meshes** (`n_y = 4, 8, 16`, the orders on 8 -> 16).
 **2.5:1 holds**: converged on all three meshes, `p_u = 2.54`, `p_sigma =
 1.49`, the finest tip 0.07 % off the closed form; §94's study of the tip is
 monotone with `p = 2.79` and `U_fine = 2.6e-7` (0.78 % of the tip).
@@ -34771,6 +34889,28 @@ tip is 0.026 % off. **10:1 misses**: the coarsest mesh stalls at `q_obs =
 0.992` to the cap, and `p_u = 1.31`; `p_sigma = 1.47`, the finest tip 0.057 %
 off. The two studies of 5:1 and 10:1 read nothing, because their coarse level
 is not a converged solve.
+
+**On four meshes** (VAL-12: the orders on 16 -> 32, §94's study on
+`n_y = 8, 16, 32`). Every order pair is printed; a pair with a mesh that is
+not a converged solve prints no order.
+
+| ratio | `p_u` 8→16 | `p_u` 16→32 | `p_sigma` 16→32 | tip study (8, 16, 32) | `U_fine` / tip | finest tip | Gate 95-A |
+|---|---|---|---|---|---|---|---|
+| 2.5:1 | 2.539 | 2.348 | 1.466 | monotone, `p = 2.608` | 0.11 % | 0.012 % | **holds** |
+| 5:1 | 1.136 | **1.423** | 1.458 | oscillatory | 0.079 % | 0.010 % | misses: `n_y = 4` diverges, `p_u` |
+| 10:1 | 1.308 | **1.896** | 1.445 | monotone, `p = 1.015` | 0.051 % | 0.015 % | misses: `n_y = 4` stalls, `p_u` |
+
+The two slender beams still miss, now each for the same two named reasons:
+the coarsest mesh is not a converged solve (the loop's half of §142.1, which
+VAL-11's GMRES outer iteration is for), and the displacement order on the
+finest pair is short of 1.9 - by 0.48 at 5:1 and by 0.004 at 10:1. The fourth
+mesh moves both orders toward 2 (5:1 from 1.14 to 1.42, 10:1 from 1.31 to
+1.90). Neither settles near 1: both rise with the fourth mesh, which is
+§142.1's reading of a pre-asymptotic range, so on this measurement the D-VAL-7
+trigger for §109.4's implicit tangential stencil (VAL-13) does not fire. Three
+levels per ratio past the coarsest still cannot say where the 5:1 order
+settles. The stress order holds at 1.44-1.47 on every beam, and the finest tip is within 0.015 % of the closed
+form on all three. No bar moved.
 
 What the block solve changes, read beside the segregated loop on the same
 `n_y = 8` beams with the same controls (the ignored measurement
@@ -43172,8 +43312,8 @@ source plus `rho` times its flux sum, as the row says. The brief's first form
 ## 125. Energy, the outer loop, and the local time step
 
 `No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
-`src/compressible/energy.rs`, CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
-§125.4 in `src/compressible/lts.rs`.
+`src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`
+(as built: §125.6), and CMP-13 §125.4 in `src/compressible/lts.rs` (as built: §125.7).
 
 ### 125.1 The energy equation, solved for `T`
 
@@ -43268,6 +43408,271 @@ every ddt difference is zero, so the fixed point does not depend on `CFL`. CMP-1
 `steady_fixed_point_independent_of_cfl` holds two CFLs to the same field within `1e-8`
 in f64 (class P; the same bar in f32 is reported as its own row if missed, §5.1.4) and
 `dt_field_matches_host_formula` holds (125.2) to its host twin (class R).
+*As built* (§125.7): the fixed-point row is MISSED. `rAU` (123.5) carries the time term's
+diagonal, so the Rhie-Chow flux keeps `CFL` at the fixed point.
+
+### 125.5 The assembly as built (CMP-11)
+
+`src/compressible/energy.rs` holds `RhoEnergy`, and `cuda/compressible.cu` gains three
+kernels. Like §123.3 and §124.4, this subsection adds no physics: it fixes the scaling,
+the order and the face values of (125.1). Everything §3, §7, §12 and §86.3 already
+compute is CALLED: the scalar operators of `src/fv.rs`, the time term
+`timescheme::Ddt::add_rho`, the face product of `cuda/momentum.cu` (`momMul`) and the
+face-flux sum of `cuda/simple.cu` (`smpFaceFluxSum`).
+
+**The scaling.** *DESIGN*: `c_p` is constant (`hConst`, §122.1), so the system
+assembled is (125.1) divided by `c_p`. The time term is `Ddt::add_rho` with weight `rho`
+on `T`'s old levels, the convection is `fvm_div_gauss` on `mdot`, the laplacian's
+coefficient is `kappa_f |Sf| / c_p`, and every explicit term carries
+`rcp = fl(1/c_p)`, formed in f64 and rounded once. The solution is (125.1)'s; only the
+rounding of the scaling differs. The system is
+
+```
+A T = b
+A T = ddt_rho(T) + sum_f mdot_f T~_f - sum_f rcp kappa_f |Sf| snGrad(T)                      (125.3)
+b   = sum_f ±e_f + rcp V_P [ (a_n p_P + a_0 p_P^o + a_00 p_P^oo)
+                             - (a_n rho_P K_P + a_0 rho_P^o K_P^o + a_00 rho_P^oo K_P^oo)
+                             + rho_P g . u_P ]
+e_f = rcp ( W_f - mdot_f K~_f ) ,   K = |u|^2 / 2 ,   W_f = u_f . (tau_f . Sf)                     (125.4)
+(tau_f . Sf)_i = mu_f ( sum_j (T_f,ij + T_f,ji) Sf_j - (2/3) tr(T_f) Sf_i ) ,   T_ij = d u_j/d x_i  (grad u)
+```
+
+`(a_n, a_0, a_00)` are this equation's own time coefficients (`DdtCoeffs`), so `dp/dt`,
+`d(rho K)/dt` and `d(rho T)/dt` are one scheme. `K^o` and `K^oo` are `|u^o|^2/2` and
+`|u^oo|^2/2`, formed from `u`'s old levels. `(tau . Sf)` is (123.2) contracted with
+`Sf` in §123.2's three terms. `sum_f` runs over the cell's faces with the outward sign
+(owner `+`, neighbour `-`, boundary `+`).
+
+**Face values.** One set of weights serves `T~_f` and `K~_f`: §7's weights of the
+scheme on `mdot`, with `T` as the sensor (§125.1's DESIGN). A deferred-correction scheme
+(`linearUpwind`, `linearUpwindBlended`, `cubic`) has no weight for its face value, so it
+is refused by name. `u_f`, `mu_f` and the face tensor `T_f` of `grad u` (§123.3's `T`,
+not the temperature) are linear on the mesh weights:
+
+```
+internal face:                      K~_f = w_f K_P + (1 - w_f) K_N ,   T_f = l_f T_P + (1 - l_f) T_N ,   u_f likewise
+cyclic face with a cell across it:  the same with bw_b (K) and the mesh's b_weights (T_f, u_f)
+any other boundary face:            K~_b = |u_b|^2/2 ,   u_f = u_b ,   T_f = T_P                     (123.10)
+empty face:                         e_b = 0
+```
+
+`u_b` is the value of `u`'s §4 triple, as `T~_b` is the value of `T`'s, so a boundary
+face's flux is `mdot_b (T_b + K_b/c_p)` from the two triples.
+
+**The order** (`assemble_only`, and `solve` before its one linear solve):
+1. the weights, `rcp kappa_f |Sf|`, and, with `viscousWork`, `mu_f` and `grad u`; then `e_f`;
+2. zero the matrix;
+3. `Ddt::add_rho(rho, rho^o, rho^oo; T^o, T^oo, +1)`;
+4. `fvm_div_gauss(mdot, w, bw, T, +1)`;
+5. `fvm_laplacian(rcp kappa_f |Sf|, T, -1)`, and §12.3's correction with the Gauss `grad T`;
+6. `source += sum_f ±e_f` (`smpFaceFluxSum`, accumulating);
+7. the cell source, launched when the time coefficients are not all zero or `g != 0`;
+8. `ldu_ops::relax` by `alpha_T`, always (at 1 it only enforces dominance);
+9. the boundary fold.
+
+`solve` then solves for `T` and evaluates its boundary values. The solve's initial
+residual is the `h_0` residual of §125.3 step 8. `set_t_relax` sets `alpha_T` for a final
+corrector. Refused by name: `localEuler` and `CrankNicolson` (as §123.3 refuses them),
+`PCG`, `DIC` and `GAMG` (the convection makes the matrix asymmetric), `alpha_T` outside
+`(0, 1]`, and a `c_p` that is not positive and finite.
+
+| gate (lib: `compressible::energy::tests::*`, f64 build; the same names in `tests/compressible_energy.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `uniform_flow_preserves_t` | §123.3's 6x5x4 box graded 3:1 in y, uniform `u = (37.5, -12.25, 4)`, `rho = 1.177`, `p = 250` and `T = 300` at every level; `u` fixed on every patch, `T` fixed on the inflow faces and zeroGradient on the outflow faces; `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air). Run for steadyState (`alpha_T = 0.9`), Euler and backward (`dt = 1e-3`) with upwind, and Euler with `Limited(VanLeer)`. The residual at `T = 300` satisfies `abs(r_P) <= 1e-13 S_P`, `S_P = abs(diag_P) T + sum_f abs(mdot_f) (T + K/c_p) + V_P abs(a_n) (rho T + (rho K + abs(p))/c_p)`. One solve leaves `T` within `1e-10 S_P/abs(diag_P)` of 300. Control: `T + 1` in one interior cell puts `abs(r_P)` within `[0.5, 1.5] abs(diag_P)` | R |
+| `slab_conduction_linear_exact` | an 8x3x2 box on `[0, 0.5] x [0, 0.2] x [0, 0.1]` graded 3:1 in x, `u = 0`, `mdot = 0`, `kappa = 0.0263`, `T = 300` at `x = 0` and `400` at `x = 0.5`, zeroGradient elsewhere. Steady, and Euler (`dt = 1e-3`) with the profile as the old levels, each from `T = 300`: every `abs(T_P - (300 + 200 x_P)) <= 1e-10 x 400` K | R |
+| `viscous_work_matches_couette_exact` | (127.12) on a 1x20x1 channel, `h = 0.01`, `U = 200` m/s, `T_top = 300` fixed, the bottom wall adiabatic, `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air), `u = U y/h` fixed on every patch. The x and z boundary faces carry no mass flux (the channel is one-dimensional; see below). Steady: every `abs(T_P - T(y_P)) <= 0.005 (T_w - T_top)`, §127.4's allowance. Derived for this mesh: the discrete solution is the parabola lowered by `(dy/h)^2/4` of the rise (the half-cell closure at the isothermal wall), `6.25e-4`. Control: without the work the miss is more than 100 bars | P |
+| `h0_conserved_along_inviscid_duct_to_1e_6` | a 16x3x2 duct on `[0, 2] x [0, 0.3] x [0, 0.2]` graded 2:1 in x, `mdot = 117.7 Sf_x` (exactly divergence-free), `u = (100 + 200 x, 0, 0)` fixed on every patch but the outlet (zeroGradient), `mu = kappa = 0`, `T = 300` fixed at the inlet. Steady. Every cell's `abs(sum_f ±mdot_f (T~_f + K~_f/c_p)) <= 1e-6 sum_f abs(mdot_f) (abs(T~_f) + K~_f/c_p)` on the solve's weights, with upwind (one solve) and with `Limited(VanLeer)` (200 outer solves: step 8's dominance enforcement makes a partly central convection reach (125.3) only at its outer fixed point, about 150 solves in f64). With upwind every `abs(h0_P - h0_in) <= 1e-6 h0_in`, `h0 = T + K/c_p`. Control: `T` falls by more than 100 K along the duct | A |
+| `energy_refusals_name_the_setting` | `RhoEnergy::new` refuses `localEuler`, `CrankNicolson`, `LinearUpwind`, `Cubic`, `t_relax = 0`, `cp = 0`, `PCG`, `GAMG` and `DIC`, each by name | D |
+| `the_compressible_energy_equation_replays_bitwise` (lib) | §81.7's row for `src/compressible/energy.rs`. One energy solve - every term of (125.3)-(125.4) live (Euler, `g = (0, -9.81, 0)`, non-uniform `u` with an old level, `rho`, `p`, `mu`, `kappa` and `T`) and a fixed 4-sweep Jacobi solve - captures into one graph and replays bitwise | D |
+
+The R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1): `1e-5` for the
+`1e-10` and `1e-13` bars. The P and A rows are the same in both builds.
+
+**Landed (CMP-11).** Measured on the RTX 5070 Ti, f64 first and then `single`; each
+number is the worst over the row.
+
+- The uniform flow: the residual is `2.4e-16` and `1.1e-7` of `S_P`, the solve's `T`
+  `4.7e-16` and `9.4e-8` of `S_P/abs(diag_P)`, and the control ratio is 1 to `3.4e-5`.
+- The slab: `2.8e-13` K and `1.3e-4` K (bars `4e-8` and `4e-3` K).
+- Couette: the rise is `14.133676596` K, and the worst cell is `6.250e-4` and `6.194e-4`
+  of it, the derived `6.25e-4` (bar `5e-3`). Without the work the miss is `0.9994` of the
+  rise.
+- The duct: the face sum is `4.1e-15` and `3.6e-8` with upwind, `2.9e-15` and `4.7e-8`
+  with van Leer; the upwind `h0` drift is `1.2e-14` and `7.8e-8`; `T` falls 110.09 K.
+- The replay gate captures 110 nodes (99 kernel, 11 memset) and replays three times
+  bitwise over 4 buffers and 174 values.
+
+*Finding (single).* A first form of the Couette row let the x boundary faces carry the
+channel's through-flow. Each cell's two x faces then carry K fluxes `4e4` times its viscous
+work, which cancel exactly only in exact arithmetic. Under `single` the rounding of that
+cancellation moved the worst cell to `3.5e-3` of the rise, inside the bar but six times the
+f64 error, and f64 was unchanged. The row now states the one-dimensional channel. A case
+whose energy balance is a small difference of large convected `K` fluxes carries that
+rounding in `single`.
+
+Every cubin but `compressible.cubin` is unchanged in SASS in both builds, apart from
+`solidblock.cubin` in f64, which flipped between its two known hashes on a rebuild with
+no edit to it (nvcc's nondeterminism, as CMP-08 recorded). CMP-08's, CMP-09's and
+CMP-10's integration tests are unchanged (4, 5 and 4 passed in both builds).
+
+### 125.6 The outer loop as built (CMP-12)
+
+`src/compressible/mod.rs` holds `Compressible`, the loop of §125.3 over CMP-08's gas law,
+CMP-09's momentum, CMP-10's pressure and CMP-11's energy equations. It adds no kernel:
+`cuda/compressible.cu` is unchanged, and the only arithmetic of its own is step 6's
+relaxation through `simple.cu`'s `smpRelaxField`. `CompressibleState` holds `u`, the gauge
+`p` and `T` with the caller's boundary conditions, and `rho`, `psi`, `mu`, `kappa` and
+`mdot`. The boundary values of `rho`, `psi`, `mu` and `kappa` are formed elementwise from
+`p`'s and `T`'s evaluated boundary values. Their own boundary conditions are never
+evaluated.
+
+*DESIGN* - the choices §125.3 leaves open:
+
+* **Steady or transient** is the momentum equation's ddt scheme: `steadyState` is SIMPLE,
+  `Euler` or `backward` is PIMPLE. The energy equation must name the same scheme, `delta_t`
+  and `g`, or `Compressible::new` refuses by name. `c_p` is never an input (§122.1), so
+  the loop writes `PerfectGas::cp` into the energy controls.
+* **"Final"** exists only in a transient run: on the last outer iteration `alpha_U` and
+  `alpha_T` are 1 (`RhoMomentum::set_u_relax`, `RhoEnergy::set_t_relax`), and `p` is not
+  relaxed. A steady run relaxes all three on every iteration.
+* **The old levels.** At the top of every step, `advance_time_levels` rotates `rho`, `u`,
+  `T` and `p`, and `K^o` follows because the energy source forms it from `u^o`. Both
+  equations' `TimeState::advance` runs at every step but the first, so a first backward
+  step is Euler (§13.3). `initialise` seeds both old levels from the initial fields. It
+  evaluates the boundaries of `u`, `p` and `T`, forms `mu`, `kappa`, `psi` and `rho`, and
+  sets `mdot = rho_f (u_f . Sf)` with a linear `rho_f`.
+* **Steps 1 and 4.** Step 1 is `transport` (`mu`, `kappa`). Step 4 is `gas_state`, which
+  gives `psi` AND `rho* = psi (p* + p_op)`, the consistent `rho*` that CMP-10's corrector
+  needs. The corrector leaves `rho = psi (p + p_op)` to round-off, so a second corrector
+  starts from a consistent `rho*` too.
+* **Step 6.** `p` is relaxed against its value before the correctors, in a steady run and
+  on a transient run's non-final outer iterations. Then `p`'s boundary is evaluated and
+  `gas_state` restores the gas law. Every outer iteration therefore ends with
+  `rho = psi (p + p_op)`.
+* **Step 7 is absent.** The gas is laminar until CMP-14's SA lands.
+* **Step 8.** The mass imbalance is formed in f64 on the host after the correctors, on the
+  momentum equation's time coefficients. A steady run has no `ddt(rho)` and divides by its
+  `delta_t`. The `h_0` residual is the energy solve's initial residual. The bounds count
+  tests `!(x > 0)`, so a NaN counts. Its order is `T`, then `p_abs = p + p_op`, then
+  `rho`, each by cell index, and the first violation found is the one named. `M_max` and
+  `M_mean` are (93.7). `OuterReport::line` prints all of these, and `BOUNDS n` when `n` is
+  nonzero. `residualControl` (`u`, `p` on the first corrector, `T`) stops only a steady
+  `run`. A transient step reports it and stops nothing.
+* **Capture.** The registry row is `Refused`: step 8 reads `T`, `p`, `rho`, `u` and
+  `mdot` back after every outer iteration and stops on what it reads. Each of the four
+  equations is gated on its own.
+
+*Tree over plan.* The row names `mod.rs` and `tests.rs`. The final-corrector rule also
+needs `RhoMomentum::set_u_relax`, which is additive, and the module root needs its
+capture-registry row.
+
+CMP-12's gate table (`tests/shared/compressible_solver_cases.rs`, included by
+`src/compressible/tests.rs` and by `tests/compressible_solver.rs`, so it runs in both
+builds):
+
+| test | class | what |
+|---|---|---|
+| `one_step_twice_equals_two_steps_state` | D | A graded 5x4x3 channel, backward with `dt = 1e-4`, two outer iterations and two correctors. `step; step` equals `run(2)` in every bit of 30 buffers. After each step every `^o` is the state the step started from, and `^oo` is the one before. Control: step 1 moves `T`, `u` and `p` |
+| `quiescent_box_stays_at_rest` | R | The closed box at rest under Euler (two outer iterations), backward and steady SIMPLE, three steps each: `|u| <= tol_r(1e-12) c_0`, `|T - 300| <= tol_r(1e-12) 300`, `|p| <= tol_r(1e-12) p_op`, `|rho - rho_0| <= tol_r(1e-12) rho_0`, mass imbalance `<= tol_r(1e-12)`, bounds 0. Control: one cell 2e4 Pa above the rest moves the gas by more than 100 bars |
+| `bounds_counter_fires_and_names_the_cell` | D | `T = -50 K` in cell 7 stops step 1 with `Error::Refused`, which names `T`, the cell and the value after the solve (still negative, so nothing clipped it) and counts `rho <= 0: 1`. Gauge `p = -1.5e5` in cell 11 is named as `p_abs`. Control: `T = 50 K` runs two steps and counts zero |
+| `solver_refusals_name_the_setting` | D | `nOuterCorrectors` 0, `nCorrectors` 0, `p_relax` 0 and 1.5, a `ddtSchemes`, `delta_t` or `g` mismatch, `gamma = 1` |
+
+The old-level row was checked against its bug: a refresh inside the outer loop (on the
+second outer iteration) fails it at once ("p: after step 1 the old level is not the
+initial state").
+
+*Landed* (f64, then single):
+
+- The quiescent box, Euler, backward and steady: `|u|` is `4.6e-14`, `3.9e-14` and `0`
+  m/s, then `1.4e-5`, `2.1e-5` and `0` m/s. The bars are `3.47e-10` and `3.47e-3`.
+- `|p|` is `6.0e-11`, `8.2e-11` and `0` Pa, then `3.3e-3`, `4.4e-2` and `0` Pa. The bars
+  are `1e-7` and `1` Pa.
+- `|T - 300|` is at most `3.4e-13` K, then `1.8e-4` K (bars `3e-10` and `3e-3` K).
+- The control reaches `0.674` m/s in both builds: `1.9e9` bars in f64, `194` bars in single.
+- The channel's last mass imbalance is `1.7e-16`, then `6.9e-8`.
+- The bounds messages give `T = -50.00000018123904` in f64 and `T = -50` in single (the
+  conduction step is below f32's resolution of 50), and `p_abs = -50000.14526378136`, then
+  `-50000.140625`.
+
+No `.cu`, `build.rs`, driver or validate code changed.
+
+### 125.7 The local time step as built (CMP-13)
+
+`src/compressible/lts.rs` holds (125.2) and the per-cell time terms, and
+`cuda/compressible.cu` gains four kernels after CMP-08's to CMP-11's nineteen, which are
+untouched. `cmpLtsRDeltaT` forms the reciprocal step `r_P = (|u_P| + c_P) / (CFL V_P^(1/3))`
+with `c_P = sqrt(grs T_P)` as (122.12) forms it. `cmpDdtRhoLocal`, `cmpPressureDdtLocal` and
+`cmpEnergySourceLocal` are `tsDdtGeneralRho`, `cmpPressureDdt` and `cmpEnergySource` with the
+Euler coefficients `a_n = r_P`, `a_0 = -r_P`, `a_00 = 0` taken per cell, in the same expression
+order. They carry no floor and no clip (§122.5).
+
+*DESIGN* - the choices §125.4 leaves open:
+
+* **Selection.** A run names `localEuler` for the momentum AND the energy equation (one
+  scheme for both, as §125.6 already requires). `Compressible::new` then builds both
+  equations on `Euler` and attaches a `LocalStep` to each (`attach_local_step`). The
+  pressure equation reads the momentum equation's, because (124.1) shares its ddt. The run
+  is steady: every outer iteration is relaxed, and `residualControl` stops it. `CFL` is
+  `CompressibleControls::lts.cfl`, finite and above 0, or `Compressible::new` refuses it by
+  name. The default is 1, the acoustic Courant limit of an explicit scheme. A lone
+  `RhoMomentum` or `RhoEnergy` still refuses `localEuler` by name.
+* **When `r` is formed.** Once per pseudo step, at its top, right after the old levels
+  rotate. It is formed from the cell `u` and `T` the step starts from, so every outer
+  iteration and every corrector of the step uses one step field. The energy equation's
+  field is a device copy of the momentum equation's.
+* **The mass imbalance** of §125.6 step 8 takes `a_n = r_P`, `a_0 = -r_P` per cell, and its
+  denominator is `sum_P rho_P V_P r_P`.
+* **Capture.** The registry row is `Via` the module root, which is `Refused`. The step is
+  formed inside `Compressible::step`, and the three time-term kernels run only in equations
+  that `Compressible::new` attached it to. The equations' own capture gates run their scalar
+  coefficients.
+
+*Tree over plan.* The row names `lts.rs` and `compressible.cu`. The equations also need an
+optional attached step: `RhoMomentum::attach_local_step` and `RhoEnergy::attach_local_step`
+(additive), one branch in each time term, and the module root's wiring.
+
+**The fixed-point row is MISSED** (an open finding for the user). §125.4 argues that every
+ddt difference is zero at a converged fixed point, so the fixed point does not depend on
+`CFL`. The argument misses one term. `rAU = V/a_P` (123.5) carries the time term's diagonal
+`V_P r_P rho_P`, and the Rhie-Chow flux of (123.6)-(123.7) carries `rAU` at the fixed point,
+where the ddt differences themselves vanish. So the fixed point moves with `CFL`, just as
+steady SIMPLE's moves with `alpha_U`, whose relaxed diagonal enters `rAU` the same way. A
+cure would change the Rhie-Chow numerics (a time-step-independent `rAU` or a ddt
+correction), so it is the user's decision (docs/17 §5.3.4).
+
+CMP-13's gate table (`tests/shared/compressible_lts_cases.rs`, included by
+`src/compressible/lts.rs` and by `tests/compressible_lts.rs`, so it runs in both builds):
+
+| test | class | what |
+|---|---|---|
+| `dt_field_matches_host_formula` | R | One pseudo step of the graded 5x4x3 channel at `CFL` 0.7. The momentum equation's `r_P` equals `1/host_delta_t` in f64 on the device's own inputs within `tol_r(1e-12)` relative, cell by cell. The energy equation's copy has the same bits. Control: `r` varies by more than 1.2 across the box |
+| `uniform_step_equals_euler` | R | A uniform 4^3 closed box at 300 K, with one cell 2e4 Pa up and gravity on, so `r_P = c/(CFL h)` is one value. One `localEuler` pseudo step (two outer iterations, relaxation 1) equals one Euler step at `dt = CFL h/c` within the quiescent box's bars (§125.6). Controls: `u` moves by more than 100 bars, and Euler at `2 dt` misses by more than 100 |
+| `steady_fixed_point_independent_of_cfl` | P | The steady channel, 1500 pseudo steps at `CFL` 2, 20 and 1e6 and steady SIMPLE at `alpha_U` 0.9 and 0.7, each at its initial-residual floor in f64. Records the miss: `CFL` 2 against 20 is above `1e-8`. Records the cause: SIMPLE's two `alpha_U` differ by more than `1e-8`, the distance to SIMPLE falls as `CFL` grows, and at `CFL` 1e6 `u` and `T` are SIMPLE's within `1e-8`. Under `single` every row is reported (§5.1.4). Control: five pseudo steps in, the two CFLs are `4.3e-3` apart |
+| `lts_refusals_name_the_setting` | D | `cfl` 0, -1, NaN and infinity. `localEuler` on the momentum equation alone (`ddtSchemes differ`). A lone `RhoMomentum` on `localEuler` |
+
+Each difference is taken over the field's largest magnitude: `max_P |a_P - b_P| / max_P |a_P|`
+(`u` in the Euclidean norm, gauge `p`, `T` in K).
+
+*Landed* (f64, then single):
+
+- (125.2): the worst relative deviation is `3.5e-16`, then `1.6e-7` (bars `1e-12` and `1e-5`).
+  `r` spans `2407` to `3003` 1/s.
+- The uniform step, at `dt = 2.88e-3` s: `|du|` is `1.7e-14` m/s, then `7.9e-6` m/s (bars
+  `3.47e-10` and `3.47e-3`). `|dp|` is `4.0e-12` Pa, then `4.3e-3` Pa. `|dT|` is `1.1e-13` K, then
+  `6.1e-5` K. `u` moves `1.42` m/s, which is `4.1e9` bars in f64 and `409` bars in single.
+- The fixed point in f64: `CFL` 2 against 20 differs by `2.85e-6` in `u`, `7.0e-2` in `p` and
+  `5.5e-9` in `T`. That is MISSED against `1e-8`. `max |p|` is `3.18e-2` Pa, so the `p` gap is
+  `2.2e-3` Pa, `6e-6` of the dynamic pressure. Steady SIMPLE at `alpha_U` 0.9 against 0.7
+  differs by `8.4e-7`, `1.5e-2` and `1.4e-9`. From SIMPLE at 0.9, `u` sits at `5.0e-6` (`CFL`
+  2), `2.1e-6` (`CFL` 20) and `6.7e-11` (`CFL` 1e6). `T` at 1e6 is `1.1e-13` and `p` at 1e6 is
+  `1.1e-6`. The initial-residual floors are about `3e-11` (`u`), `1e-9` (`p`) and `5e-9` (`h_0`).
+- The fixed point in single (reported): no run reaches an f64-like floor (the initial
+  residuals stay between `3e-3` and `0.61`). `CFL` 2 against 20 differs by `3.1e-6`, `0.11` and
+  `1.4e-6`, and SIMPLE's two `alpha_U` by `8.6e-7`, `2.1e-2` and `4.1e-7`.
+
+No driver or validate code changed. No existing kernel changed: the four kernels were
+appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
+both builds.
 
 ---
 
@@ -50249,14 +50654,175 @@ only in the oracle: there is no device kernel, case keyword or registry row (VAL
 ## 144. The flat-plate harness, Blasius, T3A leg 4 and the ZPG plate
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
-VAL-30 to VAL-34, and §12's rows place the T3A key here as §144.1 (VAL-04). §144.2 (the
-Blasius harness, VAL-31), §144.3 (the T3A case, VAL-32), §144.4 (leg 4, VAL-33) and §144.5
-(the ZPG plate, VAL-34) are not yet written. §88.10 and §90.10 name the T3A rig's open legs:
-"no published digit-level onset `Re_x` for T3A was found to compare against". This section's
-first part is the measured key leg 4 will be held against. No solver, gate or test that
-existed before it changes.
+VAL-30 to VAL-34. §144.1 is the flat-plate mesh (VAL-30), and it claims nothing about a
+solution. §144.2 is the Blasius gate (VAL-31). §144.3 (the T3A case, VAL-32), §144.4 (leg 4,
+VAL-33) and §144.5 (the ZPG plate, VAL-34) are the plan's numbers and are not yet written;
+they go between §144.2 and §144.6. §144.6 is the T3A key (VAL-04). The plan's row gives it
+§144.1, and it was written as §144.1 in its own lane, but VAL-30 had taken §144.1, so it was
+renumbered when the lanes merged and the plan's numbers for VAL-32 to VAL-34 were kept.
+§88.10, §40.7 and §56.11 each record that this tree had no flat-plate harness, and §88.10 and
+§90.10 name the T3A rig's open legs: "no published digit-level onset `Re_x` for T3A was found
+to compare against". §144.6 is the measured key leg 4 will be held against, and it changes no
+solver, gate or test that existed before it.
 
-### 144.1 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
+### 144.1 The flat-plate mesh
+
+`blockgen::FlatPlateSpec` is a 2-D box with the leading edge at `x = 0`. The floor `y = 0` is a symmetry plane over
+`[-x_up, 0]` and the wall `plate` over `[0, L]`. The domain is `[0, H]` above it, with one `empty` cell of `depth` in
+z. The floor is split by the one `PatchWindow` its slot may carry (`build_patches` refuses a second): the window is
+the first `n_up` floor columns, named `symmetry` with type `symmetryPlane`, and it is written before the rest of the
+slot, `plate` (`wall`). The patches in face order are `inlet`, `outlet`, `symmetry`, `plate`, `top`, `back` and
+`front`. `inlet` and `outlet` are the two x faces and `top` is an open `patch`; the boundary conditions on them are
+each case's.
+
+The x axis is two graded segments meeting at the edge. No single `GradedAxis` expresses that, so the nodes are
+computed in f64 whatever `Scalar` is (§118.2: host geometry is f64), rounded once into the grid, and the mesh points
+are exactly those roundings. A segment `[a, b]` of `n` cells whose last cell divided by its first is `E` has the
+nodes of `fill_graded`'s law:
+
+```text
+r = E^(1/(n-1)),   x_i = a + (b - a)(r^i - 1)/(r^n - 1),   i = 0..n                  (144.1a)
+```
+
+with `E = 1` or `n = 1` uniform and both endpoints set, not accumulated. The plate's nodes are
+
+```text
+s = segment(0, x_up, n_up, r_up),   x_i = 0 - s_(n_up - i)   for i = 0..n_up
+x_(n_up + i) = segment(0, L, n_plate, r_plate)_i              for i = 1..n_plate
+y = segment(0, H, n_y, r_y),   z = {0, depth}                                     (144.1b)
+```
+
+`r_up` is the inlet cell over the edge cell, `r_plate` the trailing-edge cell over the edge cell, `r_y` the top cell
+over the wall cell. The upstream segment is graded outward from the edge and mirrored, so the smallest cells sit at
+the smallest coordinates and `x_(n_up)` is exactly `+0.0`: the leading edge is a node, and the last symmetry face
+and the first plate face share its two points.
+
+The generator prints an estimate of the wall cell's y+ to choose `dy_1` by. It is Blasius's local skin friction,
+`C_f = 2 f''(0) Re_x^(-1/2)` with `f''(0) = 0.332057` (Blasius, *Z. Math. Phys.* 56 (1908) 1-37; the value §88.7
+measures, so `2 f''(0) = 0.664114`, of which the estimate takes the classical `0.664`), at the wall cell's centre
+`y_P = dy_1/2`:
+
+```text
+C_f = 0.664 Re_x^(-1/2),   Re_x = U x/nu,   u_tau = U sqrt(C_f/2),   y+_P = y_P u_tau/nu   (144.1c)
+```
+
+It is printed at the first plate face's centre and at the trailing edge. It is an estimate for sizing a mesh, not a
+measurement and not a gate.
+
+`FlatPlateSpec::laminar()` is `cases/flatPlateLaminar`'s plate: `x_up = 0.25 m` (the TMR T3A rig's distance,
+§88.10), `L = 1 m`, `H = 0.25 m`, `depth = 0.01 m`, `30 + 120` cells along x and 80 across, `r_up = r_plate = 20`,
+`r_y = 200`, `U = 1 m/s`, `nu = 5e-6 m^2/s`, so `Re_L = 2e5`. On it the two cells at the edge are `1.2847e-3 m` and
+`1.3067e-3 m` (ratio 1.0171), the wall cell is `8.1466e-5 m`, and (144.1c) gives `y+ = 1.388` at the first plate face
+and `0.223` at the trailing edge. `ofgpu-generate-mesh plate <dir> [nx ny 1]` writes it as a laminar case, splitting
+`nx` a fifth ahead of the edge. The flags `-upstream`, `-length`, `-height`, `-ratios rUp rPlate rY`, `-uInf` and
+`-nu` set the spec; `-stl`, `-cutcell`, `-extent`, `-grading` and `-cyclic` are refused by name.
+`blockgen::build_flat_plate_mesh` is the same mesh in memory.
+
+`cases/flatPlateLaminar.jsonc` is the same plate, box and patches on the JSONC reader's `cartesian` mesh. That mesh
+carries one grading ratio per axis toward an end of the axis, so the file is uniform in x (the edge on node 30) and
+graded only to the wall. Its header says so.
+
+Gate (`tests/flat_plate_mesh.rs`, both builds): the patch face ranges are exact (starts 0, 80, 160, 190, 310, 460 and
+12460 after 23770 internal faces); the edge is a node shared by the last symmetry face and the first plate face; the
+cell-size ratios of the three segments hold to `1e-12` on the f64 nodes; the points are the nodes rounded to `Scalar`;
+and (144.1c) matches a hand evaluation to `1e-12`. Precision classes: D for the ranges, the edge node and the points,
+A for the ratios and the estimate (evaluated in f64, the same tolerance in both builds).
+
+**Not claimed.** No flow has been solved on this mesh. The Blasius comparison is VAL-31's, and the mesh's
+fitness for it is that gate's to show.
+
+### 144.2 Gate 132-L: the laminar plate against Blasius
+
+`No GPL-licensed source was consulted.` The plan names this gate 132-L (docs/17's row VAL-31); it lives here
+in §144, not in §132. `src/bin/validate_gates/blasius_plate.rs` solves §144.1's plate laminar and steady on three
+meshes and holds the wall shear and one velocity profile against the Blasius similarity solution. That solution
+is exact for the boundary-layer equations (H. Blasius, *Z. Math. Phys.* 56 (1908) 1-37), so a miss is the verdict
+MISSES. No published table is read. `f''' + f f''/2 = 0` with `f(0) = f'(0) = 0` and `f'(inf) = 1` is integrated
+by RK4 at `h = 1e-3` with a secant shot on `f''(0)` that drives `f'(10)` to 1, as §88.7 does, and the shot's own
+`f''(0)` is the gate's first row. Between the RK4 nodes `f'` is the cubic Hermite interpolant whose slopes are the
+nodes' `f''`. The gate compares against:
+
+```text
+C_f,B = 2 f''(0) Re_x^(-1/2),   Re_x = U x/nu                                          (144.2a)
+u/U = f'(eta),   eta = y sqrt(U/(nu x))                                                (144.2b)
+```
+
+**The meshes.** The meshes keep `FlatPlateSpec::laminar()`'s box, end-cell ratios (`r_up = r_plate = 20`,
+`r_y = 200`) and free stream (`U = 1 m/s`, `nu = 5e-6 m^2/s`, `Re_L = 2e5`). They differ only in their counts
+`n_up + n_plate x n_y`: `32 + 128 x 96` (15 360 cells), `16 + 64 x 48` (3 840) and `8 + 32 x 24` (960). Each
+level halves every count of the one before, so (94.1)'s `h = sqrt(A/N)` doubles exactly: `4.5105e-3`, `9.0211e-3`
+and `1.8042e-2` m. The boundary conditions are `cases/flatPlateLaminar.jsonc`'s:
+
+- the inlet carries the free stream, with zero-gradient `p`;
+- the outlet and the top have zero-gradient `U` at `p = 0`;
+- `symmetry` is a symmetry plane;
+- the plate is no-slip;
+- `back` and `front` are `empty`.
+
+The run seeds the free stream and its face fluxes. It is steady SIMPLE with `alpha_U = 0.7` and `alpha_p = 0.3`
+(§5.2), `linearUpwind` on `div(phi,U)` with the bounded form, and no eddy viscosity.
+
+**The wall shear.** On a plate face with centre `c_f`, unit normal `n` and wall cell `P`, all in f64 from
+`geom64()`:
+
+```text
+tau_w = nu u_P,x / d,   d = |(c_P - c_f) . n|,   C_f = 2 tau_w / U^2                   (144.2d)
+```
+
+This is the one-sided wall gradient that the momentum equation's own wall flux uses. The study's quantity, `C_f` at
+`Re_x = 1e5` (`x = 0.5 m`), interpolates `C_f sqrt(Re_x)` linearly in `x` between the two faces that bracket it,
+because Blasius makes that product constant:
+
+```text
+C_f(Re) = [g_a + t (g_b - g_a)] / sqrt(Re),   g = C_f sqrt(Re_x),   t = (Re - Re_a)/(Re_b - Re_a)   (144.2c)
+```
+
+**The stopping rule.** Every 50 SIMPLE iterations, after at least 200, the run takes the largest relative change of
+`C_f` over the band's faces since the last check. It stops when that change is `1e-6` or less, with a cap of
+20 000 iterations. A non-finite initial residual is an `Err`, never a row.
+
+**The rows**, all in `ofgpu-validate`'s section `Gate 132-L`:
+
+1. `|f''(0) - 0.332057| <= 1e-6`: the reference itself.
+2. Each mesh meets the stopping rule within the cap.
+3. On the finest mesh, `max |C_f/C_f,B - 1| <= 0.03` over every plate face with `2e4 <= Re_x <= Re_L`, by (144.2a)
+   and (144.2d).
+4. On the finest mesh, `max |u/U - f'(eta)| <= 0.02` (fractions of `U`) over the column of cells above the plate face
+   nearest `Re_x = 1e5`, for `eta <= 8`. Here `eta` is (144.2b) evaluated at the column's own centroid `x`. The rows
+   above `eta = 8`, where `f' = 1` to `1e-5`, are free stream and are not read.
+5. §94's `grid_study` reads the three levels of (144.2c).
+
+The study and the (94.10) metric against `D = C_f,B(1e5)` are printed as notes. `u_input = 0` because the inputs
+are exact, and `u_D = 0` because Blasius is exact. A failure of row 3 or row 4 registers `Verdict::Misses` with the
+study as its `Uncertainty`. A pass registers nothing (§69).
+
+**Measured** on this tree, on this machine's GPU, in both builds:
+
+| row | f64 | single |
+|---|---|---|
+| `f''(0)` (shot, f64 in both) | `0.33205734`, err `3.37e-7` | the same |
+| iterations, finest / medium / coarse | 1500 / 500 / 250 | 1600 / 500 / 250 |
+| `C_f` at `Re_x = 1e5`, finest / medium / coarse | `2.098053e-3` / `2.095611e-3` / `2.084387e-3` | `2.098052e-3` / `2.095612e-3` / `2.084389e-3` |
+| `C_f / C_f,B` at `Re_x` 2e4, 5e4, 1e5 (finest) | 1.0047, 1.0016, 0.9990 | the same |
+| row 3: worst face | `1.299e-2` (bar `0.03`), at `x = 0.9877 m`, the last plate face | the same |
+| row 4: worst cell | `3.163e-3` (bar `0.02`), at `eta = 4.404` of the column at `x = 0.4983 m`, 44 cells | the same |
+| study | monotone, `p = 2.201`, `phi_ext = 2.099110e-3`, `U_fine = 3.117e-6` (Fs 3, second order, unweighted) | `phi_ext = 2.099109e-3`, `U_fine = 3.118e-6` |
+| (94.10) | `E = -2.062e-6 +/- 3.117e-6` (`-0.10 % +/- 0.15 %` of D): `abs(E) <= u_val` | `E = -2.063e-6 +/- 3.118e-6` |
+| section wall time, two runs each | 51.7 s, 63.7 s | 23.9 s, 23.8 s |
+
+The gate HOLDS in both builds. The run's single-build `C_f` agrees with the f64 build's to `1e-6` relative. The
+initial residual at the stop is `1.1e-9` in f64 and `5.2e-4` under single, so the `C_f` rule is the one that both
+builds can meet. Precision classes: A for row 1 (host f64 in both builds), and R for rows 3 and 4 (a solved field
+against an exact solution, with the same bars in both builds).
+
+**Not claimed.** The leading-edge region `Re_x < 2e4` is not gated. There the boundary-layer approximation and the
+mesh both fail by design, so the band starts at `x = 0.1 m`. The worst face of row 3 is the last plate face, whose
+cell touches the zero-gradient outlet. It is 1.3 % low there, and that end effect is not diagnosed further. §144.1's
+`laminar()` mesh (`30 + 120 x 80`) is not one of the three levels, because halving its 30 and 120 twice is not whole.
+The levels keep its box and ratios instead. Nothing here holds a transition model or a turbulent plate; those are
+the later subsections of §144, by the plan's allocation.
+
+### 144.6 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
 
 **Source.** The ERCOFTAC Classic Collection, case 020, "Flat Plate Transitional Boundary
 Layers - Experiments by Coupland" (<http://cfd.mace.manchester.ac.uk/ercoftac/doku.php?id=cases:case020>,
@@ -50280,7 +50846,7 @@ traverse, from `x = 45` to `1495 mm`. The columns are the run number, the axial 
 from the leading edge (mm), the Reynolds number on `x` and `U0`,
 
 ```
-  Re_x = x U0 / nu                                                                  (144.1)
+  Re_x = x U0 / nu                                                                  (144.6)
 ```
 
 the local free-stream velocity `U0` (m/s), the skin-friction coefficient `Cf`, the shape

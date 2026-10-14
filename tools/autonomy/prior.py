@@ -694,7 +694,8 @@ def decide_all(bundle, model, gates, knobs):
                         campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
                         ft_radius=rules.ft_radius_of(bundle.get("records") or []),
                         win_2to1=rules.win_2to1_of(bundle.get("records") or []),
-                        glb=rules.glb_of(bundle.get("records") or []))
+                        glb=rules.glb_of(bundle.get("records") or []),
+                        r_snap=rules.r_snap_of(bundle.get("records") or []))
         if s["refused"]:
             raise PriorError("rules.setup refuses %s: %s"
                              % (gid, ", ".join(s["refused"])))

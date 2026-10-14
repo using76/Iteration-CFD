@@ -21,3 +21,6 @@ pub(crate) mod martin_moyce;
 /// SPEC-LIT §146.2, Gate 78-D's measured leg: the two splash criteria of §78.4
 /// against Riboux & Gordillo's (2014) threshold speeds.
 pub(crate) mod splash;
+
+/// SPEC-LIT §144.2, Gate 132-L: the laminar flat plate against Blasius.
+pub(crate) mod blasius_plate;

@@ -2,7 +2,7 @@
 # meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
-"""fetch_answer_keys.py - place and check the SPEC-LIT 110 and 144.1 answer keys.
+"""fetch_answer_keys.py - place and check the SPEC-LIT 110 and 144.6 answer keys.
 
 usage:
     python tools/keys/fetch_answer_keys.py write
@@ -14,14 +14,14 @@ rust/SPEC-LIT.md (110.3 Driver & Seegmiller, 110.4 McCaffrey) and writes them
 byte for byte under reference/. ``fetch`` downloads the keys that are not
 redistributed (so they are git-ignored) - the three MKM channel DNS files from
 turbulence.oden.utexas.edu and the ERCOFTAC T3A summary table t3ay.dat from
-the ERCOFTAC Classic Collection (SPEC-LIT 144.1, docs/17 decision D-VAL-2) -
+the ERCOFTAC Classic Collection (SPEC-LIT 144.6, docs/17 decision D-VAL-2) -
 or takes them from a local copy with ``--from DIR``; a file whose SHA-256 is
 not the manifest's pinned digest is never kept. When a download fails, the
 manual placement is printed: the page to download the file from by hand and
 the ``--from`` command that checks and places it. ``check`` recomputes every
 pin - the fenced blocks, the manifest rows and every key file present - and
 prints ``check: <ok> ok, <missing> missing, <failed> failed``, exiting 0 iff
-nothing failed. SPEC-LIT 110.1, 110.5 and 144.1 are the contract this script
+nothing failed. SPEC-LIT 110.1, 110.5 and 144.6 are the contract this script
 serves.
 """
 import argparse
@@ -233,7 +233,7 @@ def cmd_check():
 
 def main():
     ap = argparse.ArgumentParser(
-        description="place and check the SPEC-LIT 110 and 144.1 answer keys")
+        description="place and check the SPEC-LIT 110 and 144.6 answer keys")
     ap.add_argument("command", nargs="?", default="check",
                     choices=("write", "fetch", "check"))
     ap.add_argument("--check", action="store_const", dest="command",

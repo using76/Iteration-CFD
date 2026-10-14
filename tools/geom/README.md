@@ -150,29 +150,39 @@ corners are welded at `--weld` × the bounding-box diagonal (default 1e-6, the
 house convention; `0` = bit-exact only), degenerate triangles are dropped,
 duplicate facets are removed (an exact copy always; a coincident opposite
 pair whole when it is a zero-thickness sheet, otherwise the one of the two
-that runs against the surrounding surface), each vertex-connected component
+that runs against the surrounding surface), a vertex lying on another
+triangle's open edge within the weld tolerance splits that edge (a
+T-junction), each vertex-connected component
 is oriented patch by patch across manifold edges and every closed shell is
 flipped outward, a boundary loop of up to
-`--max-hole-edges` edges is filled — three edges with one triangle, four or
-more by ear clipping in the plane of the loop's Newell normal (Meisters
-1975) — and the result is written with normals recomputed from the winding.
+`--max-hole-edges` edges is filled — three edges with one triangle, a
+planar loop of four to 32 edges by ear clipping in the plane of its Newell
+normal (Meisters 1975), and every other loop by Liepa's minimum-weight
+triangulation (largest dihedral angle, then area), refinement to the
+surrounding edge density with Delaunay-style edge swaps, and a membrane
+fairing of the inserted points (Liepa 2003, SPEC-LIT §23.2.1; AUT-02c) — and
+the result is written with normals recomputed from the winding.
 
 Flags: `--out PATH` (without it the tool only reports), `--json OUT` (the
-report, never stdout), `--weld REL`, `--max-hole-edges N` (default 32),
+report, never stdout), `--weld REL`, `--max-hole-edges N` (default 64),
 `--ascii | --binary` (default: the input's format; binary refuses a
 multi-`solid` file). Report keys: `file, format_in, out, format_out, units,
 bbox, diagonal, triangles_in, triangles_out, degenerate_dropped, duplicates
-{exact_removed, opposite_removed}, weld
+{exact_removed, opposite_removed}, t_junctions
+{split_edges, inserted_vertices, triangles_added, passes}, weld
 {tol_rel, tol_abs, points_raw, points_bit_exact, points_welded, merged,
 max_move}, orientation {reoriented_triangles, left_alone, left_alone_reason,
 reseeded_patches, flipped_components}, holes
-{max_hole_edges, filled, filled_triangles, unfilled[], per_hole[]}, stages[]
-(input, weld, dedup, orient, fill: open and non-manifold edges after each), before
+{max_hole_edges, filled, filled_triangles, unfilled[], per_hole[]} (a Liepa
+fill's per_hole entry adds `method: "liepa"` and `inserted_vertices`), liepa
+{filled, triangles, inserted_vertices}, stages[]
+(input, weld, dedup, tjunction, orient, fill: open and non-manifold edges after each), before
 {}, after {open_edges, non_manifold_edges, closed, volume}, n_components,
 components[]
 {index, patch, n_triangles, open_edges, non_manifold_edges, closed, volume,
-flipped}, patches`. Stdout carries seven lines (the summary, the weld, the
-duplicates, the orientation, the holes, the after-state, the written file),
+flipped}, patches`. Stdout carries nine lines (the summary, the weld, the
+duplicates, the T-junctions, the orientation, the holes, the Liepa fills,
+the after-state, the written file),
 one line per stage, plus one line per
 open component when the result is not closed. Exit 0 whenever a report was
 produced — an unclosed result is reported, not an error; refusals (missing
@@ -185,8 +195,8 @@ Limits: the weld tolerance is a geometry EDIT — the tool prints `max_move`,
 the largest distance any corner moved, and the user decides; near pairs can
 CHAIN (`a-b` and `b-c` merge `a` and `c` at up to twice the tolerance), and
 the representative is always a coordinate the file already had. A loop
-longer than `--max-hole-edges`, a loop that is not simple in its own
-plane (ear clipping finds no ear), and a loop whose fill would add a
+longer than `--max-hole-edges`, a loop no triangulation of which avoids
+an edge the surface already has, and a loop whose fill would add a
 triangle with zero area at float64 — the same exact test that drops a
 degenerate triangle on the way IN — are named in `holes.unfilled` and
 never filled; the zero-area refusal (`filling it would add N zero-area
@@ -229,6 +239,49 @@ to the other users on more edges (`duplicates.opposite_removed`; a tie
 keeps the earlier one).  Duplicates are not counted in
 `degenerate_dropped`.
 
+T-junctions (AUT-02b) are resolved after the duplicates and before the
+orientation pass.  Only open edges (one use) and boundary vertices (an
+endpoint of an open edge) take part, so a closed surface is untouched.
+A vertex `m` splits the open edge `(a, b)` of triangle `(a, b, c)` when it
+is none of the three corners, its parameter `s = (m − a)·(b − a) / |b − a|²`
+lies strictly between 0 and 1, its distance to `a + s (b − a)` is at most
+the weld's absolute tolerance (`weld.tol_abs`), and it is farther than that
+from `a` and from `b`.  The hits, sorted by `s`, replace the triangle in
+place by the fan `(q_i, q_i+1, c)` from `a` to `b`, which keeps its winding
+and its patch; a triangle splits one edge per pass, and a fan is not
+made when one of its triangles has an exactly-zero cross product, when
+one of its new spokes `(q_i, c)` is already an edge, because that fan
+would lay a triangle over one already there — the three-triangle fan
+around a collinear sliver `A, B, C` keeps its open loop for the
+zero-area fill refusal instead — or when a sub-edge `(q_i, q_i+1)`
+already has two uses (counted on the pass's input plus the fans planned
+before it, the rule the hole fill applies, so no edge ends with three);
+passes repeat until none splits (at most 16).  `t_junctions` counts the split edges, the vertex
+insertions, the triangles added and the passes that split.  On the 14
+tuning t_junction rows of family G every row closes, with area and
+signed volume equal to the regenerated parent's to 1.3e-13 relative and
+no hole filled; before AUT-02b, 5 of them closed only because the
+three-edge fill laid a sliver triangle over the split.
+
+Holes (AUT-02c, SPEC-LIT §23.2.1): a planar loop of four to 32 edges —
+every point within `weld.tol_abs` of the plane through the loop's mean
+point orthogonal to its Newell normal — keeps the ear clip, byte for byte;
+every other loop up to `--max-hole-edges` (default 64), and a planar loop
+with no ear, takes Liepa's fill.  The minimum-weight triangulation over the
+loop points minimises the largest dihedral angle with the neighbouring
+triangles first and the area second, and never uses a chord that is
+already a surface edge; refinement splits a patch triangle at its centroid
+while the centroid is farther than `σ/√2` from each corner (σ the mean
+surface edge length at the corners), with Delaunay-style edge swaps; the
+inserted points then solve the scale-dependent umbrella membrane with the
+loop fixed, so a planar hole stays in its plane.  On the 16 tuning hole
+rows of family G (6 to 64 edges) every row closes; the filled area equals
+the removed area to 3.2e-5 relative at worst (bar 2 %), and the 4 points
+inserted (on G-1-060, G-1-090 and G-1-114) lie within 0.002 h_f of the
+parent surface (bar 0.5 h_f, h_f from `rules.py`'s setup on the parent).
+Before AUT-02c, 4 of the 16 closed, and the ear clip on G-1-108's bent
+17-edge loop was 2.6 % off the removed area.
+
 The orientation pass (AUT-02a) walks PATCHES: a patch is a maximal set of
 triangles joined by two-triangle edges whose two uses run opposite in the
 input, so its winding is already consistent and every two-triangle edge
@@ -247,38 +300,33 @@ needed because a component's remainder was not reached from the previous
 seed; a re-seeded patch is oriented consistently within itself but not
 necessarily with the patch before it.
 
-Worked example, re-measured 2026-10-13 after AUT-02a on the F1 body that
+Worked example, re-measured 2026-10-14 after AUT-02c on the F1 body that
 an earlier session could not close (`c42-f1.stl`, 237,482 triangles):
 before 13,854 open / 810 non-manifold edges; 1,874 degenerate triangles
 dropped, 0 points welded; 9 exact duplicates and 28 opposite-coincident
-triangles removed; the orientation pass reorients 95 triangles, leaves
-none alone and takes 239 extra seeds (`reseeded_patches`); the stages run
-input 13,854 open / 810 non-manifold, weld 13,854 / 810, dedup 13,859 /
-773, orient 13,859 / 677 and fill 7,119 / 677; the fill closes 487 loops
-with 5,766 triangles — 31 of them three-edge, 456 ear-clipped — and names
-1,345 loops in `holes.unfilled`; exit 0.  (Before AUT-02a, measured
-2026-09-20, the same file ended at 7,138 open / 787 non-manifold: 15
-triangles reoriented and 55 flips refused.)  The file is still not
-closed, with 7,119 open edges: 87 loops longer than `--max-hole-edges` 32
-(4,364 edges), 1,187 walks that hit a boundary vertex without exactly one
-unused outgoing open edge (2,029 edges), 43 loops whose clipped fan would
-make an edge non-manifold (542 edges), 10 loops with no ear (130 edges)
-and 18 loops whose fill would add a zero-area triangle (54 edges) — the
-five families' edges sum to 7,119 — so `ofgpu-generate-mesh` still
-refuses it without `-permissive`.  Re-reading the file the run wrote
-reports 0 degenerate triangles dropped, because the fill never writes a
-triangle the reader would drop.
+triangles removed; 31 T-junction edges split at 32 vertex insertions
+(32 triangles added, one pass); the orientation pass reorients 95
+triangles, leaves none alone and takes 240 extra seeds
+(`reseeded_patches`); the stages run input 13,854 open / 810
+non-manifold, weld 13,854 / 810, dedup 13,859 / 773, tjunction 13,783 /
+773, orient 13,783 / 677 and fill 3,238 / 677; the fill closes 603 loops
+with 29,481 triangles — 33 of them three-edge, 40 planar loops
+ear-clipped and 530 loops by Liepa's fill with 29,073 triangles and
+10,071 inserted points — and names 1,160 loops in `holes.unfilled`; exit
+0 in about 9 s.  The file is still not closed, with 3,238 open edges:
+1,135 walks that hit a boundary vertex without exactly one unused
+outgoing open edge (1,958 edges), 12 loops longer than
+`--max-hole-edges` 64 (1,168 edges) and 13 loops whose fill would make
+an edge non-manifold (112 edges) — the three families' edges sum to
+3,238 — so `ofgpu-generate-mesh` still refuses it without `-permissive`.
+(After AUT-02b, with the ear clip and the old default of 32, the same
+file ended at 6,978 open edges: 87 loops longer than 32 edges, 1,135
+walks, 43 non-manifold fills and 7 loops with no ear; after AUT-02a at
+7,119; before AUT-02a, 2026-09-20, at 7,138 open / 787 non-manifold.)
 
-`--max-hole-edges` is a trade, not a bug report: on the same
-`c42-f1.stl`, `python tools/geom/geom_tool.py repair <file>.stl
---max-hole-edges 256 --out ... --json ...` (the default stays 32) fills
-562 loops with 9,116 triangles and takes the open-edge total from 7,119
-to 3,619 — the 87 loops longer than the default limit go to 0, at the
-cost of 3,350 more triangles written — while the refusal families grow
-because longer loops are harder to clip without pushing an edge to three
-uses: the non-manifold family rises from 43 loops / 542 edges to 50 / 894
-and the no-ear family from 10 / 130 to 15 / 642, the non-manifold edge
-count itself is unchanged at 677, and the zero-area family is unchanged
-at 18 loops / 54 edges.  A bigger limit closes more of the surface at
-the cost of more ear-clipped triangles and more loops that fail the
-manifold and ear tests, and the default stays 32.
+`--max-hole-edges` is a trade, not a bug report: a bigger limit closes
+more of the surface at the cost of more triangles written, and a loop
+past a few dozen edges is often a missing face rather than a hole, which
+a fill only papers over; the default is 64 (AUT-02c; it was 32 with the
+ear clip, and on this file the ear clip at 256 had ended at 3,478 open
+edges with more loops failing the manifold and ear tests).

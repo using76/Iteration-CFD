@@ -15,15 +15,19 @@ What is repaired, in order: a bit-exact weld is measured first, duplicate
 corners are welded at a tolerance (a coordinate a cluster already had is
 kept), degenerate triangles are dropped, verbatim duplicate facets are
 removed - exact copies, and coincident opposite pairs unless one of the
-two runs against the surrounding surface - and each component is oriented
+two runs against the surrounding surface - a vertex lying on another
+triangle's open edge within the weld tolerance splits that edge (a
+T-junction), and each component is oriented
 patch by patch: a patch is a maximal set of triangles joined by edges the
 input uses twice in opposite directions, so the windings inside a patch
 already agree, and a reached patch is flipped whole when more of its
 edges to the decided patches run same-direction than opposite.  Then a
 closed component is flipped outward when its volume is negative, a
-boundary loop of up to --max-hole-edges edges is filled (three edges with
-one triangle, four or more by ear clipping in the plane of the loop's
-Newell normal), and the result is written with recomputed normals.  The
+boundary loop of up to --max-hole-edges (default 64) edges is filled:
+three edges with one triangle, a planar loop of up to 32 edges by ear
+clipping in the plane of its Newell normal, and every other loop by
+Liepa's minimum-weight triangulation, refinement and fairing (SPEC-LIT
+§23.2.1), and the result is written with recomputed normals.  The
 defect counts after every stage and everything the tool could not repair
 are reported, never hidden.
 """
@@ -338,6 +342,114 @@ def _dedup(T, tri_patch, nP):
     return T2[keep2], patch2[keep2], n_exact, n_opposite
 
 
+# --- T-junctions (AUT-02b) -------------------------------------------------
+
+TJ_MAX_PASSES = 16
+
+
+def _split_t_junctions(T, P, tri_patch, nP, tol_abs):
+    """(T, tri_patch, stats): a vertex lying on another triangle's edge,
+    within the weld tolerance, splits that edge.  Only OPEN edges (one use)
+    and only boundary vertices (an endpoint of an open edge) take part, so
+    a closed surface is returned untouched.  Vertex m splits the open edge
+    (a, b) of triangle (a, b, c) iff m is none of a, b, c, its parameter
+    s = (m - a).(b - a) / |b - a|^2 lies in (0, 1), its distance to
+    a + s (b - a) is <= tol_abs, and it is farther than tol_abs from a and
+    from b.  The hits sorted by s, a = q_0, q_1 .. q_k, q_k+1 = b, replace
+    the triangle in place by the fan (q_i, q_i+1, c), which keeps its
+    winding and its patch.  A triangle splits at most one edge per pass
+    (its lowest corner with a hit).  A fan is not made when one of its
+    triangles has an exactly-zero cross product, when one of its new
+    spokes (q_i, c), 1 <= i <= k, is already an edge (it would lay a
+    triangle over one already there, as around a collinear sliver), or
+    when a sub-edge (q_i, q_i+1) already has two uses - the uses counted
+    on the pass's input plus the fans planned before it in the pass, the
+    rule the hole fill applies, so no edge ends with three.  Passes repeat
+    until none splits (at most TJ_MAX_PASSES).  stats counts the split
+    edges, the vertex insertions, the triangles added and the passes that
+    split."""
+    stats = {'split_edges': 0, 'inserted_vertices': 0,
+             'triangles_added': 0, 'passes': 0}
+    for _ in range(TJ_MAX_PASSES):
+        if len(T) == 0:
+            break
+        a, b, key = _edge_key(T, nP)
+        uk, inv, counts = np.unique(key, return_inverse=True, return_counts=True)
+        inv = np.asarray(inv).reshape(-1)
+        open_c = np.nonzero(counts[inv] == 1)[0]     # flat corner 3 t + k
+        if len(open_c) == 0:
+            break
+        bverts = np.unique(np.concatenate((a[open_c], b[open_c])))
+        tree = cKDTree(P[bverts])
+        uses = dict(zip(uk.tolist(), counts.tolist()))   # undirected edge -> uses
+        ekey = lambda p, q: min(p, q) * nP + max(p, q)
+        plan = {}
+        for e in open_c.tolist():
+            t, k = divmod(e, 3)
+            if t in plan:
+                continue
+            ia, ib, ic = int(a[e]), int(b[e]), int(T[t, (k + 2) % 3])
+            pa, pb = P[ia], P[ib]
+            d = pb - pa
+            L2 = float(d @ d)
+            if L2 == 0.0:
+                continue
+            hits = []
+            for j in sorted(tree.query_ball_point(0.5 * (pa + pb),
+                                                  0.5 * math.sqrt(L2) + tol_abs)):
+                m = int(bverts[j])
+                if m in (ia, ib, ic):
+                    continue
+                pm = P[m]
+                s = float((pm - pa) @ d) / L2
+                if not 0.0 < s < 1.0:
+                    continue
+                if np.linalg.norm(pm - (pa + s * d)) > tol_abs:
+                    continue
+                if np.linalg.norm(pm - pa) <= tol_abs or \
+                        np.linalg.norm(pm - pb) <= tol_abs:
+                    continue
+                hits.append((s, m))
+            if not hits:
+                continue
+            hits.sort()
+            chain = [ia] + [m for _, m in hits] + [ib]
+            fan = [(chain[i], chain[i + 1], ic) for i in range(len(chain) - 1)]
+            if any(np.all(np.cross(P[q1] - P[q0], P[qc] - P[q0]) == 0.0)
+                   for q0, q1, qc in fan):
+                continue
+            spokes = [ekey(m, ic) for _, m in hits]
+            subs = [ekey(q0, q1) for q0, q1, _ in fan]
+            if any(uses.get(x, 0) for x in spokes) or \
+                    any(uses.get(x, 0) >= 2 for x in subs):
+                continue
+            for x in spokes:
+                uses[x] = 2
+            for x in subs:
+                uses[x] = uses.get(x, 0) + 1
+            uses[ekey(ia, ib)] -= 1
+            plan[t] = fan
+        if not plan:
+            break
+        rows, patches = [], []
+        for t in range(len(T)):
+            pieces = plan.get(t)
+            if pieces is None:
+                rows.append(T[t])
+                patches.append(tri_patch[t])
+            else:
+                rows.extend(np.array(f, dtype=np.int64) for f in pieces)
+                patches.extend([tri_patch[t]] * len(pieces))
+        added = sum(len(f) - 1 for f in plan.values())
+        T = np.array(rows, dtype=np.int64).reshape(-1, 3)
+        tri_patch = np.array(patches, dtype=tri_patch.dtype)
+        stats['split_edges'] += len(plan)
+        stats['inserted_vertices'] += added
+        stats['triangles_added'] += added
+        stats['passes'] += 1
+    return T, tri_patch, stats
+
+
 def _orient(T, P, nP):
     """Per component the walk now runs over PATCHES, not single triangles:
     a patch is a maximal set of triangles joined by two-use edges whose
@@ -492,10 +604,305 @@ def _clip_loop(P, loop):
     return tris
 
 
-def _fill_holes(T, P, tri_patch, nP, max_hole):
-    """(T, tri_patch, filled, filled_triangles, unfilled, per_hole): walk
-    the open directed edges, fill 3-edge loops with one triangle and
-    ear-clip loops of up to max_hole edges, report every other loop.  A
+EAR_CLIP_MAX = 32           # a planar loop up to this length keeps the ear clip
+LIEPA_ALPHA = math.sqrt(2.0)  # Liepa's density factor (SPEC-LIT §23.2.1)
+LIEPA_PASSES = 32           # refinement passes (each splits every triangle at most once)
+RELAX_PASSES = 64           # edge-swap passes per relaxation
+
+
+def _is_planar(P, loop, tol_abs):
+    """True when every loop point lies within tol_abs of the plane through
+    the loop's mean point orthogonal to its unit Newell normal."""
+    pts = P[np.asarray(loop, dtype=np.int64)]
+    n = np.cross(pts, np.roll(pts, -1, axis=0)).sum(axis=0)
+    ln = float(np.linalg.norm(n))
+    if ln == 0.0:
+        return False
+    d = (pts - pts.mean(axis=0)) @ (n / ln)
+    return float(np.abs(d).max()) <= tol_abs
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _cross(u, w):
+    return (u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2],
+            u[0] * w[1] - u[1] * w[0])
+
+
+def _dot(u, w):
+    return u[0] * w[0] + u[1] * w[1] + u[2] * w[2]
+
+
+def _tri_cross(X, t):
+    a = X[t[0]]
+    return _cross(_sub(X[t[1]], a), _sub(X[t[2]], a))
+
+
+def _angle(n1, n2):
+    """The angle between two non-zero normals, in [0, pi]."""
+    c = _dot(n1, n2) / math.sqrt(_dot(n1, n1) * _dot(n2, n2))
+    return math.acos(max(-1.0, min(1.0, c)))
+
+
+def _liepa_mwt(X, n, across, chord_ok):
+    """Liepa's minimum-weight triangulation of the loop X[0..n-1] (walk
+    order).  The weight of a triangle is (its largest dihedral angle with
+    its neighbours, its area); weights add as (max, sum) and compare
+    lexicographically.  across[i] is the cross product of the surface
+    triangle on the loop edge (i, i+1 mod n).  Patch triangle (i, m, k) is
+    written (k, m, i), the reversed walk winding.  Returns the triangle list
+    or None when every triangulation needs a refused chord or a zero-area
+    triangle."""
+    INF = (math.inf, math.inf)
+    W = [[INF] * n for _ in range(n)]
+    lam = [[-1] * n for _ in range(n)]
+    for i in range(n - 1):
+        W[i][i + 1] = (0.0, 0.0)
+    cr = {}
+
+    def tri(i, m, k):
+        key = (i, m, k)
+        if key not in cr:
+            cr[key] = _cross(_sub(X[m], X[k]), _sub(X[i], X[k]))
+        return cr[key]
+
+    for d in range(2, n):
+        for i in range(n - d):
+            k = i + d
+            if d < n - 1 and not chord_ok(i, k):
+                continue
+            best, bm = INF, -1
+            for m in range(i + 1, k):
+                wim, wmk = W[i][m], W[m][k]
+                if wim[0] == math.inf or wmk[0] == math.inf:
+                    continue
+                c = tri(i, m, k)
+                if c == (0.0, 0.0, 0.0):
+                    continue
+                nb1 = across[i] if m == i + 1 else tri(i, lam[i][m], m)
+                nb2 = across[m] if k == m + 1 else tri(m, lam[m][k], k)
+                ang = max(_angle(c, nb1), _angle(c, nb2))
+                if d == n - 1:
+                    ang = max(ang, _angle(c, across[n - 1]))
+                w = (max(wim[0], wmk[0], ang),
+                     wim[1] + wmk[1] + 0.5 * math.sqrt(_dot(c, c)))
+                if w < best:
+                    best, bm = w, m
+            W[i][k], lam[i][k] = best, bm
+    if W[0][n - 1][0] == math.inf:
+        return None
+    tris, stack = [], [(0, n - 1)]
+    while stack:
+        i, k = stack.pop()
+        if k - i < 2:
+            continue
+        m = lam[i][k]
+        tris.append([k, m, i])
+        stack.append((i, m))
+        stack.append((m, k))
+    return tris
+
+
+def _patch_edges(tris):
+    """Directed edge (a, b) -> index of the patch triangle that holds it."""
+    de = {}
+    for ti, t in enumerate(tris):
+        for j in range(3):
+            de[(t[j], t[(j + 1) % 3])] = ti
+    return de
+
+
+def _relax_edge(X, tris, de, a, b, edge_ok):
+    """Swap the interior patch edge (a, b) when the opposite vertex of its
+    second triangle lies strictly inside the sphere on the first triangle's
+    circumcircle (SPEC-LIT §23.2.1).  The swap is not made when the new
+    edge already exists, a new triangle has zero area, or a new triangle's
+    normal turns against the pair's.  Returns True when swapped."""
+    t1, t2 = de.get((a, b)), de.get((b, a))
+    if t1 is None or t2 is None:
+        return False
+    T1, T2 = tris[t1], tris[t2]
+    c = [v for v in T1 if v != a and v != b]
+    d = [v for v in T2 if v != a and v != b]
+    if len(c) != 1 or len(d) != 1 or c[0] == d[0]:
+        return False
+    c, d = c[0], d[0]
+    if (c, d) in de or (d, c) in de or not edge_ok(c, d):
+        return False
+    pa, u, w = X[a], _sub(X[b], X[a]), _sub(X[c], X[a])
+    nn = _cross(u, w)
+    l2 = _dot(nn, nn)
+    if l2 == 0.0:
+        return False
+    uu, ww = _dot(u, u), _dot(w, w)
+    x = _cross(w, nn)
+    y = _cross(nn, u)
+    off = tuple((uu * x[j] + ww * y[j]) / (2.0 * l2) for j in range(3))
+    cc = (pa[0] + off[0], pa[1] + off[1], pa[2] + off[2])
+    dd = _sub(X[d], cc)
+    if _dot(dd, dd) >= _dot(off, off):
+        return False
+    N1, N2 = [a, d, c], [d, b, c]
+    n1, n2 = _tri_cross(X, N1), _tri_cross(X, N2)
+    if n1 == (0.0, 0.0, 0.0) or n2 == (0.0, 0.0, 0.0):
+        return False
+    ref = tuple(a_ + b_ for a_, b_ in zip(nn, _tri_cross(X, T2)))
+    if _dot(n1, ref) <= 0.0 or _dot(n2, ref) <= 0.0:
+        return False
+    for t in (T1, T2):
+        for j in range(3):
+            del de[(t[j], t[(j + 1) % 3])]
+    tris[t1], tris[t2] = N1, N2
+    for ti, t in ((t1, N1), (t2, N2)):
+        for j in range(3):
+            de[(t[j], t[(j + 1) % 3])] = ti
+    return True
+
+
+def _relax_all(X, tris, de, edge_ok):
+    for _ in range(RELAX_PASSES):
+        swapped = 0
+        for (a, b) in list(de.keys()):
+            if a < b and (a, b) in de and _relax_edge(X, tris, de, a, b, edge_ok):
+                swapped += 1
+        if not swapped:
+            return
+
+
+def _liepa_fill(X, n, across, sigma, chord_ok):
+    """Fill the loop X[0..n-1] by Liepa (SPEC-LIT §23.2.1): the minimum-
+    weight triangulation, then refinement with edge relaxation, then
+    fairing.  X holds the loop points; inserted points are appended to it.
+    sigma[i] is loop point i's mean surface edge length; chord_ok(i, j)
+    says whether loop points i and j are not yet joined on the surface.
+    Returns (triangles in X's indices, None) or (None, reason)."""
+    tris = _liepa_mwt(X, n, across, chord_ok)
+    if tris is None:
+        return None, ('no triangulation: every one needs an existing edge or '
+                      'a zero-area triangle')
+    sig = list(sigma)
+
+    def edge_ok(i, j):
+        return i >= n or j >= n or chord_ok(i, j)
+
+    de = _patch_edges(tris)
+    for _ in range(LIEPA_PASSES):
+        split = 0
+        for ti in range(len(tris)):
+            t = tris[ti]
+            pc = tuple((X[t[0]][j] + X[t[1]][j] + X[t[2]][j]) / 3.0 for j in range(3))
+            sc = (sig[t[0]] + sig[t[1]] + sig[t[2]]) / 3.0
+            ok = True
+            for v in t:
+                dv = _sub(pc, X[v])
+                L = LIEPA_ALPHA * math.sqrt(_dot(dv, dv))
+                if not (L > sc and L > sig[v]):
+                    ok = False
+                    break
+            if not ok:
+                continue
+            c = len(X)
+            X.append(pc)
+            sig.append(sc)
+            i, j, k = t
+            for e in ((i, j), (j, k), (k, i)):
+                del de[e]
+            news = [[c, j, k], [i, c, k], [i, j, c]]
+            tris[ti] = news[0]
+            tris.extend(news[1:])
+            for tj, nt in ((ti, news[0]), (len(tris) - 2, news[1]),
+                           (len(tris) - 1, news[2])):
+                for q in range(3):
+                    de[(nt[q], nt[(q + 1) % 3])] = tj
+            for a, b in ((i, j), (j, k), (k, i)):
+                _relax_edge(X, tris, de, a, b, edge_ok)
+            split += 1
+        if not split:
+            break
+        _relax_all(X, tris, de, edge_ok)
+    _fair(X, n, tris)
+    return tris, None
+
+
+def _fair(X, n, tris):
+    """Scale-dependent umbrella fairing (SPEC-LIT §23.2.1): the inserted
+    points X[n:] solve the membrane U(v) = 0, U(v) = (2/E) sum_j
+    (v_j - v)/|e_j| over v's patch neighbours, E = sum_j |e_j|, the
+    lengths taken before the solve and the loop points fixed (2/E scales a
+    row and drops out)."""
+    k = len(X) - n
+    if k == 0:
+        return
+    nb = [set() for _ in range(len(X))]
+    for t in tris:
+        for q in range(3):
+            a, b = t[q], t[(q + 1) % 3]
+            nb[a].add(b)
+            nb[b].add(a)
+    A = np.zeros((k, k))
+    rhs = np.zeros((k, 3))
+    for r in range(k):
+        v = n + r
+        for u in sorted(nb[v]):
+            d = _sub(X[u], X[v])
+            w = 1.0 / math.sqrt(_dot(d, d))
+            A[r, r] += w
+            if u >= n:
+                A[r, u - n] -= w
+            else:
+                rhs[r] += w * np.asarray(X[u])
+    sol = np.linalg.solve(A, rhs)
+    for r in range(k):
+        X[n + r] = (float(sol[r, 0]), float(sol[r, 1]), float(sol[r, 2]))
+
+
+def _surface_ring(T):
+    """Point -> the set of points it shares a surface edge with."""
+    ring = {}
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        for u, v in zip(T[:, a].tolist(), T[:, b].tolist()):
+            ring.setdefault(u, set()).add(v)
+            ring.setdefault(v, set()).add(u)
+    return ring
+
+
+def _fill_liepa(T, P, loop, ledges, use, nP, ring, base):
+    """Liepa's fill of one loop (SPEC-LIT §23.2.1) in global indices: the
+    patch triangles (inserted points numbered from base) and the inserted
+    points, or (None, reason)."""
+    n = len(loop)
+    X = [tuple(P[v].tolist()) for v in loop]
+    across = []
+    for e in ledges:
+        t = T[e // 3]
+        across.append(_tri_cross([tuple(P[v].tolist()) for v in t], (0, 1, 2)))
+    if any(c == (0.0, 0.0, 0.0) for c in across):
+        return None, 'a surface triangle on the loop has zero area'
+    sigma = []
+    for v in loop:
+        nb = sorted(ring[v])
+        sigma.append(float(np.linalg.norm(P[nb] - P[v], axis=1).mean()))
+
+    def chord_ok(i, j):
+        a, b = loop[i], loop[j]
+        return use.get(min(a, b) * nP + max(a, b), 0) == 0
+
+    tris, reason = _liepa_fill(X, n, across, sigma, chord_ok)
+    if tris is None:
+        return None, reason
+    g = [loop[i] if i < n else base + i - n for i in range(len(X))]
+    return [(g[t[0]], g[t[1]], g[t[2]]) for t in tris], X[n:]
+
+
+def _fill_holes(T, P, tri_patch, nP, max_hole, tol_abs):
+    """(T, P, tri_patch, filled, filled_triangles, unfilled, per_hole,
+    liepa): walk the open directed edges, fill 3-edge loops with one
+    triangle, ear-clip a planar loop of up to EAR_CLIP_MAX edges, fill
+    every other loop of up to max_hole edges (and a planar one with no
+    ear) by Liepa (inserted points are appended to P), report every other
+    loop.  A
     fill is applied only if it leaves every one of its new triangles'
     undirected edges used at most twice (the use tally is counted once,
     before the walk; a clipped loop's whole candidate fan is tallied
@@ -514,13 +921,15 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
     used = set()
     filled, filled_tris, unfilled, per_hole = 0, 0, [], []
     newT, newP = [], []
+    newX, ring = [], None
+    liepa = {'filled': 0, 'triangles': 0, 'inserted_vertices': 0}
     for e0 in open_e:
         e0 = int(e0)
         if e0 in used:
             continue
         p0, p1 = int(a[e0]), int(b[e0])
         used.add(e0)
-        loop, dead = [p0, p1], None
+        loop, dead, ledges = [p0, p1], None, [e0]
         while loop[-1] != p0:
             outs = out_map.get(loop[-1], [])
             if len(outs) != 1 or outs[0] in used:
@@ -529,6 +938,7 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
                 break
             ne = outs[0]
             used.add(ne)
+            ledges.append(ne)
             loop.append(int(b[ne]))
         if dead is not None:
             unfilled.append({'edges': dead[0], 'reason': dead[1]})
@@ -536,6 +946,9 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
                              'triangles': 0, 'reason': dead[1]})
             continue
         m = len(loop) - 1
+        tris = None
+        if 3 < m <= min(max_hole, EAR_CLIP_MAX) and _is_planar(P, loop[:-1], tol_abs):
+            tris = _clip_loop(P, loop[:-1])
         if m > max_hole:
             unfilled.append({'edges': m, 'reason':
                              'loop of %d edges > max_hole_edges %d' % (m, max_hole)})
@@ -570,15 +983,7 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
             filled_tris += 1
             per_hole.append({'edges': m, 'outcome': 'filled',
                              'triangles': 1, 'reason': None})
-        else:
-            tris = _clip_loop(P, loop[:-1])
-            if tris is None:
-                unfilled.append({'edges': m, 'reason':
-                                 'no ear found: the loop is not simple in its own plane'})
-                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
-                                 'reason': 'no ear found: the loop is not simple '
-                                           'in its own plane'})
-                continue
+        elif tris is not None:
             cand = {}
             for t in tris:
                 for i, j in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
@@ -611,10 +1016,56 @@ def _fill_holes(T, P, tri_patch, nP, max_hole):
             filled_tris += m - 2
             per_hole.append({'edges': m, 'outcome': 'filled',
                              'triangles': m - 2, 'reason': None})
+        else:
+            if ring is None:
+                ring = _surface_ring(T)
+            base = nP + len(newX)
+            tris, pts = _fill_liepa(T, P, loop[:-1], ledges, use, nP, ring, base)
+            reason = None
+            if tris is None:
+                reason = pts
+            else:
+                cand = {}
+                for t in tris:
+                    for i, j in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+                        k = min(i, j) * nP + max(i, j) if max(i, j) < nP                             else (min(i, j), max(i, j))
+                        cand[k] = cand.get(k, 0) + 1
+                bad = sum(1 for k in cand if use.get(k, 0) + cand[k] > 2)
+                X = np.vstack([P, np.asarray(newX + pts, dtype=np.float64).reshape(-1, 3)])
+                ta = np.asarray(tris, dtype=np.int64)
+                zc = np.cross(X[ta[:, 1]] - X[ta[:, 0]], X[ta[:, 2]] - X[ta[:, 0]])
+                nz = int(np.count_nonzero(np.all(zc == 0.0, axis=1)))
+                if bad:
+                    reason = 'filling it would make %d edge(s) non-manifold' % bad
+                elif nz:
+                    reason = 'filling it would add %d zero-area triangle(s)' % nz
+                elif not np.all(np.isfinite(X[base:])):
+                    reason = 'the fairing gave a non-finite point'
+            if reason is not None:
+                unfilled.append({'edges': m, 'reason': reason})
+                per_hole.append({'edges': m, 'outcome': 'skipped', 'triangles': 0,
+                                 'reason': reason})
+                continue
+            owner = int(e0) // 3
+            newT.extend(tris)
+            newP.extend([int(tri_patch[owner])] * len(tris))
+            newX.extend(pts)
+            for k, c in cand.items():
+                use[k] = use.get(k, 0) + c
+            filled += 1
+            filled_tris += len(tris)
+            liepa['filled'] += 1
+            liepa['triangles'] += len(tris)
+            liepa['inserted_vertices'] += len(pts)
+            per_hole.append({'edges': m, 'outcome': 'filled',
+                             'triangles': len(tris), 'reason': None,
+                             'method': 'liepa', 'inserted_vertices': len(pts)})
     if newT:
         T = np.vstack([T, np.array(newT, dtype=T.dtype)])
         tri_patch = np.concatenate([tri_patch, np.array(newP, dtype=tri_patch.dtype)])
-    return T, tri_patch, filled, filled_tris, unfilled, per_hole
+    if newX:
+        P = np.vstack([P, np.asarray(newX, dtype=P.dtype)])
+    return T, P, tri_patch, filled, filled_tris, unfilled, per_hole, liepa
 
 
 def _flip_outward(T, P, nP):
@@ -688,9 +1139,9 @@ def add_arguments(parser):
     parser.add_argument('--weld', type=float, default=1e-6,
                         help='weld tolerance as a fraction of the bounding-box '
                              'diagonal (default 1e-6; 0 = bit-exact only)')
-    parser.add_argument('--max-hole-edges', type=int, default=32,
+    parser.add_argument('--max-hole-edges', type=int, default=64,
                         dest='max_hole_edges',
-                        help='fill a boundary loop of at most this many edges (default 32)')
+                        help='fill a boundary loop of at most this many edges (default 64)')
     g = parser.add_mutually_exclusive_group()
     g.add_argument('--ascii', action='store_true',
                    help="force the output format (default: the input's)")
@@ -758,10 +1209,13 @@ def run_repair(args):
     weld_stage = _defects(T, nP)
     T, patch_k, n_exact, n_opposite = _dedup(T, patch_k, nP)
     dedup_stage = _defects(T, nP)
+    T, patch_k, tj = _split_t_junctions(T, P, patch_k, nP, tol_abs)
+    tj_stage = _defects(T, nP)
     flip3, left_alone, alone_reasons, reseeded = _orient(T, P, nP)
     orient_stage = _defects(T, nP)
-    T, tri_patch, filled, filled_tris, unfilled, per_hole = _fill_holes(
-        T, P, patch_k, nP, args.max_hole_edges)
+    T, P, tri_patch, filled, filled_tris, unfilled, per_hole, liepa = _fill_holes(
+        T, P, patch_k, nP, args.max_hole_edges, tol_abs)
+    nP = len(P)
     T, flipped_set, comp = _flip_outward(T, P, nP)
     after_open, after_nm = _defects(T, nP)
     stages = [
@@ -771,6 +1225,8 @@ def run_repair(args):
          'non_manifold_edges': weld_stage[1]},
         {'stage': 'dedup', 'open_edges': dedup_stage[0],
          'non_manifold_edges': dedup_stage[1]},
+        {'stage': 'tjunction', 'open_edges': tj_stage[0],
+         'non_manifold_edges': tj_stage[1]},
         {'stage': 'orient', 'open_edges': orient_stage[0],
          'non_manifold_edges': orient_stage[1]},
         {'stage': 'fill', 'open_edges': after_open,
@@ -810,6 +1266,7 @@ def run_repair(args):
            'degenerate_dropped': dropped,
            'duplicates': {'exact_removed': n_exact,
                           'opposite_removed': n_opposite},
+           't_junctions': tj,
            'weld': dict({'tol_rel': args.weld, 'tol_abs': tol_abs,
                          'points_raw': 3 * n_in}, **wst),
            'orientation': {'reoriented_triangles': flip3,
@@ -820,6 +1277,7 @@ def run_repair(args):
            'holes': {'max_hole_edges': args.max_hole_edges, 'filled': filled,
                      'filled_triangles': filled_tris, 'unfilled': unfilled,
                      'per_hole': per_hole},
+           'liepa': liepa,
            'stages': stages,
            'before': {'open_edges': before[0], 'non_manifold_edges': before[1],
                       'closed': before == (0, 0)},
@@ -837,12 +1295,17 @@ def run_repair(args):
                      % (wst['merged'], tol_abs, args.weld, diag, wst['max_move'], dropped))
     sys.stdout.write('  duplicates: %d exact, %d opposite-coincident removed\n'
                      % (n_exact, n_opposite))
+    sys.stdout.write('  t-junctions: %d edge(s) split at %d vertex insertion(s), %d triangle(s) added\n'
+                     % (tj['split_edges'], tj['inserted_vertices'], tj['triangles_added']))
     sys.stdout.write('  orient: %d triangle(s) reoriented, %d left alone, %d patch(es) re-seeded, %d component(s) flipped outward\n'
                      % (flip3, left_alone, reseeded, len(flipped_set)))
     ear_tris = sum(h['triangles'] for h in per_hole
-                   if h['outcome'] == 'filled' and h['triangles'] > 1)
+                   if h['outcome'] == 'filled' and h['triangles'] > 1
+                   and h.get('method') != 'liepa')
     sys.stdout.write('  holes: %d filled with %d triangle(s), %d unfilled, %d by ear clipping\n'
                      % (filled, filled_tris, len(unfilled), ear_tris))
+    sys.stdout.write('  liepa: %d hole(s) filled with %d triangle(s), %d vertex insertion(s)\n'
+                     % (liepa['filled'], liepa['triangles'], liepa['inserted_vertices']))
     sys.stdout.write('  after: %d open edge(s), %d non-manifold edge(s) -> closed %s, volume %s\n'
                      % (after_open, after_nm, 'yes' if after_closed else 'no',
                         '%.9e' % after_vol if after_vol is not None else '-'))

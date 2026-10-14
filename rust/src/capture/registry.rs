@@ -139,6 +139,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/compressible/energy.rs",
+        Stance::Gate("the_compressible_energy_equation_replays_bitwise"),
+    ),
+    (
         "src/compressible/momentum.rs",
         Stance::Gate("the_compressible_momentum_predictor_replays_bitwise"),
     ),
@@ -159,6 +163,24 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
+    (
+        "src/compressible/mod.rs",
+        Stance::Refused(
+            "`Compressible::step` is the outer loop of SPEC-LIT 125.3, and its \
+             step 8 READS BACK `T`, `p`, `rho`, `u` and `mdot` after every outer \
+             iteration: SPEC-LIT 122.3 counts the out-of-bounds cells on the \
+             host and stops the run on a nonzero count, and residualControl \
+             stops a steady run on the solvers' residuals. A data-dependent \
+             stop is the one thing a graph cannot hold. Its equations are each \
+             gated on their own (thermo, momentum, pressure, energy). \
+             Alternative: a captured inner region per outer iteration with the \
+             count reduced on the device; not implemented",
+        ),
+    ),
+    // SPEC-LIT 125.7: the local step is formed at the top of each pseudo
+    // step of `Compressible::step`, and its three time-term kernels run only
+    // in the equations `Compressible::new` attached it to.
+    ("src/compressible/lts.rs", Stance::Via("src/compressible/mod.rs")),
     (
         "src/compressible/exact/riemann.rs",
         Stance::Outside(

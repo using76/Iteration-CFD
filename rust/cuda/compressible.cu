@@ -635,3 +635,338 @@ extern "C" __global__ void cmpLinearizedRho
     if (i >= n) return;
     rho[i] = rho[i] + psi[i]*(p[i] - pStar[i]);
 }
+
+
+/*
+  ==========================================================================
+  The energy equation, solved for T. SPEC-LIT 125.1, 125.5 (CMP-11). Three
+  kernels, one thread per element, called from src/compressible/energy.rs
+  beside the scalar operators of cuda/fv.cu and the face-flux sum of
+  cuda/simple.cu. They form only the explicit side of (125.1) divided by
+  the constant c_p (SPEC-LIT 125.5): the face flux e_f of the K convection and the
+  viscous work, and the cell source of dp/dt, d(rho K)/dt and the gravity
+  work. rcp = fl(1/c_p) is formed once on the host. No floor and no clip.
+  ==========================================================================
+*/
+
+//- K = |u|^2/2, the sum of squares left to right, then one product.
+OFGPU_DEV ofscalar cmpKin(const ofvec3& u)
+{
+    return (ofscalar)0.5*(u.x*u.x + u.y*u.y + u.z*u.z);
+}
+
+//- The viscous work through one face, W_f = u_f . (tau_f . Sf), with
+//  (tau . Sf)_i = mu_f ( sum_j (T_ij + T_ji) Sf_j - (2/3) tr(T) Sf_i ) and
+//  T_ij = d u_j / d x_i - (123.2) contracted with Sf, as SPEC-LIT 123.2
+//  writes its three terms. Written once, so the internal, the coupled and
+//  the plain boundary face state the same expression in the same order.
+OFGPU_DEV ofscalar cmpFaceWork
+(
+    const oftensor& t,
+    const ofvec3& s,
+    ofscalar mu,
+    const ofvec3& u
+)
+{
+    const ofscalar tr = t.xx + t.yy + t.zz;
+    const ofscalar c = (ofscalar)2 / (ofscalar)3;
+    const ofscalar qx = mu*((t.xx + t.xx)*s.x + (t.xy + t.yx)*s.y + (t.xz + t.zx)*s.z - c*tr*s.x);
+    const ofscalar qy = mu*((t.yx + t.xy)*s.x + (t.yy + t.yy)*s.y + (t.yz + t.zy)*s.z - c*tr*s.y);
+    const ofscalar qz = mu*((t.zx + t.xz)*s.x + (t.zy + t.yz)*s.y + (t.zz + t.zz)*s.z - c*tr*s.z);
+    return qx*u.x + qy*u.y + qz*u.z;
+}
+
+//- (125.4) on the internal faces: e_f = rcp (work W_f - mdot_f K~_f), with
+//  K~_f = w_f K_P + (1 - w_f) K_N on THE CONVECTION WEIGHTS of T (125.1's
+//  DESIGN), and T_f, u_f linear on the mesh weights lw. work = 0 leaves
+//  the K convection alone.
+extern "C" __global__ void cmpEnergyFaceFlux
+(
+    ofscalar* __restrict__ e,
+    const ofscalar* __restrict__ mdot,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ lw,
+    const ofvec3* __restrict__ u,
+    const oftensor* __restrict__ gradU,
+    const ofscalar* __restrict__ muf,
+    const ofvec3* __restrict__ Sf,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    ofscalar rcp,
+    oflabel work,
+    oflabel nFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nFaces) return;
+
+    const oflabel o = owner[f];
+    const oflabel nb = neighbour[f];
+    const ofscalar wf = w[f];
+    const ofscalar kf = wf*cmpKin(u[o]) + (1 - wf)*cmpKin(u[nb]);
+    ofscalar s = -mdot[f]*kf;
+
+    if (work)
+    {
+        const ofscalar l = lw[f];
+        const ofscalar k = 1 - l;
+        const oftensor to = gradU[o];
+        const oftensor tn = gradU[nb];
+        const oftensor tf = {
+            l*to.xx + k*tn.xx, l*to.xy + k*tn.xy, l*to.xz + k*tn.xz,
+            l*to.yx + k*tn.yx, l*to.yy + k*tn.yy, l*to.yz + k*tn.yz,
+            l*to.zx + k*tn.zx, l*to.zy + k*tn.zy, l*to.zz + k*tn.zz };
+        const ofvec3 uo = u[o];
+        const ofvec3 un = u[nb];
+        const ofvec3 uf = mkvec(l*uo.x + k*un.x, l*uo.y + k*un.y, l*uo.z + k*un.z);
+        s += cmpFaceWork(tf, Sf[f], muf[f], uf);
+    }
+
+    e[f] = rcp*s;
+}
+
+//- (125.4) on the boundary faces. An empty face carries nothing. A coupled
+//  face with a cell across the couple weights K with the convection weight
+//  bw and T_f, u_f with the mesh weight blw, like an internal face; any
+//  other face takes K and u from u's own boundary value - the face value
+//  of u's triple, as fvmDivGauss takes T's - and T_f = T_P (123.10).
+extern "C" __global__ void cmpEnergyFaceFluxBoundary
+(
+    ofscalar* __restrict__ be,
+    const ofscalar* __restrict__ bmdot,
+    const ofscalar* __restrict__ bw,
+    const ofscalar* __restrict__ blw,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ ub,
+    const oftensor* __restrict__ gradU,
+    const ofscalar* __restrict__ bmuf,
+    const ofvec3* __restrict__ bSf,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    ofscalar rcp,
+    oflabel work,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    const oflabel kind = bKind[i];
+    if (kind == OFPATCH_EMPTY)
+    {
+        be[i] = 0;
+        return;
+    }
+
+    const oflabel o = bFaceCells[i];
+    const oflabel nb = bNbrCell[i];
+    const bool coupled = (kind == OFPATCH_CYCLIC && nb >= 0);
+
+    ofscalar kb;
+    if (coupled)
+    {
+        const ofscalar wf = bw[i];
+        kb = wf*cmpKin(u[o]) + (1 - wf)*cmpKin(u[nb]);
+    }
+    else
+    {
+        kb = cmpKin(ub[i]);
+    }
+    ofscalar s = -bmdot[i]*kb;
+
+    if (work)
+    {
+        oftensor tf;
+        ofvec3 uf;
+        if (coupled)
+        {
+            const ofscalar l = blw[i];
+            const ofscalar k = 1 - l;
+            const oftensor to = gradU[o];
+            const oftensor tn = gradU[nb];
+            tf.xx = l*to.xx + k*tn.xx;
+            tf.xy = l*to.xy + k*tn.xy;
+            tf.xz = l*to.xz + k*tn.xz;
+            tf.yx = l*to.yx + k*tn.yx;
+            tf.yy = l*to.yy + k*tn.yy;
+            tf.yz = l*to.yz + k*tn.yz;
+            tf.zx = l*to.zx + k*tn.zx;
+            tf.zy = l*to.zy + k*tn.zy;
+            tf.zz = l*to.zz + k*tn.zz;
+            const ofvec3 uo = u[o];
+            const ofvec3 un = u[nb];
+            uf = mkvec(l*uo.x + k*un.x, l*uo.y + k*un.y, l*uo.z + k*un.z);
+        }
+        else
+        {
+            tf = gradU[o];
+            uf = ub[i];
+        }
+        s += cmpFaceWork(tf, bSf[i], bmuf[i], uf);
+    }
+
+    be[i] = rcp*s;
+}
+
+//- (125.3)'s cell source, one thread per cell, with the energy equation's
+//  own time coefficients (a_n, a_0, a_00):
+//    source += rcp V ( dp/dt - d(rho K)/dt + rho g . u )
+//    dp/dt      = a_n p + a_0 p0 + a_00 p00
+//    d(rho K)/dt = a_n rho K + a_0 rho0 K0 + a_00 rho00 K00,  K = |u|^2/2
+//  steadyState launches it only with g != 0, at zero coefficients.
+extern "C" __global__ void cmpEnergySource
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ rho00,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ p0,
+    const ofscalar* __restrict__ p00,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ u0,
+    const ofvec3* __restrict__ u00,
+    ofscalar aN,
+    ofscalar a0,
+    ofscalar a00,
+    ofscalar gx,
+    ofscalar gy,
+    ofscalar gz,
+    ofscalar rcp,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+
+    const ofvec3 uc = u[i];
+    const ofscalar dpdt = aN*p[i] + a0*p0[i] + a00*p00[i];
+    const ofscalar drk = aN*rho[i]*cmpKin(uc) + a0*rho0[i]*cmpKin(u0[i])
+                       + a00*rho00[i]*cmpKin(u00[i]);
+    const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
+    source[i] += rcp*V[i]*(dpdt - drk + gw);
+}
+
+
+/*
+  ==========================================================================
+  The local time step of a steady run. SPEC-LIT 125.4, 125.7 (CMP-13). Four
+  kernels, one thread per cell, called from src/compressible/lts.rs. The
+  first forms (125.2)'s reciprocal step rDeltaT = 1/dt_P; the other three are
+  the Euler time terms of (123.3), (124.1) and (125.1) with a per-cell
+  coefficient: a_n = rDeltaT_P, a_0 = -rDeltaT_P, a_00 = 0, in the same
+  expression order as tsDdtGeneralRho, cmpPressureDdt and cmpEnergySource,
+  so an rDeltaT equal to 1/dt everywhere is the Euler step. The kernels above
+  are untouched. No floor and no clip (SPEC-LIT 122.5): T <= 0 gives a NaN c,
+  and SPEC-LIT 122.3 counts the cell afterwards.
+  ==========================================================================
+*/
+
+//- (125.2) as its reciprocal: rDeltaT = (|u| + c) / (cfl V^(1/3)), with
+//  c = sqrt(grs T) as cmpSoundMach forms it and |u| the sum of squares left
+//  to right, then one square root.
+extern "C" __global__ void cmpLtsRDeltaT
+(
+    ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ V,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    ofscalar grs,
+    ofscalar cfl,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+    const ofscalar c = sqrt(grs * T[i]);
+    const ofvec3 u = U[i];
+    const ofscalar um = sqrt(u.x * u.x + u.y * u.y + u.z * u.z);
+    rDeltaT[i] = (um + c) / (cfl * cbrt(V[i]));
+}
+
+//- d(rho psi)/dt, Euler with the per-cell step:
+//    diag   += sign*V*r*rho
+//    source -= sign*V*(-r*rho0*psi0)
+extern "C" __global__ void cmpDdtRhoLocal
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ psi0,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const ofscalar aN = rDeltaT[c];
+    const ofscalar a0 = -aN;
+    const ofscalar sv = sign*V[c];
+    diag[c]   += sv*aN*rho[c];
+    source[c] -= sv*(a0*rho0[c]*psi0[c]);
+}
+
+//- (124.7)-(124.8)'s time term with the per-cell step, launched with
+//  sign = -1 as cmpPressureDdt is:
+//    diag   += sign*V*r*psi
+//    source -= sign*V*(r*(rho - psi*pStar) - r*rho0)
+extern "C" __global__ void cmpPressureDdtLocal
+(
+    ofscalar* __restrict__ diag,
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ pStar,
+    const ofscalar* __restrict__ rho0,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+    const ofscalar aN = rDeltaT[i];
+    const ofscalar a0 = -aN;
+    diag[i] += sign*V[i]*aN*psi[i];
+    source[i] -= sign*V[i]*(aN*(rho[i] - psi[i]*pStar[i]) + a0*rho0[i]);
+}
+
+//- (125.3)'s cell source with the per-cell step:
+//    source += rcp V ( dp/dt - d(rho K)/dt + rho g . u )
+//    dp/dt       = r p - r p0
+//    d(rho K)/dt = r rho K - r rho0 K0,  K = |u|^2/2
+extern "C" __global__ void cmpEnergySourceLocal
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ V,
+    const ofscalar* __restrict__ rDeltaT,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ p0,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ u0,
+    ofscalar gx,
+    ofscalar gy,
+    ofscalar gz,
+    ofscalar rcp,
+    oflabel nCells
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nCells) return;
+
+    const ofscalar aN = rDeltaT[i];
+    const ofscalar a0 = -aN;
+    const ofvec3 uc = u[i];
+    const ofscalar dpdt = aN*p[i] + a0*p0[i];
+    const ofscalar drk = aN*rho[i]*cmpKin(uc) + a0*rho0[i]*cmpKin(u0[i]);
+    const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
+    source[i] += rcp*V[i]*(dpdt - drk + gw);
+}

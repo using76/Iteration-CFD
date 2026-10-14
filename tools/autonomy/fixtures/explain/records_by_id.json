@@ -1,6 +1,6 @@
 {
  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
- "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint); RM-SNAP-TAU apply added 2026-10-02 (AM-L: remedies.propose on the wing_a_L3 probe, whose snap pins at the default radius)",
+ "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint); RM-SNAP-TAU apply added 2026-10-02 (AM-L: remedies.propose on the wing_a_L3 probe, whose snap pins at the default radius); R-SNAP apply, abstain and pass added 2026-10-14 (AUT-05: rules.setup on B-1-000 and cubep, and r_snap on a max_level 1 state)",
  "records": [
   {
    "cite": "gates.json cell_budget; docs/15 §D.1 F5",
@@ -1187,6 +1187,103 @@
     "source": "features.py",
     "threshold": true,
     "value": false
+   },
+   "uncertainty": 0,
+   "verdict": "pass"
+  },
+  {
+   "cite": "SPEC-LIT §92.11 (92.28) the dead band eps = snap.tolerance * base_size; docs/15 §F G-FID; docs/17 §12.6 AUT-05",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-SNAP: R-PLANE owns this body: its wall points already lie on the geometry, which the default band returns bit for bit, and its snap block stays R-PLANE's",
+   "rule_id": "R-SNAP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-14T11:23:45Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "SPEC-LIT §92.11 (92.28) the dead band eps = snap.tolerance * base_size; docs/15 §F G-FID; docs/17 §12.6 AUT-05",
+   "edits": [
+    {
+     "from": null,
+     "pointer": "/snap/tolerance",
+     "to": 6.103515625e-05
+    },
+    {
+     "from": null,
+     "pointer": "/snap/iterations",
+     "to": 60
+    }
+   ],
+   "formula": "eps = snap.tolerance * base_size (92.28); h_f = base_size / 2**max_level; snap.tolerance = 2**-max_level / 256, so eps = h_f / 256; snap.iterations = 60",
+   "inputs": [
+    {
+     "name": "max_level",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "default_band_over_h_f",
+     "unit": "1",
+     "value": 0.064
+    },
+    {
+     "name": "tolerance",
+     "unit": "1",
+     "value": 6.103515625e-05
+    },
+    {
+     "name": "iterations",
+     "unit": "1",
+     "value": 60
+    }
+   ],
+   "layer": "rule",
+   "message": "R-SNAP: at max_level 6 the default dead band of (92.28) is 0.064 h_f, and a snapped wall's p99 residual stops on it; snap.tolerance = 2^-6 / 256 = 6.10352e-05 puts it at h_f / 256, and snap.iterations = 60 lets the pull reach it (about one iteration per halving of the band)",
+   "rule_id": "R-SNAP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-14T11:23:45Z",
+   "trigger": {
+    "observable": "default dead band / h_f",
+    "op": ">",
+    "source": "preflight.MESHER_DEFAULTS /snap/tolerance * 2**max_level",
+    "threshold": 0.00390625,
+    "value": 0.064
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "SPEC-LIT §92.11 (92.28) the dead band eps = snap.tolerance * base_size; docs/15 §F G-FID; docs/17 §12.6 AUT-05",
+   "edits": [],
+   "formula": "eps = snap.tolerance * base_size (92.28); h_f = base_size / 2**max_level; snap.tolerance = 2**-max_level / 256, so eps = h_f / 256; snap.iterations = 60",
+   "inputs": [
+    {
+     "name": "max_level",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "default_band_over_h_f",
+     "unit": "1",
+     "value": 0.002
+    }
+   ],
+   "layer": "rule",
+   "message": "R-SNAP: at max_level 1 the default dead band is 0.002 h_f, already inside h_f / 256; the snap block keeps its defaults",
+   "rule_id": "R-SNAP",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-14T11:23:45Z",
+   "trigger": {
+    "observable": "default dead band / h_f",
+    "op": ">",
+    "source": "preflight.MESHER_DEFAULTS /snap/tolerance * 2**max_level",
+    "threshold": 0.00390625,
+    "value": 0.002
    },
    "uncertainty": 0,
    "verdict": "pass"
