@@ -16,6 +16,8 @@
     Saad, "Iterative Methods for Sparse Linear Systems", 2nd ed. (2003), 3.4
       (compressed sparse row storage)
     ofgpu SPEC-LIT.md sections 1, 3, 4 and 5.2
+    ofgpu SPEC-LIT.md section 120.2 - lduAddJumpSource, the known part of a
+      cyclic jump on both rows of the couple (120.2d)
   No GPL-licensed source was consulted.
 
   ------------------------------------------------------------------------
@@ -571,4 +573,55 @@ extern "C" __global__ void lduCsrFill
         const oflabel s = coupledSlot[t];
         if (s >= 0) val[s] = -boundaryCoeffs[t];
     }
+}
+
+
+// ==========================================================================
+//  addJumpSource - the known part of a cyclic jump (SPEC-LIT 120.2)
+// ==========================================================================
+
+//- source[c] += sum over the coupled faces of c of boundaryCoeffs[bf]*j[bf].
+//
+//  SPEC-LIT (120.2d). A coupled face's explicit statement is
+//  b_P += boundaryCoeffs*psi_N; with a jump the far cell is seen at
+//  psi_N + j (120.2b), so the psi_N half stays implicit inside lduAmul
+//  exactly as before - the matrix, and with it its symmetry (S48), does not
+//  change - and the known half boundaryCoeffs*j joins the source. Both faces
+//  of a pair do this, each with its own j (j_b = -j_a, (120.2a)): that is the
+//  jump source on BOTH rows.
+//
+//  j is the field's refValue, which is zero on every coupled face that
+//  carries no jump; such a face adds nothing - it is skipped, not added as
+//  bc*0 - so a row with no jump keeps its source bit for bit. An uncoupled
+//  face is skipped because its boundaryCoeffs are already in the source
+//  (lduAddBoundaryContributions). One thread per cell, the bcf CSR order, no
+//  atomics, as every kernel here.
+extern "C" __global__ void lduAddJumpSource
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const ofscalar* __restrict__ jump,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bcfOffset,
+    const oflabel* __restrict__ bcfFace,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar s = 0;
+    bool any = false;
+
+    for (oflabel j = bcfOffset[c]; j < bcfOffset[c + 1]; ++j)
+    {
+        const oflabel bf = bcfFace[j];
+        if (bf < 0 || bNbrCell[bf] < 0) continue;
+        const ofscalar jf = jump[bf];
+        if (jf == (ofscalar)0) continue;
+        s += boundaryCoeffs[bf]*jf;
+        any = true;
+    }
+
+    if (any) source[c] += s;
 }

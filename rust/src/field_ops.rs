@@ -188,6 +188,8 @@ pub fn correct_boundary_conditions(
             .arg(&m.b_delta_coeffs)
             .arg(&m.b_nbr_cell)
             .arg(&m.b_weights)
+            // SPEC-LIT (120.2b): the cyclic jump a coupled face sees.
+            .arg(&f.jump)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }

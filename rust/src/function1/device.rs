@@ -15,7 +15,9 @@
 //! Robin-triple entry is a Function1 of time, applied once per step after
 //! [`F1Clock::advance`] (SPEC-LIT 120.1's table of conditions); and
 //! [`DeviceTvMapped`], SPEC-LIT 120.11's `timeVaryingMappedFixedValue`
-//! patch, linear in time between per-face slabs on the same clock.
+//! patch, linear in time between per-face slabs on the same clock; and
+//! [`DeviceCyclicJumps`], SPEC-LIT 120.2's cyclic jump pairs, whose fan and
+//! porousBafflePressure laws are re-evaluated from the face flux.
 //!
 //! Every evaluation is in f64 in both builds - a time of 1000 s stepped by
 //! 1e-4 s is not an f32 number - and the unit is compiled with `-fmad=false`,
@@ -48,11 +50,13 @@ pub struct F1Kernels {
     apply_vector: CudaFunction,
     tv_scalar: CudaFunction,
     tv_vector: CudaFunction,
+    cyclic_jump: CudaFunction,
 }
 
 impl F1Kernels {
-    /// Load the six kernels of the module (the last two are SPEC-LIT
-    /// 120.11's `timeVaryingMappedFixedValue` apply).
+    /// Load the seven kernels of the module (the fifth and sixth are SPEC-LIT
+    /// 120.11's `timeVaryingMappedFixedValue` apply, the seventh SPEC-LIT
+    /// 120.2's cyclic jump).
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let k = KernelSet::new(gpu, crate::kernels::FUNCTION1)?;
         Ok(Self {
@@ -62,6 +66,7 @@ impl F1Kernels {
             apply_vector: k.func("f1ApplyVector")?,
             tv_scalar: k.func("f1TvApplyScalar")?,
             tv_vector: k.func("f1TvApplyVector")?,
+            cyclic_jump: k.func("f1CyclicJump")?,
         })
     }
 }
@@ -275,11 +280,15 @@ impl DeviceF1 {
 // ==========================================================================
 
 /// Which Robin-triple entry a [`TimedPatch`] writes (SPEC-LIT 120.1's table
-/// of conditions): the fixed-value or the fixed-gradient target.
+/// of conditions): the fixed-value or the fixed-gradient target - or, for
+/// SPEC-LIT 120.2's `uniformJump`, the field's cyclic jump array, which is
+/// not a triple entry (a coupled face has none it reads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum F1Target {
     RefValue,
     RefGrad,
+    /// `GpuScalarField::jump`; scalar fields only.
+    Jump,
 }
 
 /// A patch whose Robin-triple entry is a Function1 of time (SPEC-LIT 120.1's
@@ -645,6 +654,140 @@ impl DeviceTvMapped {
                 .arg(&self.n)
                 .arg(&mut *dst)
                 .launch(cfg_for(self.n as usize))?;
+        }
+        Ok(())
+    }
+}
+
+// ==========================================================================
+//  The cyclic jumps (SPEC-LIT 120.2)
+// ==========================================================================
+
+/// One flux-dependent pair on the device: its law, its Function1 (a
+/// constant zero for the porous law, which reads no Function1), and its two
+/// face ranges.
+#[derive(Debug)]
+struct DeviceJumpRule {
+    patch: String,
+    mode: i32,
+    f: DeviceF1,
+    r_visc: f64,
+    r_inert: f64,
+    owner_start: i32,
+    nbr_start: i32,
+    n: i32,
+}
+
+/// SPEC-LIT 120.2: a field's cyclic jump pairs on the device. `Some` on
+/// [`crate::GpuScalarField::cyclic_jump`] exactly when the field carries a
+/// jump pair of any kind - which is when its pressure assembly adds
+/// `ldu_ops::add_jump_source` - and holding the flux-dependent pairs (fan,
+/// porousBafflePressure) that [`Self::refresh`] re-evaluates. A fixedJump or
+/// a uniformJump pair holds no rule here: its jump array is written at setup
+/// or by the clock's `TimedBcs`.
+#[derive(Debug)]
+pub struct DeviceCyclicJumps {
+    k: CudaFunction,
+    rules: Vec<DeviceJumpRule>,
+}
+
+impl DeviceCyclicJumps {
+    /// Upload the flux-dependent rules (possibly none) of a field that
+    /// carries a jump pair.
+    pub fn upload(gpu: &Gpu, rules: &[crate::field::cyclic_jump::CyclicJumpRule]) -> Result<Self> {
+        use crate::field::cyclic_jump::JumpLaw;
+        let k = F1Kernels::new(gpu)?.cyclic_jump;
+        let zero = F1 {
+            n_c: 1,
+            f: Function1::Constant { v: [0.0; 3] },
+            setting: "porousBafflePressure".to_string(),
+        };
+        let mut out = Vec::with_capacity(rules.len());
+        for r in rules {
+            let label = |x: usize, what: &str| -> Result<i32> {
+                i32::try_from(x).map_err(|_| {
+                    Error::Config(format!("{}: the {what} {x} does not fit a kernel label", r.patch))
+                })
+            };
+            let (f, r_visc, r_inert) = match &r.law {
+                JumpLaw::Fan(f) => {
+                    if f.n_c != 1 {
+                        return Err(Error::Config(format!(
+                            "{}: a fan jumpTable is a scalar Function1, this one has {} components",
+                            r.patch, f.n_c
+                        )));
+                    }
+                    (DeviceF1::upload(gpu, f)?, 0.0, 0.0)
+                }
+                JumpLaw::Porous { r_visc, r_inert } => {
+                    (DeviceF1::upload(gpu, &zero)?, *r_visc, *r_inert)
+                }
+            };
+            out.push(DeviceJumpRule {
+                patch: r.patch.clone(),
+                mode: r.law.mode(),
+                f,
+                r_visc,
+                r_inert,
+                owner_start: label(r.owner_start, "owner start")?,
+                nbr_start: label(r.nbr_start, "neighbour start")?,
+                n: label(r.n, "face count")?,
+            });
+        }
+        Ok(Self { k, rules: out })
+    }
+
+    /// The flux-dependent pairs held, for a caller deciding whether to
+    /// refresh at all.
+    pub fn n_flux_rules(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// (120.2g)/(120.2h) from the current face flux: for every pair face `k`,
+    /// `u = phi_b[a_k]/mag_sf[a_k]` in f64, `J = F(u)` or the porous drop,
+    /// `jump[a_k] = (Scalar)(-J)` and `jump[b_k] = (Scalar)J` - bit for bit
+    /// [`crate::field::cyclic_jump::CyclicJumpRule::jumps`]. One launch per
+    /// pair; nothing downloads, syncs or allocates.
+    pub fn refresh(
+        &self,
+        gpu: &Gpu,
+        phi_b: &DevBuf<Scalar>,
+        mag_sf: &DevBuf<Scalar>,
+        jump: &mut DevBuf<Scalar>,
+    ) -> Result<()> {
+        for r in &self.rules {
+            if r.n == 0 {
+                continue;
+            }
+            // The kernel writes both ranges with no device-side bounds
+            // check; refuse a jump array or flux of the wrong field by name.
+            let end = (r.owner_start.max(r.nbr_start) + r.n) as usize;
+            if end > jump.len() || end > phi_b.len() || end > mag_sf.len() {
+                return Err(Error::Config(format!(
+                    "{}: the cyclic jump runs to boundary face {end}, past the \
+                     arrays it was handed ({} / {} / {})",
+                    r.patch,
+                    jump.len(),
+                    phi_b.len(),
+                    mag_sf.len()
+                )));
+            }
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&self.k)
+                    .arg(&r.f.code)
+                    .arg(&r.f.coef)
+                    .arg(&r.mode)
+                    .arg(&r.r_visc)
+                    .arg(&r.r_inert)
+                    .arg(&r.owner_start)
+                    .arg(&r.nbr_start)
+                    .arg(&r.n)
+                    .arg(phi_b)
+                    .arg(mag_sf)
+                    .arg(&mut *jump)
+                    .launch(cfg_for(r.n as usize))?;
+            }
         }
         Ok(())
     }

@@ -39,7 +39,8 @@
       gradient
     V. Venkatakrishnan, AIAA 93-0880 (1993) - its differentiable variant
   and from rust/SPEC-LIT.md sections 2, 3, 4, 6, 7, 11 and 12, which cite all
-  of the above. No GPL-licensed source was consulted.
+  of the above; section 120.2 for the cyclic jump j_f a coupled face
+  carries (fvCoupledNbr). No GPL-licensed source was consulted.
 
   ---------------------------------------------------------------------------
   TWO STRUCTURAL RULES, which the rest of this file obeys without exception.
@@ -145,6 +146,17 @@ OFGPU_DEV ofscalar bcGradBoundary
 }
 
 OFGPU_DEV ofscalar ofabs_(ofscalar a) { return a < 0 ? -a : a; }
+
+//- SPEC-LIT 120.2, (120.2b)/(120.2c): the far cell of a coupled face as this
+//  side sees it, psi_N + j_f, where j_f is the field's per-face jump array
+//  (`GpuScalarField::jump`) - the jump of a fixedJump / uniformJump / fan /
+//  porousBafflePressure pair, and 0 on every other face. A select, so a face
+//  with no jump reads psi_N itself, bit for bit. The twin of field.cu's
+//  fldCoupledNbr.
+OFGPU_DEV ofscalar fvCoupledNbr(ofscalar psiN, ofscalar j)
+{
+    return (j != (ofscalar)0) ? psiN + j : psiN;
+}
 
 
 //- The over-relaxed correction vector of a BOUNDARY face.
@@ -1207,6 +1219,7 @@ extern "C" __global__ void fvLapNonOrth
     const ofscalar* __restrict__ bDeltaCoeffs,
     const ofvec3* __restrict__ bNonOrthCorr,
     const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,      // the field's jump j_f (120.2c)
     const ofscalar* __restrict__ bWeights,
     const ofscalar* __restrict__ fr,
     const ofscalar* __restrict__ refValue,
@@ -1283,7 +1296,7 @@ extern "C" __global__ void fvLapNonOrth
             const ofvec3 gf = faceGrad(gP, gradPsi[n], bWeights[b]);
 
             corr = dot3(bNonOrthCorr[b], gf);
-            orth = bDeltaCoeffs[b]*(psi[n] - psi[c]);
+            orth = bDeltaCoeffs[b]*(fvCoupledNbr(psi[n], bJump[b]) - psi[c]);
         }
         else
         {
@@ -1828,6 +1841,7 @@ extern "C" __global__ void fvGradScalarLeastSquares
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,      // the field's jump j_f (120.2c)
     const oflabel* __restrict__ bKind,
     const oflabel* __restrict__ cfOffset,
     const oflabel* __restrict__ cfFace,
@@ -1888,8 +1902,9 @@ extern "C" __global__ void fvGradScalarLeastSquares
         ofscalar diff = 0;
         if (kind != OFPATCH_EMPTY)
         {
-            diff = (kind == OFPATCH_CYCLIC && nbr >= 0) ? psi[nbr] - psiP
-                                                        : bpsi[b] - psiP;
+            diff = (kind == OFPATCH_CYCLIC && nbr >= 0)
+                 ? fvCoupledNbr(psi[nbr], bJump[b]) - psiP
+                 : bpsi[b] - psiP;
         }
 
         const ofscalar dv = w2*diff;
@@ -2105,6 +2120,7 @@ extern "C" __global__ void fvGradLimitScalar
     const oflabel* __restrict__ owner,
     const oflabel* __restrict__ neighbour,
     const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,      // the field's jump j_f (120.2c)
     const oflabel* __restrict__ bKind,
     const oflabel* __restrict__ cfOffset,
     const oflabel* __restrict__ cfFace,
@@ -2139,8 +2155,8 @@ extern "C" __global__ void fvGradLimitScalar
             const oflabel b = bcfFace[j];
             if (bKind[b] == OFPATCH_EMPTY) continue;
             const oflabel nbr = bNbrCell[b];
-            const ofscalar v =
-                (bKind[b] == OFPATCH_CYCLIC && nbr >= 0) ? psi[nbr] : bpsi[b];
+            const ofscalar v = (bKind[b] == OFPATCH_CYCLIC && nbr >= 0)
+                             ? fvCoupledNbr(psi[nbr], bJump[b]) : bpsi[b];
             lo = ofmin_(lo, v); hi = ofmax_(hi, v);
         }
         relaxBounds(coeff, &lo, &hi);
@@ -2179,8 +2195,8 @@ extern "C" __global__ void fvGradLimitScalar
         if (mode == OFGRADMODE_FACE)
         {
             const oflabel nbr = bNbrCell[b];
-            const ofscalar v =
-                (bKind[b] == OFPATCH_CYCLIC && nbr >= 0) ? psi[nbr] : bpsi[b];
+            const ofscalar v = (bKind[b] == OFPATCH_CYCLIC && nbr >= 0)
+                             ? fvCoupledNbr(psi[nbr], bJump[b]) : bpsi[b];
             flo = ofmin_(psiP, v); fhi = ofmax_(psiP, v);
             relaxBounds(coeff, &flo, &fhi);
         }
@@ -2510,6 +2526,7 @@ extern "C" __global__ void fvSnGradFluxBoundary
     const ofscalar* __restrict__ refGrad,
     const oflabel* __restrict__ bFaceCells,
     const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,      // the field's jump j_f (120.2c)
     const oflabel* __restrict__ bKind,
     oflabel nbf
 )
@@ -2532,7 +2549,10 @@ extern "C" __global__ void fvSnGradFluxBoundary
     {
         const oflabel n = bNbrCell[i];
         const ofscalar coef = g*delta;
-        bphi[i] = (n >= 0) ? coef*(psi[n] - psi[o]) : (ofscalar)0;
+        // SPEC-LIT (120.2c): across a jump the far cell is psi_N + j_f, so
+        // this flux is the one fvLapBoundary + lduAddJumpSource assembled.
+        bphi[i] = (n >= 0) ? coef*(fvCoupledNbr(psi[n], bJump[i]) - psi[o])
+                           : (ofscalar)0;
         return;
     }
 
@@ -2598,6 +2618,7 @@ extern "C" __global__ void fvSnGradCorrBoundary
     const ofscalar* __restrict__ bDeltaCoeffs,
     const ofvec3* __restrict__ bNonOrthCorr,
     const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,      // the field's jump j_f (120.2c)
     const ofscalar* __restrict__ bWeights,
     const ofscalar* __restrict__ fr,
     const ofscalar* __restrict__ refValue,
@@ -2629,7 +2650,7 @@ extern "C" __global__ void fvSnGradCorrBoundary
 
         const ofvec3 gf = faceGrad(gradPsi[o], gradPsi[n], bWeights[i]);
         corr = dot3(bNonOrthCorr[i], gf);
-        orth = bDeltaCoeffs[i]*(psi[n] - psi[o]);
+        orth = bDeltaCoeffs[i]*(fvCoupledNbr(psi[n], bJump[i]) - psi[o]);
     }
     else
     {

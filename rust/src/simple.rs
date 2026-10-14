@@ -992,6 +992,24 @@ impl<'m> Simple<'m> {
                 field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
             }
 
+            // SPEC-LIT 120.2: a fan or porousBafflePressure pair's jump,
+            // (120.2g)/(120.2h), from the flux the last corrector left - a
+            // Picard step, re-taken every corrector. A fixedJump or
+            // uniformJump pair has no flux law and launches nothing here.
+            let refreshed = {
+                let Self { p, phi, .. } = self;
+                match &p.cyclic_jump {
+                    Some(cj) if cj.n_flux_rules() > 0 => {
+                        cj.refresh(gpu, &phi.bf, &m.b_mag_sf, &mut p.jump)?;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if refreshed {
+                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+            }
+
             // The non-orthogonal correctors: the same `phi_HbyA`, the
             // explicit correction re-evaluated against the latest `p`
             // (Jasak §3.4.3). A different loop doing a different job.
@@ -1136,6 +1154,14 @@ impl<'m> Simple<'m> {
                     1.0,
                 )?;
             }
+        }
+
+        // SPEC-LIT 120.2, (120.2d): a cyclic jump's known half,
+        // `boundaryCoeffs * j` on both rows of the couple. Launched only for
+        // a pressure carrying a jump pair, so every other run's source is
+        // untouched.
+        if self.p.cyclic_jump.is_some() {
+            ldu_ops::add_jump_source(gpu, &self.lduk, &mut self.a_p, m, &self.p.jump)?;
         }
 
         // `accumulate`, because the non-orthogonal correction is already in

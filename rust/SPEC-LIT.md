@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 93 names of
+accepts it on the field the row is asked on, and it is one of the 95 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39121,6 +39121,8 @@ row, row for row.
 | mapped inflow | `mappedFixedValue` | implemented | — | — | `mapped`'s other spelling, the same condition |
 | mapped inflow | `turbulentInlet` | implemented | — | — | (120.10e)-(120.10h), `referenceField` plus a seeded fluctuation of RMS `fluctuationScale` times the reference's magnitude and memory `1 - alpha` |
 | mapped inflow | `timeVaryingMappedFixedValue` | implemented | — | — | (120.11a)-(120.11d), `constant/boundaryData/<patch>` interpolated by a planar Delaunay with barycentric weights at setup, and linearly in time on the device clock |
+| jump | `fixedJump` | implemented | — | — | (120.2a)-(120.2e), a pressure jump across a cyclic pair, carried by the per-face jump array |
+| jump | `uniformJump` | implemented | — | — | (120.2f), the jump a Function1 of time on the device clock |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
@@ -39128,8 +39130,6 @@ row, row for row.
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
 | synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
 | synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
-| jump | `fixedJump` | planned | BC-17 | — | — |
-| jump | `uniformJump` | planned | BC-17 | — | — |
 | coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
@@ -39394,6 +39394,156 @@ its count by one). `S2`/`C2` agree with `sin(2 pi c)`/`cos(2 pi c)` to
 2e-15 absolute on `c in [0, 1)` (`function1::tests::s2_c2_match_std_to_2e_15`).
 
 No GPL-licensed source was consulted.
+
+### 120.2 Cyclic jumps - a pressure jump across a cyclic pair, fixed, timed, or a function of the face flux
+
+BC-17 implements `fixedJump` and `uniformJump`, and gives `fan` and
+`porousBafflePressure` their second meaning: on one half of a cyclic pair they
+are a jump across the couple whose size is a function of the face flux. On an
+open patch the two keep their §52 and §53.3 meaning, unchanged; the patch kind
+of `constant/polyMesh/boundary` is what tells the two meanings apart. The names
+are from the §120 user guides, by name only. The algebra below is ours. It is
+the §34 couple with a known offset, and the porous law is the one §53.1
+already derives from
+
+* J. C. Ward, "Turbulent flow in porous media", *J. Hydraulics Division, ASCE*
+  **90**(5) (1964) 1-12, DOI `10.1061/JYCEAJ.0001096` - the Darcy-Forchheimer
+  drop of (S53.1), integrated through a sheet of thickness `L`.
+
+No GPL-licensed source was consulted, and no description or formula was taken
+from either user guide.
+
+**The pair and the sign.** A cyclic pair `(a, b)` has `a` as the patch of the
+lower index in the boundary list, its owner. Face `k` of `a` pairs face `k`
+of `b`, as `mesh::geometry::cyclic_pairing` pairs them. The jump is the rise
+crossing from `a` into `b`:
+
+```
+    J = psi(b side) - psi(a side)                                   (120.2a)
+    j_a = -J ,   j_b = +J
+```
+
+`j_f` is the field's per-face jump array, `GpuScalarField::jump`. It is the
+amount by which the far cell of coupled face `f` is offset as this side sees
+it. The negation is exact, so the pair stays antisymmetric after any rounding.
+Whether OpenFOAM's own sign convention for `jump` is this one was not checked,
+because its source is not read. A case ported from OpenFOAM whose jump comes
+out reversed should flip the sign of `jump`.
+
+**Where the jump enters.** A coupled face's only change is that the far cell
+is seen at `psi_N + j_f`:
+
+```
+    psi_f   = w psi_P + (1 - w)(psi_N + j_f)                        (120.2b)
+    snGrad  = Delta_b (psi_N + j_f - psi_P)                         (120.2c)
+```
+
+(120.2b) is `fldCorrectBcScalar`'s cyclic branch. (120.2c) is the coupled
+branch of `fvSnGradFluxBoundary`, the flux `Simple` corrects `phi` with and
+builds the pressure force from. It is also the orthogonal part that the two
+non-orthogonal kernels compare their correction against, the least-squares
+gradient's coupled difference, and the limiter's coupled bound. The matrix
+keeps the coupled term `-bc_f psi_N` inside `lduAmul`, unchanged, so the
+matrix and its §48 symmetry are what they were. The known half moves to the
+source:
+
+```
+    source_P += bc_f j_f      over every coupled face f of cell P   (120.2d)
+```
+
+This is `lduAddJumpSource`, the jump source on both rows of the couple, with
+`j_b = -j_a`. A face with `j_f = 0` is skipped, and every read above is a
+select (`j != 0 ? psi_N + j : psi_N`) rather than `psi_N + 0`. A plain cyclic
+face therefore reads exactly what it read before: the `ofgpu-validate
+-sections 1-40` rows are identical to the pre-unit build, 877 of 877
+(`tools/f64_identity.py rows`).
+
+The jump is a separate array rather than the coupled face's unused `refValue`.
+Drivers and validation fixtures write the triple wholesale, and a stray value
+there would become a jump. This is the one condition in §120 that is not a §4
+triple rewrite, because a coupled face reads no triple. docs/17 §5.2.1 is
+departed from here for that reason.
+
+**The four jumps.** All four are read from `a`'s entry. `b` may carry the same
+type with the defining entries absent or textually equal, as OpenFOAM's own
+cases write both halves, or it may be plain `cyclic`.
+
+```
+    fixedJump:   J_k = jump_k  (`jump`, uniform or a per-face list)  (120.2e)
+    uniformJump: J   = F(t),   F the `jumpTable` Function1 of time   (120.2f)
+    fan:         J_k = F(u_k), F the `jumpTable` Function1 of u      (120.2g)
+    porousBafflePressure:
+                 J_k = -(nu D L + (1/2) I L |u_k|) u_k               (120.2h)
+    u_k = phi_{a,k} / |S_{a,k}|    (the owner face's normal velocity; 0 on a
+                                    face of no area)
+```
+
+(120.2f) is BC-06's device Function1 on the clock. It is applied as a
+`TimedPatch` with target `F1Target::Jump`, base 0, and `w = -1` on `a` and
+`+1` on `b`, so both halves round the same `F(t)` (§120.1). A constant
+`jumpTable` is its fixedJump twin.
+
+(120.2h) is (S53.1) in kinematic units, with `D = 1/alpha` (1/m^2), `I = C2`
+(1/m) and `L = length` (m); `nu` comes from `BcInputs::nu`. (120.2g) and
+(120.2h) are re-evaluated once per corrector from the flux the last corrector
+left, by `f1CyclicJump` in `cuda/function1.cu` (f64, fmad-off). The host twin
+`CyclicJumpRule::jumps` matches it bit for bit.
+
+**The flux law is a Picard step.** The new jump is computed from the old flux,
+explicitly. In a pressure-driven loop the iteration contracts when `|dJ/du|`
+is below the conductance of the path it drives, which is the ratio 0.25 of the
+fan gate and 0.6 of the porous gate below. A stiff baffle that a pressure
+difference drives should use §53.2's implicit internal-face form, which is
+unconditionally stable. Where the flux is set by an inlet, as in the SIMPLE
+gate, the step converges at once. The fan's argument is the owner face's
+normal velocity, not the patch flow rate of §52, so the curve does not depend
+on the mesh. A `jumpTable` whose table asks to `error` or `warn` outside its
+points is refused, naming `outOfBounds clamp`, because the range of `u` is not
+known at setup.
+
+**Refused by name.** The following are refused, each with an error that names
+it:
+
+* `fixedJump` or `uniformJump` on a patch that is not half of a cyclic pair.
+* Any of the four on a field that is not the pressure (`BcKind::from_name`
+  and the setup). The jump source enters the pressure assembly only.
+* A pair whose jump is written on `b` only.
+* Halves that name different jumps, or whose defining entries differ.
+* `fanPressure` or `porousJumpPressure` on a pair (the coupled spellings are
+  `fan` and `porousBafflePressure`).
+* A jump on a vector field.
+* A cyclic patch with no partner, or paired with itself.
+* A negative `D`, `I` or `length`.
+* `D > 0` with no `nu`.
+* A time-varying `uniformJump` on a setup path with no clock.
+* Any jump when the caller's `BcInputs::jumps` is false.
+
+`BcInputs::jumps` promises that the pressure loop adds `ldu_ops::add_jump_source`
+and refreshes the flux laws each corrector. `Simple::correct_outer` does both,
+and no driver passes it yet: every driver refuses the four names on a cyclic
+pair, as with BC-06's timed path and BC-09's `advective`.
+
+**Gate (tests/bc_cyclic_jump.rs, both builds).** The duct is 16 cells on
+`[0, 1]` with its internal face at `x = 0.5` split into a baffle pair, `p = 1`
+and `p = 0` at the ends, and `laplacian(1, p) = 0`. Its answer is the
+piecewise-linear `p = 1 - G x (+ J past the baffle)`, `G = 1 + J`, with the
+flow `u = G` through every face.
+
+| test | measured (f64) | measured (single) | held to (class R) |
+|---|---|---|---|
+| fixedJump `J = 0.25`: cells against the line | 6.1e-16 | 6.0e-8 | 1e-12 / 1e-5 |
+| the two baffle face values `J` apart | 0 | 0 | 1e-12 / 1e-5 |
+| every face's flow against `G A` | 4.5e-17 | 1.2e-8 | 1e-10 / 1e-5 |
+| matrix symmetric (§48) | yes | yes | exact |
+| `J = 0` against the plain cyclic pair | bitwise | bitwise | bitwise |
+| uniformJump `table ((0 0.125) (1 0.375))` at `t = 0.5` | jump array `-0.25/+0.25` bitwise, cells 6.1e-16 | bitwise, 6.0e-8 | 1e-12 / 1e-5 |
+| porousBafflePressure, `nu D L = I L/2 = 0.25`: `u` against `(-(1+a) + sqrt((1+a)^2 + 4b))/(2b)` | 0.701562118716444, 2.0e-14 off, 61 steps | 2.0e-6 off | 1e-10 / 1e-5 |
+| fan `J = 0.5 - 0.25 u`: `u` against `1.5/1.25 = 1.2` | 1.6e-14 off, 23 steps | 8.3e-8 off | 1e-10 / 1e-5 |
+| device refresh against `CyclicJumpRule::jumps` | bitwise at every step | bitwise | bitwise |
+| SIMPLE duct, inlet `U0 = 1`, porous `nu D L = I L/2 = 0.1`: upstream `p = -J(U0) = 0.2`, downstream 0 | 3.3e-15, `U` 6.7e-16, 102 iterations | 2.4e-7, `U` 6.0e-8, 95 iterations | 1e-10 / 1e-5 |
+
+Reversing the ends reverses both the flow and the drop. The refusals above
+are each tested by name.
 
 ### 120.3 The wall and slip family - one tensorial mixed condition, a rotating wall, and a shear-stress wall
 

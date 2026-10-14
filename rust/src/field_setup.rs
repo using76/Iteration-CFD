@@ -156,6 +156,17 @@ pub struct BoundaryTriple<T> {
     /// [`TimedBcs`] the `*_timed` setup returns and applied after each
     /// `F1Clock::advance`.
     pub tv_rules: Vec<crate::field::tvmapped::TvMappedRule>,
+    /// SPEC-LIT 120.2: `[n_bf]` the cyclic jump array `j_f` (120.2a) -
+    /// `-J` on the owner patch of a jump pair, `+J` on its partner, zero on
+    /// every other face (and on every face of a vector field).
+    pub jump: Vec<Scalar>,
+    /// SPEC-LIT 120.2: the flux-dependent pairs (fan, porousBafflePressure on
+    /// a cyclic pair), re-evaluated once per corrector through
+    /// `DeviceCyclicJumps::refresh`.
+    pub jump_rules: Vec<crate::field::cyclic_jump::CyclicJumpRule>,
+    /// SPEC-LIT 120.2: the field carries a jump pair of any kind, so its
+    /// pressure assembly must add the jump source.
+    pub has_jump: bool,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -171,8 +182,24 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             mapped_rules: Vec::new(),
             turbulent_rules: Vec::new(),
             tv_rules: Vec::new(),
+            jump: vec![0.0; n],
+            jump_rules: Vec::new(),
+            has_jump: false,
         }
     }
+}
+
+/// SPEC-LIT 120.2: the device side of a scalar triple's cyclic jumps -
+/// `None` for a field with no jump pair, so nothing is loaded or launched.
+fn upload_cyclic_jump(
+    gpu: &Gpu,
+    has_jump: bool,
+    rules: &[crate::field::cyclic_jump::CyclicJumpRule],
+) -> Result<Option<crate::function1::DeviceCyclicJumps>> {
+    if !has_jump {
+        return Ok(None);
+    }
+    Ok(Some(crate::function1::DeviceCyclicJumps::upload(gpu, rules)?))
 }
 
 // ==========================================================================
@@ -278,6 +305,15 @@ pub struct BcInputs<'a> {
     /// 13.4). `turbulentHeatFluxTemperature` is NOT gated on it - it rides
     /// §32.2's fixed-flux wiring, which every `Energy` already runs.
     pub thermal: bool,
+    /// SPEC-LIT 120.2: the caller's PRESSURE loop honours a cyclic jump - it
+    /// adds `ldu_ops::add_jump_source` to the assembly and, for the fan and
+    /// porousBafflePressure pairs, calls `DeviceCyclicJumps::refresh` from
+    /// the current flux once per corrector. `Simple::correct_outer` does
+    /// both. False - the default, which every driver passes today - refuses
+    /// the jump names on a cyclic pair: a jump the matrix never sees would be
+    /// read by the face value and the flux but not by the equation, a
+    /// condition half applied (SPEC-LIT 13.4).
+    pub jumps: bool,
 }
 
 impl<'a> BcInputs<'a> {
@@ -548,6 +584,8 @@ impl TimedBcs {
             match p.target() {
                 F1Target::RefValue => p.apply_scalar(gpu, k, clock, &mut f.ref_value)?,
                 F1Target::RefGrad => p.apply_scalar(gpu, k, clock, &mut f.ref_grad)?,
+                // SPEC-LIT 120.2: a uniformJump pair's half.
+                F1Target::Jump => p.apply_scalar(gpu, k, clock, &mut f.jump)?,
             }
         }
         for p in &self.tv {
@@ -568,6 +606,15 @@ impl TimedBcs {
             match p.target() {
                 F1Target::RefValue => p.apply_vector(gpu, k, clock, &mut f.ref_value)?,
                 F1Target::RefGrad => p.apply_vector(gpu, k, clock, &mut f.ref_grad)?,
+                // SPEC-LIT 120.2: a jump is a pressure's; the vector setup
+                // never builds one.
+                F1Target::Jump => {
+                    return Err(Error::Config(
+                        "a cyclic jump on a vector field: SPEC-LIT 120.2 puts it on \
+                         the pressure only"
+                            .to_string(),
+                    ))
+                }
             }
         }
         for p in &self.tv {
@@ -853,6 +900,322 @@ fn scalar_timed_seed(
             ref_grad: vec![0.0; n],
         }
     })
+}
+
+// ==========================================================================
+//  The cyclic jumps (SPEC-LIT 120.2)
+// ==========================================================================
+
+/// The four names that mean a jump across a cyclic pair (SPEC-LIT 120.2).
+/// `fan` and `porousBafflePressure` keep their §52/§53 meaning on an open
+/// patch; on one half of a cyclic pair they are the coupled jump.
+const CYCLIC_JUMP_NAMES: [&str; 4] = ["fixedJump", "uniformJump", "fan", "porousBafflePressure"];
+
+/// The keys whose text defines each jump - compared between the two halves
+/// of a pair, which may both carry the entry (as OpenFOAM's own cases write
+/// it) but may not disagree.
+fn jump_keys(name: &str) -> &'static [&'static str] {
+    match name {
+        "fixedJump" => &["jump"],
+        "uniformJump" | "fan" => &["jumpTable"],
+        "porousBafflePressure" => &["D", "I", "length"],
+        _ => &[],
+    }
+}
+
+fn jump_refused(field: &str, patch: &str, msg: String) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!("{patch}: {msg} (SPEC-LIT 120.2)"),
+    }
+}
+
+/// SPEC-LIT 120.2: a jump name on a VECTOR field, refused by name before the
+/// topology override would quietly read it as a plain cyclic couple.
+fn refuse_vector_jump(spec: Option<&PatchFieldSpec>, patch: &str, field: &str) -> Result<()> {
+    let Some(s) = spec else { return Ok(()) };
+    let name = s.type_name.as_str();
+    if CYCLIC_JUMP_NAMES.contains(&name) || name == "fanPressure" || name == "porousJumpPressure" {
+        return Err(jump_refused(
+            field,
+            patch,
+            format!(
+                "`{name}` is a jump in the PRESSURE `p`; {field} is a vector field, \
+                 which crosses a cyclic pair as the plain `cyclic` couple"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 120.2: write every cyclic pair's jump array, after the patch loop
+/// has seeded each half as the plain couple `topology_override` makes it.
+///
+/// The pair `(a, b)` is taken from its owner `a`, the patch of the lower
+/// index; face `k` of `a` pairs face `k` of `b`. The jump
+/// `J = psi(b side) - psi(a side)` (120.2a) is read from `a`'s entry; `b`
+/// may carry the same type with the defining entries absent or textually
+/// equal, or be plain `cyclic`. The array gets `-J` on `a` and `+J` on `b`.
+fn resolve_cyclic_jumps(
+    out: &mut BoundaryTriple<Scalar>,
+    m: &HostMesh,
+    raw: &RawScalarField,
+    inputs: &BcInputs,
+    f1: Option<&F1Setup>,
+    timed: &mut Vec<TimedPatch>,
+) -> Result<()> {
+    let field = raw.name.as_str();
+    for (ia, pa) in m.patches.iter().enumerate() {
+        if pa.kind != PatchKind::Cyclic {
+            continue;
+        }
+        let sa = raw.spec(&pa.name)?;
+        let ta = sa.map(|s| s.type_name.as_str()).unwrap_or("cyclic");
+
+        // The open-patch spellings have no coupled meaning here.
+        if ta == "fanPressure" || ta == "porousJumpPressure" {
+            let coupled = if ta == "fanPressure" { "fan" } else { "porousBafflePressure" };
+            return Err(jump_refused(
+                field,
+                &pa.name,
+                format!(
+                    "`{ta}` is the open-patch condition of SPEC-LIT {}; on a cyclic \
+                     pair the jump is `{coupled}`",
+                    if ta == "fanPressure" { "52" } else { "53.3" }
+                ),
+            ));
+        }
+        let a_jump = CYCLIC_JUMP_NAMES.contains(&ta);
+
+        let Some(ib) = pa.nbr_patch else {
+            if a_jump {
+                return Err(jump_refused(
+                    field,
+                    &pa.name,
+                    format!("`{ta}` needs a cyclic pair, and this cyclic patch names no neighbourPatch"),
+                ));
+            }
+            continue;
+        };
+        if ib == ia {
+            if a_jump {
+                return Err(jump_refused(
+                    field,
+                    &pa.name,
+                    format!("`{ta}` needs two patches, and this cyclic patch is paired with itself"),
+                ));
+            }
+            continue;
+        }
+        let pb = &m.patches[ib];
+        let sb = raw.spec(&pb.name)?;
+        let tb = sb.map(|s| s.type_name.as_str()).unwrap_or("cyclic");
+        let b_jump = CYCLIC_JUMP_NAMES.contains(&tb);
+
+        if ib < ia {
+            // `pa` is the neighbour half; the owner half `pb` was resolved
+            // already, unless the jump is written here only.
+            if b_jump || !a_jump {
+                continue;
+            }
+            return Err(jump_refused(
+                field,
+                &pa.name,
+                format!(
+                    "`{ta}` is written on the neighbour half of the pair and `{}` (the \
+                     owner, first in the boundary list) is `{tb}`; the jump \
+                     J = psi({}) - psi({}) is read from the owner's entry, so write it there",
+                    pb.name, pa.name, pb.name
+                ),
+            ));
+        }
+        if !a_jump {
+            // A jump on `b` only is refused when the loop reaches `b`.
+            continue;
+        }
+        let sa = sa.expect("a jump name came from an entry");
+        if b_jump && tb != ta {
+            return Err(jump_refused(
+                field,
+                &pa.name,
+                format!("the pair's two halves name different jumps, `{ta}` and `{tb}` on `{}`", pb.name),
+            ));
+        }
+        if b_jump {
+            let sb = sb.expect("a jump name came from an entry");
+            for key in jump_keys(ta) {
+                let in_b = sb.extra.get(*key).or_else(|| sb.dicts.get(*key));
+                let in_a = sa.extra.get(*key).or_else(|| sa.dicts.get(*key));
+                if in_b.is_some() && in_b != in_a {
+                    return Err(jump_refused(
+                        field,
+                        &pa.name,
+                        format!(
+                            "`{key}` differs between the pair's halves `{}` and `{}`; the \
+                             jump is read from the owner `{}`, so the neighbour's entry \
+                             must be absent or the same",
+                            pa.name, pb.name, pa.name
+                        ),
+                    ));
+                }
+            }
+        }
+        if !crate::field::is_pressure_field(field) {
+            return Err(jump_refused(
+                field,
+                &pa.name,
+                format!(
+                    "`{ta}` is a jump in the PRESSURE `p`, whose assembly is the only one \
+                     that adds the jump source; on {field} it would reach the face value \
+                     and never the matrix"
+                ),
+            ));
+        }
+        if !inputs.jumps {
+            return Err(jump_refused(
+                field,
+                &pa.name,
+                format!(
+                    "`{ta}` needs a pressure loop that adds the jump source and refreshes \
+                     a flux law each corrector (`BcInputs::jumps`, which \
+                     `Simple::correct_outer` honours), and this setup was not given one"
+                ),
+            ));
+        }
+
+        let n = pa.size;
+        let (a0, b0) = (pa.start, pb.start);
+        let setting = |key: &str| format!("{field}: boundaryField/{}/{key}", pa.name);
+        let mut jj: Vec<Scalar> = vec![0.0; n];
+
+        match ta {
+            "fixedJump" => {
+                let Some(text) = sa.extra.get("jump") else {
+                    return Err(jump_refused(
+                        field,
+                        &pa.name,
+                        "fixedJump needs a `jump` entry and the patch has none".to_string(),
+                    ));
+                };
+                jj = scalar_entry_faces(text, "jump", n, &pa.name, field)?;
+            }
+            "uniformJump" => {
+                let st = setting("jumpTable");
+                let entries = crate::function1::patch_entries(sa, &st)?;
+                let Some(f) = F1::parse(&entries, "jumpTable", 1, &st, f1.and_then(|s| s.case_dir))?
+                else {
+                    return Err(jump_refused(
+                        field,
+                        &pa.name,
+                        "uniformJump needs a `jumpTable` entry and the patch has none".to_string(),
+                    ));
+                };
+                if f.is_constant() {
+                    jj = vec![f.eval(0.0)[0] as Scalar; n];
+                } else {
+                    let Some(fs) = f1 else {
+                        return Err(f1_needs_timed(&st, field, "setup_scalar_field_timed"));
+                    };
+                    f.check_range(fs.t_start, fs.t_end)?;
+                    // (120.2f): base 0, w = -1 on the owner and +1 on its
+                    // partner, so the two halves round the same F(t).
+                    for (start, name, w) in [(a0, &pa.name, -1.0), (b0, &pb.name, 1.0)] {
+                        timed.push(TimedPatch {
+                            patch: name.clone(),
+                            start,
+                            n,
+                            n_t: 1,
+                            target: F1Target::Jump,
+                            f: f.clone(),
+                            base: vec![0.0; n],
+                            w: vec![w; n],
+                        });
+                    }
+                    let tp = &timed[timed.len() - 1];
+                    jj = tp.host_values(fs.t_start);
+                }
+            }
+            "fan" | "porousBafflePressure" => {
+                let law = if ta == "fan" {
+                    let st = setting("jumpTable");
+                    let entries = crate::function1::patch_entries(sa, &st)?;
+                    let Some(f) = F1::parse(&entries, "jumpTable", 1, &st, f1.and_then(|s| s.case_dir))?
+                    else {
+                        return Err(jump_refused(
+                            field,
+                            &pa.name,
+                            "fan on a cyclic pair needs a `jumpTable` entry (the jump as a \
+                             Function1 of the face's normal velocity) and the patch has none"
+                                .to_string(),
+                        ));
+                    };
+                    crate::field::cyclic_jump::refuse_unbounded_table(&f, &st)?;
+                    crate::field::cyclic_jump::JumpLaw::Fan(f)
+                } else {
+                    let what = "porousBafflePressure";
+                    let d = sa.required_number("D", &pa.name, what)? as f64;
+                    let i = sa.required_number("I", &pa.name, what)? as f64;
+                    let l = sa.required_number("length", &pa.name, what)? as f64;
+                    if !(d >= 0.0) || !(i >= 0.0) || !(l >= 0.0) {
+                        return Err(jump_refused(
+                            field,
+                            &pa.name,
+                            format!(
+                                "porousBafflePressure: D = {d}, I = {i} and length = {l} must \
+                                 be non-negative - a negative resistance would push the flow"
+                            ),
+                        ));
+                    }
+                    let nu = if d != 0.0 {
+                        let Some(nu) = inputs.nu else {
+                            return Err(jump_refused(
+                                field,
+                                &pa.name,
+                                "porousBafflePressure with D > 0 needs the laminar viscosity \
+                                 nu (`BcInputs::nu`) for its Darcy term nu D length, and this \
+                                 setup was given none"
+                                    .to_string(),
+                            ));
+                        };
+                        nu as f64
+                    } else {
+                        0.0
+                    };
+                    crate::field::cyclic_jump::JumpLaw::Porous {
+                        r_visc: nu * d * l,
+                        r_inert: 0.5 * i * l,
+                    }
+                };
+                let rule = crate::field::cyclic_jump::CyclicJumpRule {
+                    patch: pa.name.clone(),
+                    nbr_patch: pb.name.clone(),
+                    owner_start: a0,
+                    nbr_start: b0,
+                    n,
+                    law,
+                };
+                // The seed is the law at the flux the caller hands in, or at
+                // rest; the first corrector's refresh replaces it.
+                let zero = vec![0.0 as Scalar; m.n_boundary_faces];
+                let phi = inputs.phi_b.unwrap_or(&zero);
+                let pairs = rule.jumps(phi, &m.b_mag_sf);
+                for (k, (ja, jb)) in pairs.into_iter().enumerate() {
+                    out.jump[a0 + k] = ja;
+                    out.jump[b0 + k] = jb;
+                }
+                out.jump_rules.push(rule);
+                out.has_jump = true;
+                continue;
+            }
+            _ => unreachable!("CYCLIC_JUMP_NAMES holds four names"),
+        }
+        for (k, &j) in jj.iter().enumerate() {
+            out.jump[a0 + k] = -j;
+            out.jump[b0 + k] = j;
+        }
+        out.has_jump = true;
+    }
+    Ok(())
 }
 
 // ==========================================================================
@@ -1496,6 +1859,23 @@ fn scalar_patch(
         }
         return Ok(());
     };
+
+    // SPEC-LIT 120.2: the two cyclic jumps exist only across a cyclic pair,
+    // which `topology_override` above has already handed to the jump
+    // post-pass. Anywhere else the name would fall through to the static arm
+    // as a plain `Cyclic` kind on a face with no partner - refused by name.
+    // (`fan` and `porousBafflePressure` keep their §52/§53 meaning here.)
+    if matches!(spec.type_name.as_str(), "fixedJump" | "uniformJump") {
+        return Err(jump_refused(
+            field,
+            patch,
+            format!(
+                "`{}` is a jump across a cyclic pair, and this patch is not one half \
+                 of a pair (the mesh types it {:?})",
+                spec.type_name, mesh_kind
+            ),
+        ));
+    }
 
     // SPEC-LIT 120.1: the six Function1 conditions resolve here, before the
     // static arms - a constant IS its static twin (its value feeds the same
@@ -2221,6 +2601,8 @@ pub fn scalar_boundary_with(
     }
     // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
     resolve_mapped_scalar(&mut out, m, internal, &raw.name)?;
+    // SPEC-LIT 120.2: the cyclic pairs' jump arrays.
+    resolve_cyclic_jumps(&mut out, m, raw, &inputs, None, &mut timed)?;
 
     Ok(out)
 }
@@ -2273,6 +2655,9 @@ pub fn scalar_boundary_timed(
     }
     // SPEC-LIT 120.10: the mapped patches' sampled cells and seed values.
     resolve_mapped_scalar(&mut out, m, internal, &raw.name)?;
+    // SPEC-LIT 120.2: the cyclic pairs' jump arrays, a uniformJump's on the
+    // clock.
+    resolve_cyclic_jumps(&mut out, m, raw, &inputs, Some(f1), &mut timed)?;
 
     Ok((out, timed))
 }
@@ -2286,6 +2671,8 @@ pub fn upload_scalar(
 ) -> Result<GpuScalarField> {
     let internal = crate::io::fields::expand_scalars(&raw.internal, m.n_cells, &raw.name)?;
     let b = scalar_boundary(raw, m, &internal)?;
+    // SPEC-LIT 120.2: before the literal moves the rules out of `b`.
+    let cyclic_jump = upload_cyclic_jump(gpu, b.has_jump, &b.jump_rules)?;
 
     Ok(GpuScalarField {
         name: raw.name.clone(),
@@ -2305,6 +2692,8 @@ pub fn upload_scalar(
         mean_rules: b.mean_rules,
         mapped: crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?,
         turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
+        jump: gpu.upload(&b.jump)?,
+        cyclic_jump,
     })
 }
 
@@ -4083,6 +4472,9 @@ fn vector_patch(
     let zero = Vec3::default();
 
     if let Some(forced) = topology_override(mesh_kind) {
+        // SPEC-LIT 120.2: a jump name is the pressure's, refused here by
+        // name rather than read as the plain couple the mesh forces.
+        refuse_vector_jump(spec, patch, field)?;
         for i in 0..n {
             out.kind[at + i] = forced as Label;
             out.fr[at + i] = 0.0;
@@ -4887,6 +5279,9 @@ pub fn setup_scalar_field(
     f.mean_rules = b.mean_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    // SPEC-LIT 120.2: the cyclic jump array and its flux laws.
+    f.cyclic_jump = upload_cyclic_jump(gpu, b.has_jump, &b.jump_rules)?;
+    gpu.write(&mut f.jump, &b.jump)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
@@ -4915,6 +5310,9 @@ pub fn setup_scalar_field_with(
     f.mean_rules = b.mean_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    // SPEC-LIT 120.2: the cyclic jump array and its flux laws.
+    f.cyclic_jump = upload_cyclic_jump(gpu, b.has_jump, &b.jump_rules)?;
+    gpu.write(&mut f.jump, &b.jump)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     Ok(())
 }
@@ -5000,6 +5398,9 @@ pub fn setup_scalar_field_timed(
     f.mean_rules = b.mean_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
+    // SPEC-LIT 120.2: the cyclic jump array and its flux laws.
+    f.cyclic_jump = upload_cyclic_jump(gpu, b.has_jump, &b.jump_rules)?;
+    gpu.write(&mut f.jump, &b.jump)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
     // SPEC-LIT 120.11: the inflow-database patches ride the same clock.
     TimedBcs::upload_with_tv(gpu, &timed, &b.tv_rules)
@@ -6288,6 +6689,10 @@ mod tests {
                 // triple they are defined by. Their refusal on any other field
                 // is `fan::tests::a_fan_condition_on_a_field_that_is_not_the_pressure_is_refused_by_name`.
                 "fanPressure" | "fan" | "porousJumpPressure" | "porousBafflePressure"
+                    // SPEC-LIT 120.2: so are the two cyclic jumps, whose
+                    // refusal on any other field is in tests/bc_cyclic_jump.rs.
+                    | "fixedJump"
+                    | "uniformJump"
             ) {
                 "p"
             } else {

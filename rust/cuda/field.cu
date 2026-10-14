@@ -15,6 +15,9 @@
     Hirsch, "Numerical Computation of Internal and External Flows", 2nd ed.
       (2007), on Robin/mixed boundary treatment
     Jasak (1996) section 3.2 for the symmetry-plane condition
+    ofgpu SPEC-LIT.md section 120.2 - the cyclic jump: a coupled face sees
+      its neighbour at psi_N + j_f (120.2b), j_f the field's per-face jump
+      array; fldCoupledNbr below
     ofgpu SPEC-LIT.md section 13.4 - the flux-switched block below is a RANGE
       rather than one value because the turbulence inlets and
       pressureInletOutletVelocity all switch on the sign of the same flux and
@@ -152,6 +155,18 @@
 #define OFGPU_BC_INLET_OUTLET_LAST  12
 
 
+//- SPEC-LIT 120.2, (120.2b): the neighbour value a coupled face sees. j is
+//  the field's per-face jump array (`GpuScalarField::jump`), nonzero only on
+//  the faces of a fixedJump / uniformJump / fan / porousBafflePressure pair,
+//  where the far cell is seen at psi_N + j_f. A face with no jump holds
+//  j = 0 and reads psi_N itself - a select, not psi_N + 0, so a -0.0 stays
+//  -0.0 and every plain cyclic face is bit for bit what it was.
+OFGPU_DEV ofscalar fldCoupledNbr(ofscalar psiN, ofscalar j)
+{
+    return (j != (ofscalar)0) ? psiN + j : psiN;
+}
+
+
 //- The mixed expression of SPEC-LIT section 4, for one component.
 //
 //  Delta_b is the boundary delta coefficient of SPEC-LIT section 2.4 and is
@@ -190,6 +205,7 @@ extern "C" __global__ void fldCorrectBcScalar
     const ofscalar* __restrict__ bDeltaCoeffs,
     const oflabel* __restrict__ bNbrCell,
     const ofscalar* __restrict__ bWeights,
+    const ofscalar* __restrict__ bJump,
     oflabel nBoundaryFaces
 )
 {
@@ -211,9 +227,10 @@ extern "C" __global__ void fldCorrectBcScalar
         {
             //- The face sits between two cells exactly as an internal face
             //  does, so it is interpolated exactly as one: SPEC-LIT 2.3, with
-            //  bWeights the weight of THIS side.
+            //  bWeights the weight of THIS side - against the far cell as
+            //  this side sees it, psi_N + j_f (SPEC-LIT 120.2b).
             const ofscalar w = bWeights[i];
-            bf[i] = w*psiP + ((ofscalar)1 - w)*psi[nbr];
+            bf[i] = w*psiP + ((ofscalar)1 - w)*fldCoupledNbr(psi[nbr], bJump[i]);
         }
         else
         {
