@@ -834,6 +834,33 @@ error: solution diverged (NaN/Inf)
 | `nvdb` / `vdb` | NanoVDB / OpenVDB 볼륨 |
 | `usda` | USD ASCII |
 
+### 볼륨 파일의 복셀 격자 — `output.visualisation.lattice`
+
+`.vdb`/`.nvdb` 파일은 복셀 격자입니다. 균일 카테시안 상자에서는 셀이 곧 복셀입니다.
+그 밖의 격자는 정육면체 복셀 격자에 샘플링되며, JSONC 케이스는 그 격자를
+`output.visualisation` 안에 적습니다.
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "lattice": { "voxel": 0.01, "box": [0, 0, 0, 2, 1, 1], "maxVoxels": 8000000,
+               "sample": "cell", "activation": "dense", "background": 0.0 } } }
+```
+
+| 키 | 뜻 | 기본값 |
+|---|---|---|
+| `voxel` | 복셀 한 변, m | 가장 작은 셀 부피의 세제곱근 |
+| `box` | `[xlo, ylo, zlo, xhi, yhi, zhi]`, m | 격자 점들의 경계 상자 |
+| `maxVoxels` | 복셀 예산; 이보다 큰 격자는 맞을 때까지 성기게 함 | 8 000 000 |
+| `sample` | `cell`(셀 값) 또는 `linear`(잘라낸 기울기를 더함) | `cell` |
+| `activation` | `dense`(모든 복셀) 또는 `fluid`(셀 안의 복셀만) | `dense` |
+| `background` | 어느 셀에도 들지 않는 복셀의 값 | `0.0` |
+
+키는 모두 생략할 수 있습니다. 이 블록으로 격자를 만들 수 없으면 솔버는 루프 전에 키 이름을
+대고 거절합니다: 어느 축에서 `lo >= hi`인 `box`, 0 이하의 `voxel`, `maxVoxels: 0`, 예산을
+맞추려면 16배를 넘게 성기게 해야 하는 명시적 `voxel`, 모르는 `sample`·`activation` 값.
+아직 격자를 깔지 않는 드라이버는 카테시안이 아닌 격자에서 `vdb`/`nvdb`를 루프 전에
+자기 이름을 대고 거절합니다. `-permissive`를 주면 대신 시각화 출력을 쓰지 않습니다.
+
 ### Studio 3D 뷰어
 
 절단면, 임의 평면, 등가면, 유선, 벡터 글리프를 그 자리에서 그립니다. WebGPU로
@@ -1067,8 +1094,10 @@ ofgpu-validate
 
 ### 컷셀·경사 격자에서 `-output nvdb`가 거절됨
 
-`nvdb`/`vdb`는 균일 카테시안 상자에만 있는 복셀 격자입니다. 격자가 그 상자가 아니면
-솔버는 루프에 들어가기 전에 이유(예: `cell volumes are not uniform`)를 대고 거절합니다.
+`nvdb`/`vdb`는 복셀 격자입니다. 균일 카테시안 상자에서는 셀이 곧 복셀이고, 그 밖의
+격자에는 `output.visualisation.lattice`의 복셀 격자가 필요합니다(8장). 그 격자를 깔지
+않는 드라이버는 루프에 들어가기 전에 자기 이름과 이유(예: `cell volumes are not uniform`)를
+대고 거절합니다.
 컷셀 해석의 산출물은 `-output foam,vtu`로 받으십시오. `-permissive`를 주면 `nvdb`만
 목록에서 빠지고 나머지 형식은 그대로 쓰입니다.
 

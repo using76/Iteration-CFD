@@ -445,7 +445,9 @@ pub fn coarsen_to_budget(l: [f64; 3], h: f64, max_voxels: usize) -> (f64, f64) {
 //  Refusals - 117.12's first four rows, by name, before any work
 // ==========================================================================
 
-fn check_spec(spec: &LatticeSpec) -> Result<()> {
+/// 117.12's spec-only refusals: the ones that need no mesh (VIO-04 raises
+/// them when the case is read).
+pub fn check_spec(spec: &LatticeSpec) -> Result<()> {
     if let Some(b) = spec.bbox {
         for (a, &e) in b.iter().enumerate() {
             if !e.is_finite() {
@@ -519,6 +521,89 @@ fn check_mesh(raw: &PolyMeshRaw, hm: &HostMesh) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The lattice of (117.1)-(117.4), decided without rasterising a voxel:
+/// the box, the voxel asked for, and the voxel the budget lays.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatticeShape {
+    /// The low corner of the lattice box (117.2).
+    pub lo: DVec3,
+    /// `L_a = hi_a - lo_a` (117.1).
+    pub l: [f64; 3],
+    /// `h`, the voxel edge asked for (117.3).
+    pub voxel_requested: f64,
+    /// `h'` of (117.3).
+    pub voxel: f64,
+    /// `s = h' / h` of (117.4).
+    pub coarsen: f64,
+}
+
+impl LatticeShape {
+    /// `[n_x, n_y, n_z]` of (117.1) at `h'`.
+    pub fn n(&self) -> [usize; 3] {
+        lattice_dims(self.l, self.voxel)
+    }
+}
+
+/// (117.3)-(117.4)'s budget, with 117.12's refusal of an explicit voxel the
+/// budget would coarsen by `s > 16`. `explicit` is "the case named `voxel`";
+/// the default voxel is coarsened without that limit. Returns `(h', s)`.
+pub fn check_budget(l: [f64; 3], h_req: f64, explicit: bool, max_voxels: usize) -> Result<(f64, f64)> {
+    let (h, coarsen) = coarsen_to_budget(l, h_req, max_voxels);
+    if explicit && coarsen > MAX_EXPLICIT_COARSEN {
+        let n_req = match lattice_count(l, h_req) {
+            Some(n) => format!("{n}"),
+            None => "more than usize can hold".to_string(),
+        };
+        return Err(Error::Refused(format!(
+            "output.visualisation.lattice.voxel: the budget cannot hold the lattice asked for: voxel {h_req} m needs {n_req} voxels, over maxVoxels {max_voxels}; the smallest lattice that fits has h' = {h} m, a coarsening factor s = {coarsen} over the {} limit",
+            MAX_EXPLICIT_COARSEN
+        )));
+    }
+    Ok((h, coarsen))
+}
+
+/// Every refusal of 117.12 that [`VoxelMap::build`] raises, and nothing it
+/// computes after them: the spec, the mesh, the box, the requested voxel
+/// and the budget. Linear in the points and cells, no voxel visited - so a
+/// driver can ask "can a lattice be laid here?" before the time loop
+/// (VIO-04) without building the map. `build` calls it first, so the two
+/// can never disagree.
+pub fn lattice_shape(raw: &PolyMeshRaw, hm: &HostMesh, spec: &LatticeSpec) -> Result<LatticeShape> {
+    check_spec(spec)?;
+    check_mesh(raw, hm)?;
+    // ---- the lattice box (117.3) ------------------------------------
+    let (lo, hi) = match spec.bbox {
+        Some(b) => (DVec3::new(b[0], b[1], b[2]), DVec3::new(b[3], b[4], b[5])),
+        None => {
+            let mut blo = DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            let mut bhi = DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for p in &raw.points {
+                widen(*p, &mut blo, &mut bhi);
+            }
+            (blo, bhi)
+        }
+    };
+    let l = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z];
+
+    // ---- the requested voxel (117.3) --------------------------------
+    let h_req = match spec.voxel {
+        Some(v) => v,
+        None => {
+            let v_min = hm.geom64().v.iter().copied().fold(f64::INFINITY, f64::min);
+            if !(v_min > 0.0 && v_min.is_finite()) {
+                return Err(Error::Mesh(format!(
+                    "output.visualisation.lattice.voxel: the default voxel is (min_c V_c)^(1/3), but the smallest cell volume is {v_min}"
+                )));
+            }
+            v_min.cbrt()
+        }
+    };
+
+    // ---- the budget (117.3, 117.4) -----------------------------------
+    let (h, coarsen) = check_budget(l, h_req, spec.voxel.is_some(), spec.max_voxels)?;
+    Ok(LatticeShape { lo, l, voxel_requested: h_req, voxel: h, coarsen })
 }
 
 // ==========================================================================
@@ -881,8 +966,7 @@ impl VoxelMap {
     /// item 4). Deterministic and single-threaded; no float is hashed.
     pub fn build(raw: &PolyMeshRaw, hm: &HostMesh, spec: &LatticeSpec) -> Result<VoxelMap> {
         let t0 = Instant::now();
-        check_spec(spec)?;
-        check_mesh(raw, hm)?;
+        let shape = lattice_shape(raw, hm, spec)?;
         // The linear stencil, when `linear` sampling is asked for (117.5) -
         // inside the timed section, so `report.build_s` covers it.
         let linear = match spec.sample {
@@ -890,47 +974,7 @@ impl VoxelMap {
             LatticeSample::Cell => None,
         };
         let g = hm.geom64();
-
-        // ---- the lattice box (117.3) ------------------------------------
-        let (lo, hi) = match spec.bbox {
-            Some(b) => (DVec3::new(b[0], b[1], b[2]), DVec3::new(b[3], b[4], b[5])),
-            None => {
-                let mut blo = DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-                let mut bhi = DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-                for p in &raw.points {
-                    widen(*p, &mut blo, &mut bhi);
-                }
-                (blo, bhi)
-            }
-        };
-        let l = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z];
-
-        // ---- the requested voxel (117.3) --------------------------------
-        let h_req = match spec.voxel {
-            Some(v) => v,
-            None => {
-                let v_min = g.v.iter().copied().fold(f64::INFINITY, f64::min);
-                if !(v_min > 0.0 && v_min.is_finite()) {
-                    return Err(Error::Mesh(format!(
-                        "output.visualisation.lattice.voxel: the default voxel is (min_c V_c)^(1/3), but the smallest cell volume is {v_min}"
-                    )));
-                }
-                v_min.cbrt()
-            }
-        };
-
-        // ---- the budget (117.3, 117.4) -----------------------------------
-        let (h, coarsen) = coarsen_to_budget(l, h_req, spec.max_voxels);
-        if spec.voxel.is_some() && coarsen > MAX_EXPLICIT_COARSEN {
-            let n_req = match lattice_count(l, h_req) {
-                Some(n) => format!("{n}"),
-                None => "more than usize can hold".to_string(),
-            };
-            return Err(Error::Refused(format!(
-                "output.visualisation.lattice.voxel: the budget cannot hold the lattice asked for: voxel {h_req} m needs {n_req} voxels, over maxVoxels {}; the smallest lattice that fits has h' = {h} m, a coarsening factor s = {coarsen} over the {} limit",
-                spec.max_voxels, MAX_EXPLICIT_COARSEN
-            )));
-        }
+        let LatticeShape { lo, l, voxel_requested: h_req, voxel: h, coarsen } = shape;
 
         // ---- the lattice (117.1) ----------------------------------------
         let n = lattice_dims(l, h);

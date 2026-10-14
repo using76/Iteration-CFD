@@ -37455,6 +37455,25 @@ disappears silently, and `-permissive` keeps its §44.1 behaviour.
 | `kind: massFraction` on a run with no density field | (117.14) has no `rho` |
 | a mesh whose points move, or whose cells change, during the run | the map would be stale; it is built once (§117.4) |
 
+**Where the refusals live (VIO-04).** `OutputPlan::from_json` (`io/output_plan.rs`) parses
+`output.visualisation.lattice` into `VisSpec.lattice`, a `voxelmap::LatticeSpec`. When the case
+is read, on every mesh, it raises the rows that need only the block: the first three rows, an
+unknown `sample` or `activation`, and the `s > 16` row when the case names both `voxel` and
+`box`. The rows that need the mesh (the default box or the default voxel) are
+`VisSpec::lattice_refusal`, which runs `voxelmap::lattice_shape`. That is the first step of
+`VoxelMap::build`, so the two cannot disagree, and it visits no voxel. Either reason goes to
+`OutputPlan::refuse_visualisation_without_a_lattice`, which replaced
+`refuse_visualisation_on_a_non_cartesian_mesh`. Strict, it is an error naming
+`output.visualisation.format`, the reason and `output.exact`; under `-permissive` the run writes
+no visualisation output, as in §44.1. A driver that lays no lattice passes its own reason. At
+VIO-04 that is every driver that reads the block (`ofgpu-lowmach`, `ofgpu-k-epsilon`,
+`ofgpu-cht`), so their refusal now names the driver rather than claiming that no lattice exists;
+VIO-05a's row wires `ofgpu-lowmach` and `ofgpu-k-omega`. The writers keep a late copy for a write with neither `ctx.cart` nor
+`ctx.vox`: it names `-output nvdb` or `-output vdb` and `output.visualisation.lattice`. The
+rewritten `nvdb_writer_refuses_a_non_cartesian_mesh_by_default` tests it for both writers, strict
+and `-permissive`; `output_plan::tests::lattice_parses` and `::lattice_refusals` test each text
+above.
+
 ### 117.13 Gates, their precision classes, and what has been measured
 
 The bars below are fixed before measurement. A missed bar is a finding, never a widened band.

@@ -42,10 +42,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::io::case_json::JsonOutput;
+use crate::io::case_json::{JsonLattice, JsonOutput};
 use crate::io::contract;
 use crate::io::nvdb::Precision;
 use crate::io::output_types::OutputField;
+use crate::io::polymesh::PolyMeshRaw;
+use crate::io::voxelmap::{self, LatticeActivation, LatticeSample, LatticeSpec};
+use crate::mesh::HostMesh;
 use crate::io::writer::{
     FoamWriter, NvdbWriter, ResultWriter, UsdaWriter, VdbWriter, VtuWriter, WriteCtx,
 };
@@ -280,6 +283,23 @@ pub struct VisSpec {
     pub interval: f64,
     pub fields: FieldSelection,
     pub precision: Precision,
+    /// `output.visualisation.lattice`, resolved (SPEC-LIT 117.3): what
+    /// [`voxelmap::VoxelMap::build`] takes on a mesh that is not a uniform
+    /// Cartesian box. Every default of 117.3 when the block is absent.
+    pub lattice: LatticeSpec,
+}
+
+impl VisSpec {
+    /// SPEC-LIT 117.12 on this mesh: `None` when a lattice can be laid,
+    /// else the named reason - an empty box, a voxel that is no voxel, a
+    /// zero budget, or an explicit voxel the budget would coarsen more than
+    /// 16 times. [`voxelmap::lattice_shape`] decides it, the same function
+    /// `VoxelMap::build` runs first, without visiting a voxel; so it is the
+    /// answer before the time loop, not at the first write. Pass the answer
+    /// to [`OutputPlan::refuse_visualisation_without_a_lattice`].
+    pub fn lattice_refusal(&self, raw: &PolyMeshRaw, hm: &HostMesh) -> Option<String> {
+        voxelmap::lattice_shape(raw, hm, &self.lattice).err().map(|e| e.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -301,6 +321,93 @@ pub struct OutputPlan {
     pub vis: Option<VisSpec>,
     pub exact: Option<ExactSpec>,
     pub restart: Option<RestartSpec>,
+}
+
+/// `output.visualisation.lattice`, resolved (SPEC-LIT 117.3). An unknown
+/// `sample` or `activation` is refused listing the menu (117.12); under
+/// `-permissive` the default is substituted and said.
+fn parse_lattice(j: Option<&JsonLattice>) -> Result<LatticeSpec> {
+    let mut spec = LatticeSpec::default();
+    let Some(j) = j else { return Ok(spec) };
+    spec.voxel = j.voxel;
+    spec.bbox = j.bbox;
+    if let Some(m) = j.max_voxels {
+        spec.max_voxels = m;
+    }
+    spec.sample = match j.sample.as_deref() {
+        None | Some("cell") => LatticeSample::Cell,
+        Some("linear") => LatticeSample::Linear,
+        Some(other) => contract::unsupported(
+            "output.visualisation.lattice.sample",
+            other,
+            &["cell", "linear"],
+            "cell - the solver's own cell value",
+            LatticeSample::Cell,
+        )?,
+    };
+    spec.activation = match j.activation.as_deref() {
+        None | Some("dense") => LatticeActivation::Dense,
+        Some("fluid") => LatticeActivation::Fluid,
+        Some(other) => contract::unsupported(
+            "output.visualisation.lattice.activation",
+            other,
+            &["dense", "fluid"],
+            "dense - every voxel active",
+            LatticeActivation::Dense,
+        )?,
+    };
+    if let Some(b) = j.background {
+        spec.background = b;
+    }
+    Ok(spec)
+}
+
+/// SPEC-LIT 117.12's refusals that need nothing but the block itself: the
+/// spec's own (`box` empty or not finite, `voxel <= 0` or not finite,
+/// `maxVoxels = 0`, a non-finite `background`), and, when the case names
+/// both `voxel` and `box`, the budget's `s > 16`. The rest need the mesh
+/// ([`VisSpec::lattice_refusal`]).
+fn lattice_refusal_of_the_block(spec: &LatticeSpec) -> Option<String> {
+    if let Err(e) = voxelmap::check_spec(spec) {
+        return Some(e.to_string());
+    }
+    if let (Some(h), Some(b)) = (spec.voxel, spec.bbox) {
+        let l = [b[3] - b[0], b[4] - b[1], b[5] - b[2]];
+        if let Err(e) = voxelmap::check_budget(l, h, true, spec.max_voxels) {
+            return Some(e.to_string());
+        }
+    }
+    None
+}
+
+/// The one refusal of a volume format with no lattice behind it (SPEC-LIT
+/// 117.12, in §13.4's words): strict is an `Err` naming the format, the
+/// reason and what does work; `-permissive` drops the visualisation stage,
+/// which is the substitution it printed (§44.1).
+fn refuse_without_a_lattice(vis: &mut Option<VisSpec>, reason: &str) -> Result<()> {
+    let Some(v) = vis.as_ref() else { return Ok(()) };
+    let volume: Vec<&str> = v
+        .formats
+        .iter()
+        .filter(|f| matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb))
+        .map(|f| f.name())
+        .collect();
+    if volume.is_empty() {
+        return Ok(());
+    }
+    contract::unsupported_note(
+        "output.visualisation.format",
+        &volume.join(", "),
+        &EXACT_FORMATS,
+        &format!(
+            "a .vdb/.nvdb file is a voxel grid, and no lattice can be laid for this run: {reason}. output.exact (vtu, openfoam) preserves the polyhedra"
+        ),
+        "no visualisation output",
+        (),
+    )?;
+    // `-permissive` only - and this is the substitution it printed.
+    *vis = None;
+    Ok(())
 }
 
 /// What `visualisation.format` accepts, for the refusal message.
@@ -459,7 +566,7 @@ impl OutputPlan {
     /// Resolve the case's `output` block. Every SPEC-LIT §13.4 refusal that
     /// needs nothing but the block itself is raised here.
     pub fn from_json(o: &JsonOutput) -> Result<Self> {
-        let vis = match &o.visualisation {
+        let mut vis = match &o.visualisation {
             Some(v) => {
                 let formats = vis_formats(&v.format, v.usd_scene)?;
                 let spec = VisSpec {
@@ -467,6 +574,7 @@ impl OutputPlan {
                     interval: check_interval("output.visualisation.interval", v.interval)?,
                     fields: FieldSelection::from_case(v.fields.as_ref())?,
                     precision: parse_precision("output.visualisation.precision", v.precision.as_ref())?,
+                    lattice: parse_lattice(v.lattice.as_ref())?,
                 };
                 // Under `-permissive` an unusable format list comes back
                 // empty rather than as an error; an empty stage is no stage.
@@ -474,6 +582,13 @@ impl OutputPlan {
             }
             None => None,
         };
+        // SPEC-LIT 117.12: a lattice block that lays no lattice is refused
+        // when the case is read, on every mesh - a uniform Cartesian box
+        // never reads the block, but a block that asks for the impossible
+        // is a mistake in the case either way.
+        if let Some(reason) = vis.as_ref().and_then(|v| lattice_refusal_of_the_block(&v.lattice)) {
+            refuse_without_a_lattice(&mut vis, &reason)?;
+        }
 
         let exact = match &o.exact {
             Some(e) => {
@@ -571,37 +686,21 @@ impl OutputPlan {
         Ok(())
     }
 
-    /// SPEC-LIT §44.1: `vdb`/`nvdb` are a dense lattice, so a mesh that is
-    /// not a recognised uniform Cartesian box has no voxels to write.
+    /// SPEC-LIT 117.12, which replaced §44.1's refusal of every mesh that is
+    /// not a uniform Cartesian box: `vdb`/`nvdb` are refused only when no
+    /// lattice can be laid for this run. `no_lattice` is `None` on a uniform
+    /// Cartesian box or when the lattice can be laid
+    /// ([`VisSpec::lattice_refusal`]), and otherwise the named reason - the
+    /// lattice's own refusal, or a driver that lays none.
     ///
-    /// The two volume writers already refuse this - at the FIRST WRITE, which
-    /// on a transient run is after the loop has already started. Raised here
-    /// it is raised before anything runs.
-    pub fn refuse_visualisation_on_a_non_cartesian_mesh(&mut self, cartesian: bool) -> Result<()> {
-        if cartesian {
-            return Ok(());
+    /// The two volume writers refuse a write with no lattice too - at the
+    /// FIRST WRITE, which on a transient run is after the loop has started.
+    /// Raised here it is raised before anything runs.
+    pub fn refuse_visualisation_without_a_lattice(&mut self, no_lattice: Option<&str>) -> Result<()> {
+        match no_lattice {
+            None => Ok(()),
+            Some(reason) => refuse_without_a_lattice(&mut self.vis, reason),
         }
-        let Some(v) = &self.vis else { return Ok(()) };
-        let volume: Vec<&str> = v
-            .formats
-            .iter()
-            .filter(|f| matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb))
-            .map(|f| f.name())
-            .collect();
-        if volume.is_empty() {
-            return Ok(());
-        }
-        contract::unsupported_note(
-            "output.visualisation.format",
-            &volume.join(", "),
-            &EXACT_FORMATS,
-            "a .vdb/.nvdb file is a dense voxel grid, and this case's mesh is not a recognised uniform Cartesian box, so there is no lattice to sample onto. output.exact (vtu, openfoam) preserves the polyhedra",
-            "no visualisation output",
-            (),
-        )?;
-        // `-permissive` only - and this is the substitution it printed.
-        self.vis = None;
-        Ok(())
     }
 
     /// SPEC-LIT §44.1: a driver with no checkpoint at all cannot honour
@@ -968,6 +1067,7 @@ mod tests {
             fields: None,
             precision: None,
             usd_scene: false,
+            lattice: None,
         }
     }
 
@@ -1184,15 +1284,134 @@ mod tests {
     }
 
     #[test]
-    fn a_volume_format_on_a_non_cartesian_mesh_is_refused_before_the_loop() {
+    fn a_volume_format_with_no_lattice_is_refused_before_the_loop() {
         let _g = permissive_test_guard();
         set_permissive(false);
         let mut p = OutputPlan::from_json(&only_vis(vis("vdb"))).unwrap();
-        assert!(p.refuse_visualisation_on_a_non_cartesian_mesh(true).is_ok());
-        let e = p.refuse_visualisation_on_a_non_cartesian_mesh(false).unwrap_err();
+        assert!(p.refuse_visualisation_without_a_lattice(None).is_ok());
+        assert!(p.vis.is_some(), "a lattice that can be laid keeps the stage");
+        let why = "ofgpu-k-epsilon lays no output.visualisation.lattice";
+        let e = p.refuse_visualisation_without_a_lattice(Some(why)).unwrap_err();
         let s = e.to_string();
-        assert!(s.contains("vdb") && s.contains("Cartesian"), "{s}");
+        assert!(s.contains("output.visualisation.format") && s.contains("\"vdb\""), "{s}");
+        assert!(s.contains("no lattice can be laid for this run") && s.contains(why), "{s}");
         assert!(s.contains("vtu"), "the error must name what DOES work: {s}");
+        // An exact-only plan has no volume format to refuse.
+        let mut q = OutputPlan::default();
+        assert!(q.refuse_visualisation_without_a_lattice(Some(why)).is_ok());
+    }
+
+    fn lattice_case(lattice: &str) -> JsonOutput {
+        let text = format!(r#"{{ "visualisation": {{ "format": "vdb", "lattice": {lattice} }} }}"#);
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    /// SPEC-LIT 117.3: the six keys, their defaults, and the schema.
+    #[test]
+    fn lattice_parses() {
+        let full = lattice_case(
+            r#"{ "voxel": 0.05, "box": [-1, -1, -1, 2, 2, 2], "maxVoxels": 1000,
+                 "sample": "linear", "activation": "fluid", "background": -1.5 }"#,
+        );
+        let p = plan_of(full).expect("a full lattice block");
+        assert_eq!(
+            p.vis.as_ref().unwrap().lattice,
+            LatticeSpec {
+                voxel: Some(0.05),
+                bbox: Some([-1.0, -1.0, -1.0, 2.0, 2.0, 2.0]),
+                max_voxels: 1000,
+                sample: LatticeSample::Linear,
+                activation: LatticeActivation::Fluid,
+                background: -1.5,
+            }
+        );
+        let absent = plan_of(only_vis(vis("vdb"))).unwrap();
+        assert_eq!(absent.vis.unwrap().lattice, LatticeSpec::default(), "absent is every 117.3 default");
+        assert_eq!(LatticeSpec::default().max_voxels, 8_000_000);
+        let partial = plan_of(lattice_case(r#"{ "voxel": 0.1 }"#)).unwrap();
+        assert_eq!(
+            partial.vis.unwrap().lattice,
+            LatticeSpec { voxel: Some(0.1), ..LatticeSpec::default() },
+            "a key not named keeps its default"
+        );
+        let explicit = plan_of(lattice_case(r#"{ "sample": "cell", "activation": "dense" }"#)).unwrap();
+        assert_eq!(explicit.vis.unwrap().lattice, LatticeSpec::default());
+
+        let text = r#"{ "visualisation": { "format": "vdb", "lattice": { "voxels": 0.1 } } }"#;
+        let e = serde_json::from_str::<JsonOutput>(text).unwrap_err().to_string();
+        assert!(e.contains("voxels"), "an unknown key is refused by name: {e}");
+
+        let schema = crate::io::case_json::emit_schema();
+        for want in ["\"JsonLattice\"", "\"lattice\"", "\"maxVoxels\"", "\"activation\"", "\"background\"", "\"box\""] {
+            assert!(schema.contains(want), "schema missing {want}");
+        }
+    }
+
+    /// SPEC-LIT 117.12's lattice rows, each refusal's text, strict and
+    /// `-permissive`.
+    #[test]
+    fn lattice_refusals() {
+        let _g = permissive_test_guard();
+        set_permissive(false);
+        reset_warnings();
+        let refused = |lattice: &str| -> String {
+            OutputPlan::from_json(&lattice_case(lattice)).unwrap_err().to_string()
+        };
+        let common = ["output.visualisation.format", "\"vdb\"", "no lattice can be laid for this run", "vtu", "-permissive"];
+        let cases: [(&str, &[&str]); 7] = [
+            (r#"{ "box": [0, 0, 0, 1, 0, 1] }"#, &["output.visualisation.lattice.box", "lo[1] = 0 >= hi[1] = 0", "the lattice would be empty"]),
+            (r#"{ "voxel": 0 }"#, &["output.visualisation.lattice.voxel: 0", "non-positive"]),
+            (r#"{ "voxel": -1 }"#, &["output.visualisation.lattice.voxel: -1", "non-positive"]),
+            (r#"{ "maxVoxels": 0 }"#, &["output.visualisation.lattice.maxVoxels: 0", "zero-voxel budget"]),
+            (
+                r#"{ "voxel": 0.01, "box": [0, 0, 0, 1, 1, 1], "maxVoxels": 100 }"#,
+                &["output.visualisation.lattice.voxel", "needs 1000000 voxels, over maxVoxels 100", "h' = 0.25 m", "over the 16 limit"],
+            ),
+            (r#"{ "sample": "trilinear" }"#, &["output.visualisation.lattice.sample", "\"trilinear\"", "available: cell, linear"]),
+            (r#"{ "activation": "sparse" }"#, &["output.visualisation.lattice.activation", "\"sparse\"", "available: dense, fluid"]),
+        ];
+        for (i, (lattice, wants)) in cases.iter().enumerate() {
+            let s = refused(lattice);
+            for want in *wants {
+                assert!(s.contains(want), "{lattice} must say {want:?}: {s}");
+            }
+            if i < 5 {
+                for want in common {
+                    assert!(s.contains(want), "{lattice} must say {want:?}: {s}");
+                }
+            }
+        }
+        // s = 10 <= 16: the budget coarsens and the case is accepted.
+        let p = OutputPlan::from_json(&lattice_case(r#"{ "voxel": 0.01, "box": [0, 0, 0, 1, 1, 1], "maxVoxels": 1000 }"#)).unwrap();
+        assert!(p.vis.is_some());
+
+        // On a mesh: the default box needs the mesh, so the budget refusal
+        // of an explicit voxel is only known there.
+        let (raw, hm) = crate::io::nvdb::lattice_fixture::refined();
+        let fine = OutputPlan::from_json(&lattice_case(r#"{ "voxel": 0.001, "maxVoxels": 1000 }"#)).unwrap();
+        let why = fine.vis.as_ref().unwrap().lattice_refusal(&raw, &hm).expect("s > 16 on the unit cube");
+        for want in ["output.visualisation.lattice.voxel", "over maxVoxels 1000", "over the 16 limit"] {
+            assert!(why.contains(want), "{want:?}: {why}");
+        }
+        let mut fine = fine;
+        let s = fine.refuse_visualisation_without_a_lattice(Some(why.as_str())).unwrap_err().to_string();
+        assert!(s.contains("output.visualisation.format") && s.contains(&why), "{s}");
+        let ok = OutputPlan::from_json(&only_vis(vis("vdb"))).unwrap();
+        assert_eq!(ok.vis.as_ref().unwrap().lattice_refusal(&raw, &hm), None, "the 117.3 defaults always lay a lattice");
+
+        // `-permissive`: the stage is dropped, as it printed; an unknown
+        // menu entry is substituted instead.
+        set_permissive(true);
+        for (lattice, _) in &cases[..5] {
+            let p = OutputPlan::from_json(&lattice_case(lattice)).expect("permissive");
+            assert!(p.vis.is_none(), "{lattice}: \"no visualisation output\"");
+        }
+        assert!(warned("output.visualisation.format"));
+        let p = OutputPlan::from_json(&lattice_case(r#"{ "sample": "trilinear", "activation": "sparse" }"#)).expect("permissive");
+        let l = &p.vis.as_ref().unwrap().lattice;
+        assert_eq!((l.sample, l.activation), (LatticeSample::Cell, LatticeActivation::Dense));
+        assert!(warned("output.visualisation.lattice.sample") && warned("output.visualisation.lattice.activation"));
+        set_permissive(false);
     }
 
     #[test]
@@ -1257,7 +1476,7 @@ mod tests {
         assert_eq!(p.vis.as_ref().unwrap().interval, 0.0, "\"the final state only\"");
 
         let mut p = OutputPlan::from_json(&only_vis(vis("vdb"))).expect("permissive");
-        p.refuse_visualisation_on_a_non_cartesian_mesh(false).expect("permissive");
+        p.refuse_visualisation_without_a_lattice(Some("a driver that lays none")).expect("permissive");
         assert!(p.vis.is_none(), "\"no visualisation output\"");
 
         let mut p = OutputPlan::from_json(&JsonOutput {

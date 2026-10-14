@@ -1816,11 +1816,16 @@ fn run(o: &Options) -> Result<RunEnd> {
                 "give it -endTime and -deltaT for a transient run; without them it writes its final state once",
             )?;
         }
-        // §44.1 - a dense voxel grid needs a lattice to sample onto, and the
-        // volume writers would otherwise only say so at the FIRST WRITE,
-        // which on a long transient run is a long way in.
-        plan.refuse_visualisation_on_a_non_cartesian_mesh(
-            ofgpu::pressure::cartesian::detect(&hm).is_ok(),
+        // SPEC-LIT 117.12 - a voxel grid needs a lattice to sample onto, and
+        // the volume writers would otherwise only say so at the FIRST WRITE,
+        // which on a long transient run is a long way in. This driver lays
+        // no output.visualisation.lattice yet, so a mesh that is not a
+        // uniform Cartesian box has none.
+        plan.refuse_visualisation_without_a_lattice(
+            ofgpu::pressure::cartesian::detect(&hm)
+                .err()
+                .map(|why| format!("ofgpu-lowmach lays no output.visualisation.lattice yet, and this mesh is not a uniform Cartesian box ({why})"))
+                .as_deref(),
         )?;
         // Every sub-block may have been substituted away under
         // `-permissive`; an empty plan is no plan, and the command line

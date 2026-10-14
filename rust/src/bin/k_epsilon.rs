@@ -292,8 +292,13 @@ fn run(o: &Options) -> Result<()> {
             "ofgpu-k-epsilon",
             "ofgpu-lowmach, ofgpu-buoyant and ofgpu-vof do write .mcr checkpoints, and ofgpu-lowmach honours output.restart",
         )?;
-        plan.refuse_visualisation_on_a_non_cartesian_mesh(
-            ofgpu::pressure::cartesian::detect(&hm).is_ok(),
+        // SPEC-LIT 117.12: this driver lays no output.visualisation.lattice,
+        // so a mesh that is not a uniform Cartesian box has no lattice.
+        plan.refuse_visualisation_without_a_lattice(
+            ofgpu::pressure::cartesian::detect(&hm)
+                .err()
+                .map(|why| format!("ofgpu-k-epsilon lays no output.visualisation.lattice, and this mesh is not a uniform Cartesian box ({why})"))
+                .as_deref(),
         )?;
         // §44.2's early half. This driver's cell fields are these three and
         // only these three; `phi` is a SURFACE field and goes only to the

@@ -2392,9 +2392,12 @@ impl ChtCase {
         let output = match &self.output {
             Some(o) => {
                 let mut plan = OutputPlan::from_json(o)?;
-                // A multi-region mesh is not one Cartesian lattice, so there
-                // is no voxel grid to sample onto.
-                plan.refuse_visualisation_on_a_non_cartesian_mesh(false)?;
+                // A multi-region mesh is not one Cartesian lattice, and this
+                // driver lays no output.visualisation.lattice (SPEC-LIT
+                // 117.12), so there is no voxel grid to sample onto.
+                plan.refuse_visualisation_without_a_lattice(Some(
+                    "ofgpu-cht lays no output.visualisation.lattice, and a multi-region mesh is not one uniform Cartesian box",
+                ))?;
                 plan.refuse_restart("ofgpu-cht", "run the case again")?;
                 let foam = plan
                     .exact
