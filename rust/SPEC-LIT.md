@@ -590,6 +590,10 @@ gamma_1  = 5/9   gamma_2  = 0.44   a_1 = 0.31  b_1 = 1.0  c_1 = 10
 
 `y` is the distance to the nearest wall — see §6.6.
 
+The ρ-weighted (conservative, variable-density) form of this model, with SST-sust as an option,
+is §156 (DST-05). It is opt-in: `KOmegaSst::correct_rho` reaches it and nothing existing calls
+that, so every case above runs the kinematic form unchanged.
+
 ### 6.4 Wall functions
 
 **Launder & Spalding (1974) §on wall treatment; Spalding, *J. Appl. Mech.* 28
@@ -46241,6 +46245,85 @@ build; every existing SST test runs unmodified:
 * `k_omega_sst::tests::omega_limiter_setting` (added by DST-00, §156.3): with
   `limitOmegaProduction = true`, at a state where `P > 10 β* ρ ω k`, the ω production equals
   `γ ρ min(P, 10 β* ρ ω k)/μ_t` to 1e−12 (R), and with false it equals `γ ρ P/μ_t` (D).
+
+### 156.7 What landed (DST-05)
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Equations from §156.1-§156.5 only.
+
+**The entry point.** `KOmegaSst::correct_rho(gpu, flow, &SstDensity { rho, rho0, rho00,
+rho_face, phi_volume })` runs one outer iteration of (156.1)-(156.2); `set_rho_options(
+RhoSstOptions { limit_omega_production, sust: Option<SstSust { k_amb, omega_amb }> })` holds
+§156.3's `limitOmegaProduction` (default false) and SST-sust (default off); `k_production()`
+exposes the `k` equation's explicit production as last assembled. `flow.phi` must be the MASS
+flux `ρ_f φ` (the §86.3 contract), `flow.nu` is the laminar ν, and `phi_volume` is the volume
+flux. Nothing in the tree calls `correct_rho`; DST-06 and DST-10 wire it to a DUST case.
+
+**The discretisation, term by term.**
+
+* `ddt(ρ, ψ)`: `Ddt::add_rho`, each level with its own density (§86.3); `localEuler` is refused
+  there by name (§86.7).
+* `div(φ_m, ψ)`: the shared assembly on the mass flux; `bounded` subtracts (86.4)'s continuity
+  coefficient as well, formed by `Ddt::rho_continuity` once per correction.
+* `laplacian((μ + σ μ_t), ψ)`: the kinematic face diffusivity `(ν + σ ν_t)|S_f|` times `ρ_f`,
+  through the new `RasCore::assemble_transport_blended_mass_weighted` (the blended-σ sibling of
+  §86.3's entry point; the one edit to `src/turbulence.rs`). The laminar part is `ρ_f ν` with the
+  one ν of `FlowState`: a temperature-dependent μ needs a field in `FlowState`, which is DST-06's
+  (lane S) item.
+* `μ_t = ρ ν_t` with the kinematic `ν_t = a1 k/max(a1 ω, S F2)`, which is (156.4).
+* (156.5): `sstBlendingRho` puts ρ into `CD_kω` and into `arg1`'s third branch, multiplied last.
+  The `1e−10` floor is then in (156.5)'s ρ units.
+* The sources: the kinematic kernels' `Su`, `Sp` and `Susp` (k: `min(G, c1 β* k ω)`, `β* ω`,
+  `(2/3)∇·u`; ω: `blend(γ) P`, `blend(β) ω`, the cross-diffusion) are multiplied by ρ cell by
+  cell in a separate pass, after `sstOmegaLimitedProduction` (the setting) and `sstSustK`/
+  `sstSustOmega` (156.9) have added their terms. SST-sust's ω term uses the blended β, the one
+  the destruction carries, so the ambient state is a fixed point whatever F1 is.
+* `∇·u` for the dilatation is re-formed from the VOLUME flux after `update_flow_derived`, which
+  forms it from `flow.phi` (here the mass flux).
+* Refused by name in `correct_rho`: buoyancy production (§17), a hybrid length scale (§57) and
+  both transition models (§88, §90). Each is a kinematic stamp this form does not weight by ρ.
+
+**Two structural statements (TREE: the kinematic form's structure, kept for the ρ ≡ 1 row).**
+(1) The dilatation term `−(2/3)ρk∇·u` of (156.3) is carried as the `k` equation's Susp `(2/3)ρ∇·u`,
+OUTSIDE the limiter `min(·, 10β*ρωk)`, and the limiter acts on `μ_t(2S_ijS_ij − (2/3)(∇·u)²)`.
+(2) The ω production is `blend(γ) ρ P` with `P = 2S_ijS_ij − (2/3)(∇·u)²` (§6.3's `sstProductionByNut`);
+the `−(2/3)ρk∇·u/ν_t` part of `(γ/ν_t)P` is not in it. Both are what `cuda/sst.cu` already does
+in the kinematic form, and §156.1 asks the ρ form to multiply the same terms by ρ; changing either
+would break the ρ ≡ 1 row for every flow with `∇·u ≠ 0`.
+
+**Why ρ ≡ 1 is bitwise.** Every ρ product is a separate multiply by an exact `1.0`. The one place
+a fused multiply-add could differ is the `ddt` diagonal: `tsDdtGeneralRho` computes
+`fma(sv·a_N, ρ, diag)` where `tsDdtGeneral` computes `fma(sv, a_N, diag)` (read off the SASS).
+The `ddt` is the first term written into the zeroed matrix, so both are `round(sv·a_N)`. The
+source line contracts to `fma(a_0, ψ0, a_00 ψ00)` in both at ρ = 1. The six existing kernels of
+`cuda/sst.cu` are unchanged; four were appended.
+
+**Gates** (`tests/shared/sst_rho_cases.rs`, run as `k_omega_sst::tests::*` and by
+`tests/sst_rho.rs` in both builds; f64 / single measured):
+
+| test | bar | f64 | single | class |
+|---|---|---|---|---|
+| `rho_one_is_bitwise_kinematic`: decay at F1 = 1 and 0 (4×4, 20 steps); a 6×6 channel with wall functions on y, `u = (4y(1−y) + 0.3x, 0.1xy, 0)`, computed F1/F2 and the k limiter active, Euler with `bounded linearUpwind` and `backward` with upwind at dt = 2⁻¹⁰ (8 steps each). k, ω, ν_t (cells and faces) and the last matrix (diag, upper, lower, source) after every step | bit for bit | bit for bit | bit for bit | D |
+| `homogeneous_decay_closed_form`: ρ = 1.3, F1 = 0, ω0 = 10, k0 = 1e−2, t = 5/(β2 ω0). Order from N = 1000 and 2000, bar at N = 10⁴ | ratio in [1.8, 2.2]; k, ω within 1e−3 | ratio 1.9993; k 4.73e−4, ω 5.4e−15 | ratio 2.048; k 1.03e−4, ω 4.09e−4 | P |
+| `sust_holds_ambient`: ρ = 1.3, k_amb = k0, ω_amb = ω0, computed F1, the setting on, 50 steps; control: without sust k decays | 1e−12 (1e−5) | 8.9e−15 | 2.1e−6 | R |
+| `rho_k_budget_closes`: 5×4 closed box, zeroGradient, `u = (0.5 sin πx, 0.3 sin πy, 0)`, ρ = 1 + 0.4x + 0.2y new and 0.9(1 + 0.3x) old, 3 Euler steps; relative to the gross terms `Σ V(ρk′ + ρ⁰k)/dt + Σ(|P| + |sink| + |dil|)` | 1e−12 (1e−5) | 3.2e−17 | 2.0e−8 | R |
+| `dilatation_production_terms`: `u = (0.2x, 0, 0)`, ρ = 1.3: `ρ min(G, ·) − (2/3)ρ(∇·u) k = ρ ν_t (4/3)a² − (2/3)ρka` | 1e−12 (1e−5) | 3.9e−16 | 2.0e−7 | R |
+| `omega_limiter_setting`: `u = (20y, 0, 0)`, k = 1e−3, ω = 1 + 99x, F1 = 0, ρ = 1.3; 4 of 16 cells limited | false: ρ × kinematic, bit for bit; true: 1e−12 (1e−5) in the limited cells, the false value bit for bit elsewhere | 1.5e−16 | 8.1e−8 | D / R |
+
+**Findings.** (i) The budget row was named class A in §156.6; it is class R, as §124.2's imbalance
+row became in §125: k is stored in the build's precision, so the storage term `V ρ k′/dt` carries
+its round-off at the gross size whatever the net change, and no f64 summation recovers it. Measured
+against the net largest term instead, single gives 3.4e−5. (ii) Under `single` the k error at
+N = 10⁴ is the sum of the truncation error (4.7e−4) and accumulated float round-off of the same
+size and opposite sign (ω, exact in exact arithmetic, drifts 4.1e−4), so the order cannot be read
+at N = 5000/10⁴ (single gives a ratio of 7.45 there). The row therefore takes the order where
+truncation dominates and keeps the 1e−3 bar at N = 10⁴, the same in both builds. (iii) [derived]
+The semi-implicit ω update `ω′ = ω/(1 + β2 Δt ω)` solves the homogeneous Riccati equation exactly
+(`1/ω` grows by `β2 Δt` per step), so in f64 ω is (156.11) to round-off at any Δt.
+
+**Decisions (TAKEN).** D1: DST-05 stayed in lane M with one additive `RasCore` method; plan §12.8
+note 4 moves the unit only for a field in `FlowState`/`RasCore`, none was added, and no other lane
+edits `src/turbulence.rs` in W2-W4. D2: the two structural statements above.
 
 ---
 

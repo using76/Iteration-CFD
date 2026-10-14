@@ -19,6 +19,12 @@
 //! illegal launch configuration, not a no-op. Split out of the model itself
 //! for the same reason `turbulence.rs` splits its own: the model file should
 //! read as the physics of SPEC-LIT §6.3, and argument marshalling is not that.
+//!
+//! The last four launchers are the rho-weighted form of SPEC-LIT §156
+//! (DST-05), written from the NASA Turbulence Modeling Resource SST page
+//! (the conservation form, SST-2003, SST-sust) as §156 restates it. The
+//! specification was informed by a review of FSCDustFoam (Huang &
+//! Lipatnikov, GPL) and no code was copied.
 
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
@@ -36,6 +42,12 @@ pub struct SstKernels {
     production: CudaFunction,
     k_sources: CudaFunction,
     omega_sources: CudaFunction,
+
+    // SPEC-LIT §156 (DST-05): the rho-weighted form's four additions.
+    blending_rho: CudaFunction,
+    omega_limited_production: CudaFunction,
+    sust_k: CudaFunction,
+    sust_omega: CudaFunction,
 }
 
 impl SstKernels {
@@ -48,6 +60,10 @@ impl SstKernels {
             production: k.func("sstProductionByNut")?,
             k_sources: k.func("sstKSources")?,
             omega_sources: k.func("sstOmegaSources")?,
+            blending_rho: k.func("sstBlendingRho")?,
+            omega_limited_production: k.func("sstOmegaLimitedProduction")?,
+            sust_k: k.func("sstSustK")?,
+            sust_omega: k.func("sstSustOmega")?,
         })
     }
 }
@@ -329,6 +345,168 @@ pub fn sst_omega_sources(
             .arg(gamma_b)
             .arg(beta_b)
             .arg(&sigma_w2)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  The rho-weighted form - SPEC-LIT §156 (DST-05)
+// ==========================================================================
+
+/// `F_1` and `F_2` with the density in `CD_kw` and in `arg1`'s third branch -
+/// (156.5). At `rho == 1` bit for bit [`sst_blending`]; see `cuda/sst.cu`.
+#[allow(clippy::too_many_arguments)]
+pub fn sst_blending_rho(
+    gpu: &Gpu,
+    kern: &SstKernels,
+    f1: &mut DevBuf<Scalar>,
+    f2: &mut DevBuf<Scalar>,
+    k: &DevBuf<Scalar>,
+    omega: &DevBuf<Scalar>,
+    grad_k: &DevBuf<Vec3>,
+    grad_omega: &DevBuf<Vec3>,
+    y: &DevBuf<Scalar>,
+    rho: &DevBuf<Scalar>,
+    nu: Scalar,
+    beta_star: Scalar,
+    sigma_w2: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(f1, n, "F1")?;
+    expect_len(f2, n, "F2")?;
+    expect_len(k, n, "k")?;
+    expect_len(omega, n, "omega")?;
+    expect_len(grad_k, n, "grad k")?;
+    expect_len(grad_omega, n, "grad omega")?;
+    expect_len(y, n, "y")?;
+    expect_len(rho, n, "rho")?;
+
+    let nl = n as Label;
+    let f = kern.blending_rho.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(f1)
+            .arg(f2)
+            .arg(k)
+            .arg(omega)
+            .arg(grad_k)
+            .arg(grad_omega)
+            .arg(y)
+            .arg(rho)
+            .arg(&nu)
+            .arg(&beta_star)
+            .arg(&sigma_w2)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `limitOmegaProduction` (156.3), (156.8): where `G > c_1 beta* k omega`,
+/// `Su <- blend(gamma) c_1 beta* k omega/nu_t`; every other cell keeps the
+/// `Su` [`sst_omega_sources`] wrote.
+#[allow(clippy::too_many_arguments)]
+pub fn sst_omega_limited_production(
+    gpu: &Gpu,
+    kern: &SstKernels,
+    su: &mut DevBuf<Scalar>,
+    g: &DevBuf<Scalar>,
+    nut: &DevBuf<Scalar>,
+    k: &DevBuf<Scalar>,
+    omega: &DevBuf<Scalar>,
+    gamma_b: &DevBuf<Scalar>,
+    beta_star: Scalar,
+    c1: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(su, n, "Su")?;
+    expect_len(g, n, "G")?;
+    expect_len(nut, n, "nu_t")?;
+    expect_len(k, n, "k")?;
+    expect_len(omega, n, "omega")?;
+    expect_len(gamma_b, n, "blend(gamma)")?;
+
+    let nl = n as Label;
+    let f = kern.omega_limited_production.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(su)
+            .arg(g)
+            .arg(nut)
+            .arg(k)
+            .arg(omega)
+            .arg(gamma_b)
+            .arg(&beta_star)
+            .arg(&c1)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// SST-sust's `k` term (156.9): `g_lim += beta* omega_amb k_amb`.
+pub fn sst_sust_k(
+    gpu: &Gpu,
+    kern: &SstKernels,
+    g_lim: &mut DevBuf<Scalar>,
+    beta_star: Scalar,
+    k_amb: Scalar,
+    omega_amb: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(g_lim, n, "limited production")?;
+
+    let nl = n as Label;
+    let f = kern.sust_k.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(g_lim)
+            .arg(&beta_star)
+            .arg(&k_amb)
+            .arg(&omega_amb)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// SST-sust's `omega` term (156.9): `Su += blend(beta) omega_amb²`.
+pub fn sst_sust_omega(
+    gpu: &Gpu,
+    kern: &SstKernels,
+    su: &mut DevBuf<Scalar>,
+    beta_b: &DevBuf<Scalar>,
+    omega_amb: Scalar,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    expect_len(su, n, "Su")?;
+    expect_len(beta_b, n, "blend(beta)")?;
+
+    let nl = n as Label;
+    let f = kern.sust_omega.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(su)
+            .arg(beta_b)
+            .arg(&omega_amb)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }

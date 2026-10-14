@@ -1965,6 +1965,61 @@ impl<'m> RasCore<'m> {
         self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
     }
 
+    /// [`Self::assemble_transport_blended`] for a MASS-WEIGHTED equation -
+    /// SPEC-LIT §156.1 (DST-05), the rho-weighted SST:
+    ///
+    /// ```text
+    /// ddt(rho, psi) + div(phi_m, psi) - laplacian(rho_f (nu + sigma nu_t), psi) = 0
+    /// ```
+    ///
+    /// with `sigma` read per cell, as SST's blend needs. The same contract as
+    /// [`Self::assemble_transport_mass_weighted`]: `flow.phi` must already BE
+    /// the mass flux, and everything after the diffusivity is the one
+    /// assembly every entry point shares. At `rho == 1` this is
+    /// [`Self::assemble_transport_blended`] bit for bit: the face
+    /// diffusivity is multiplied by an exact `1`, and the `ddt` is the first
+    /// term written into the zeroed matrix, so `fma(sv*a_N, 1, 0)` and
+    /// `fma(sv, a_N, 0)` are the same rounding of the same product.
+    pub fn assemble_transport_blended_mass_weighted(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        psi: &GpuScalarField,
+        conv: DivEntry,
+        r_sigma: &DevBuf<Scalar>,
+        mass: &MassWeighting<'_>,
+    ) -> Result<()> {
+        self.a.zero(gpu)?;
+
+        face_diffusivity_cell(
+            gpu,
+            &self.turb,
+            &mut self.gamma,
+            &mut self.b_gamma,
+            &self.nut,
+            r_sigma,
+            self.mesh,
+            flow.nu,
+        )?;
+
+        crate::field_ops::multiply_field(
+            gpu,
+            &self.fld,
+            &mut self.gamma,
+            &mass.rho_face.f,
+            self.mesh.n_internal_faces,
+        )?;
+        crate::field_ops::multiply_field(
+            gpu,
+            &self.fld,
+            &mut self.b_gamma,
+            &mass.rho_face.bf,
+            self.mesh.n_boundary_faces,
+        )?;
+
+        self.assemble_after_diffusivity(gpu, flow, psi, conv, Some(mass))
+    }
+
     /// [`Self::assemble_transport`] with the face diffusivity supplied by
     /// the CALLER - SPEC-LIT §56.6.
     ///
