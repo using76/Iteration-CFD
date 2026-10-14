@@ -51,7 +51,7 @@ pub(crate) struct Entry {
 /// aliases, then the planned names by their unit, the owned names by their
 /// stream, and the permanent refusals last.
 pub(crate) const CATALOGUE: &[Entry] = &[
-    // ---- implemented (83), in IMPLEMENTED_BC_NAMES' order -----------------
+    // ---- implemented (89), in IMPLEMENTED_BC_NAMES' order -----------------
     Entry { family: "basic", name: "fixedValue", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "noSlip", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "basic", name: "zeroGradient", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
@@ -152,6 +152,15 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "thermal", name: "turbulentHeatFluxTemperature", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "lumpedMassTemperature", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "totalFlowRateAdvectiveDiffusive", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    // SPEC-LIT 120.9: the atmospheric family - four Richards & Hoxey inlet
+    // profiles computed once at setup, and two wall functions `wfNutWall`
+    // writes.
+    Entry { family: "atmospheric", name: "atmBoundaryLayerInletVelocity", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "atmospheric", name: "atmBoundaryLayerInletK", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "atmospheric", name: "atmBoundaryLayerInletEpsilon", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "atmospheric", name: "atmBoundaryLayerInletOmega", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "atmospheric", name: "nutkAtmRoughWallFunction", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "atmospheric", name: "nutUBlendedWallFunction", status: Status::Implemented, field: "psi", extended_by: &[], probes: &[] },
     // ---- alias (5) --------------------------------------------------------
     Entry { family: "thermal", name: "compressible::alphatJayatillekeWallFunction", status: Status::Alias { to: "thermalWallFunction" }, field: "T", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::turbulentTemperatureCoupledBaffleMixed", status: Status::Alias { to: "coupledTemperature" }, field: "T", extended_by: &[], probes: &[] },
@@ -161,13 +170,7 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     // named `alphat`, refused naming `alphat` on any other.
     Entry { family: "thermal", name: "alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
     Entry { family: "thermal", name: "compressible::alphatWallFunction", status: Status::Alias { to: "calculated" }, field: "alphat", extended_by: &[], probes: &[] },
-    // ---- planned (22), by unit --------------------------------------------
-    Entry { family: "atmospheric", name: "atmBoundaryLayerInletVelocity", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "atmospheric", name: "atmBoundaryLayerInletK", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "atmospheric", name: "atmBoundaryLayerInletEpsilon", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "atmospheric", name: "atmBoundaryLayerInletOmega", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "atmospheric", name: "nutkAtmRoughWallFunction", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
-    Entry { family: "atmospheric", name: "nutUBlendedWallFunction", status: Status::Planned { unit: "BC-13" }, field: "psi", extended_by: &[], probes: &[] },
+    // ---- planned (16), by unit --------------------------------------------
     Entry { family: "mapped inflow", name: "mapped", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "mapped inflow", name: "mappedFixedValue", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "mapped inflow", name: "turbulentInlet", status: Status::Planned { unit: "BC-14" }, field: "psi", extended_by: &[], probes: &[] },

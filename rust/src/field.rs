@@ -497,6 +497,20 @@ pub enum BcKind {
     /// `inletPatch` - `refValue = U_P + c S_f/|S_f|`, `c = (Q - F)/A`.
     /// Vector only.
     MatchedFlowRateOutletVelocity = 50,
+
+    /// `nutkAtmRoughWallFunction` (SPEC-LIT 120.9, (120.9g)): the `k`-based
+    /// wall value of a ground whose roughness LENGTH `z0` the Richards &
+    /// Hoxey (1993) profile is written in - `u* = C_mu^{1/4} sqrt(k_P)`,
+    /// `nu_t,w = max(0, u* kappa y / ln(1 + y/z0) - nu)`, so the wall shear
+    /// is `u*^2` wherever the cell sits on the profile. A wall-function kind:
+    /// the triple degenerates to the cell value until `wfNutWall` writes it.
+    NutkAtmRoughWallFunction = 51,
+
+    /// `nutUBlendedWallFunction` (SPEC-LIT 120.9, (120.9h)): the `nutU`
+    /// family with `u_tau` the binomial blend `(u_v^n + u_l^n)^{1/n}` of the
+    /// viscous-sublayer and log-law friction velocities, `n` from the patch
+    /// entry (4 when absent). A wall-function kind, velocity-based.
+    NutUBlendedWallFunction = 52,
 }
 
 /// The flux-switched block, `[FLUX_SWITCHED_FIRST, FLUX_SWITCHED_LAST]`.
@@ -624,6 +638,16 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "turbulentHeatFluxTemperature",
     "lumpedMassTemperature",
     "totalFlowRateAdvectiveDiffusive",
+    // SPEC-LIT 120.9: the atmospheric family. The four Richards & Hoxey
+    // inlet profiles ride `BcKind::FixedValue` with a per-face value the
+    // setup computes; the two wall functions are wall-function kinds that
+    // `wfNutWall` writes.
+    "atmBoundaryLayerInletVelocity",
+    "atmBoundaryLayerInletK",
+    "atmBoundaryLayerInletEpsilon",
+    "atmBoundaryLayerInletOmega",
+    "nutkAtmRoughWallFunction",
+    "nutUBlendedWallFunction",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -967,20 +991,19 @@ impl BcKind {
             "nutkRoughWallFunction" => Self::NutkRoughWallFunction,
             "nutURoughWallFunction" => Self::NutURoughWallFunction,
 
-            // The atmospheric (Monin-Obukhov) rough wall function is a
-            // different profile, not a discarded parameter - it is an error
-            // naming the two non-atmospheric rough functions this solver
-            // does implement, not a silent substitution.
-            "nutkAtmRoughWallFunction" => {
-                return unsupported(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    &["nutkRoughWallFunction", "nutURoughWallFunction"],
-                    "the non-atmospheric rough wall function of the same family (the \
-                     Monin-Obukhov atmospheric profile is not implemented)",
-                    Self::NutkRoughWallFunction,
-                );
-            }
+            // SPEC-LIT 120.9: the atmospheric family. The ground's wall
+            // function is written in the roughness LENGTH `z0` of the
+            // Richards & Hoxey profile ((120.9g)), not in a sand-grain
+            // height, so it is a kind of its own; the blended `nutU` reads
+            // its exponent `n` ((120.9h)). The four inlet profiles ARE a
+            // fixedValue - `field_setup` computes each face's value once
+            // from (120.9a)-(120.9e).
+            "nutkAtmRoughWallFunction" => Self::NutkAtmRoughWallFunction,
+            "nutUBlendedWallFunction" => Self::NutUBlendedWallFunction,
+            "atmBoundaryLayerInletVelocity"
+            | "atmBoundaryLayerInletK"
+            | "atmBoundaryLayerInletEpsilon"
+            | "atmBoundaryLayerInletOmega" => Self::FixedValue,
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
             "epsilonWallFunction" => Self::EpsilonWallFunction,
             "omegaWallFunction" => Self::OmegaWallFunction,
@@ -1413,6 +1436,8 @@ impl BcKind {
                 | Self::NutUWallFunction
                 | Self::NutkRoughWallFunction
                 | Self::NutURoughWallFunction
+                | Self::NutkAtmRoughWallFunction
+                | Self::NutUBlendedWallFunction
         )
     }
 
@@ -1428,7 +1453,10 @@ impl BcKind {
     /// own patch type.
     #[inline]
     pub fn is_nut_velocity_based(self) -> bool {
-        matches!(self, Self::NutUWallFunction | Self::NutURoughWallFunction)
+        matches!(
+            self,
+            Self::NutUWallFunction | Self::NutURoughWallFunction | Self::NutUBlendedWallFunction
+        )
     }
 
     /// True where the face carries the Cebeci & Bradshaw roughness downshift
@@ -1934,7 +1962,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [83, 5, 22, 10, 10], "the per-status counts");
+        assert_eq!(counts, [89, 5, 16, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

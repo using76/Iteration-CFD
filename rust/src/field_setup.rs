@@ -1479,6 +1479,7 @@ fn scalar_patch(
             | "pressureDirectedInletVelocity"
             | "pressureDirectedInletOutletVelocity"
             | "pressureInletOutletParSlipVelocity"
+            | "atmBoundaryLayerInletVelocity"
     ) {
         return Err(Error::Field {
             field: field.to_string(),
@@ -1648,6 +1649,34 @@ fn scalar_patch(
             out.ref_value[at + i] = rv as Scalar;
             out.ref_grad[at + i] = 0.0;
             out.value[at + i] = internal[i];
+        }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.9: the three scalar Richards & Hoxey profiles, before the
+    // static arms for the same reason as 120.5's - `from_name` maps them to
+    // `FixedValue`, whose static arm would take the `value` entry instead
+    // of the profile. Each face's value is computed once, in f64 from the
+    // world face centre, and rounded once.
+    if matches!(
+        spec.type_name.as_str(),
+        "atmBoundaryLayerInletK" | "atmBoundaryLayerInletEpsilon" | "atmBoundaryLayerInletOmega"
+    ) {
+        let name = spec.type_name.as_str();
+        let e = atm_entry(spec, name, n, patch, field, f1)?;
+        let kind = BcKind::from_name(name, field, patch)?;
+        for i in 0..n {
+            let (_, k, eps, omega) = atm_face(&e, aux, i);
+            let rv = match name {
+                "atmBoundaryLayerInletK" => k,
+                "atmBoundaryLayerInletEpsilon" => eps,
+                _ => omega,
+            } as Scalar;
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = rv;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = rv;
         }
         return Ok(());
     }
@@ -1850,6 +1879,8 @@ fn scalar_patch(
             | BcKind::NutUWallFunction
             | BcKind::NutkRoughWallFunction
             | BcKind::NutURoughWallFunction
+            | BcKind::NutkAtmRoughWallFunction
+            | BcKind::NutUBlendedWallFunction
             | BcKind::WernerWengleWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction => (
@@ -2602,7 +2633,30 @@ fn finished_direction_mixed(
 /// over the patch, a list whose count is not the patch's face count is an
 /// error naming both.
 fn scalar_ref_value_faces(raw: &str, n: usize, patch: &str, field: &str) -> Result<Vec<Scalar>> {
-    let setting = format!("{field}: boundaryField/{patch}/refValue");
+    scalar_entry_faces(raw, "refValue", n, patch, field)
+}
+
+/// SPEC-LIT 120.9's per-face scalar entries (`z0`, `zGround`): a bare
+/// `<number>` spreads over the patch, as OpenFOAM's own examples write `z0`,
+/// and anything else is read by [`scalar_entry_faces`].
+fn atm_faces(raw: &str, key: &str, n: usize, patch: &str, field: &str) -> Result<Vec<Scalar>> {
+    if let Ok(v) = raw.trim().parse::<f64>() {
+        return Ok(vec![v as Scalar; n]);
+    }
+    scalar_entry_faces(raw, key, n, patch, field)
+}
+
+/// [`scalar_ref_value_faces`]'s reader for any per-face SCALAR entry `key`
+/// (SPEC-LIT 120.5, 120.9): `uniform <number>` or `nonuniform List<scalar>
+/// N (...)`, one number a face.
+fn scalar_entry_faces(
+    raw: &str,
+    key: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+) -> Result<Vec<Scalar>> {
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
     let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
     if tz.is_word("uniform") {
         tz.next()?;
@@ -3105,6 +3159,175 @@ fn wall_slip_seed(
     }
 }
 
+// ==========================================================================
+//  The atmospheric family (SPEC-LIT 120.9)
+// ==========================================================================
+
+/// One patch's Richards & Hoxey (1993) inputs (SPEC-LIT 120.9), every number
+/// widened to f64 once.
+struct AtmEntry {
+    /// `flowDir`, normalised in f64.
+    flow_dir: DVec3,
+    /// `zDir`, normalised in f64.
+    z_dir: DVec3,
+    u_ref: f64,
+    z_ref: f64,
+    kappa: f64,
+    cmu: f64,
+    /// `z0` per face, m.
+    z0: Vec<f64>,
+    /// `zGround` per face, m (0 when absent).
+    z_ground: Vec<f64>,
+}
+
+/// The entries no (120.9) profile reads, refused by name rather than
+/// dropped: `d` is a displacement height and `C1`/`C2` are the extended
+/// `k` profile of a later paper, neither of which (120.9a)-(120.9e) has.
+const ATM_UNREAD: &[&str] = &["d", "C1", "C2"];
+
+/// One CONSTANT scalar of the family. A time-varying Function1 is refused by
+/// name, as 120.5's profiles refuse one: no driver runs the timed path for
+/// these names. `default` is used when the key is absent; `None` makes the
+/// key required.
+fn atm_scalar(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    name: &str,
+    base: &str,
+    field: &str,
+    f1: Option<&F1Setup>,
+    default: Option<f64>,
+) -> Result<f64> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, 1, &setting, f1.and_then(|s| s.case_dir))? else {
+        return default.ok_or_else(|| Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: {name} needs a `{key}` entry and the patch has none \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    };
+    if !f.is_constant() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: a time-varying `{key}` is refused on the atmospheric \
+                 family - no driver runs the timed path for these names \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    Ok(f.eval(0.0)[0])
+}
+
+/// A direction entry of the family, normalised in f64; zero is refused.
+fn atm_dir(spec: &PatchFieldSpec, key: &str, name: &str, patch: &str, field: &str) -> Result<DVec3> {
+    let v = required_vec3(spec, key, patch, field, name)?;
+    let d = DVec3::new(v.x as f64, v.y as f64, v.z as f64);
+    let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+    if !(len > 0.0) || !len.is_finite() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: {name}'s `{key}` must be a \
+                 non-zero direction (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    Ok(d * (1.0 / len))
+}
+
+/// Parse one atmospheric patch entry (SPEC-LIT 120.9), validating every
+/// input the profile reads: `flowDir` and `zDir` non-zero, `Uref` and `Zref`
+/// constant and positive, `z0` positive at every face, `kappa` and `Cmu`
+/// positive (0.41 and 0.09 when absent), `zGround` 0 when absent, and the
+/// unread `d`/`C1`/`C2` refused by name.
+fn atm_entry(
+    spec: &PatchFieldSpec,
+    name: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+    f1: Option<&F1Setup>,
+) -> Result<AtmEntry> {
+    let base = format!("{field}: boundaryField/{patch}");
+    if let Some(key) = ATM_UNREAD.iter().find(|k| spec.extra.contains_key(**k)) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/{key}: {name} does not read `{key}` - the profile is \
+                 Richards & Hoxey's (120.9a)-(120.9e), which has no displacement \
+                 height and no extended k coefficients; remove the entry \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    let entries = crate::function1::patch_entries(spec, &base)?;
+    let flow_dir = atm_dir(spec, "flowDir", name, patch, field)?;
+    let z_dir = atm_dir(spec, "zDir", name, patch, field)?;
+    let u_ref = atm_scalar(&entries, "Uref", name, &base, field, f1, None)?;
+    let z_ref = atm_scalar(&entries, "Zref", name, &base, field, f1, None)?;
+    let kappa = atm_scalar(&entries, "kappa", name, &base, field, f1, Some(0.41))?;
+    let cmu = atm_scalar(&entries, "Cmu", name, &base, field, f1, Some(0.09))?;
+    for (key, v) in [("Uref", u_ref), ("Zref", z_ref), ("kappa", kappa), ("Cmu", cmu)] {
+        if !(v > 0.0) || !v.is_finite() {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{base}/{key}: {name}'s `{key}` is {v}; it must be positive \
+                     (SPEC-LIT 120.9)"
+                ),
+            });
+        }
+    }
+    let Some(z0_text) = spec.extra.get("z0") else {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/z0: {name} needs the roughness length `z0` (uniform or one \
+                 per face) and the patch has none (SPEC-LIT 120.9)"
+            ),
+        });
+    };
+    let z0: Vec<f64> = atm_faces(z0_text, "z0", n, patch, field)?
+        .into_iter()
+        .map(|v| v as f64)
+        .collect();
+    if let Some((i, v)) = z0.iter().enumerate().find(|(_, v)| !(**v > 0.0)) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/z0: face {i} has z0 = {v}; the roughness length must be \
+                 positive (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    let z_ground: Vec<f64> = match spec.extra.get("zGround") {
+        Some(t) => atm_faces(t, "zGround", n, patch, field)?
+            .into_iter()
+            .map(|v| v as f64)
+            .collect(),
+        None => vec![0.0; n],
+    };
+    Ok(AtmEntry { flow_dir, z_dir, u_ref, z_ref, kappa, cmu, z0, z_ground })
+}
+
+/// (120.9a)-(120.9e) at face `i`, in f64 from the WORLD face centre
+/// (SPEC-LIT 118.7): `(U, k, epsilon, omega)`. `z = max(zDir . x_f -
+/// zGround, 0)`; both logarithms are `ln_1p`, `ln((a + z0)/z0) =
+/// ln_1p(a/z0)`.
+fn atm_face(e: &AtmEntry, aux: &PatchAux, i: usize) -> (DVec3, f64, f64, f64) {
+    let z0 = e.z0[i];
+    let z = (e.z_dir.dot(aux.bc_f[i]) - e.z_ground[i]).max(0.0);
+    let u_star = e.kappa * e.u_ref / (e.z_ref / z0).ln_1p();
+    let u = e.flow_dir * (u_star / e.kappa * (z / z0).ln_1p());
+    let k = u_star * u_star / e.cmu.sqrt();
+    let eps = u_star * u_star * u_star / (e.kappa * (z + z0));
+    let omega = u_star / (e.kappa * e.cmu.sqrt() * (z + z0));
+    (u, k, eps, omega)
+}
+
 /// SPEC-LIT 120.5: the velocity-inlet family on a vector field - the three
 /// fixed-value profiles as a `FixedValue` whose per-face value the setup
 /// computes once, in f64 from the f64 face centres and unit normals
@@ -3448,6 +3671,38 @@ fn vector_patch(
         return Ok(());
     }
 
+    // SPEC-LIT 120.9: the Richards & Hoxey velocity profile (120.9b), a
+    // `FixedValue` whose per-face value is computed once in f64 from the
+    // world face centre and rounded once - before the static arms, which
+    // would take the `value` entry instead. The three scalar profiles map to
+    // `FixedValue` too, so they are refused here on the NAME.
+    match spec.type_name.as_str() {
+        "atmBoundaryLayerInletVelocity" => {
+            let e = atm_entry(spec, "atmBoundaryLayerInletVelocity", n, patch, field, f1)?;
+            for i in 0..n {
+                let (u, _, _, _) = atm_face(&e, aux, i);
+                let rv = Vec3::new(u.x as Scalar, u.y as Scalar, u.z as Scalar);
+                out.kind[at + i] = BcKind::FixedValue as Label;
+                out.fr[at + i] = 1.0;
+                out.ref_value[at + i] = rv;
+                out.ref_grad[at + i] = zero;
+                out.value[at + i] = rv;
+            }
+            return Ok(());
+        }
+        "atmBoundaryLayerInletK" | "atmBoundaryLayerInletEpsilon" | "atmBoundaryLayerInletOmega" => {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{}` is a scalar condition and {field} is a vector \
+                     field (SPEC-LIT 120.9)",
+                    spec.type_name
+                ),
+            });
+        }
+        _ => {}
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
@@ -3776,6 +4031,8 @@ fn vector_patch(
             | BcKind::NutUWallFunction
             | BcKind::NutkRoughWallFunction
             | BcKind::NutURoughWallFunction
+            | BcKind::NutkAtmRoughWallFunction
+            | BcKind::NutUBlendedWallFunction
             | BcKind::NutLowReWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction
@@ -4578,6 +4835,26 @@ pub struct NutRoughness {
     /// SPEC-LIT §15.3 default for uniform sand, filled in here so a rough
     /// patch that omits `Cs` still gets it rather than a stray zero.
     pub cs: Vec<Scalar>,
+    /// SPEC-LIT §120.9: which law of the wall the face's `nu_t` comes from
+    /// beyond `u_based`'s two families. [`NutFamily::Standard`] on every face
+    /// that is not one of the two atmospheric-family names.
+    pub family: Vec<NutFamily>,
+    /// SPEC-LIT §120.9: the family's one parameter - the roughness length
+    /// `z0` (m) on a [`NutFamily::AtmRough`] face, the blend exponent `n` on
+    /// a [`NutFamily::Blended`] face, zero on every other.
+    pub par: Vec<Scalar>,
+}
+
+/// SPEC-LIT §120.9: the law of the wall a `nut` face asked for, beyond the
+/// `k`-based/velocity-based split [`NutRoughness::u_based`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NutFamily {
+    /// `nutk`, `nutU` and their rough forms (SPEC-LIT §6.4/§15).
+    Standard,
+    /// `nutkAtmRoughWallFunction`, (120.9g) - `k`-based, in `z0`.
+    AtmRough,
+    /// `nutUBlendedWallFunction`, (120.9h) - velocity-based.
+    Blended,
 }
 
 impl NutRoughness {
@@ -4589,6 +4866,8 @@ impl NutRoughness {
             u_based: vec![false; n_boundary_faces],
             ks: vec![0.0; n_boundary_faces],
             cs: vec![0.5; n_boundary_faces],
+            family: vec![NutFamily::Standard; n_boundary_faces],
+            par: vec![0.0; n_boundary_faces],
         }
     }
 
@@ -4603,6 +4882,8 @@ impl NutRoughness {
         let mut u_based = vec![false; m.n_boundary_faces];
         let mut ks = vec![0.0 as Scalar; m.n_boundary_faces];
         let mut cs = vec![0.5 as Scalar; m.n_boundary_faces];
+        let mut family = vec![NutFamily::Standard; m.n_boundary_faces];
+        let mut par = vec![0.0 as Scalar; m.n_boundary_faces];
 
         for p in &m.patches {
             let Some(spec) = raw.spec(&p.name)? else {
@@ -4626,14 +4907,62 @@ impl NutRoughness {
                 (0.0, 0.5)
             };
 
+            // SPEC-LIT §120.9: the atmospheric family's one parameter per
+            // face - `z0` for (120.9g), required and positive at every face;
+            // `n` for (120.9h), 4 when absent and positive when given.
+            let (fam, pars) = match kind {
+                BcKind::NutkAtmRoughWallFunction => {
+                    let base = format!("{}: boundaryField/{}", raw.name, p.name);
+                    let Some(text) = spec.extra.get("z0") else {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{base}/z0: nutkAtmRoughWallFunction needs the roughness \
+                                 length `z0` (uniform or one per face) and the patch has \
+                                 none (SPEC-LIT 120.9)"
+                            ),
+                        });
+                    };
+                    let z0 = atm_faces(text, "z0", p.size, &p.name, &raw.name)?;
+                    if let Some((i, v)) = z0.iter().enumerate().find(|(_, v)| !(**v > 0.0)) {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{base}/z0: face {i} has z0 = {v}; the roughness length \
+                                 must be positive (SPEC-LIT 120.9)"
+                            ),
+                        });
+                    }
+                    (NutFamily::AtmRough, z0)
+                }
+                BcKind::NutUBlendedWallFunction => {
+                    let nb = spec.number("n", &p.name)?.unwrap_or(4.0);
+                    if !(nb > 0.0) || !nb.is_finite() {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{}: boundaryField/{}/n: nutUBlendedWallFunction's blend \
+                                 exponent is {nb}; it must be positive and finite \
+                                 (SPEC-LIT 120.9)",
+                                raw.name, p.name
+                            ),
+                        });
+                    }
+                    (NutFamily::Blended, vec![nb; p.size])
+                }
+                _ => (NutFamily::Standard, vec![0.0; p.size]),
+            };
+
             for i in 0..p.size {
                 u_based[p.start + i] = u_flag;
                 ks[p.start + i] = k_val;
                 cs[p.start + i] = c_val;
+                family[p.start + i] = fam;
+                par[p.start + i] = pars[i];
             }
         }
 
-        Ok(Self { u_based, ks, cs })
+        Ok(Self { u_based, ks, cs, family, par })
     }
 }
 
@@ -4804,6 +5133,8 @@ pub fn bc_kind_name(k: BcKind) -> &'static str {
         BcKind::NutUWallFunction => "nutUWallFunction",
         BcKind::NutkRoughWallFunction => "nutkRoughWallFunction",
         BcKind::NutURoughWallFunction => "nutURoughWallFunction",
+        BcKind::NutkAtmRoughWallFunction => "nutkAtmRoughWallFunction",
+        BcKind::NutUBlendedWallFunction => "nutUBlendedWallFunction",
         BcKind::NutLowReWallFunction => "nutLowReWallFunction",
         BcKind::KqRWallFunction => "kqRWallFunction",
         BcKind::KLowReWallFunction => "kLowReWallFunction",
@@ -5842,16 +6173,60 @@ mod tests {
         assert_eq!(r.u_based, vec![false; m.n_boundary_faces]);
     }
 
-    /// The atmospheric rough wall function is a different profile
-    /// (Monin-Obukhov), not a discarded parameter: it is an error naming the
-    /// two rough functions this solver does implement.
+    /// SPEC-LIT §120.9: `nutkAtmRoughWallFunction` is the `k`-based family
+    /// in the roughness length `z0`, read per face (a bare number, `uniform`
+    /// or a list), and refused by name without one or with `z0 <= 0`.
     #[test]
-    fn nutk_atm_rough_wall_function_is_an_error_naming_the_two() {
-        let err = BcKind::from_name("nutkAtmRoughWallFunction", "nut", "inlet")
-            .expect_err("not implemented");
-        let msg = format!("{err}");
-        assert!(msg.contains("nutkRoughWallFunction"), "{msg}");
-        assert!(msg.contains("nutURoughWallFunction"), "{msg}");
+    fn nutk_atm_rough_wall_function_reads_z0_and_refuses_without_it() {
+        let m = mesh();
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "uniform 0.03".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.family[0], NutFamily::AtmRough);
+        assert_eq!(r.par[0], 0.03);
+        assert_eq!(r.ks[0], 0.0, "z0 is not a sand-grain height");
+        assert!(!r.u_based[0], "the atmospheric ground is k-based");
+
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "0.1".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.par[0], 0.1);
+
+        let raw = scalar_field("inlet", spec("nutkAtmRoughWallFunction"));
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("no z0"));
+        assert!(msg.contains("z0") && msg.contains("120.9"), "{msg}");
+
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "uniform 0".into());
+        let raw = scalar_field("inlet", s);
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("z0 = 0"));
+        assert!(msg.contains("positive"), "{msg}");
+    }
+
+    /// SPEC-LIT §120.9: `nutUBlendedWallFunction` is velocity-based, with
+    /// the blend exponent `n` defaulting to 4 and refused when not positive.
+    #[test]
+    fn nutu_blended_wall_function_reads_n_and_is_velocity_based() {
+        let m = mesh();
+        let r = NutRoughness::from_case(
+            Some(&scalar_field("inlet", spec("nutUBlendedWallFunction"))),
+            &m,
+        )
+        .expect("builds");
+        assert_eq!(r.family[0], NutFamily::Blended);
+        assert_eq!(r.par[0], 4.0);
+        assert!(r.u_based[0]);
+
+        let mut s = spec("nutUBlendedWallFunction");
+        s.extra.insert("n".into(), "2".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.par[0], 2.0);
+
+        let mut s = spec("nutUBlendedWallFunction");
+        s.extra.insert("n".into(), "-1".into());
+        let raw = scalar_field("inlet", s);
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("n < 0"));
+        assert!(msg.contains("exponent"), "{msg}");
     }
 
     // ------------------------------------------------------------------

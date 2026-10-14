@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 83 names of
+accepts it on the field the row is asked on, and it is one of the 89 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39111,17 +39111,17 @@ row, row for row.
 | thermal | `turbulentHeatFluxTemperature` | implemented | — | — | §32.2's `fixedFluxTemperature` through `k_eff`, `heatSource` `flux` or `power` |
 | thermal | `lumpedMassTemperature` | implemented | — | — | (120.8g), a lumped mass behind the wall stepped by the energy equation's own ddt row |
 | thermal | `totalFlowRateAdvectiveDiffusive` | implemented | — | — | (120.8h), Danckwerts' inlet: the total heat flow in is the advected `inletValue` |
+| atmospheric | `atmBoundaryLayerInletVelocity` | implemented | — | — | (120.9b), the Richards & Hoxey log profile in `z0` |
+| atmospheric | `atmBoundaryLayerInletK` | implemented | — | — | (120.9c), `u*^2/sqrt(C_mu)` |
+| atmospheric | `atmBoundaryLayerInletEpsilon` | implemented | — | — | (120.9d), `u*^3/(kappa (z + z0))` |
+| atmospheric | `atmBoundaryLayerInletOmega` | implemented | — | — | (120.9e), `epsilon/(C_mu k)` |
+| atmospheric | `nutkAtmRoughWallFunction` | implemented | — | — | (120.9g), the k-based ground in the roughness length `z0`; the wall shear is `u*^2` on the profile |
+| atmospheric | `nutUBlendedWallFunction` | implemented | — | — | (120.9h), the binomial blend of the viscous and log-law friction velocities, exponent `n` |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| atmospheric | `atmBoundaryLayerInletVelocity` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletK` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletEpsilon` | planned | BC-13 | — | — |
-| atmospheric | `atmBoundaryLayerInletOmega` | planned | BC-13 | — | — |
-| atmospheric | `nutkAtmRoughWallFunction` | planned | BC-13 | — | the Monin-Obukhov rough profile; refused today naming the two non-atmospheric rough functions |
-| atmospheric | `nutUBlendedWallFunction` | planned | BC-13 | — | — |
 | mapped inflow | `mapped` | planned | BC-14 | — | — |
 | mapped inflow | `mappedFixedValue` | planned | BC-14 | — | — |
 | mapped inflow | `turbulentInlet` | planned | BC-14 | — | — |
@@ -39212,9 +39212,8 @@ the fallback that refusal names (§13.4): `calculated` for the generic refusal
 of a name outside the catalogue and for every permanent refusal except
 `compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
 fallback `coupledTemperature` (the conjugate coupling without the radiative
-term, §50.8); the planned names refused by their own arm today keep theirs
-(`cyclicAMI` a position-paired
-`cyclic`, `nutkAtmRoughWallFunction` `nutkRoughWallFunction`).
+term, §50.8); the planned name refused by its own arm today keeps its own
+(`cyclicAMI` a position-paired `cyclic`).
 
 ### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
 
@@ -40416,6 +40415,170 @@ build.
 * **Danckwerts, P. V.** Continuous flow systems: distribution of residence
   times. *Chem. Eng. Sci.* 2(1) (1953) 1-13, doi:10.1016/0009-2509(53)80001-1
   - the inlet condition of a flow with axial dispersion.
+
+No GPL-licensed source was consulted.
+
+### 120.9 The atmospheric family - the Richards & Hoxey surface layer at an inlet, and two wall functions
+
+BC-13 implements the six atmospheric names of the §120 table. The names are
+taken from the user guides of §120 by name only; every equation below is
+cited, or is ours and marked DESIGN.
+
+**Four inlet profiles** (Richards & Hoxey 1993). `atmBoundaryLayerInletVelocity`,
+`atmBoundaryLayerInletK`, `atmBoundaryLayerInletEpsilon` and
+`atmBoundaryLayerInletOmega` are a `fixedValue` (`BcKind::FixedValue`,
+`fr = 1`) whose per-face value the setup computes once, in f64 from the
+world face centre (§118.7), and rounds once into `Scalar` - the treatment
+§120.5 gives its fixed-value profiles. The neutral surface layer of a
+roughness length `z0`, with the height above the ground
+`z = max(zDir . x_f - zGround, 0)`:
+
+```
+u* = kappa Uref / ln((Zref + z0)/z0)                                 (120.9a)
+U  = (u*/kappa) ln((z + z0)/z0) flowDir                              (120.9b)
+k  = u*^2 / sqrt(C_mu)                                               (120.9c)
+epsilon = u*^3 / (kappa (z + z0))                                    (120.9d)
+omega   = epsilon/(C_mu k) = u* / (kappa sqrt(C_mu) (z + z0))        (120.9e)
+```
+
+(120.9a)-(120.9d) are Richards & Hoxey's; (120.9e) is (120.9d) through the
+k-omega relation `omega = epsilon/(beta* k)` with `beta* = C_mu`
+(Wilcox; §6.2). Both logarithms are evaluated as `ln_1p(a/z0)`. The entries:
+`flowDir` and `zDir` (required, normalised in f64, a zero vector refused),
+`Uref` and `Zref` (required, positive; a time-varying Function1 is refused
+by name, as §120.5 refuses one, because no driver runs the timed path for
+these names), `z0` (required, positive at every face; `uniform`, a bare
+number, or one per face), `zGround` (0 when absent; uniform or per face),
+`kappa` (0.41) and `Cmu` (0.09). The entries `d`, `C1` and `C2` are refused
+by name: a displacement height and the extended `k` profile of later work
+are not in (120.9a)-(120.9e), and dropping them silently would be the
+substitution §13.4 forbids. A scalar name on a vector field, and the
+velocity name on a scalar field, are refused naming the mismatch.
+
+Richards & Hoxey show that (120.9b)-(120.9d) solve the standard k-epsilon
+equations exactly - `k` is uniform, its production equals `epsilon`, and
+`nu_t = C_mu k^2/epsilon = kappa u* (z + z0)` - provided
+
+```
+sigma_eps = kappa^2 / ((C_2 - C_1) sqrt(C_mu))                       (120.9f)
+```
+
+which is 1.1674 for `kappa = 0.41` and the §6.1 constants, against the
+standard 1.3. A case that wants the profile kept along a fetch sets it.
+
+**The ground: `nutkAtmRoughWallFunction`** *(DESIGN - ours, after
+Hargreaves & Wright 2007)*. Hargreaves & Wright traced the decay of an
+inlet profile along an empty fetch to a rough-wall function written in a
+sand-grain height rather than in the profile's own `z0`. The wall function
+here is written so that a cell sitting on (120.9b)-(120.9c) carries exactly
+the shear `u*^2` (BcKind 51, family code 2 of `wfNutWall`, host twin
+`wallfunctions::nut_wall_atm_rough`):
+
+```
+u* = C_mu^{1/4} sqrt(k_P),
+nu_t,w = max(0, u* kappa y / ln(1 + y/z0) - nu)                      (120.9g)
+```
+
+With `U_P = (u*/kappa) ln(1 + y/z0)` at the cell's wall distance `y`, the
+face shear `(nu + nu_t,w) U_P/y` is `u*^2` for any `y` - the property the
+gate measures. `k_P` is floored at `k_min` as `nutk` floors it. `z0` is the
+patch's own (required, positive at every face, per face or uniform); it is
+NOT a sand-grain height, and `Ks`/`Cs` are not read. The ground's `epsilon`
+keeps `epsilonWallFunction` (§6.4); `G` in the wall cell is built from the
+`nu_t,w` this writes.
+
+**`nutUBlendedWallFunction`** *(DESIGN - ours)*. The velocity-based family
+(§15.1) with the friction velocity a binomial blend of the two asymptotes
+(BcKind 52, family code 3, host twins `u_tau_log`, `u_tau_blended`,
+`nut_wall_blended`):
+
+```
+u_v = sqrt(nu |U|/y)                              (u+ = y+)
+u_l: the root of u ln(1 + E y u/nu) = kappa |U|   (u+ = ln(1 + E y+)/kappa)
+u_tau = (u_v^n + u_l^n)^{1/n},   nu_t,w = max(0, u_tau^2 y/|U| - nu)  (120.9h)
+```
+
+`|U|` is the wall-parallel speed `wfMagUParallel` gives the `nutU` family,
+and `n` is the patch entry `n` (4 when absent; positive and finite, or
+refused). The log law is written with `ln(1 + E y+)`, not `ln(E y+)`: the two
+differ by `1/(kappa E y+)`, under 4e-3 of `u+` from `y+ = 30` on, but only
+the first has a root that vanishes with `|U|` (`u_l -> sqrt(kappa/E) u_v`),
+so the blend's viscous limit is the sublayer's - `nu_t,w/nu -> (1 +
+(kappa/E)^2)^{1/2} - 1 = 8.7e-4` - and not the floor `y+ = 1/E` of the plain
+log law. `u_l` is found by Newton from `u_v`, at most 40 steps, stopping
+when a step is below `4 eps` of the precision relative: `G(u) = u ln(1 + E y
+u/nu) - kappa |U|` is increasing and convex for `u > 0` with `G(0) < 0`, so
+after at most one step the iterates fall to the root from above. The blend
+is formed as `m (1 + r^n)^{1/n}`, `m = max(u_v, u_l)`, `r = min/max` - the
+same number without the overflow `u^n` would risk in `f32`.
+
+**Precision.** Codes 0 and 1 of `wfNutWall` (`nutk`, `nutU` and their
+rough forms) keep their arithmetic; only `wallfunctions.cubin` changes, and
+no other kernel's SASS moves. The profiles are f64 and rounded once. The
+new kernel arithmetic runs in `ofscalar` with `log1p`, `pow` and the
+precision's own stopping rule; the twins are held at class R.
+
+**Refusals by name.** A missing or non-positive `z0` (on any of the six), a
+missing or non-positive `Uref`/`Zref`/`kappa`/`Cmu`, a zero `flowDir` or
+`zDir`, a time-varying `Uref`, the entries `d`, `C1`, `C2`, a non-positive
+blend exponent, and the scalar/vector mix-ups. `WallData::build` refuses a
+face whose atmospheric family disagrees with its `u_based` flag.
+
+**Gate** (`tests/bc_atmospheric.rs`, both builds; f64 first, `single` in
+brackets). `the_inlet_profiles_are_richards_and_hoxey` - a 12-face inlet
+graded towards the ground, `Uref 8`, `Zref 20`, `z0 0.05`, `zGround -2`,
+`kappa 0.4`, `Cmu 0.085`: the face values of all four names against
+(120.9a)-(120.9e) in f64, worst relative 0 [4.8e-8] (tol(1e-14), class R).
+`nutk_atm_rough_holds_the_profile_shear` - eight ground faces at `y = 0.05`
+with `z0` from 1e-4 to 30 m, `k = u*^2/sqrt(C_mu)` at `u* = 0.5`: the device
+`nu_t,w` against `nut_wall_atm_rough` within 1.5e-16 [0] and the wall shear
+`(nu + nu_t,w) U(y)/y` against `u*^2` within 2.2e-16 [6.8e-8] (tol(1e-12),
+class R). `nutu_blended_meets_its_twin_and_its_limits` - wall-parallel
+speeds 1e-6 to 10 m/s (`Re_y` 3.3e-3 to 3.3e4) at `n = 4` and `n = 3`: device
+against twin within 0 [4.4e-7] (tol(1e-12), relative to `max(nu_t,w, nu)`);
+the viscous limit `nu_t,w/nu = 9.80e-4` (<= 1e-3), the log limit
+`u_tau/u_l - 1 = 6.6e-5` (<= 1e-4) with `|G(u_l)|` 0 [1.0e-7] (tol(1e-12)
+`kappa |U|`). `atmospheric_refusals_are_by_name` - 12 refusals, each naming
+its entry. `a_five_km_fetch_keeps_the_inlet_profile` - THE gate: 50 x 1 x 24
+cells over 5000 x 10 x 500 m, the vertical graded 50:1 (first cell 1.59 m),
+y empty; xMin and the top carry (120.9b)-(120.9d) (the top's fixed values
+hold the shear that drives the layer), xMax `zeroGradient` with `p = 0`,
+the ground `noSlip`, `kqRWallFunction`, `epsilonWallFunction` and
+`nutkAtmRoughWallFunction z0 0.01`; `Uref 10` at `Zref 10` (`u* =
+0.593450`), `nu = 1.5e-5`, k-epsilon with (120.9f), `nut_max_coeff 1e8`
+(the default cap `1e5 nu` would bound `epsilon` off a profile whose `nu_t`
+reaches 122 m^2/s), the pressure by PCG with DIC. Steady SIMPLE from the
+profile stops in 225 iterations at a 25-iteration change of `U.x` below
+1e-9 m/s [the 1000-iteration cap, the f32 SIMPLE floor of §118, change
+5.7e-6 m/s]. The outlet column against the inlet profile: `U` worst
+2.483 % [2.483 %] at `z = 2.53 m` (<= 3 %), `k` worst 8.351 % [8.351 %] at
+`z = 2.53 m` (<= 10 %); the ground's `u* = sqrt((nu + nu_t,w) U_P/y)` worst
+1.197 % [1.197 %] over all 50 ground faces (<= 3 %) - class P, the same
+bands in both builds. 5 of 5 in each build.
+
+Controls, measured once and not kept as tests: the same fetch with the
+ground on `nutkWallFunction` (a smooth wall) is off by 58 % (`U`), 65 %
+(`k`) and 46 % (`u*`), so the gate sees the wall function; with the
+standard `sigma_eps = 1.3` instead of (120.9f), `U` 1.0 % and `u*` 0.7 % but
+`k` 12.5 %, outside the band - (120.9f) is what keeps `k`.
+
+Finding (for the §118 owner, F32-13/14/15): under `single`, PBiCGStab with
+the diagonal preconditioner on this fetch's pressure system (cells 100 m
+x 1.6 m at the ground) does not converge from the first outer iteration
+(final residual 38 against an initial 1 after 500 iterations) and the run
+is NaN by iteration 8; the f64 build converges with the same controls. PCG
+with DIC converges in both builds (171 iterations at the first), which is
+why the gate selects it.
+
+* **Richards, P. J., Hoxey, R. P.** Appropriate boundary conditions for
+  computational wind engineering models using the k-epsilon turbulence
+  model. *J. Wind Eng. Ind. Aerodyn.* 46-47 (1993) 145-153,
+  doi:10.1016/0167-6105(93)90124-7 - (120.9a)-(120.9d) and (120.9f).
+* **Hargreaves, D. M., Wright, N. G.** On the use of the k-epsilon model in
+  commercial CFD software to model the neutral atmospheric boundary layer.
+  *J. Wind Eng. Ind. Aerodyn.* 95 (2007) 355-369,
+  doi:10.1016/j.jweia.2006.08.002 - the empty-fetch test of horizontal
+  homogeneity, and the rough-wall function written in `z0`.
 
 No GPL-licensed source was consulted.
 
