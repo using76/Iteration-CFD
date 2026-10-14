@@ -308,18 +308,37 @@ export const useGeometryStore = create<GeometryStore>()((set, get) => ({
   boolean: async (path, op, a, b) => {
     const s = get().byPath[path]
     if (!s || s.status !== 'ready' || !s.info) throw new Error(notLoaded(path))
-    // geom_tool edit takes CAD input only, so a boolean exists for a geometry
-    // the tab imported from a STEP, and the refs go to geom_edit by OCC tag.
-    if (s.info.source?.kind !== 'step') throw new Error('booleans run only on a STEP geometry')
+    // A STEP import's tab carries source.kind 'step' over its converted STL,
+    // so the STEP test comes first.
+    const src = s.info.source
+    const stl = s.info.format === 'stl-ascii' || s.info.format === 'stl-binary'
+    if (src?.kind !== 'step' && !stl) throw new Error('booleans run on an STL or STEP geometry')
     const solA = findPart(s, a)
     const solB = findPart(s, b)
     if (!solA) throw new Error(noPart(s, a))
     if (!solB) throw new Error(noPart(s, b))
+    if (src?.kind !== 'step') {
+      // STU-17: the server's Manifold route (STU-16) reads the STL as saved
+      // and matches its solids by ORIGINAL name, so a pending transform would
+      // be dropped silently; out null is its <stem>-<op>.stl beside the input.
+      if (!isIdentity(matrixOf(s))) throw new Error(`the boolean reads ${path} as saved; geometry_save the pending transform first (or undo it)`)
+      // The server takes the first solid of a name, so a shared original name
+      // could pick the other part.
+      for (const sol of [solA, solB]) {
+        if (s.info.solids.filter((d) => d.name === sol.name).length > 1) {
+          throw new Error(`${path} has more than one part named "${sol.name}"; rename one and geometry_save before a boolean`)
+        }
+      }
+      const reply = await api.geometryStlBoolean({ path, op, a: solA.name, b: solB.name, out: null, overwrite: true })
+      return { out: reply.path }
+    }
+    // geom_tool edit takes CAD input only, so a STEP tab's boolean goes to
+    // geom_edit by OCC tag.
     const refOf = (sol: GeometrySolid): string | number => (sol.tag ?? sol.name)
     // The ui.command word `common` is geom_edit's `intersect`; `out` sits
     // beside the STEP with the ui word in the stem.
     const ops = JSON.stringify([{ op: op === 'common' ? 'intersect' : op, object: [refOf(solA)], tools: [refOf(solB)] }])
-    const stepPath = s.info.source.path
+    const stepPath = src.path
     const slash = stepPath.lastIndexOf('/')
     const dir = slash < 0 ? '' : stepPath.slice(0, slash + 1)
     const base = slash < 0 ? stepPath : stepPath.slice(slash + 1)

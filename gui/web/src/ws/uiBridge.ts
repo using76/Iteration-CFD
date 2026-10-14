@@ -371,9 +371,12 @@ export function createUiBridge(deps: UiBridgeDeps) {
         return { ok: true }
       }
       case 'geometry_boolean': {
+        // A STEP tab goes to geom_tool edit, an STL tab to the server's
+        // Manifold route (STU-17); an OBJ has neither.
         const cur = g.byPath[path]
-        if (!cur || cur.info == null || cur.info.source?.kind !== 'step') {
-          return unsupported('geometry_boolean', 'booleans run only on a STEP geometry; this tab opened ' + path + ' - geometry_import_step a .step first')
+        const info = cur?.info ?? null
+        if (info == null || (info.source?.kind !== 'step' && info.format !== 'stl-ascii' && info.format !== 'stl-binary')) {
+          return unsupported('geometry_boolean', 'booleans run on an STL or STEP geometry; this tab opened ' + path + ' - geometry_open a .stl or geometry_import_step a .step first')
         }
         const { out } = await g.boolean(path, cmd.op, cmd.a, cmd.b)
         ui.getState().openGeometryTab(out)

@@ -96,6 +96,22 @@ export interface GeometryEditResponse {
   toolMs: number
 }
 
+/** Reply of POST /api/geometry/boolean (STU-16, Manifold): the new STL's
+ *  workspace path, Manifold's volumes and the result's re-read edge counts. */
+export interface GeometryStlBooleanResponse {
+  path: string
+  op: 'fuse' | 'cut' | 'common'
+  a: string
+  b: string
+  volume: number
+  volumeA: number
+  volumeB: number
+  triangles: number
+  vertices: number
+  openEdges: number
+  nonManifoldEdges: number
+}
+
 /** GET /api/results/sample: line_sample's parallel arrays (s 0..1, x metres from p0, values). */
 export interface LineSampleReply {
   s: number[]
@@ -147,4 +163,7 @@ export const api = {
   /** Run a geom_edit boolean on a STEP; the reply carries no id — re-import `path`. */
   geometryEdit: (body: { path: string; ops: string; out: string; overwrite: boolean | null }) =>
     request<GeometryEditResponse>('POST', `${REST.geometry}/edit`, body),
+  /** Fuse, cut or common two named parts of one STL (out null: <stem>-<op>.stl beside it). */
+  geometryStlBoolean: (body: { path: string; op: 'fuse' | 'cut' | 'common'; a: string; b: string; out: string | null; overwrite: boolean | null }) =>
+    request<GeometryStlBooleanResponse>('POST', `${REST.geometry}/boolean`, body),
 }
