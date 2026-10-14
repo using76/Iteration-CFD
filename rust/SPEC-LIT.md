@@ -1502,8 +1502,9 @@ that no reader asks for are listed as owed rather than hidden.
 
 | setting | honoured | aliases (same thing) | refused by name | `-permissive` runs | proof |
 |---|---|---|---|---|---|
-| `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2) | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` on every equation: `solver::solve` refuses it naming AMGX (§8.3); on the pressure equation `PbicgstabBackend::setup` refuses it under this rule — **was silent** there (one stderr line, then PBiCGStab); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_is_refused_with_the_reason`; `pressure::tests::gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx`; `pressure::tests::setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device`; the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
-| `solvers/<var>/preconditioner` (`Preconditioner::from_name`) | `none`, `diagonal`, `DIC`, `DILU` | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG`, `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test |
+| `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2); `GAMG` on a pressure equation solved by `PbicgstabBackend`, with the sub-entries of §141.7 | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` where no hierarchy is built: every equation outside `PbicgstabBackend` (§141.7), refused by `solver::solve` naming `set_gamg` (§141.5); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_without_a_hierarchy_is_refused_by_name`; `pressure::tests::gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix`; `tests/gamg_case.rs` (§141.7); the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
+| `solvers/<var>/preconditioner` (`Preconditioner::from_name`), a bare word or OpenFOAM's `preconditioner { preconditioner <name>; ... }` sub-dictionary (§141.7; the sub-dictionary **was silent**: read by nobody, the default kept) | `none`, `diagonal`, `DIC`, `DILU`; `GAMG` on a pressure equation solved by `PbicgstabBackend` (§141.7) | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG` where no hierarchy is built (§141.5's refusal naming `set_gamg`), `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test; `tests/gamg_case.rs` (§141.7) |
+| GAMG sub-entries `smoother`, `nPreSweeps`, `nPostSweeps`, `nCellsInCoarsestLevel`, `maxLevels`, `cacheAgglomeration`, `mergeLevels`, `agglomerator` (`src/io/case.rs`, `read_gamg_controls`; JSONC `numerics.solvers[].gamg`, §141.7) | `Chebyshev`, `l1Jacobi`, `Jacobi`; whole-number counts (sweeps `>= 0` with a non-zero sum, the other two `>= 1`); a Switch; `mergeLevels 1` | — | `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DIC`, `DILU`, `FDIC` and anything else as `smoother`; `mergeLevels` other than 1; every `agglomerator`; a malformed count or switch (not downgradable); in JSONC `mergeLevels`/`agglomerator` as unknown keys and a `gamg` block on a rule naming no GAMG | Chebyshev; `mergeLevels 1`; the native aggregation | `tests/gamg_case.rs`: `every_gamg_key_reaches_the_solve` (one §13.4.1 pair per key), `unsupported_gamg_values_are_refused_by_name_with_the_alternative`; `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` |
 | CHT `numerics.solver`, `numerics.preconditioner` (`src/io/case_cht.rs`) | `PCG`, `PBiCGStab`; `DIC`, `DILU`, `diagonal`, `none` | none | `GAMG`, anything else | PCG; DIC | `io::case_cht::tests::a_preconditioner_of_none_lowers_to_none` — `none` lowered to Jacobi, **was silent**; `io::case_cht::tests::two_cases_differing_only_in_the_preconditioner_produce_different_output` |
 | `ddtSchemes/default` (`src/timescheme.rs`, `DdtScheme::parse`) | `steadyState`, `Euler`, `backward`, `CrankNicolson <θ>` with θ in (0, 1], `localEuler`; a `bounded` prefix is accepted and ignored (documented) | `euler`; `LocalEuler`; `CrankNicholson` | `CoEuler`, `SLTS`, bare `bounded` (recognised, not implemented); anything else; per equation: `CrankNicolson` under implicit relaxation, `localEuler`/`CrankNicolson` on `T`, a steady scheme under DES; in `ofgpu-vof` everything but `Euler` — an UNPARSEABLE name **was silent** there (folded into Euler) | Euler (OpenFOAM route, `read_fv_schemes`); the JSONC route's `numerics.ddt` refusal is NOT downgradable — a stated asymmetry | `timescheme::tests`; `io::case::tests::ddt_schemes_reaches_the_controls_in_full`; `vof::tests::a_ddt_scheme_that_is_not_euler_is_refused_by_name_even_when_unparseable` |
 | `divSchemes/<key>` (`src/io/schemes.rs`, `parse_div`) | the fifteen names of `DIV_AVAILABLE`, `Gauss` integration only, `bounded` prefix honoured (refused in `ofgpu-vof`, §20.3); coefficients `limitedLinear`/`Sweby <β>` in [1, 2] (§7), `Gamma <β_m>` in [0.1, 0.5] (§11.6), `blended`/`linearUpwindBlended <γ>` in [0, 1] (§11.5); `linearUpwind grad(U)`'s trailing word is accepted and ignored (DESIGN, the field's own `gradSchemes` entry is used) | case variants (`quick`, `vanleer`, `minmod`, `superbee`, `muscl`, `gamma`, `sweby`) | the nineteen names of `DIV_KNOWN_UNIMPLEMENTED` (recognised, not implemented) and anything else; a non-`Gauss` integration; a missing coefficient; a coefficient outside its range — **was silent** (clamped in `fv.rs` with no message) | `Gauss upwind`; for a coefficient, the clamped value | `io::schemes::tests` (`every_limiter_of_section_7_is_reachable_by_name`, `an_unimplemented_scheme_is_an_error_naming_it_and_the_menu`, `a_scheme_coefficient_outside_its_range_is_refused_by_name`, `permissive_takes_the_clamped_coefficient`); every driver's `divSchemes` knobs |
@@ -1519,8 +1520,10 @@ that no reader asks for are listed as owed rather than hidden.
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
 `writeInterval`, `purgeWrite` are read by no driver; the writer is ASCII at `writePrecision`, and
 `cases/plumeB` writes `writeFormat ascii`, which is what it gets. (ii) `solvers/<var>Final` and the
-GAMG/smoothSolver sub-entries (`smoother`, `nSweeps`, `nPreSweeps`, `nPostSweeps`, `cacheAgglomeration`,
-`agglomerator`, `mergeLevels`, `nCellsInCoarsestLevel`) are read by nobody. (iii) `FoamDict::scalar`,
+smoothSolver sub-entries (`smoother`, `nSweeps`) are read by nobody, and so are OpenFOAM's GAMG entries
+outside §141.7's list (`nFinestSweeps`, `nVcycles`, `directSolveCoarsest`, `scaleCorrection`,
+`interpolateCorrection`, `processorAgglomerator`); the GAMG sub-entries §141.7 names are read, and
+refused where unsupported, since AMG-04b. (iii) `FoamDict::scalar`,
 `::label` and `::bool` return the caller's default on a token they cannot read (`tolerance banana;`,
 `turbulence maybe;`), which is the same defect class in a non-enumerated setting; the
 contract-conformant shape exists (`ofgpu-vof`'s `number_entry`) and applying it everywhere is a unit of
@@ -49186,8 +49189,8 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
-before AMG-04b.
+AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5), and since AMG-04b a case asks
+for it and its settings (§141.7).
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -49843,8 +49846,8 @@ asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda
 two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
 integration test (both builds; the iteration gates are f64 and wait for AMG-06a under
 `single`), and one library test, the capture gate of §81. No existing solve, case or SASS
-outside `amg.cubin` moves: a case cannot ask for GAMG yet (AMG-04b), the pressure backend
-still refuses it (AMG-04b, AMG-05), and every other preconditioner and solver path is unchanged.
+outside `amg.cubin` moves: a case could not ask for GAMG before AMG-04b, which also lifted
+the pressure backend's refusal (§141.7), and every other preconditioner and solver path is unchanged.
 
 Sources: **Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (the author's
 open copy, read again on 2026-10-13), §13.4.3, Algorithm 13.3 `uh = V-cycle(Ah, uh0, fh)`:
@@ -50004,6 +50007,98 @@ GAMG-PCG counts were 26, 40, 62 and the standalone 154, 357, 810. The iteration 
 32^3 -> 128^3 is 2.4x for GAMG-PCG and 5.1x for the standalone V-cycle: the h-dependence
 of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle is to
 remove. `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
+
+### 141.7 GAMG from a case: the settings, and the pressure backend that serves them (AMG-04b)
+
+`No GPL-licensed source was consulted.` A case names GAMG in `solvers/<var>/solver` or
+`solvers/<var>/preconditioner` and states its settings beside it; `io::case::read_solver_controls`
+reads them into `SolverControls::gamg` (`GamgControls`: the `GamgConfig` of §141.5 and
+`cache_agglomeration`), the JSONC route reads the same keys from a `numerics.solvers[]` rule's
+`gamg` block, and `pressure::PbicgstabBackend` builds the hierarchy and attaches it
+(`set_gamg`) before it calls `solver::solve`. The backend's refusal of GAMG, which named AMGX, is
+removed. Every other solve keeps §141.5's refusal naming `set_gamg`: a hierarchy is built only where
+the pressure equation is solved by a `PbicgstabBackend` (the SIMPLE/PISO core of `src/simple.rs` with
+the backend a driver hands it, as `ofgpu-buoyant`, `ofgpu-lowmach` and `ofgpu-datacentre` do, the CHT
+flow of `src/cht/flow.rs`, and the ALE and Turek-Hron flows). `ofgpu-vof`'s `p_rgh`, the compressible pressure, the energy and turbulence equations and
+`dist_solve` do not build one. AMG-05 adds GAMG as a backend of its own.
+
+Sources: no new literature. The key names are the case format's, as `fvSolution` files write them;
+what each key does here is the setting of §141.3 or §141.5 it is mapped onto, stated below. OpenFOAM's
+GAMG and its sources were not opened.
+
+**The keys** (read where the GAMG they belong to is named: `solver GAMG` reads them from
+`solvers/<var>/`; `preconditioner GAMG` from `solvers/<var>/` when it is a bare word, and from inside
+OpenFOAM's sub-dictionary form `preconditioner { preconditioner GAMG; ... }`, whose own `preconditioner`
+entry names the preconditioner; any preconditioner name may use that form; a key beside a solve that
+names no GAMG is not read):
+
+| key | maps onto | values | default |
+|---|---|---|---|
+| `smoother` | `HierarchyConfig::smoother` (§141.3) | `Chebyshev` (degree 2, fraction 0.3), `l1Jacobi`, `Jacobi` (weighted, `ω = 2/3`) | `Chebyshev` (§141.5) |
+| `nPreSweeps` | `GamgConfig::n_pre`, `ν1` of (141.5.1) | whole number `>= 0` | 2 |
+| `nPostSweeps` | `GamgConfig::n_post`, `ν2` of (141.5.1) | whole number `>= 0`; `ν1 + ν2 >= 1` | 2 |
+| `nCellsInCoarsestLevel` | `HierarchyConfig::n_cells_coarsest` (§141.3) | whole number `>= 1` | 64 |
+| `maxLevels` | `HierarchyConfig::max_levels`, the finest level counted (§141.3) | whole number `>= 1` | 50 |
+| `cacheAgglomeration` | `GamgControls::cache_agglomeration` | an OpenFOAM Switch | `true` |
+| `mergeLevels` | — | `1` only: no merging, which is what the hierarchy does | — |
+| `agglomerator` | — | none: refused | — |
+
+**Refused by name** (§13.4, with the alternative in the message): a `smoother` of the Gauss-Seidel
+family (`GaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DICGaussSeidel`), `DIC`, `DILU`,
+`FDIC` or anything else, with the menu `Chebyshev, l1Jacobi, Jacobi` and the note that the native
+smoothers run one thread per cell; `-permissive` substitutes Chebyshev. `mergeLevels` other than 1, with
+the menu `1` and the note to set `nCellsInCoarsestLevel` or `maxLevels`; `-permissive` substitutes 1.
+Every `agglomerator`, with the note that the aggregation is algebraic (§141.1) and the entry should be
+removed; `-permissive` keeps the native aggregation. A count that is not a whole number in range, a
+`cacheAgglomeration` that is not a Switch, and `nPreSweeps = nPostSweeps = 0` are refused naming the
+key, and `-permissive` does not downgrade them. In JSONC the block denies unknown fields, so
+`mergeLevels` and `agglomerator` are refused by name with the accepted keys as the menu, and a `gamg`
+block on a rule whose solver and preconditioner are both other than GAMG is refused: nothing would read
+it (§13.4.1).
+
+**The backend** (*DESIGN*). `setup` keeps a copy of the host mesh when the controls name GAMG. Each
+`solve` downloads the matrix it is given and builds a `Gamg` of it with `GamgControls::cycle`, the
+`permissive` flag of §13.4 passed on to the coarsest solve's pivot fallback (§141.5), unless
+`cacheAgglomeration` is on and the matrix is bit for bit (diag, upper, lower, boundary_coeffs: every
+array the hierarchy reads) the one the attached hierarchy was built from, in which case the attached one
+is used again. The cache therefore never changes an answer: a hierarchy built twice from one matrix is
+the same hierarchy, and the gate holds the two answers bitwise equal. AMG-05 changes what
+`cacheAgglomeration true` keeps (the aggregation, with the Galerkin values re-gathered per solve);
+until then every changed matrix costs one host build, which is the cost AMG-05 exists to remove. No
+default moves: a case that names no GAMG keeps its controls, its backend and its numbers.
+
+#### 141.7.1 The gates
+
+`POI(16)` of (141.5.5) (4096 cells), `b = 1`, tolerance `1e-8`, `relTol 0`, from zero. Each row
+reads an `fvSolution` text through `read_solver_controls` and solves through `PbicgstabBackend`; a
+pair is two texts that differ in one line. All rows run in both builds.
+
+| test (`tests/gamg_case.rs` unless marked) | what | class |
+|---|---|---|
+| `the_solver_a_case_asks_for_is_the_solver_it_gets` | `PBiCGStab`/`diagonal`, `PCG`/`DIC`, `GAMG`, `PCG`/`GAMG`, `PBiCGStab`/`GAMG` and `PCG` with the `preconditioner { preconditioner GAMG; smoother l1Jacobi; }` sub-dictionary read as named; each converges; one hierarchy is built and attached exactly when GAMG is named; the GAMG rows take other counts than the Krylov rows they replace | P, D |
+| `every_gamg_key_reaches_the_solve` | `smoother` Chebyshev / l1Jacobi under PCG/GAMG; `nPreSweeps` 2 / 1 and `nPostSweeps` 2 / 1 under the GAMG solver: other iteration counts. `nCellsInCoarsestLevel` 64 / 512 and `maxLevels` 50 / 2: other hierarchies (`maxLevels 2` has two levels). `cacheAgglomeration` yes / no over two solves of one matrix: 1 / 2 builds and the answers bitwise equal; with it on, a changed matrix (the diagonal times 1.5) is rebuilt and answers bitwise as a fresh build | P, D |
+| `unsupported_gamg_values_are_refused_by_name_with_the_alternative` | `smoother` `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `DIC` (naming `solvers/p/smoother`, the value, `Chebyshev`, `l1Jacobi`, `-permissive`); `mergeLevels 2`; `agglomerator faceAreaPair`; the sub-dictionary's `smoother DICGaussSeidel` under `solvers/p/preconditioner/smoother`; both sweeps 0; `maxLevels 0`; `nCellsInCoarsestLevel 2.5`; `cacheAgglomeration maybe`. `mergeLevels 1` is the default controls; under `-permissive` `GaussSeidel` becomes Chebyshev | D |
+| `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` (library) | every key of a `gamg` block lowers under `solver GAMG` and under `preconditioner GAMG`; no block is the defaults; `mergeLevels`, `agglomerator` refused by name; a block under `PBiCGStab`/`DILU` refused; `GaussSeidel`, both sweeps 0, `maxLevels 0` refused naming `numerics.solvers` | D |
+| `pressure::tests::gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix` (library) | the backend's own: `setup` keeps the mesh, the first solve builds one hierarchy of the fine size, GAMG, PCG/GAMG and PBiCGStab/GAMG converge to `1e-6` | D |
+| `pressure::tests::a_pbicgstab_or_pcg_entry_builds_no_hierarchy` (library) | PBiCGStab and PCG with DIC keep no mesh and build nothing | D |
+
+**Measured** (supervisor's runs, 2026-10-15; iterations of the first solve; under `single` the count
+is that of the §118.4-refined solve):
+
+| row | f64 | `single` |
+|---|---|---|
+| PBiCGStab/diagonal, PCG/DIC | 27, 19 | 35, 25 |
+| GAMG, PCG/GAMG, PBiCGStab/GAMG | 31, 10, 6 | 28, 9, 6 |
+| PCG with the sub-dictionary (`l1Jacobi`) | 17 | 15 |
+| `smoother` Chebyshev / l1Jacobi (PCG/GAMG) | 10 / 17 | 9 / 15 |
+| GAMG V(2,2) / V(1,2) / V(2,1) | 31 / 36 / 37 | 28 / 32 / 33 |
+| level sizes, `nCellsInCoarsestLevel` 64 | 4096, 1024, 256, 65, 17 | 4096, 1024, 256, 64 |
+| level sizes, `nCellsInCoarsestLevel` 512 | 4096, 1024, 256 | 4096, 1024, 256 |
+| level sizes, `maxLevels` 2 | 4096, 1024 | 4096, 1024 |
+| builds, `cacheAgglomeration` yes / no | 1 / 2 | 1 / 2 |
+
+The two builds coarsen `POI(16)` differently below 256 cells for the reason §141.3 gives for
+`POI(64)`: the f64 face coefficients differ in the last bits and move the tie-breaks.
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

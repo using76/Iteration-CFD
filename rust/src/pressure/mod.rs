@@ -326,6 +326,14 @@ pub struct PbicgstabBackend {
     ctrl: SolverControls,
     kernels: Option<SolverKernels>,
     ws: Option<SolverWorkspace>,
+    /// The host mesh a GAMG hierarchy is aggregated on, kept by `setup`
+    /// only when the controls name GAMG (SPEC-LIT 141.7).
+    gamg_mesh: Option<HostMesh>,
+    /// The matrix the attached hierarchy was built from, kept when
+    /// `cacheAgglomeration` is on (SPEC-LIT 141.7).
+    gamg_matrix: Option<crate::ldu::HostLduMatrix>,
+    /// How many hierarchies this backend has built.
+    gamg_builds: usize,
 }
 
 /// Controls for the selector's internal reference solve.
@@ -349,7 +357,14 @@ pub fn reference_controls() -> SolverControls {
 
 impl PbicgstabBackend {
     pub fn new(ctrl: SolverControls) -> Self {
-        Self { ctrl, kernels: None, ws: None }
+        Self {
+            ctrl,
+            kernels: None,
+            ws: None,
+            gamg_mesh: None,
+            gamg_matrix: None,
+            gamg_builds: 0,
+        }
     }
 
     /// A backend configured as the selector's reference.
@@ -361,29 +376,63 @@ impl PbicgstabBackend {
         &self.ctrl
     }
 
-    /// `solvers/p/solver` GAMG cannot be served by this backend, and saying
-    /// so is SPEC-LIT §13.4's rule: algebraic multigrid reaches ofgpu only
-    /// as the AMGX pressure backend (§8.3). Refused here, in `setup`, so
-    /// the run stops before a single pressure solve; under `-permissive`
-    /// the substitution is printed once and `solve` runs PBiCGStab. The
-    /// setting name is `solvers/p/solver` even when the variable is `p_rgh`:
-    /// the backend does not know the variable's name, and `warn_once` keys
-    /// on the setting (`src/io/contract.rs`).
-    fn refuse_gamg(&self) -> Result<()> {
-        if self.ctrl.solver != solver::LinearSolverKind::Gamg {
+    /// Whether these controls name GAMG, as the solver or as the
+    /// preconditioner (SPEC-LIT 141.7).
+    fn wants_gamg(&self) -> bool {
+        self.ctrl.solver == solver::LinearSolverKind::Gamg
+            || self.ctrl.precon == solver::Preconditioner::Gamg
+    }
+
+    /// How many GAMG hierarchies this backend has built (SPEC-LIT 141.7):
+    /// one per solve with `cacheAgglomeration` off, one per distinct matrix
+    /// with it on, zero when the controls name no GAMG.
+    pub fn gamg_builds(&self) -> usize {
+        self.gamg_builds
+    }
+
+    /// The level sizes of the attached hierarchy, finest first, if any.
+    pub fn gamg_sizes(&self) -> Option<Vec<usize>> {
+        self.ws.as_ref()?.gamg().map(|g| g.sizes())
+    }
+
+    /// SPEC-LIT 141.7: build the hierarchy of `a` and attach it, unless
+    /// `cacheAgglomeration` is on and `a` is bit for bit (diag, upper,
+    /// lower, boundary_coeffs - every array the hierarchy reads) the matrix
+    /// the attached one was built from.
+    fn attach_gamg(&mut self, gpu: &Gpu, a: &GpuLduMatrix) -> Result<()> {
+        let host = crate::ldu::HostLduMatrix::download(gpu, a)?;
+        let same = |x: &[Scalar], y: &[Scalar]| {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits())
+        };
+        let cached = self.ctrl.gamg.cache_agglomeration
+            && self.ws.as_ref().is_some_and(|w| w.gamg().is_some())
+            && self.gamg_matrix.as_ref().is_some_and(|c| {
+                same(&c.diag, &host.diag)
+                    && same(&c.upper, &host.upper)
+                    && same(&c.lower, &host.lower)
+                    && same(&c.boundary_coeffs, &host.boundary_coeffs)
+            });
+        if cached {
             return Ok(());
         }
-        crate::io::contract::unsupported_note(
-            "solvers/p/solver",
-            "GAMG",
-            &["PBiCGStab", "PCG"],
-            "algebraic multigrid reaches ofgpu only as the AMGX pressure backend \
-             (SPEC-LIT 8.3), which is behind the `amgx` Cargo feature (off by \
-             default, needs libamgx) and is selected only by ofgpu-buoyant's \
-             -backend auto; this backend is PBiCGStab/PCG and cannot serve GAMG",
-            "PBiCGStab on the pressure equation",
-            (),
-        )
+        let hm = self.gamg_mesh.as_ref().ok_or_else(|| {
+            Error::Config("PBiCGStab backend: setup() was not called".into())
+        })?;
+        let g = crate::amg::Gamg::new(
+            gpu,
+            hm,
+            &host,
+            &self.ctrl.gamg.cycle,
+            crate::io::contract::permissive(),
+        )?;
+        let w = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| Error::Config("PBiCGStab backend: setup() was not called".into()))?;
+        w.set_gamg(g)?;
+        self.gamg_builds += 1;
+        self.gamg_matrix = if self.ctrl.gamg.cache_agglomeration { Some(host) } else { None };
+        Ok(())
     }
 }
 
@@ -399,13 +448,16 @@ impl PressureBackend for PbicgstabBackend {
     fn setup(
         &mut self,
         gpu: &Gpu,
-        _hm: &HostMesh,
+        hm: &HostMesh,
         m: &GpuMesh,
         _probe: &SystemProbe,
     ) -> Result<()> {
-        self.refuse_gamg()?;
         self.kernels = Some(SolverKernels::new(gpu)?);
         self.ws = Some(SolverWorkspace::for_mesh(gpu, m)?);
+        // SPEC-LIT 141.7: GAMG is served here; its hierarchy is built from
+        // the matrix the first solve receives, on this mesh.
+        self.gamg_mesh = if self.wants_gamg() { Some(hm.clone()) } else { None };
+        self.gamg_matrix = None;
         Ok(())
     }
 
@@ -416,6 +468,16 @@ impl PressureBackend for PbicgstabBackend {
         a: &GpuLduMatrix,
         m: &GpuMesh,
     ) -> Result<SolverPerformance> {
+        // `solvers/p/solver` and `solvers/p/preconditioner` are HONOURED
+        // here rather than discarded: PCG for the symmetric pressure matrix,
+        // PBiCGStab otherwise, and PCG on an asymmetric matrix is an error
+        // (SPEC-LIT 8.2, 13.4). See `crate::solver::solve`. GAMG, as the
+        // solver or as the preconditioner, gets a hierarchy of this matrix
+        // with the case's settings (SPEC-LIT 141.7); it used to be refused
+        // here, naming AMGX.
+        if self.wants_gamg() {
+            self.attach_gamg(gpu, a)?;
+        }
         let k = self
             .kernels
             .as_ref()
@@ -424,24 +486,6 @@ impl PressureBackend for PbicgstabBackend {
             .ws
             .as_mut()
             .ok_or_else(|| Error::Config("PBiCGStab backend: setup() was not called".into()))?;
-
-        // `solvers/p/solver` is HONOURED here rather than discarded: PCG for
-        // the symmetric pressure matrix, PBiCGStab otherwise, and PCG on an
-        // asymmetric matrix is an error (SPEC-LIT 8.2, 13.4). See
-        // `crate::solver::solve`.
-        //
-        // `GAMG` is the one entry this backend cannot serve, and the request
-        // is refused in `setup` under SPEC-LIT §13.4 - the run stops before a
-        // single pressure solve, and under `-permissive` the substitution is
-        // announced there. This arm is that `-permissive` fallback: it answers
-        // the request with PBiCGStab, `choose_pressure_backend` still prints
-        // AMGX in its decision table with the reason it is or is not
-        // available, and this backend keeps its role as the always-applicable
-        // fallback and correctness reference.
-        if self.ctrl.solver == solver::LinearSolverKind::Gamg {
-            return solver::solve_pbicgstab(gpu, k, p, a, m, w, &self.ctrl);
-        }
-
         solver::solve(gpu, k, p, a, m, w, &self.ctrl)
     }
 
@@ -1632,98 +1676,65 @@ mod tests {
         assert_eq!(AGREEMENT_TOL, 1e-8);
     }
 
-    /// SPEC-LIT §13.4. `solvers/p/solver GAMG` used to print one stderr line
-    /// in `setup` and run PBiCGStab anyway - the silent substitution the rule
-    /// forbids. It is now refused by name in `setup`, before a single pressure
-    /// solve; `-permissive` downgrades it to the announced PBiCGStab fallback
-    /// that `solve`'s `Gamg` arm runs.
+    /// SPEC-LIT 141.7 (AMG-04b): `solvers/p/solver GAMG` used to be refused
+    /// in `setup`, naming AMGX. It is now served: `setup` keeps the mesh,
+    /// the first solve builds the hierarchy of the matrix it receives, and
+    /// the solve converges with one hierarchy attached.
     #[test]
-    fn gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx() {
-        let _guard = crate::io::contract::permissive_test_guard();
-        crate::io::contract::set_permissive(false);
-        crate::io::contract::reset_warnings();
-
-        let be = PbicgstabBackend::new(SolverControls {
-            solver: solver::LinearSolverKind::Gamg,
-            ..SolverControls::default()
-        });
-        let e = be
-            .refuse_gamg()
-            .expect_err("GAMG on the pressure equation must be refused in strict mode")
-            .to_string();
-        assert!(e.contains("solvers/p/solver"), "{e}");
-        assert!(e.contains("GAMG"), "{e}");
-        assert!(e.contains("AMGX"), "{e}");
-        assert!(e.contains("PBiCGStab"), "{e}");
-        assert!(e.contains("amgx"), "{e}");
-        assert!(e.contains("-permissive"), "{e}");
-
-        crate::io::contract::set_permissive(true);
-        assert!(be.refuse_gamg().is_ok(), "permissive must let the run continue");
-        assert!(
-            crate::io::contract::warned("solvers/p/solver"),
-            "the substitution must be announced"
-        );
-        crate::io::contract::set_permissive(false);
-    }
-
-    /// The two Krylov methods this backend actually has pass the refusal and
-    /// say nothing: the refusal is about GAMG, not about the entry point.
-    #[test]
-    fn a_pbicgstab_or_pcg_entry_on_the_pressure_equation_passes_the_refusal() {
-        let _guard = crate::io::contract::permissive_test_guard();
-        crate::io::contract::set_permissive(false);
-        crate::io::contract::reset_warnings();
-
-        for kind in [solver::LinearSolverKind::PBiCGStab, solver::LinearSolverKind::PCG] {
-            let be = PbicgstabBackend::new(SolverControls {
-                solver: kind,
-                ..SolverControls::default()
-            });
-            assert!(
-                be.refuse_gamg().is_ok(),
-                "{kind:?} must pass the pressure-backend refusal"
-            );
-            assert!(
-                !crate::io::contract::warned("solvers/p/solver"),
-                "{kind:?} must not warn"
-            );
-        }
-        crate::io::contract::set_permissive(false);
-    }
-
-    /// SPEC-LIT §13.4.1: the refusal has to stop the run BEFORE the device
-    /// is touched. `setup` answers `Err` with `kernels` and `ws` still
-    /// `None` when the case asks for `solvers/p/solver GAMG`, and the
-    /// default controls still set both up.
-    #[test]
-    fn setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device() {
+    fn gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
 
         let Some(sys) = build([6, 4, 3], Vec3::new(0.3, 0.3, 0.3), &[1], 7) else {
             return;
         };
-        let mut be = PbicgstabBackend::new(SolverControls {
-            solver: solver::LinearSolverKind::Gamg,
-            ..SolverControls::default()
-        });
-        let e = be
-            .setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
-            .expect_err("GAMG must be refused before the device is touched")
-            .to_string();
-        assert!(e.contains("GAMG"), "{e}");
-        assert!(e.contains("AMGX"), "{e}");
-        assert!(
-            be.kernels.is_none() && be.ws.is_none(),
-            "a refused run must not have built a kernel or a workspace"
-        );
+        for (solver_kind, precon) in [
+            (solver::LinearSolverKind::Gamg, solver::Preconditioner::Diagonal),
+            (solver::LinearSolverKind::PCG, solver::Preconditioner::Gamg),
+            (solver::LinearSolverKind::PBiCGStab, solver::Preconditioner::Gamg),
+        ] {
+            let what = format!("{solver_kind:?}/{precon:?}");
+            let mut be = PbicgstabBackend::new(SolverControls {
+                solver: solver_kind,
+                precon,
+                tolerance: 1e-6,
+                max_iter: 500,
+                ..SolverControls::default()
+            });
+            be.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe).expect("GAMG must set up");
+            assert!(be.gamg_mesh.is_some(), "{what}: setup keeps the mesh");
+            assert_eq!(be.gamg_builds(), 0, "{what}: nothing is built before a solve");
+            let mut psi: DevBuf<Scalar> = sys.gpu.zeros(sys.hm.n_cells).expect("psi");
+            let perf = be.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).expect("GAMG solve");
+            assert!(perf.converged, "{what}: {perf:?}");
+            assert_eq!(be.gamg_builds(), 1, "{what}");
+            assert_eq!(
+                be.gamg_sizes().map(|v| v[0]),
+                Some(sys.hm.n_cells),
+                "{what}: the hierarchy is of this matrix"
+            );
+        }
+    }
 
-        let mut ok = PbicgstabBackend::new(SolverControls::default());
-        ok.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe)
-            .expect("the default controls must set up");
-        assert!(ok.kernels.is_some() && ok.ws.is_some());
-
-        crate::io::contract::set_permissive(false);
+    /// The two Krylov methods with a preconditioner other than GAMG keep no
+    /// mesh and build no hierarchy: GAMG costs nothing unless it is named.
+    #[test]
+    fn a_pbicgstab_or_pcg_entry_builds_no_hierarchy() {
+        let Some(sys) = build([6, 4, 3], Vec3::new(0.3, 0.3, 0.3), &[1], 7) else {
+            return;
+        };
+        for kind in [solver::LinearSolverKind::PBiCGStab, solver::LinearSolverKind::PCG] {
+            let mut be = PbicgstabBackend::new(SolverControls {
+                solver: kind,
+                precon: solver::Preconditioner::Dic,
+                ..SolverControls::default()
+            });
+            be.setup(&sys.gpu, &sys.hm, &sys.m, &sys.probe).expect("setup");
+            let mut psi: DevBuf<Scalar> = sys.gpu.zeros(sys.hm.n_cells).expect("psi");
+            be.solve(&sys.gpu, &mut psi, &sys.a, &sys.m).expect("solve");
+            assert!(be.gamg_mesh.is_none(), "{kind:?}");
+            assert_eq!(be.gamg_builds(), 0, "{kind:?}");
+            assert!(be.gamg_sizes().is_none(), "{kind:?}");
+        }
     }
 }

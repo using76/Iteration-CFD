@@ -109,6 +109,7 @@ fn controls(
         check_interval: 1,
         fixed_iters: fixed.is_some(),
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     }
 }
 

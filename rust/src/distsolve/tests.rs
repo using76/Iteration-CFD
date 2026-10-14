@@ -122,6 +122,7 @@ fn controls(solver: LinearSolverKind, precon: Preconditioner, fixed: Option<usiz
         check_interval: 1,
         fixed_iters: fixed.is_some(),
         report_residuals: true,
+        gamg: crate::io::case::GamgControls::default(),
     }
 }
 

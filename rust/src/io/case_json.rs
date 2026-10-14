@@ -1061,10 +1061,78 @@ pub struct JsonSolverRule {
     /// reason as [`Self::rel_tol`].
     #[serde(rename = "maxIter", default = "default_max_iter")]
     pub max_iter: Label,
+    /// The GAMG settings of SPEC-LIT 141.7, allowed only on a rule whose
+    /// `solver` or `preconditioner` is `GAMG`. Absent: the cycle's
+    /// defaults (SPEC-LIT 141.5) and `cacheAgglomeration` true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gamg: Option<JsonGamg>,
 }
 
 fn default_max_iter() -> Label {
     SolverControls::default().max_iter
+}
+
+/// A rule's `gamg` block (SPEC-LIT 141.7): the keys of an OpenFOAM GAMG
+/// entry this solver honours, each optional. OpenFOAM's `mergeLevels` and
+/// `agglomerator` are not keys here; `deny_unknown_fields` refuses them by
+/// name with the accepted keys as the menu.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonGamg {
+    /// `Chebyshev` (default), `l1Jacobi` or `Jacobi` (weighted, 2/3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smoother: Option<String>,
+    /// Pre-smoothing sweeps (default 2).
+    #[serde(rename = "nPreSweeps", default, skip_serializing_if = "Option::is_none")]
+    pub n_pre_sweeps: Option<usize>,
+    /// Post-smoothing sweeps (default 2).
+    #[serde(rename = "nPostSweeps", default, skip_serializing_if = "Option::is_none")]
+    pub n_post_sweeps: Option<usize>,
+    /// Coarsening stops at or below this many cells (default 64, at least 1).
+    #[serde(rename = "nCellsInCoarsestLevel", default, skip_serializing_if = "Option::is_none")]
+    pub n_cells_in_coarsest_level: Option<usize>,
+    /// The most levels, the finest counted (default 50, at least 1).
+    #[serde(rename = "maxLevels", default, skip_serializing_if = "Option::is_none")]
+    pub max_levels: Option<usize>,
+    /// Keep the hierarchy while the matrix is unchanged (default true).
+    #[serde(rename = "cacheAgglomeration", default, skip_serializing_if = "Option::is_none")]
+    pub cache_agglomeration: Option<bool>,
+}
+
+impl JsonGamg {
+    /// Lower onto [`crate::io::case::GamgControls`], refusing what
+    /// `read_gamg_controls` refuses, named under `p`.
+    fn lower(&self, p: &str) -> Result<crate::io::case::GamgControls> {
+        let mut g = crate::io::case::GamgControls::default();
+        if let Some(s) = &self.smoother {
+            g.cycle.hierarchy.smoother =
+                crate::io::case::gamg_smoother_from_name(&format!("{p}smoother"), s)?;
+        }
+        if let Some(v) = self.n_pre_sweeps {
+            g.cycle.n_pre = v;
+        }
+        if let Some(v) = self.n_post_sweeps {
+            g.cycle.n_post = v;
+        }
+        crate::io::case::check_gamg_sweeps(&g, p)?;
+        for (key, v, slot) in [
+            ("nCellsInCoarsestLevel", self.n_cells_in_coarsest_level, &mut g.cycle.hierarchy.n_cells_coarsest),
+            ("maxLevels", self.max_levels, &mut g.cycle.hierarchy.max_levels),
+        ] {
+            if let Some(v) = v {
+                if v == 0 {
+                    return Err(Error::Config(format!(
+                        "{p}{key} is 0: it must be a whole number of at least 1 (SPEC-LIT 141.7)"
+                    )));
+                }
+                *slot = v;
+            }
+        }
+        if let Some(c) = self.cache_agglomeration {
+            g.cache_agglomeration = c;
+        }
+        Ok(g)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2804,6 +2872,22 @@ fn solver_for(solvers: &[JsonSolverRule], var: &str) -> Result<SolverControls> {
         sc.tolerance = rule.tolerance as Scalar;
         sc.rel_tol = rule.rel_tol as Scalar;
         sc.max_iter = rule.max_iter;
+        // SPEC-LIT 141.7: a `gamg` block belongs to a GAMG the rule names;
+        // on any other rule it would be read by nobody (SPEC-LIT 13.4.1).
+        if let Some(g) = &rule.gamg {
+            let p = format!("numerics.solvers[\"{}\"].gamg.", rule.pattern);
+            if sc.solver != LinearSolverKind::Gamg && sc.precon != Preconditioner::Gamg {
+                return Err(Error::Config(format!(
+                    "{}: the rule's solver is {} and its preconditioner {}, so no GAMG \
+                     would read this block; name GAMG as the solver or the \
+                     preconditioner, or remove the block (SPEC-LIT 141.7)",
+                    p.trim_end_matches('.'),
+                    sc.solver.name(),
+                    sc.precon.name()
+                )));
+            }
+            sc.gamg = g.lower(&p)?;
+        }
         return Ok(sc);
     }
     Ok(SolverControls::default())
@@ -5933,5 +6017,57 @@ mod tests {
         };
         println!("move without a law: {e}");
         assert!(e.contains("motion.patches"), "{e}");
+    }
+
+    /// SPEC-LIT 141.7: a JSONC rule's `gamg` block lowers onto the same
+    /// `GamgControls` the dictionary route reads; `mergeLevels` and
+    /// `agglomerator` are refused by name; a block on a rule that names no
+    /// GAMG is refused, because nothing would read it.
+    #[test]
+    fn a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key() {
+        let rules = |gamg: &str, solver: &str, precon: &str| -> serde_json::Result<Vec<JsonSolverRule>> {
+            serde_json::from_str(&format!(
+                r#"[{{ "match": "p", "solver": "{solver}", "preconditioner": "{precon}", "tolerance": 1e-8{gamg} }}]"#
+            ))
+        };
+        let full = r#", "gamg": { "smoother": "l1Jacobi", "nPreSweeps": 1, "nPostSweeps": 3,
+            "nCellsInCoarsestLevel": 200, "maxLevels": 4, "cacheAgglomeration": false }"#;
+        for (solver, precon) in [("GAMG", "diagonal"), ("PCG", "GAMG")] {
+            let sc = solver_for(&rules(full, solver, precon).expect("parses"), "p").expect("lowers");
+            let g = sc.gamg;
+            assert_eq!(crate::io::case::gamg_smoother_name(g.cycle.hierarchy.smoother), "l1Jacobi");
+            assert_eq!((g.cycle.n_pre, g.cycle.n_post), (1, 3));
+            assert_eq!(g.cycle.hierarchy.n_cells_coarsest, 200);
+            assert_eq!(g.cycle.hierarchy.max_levels, 4);
+            assert!(!g.cache_agglomeration);
+        }
+        // No block: the defaults.
+        let sc = solver_for(&rules("", "GAMG", "diagonal").expect("parses"), "p").expect("lowers");
+        assert_eq!(sc.gamg, crate::io::case::GamgControls::default());
+
+        for key in [r#""mergeLevels": 1"#, r#""agglomerator": "faceAreaPair""#] {
+            let e = rules(&format!(r#", "gamg": {{ {key} }}"#), "GAMG", "diagonal")
+                .expect_err(key)
+                .to_string();
+            let name = key.split('"').nth(1).expect("key name");
+            assert!(e.contains(name) && e.contains("smoother"), "{key}: {e}");
+        }
+        let e = solver_for(&rules(full, "PBiCGStab", "DILU").expect("parses"), "p")
+            .expect_err("a gamg block without GAMG")
+            .to_string();
+        assert!(e.contains("gamg") && e.contains("PBiCGStab") && e.contains("DILU"), "{e}");
+
+        let _guard = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
+        for (block, needle) in [
+            (r#", "gamg": { "smoother": "GaussSeidel" }"#, "Chebyshev"),
+            (r#", "gamg": { "nPreSweeps": 0, "nPostSweeps": 0 }"#, "both 0"),
+            (r#", "gamg": { "maxLevels": 0 }"#, "maxLevels"),
+        ] {
+            let e = solver_for(&rules(block, "GAMG", "diagonal").expect("parses"), "p")
+                .expect_err(block)
+                .to_string();
+            assert!(e.contains(needle) && e.contains("numerics.solvers"), "{block}: {e}");
+        }
     }
 }
