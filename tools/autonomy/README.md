@@ -639,14 +639,15 @@ on every candidate; `surface_facts` caches per (path, size, mtime); pass
 
 ## rules.py — L1 setup rules
 
-AM-9's attempt 1: eight pure rules run in a fixed order, each editing the config and returning one DecisionRecord
+AM-9's attempt 1: nine pure rules run in a fixed order, each editing the config and returning one DecisionRecord
 (formula, inputs with units, edits, cite). Verdicts: `apply` edited, `pass` — holds already or trigger absent,
 `abstain` — cannot act, `refuse` — no config under the rule; it sets `stop`, the config comes back None and every
 later rule abstains. Every edit goes through the locked knob table (no `/quality`, no `cell_frac`, `medial_frac`,
 `min_thickness`); R-PLANE writes `/snap/*` (`feature_tolerance` 0, `smoothing_passes` 0), and since FT-RADIUS
 (2026-09-27) R-FEAT writes `/snap/feature_tolerance = 0.5 · 2^−max_level`, so the attraction radius
 tau = feature_tolerance · base_size is h_f/2 (R-BUDGET re-derives it when it changes max_level); 0 still switches
-the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D).
+the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D). Since AUT-05
+(2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE.
 
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
@@ -656,6 +657,7 @@ the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0,
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
+- R-SNAP reads the final max_level and, off R-PLANE, writes `/snap/tolerance = 2^−max_level / 256` and `/snap/iterations = 60`: the (92.28) dead band eps = tolerance·base_size becomes h_f/256 (it passes when the default band is already inside, max_level ≤ 1; it abstains on R-PLANE).
 
 Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 as the floor on every snapped wall and, since GLB-CONFIG (2026-10-03), prefers 60/1.10 there when the margin holds after the (92.45) depth (below). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
 
@@ -759,6 +761,39 @@ G-1-054 loses its 0.902 stack, `thin_proposed`, snap p99/h 0.020 → 0.392); F-1
 the 356 attempt-1 configs the mean BLC_8 goes 0.2416 → 0.2472 and BLC_full 0.1640 → 0.1680; rows with BLC_8 > 0:
 86 → 88. The box_sphere G-L-b row on the release binary at `first_thickness` 0.0023 = 1.10·sqrt(A_max)/60: 8
 layers, `full_area_frac` 1.0, `level_n_non_orth_max_deg` 67.80 < 70, no retreat, no `drop_cause`.
+
+**R-SNAP (AUT-05, 2026-10-14).** SPEC-LIT §92.11's (92.28) stops a wall point once it is within
+eps = `snap.tolerance`·base_size of its target, so at the default tolerance 1e-3 the band is 1e-3·2^max_level h_f:
+0.016 h_f at the B0-template's level 4 and 0.064 h_f at the rules' level 6. Both systems' p99/h_f sat on their
+band (committed bundles, passing attempt-1 meshes: L5 rules B 0.0604, E 0.0318, G 0.0591; tuning B0-template
+0.0159 in all three), which is G-FID's B/E/G miss on the test split (docs/15). Measured on B-1-000's rules config
+(`-stopAfter snap`): tolerance 1e-3 converges in 4 iterations (20.7 s, p99/h_f 0.0615), h_f/256 in 8 (29.4 s,
+0.00386), h_f/1000 in 10 (36.1 s, 0.00100) and 1e-9 in 34 (96.1 s, 0): about one iteration per halving of the band.
+R-SNAP therefore sets the band at h_f/256 (exact in binary) and the iteration cap at 60 (the action-space row's
+"60 measured as enough for the 1e-6 dead band"); it runs after R-BUDGET, so it reads the final max_level. A later
+remedy that moves max_level leaves the band in base units: one level finer makes it h_f/128, one coarser h_f/512,
+both inside the B0-template's 0.016. `setup(..., r_snap=False)` runs the eight rules before it, the set every
+committed campaign was recorded under, and `r_snap_of(records)` tells which one a campaign used (an R-SNAP record);
+`optimise.rows_from`, optimise.py's selftest and prior.py's G-PRIOR rows pass it beside `ft_radius`, `win_2to1` and
+`glb`, and the G-FT-RADIUS, G-WIN-2TO1 and G-GLB-CONFIG identities rebuild with r_snap False, so their committed
+reports still reproduce.
+
+G-R-SNAP 2026-10-14 (`rules.py --snap-gate`, `rules/R-SNAP.json` and `.md`; binary e8b4792a…, the AUT-05 tree over
+d9c1d93, 3 streams, 591 s): PASS. The quick set is chosen from the committed bundles before any run: per family
+B, E, G, ids sorted, first those whose tuning B0-template attempt 1 passed, then those whose L5 rules attempt 1
+passed, R-PLANE bodies skipped, four each (B-1-003, B-1-009, B-1-015, B-1-021; E-1-001, E-1-004, E-1-007, E-1-010;
+G-1-081, G-1-111, G-1-010, G-1-022). Each body is meshed three times, B0-template, the rules before R-SNAP and the
+rules with it. Median p99/h_f over passing meshes, R-SNAP against the bar (the committed tuning B0-template median)
+and against B0-template on the same bodies: B 0.00388 vs 0.01586 and 0.01587; E 0.00392 vs 0.01590 and 0.01590;
+G 0.00393 vs 0.01592 and 0.01592 (B0-template passes 2 of the 4 G bodies). R-SNAP's p99/h_f sits on its own band,
+1/256 = 0.0039: the residual is still the band, now a fixed fraction of h_f instead of 1e-3·2^max_level, and only
+G-1-022, which does not converge, stays above it. The rules before R-SNAP: B 0.06048, E
+0.03158, G 0.04600. Failures: 0 in both rules arms, 2 in B0-template (G-1-010, G-1-022, `retreat_snapped`).
+Cells are unchanged by R-SNAP (it moves no level). Snap seconds, median per family, rules → R-SNAP: B 15.5 → 23.6,
+E 8.3 → 10.8, G 20.4 → 30.4 (iterations 4 → 8, 5 → 8, 5 → 9). The one body that does not converge, G-1-022, runs
+to the cap: 30 iterations at 45.1 s and p99/h_f 0.0686 before, 60 iterations at 182.0 s and 0.0327 with R-SNAP.
+R-PLANE identity: 37 of 37 plane configs byte-identical over the 372 tuning rows with an L5 fingerprint, no refusal
+moved. A quick set decides the rule, not G-FID: the full tuning effect is AUT-12's L-run.
 
 ## remedies.py — L2 remedies
 
