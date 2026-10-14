@@ -235,6 +235,12 @@ pub struct SolverKernels {
     /// Stage two storing its result in DOUBLE.
     #[cfg(feature = "single")]
     pub sum2_to64: CudaFunction,
+    /// (118.12.1) a double split into three floats for a float exchange.
+    #[cfg(feature = "single")]
+    pub split3: CudaFunction,
+    /// (118.12.2) the three floats joined back into the double.
+    #[cfg(feature = "single")]
+    pub join3: CudaFunction,
 
     // vectors
     pub amul: CudaFunction,
@@ -302,6 +308,10 @@ impl SolverKernels {
             axpy_widen: k.func("solAxpyWiden")?,
             #[cfg(feature = "single")]
             sum2_to64: k.func("solSumStage2To64")?,
+            #[cfg(feature = "single")]
+            split3: k.func("solSplit3")?,
+            #[cfg(feature = "single")]
+            join3: k.func("solJoin3")?,
 
             amul: k.func("solAmul")?,
             copy: k.func("solCopy")?,
@@ -2675,7 +2685,7 @@ type FloatSolve = fn(
 
 /// (118.4.1) `dst = fl64(src)`.
 #[cfg(feature = "single")]
-fn widen(
+pub fn widen(
     gpu: &Gpu,
     k: &SolverKernels,
     dst: &mut DevBuf<f64>,
@@ -2696,7 +2706,7 @@ fn widen(
 
 /// (118.4.9) `dst = fl32(src)`.
 #[cfg(feature = "single")]
-fn narrow(
+pub fn narrow(
     gpu: &Gpu,
     k: &SolverKernels,
     dst: &mut DevBuf<Scalar>,
@@ -2720,7 +2730,7 @@ fn narrow(
 /// `solSumStage2` removed. `offset` carries `eps64` for the §8.4 factor and
 /// is zero everywhere else.
 #[cfg(feature = "single")]
-fn sum2_to64(
+pub fn sum2_to64(
     gpu: &Gpu,
     k: &SolverKernels,
     out: &mut CudaViewMut<f64>,
@@ -3016,6 +3026,239 @@ pub fn residual64_round(
             .arg(&inv_sigma)
             .arg(&nl)
             .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+// --------------------------------------------------------------------------
+//  The refinement's double-vector steps on any (b, x, A) - SPEC-LIT §118.12.
+//  F32-07's refinements (the cuFFT solve, the selector's probe and the
+//  distributed Krylov) drive the §118.4 kernels through these; each is the
+//  launch `refine_loop` makes, on the caller's buffers. `single` only.
+// --------------------------------------------------------------------------
+
+/// (118.4.2) stage one of `sum x` over the first `n` entries into
+/// `partials`; returns the partial count stage two reads.
+#[cfg(feature = "single")]
+pub fn sum64_stage1(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    partials: &mut DevBuf<Acc>,
+    x: &DevBuf<f64>,
+    n: usize,
+) -> Result<usize> {
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.sum64_1)
+            .arg(&mut *partials)
+            .arg(x)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    Ok(nparts)
+}
+
+/// (118.4.2) stage one of the §8.4 factor in double over `a`'s rows, with
+/// `x_ref = sum_x[0]·inv_n`: `sum|A x - A x_ref 1| + sum|b - A x_ref 1|`,
+/// `b = a.source`. Returns the partial count; stage two adds `eps64`.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+pub fn norm_factor64_stage1(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    partials: &mut DevBuf<Acc>,
+    x: &DevBuf<f64>,
+    sum_x: &DevBuf<f64>,
+    inv_n: f64,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<usize> {
+    let n = a.n_cells;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.norm_factor64_1)
+            .arg(&mut *partials)
+            .arg(x)
+            .arg(sum_x)
+            .arg(&inv_n)
+            .arg(&a.source)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    Ok(nparts)
+}
+
+/// (118.4.3) stage one of `R = sum|b - A x|` over `a`'s rows, `b =
+/// a.source`, the double row product. Returns the partial count.
+#[cfg(feature = "single")]
+pub fn residual64_sum_stage1(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    partials: &mut DevBuf<Acc>,
+    x: &DevBuf<f64>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<usize> {
+    let n = a.n_cells;
+    let nl = to_label(n)?;
+    let (cfg, nparts) = reduce_geometry(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.residual64_1)
+            .arg(&mut *partials)
+            .arg(&a.source)
+            .arg(x)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    Ok(nparts)
+}
+
+/// (118.4.5) `out = fl32((a.source - A x)·inv_sigma)` on `a`'s rows.
+#[cfg(feature = "single")]
+pub fn scaled_residual64(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<Scalar>,
+    x: &DevBuf<f64>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    inv_sigma: f64,
+) -> Result<()> {
+    let n = a.n_cells;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.residual64_scaled)
+            .arg(&mut *out)
+            .arg(&a.source)
+            .arg(x)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&inv_sigma)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (118.4.7) `x += sigma·fl64(d)` on the first `n` entries.
+#[cfg(feature = "single")]
+pub fn axpy_widen64(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    x: &mut DevBuf<f64>,
+    d: &DevBuf<Scalar>,
+    sigma: f64,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.axpy_widen)
+            .arg(&mut *x)
+            .arg(d)
+            .arg(&sigma)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (118.12.1) `hi, mid, lo = ` the three floats of `x` on the first `n`
+/// entries, so a double crosses a float halo exchange exactly.
+#[cfg(feature = "single")]
+pub fn split3(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    hi: &mut DevBuf<Scalar>,
+    mid: &mut DevBuf<Scalar>,
+    lo: &mut DevBuf<Scalar>,
+    x: &DevBuf<f64>,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = to_label(n)?;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.split3)
+            .arg(&mut *hi)
+            .arg(&mut *mid)
+            .arg(&mut *lo)
+            .arg(x)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (118.12.2) `x = (hi + mid) + lo` on the entries `begin..end`.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+pub fn join3(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    x: &mut DevBuf<f64>,
+    hi: &DevBuf<Scalar>,
+    mid: &DevBuf<Scalar>,
+    lo: &DevBuf<Scalar>,
+    begin: usize,
+    end: usize,
+) -> Result<()> {
+    if end <= begin {
+        return Ok(());
+    }
+    let (b, e) = (to_label(begin)?, to_label(end)?);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.join3)
+            .arg(&mut *x)
+            .arg(hi)
+            .arg(mid)
+            .arg(lo)
+            .arg(&b)
+            .arg(&e)
+            .launch(cfg_for(end - begin))?;
     }
     Ok(())
 }

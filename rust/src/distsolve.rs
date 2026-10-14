@@ -93,6 +93,8 @@ use crate::precon::MultiColour;
 use crate::solver::{self, LinearSolverKind, Preconditioner, SolverControls, SolverKernels};
 use crate::{Label, Scalar};
 
+#[cfg(feature = "single")]
+mod refine;
 pub mod spmd;
 
 pub use spmd::{spmd_pcg, spmd_pbicgstab, spmd_solve, SpmdWorkspace};
@@ -375,6 +377,11 @@ pub struct DistWorkspace {
     initial_res: DevBuf<Scalar>,
     final_res: DevBuf<Scalar>,
     flag: DevBuf<Label>,
+
+    /// SPEC-LIT §118.12: the refinement's per-part state, `single` only.
+    /// `None` only while a refined solve has it out.
+    #[cfg(feature = "single")]
+    ir: Option<refine::DistIr>,
 }
 
 /// What a distributed solve did.
@@ -441,11 +448,28 @@ impl DistWorkspace {
             initial_res: gpu.zeros(1)?,
             final_res: gpu.zeros(1)?,
             flag: gpu.zeros(1)?,
+            #[cfg(feature = "single")]
+            ir: Some(refine::DistIr::new(gpu, &sys.n, &sys.n_local)?),
         })
     }
 
     pub fn n_parts(&self) -> usize {
         self.n.len()
+    }
+
+    /// `[P]` the double solution of the last REFINED solve on this
+    /// workspace, each part's `n_local` long - the owned cells are the
+    /// answer (SPEC-LIT §118.12). `single` only.
+    #[cfg(feature = "single")]
+    pub fn refined_solution(&self) -> Option<&[DevBuf<f64>]> {
+        self.ir.as_ref().map(|i| i.x_hi())
+    }
+
+    /// Outer refinement steps of the LAST solve; 0 for a solve that was
+    /// not refined (SPEC-LIT §118.12). `single` only.
+    #[cfg(feature = "single")]
+    pub fn ir_outer_steps(&self) -> usize {
+        self.ir.as_ref().map(|i| i.outer_steps).unwrap_or(0)
     }
 
     pub fn reduce_mode(&self) -> DistReduce {
@@ -737,7 +761,8 @@ fn dist_build_preconditioner(
     Ok(())
 }
 
-/// `w.b[p] = a[p].source`, and the SPEC-LIT §8.4 normalisation factor.
+/// `w.b[p] = a[p].source` (or `rhs[p]`, the refinement's correction system,
+/// SPEC-LIT §118.12), and the SPEC-LIT §8.4 normalisation factor.
 ///
 /// Leaves `A psi` in `w.apsi`, exactly as `solver::device_norm_factor` does,
 /// so the residual is one subtraction and not a second product.
@@ -747,6 +772,7 @@ fn dist_build_preconditioner(
 /// would make the normalisation - and therefore the convergence test, and
 /// therefore the iteration count - a function of the cut. SPEC-LIT §72.7
 /// listed this as open; it is closed here.
+#[allow(clippy::too_many_arguments)]
 fn dist_norm_factor(
     gpu: &Gpu,
     sol: &SolverKernels,
@@ -754,11 +780,13 @@ fn dist_norm_factor(
     sys: &DistSystem,
     w: &mut DistWorkspace,
     psi: &mut [DevBuf<Scalar>],
+    rhs: Option<&[DevBuf<Scalar>]>,
     perf: &mut DistPerformance,
 ) -> Result<()> {
     for p in 0..sys.n_parts() {
         let DistWorkspace { b, n, .. } = &mut *w;
-        solver::vec_copy(gpu, sol, &mut b[p], &sys.a[p].source, n[p])?;
+        let src = rhs.map_or(&sys.a[p].source, |r| &r[p]);
+        solver::vec_copy(gpu, sol, &mut b[p], src, n[p])?;
     }
 
     {
@@ -909,10 +937,40 @@ fn dist_finish(
 /// dropping a cut's off-diagonal couplings while keeping the diagonal share
 /// they contributed leaves each block strictly more diagonally dominant than
 /// the matrix it came from.
+///
+/// Under `single` the solve is refined (SPEC-LIT §118.12): this float
+/// method solves only the scaled correction, inside §118.4's double loop. A
+/// `fixed_iters` solve and an empty system are not refined.
 pub fn dist_pcg(
     gpu: &Gpu,
     sol: &SolverKernels,
     psi: &mut [DevBuf<Scalar>],
+    sys: &DistSystem,
+    ex: &mut HaloExchange,
+    w: &mut DistWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if refine::refines(ctrl, w.n_global_cells) {
+            w.check(sys, psi, "dist_pcg")?;
+            return refine::dist_refined(gpu, sol, psi, sys, ex, w, ctrl, refine::Method::Pcg);
+        }
+    }
+    dist_pcg_float(gpu, sol, psi, None, sys, ex, w, ctrl)
+}
+
+/// [`dist_pcg`]'s float body against `rhs` (`None`: every part's
+/// `a[p].source`, the f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+fn dist_pcg_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    psi: &mut [DevBuf<Scalar>],
+    rhs: Option<&[DevBuf<Scalar>]>,
     sys: &DistSystem,
     ex: &mut HaloExchange,
     w: &mut DistWorkspace,
@@ -931,7 +989,7 @@ pub fn dist_pcg(
     let precon = w.effective_preconditioner(ctrl.precon)?;
     dist_build_preconditioner(gpu, sol, sys, w, precon)?;
 
-    dist_norm_factor(gpu, sol, ex, sys, w, psi, &mut perf)?;
+    dist_norm_factor(gpu, sol, ex, sys, w, psi, rhs, &mut perf)?;
     dist_residual(gpu, sol, w)?;
     {
         let DistWorkspace { red, r, initial_res, reduce, .. } = &mut *w;
@@ -1151,10 +1209,39 @@ pub fn dist_pcg(
 /// reason not to fuse is that the exact accumulator's dot needs two passes
 /// anyway (the anchor must precede the limbs, SPEC-LIT §72.3), so a fused
 /// exact `dot2` would save nothing on the path that matters.
+///
+/// Under `single` the solve is refined (SPEC-LIT §118.12), as
+/// [`dist_pcg`] is.
 pub fn dist_pbicgstab(
     gpu: &Gpu,
     sol: &SolverKernels,
     psi: &mut [DevBuf<Scalar>],
+    sys: &DistSystem,
+    ex: &mut HaloExchange,
+    w: &mut DistWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if refine::refines(ctrl, w.n_global_cells) {
+            w.check(sys, psi, "dist_pbicgstab")?;
+            return refine::dist_refined(gpu, sol, psi, sys, ex, w, ctrl, refine::Method::Pbicgstab);
+        }
+    }
+    dist_pbicgstab_float(gpu, sol, psi, None, sys, ex, w, ctrl)
+}
+
+/// [`dist_pbicgstab`]'s float body against `rhs` (`None`: every part's
+/// `a[p].source`, the f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+fn dist_pbicgstab_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    psi: &mut [DevBuf<Scalar>],
+    rhs: Option<&[DevBuf<Scalar>]>,
     sys: &DistSystem,
     ex: &mut HaloExchange,
     w: &mut DistWorkspace,
@@ -1173,7 +1260,7 @@ pub fn dist_pbicgstab(
     let precon = w.effective_preconditioner(ctrl.precon)?;
     dist_build_preconditioner(gpu, sol, sys, w, precon)?;
 
-    dist_norm_factor(gpu, sol, ex, sys, w, psi, &mut perf)?;
+    dist_norm_factor(gpu, sol, ex, sys, w, psi, rhs, &mut perf)?;
     dist_residual(gpu, sol, w)?;
     {
         let DistWorkspace { r0, r, n, .. } = &mut *w;

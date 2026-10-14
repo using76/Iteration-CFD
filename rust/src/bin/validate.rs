@@ -2161,8 +2161,59 @@ fn check_fft_poisson(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             max_abs_diff(&got, &want) / max_abs(&want).max(1e-30),
             1e-10,
         );
+
+        // Under `single` both solves are refined (SPEC-LIT 118.12): the row
+        // above compares the two float fields, this one the answers.
+        #[cfg(feature = "single")]
+        check_fft_refined(c, gpu, what, &fft, &iter, n_c, dirichlet.is_empty())?;
     }
 
+    Ok(())
+}
+
+/// `single` only: the cuFFT solve's refined double answer against the
+/// refined PBiCGStab's, both de-meaned on the sealed box (SPEC-LIT 118.12).
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+fn check_fft_refined(
+    c: &mut Checks,
+    gpu: &Gpu,
+    what: &str,
+    fft: &FftBackend,
+    iter: &PbicgstabBackend,
+    n_c: usize,
+    sealed: bool,
+) -> Result<()> {
+    let (Some(xf), Some(xi)) = (fft.refined_solution(), iter.refined_solution()) else {
+        c.require(&format!("cuFFT and PBiCGStab refined, {what} (SPEC-LIT 118.12)"), false);
+        return Ok(());
+    };
+    let mut got = gpu.download(xf)?;
+    let mut want = gpu.download(xi)?;
+    got.truncate(n_c);
+    want.truncate(n_c);
+    if sealed {
+        for v in [&mut got, &mut want] {
+            let mean = v.iter().sum::<f64>() / (n_c as f64);
+            for x in v.iter_mut() {
+                *x -= mean;
+            }
+        }
+    }
+    // A NaN anywhere fails the row: `f64::max` would drop it and pass.
+    let finite = got.iter().chain(&want).all(|v| v.is_finite());
+    let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(f64::MIN_POSITIVE);
+    let worst = got.iter().zip(&want).fold(0.0f64, |m, (g, w)| m.max((g - w).abs()));
+    c.note(&format!(
+        "cuFFT refinement, {what}: {} transform solves{}",
+        fft.ir_outer_steps(),
+        if finite { "" } else { "; an answer is not finite" }
+    ));
+    c.check(
+        &format!("cuFFT refined == iterative refined, {what} (SPEC-LIT 118.12)"),
+        if finite { (worst / scale) as Scalar } else { Scalar::NAN },
+        1e-10,
+    );
     Ok(())
 }
 

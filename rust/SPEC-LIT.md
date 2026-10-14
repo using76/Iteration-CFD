@@ -38120,7 +38120,7 @@ came from a stream file that is lost; this is the tree's count, by
 | `psychro.rs` `t_wb` | `1e-13`, `1e-6`, `1e-12` | Newton stops and step | f64 (item 1) |
 | `fan.rs` `table_at` | `1e-30` | floor | unchanged. It is representable in f32. The fan and porous host algebra has no guard below round-off. `FanCurve::at` is the bit mirror of `cuda/fan.cu` and stays `Scalar`, and its `1e-13`/`1e-14` rows in section 31 are round-off rows (F32-14) |
 | `pressure/mod.rs` `reference_controls` | `1e-14` | yardstick solve tolerance | unchanged. Under `single` the solve is §118.4's refinement |
-| `pressure/mod.rs` | `AGREEMENT_TOL = 1e-8` | backend agreement | unchanged, and NOT moved to f64 here. It compares two answers that are each stored in f32, so the floor is their storage (`2^-24` each), whatever the arithmetic. Under `single` a candidate that disagrees by an ulp is disqualified and PBiCGStab is kept. F32-07, which wraps the FFT and the selector's probe in refinement, owns it |
+| `pressure/mod.rs` | `AGREEMENT_TOL = 1e-8` | backend agreement | unchanged, and NOT moved to f64 here. It compares two answers that are each stored in f32, so the floor is their storage (`2^-24` each), whatever the arithmetic. F32-07 (§118.12): under `single` the selector now compares the backends' refined double answers and measures the yardstick's residual in double, so the `1e-8` applies to the answers themselves. Before it, the float yardstick's own residual (`7.6e-8` measured) relaxed the test to `100x` that residual, and a float cuFFT answer `4e-7` away was kept on that weaker test |
 | `pressure/mod.rs` | `REFERENCE_RESIDUAL_MAX = 1e-6` | yardstick residual | unchanged. It is above the f32 floor (`8.4 × 2^-23`) |
 | `cht/ambient.rs` | `NEWTON_RTOL = 1e-10` | §98.3 pass criterion | one value in both builds (item 4) |
 | `cht/ambient.rs` `radiating_slab_root` | `1e-14 * |t|` | answer-key Newton stop | unchanged. Under `single` it reaches an exact f32 fixed point (last correction `0.0`). The answer key's class is F32-14's |
@@ -38234,7 +38234,8 @@ unused there, and the new kernels do not exist in its cubin.
 
 **What it does not do.** The FFT direct solve, the distributed Krylov of
 §73, the pressure selector's probe and the region-ranged conjugate solves are
-F32-07's. The two section-6 rows that compare the solve against the HOST
+F32-07's: §118.12 refines the first three, and says why the fourth is left
+open. The two section-6 rows that compare the solve against the HOST
 reference's own float assembly and Gaussian elimination
 (`PCG == dense direct solve`, `dense solve leaves no residual`) keep their
 meaning and their tolerance: their floor under `single` is that float
@@ -39003,6 +39004,156 @@ builds, so the f64 build zeroes the same cells, and the f32 build never writes a
 Measured: the float kernel is 0 ulp from the f64 host twin rounded to float, in all five outputs
 over 4096 states and in E over 4096 temperatures in [150, 3500] K. The zero counter equals the
 host's prediction in both builds.
+
+No GPL-licensed source was consulted.
+
+### 118.12 Refinement on the other backends - the cuFFT solve, the selector's probe, and the distributed and SPMD Krylov
+
+§118.4 refined PCG and PBiCGStab (and AMG-04a's `solve_gamg` rides the same
+`solve_refined`). Under `single` the other paths still stopped at the float
+floor: the cuFFT direct solve, the pressure selector's probe, which measured
+float fields, and §73's distributed Krylov in process and SPMD (§138.5,
+§138.6). This section applies §118.4's outer loop to all three. Equations
+(118.4.1)-(118.4.9) and the constants `IR_STAGNATION = 0.5` and
+`IR_MAX_OUTER = 12` are unchanged; what changes is the inner method, and, on
+a decomposed mesh, where the vectors live. The unit is F32-07. The f64 build
+does not change by a bit. The new kernels exist only under `OFGPU_SINGLE`,
+and each float body takes its right-hand side as an argument, which the f64
+build passes as `a.source`, the launches it made before.
+
+**1. The cuFFT direct solve** (`src/pressure/fft.rs`). The method of
+(118.4.6) is the transform solve itself, `d = Â^-1 btilde`, where `Â^-1` is
+the float transform, divide and inverse transform of §8.5. `x^0 = fl64(p)`.
+A direct solve has no tolerance, so `T = 0`, and the loop runs to the double
+floor. It stops when `R = 0` (converged), when a correction no longer halves
+`R`, or after 12 transforms. A stop on the halving rule is the floor, and the
+solve is converged if at least one earlier transform did halve `R`. If the
+very first transform fails to halve it, the float solve does not contract,
+and the solve is not converged. `n_iterations` is the number of transforms.
+The reported residuals are `R_0/N` and `R_last/N`, as in §118.4. This is the
+setting of Moler (1967) exactly: a direct solve in the working precision, with
+the residual in a higher one. Each transform reduces the residual by about
+`κ·u32`.
+
+**2. The selector's probe** (`src/pressure/mod.rs`). `PressureBackend`
+gains `refined_solution()` under `single`. It defaults to `None`.
+`PbicgstabBackend` returns its workspace's `x_hi` (not for `fixed_iters`
+controls, which are never refined), and `FftBackend` returns its own. The
+selector compares the refined answers and gates each residual with
+`residual_norm64`, which is (118.4.2) and (118.4.3) at the double field. A
+backend without a refined answer (AMGX, when it is compiled in) is compared
+through its float field. `AGREEMENT_TOL = 1e-8` and
+`REFERENCE_RESIDUAL_MAX = 1e-6` are unchanged.
+
+**3. The distributed and SPMD Krylov** (`src/distsolve.rs`,
+`src/distsolve/refine.rs`, `src/distsolve/spmd.rs`). Every part carries its
+own `x` in double, as long as the part's owned and halo cells together. A
+row (118.4.3) at a cut face reads its neighbour's `x`. The double crosses the
+float exchange of §71 as three floats, joined back on the halo cells:
+
+```
+hi = fl32(x),   mid = fl32(x - hi),   lo = fl32(x - hi - mid)     (118.12.1)
+x_halo = (hi + mid) + lo                                         (118.12.2)
+S = 0 + S_0 + S_1 + ... + S_{P-1}          (each S_p a part's ofacc sum
+                                            stored in double; part order)
+                                                                 (118.12.3)
+x_ref = S_x / n_global,  N = sum_p N_p + eps64,  R = sum_p R_p   (118.12.4)
+```
+
+(118.12.1) is the error-free split of Dekker (1971), taken one word further
+as in Hida, Li and Bailey (2001). `x - fl32(x)` is exactly representable,
+because the remainder of a round-to-nearest holds the low bits of `x` and
+nothing else; so is the second remainder. Three 24-bit words cover the 53 bits
+of a double, so `lo` is exact whenever `ulp64(x) >= 2^-149`, that is for
+`2^-97 <= |x| < 2^128`, and for `x = 0`. The build has no `--use_fast_math`,
+so a subnormal `lo` is not flushed. (118.12.2) adds non-overlapping words:
+`hi + mid = x - e2` is representable, so both sums are exact, and the ghost
+holds the owner's double to the bit. A negative zero comes back as `+0`. The
+halo fill is `solSplit3`, three float exchanges and `solJoin3`.
+
+(118.12.3) is a world sum. In process, it is the parts' doubles summed in
+part order on the host. On a rank, it is one `Comm::allgather` of the rank's
+16 bytes `[N_p, R_p]`, summed in rank order. The two are the same sum, so
+the SPMD refinement is bit for bit the in-process refinement. Every rank
+reads the same `R_k`, applies the same (118.4.8) and stops on the same step.
+With the flag vote on (§138.5), each outer verdict is voted as well: one byte
+per rank, "stop here" or not, and a refusal by name when two differ. Ranks
+whose controls differ would otherwise part at the verdict, where no inner
+solve's flag sees it. At check interval 1 a refined SPMD solve therefore
+takes `n_iterations + 2·outer + 1` votes, which is the unrefined
+`n_iterations + 1` at `outer = 0`.
+The SPMD preflight (§138.5) runs before the refinement's first collective, so
+a refusal still reaches every rank before any waits. (118.12.4) keeps
+§73's rule: the mean divides by the whole mesh's cell count.
+
+The refinement is **not** claimed partition-invariant to the bit. The part
+sums S_p move with the cut, so `R_k` can round differently from one partition
+to another. The inner float solves keep their own guarantee: with
+`DistReduce::Exact` and `Diagonal`, an inner solve is partition-invariant
+for identical inputs. The gate is the plan's: the same answer at the f64
+tolerance across part counts. The counts in `DistPerformance` include the
+refinement's own work. The initial fill and sums cost 3 exchanges and 2
+reductions, each outer step costs 3 exchanges and 1 reduction, and the inner
+solves add theirs. §73.8's per-iteration counts hold for each inner solve and,
+unchanged, for the f64 build.
+
+**What it does not do.** CHT's per-region residuals (`solver::residual_ranged`
+in `cht.rs`) are still measured on the stored float field, so under `single`
+a region's report sits at the float floor. Ranged double kernels would be
+needed, and `cht.rs` is outside this unit's files; the item is F32-13/14's to
+class. GAMG as a solver was already refined (AMG-04a), and GAMG in f32 is
+AMG-06a's. **A refined PBiCGStab on the sealed all-Neumann box of section 6
+returns NaN under `single`.** That box is singular, and its float-rounded
+source is inconsistent by `O(n·u32)`. Once the refinement has removed
+everything else, the correction system is mostly that inconsistent
+component, and the float PBiCGStab breaks down (a division by an inner
+product of order zero; the mechanism is a reading, not a measured trace).
+This was so before this section: the float row `cuFFT == iterative, sealed
+box` reports `0` only because `max_abs_diff` drops a NaN. The refined row
+added here does not drop it, and FAILS. It is listed for the owner of the
+open f32 pure-Neumann findings (BC-07). Curing it is a numerics decision this
+unit does not take.
+
+**Measured** (RTX 5070 Ti, 2026-10-14). `tests/f32_backends_refined.rs`
+passes 5/5 in both builds with the same assertions (`SLACK = 1e-10` relative,
+residuals `<= 1e-13`). The figures, `single` first and the f64 build after:
+
+| system | `single` | f64 build |
+|---|---|---|
+| cuFFT, 9x6x4 box, Dirichlet on -x and +y | 4 transforms; vs dense f64 solve `1.56e-15`; f64 residual `2.08e-16` | 1 transform; `1.04e-15`; `4.74e-16` |
+| selector, same system | yardstick residual `2.50e-15`; cuFFT agrees to `9.5e-15`; kept | `5.86e-16`; `1.5e-15`; kept |
+| distributed PCG, SPD, 120 cells, P = 1, 2, 4 (Hilbert and linear) | 4 outer steps, 60 sweeps; final `5.73e-15`; vs dense `1.30e-14`; vs P = 1: `0` | 45 iterations; `6.86e-15`; `6.93e-15`; `0` |
+| distributed PBiCGStab, asymmetric, same cuts | 4 outer steps, 32 sweeps; final `5.22e-15`; vs dense `1.67e-14`; vs P = 1: `0` | 29 iterations; `5.88e-16`; `9.80e-16`; `0` |
+| SPMD vs in-process, P = 2 and 4, both methods | every owned double, sweeps, outer steps, exchanges, reductions and residual bits equal | equal |
+| (118.12.1)-(118.12.2), 4006 doubles over `2^-97 .. 2^126` | bit for bit (zeros as zeros) | no split in this build |
+
+The sweep counts are 1.33x (PCG) and 1.10x (PBiCGStab) the f64 counts. On
+this system the across-part difference is `0`: the part sums happened to round
+alike, but nothing guarantees it, and the gate is `1e-10`. Before this
+section, under `single`, the distributed PCG at P = 2 stopped on its float
+recurrence and reported converged, with a true residual of `1.89e-7` against
+`1e-14`. The selector's yardstick residual was `7.64e-8`, and the agreement
+test was relaxed to `100x` that residual. `ofgpu-validate -sections 6` under
+`single`: the plan's gate row `cuFFT == iterative, mixed sides (Dn, nD, NN)`
+moves from `4.247e-7` to `0` against its unchanged `1e-10`. The two fields are
+now the float roundings of answers `1.75e-14` apart. The new row `cuFFT
+refined == iterative refined, mixed sides` measures `1.753e-14` after 4
+transforms. Its sealed-box twin FAILS on the NaN above (3 transforms; the
+cuFFT answer is finite). The f64 build's section 6 is row-identical
+(`tools/f64_identity.py rows`). Every cubin's SASS hashes as before except
+`solidblock.cubin`. Its source did not change, and its hash flips between its
+two known values on any recompile (§118.4).
+
+Sources: **Moler, C. B. (1967), "Iterative refinement in floating point",
+J. ACM 14(2) 316-321, doi:10.1145/321386.321394**, and **Carson & Higham
+(2018)**, as cited in §118.4; **Dekker, T. J. (1971), "A floating-point
+technique for extending the available precision", Numer. Math. 18(3)
+224-242, doi:10.1007/BF01397083**; **Hida, Y., Li, X. S. & Bailey, D. H.
+(2001), "Algorithms for quad-double precision floating point arithmetic",
+Proc. 15th IEEE Symposium on Computer Arithmetic (ARITH-15) 155-162,
+doi:10.1109/ARITH.2001.930115**, open copy
+<https://www.davidhbailey.com/dhbpapers/arith15.pdf>. And §8.5, §73, §118.4
+and §138 for everything else, unchanged.
 
 No GPL-licensed source was consulted.
 

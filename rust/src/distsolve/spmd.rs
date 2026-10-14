@@ -197,6 +197,11 @@ pub struct SpmdWorkspace {
     /// PBiCGStab's `rho_old` and `omega`, both starting at 1.
     rho_old: DevBuf<Scalar>,
     omega: DevBuf<Scalar>,
+
+    /// SPEC-LIT §118.12: the refinement's state for this rank's part,
+    /// `single` only. `None` only while a refined solve has it out.
+    #[cfg(feature = "single")]
+    pub(super) ir: Option<super::refine::DistIr>,
 }
 
 impl SpmdWorkspace {
@@ -260,7 +265,24 @@ impl SpmdWorkspace {
             flag: gpu.zeros(1)?,
             rho_old: gpu.zeros(1)?,
             omega: gpu.zeros(1)?,
+            #[cfg(feature = "single")]
+            ir: Some(super::refine::DistIr::new(gpu, &[owned], &[local])?),
         })
+    }
+
+    /// The double solution of the last REFINED solve on this rank's part,
+    /// `n_local` long - the owned cells are the answer (SPEC-LIT §118.12).
+    /// `single` only.
+    #[cfg(feature = "single")]
+    pub fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        self.ir.as_ref().and_then(|i| i.x_hi().first())
+    }
+
+    /// Outer refinement steps of the LAST solve; 0 for a solve that was
+    /// not refined (SPEC-LIT §118.12). `single` only.
+    #[cfg(feature = "single")]
+    pub fn ir_outer_steps(&self) -> usize {
+        self.ir.as_ref().map(|i| i.outer_steps).unwrap_or(0)
     }
 
     /// The rank `new` ran on.
@@ -409,21 +431,39 @@ fn read_flag_and_vote(
 ) -> Result<bool> {
     let converged = super::dist_read_flag(gpu, flag)?;
     if vote {
-        let mine = [u8::from(converged)];
-        let mut all = vec![0u8; n_ranks];
-        comm.allgather(&mine, &mut all)?;
-        *votes += 1;
-        let first = all[0];
-        if all.iter().any(|&v| v != first) {
-            let list: Vec<String> = all.iter().map(|v| v.to_string()).collect();
-            return Err(Error::Config(format!(
-                "{who}: the ranks read different convergence flags: \
-                 votes by rank: [{}]",
-                list.join(", ")
-            )));
-        }
+        take_vote(comm, n_ranks, votes, converged, who)?;
     }
     Ok(converged)
+}
+
+/// The vote itself: ONE byte per rank allgathered, and a refusal by name,
+/// with every rank's vote in rank order, when two differ.
+fn take_vote(comm: &dyn Comm, n_ranks: usize, votes: &mut u64, value: bool, who: &str) -> Result<()> {
+    let mine = [u8::from(value)];
+    let mut all = vec![0u8; n_ranks];
+    comm.allgather(&mine, &mut all)?;
+    *votes += 1;
+    let first = all[0];
+    if all.iter().any(|&v| v != first) {
+        let list: Vec<String> = all.iter().map(|v| v.to_string()).collect();
+        return Err(Error::Config(format!(
+            "{who}: the ranks read different convergence flags: \
+             votes by rank: [{}]",
+            list.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// The refinement's outer verdict (SPEC-LIT §118.12), voted like a flag
+/// read when the vote is on: `stop` is this rank's "the outer loop ends
+/// here". Counted in [`SpmdWorkspace::n_flag_votes`].
+#[cfg(feature = "single")]
+pub(super) fn vote_verdict(comm: &dyn Comm, w: &mut SpmdWorkspace, stop: bool, who: &str) -> Result<()> {
+    if !w.flag_vote {
+        return Ok(());
+    }
+    take_vote(comm, w.n_ranks, &mut w.n_flag_votes, stop, who)
 }
 
 /// The refusals of SPEC-LIT §138.5's table, rows 1-8 in order, all BEFORE
@@ -595,6 +635,45 @@ pub fn spmd_pcg(
     w: &mut SpmdWorkspace,
     ctrl: &SolverControls,
 ) -> Result<DistPerformance> {
+    // Under `single` the solve is refined (SPEC-LIT §118.12), every refusal
+    // of the preflight first - before the refinement's first collective.
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if super::refine::refines(ctrl, sys.n_global_cells()) {
+            preflight(gpu, comm, psi, sys, halo, w, ctrl, "spmd_pcg", "dist_pcg")?;
+            return super::refine::spmd_refined(
+                gpu,
+                sol,
+                comm,
+                psi,
+                sys,
+                halo,
+                w,
+                ctrl,
+                super::refine::Method::Pcg,
+            );
+        }
+    }
+    spmd_pcg_float(gpu, sol, comm, psi, None, sys, halo, w, ctrl)
+}
+
+/// [`spmd_pcg`]'s float body against `rhs` (`None`: the part's `a.source`, the
+/// f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spmd_pcg_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    psi: &mut DevBuf<Scalar>,
+    rhs: Option<&DevBuf<Scalar>>,
+    sys: &DistSystem,
+    halo: &mut SpmdHalo,
+    w: &mut SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
     let mut perf = DistPerformance {
         converged: true,
         ..Default::default()
@@ -644,7 +723,7 @@ pub fn spmd_pcg(
     let reduce = w.reduce;
 
     // ---- dist_norm_factor for ONE part ----------------------------------
-    solver::vec_copy(gpu, sol, b, &sys.a[0].source, n)?;
+    solver::vec_copy(gpu, sol, b, rhs.unwrap_or(&sys.a[0].source), n)?;
     reduce_into(gpu, sol, comm, red, reduce, What::Sum(psi), x_ref, &mut perf)?;
 
     // The mean divides by the WHOLE mesh's cell count, which the system
@@ -910,6 +989,45 @@ pub fn spmd_pbicgstab(
     w: &mut SpmdWorkspace,
     ctrl: &SolverControls,
 ) -> Result<DistPerformance> {
+    // Under `single` the solve is refined (SPEC-LIT §118.12), every refusal
+    // of the preflight first - before the refinement's first collective.
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if super::refine::refines(ctrl, sys.n_global_cells()) {
+            preflight(gpu, comm, psi, sys, halo, w, ctrl, "spmd_pbicgstab", "dist_pbicgstab")?;
+            return super::refine::spmd_refined(
+                gpu,
+                sol,
+                comm,
+                psi,
+                sys,
+                halo,
+                w,
+                ctrl,
+                super::refine::Method::Pbicgstab,
+            );
+        }
+    }
+    spmd_pbicgstab_float(gpu, sol, comm, psi, None, sys, halo, w, ctrl)
+}
+
+/// [`spmd_pbicgstab`]'s float body against `rhs` (`None`: the part's `a.source`, the
+/// f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spmd_pbicgstab_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    psi: &mut DevBuf<Scalar>,
+    rhs: Option<&DevBuf<Scalar>>,
+    sys: &DistSystem,
+    halo: &mut SpmdHalo,
+    w: &mut SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
     let mut perf = DistPerformance {
         converged: true,
         ..Default::default()
@@ -975,7 +1093,7 @@ pub fn spmd_pbicgstab(
     let reduce = w.reduce;
 
     // ---- dist_norm_factor for ONE part ----------------------------------
-    solver::vec_copy(gpu, sol, b, &sys.a[0].source, n)?;
+    solver::vec_copy(gpu, sol, b, rhs.unwrap_or(&sys.a[0].source), n)?;
     reduce_into(gpu, sol, comm, red, reduce, What::Sum(psi), x_ref, &mut perf)?;
 
     // The mean divides by the WHOLE mesh's cell count, which the system
