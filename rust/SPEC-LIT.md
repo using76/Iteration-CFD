@@ -30017,7 +30017,8 @@ form (Timoshenko & Goodier ch. 4):
 ```
 
 and it is read with (S95.27) at `P = (r_in, 0, L/2)`, where on the symmetry
-plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10.
+plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10,
+and since VAL-14 a fourth, `nr = 96` (the ring's fourth mesh, below).
 Held: the point value within `1 %` of (S95.28) on the finest mesh, and the
 observed order of its error between the two finest meshes at `p >= 0.9` -
 the bar docs/09's risk 2 wrote for exactly this read-out.
@@ -30042,7 +30043,7 @@ nearest cell's value and both relative errors; per body, its slenderness
 (`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
 not the primary, whose headline carries the finest point value and its
 error, and whose uncertainty is §94's study of the point value over the
-three meshes (LE10: its three finest) - or, when three values cannot form
+three meshes (the ring and LE10: their three finest) - or, when three values cannot form
 one, §94.3's single-mesh declaration saying so. The three targets are
 answer keys `nafems-le1`, `nafems-le10` and `nafems-le11` of
 `reference/PROVENANCE.md`, `literal` rows that name the restatement as their
@@ -30129,6 +30130,47 @@ modelling choice, not the restated condition; nothing measured here separates th
 The full run: `ofgpu-validate` 1021/1026, its five failing rows Gate 95-A's four at 5:1 and
 10:1 and the ring's order row; every row outside LE10's scope is digit-identical to the run of
 2026-09-26 (§105.14), and the registry's gates with the verdict of a shortfall fall from 6 to 5.
+
+**The ring's fourth mesh, the user's decision D-VAL-6 (VAL-14).** The ring's order row was the
+one shortfall of Gate 95-G left, its point error falling at `p = 0.842` between `nr = 24` and
+`nr = 48`. The user decided, as for LE10, to add a finer mesh and measure again, the gate's
+definition and both bars unchanged. The mesh added is `nr = 96`, `annulus(96, 192, 2)`, 36,864
+cells: the third mesh halved in `r` and `theta`, the two layers in `z` kept, as every ring mesh
+has them. The meshes are `LAME_RING_NR = [12, 24, 48, 96]` in `ofgpu-validate`, next to the gate
+as `LE10_MESHES` is; `lame_ring(nr)` takes any `nr >= 2` and did not change. The bar on the
+point value is read on `nr = 96`. The order row is read on the finest pair, `nr = 48 -> 96`.
+§94's study takes the three finest, `nr = 24, 48, 96`, finest first, under §94.3's four-mesh
+declaration when they cannot form one, and `nr = 12` is run and printed beside them. Nothing else
+moved: the segregated loop and its controls, the fit (S95.27), its `2 x 2 x 2` corner stencil,
+the closed form (S95.28) and the `1 %` and `p >= 0.9` bars. The ring's scope grows from 5 rows
+to 6, one converged row at `nr = 96`, and its two bar rows name `nr = 96` and `nr 48 -> 96`.
+`ofgpu-validate` gains one host test, `ring_gate_runs_four_meshes`, that pins the four meshes and
+builds the finest ring.
+
+**Gate 95-G ring, measured on four meshes** on 2026-10-14 on the machine of record (one RTX
+5070 Ti, f64; other workflows were compiling on the CPU), with the meshes and controls above and
+nothing tuned:
+
+```text
+                          nr = 12       nr = 24       nr = 48       nr = 96     finest    bar
+  ring sigma_tt(bore)   1.701161e6    1.688910e6    1.679071e6    1.673195e6    0.39 %    1 %    holds
+       order of its error, nr 48 -> 96:  p = 0.926                                     0.9    holds
+```
+
+The loop converged on every mesh: 23, 24, 24 and 22 outer iterations (16,521 linear at
+`nr = 96`). The first three columns are digit-identical to the run before this unit, and so is
+every LE1, LE10 and LE11 row. The point error falls at `p = 0.633` from 12 to 24, `0.842` from
+24 to 48 and `0.926` from 48 to 96. §94's study over the finest three is monotone, `p = 0.743`,
+`phi_ext = 1.664479e6`, `U_fine = 1.090e4` (Fs 1.25, power series). The nearest cell's own value
+is 0.52 % off at `nr = 96`, where the fit is 0.39 %. Gate 95-G's section is 28/28 rows in 58 s,
+and it registers nothing.
+
+What this says, and what it does not. The order of the point error rises with each refinement,
+and the bar of docs/09's risk 2 holds on the finest pair. The order measured over the three finest values
+themselves (0.743) is lower than that pair's 0.926, so the ring is not yet in a clean asymptotic
+range, and the bar is held on one pair. The study's extrapolation stops 0.13 % below (S95.28), and
+the band `phi_fine +- U_fine`, 1.662295e6 to 1.684095e6, contains the closed form. Gate 95-D's
+cell-centre hoop-stress order (§95.10, 0.848 on `nr = 24, 48`) was not re-measured on `nr = 96`.
 
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests

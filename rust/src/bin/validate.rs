@@ -3492,7 +3492,7 @@ fn run(c: &mut Checks) -> Result<()> {
     c.leave_gate();
     }
 
-    if c.section("Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (three meshes each, LE10 four with its study on the finest three, SPEC-LIT 95.11)") {
+    if c.section("Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (LE1 and LE11 three meshes, the ring and LE10 four with their study on the finest three, SPEC-LIT 95.11)") {
     c.enter_gate("Gate 95-G boundary-point fit (Lame ring)");
     check_boundary_point_fit(c, &gpu)?;
     c.leave_gate();
@@ -23841,6 +23841,18 @@ const LE10_MESHES: [(usize, usize, usize); 4] = [(6, 12, 4), (12, 24, 8), (24, 4
 /// How many of `LE10_MESHES`' finest meshes SPEC-LIT 94's study takes.
 const LE10_STUDY_LEVELS: usize = 3;
 
+/// Gate 95-G ring's radial cell counts `nr`, coarsest first, each the one
+/// before it doubled (SPEC-LIT 95.11). The fourth, `nr = 96`, is the user's
+/// decision D-VAL-6; the bars are read on the finest mesh and its pair.
+const LAME_RING_NR: [usize; 4] = [12, 24, 48, 96];
+
+/// How many of `LAME_RING_NR`'s finest meshes SPEC-LIT 94's study takes.
+const LAME_RING_STUDY_LEVELS: usize = 3;
+
+/// SPEC-LIT 94.3's declaration for the ring, whose study takes its finest three.
+const NO_STUDY_95G_RING: &str = "four meshes were run and the point values of the finest three could not \
+                                 form a study; the reason is printed above";
+
 /// Which outer loop a Gate 95-G mesh runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Loop95g {
@@ -24004,16 +24016,21 @@ fn point_95g_inner(
 }
 
 /// Gate 95-G's own read-out gate (SPEC-LIT 95.11): the Lame ring's bore
-/// hoop stress (S95.28), read at a boundary point by the fit (S95.27).
+/// hoop stress (S95.28), read at a boundary point by the fit (S95.27), on
+/// the four `LAME_RING_NR` meshes - the bar on the finest, the order on the
+/// finest pair, SPEC-LIT 94's study on the `LAME_RING_STUDY_LEVELS` finest.
 fn check_boundary_point_fit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::solid::{fixtures, restated, Material};
+    const M: usize = LAME_RING_NR.len();
+    let fine = M - 1;
+    let (nr_c, nr_f) = (LAME_RING_NR[fine - 1], LAME_RING_NR[fine]);
     let target = restated::lame_hoop_at_bore(restated::LAME_P, restated::LAME_R_IN, restated::LAME_R_OUT);
     let mat = Material { e: 200.0e9, nu: 0.3, alpha: 0.0 };
     let mut levels: Vec<vv::Level> = Vec::new();
     let mut detail: Vec<String> = Vec::new();
-    let mut errs = [Scalar::NAN; 3];
-    let mut conv = [false; 3];
-    for (idx, nr) in [12usize, 24, 48].into_iter().enumerate() {
+    let mut errs = [Scalar::NAN; M];
+    let mut conv = [false; M];
+    for (idx, nr) in LAME_RING_NR.into_iter().enumerate() {
         let p = match restated::lame_ring(nr) {
             Ok(b) => match restated::patch_pressure(&b.mesh, "inner", restated::LAME_P) {
                 Ok(tr) => point_95g(
@@ -24033,29 +24050,62 @@ fn check_boundary_point_fit(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         c.note(&format!("  {line}"));
         detail.push(line);
     }
-    let order = (errs[1] / errs[2]).ln() / (2.0 as Scalar).ln();
-    c.check("Gate 95-G ring: sigma_tt at the bore point, finest mesh (nr = 48), rel", errs[2], 0.01);
-    c.check("Gate 95-G ring: order of the bore-point error, 0.9 - p", 0.9 - order, 0.0);
-    c.note(&format!("  closed form (S95.28) {target:.6e} Pa; observed order of the point error p = {order:.3}"));
-    let unc = study_95g(c, "bore-point sigma_tt", levels, NO_STUDY_95G);
-    let ok = conv.iter().all(|&v| v) && errs[2] <= 0.01 && 0.9 - order <= 0.0;
+    let order = (errs[fine - 1] / errs[fine]).ln() / (2.0 as Scalar).ln();
+    c.check(&format!("Gate 95-G ring: sigma_tt at the bore point, finest mesh (nr = {nr_f}), rel"), errs[fine], 0.01);
+    c.check(&format!("Gate 95-G ring: order of the bore-point error, nr {nr_c} -> {nr_f}, 0.9 - p"), 0.9 - order, 0.0);
+    c.note(&format!(
+        "  closed form (S95.28) {target:.6e} Pa; observed order of the point error, nr {nr_c} -> {nr_f}: p = {order:.3}"
+    ));
+    let studied = &LAME_RING_NR[M - LAME_RING_STUDY_LEVELS..];
+    let names: Vec<String> = studied.iter().map(|nr| format!("nr = {nr}")).collect();
+    c.note(&format!("  ring: the study takes {}; nr = {} is run and printed", names.join(", "), LAME_RING_NR[0]));
+    let tail = levels.split_off(M - LAME_RING_STUDY_LEVELS);
+    let unc = study_95g(c, "bore-point sigma_tt, finest three", tail, NO_STUDY_95G_RING);
+    let ok = conv.iter().all(|&v| v) && errs[fine] <= 0.01 && 0.9 - order <= 0.0;
     if !ok {
         c.report(GateReport {
             verdict: Verdict::Misses,
             how: How::Live,
             gate: "Gate 95-G boundary-point fit (Lame ring)",
             against: "Timoshenko & Goodier ch. 4, the thick-walled cylinder's bore hoop stress (S95.28), \
-                      read by the fit (S95.27), three meshes r = 2",
+                      read by the fit (S95.27), four meshes r = 2, the order on the finest pair, the study \
+                      on the finest three",
             headline: format!(
-                "converged {}/3, finest point error {:.2e}, order p = {order:.2}",
+                "converged {}/{M}, finest point error {:.2e}, order p = {order:.2}",
                 conv.iter().filter(|&&v| v).count(),
-                errs[2]
+                errs[fine]
             ),
             detail,
             uncertainty: Some(unc),
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ring_refine {
+    use super::*;
+
+    /// SPEC-LIT 95.11: Gate 95-G ring's four meshes are one refinement by
+    /// two apart, the first three are §95.11's nr = 12, 24, 48, the study
+    /// takes the finest three, and the finest ring - nr = 96, the mesh the
+    /// bar is read on - builds with its point at the bore, (r_in, 0, L/2).
+    #[test]
+    fn ring_gate_runs_four_meshes() {
+        use ofgpu::solid::restated;
+        assert_eq!(LAME_RING_NR, [12, 24, 48, 96], "four meshes, nr = 96 the fourth");
+        assert_eq!(&LAME_RING_NR[..3], &[12, 24, 48], "the first three are §95.11's");
+        for w in LAME_RING_NR.windows(2) {
+            assert_eq!(w[1], 2 * w[0], "doubled: {w:?}");
+        }
+        assert_eq!(LAME_RING_STUDY_LEVELS, 3, "the study takes three");
+        let b = restated::lame_ring(LAME_RING_NR[LAME_RING_NR.len() - 1]).expect("the finest ring builds");
+        assert_eq!(b.n, [96, 192, 2]);
+        assert_eq!(b.mesh.n_cells, 36_864);
+        assert!(b.mesh.check().min_volume > 0.0, "positive volumes");
+        let length = restated::LAME_R_OUT - restated::LAME_R_IN;
+        assert_eq!(b.target, Vec3::new(restated::LAME_R_IN, 0.0, 0.5 * length), "the bore point");
+    }
 }
 
 /// Gate 95-G, NAFEMS LE1 as restated (SPEC-LIT 95.11): the membrane in its
