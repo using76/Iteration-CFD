@@ -53,6 +53,7 @@
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuSurfaceScalarField};
+use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, DivScheme, FvKernels};
 use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
@@ -88,7 +89,7 @@ pub struct DomMedium {
 impl DomMedium {
     /// Read a participating medium [`DomRows`] can solve: the model must be
     /// [`RadiationModel::FvDom`] and the absorption a constant grey `kappa`
-    /// (the WSGG sets are CHR-22's superposition of grey solves). Every
+    /// (the WSGG sets are [`super::wsgg::WsggDom`]'s superposition of grey solves). Every
     /// refusal names the entry it is about and the § it breaks.
     pub fn from_config(c: &props::ParticipatingConfig) -> Result<Self> {
         if c.model != RadiationModel::FvDom {
@@ -106,8 +107,8 @@ impl DomMedium {
                 return Err(Error::Config(format!(
                     "absorptionEmissionModel {} is refused: the fvDOM rows of \
                      SPEC-LIT §136.2 solve one grey medium per direction, and \
-                     the WSGG sets are a superposition of grey solves CHR-22 \
-                     will build - not this one",
+                     the WSGG sets are a superposition of grey solves, \
+                     radiation::wsgg::WsggDom (SPEC-LIT §136.9) - not this one",
                     other.kind().name()
                 )));
             }
@@ -208,6 +209,13 @@ impl DomKernels {
 /// there is no f64/f32 mixing anywhere downstream.
 pub struct DomRows {
     medium: DomMedium,
+    /// The emission weight `w` that multiplies `sigma` wherever the rows
+    /// emit - the medium's `kappa sigma T^4/pi`, the wall's
+    /// `eps sigma T_w^4/pi` and the open boundary's `sigma t_inf^4/pi`. 1
+    /// for a grey medium (`sigma 1` is exact, so the grey rows are
+    /// unchanged); WSGG's `a_i` for one grey gas of
+    /// [`super::wsgg::WsggDom`] (SPEC-LIT §136.9).
+    weight: Scalar,
     quad: Quadrature,
     n_dirs: usize,
 
@@ -261,6 +269,7 @@ pub struct DomRows {
 
     k: DomKernels,
     fvk: FvKernels,
+    fldk: FieldKernels,
 }
 
 impl DomRows {
@@ -337,6 +346,7 @@ impl DomRows {
         let beta_h = vec![(kappa + sigma_s) as Scalar; hm.n_cells];
         Ok(Self {
             medium: *medium,
+            weight: 1.0,
             quad: quad.clone(),
             n_dirs,
             n_cells: hm.n_cells,
@@ -360,6 +370,7 @@ impl DomRows {
             su: gpu.zeros(hm.n_cells)?,
             k: DomKernels::new(gpu)?,
             fvk: FvKernels::new(gpu)?,
+            fldk: FieldKernels::new(gpu)?,
         })
     }
 
@@ -576,7 +587,7 @@ impl DomRows {
             return Ok(());
         }
         let nbl = self.n_bf as Label;
-        let sigma = SIGMA_SB as Scalar;
+        let sigma = SIGMA_SB * self.weight;
         let pi = std::f64::consts::PI as Scalar;
         // The wall rows' reflection sum, direction by direction, into one
         // reused scratch (SPEC-LIT §136.2's wall row).
@@ -738,7 +749,7 @@ impl DomRows {
         if self.n_cells > 0 {
             let nl = self.n_cells as Label;
             let kappa = self.medium.kappa as Scalar;
-            let sigma = SIGMA_SB as Scalar;
+            let sigma = SIGMA_SB * self.weight;
             let pi = std::f64::consts::PI as Scalar;
             unsafe {
                 gpu.stream()
@@ -754,6 +765,45 @@ impl DomRows {
         }
         fv::fvm_su(gpu, &self.fvk, a, m, &self.su, 1.0)?;
         Ok(())
+    }
+
+    /// Make the rows ONE grey gas of a weighted sum (SPEC-LIT §136.4,
+    /// §136.9): the absorption becomes `kappa` (so `beta = kappa + sigma_s`;
+    /// the scattering stays the medium's) and every emission term is
+    /// weighted by `weight` - (136.10)'s `a_i kappa_i I_b` in the medium, and
+    /// `a_i` on the wall's and the open boundary's emission. Every
+    /// intensity is zeroed, so the rows are those a fresh [`DomRows::new`]
+    /// at this `kappa` would hold. `kappa` is refused as [`DomRows::new`]
+    /// refuses it; `weight` must be finite (a fitted WSGG weight may be
+    /// negative inside its range and is used as published, §136.9).
+    /// Launches only (SPEC-LIT §81).
+    pub fn set_grey_gas(&mut self, gpu: &Gpu, kappa: f64, weight: f64) -> Result<()> {
+        if !kappa.is_finite() || kappa < 0.0 {
+            return Err(Error::Config(format!(
+                "radiation::dom::DomRows::set_grey_gas: kappa {kappa} is refused \
+                 - kappa must be non-negative and finite (SPEC-LIT §136.2)"
+            )));
+        }
+        if !weight.is_finite() {
+            return Err(Error::Config(format!(
+                "radiation::dom::DomRows::set_grey_gas: weight {weight} is \
+                 refused - the grey gas's a_i must be finite (SPEC-LIT §136.4)"
+            )));
+        }
+        self.medium.kappa = kappa;
+        self.weight = weight as Scalar;
+        let beta = (kappa + self.medium.sigma_s) as Scalar;
+        field_ops::set_field(gpu, &self.fldk, &mut self.beta_cells, beta, self.n_cells)?;
+        for i in &mut self.intensities {
+            gpu.fill_zero(&mut i.f)?;
+        }
+        Ok(())
+    }
+
+    /// The medium the rows assemble - [`DomRows::set_grey_gas`]'s `kappa`
+    /// once it was called.
+    pub fn medium(&self) -> &DomMedium {
+        &self.medium
     }
 
     /// The quadrature the rows were built with - f64 on the host, the
@@ -1190,6 +1240,19 @@ impl DomSolve {
             report.sweeps, report.change, self.ctrl.tol, report.unconverged_solves
         );
         Ok(report)
+    }
+
+    /// Make the solve ONE grey gas of a weighted sum (SPEC-LIT §136.9):
+    /// [`DomRows::set_grey_gas`], then `G`, `q` and the wall flux zeroed -
+    /// the in-scattering lag included - so the next [`DomSolve::solve`] is
+    /// the solve a fresh [`DomSolve::new`] at this `kappa` would run, in the
+    /// same storage (§136.4: the intensity storage is reused across gases).
+    pub fn set_grey_gas(&mut self, gpu: &Gpu, kappa: f64, weight: f64) -> Result<()> {
+        self.rows.set_grey_gas(gpu, kappa, weight)?;
+        gpu.fill_zero(&mut self.g)?;
+        gpu.fill_zero(&mut self.q)?;
+        gpu.fill_zero(&mut self.wall_flux)?;
+        Ok(())
     }
 
     /// `[n_cells]` `G_P` of (136.4), from the last sweep.

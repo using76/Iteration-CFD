@@ -74,6 +74,13 @@ pub mod dom_quad;
 /// specular symmetry - and the M-matrix property the step scheme gives.
 pub mod dom;
 
+/// The weighted sum of grey gases (SPEC-LIT §136.4, §136.9): Bordbar 2021's
+/// user-supplied coefficient file read and digest-checked, the grey gases'
+/// `a_i` and `kappa_i` from `T`, `X_H2O` and `X_CO2` with the fitted range
+/// refused by name, the grey mean, and the non-grey P1 and fvDOM loops that
+/// solve once per grey gas and sum the gases.
+pub mod wsgg;
+
 /// Stefan-Boltzmann constant, W/(m2 K4) - CODATA 2018 exact value (fixed by
 /// the SI redefinition of the kelvin).
 pub const SIGMA_SB: Scalar = 5.670_374_419e-8;

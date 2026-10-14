@@ -365,6 +365,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/radiation/p1.rs",
         Stance::Gate("p1_solve_replays_under_capture"),
     ),
+    (
+        "src/radiation/wsgg.rs",
+        Stance::Gate("wsgg_p1_replays_under_capture"),
+    ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
     (
         "src/s2s.rs",

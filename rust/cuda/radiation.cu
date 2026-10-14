@@ -26,13 +26,18 @@
 
   The in-scattering sum (CHR-21, SPEC-LIT §136.8): (sigma_s/4pi)
   (G + A_1 Omega_l . q) per cell from the lagged G and q, ofscalar.
+
+  The WSGG gas sums (CHR-22, SPEC-LIT §136.9): the non-grey loop's G, q
+  and wall flux summed over the grey gases in ofacc, rounded once by the
+  solve's own rounding kernels.
   ==========================================================================
 
-  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6-§136.8
+  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.4,
+  §136.6-§136.9
   No GPL-licensed source was consulted. Provenance: see PROVENANCE.md.
 
-  Every kernel but the solve's sums is ofscalar in, ofscalar out - the
-  crate's solve precision, both builds. No atomics, no allocation, no
+  Every kernel but the solve's and the gas loop's sums is ofscalar in,
+  ofscalar out - the crate's solve precision, both builds. No atomics, no allocation, no
   sync: each thread touches only its own cell or face, so a launch is pure
   device work and the whole P1
   step of src/radiation/p1.rs and the fvDOM boundary update and row
@@ -525,4 +530,46 @@ extern "C" __global__ void domInScatter
     if (c >= nCells) return;
     const ofvec3 qc = q[c];
     su[c] = c0*g[c] + c1*(ox*qc.x + oy*qc.y + oz*qc.z);
+}
+
+// ==========================================================================
+//  The WSGG gas sums (CHR-22, SPEC-LIT §136.4 and §136.9): the non-grey
+//  loop's G = sum_i G_i, q = sum_i q_i and wall flux sum_i (q_w . n)_i,
+//  one grey gas per launch into ofacc accumulators. The rounding into the
+//  ofscalar outputs is domRoundCells/domRoundFaces above, once, after the
+//  last gas (§118.1).
+// ==========================================================================
+
+//- gAcc[c] += G_i[c], qAcc[3c + a] += q_i[c].a - every ofscalar operand
+//  widened to ofacc first. The caller zeroes both before the first gas. -
+extern "C" __global__ void wsggAccumCells
+(
+    ofacc* __restrict__ gAcc,
+    ofacc* __restrict__ qAcc,
+    const ofscalar* __restrict__ g,
+    const ofvec3* __restrict__ q,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const long long j = 3LL*(long long)c;
+    const ofvec3 qc = q[c];
+    gAcc[c] += (ofacc)g[c];
+    qAcc[j]     += (ofacc)qc.x;
+    qAcc[j + 1] += (ofacc)qc.y;
+    qAcc[j + 2] += (ofacc)qc.z;
+}
+
+//- wfAcc[i] += (q_w . n)_i[i], widened to ofacc. -
+extern "C" __global__ void wsggAccumFaces
+(
+    ofacc* __restrict__ wfAcc,
+    const ofscalar* __restrict__ wf,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    wfAcc[i] += (ofacc)wf[i];
 }

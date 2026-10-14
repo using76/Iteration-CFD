@@ -45811,6 +45811,131 @@ Labels: (136.14)-(136.17).
 
 ---
 
+### 136.9 WSGG: the coefficient file, the per-gas solve, and the slab gate (CHR-22)
+
+**ORIGINAL.** The reader, the refusals and the loop are this crate's own
+(`src/radiation/wsgg.rs`). The model is §136.4's (Bordbar et al. 2021,
+**read**). No coefficient of Bordbar's is in the tree.
+
+**The file's rows, as read.** The supplement (`mmc2.zip`, sha256 as in
+Sources) was read in a scratch copy outside the tree. Its MATLAB function
+`Bordbar_PWSGG_MatlabFunction_IJHMT2021.m`, under the same licence, was read
+for the row meaning only. Nothing of either is copied here. A data row has
+eight whitespace-separated numbers, `Pt i j b4 b3 b2 b1 b0`:
+
+* `i = 1..4` is the grey gas.
+* `j = 1..5` is the row of `T̂^(j-1)`, so `c_i,j-1,k` of (136.9).
+* `j = 0` is the row of `κ_p,i`, so `d_ik`.
+* `b4..b0` multiply `M_r^4..M_r^0`. The function evaluates them with
+  `polyval`, highest power first.
+* The function scales `κ_i = κ_p,i (X_H2O + X_CO2) P_t`. That is (136.10)
+  with the partial pressures in atm.
+
+Every other line is a header. The reader (`WsggCoefficients::parse`)
+refuses three things by name: a missing or repeated `(i, j)` (all 24 must be
+present), an index outside `1..4 × 0..5`, and a `Pt` that is not the case's
+pressure exactly (§137.2's exact-match rule). `WsggCoefficients::read`
+checks the digest first (§136.4's table). A file recorded for **another**
+pressure is refused, naming it. An unknown digest is accepted, and the
+warning that names it is printed and returned. (136.8)-(136.9) are evaluated
+by Horner in f64 in both builds. A user copy of the ten files gave
+`ε(1500 K, X_H2O = X_CO2 = 0.1, 1 atm, L = 1 m) = 1.978904519989372e-1`.
+An independent Python evaluation of the same rows gave the same number to
+all 16 printed digits.
+
+**The fit's weights are used as published (decided by recommendation).**
+Over the ten files on the fitted grid (55 temperatures 300-3000 K in 50 K
+steps, 33 `M_r` from 0.1 to 4), the four weights `a_i` are negative in 2243
+of the 72600 evaluations. The worst is `-0.1358`, at 80 atm, 300 K and
+`M_r = 4`. `Σ a_i` lies outside `(0, 1]` at 2581 of the 18150 states.
+These numbers are measured, not quoted. Inside the range the call is not
+refused, and a negative `a_i` is not clipped. Clipping would change the
+model, and that change is the user's call (`GreyGasSet::new` accepts any
+finite `a_i` and refuses `κ_i <= 0`; the window is not a member).
+
+**The per-gas solve (DESIGN).** P1 and the fvDOM rows each carry an
+emission weight `w`, which multiplies `σ` everywhere the solve emits. In
+the DOM rows that is (136.3)'s `κσT^4/π`, the wall's `εσT_w^4/π` and the
+open boundary's `σT_∞^4/π`. In P1 it is (135.8)'s `4κσT^4`, the Marshak
+wall's `4σT_w^4` (135.10), and (137.2)'s pair. The weight is 1 for a grey
+medium. `SIGMA_SB · 1` is exact in both builds, so the grey solves are
+unchanged. `set_grey_gas(κ_i, a_i)` sets `κ` and `β = κ + σ_s` on the
+device and the weight to `a_i`. It zeroes `G` (P1), or the intensities,
+`G`, `q`, the wall flux and the in-scattering lag (DOM). The next solve is
+then the solve a fresh construction at `κ_i` would run, in the same storage.
+`WsggP1::solve` and `WsggDom::solve` run each gas in turn. They add its
+`G`, `q` and wall flux into `ofacc` sums (`wsggAccumCells`,
+`wsggAccumFaces`) and round once (`domRoundCells`, `domRoundFaces`,
+§118.1). `WsggP1` registers each gas's own (137.2) pair right after its
+solve. The energy equation therefore receives
+`Σ_i κ_i (G_i - 4 a_i σT^4)`, linearised. `WsggP1` captures (§81).
+`WsggDom` is refused inside a capture, as `DomSolve::solve` is.
+
+Because (136.10) is linear in its sources, a gas with a uniform `a_i` gives
+exactly `a_i` times the grey solve at `κ_i`:
+
+```
+I_i = a_i I[κ_i],     G_i = a_i G[κ_i],     q_i = a_i q[κ_i]                    (136.18)
+```
+
+On the homogeneous isothermal slab with cold black walls, (136.18) and
+(136.12) give the loop's discrete answer and its spatially converged limit:
+
+```
+Ψ = Σ_j a_j Ψ_N(κ_j L)   →   Σ_j a_j (1 - 2E_3(κ_j L))   as N → ∞              (136.19)
+|Ψ - Σ_j a_j (1 - 2E_3(κ_j L))|  <=  Σ_j a_j |Ψ_N(κ_j L) - (1 - 2E_3(κ_j L))|   (136.20)
+```
+
+(136.20) is "the method's own grey-slab error at the same mesh and set"
+of §136.5's row (the triangle inequality, for `a_j >= 0`). The P1 half of
+the row needs no closed form: (136.18) says the loop equals `Σ_j a_j` times
+the grey P1 solve at `κ_j`, to round-off. The same inequality bounds its
+error against `Σ_j a_j` (135.11).
+
+**Two named limits (DESIGN; CHR-23 decides).**
+
+1. A wall's and an open boundary's per-gas emission is weighted by the
+   gas's own `a_i`, not `a_i(T_w)` or `a_i(T_∞)`. That is exact for a cold
+   boundary and for a boundary at the gas temperature. A per-face `a_i(T_w)`
+   is named and not built.
+2. The window (`κ_0 = 0`) is not solved (§136.4). A boundary that emits
+   loses its `a_0` share of wall-to-wall exchange through the window. The
+   loop is exact only when no boundary emits.
+
+The media are uniform here, as in P1 and the DOM rows. A per-cell `a_i(T,
+X)` and `κ_i(T, X)` is CHR-23's coupling.
+
+**The grey mean.** `GreyGasSet::grey_kappa(L_m) = -ln(1 - ε(L_m))/L_m`.
+It is refused when `ε(L_m)` is outside `(0, 1)` and when `L_m <= 0`.
+`mean_beam_length` is `3.6 V/A`. `A` counts the faces of `wall` and plain
+patches only, because empty, symmetry and coupled faces are not the
+enclosure's surface (DESIGN). A mesh with no such face is refused.
+
+**Measured** (the synthetic set `a = 0.30, 0.25, 0.20, 0.15`, `κ = 0.1, 0.5,
+2, 10` 1/m, window 0.10, `T = 1000 K`, `L = 1`):
+
+| quantity | f64 | `single` |
+|---|---|---|
+| DOM S8 `N = 32`, `Ψ` (both walls) | 0.525814570895, r = 7.2e-13 against `Σ a_j Ψ_N` | 0.525813253510, r = 2.5e-6 |
+| its error against `Σ a_j (1 - 2E_3)` = 0.527368526570 | -1.554e-3 (bound (136.20): 3.40e-3) | -1.555e-3 |
+| P1 `N = 32`, walls 500 K: `G`, `q_r`, wall flux, source pair against `Σ a_j ×` grey P1 | 1.6e-15, 2.4e-14, 2.4e-15, 2.5e-16 / 2.4e-16 | 5.9e-8, 6.2e-6, 3.5e-8, 1.2e-7 / 8.4e-8 |
+| P1 `Ψ` against `Σ a_j` (135.11) = 0.583387351309 | -2.8098e-3 (bound 2.8098e-3: every grey error has the same sign) | -2.8188e-3 (bound 2.8189e-3) |
+
+**CHR-22's rows** (classes as §136.5; R rows use `tol32` under `single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `wsgg_slab_sum_of_grey_gases` | DOM: `Ψ` against (136.19)'s `Σ a_j Ψ_N`, and the error bound (136.20); P1: `G`, `q_r`, wall flux and the source pair against `Σ a_j ×` the grey solve, and `Ψ` against `Σ a_j` (135.11) under (136.20)'s bound | DOM 1e-10 relative; P1 1e-12 relative to the largest; bounds plus the row's tolerance | P / R |
+| `wsgg_requires_h2o_co2` | species without `H2O`/`CO2`; `X_CO2 = 0`; the synthetic file's (136.8)-(136.9) at two states | refused by name; 1e-15 relative | D |
+| `wsgg_refuses_out_of_range` | `T` = 299.9, 3000.1, NaN; `M_r` = 0.09, 4.01, 0; the range ends accepted | refused naming the range | D |
+| `wsgg_user_file_digest` | FIPS 180-4's four example digests; a synthetic file warned by its digest; missing and repeated rows, a `Pt` mismatch, a pressure outside the ten, an absent file; with `OFGPU_WSGG_DIR`, the ten files silent and the 1 atm file refused at 0.5 atm (skipped by name without it) | exact | D |
+| `wsgg_grey_mean` | `L_m` of the unit cube 0.6 and of both slabs 1.8; `1 - exp(-κ L_m) = ε(L_m)`; the refusals | 1e-14 relative | D |
+| `wsgg_p1_replays_under_capture` | §81: two gases on the 8-cell slab, walls at 500 K, each registering its source | bitwise | D |
+
+Labels: (136.18)-(136.20).
+
+---
+
 ## 137. Radiation in the energy equation, and the case blocks for species, chemistry, combustion, radiation and parcels
 
 `No GPL-licensed source was consulted.` This section is this project's own
