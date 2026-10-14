@@ -39007,7 +39007,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 92 names of
+accepts it on the field the row is asked on, and it is one of the 93 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39120,12 +39120,12 @@ row, row for row.
 | mapped inflow | `mapped` | implemented | — | — | (120.10a)-(120.10c), the cells of the plane `offset` downstream, `setAverage` to an area mean |
 | mapped inflow | `mappedFixedValue` | implemented | — | — | `mapped`'s other spelling, the same condition |
 | mapped inflow | `turbulentInlet` | implemented | — | — | (120.10e)-(120.10h), `referenceField` plus a seeded fluctuation of RMS `fluctuationScale` times the reference's magnitude and memory `1 - alpha` |
+| mapped inflow | `timeVaryingMappedFixedValue` | implemented | — | — | (120.11a)-(120.11d), `constant/boundaryData/<patch>` interpolated by a planar Delaunay with barycentric weights at setup, and linearly in time on the device clock |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| mapped inflow | `timeVaryingMappedFixedValue` | planned | BC-15 | — | — |
 | synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
 | synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
 | jump | `fixedJump` | planned | BC-17 | — | — |
@@ -40754,6 +40754,138 @@ agree to 1.557e-4 of the peak - the f32 SIMPLE floor family of §120.3-§120.6.
 * **Steele, G. L., Lea, D., Flood, C. H.** Fast splittable pseudorandom
   number generators. *Proc. OOPSLA 2014* (SPLASH '14), 453-472,
   doi:10.1145/2660193.2660195 - the SplitMix64 finaliser of (120.10e).
+
+No GPL-licensed source was consulted.
+
+### 120.11 The inflow database - `timeVaryingMappedFixedValue`, a planar Delaunay in space and linear in time
+
+BC-15 implements the last mapped-inflow name of the §120 table. The name and
+the database layout - `constant/boundaryData/<patch>/points` and one folder
+per time holding `<field>` - are taken by name and as a file FORMAT only from
+the user guides of §120; every equation below is cited, or is ours and marked
+DESIGN.
+
+The condition is a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`,
+`refGrad = 0`) whose `refValue` a timed apply rewrites after each
+`F1Clock::advance` (§120.1) - no new evaluation branch (§5.2 of the
+completion plan). Space is settled once at setup on the host; time runs on
+the device.
+
+**Space** *(DESIGN - ours, on the cited triangulation)*. With the samples
+`p_k` (k = 0..N-1, WORLD f64, §118.7) and a face centre `x_f` (WORLD f64):
+
+```
+c = (1/N) SUM_k p_k,   a = argmax_k |p_k - c| (lowest index),   L = |p_a - c|
+e1 = (p_a - c)/L,   r_k = (p_k - c) - ((p_k - c).e1) e1,   b = argmax_k |r_k|
+collinear if |r_b| <= 1e-9 L, otherwise e2 = r_b/|r_b|
+(u, v)(x) = ((x - c).e1/L, (x - c).e2/L)                              (120.11a)
+```
+
+The samples' triangulation `T` in `(u, v)` is Delaunay - no sample strictly
+inside any triangle's circumcircle (Delaunay 1934):
+
+```
+|q_k - z_t| >= r_t  for every triangle t of T and every sample k that is
+not a vertex of t, (z_t, r_t) the circumcircle of t                    (120.11b)
+```
+
+It is built by Bowyer-Watson insertion (Bowyer 1981; Watson 1981): a super
+triangle of half-size 1e3, then for each sample in file order the cavity of
+the triangles whose circumcircle holds it strictly (`d^2 < r^2 (1 - 1e-12)`),
+grown from the triangle holding the sample through shared edges, then shrunk -
+a triangle dropped and the component re-grown - until every cavity edge
+`a -> b` has `orient(a, b, p) > 0`, and refilled by the fan from the sample.
+Round-off can then leave a triangle not quite Delaunay, never an invalid one.
+The super triangles are removed and the boundary completed to the convex
+hull: wherever the counter-clockwise boundary turns right at `b`
+(`orient(a, b, c) < 0` for boundary edges `a -> b -> c`), the triangle
+`(a, c, b)` is added when it holds no sample. The net is checked: every
+triangle counter-clockwise and the areas summing to the hull's (Andrew's
+monotone chain) within 1e-9, else refused by name. The setup costs `O(N^2)`
+for the triangulation and `O(F N)` for the location; none of it runs per step.
+
+```
+orient(P, Q, R) = (Q_u - P_u)(R_v - P_v) - (Q_v - P_v)(R_u - P_u)
+D = orient(A, B, C) > 0
+l_A = orient(x, B, C)/D,  l_B = orient(A, x, C)/D,  l_C = orient(A, B, x)/D
+phi_f = l_A phi_A + l_B phi_B + l_C phi_C  (f64, in this order)         (120.11c)
+```
+
+for the first triangle with `min(l) >= -1e-10`. A face outside the hull takes
+the nearest point of the nearest boundary edge `a b`,
+`s = clamp(((x - a).(b - a))/|b - a|^2, 0, 1)`, `phi_f = (1 - s) phi_a +
+s phi_b`. Collinear samples are interpolated the same way along `u` between
+neighbours, clamped at the ends; one sample is a constant. Barycentric weights
+sum to one and reproduce `x`, so (120.11c) is EXACT for a linear field on a
+planar patch, which is the gate. `mapMethod nearest` takes the sample nearest
+in 3-D (`|p_k - x_f|^2`, the lowest index on a tie).
+
+**Time** (the clamp form of (120.2), §120.1). The time folders are the
+sub-folders whose names parse as numbers, `t_0 < ... < t_{K-1}`; slab `k` is
+(120.11c) of folder `k`, `V_{k,f,c}` in f64. At the clock's `t`:
+
+```
+K = 1 or t <= t_0:  V_0;      t >= t_{K-1}:  V_{K-1}
+t_j <= t < t_{j+1}:  V_j + ((t - t_j)/(t_{j+1} - t_j)) (V_{j+1} - V_j)    (120.11d)
+```
+
+in double in both builds, rounded ONCE into `Scalar`. The kernels are
+`f1TvApplyScalar`/`f1TvApplyVector` in `cuda/function1.cu` (`-fmad=false`),
+reading `t` from the device clock so a captured step replays with the time
+moving (§81.1 defect (b)); `TvMappedRule::values64` is their host twin, the
+same operations in the same order, so the two agree bit for bit. Every
+folder's slab is on the card: `K F n_c` doubles.
+
+**Which runs carry it.** As a time-varying Function1 (§120.1): only the
+`setup_*_field_timed` entry points, which read the database from
+`<case_dir>/constant/boundaryData/<patch>`, seed the triple at `t_start` and
+return the patch inside the `TimedBcs` the driver applies after each clock
+step. Every other setup path refuses the name, naming the timed entry point,
+because a frozen first folder would be the silent substitution §13.4 forbids.
+No driver is wired yet (the gap §120.1 records).
+
+Entries: `mapMethod` (`planarInterpolation`, the default, or `nearest`),
+`fieldTable` (the file name in each time folder; the field's name when
+absent), `perturb` (a number, accepted and unused - (120.11b) does not
+perturb the samples), `setAverage` (`false` accepted). A value file may carry
+one value of the field's rank before its list - the file's average - which is
+read past. Refused by name: `setAverage` on; `offset`; another `mapMethod`;
+no case directory; an unreadable `points` or value file; a value count that
+is not the point count; two samples at one point (1e-12 in `(u, v)`); two
+folders naming one time; no time folder; with two folders or more, a run
+`[t_start, t_end]` not inside `[t_0, t_{K-1}]`.
+
+**Gates** - `tests/bc_tvmapped.rs`, both builds (f64 [single]), 4 tests.
+`a_linear_field_from_200_scattered_points_is_exact_on_the_faces` - THE gate:
+2 x 6 x 5 cells over the unit cube, xMin sampled at its 4 corners and 196
+seeded interior points; `T = 1.5 + 3y - 2z`, worst `|phi_f - phi(x_f)|` over
+the 30 faces 1.97e-16 [1.97e-16] of `max|T|`; `U = (1 + y/2, 2 - z,
+y/4 + 3z/4)` 2.22e-16 [2.22e-16] of `max|U|` (<= 1e-12, class R); the triple
+is the slab rounded once, bit for bit.
+`the_triangulation_is_delaunay_and_exact_on_linear_data` - on the 200
+samples 394 = 2N - 2 - h triangles and no in-circle determinant above 0 [0];
+a cocircular 30 x 30 grid gives 2N - 2 - 116 triangles; an 11 x 11 grid on a
+tilted plane reproduces a linear field at 50 interior targets to 1.8e-15
+[1.8e-15]; collinear samples, the hull clamp and `nearest` give the closed
+forms. `time_interpolation_is_exact_at_the_midpoints` - folders 0, 0.5 and 2:
+at each folder time the value is the slab bit for bit, at t = 0.25 and 1.25
+it is the slabs' midpoint within 0 [1.1e-16] relative (<= 2 eps); on the
+device, 16 steps of dt 0.125 to t = 2, every scalar and vector face equals
+the host twin bit for bit (class D).
+`time_varying_mapped_refusals_are_by_name` - 11 refusals, each naming the
+condition and this section. 4 of 4 in each build. The four existing kernels
+of `function1.cubin` are SASS-identical in both builds; two are added.
+
+* **Bowyer, A.** Computing Dirichlet tessellations. *Comput. J.* 24 (1981)
+  162-166, doi:10.1093/comjnl/24.2.162 - the incremental insertion.
+* **Watson, D. F.** Computing the n-dimensional Delaunay tessellation with
+  application to Voronoi polytopes. *Comput. J.* 24 (1981) 167-172,
+  doi:10.1093/comjnl/24.2.167 - the circumcircle cavity and its refill.
+* **Delaunay, B.** Sur la sphere vide. *Bull. Acad. Sci. URSS, Classe Sci.
+  Math. Nat.* 6 (1934) 793-800 - the empty-circle property.
+* **Andrew, A. M.** Another efficient algorithm for convex hulls in two
+  dimensions. *Inf. Process. Lett.* 9 (1979) 216-219,
+  doi:10.1016/0020-0190(79)90072-3 - the monotone chain of the net check.
 
 No GPL-licensed source was consulted.
 

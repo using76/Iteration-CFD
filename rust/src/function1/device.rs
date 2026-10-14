@@ -13,7 +13,9 @@
 //! graph would freeze it); [`DeviceF1`], a function uploaded once in the
 //! flattened form [`encode`] writes; and [`DeviceTimedPatch`], a patch whose
 //! Robin-triple entry is a Function1 of time, applied once per step after
-//! [`F1Clock::advance`] (SPEC-LIT 120.1's table of conditions).
+//! [`F1Clock::advance`] (SPEC-LIT 120.1's table of conditions); and
+//! [`DeviceTvMapped`], SPEC-LIT 120.11's `timeVaryingMappedFixedValue`
+//! patch, linear in time between per-face slabs on the same clock.
 //!
 //! Every evaluation is in f64 in both builds - a time of 1000 s stepped by
 //! 1e-4 s is not an f32 number - and the unit is compiled with `-fmad=false`,
@@ -44,10 +46,13 @@ pub struct F1Kernels {
     eval_many: CudaFunction,
     apply_scalar: CudaFunction,
     apply_vector: CudaFunction,
+    tv_scalar: CudaFunction,
+    tv_vector: CudaFunction,
 }
 
 impl F1Kernels {
-    /// Load the four kernels of the module.
+    /// Load the six kernels of the module (the last two are SPEC-LIT
+    /// 120.11's `timeVaryingMappedFixedValue` apply).
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let k = KernelSet::new(gpu, crate::kernels::FUNCTION1)?;
         Ok(Self {
@@ -55,6 +60,8 @@ impl F1Kernels {
             eval_many: k.func("f1EvalMany")?,
             apply_scalar: k.func("f1ApplyScalar")?,
             apply_vector: k.func("f1ApplyVector")?,
+            tv_scalar: k.func("f1TvApplyScalar")?,
+            tv_vector: k.func("f1TvApplyVector")?,
         })
     }
 }
@@ -496,6 +503,146 @@ impl DeviceTimedPatch {
                 .arg(&fc)
                 .arg(&self.base)
                 .arg(&self.w)
+                .arg(&mut *dst)
+                .launch(cfg_for(self.n as usize))?;
+        }
+        Ok(())
+    }
+}
+
+// ==========================================================================
+//  The time-varying mapped patch (SPEC-LIT 120.11)
+// ==========================================================================
+
+/// A [`crate::field::tvmapped::TvMappedRule`] on the device: the folder
+/// times and every folder's face values uploaded once, in f64 in both
+/// builds. `f1TvApplyScalar`/`f1TvApplyVector` read the time from the
+/// [`F1Clock`] ON THE DEVICE and write (120.11d) rounded once into
+/// [`Scalar`] - bit for bit [`crate::field::tvmapped::TvMappedRule::host_values`].
+/// The whole database lives on the card: `times * faces * components`
+/// doubles (SPEC-LIT 120.11).
+#[derive(Debug)]
+pub struct DeviceTvMapped {
+    patch: String,
+    times: DevBuf<f64>,
+    vals: DevBuf<f64>,
+    nk: i32,
+    start: i32,
+    n: i32,
+    n_t: i32,
+}
+
+impl DeviceTvMapped {
+    /// Upload, refusing by name a rule that is not 1 or 3 components, has no
+    /// time, or whose slabs are not `times * n * n_t` long.
+    pub fn upload(gpu: &Gpu, r: &crate::field::tvmapped::TvMappedRule) -> Result<Self> {
+        if r.n_t != 1 && r.n_t != 3 {
+            return Err(Error::Config(format!(
+                "{}: a timeVaryingMappedFixedValue rule has {} components, not 1 or 3",
+                r.patch, r.n_t
+            )));
+        }
+        if r.times.is_empty() || r.values.len() != r.times.len() * r.n * r.n_t {
+            return Err(Error::Config(format!(
+                "{}: a timeVaryingMappedFixedValue rule holds {} values where {} times x \
+                 {} faces x {} components need {}",
+                r.patch,
+                r.values.len(),
+                r.times.len(),
+                r.n,
+                r.n_t,
+                r.times.len() * r.n * r.n_t
+            )));
+        }
+        Ok(Self {
+            patch: r.patch.clone(),
+            times: gpu.upload(&r.times)?,
+            vals: gpu.upload(&r.values)?,
+            nk: r.times.len() as i32,
+            start: r.start as i32,
+            n: r.n as i32,
+            n_t: r.n_t as i32,
+        })
+    }
+
+    /// The target's component count, 1 or 3.
+    pub fn n_t(&self) -> usize {
+        self.n_t as usize
+    }
+
+    /// The refusal of a target buffer too short for `start + n`.
+    fn check_len(&self, len: usize) -> Result<()> {
+        if self.start as usize + self.n as usize > len {
+            return Err(Error::Config(format!(
+                "{}: the target is too short: start {} + n {} where the buffer holds {}",
+                self.patch, self.start, self.n, len
+            )));
+        }
+        Ok(())
+    }
+
+    /// `dst[start + i]` = (120.11d) at the clock's time for a scalar field.
+    /// Nothing downloads, syncs or allocates, so it captures.
+    pub fn apply_scalar(
+        &self,
+        gpu: &Gpu,
+        k: &F1Kernels,
+        clock: &F1Clock,
+        dst: &mut DevBuf<Scalar>,
+    ) -> Result<()> {
+        if self.n_t != 1 {
+            return Err(Error::Config(format!(
+                "{}: apply_scalar on a {}-component timeVaryingMappedFixedValue rule",
+                self.patch, self.n_t
+            )));
+        }
+        if self.n == 0 {
+            return Ok(());
+        }
+        self.check_len(dst.len())?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.tv_scalar)
+                .arg(&self.times)
+                .arg(&self.nk)
+                .arg(&self.vals)
+                .arg(&clock.buf)
+                .arg(&self.start)
+                .arg(&self.n)
+                .arg(&mut *dst)
+                .launch(cfg_for(self.n as usize))?;
+        }
+        Ok(())
+    }
+
+    /// `dst[start + i]` = (120.11d)'s three entries of face `i` for a vector
+    /// field, each rounded once.
+    pub fn apply_vector(
+        &self,
+        gpu: &Gpu,
+        k: &F1Kernels,
+        clock: &F1Clock,
+        dst: &mut DevBuf<Vec3>,
+    ) -> Result<()> {
+        if self.n_t != 3 {
+            return Err(Error::Config(format!(
+                "{}: apply_vector on a {}-component timeVaryingMappedFixedValue rule",
+                self.patch, self.n_t
+            )));
+        }
+        if self.n == 0 {
+            return Ok(());
+        }
+        self.check_len(dst.len())?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.tv_vector)
+                .arg(&self.times)
+                .arg(&self.nk)
+                .arg(&self.vals)
+                .arg(&clock.buf)
+                .arg(&self.start)
+                .arg(&self.n)
                 .arg(&mut *dst)
                 .launch(cfg_for(self.n as usize))?;
         }

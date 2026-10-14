@@ -106,7 +106,9 @@ use crate::error::{Error, Result};
 use crate::field::mapped::{MappedRule, TurbulentInletRule};
 use crate::field::patch_mean::PatchMeanRule;
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
-use crate::function1::{DeviceTimedPatch, F1, F1Clock, F1Kernels, F1Target, TimedPatch};
+use crate::function1::{
+    DeviceTimedPatch, DeviceTvMapped, F1, F1Clock, F1Kernels, F1Target, TimedPatch,
+};
 use crate::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
 use crate::types::DVec3;
@@ -149,6 +151,11 @@ pub struct BoundaryTriple<T> {
     /// SPEC-LIT 120.10: the `turbulentInlet` rules, one per patch; drawn
     /// every time step through `field_ops::advance_turbulent_inlet_*`.
     pub turbulent_rules: Vec<TurbulentInletRule>,
+    /// SPEC-LIT 120.11: the `timeVaryingMappedFixedValue` rules, one per
+    /// patch, each with its face values per time folder; uploaded into the
+    /// [`TimedBcs`] the `*_timed` setup returns and applied after each
+    /// `F1Clock::advance`.
+    pub tv_rules: Vec<crate::field::tvmapped::TvMappedRule>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -163,6 +170,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             mean_rules: Vec::new(),
             mapped_rules: Vec::new(),
             turbulent_rules: Vec::new(),
+            tv_rules: Vec::new(),
         }
     }
 }
@@ -491,24 +499,41 @@ pub struct F1Setup<'a> {
 /// `apply_*` after each `F1Clock::advance` (SPEC-LIT 120.1).
 pub struct TimedBcs {
     patches: Vec<DeviceTimedPatch>,
+    /// SPEC-LIT 120.11: the `timeVaryingMappedFixedValue` patches, applied
+    /// after the Function1 patches on the same clock.
+    tv: Vec<DeviceTvMapped>,
 }
 
 impl TimedBcs {
     pub fn upload(gpu: &Gpu, patches: &[TimedPatch]) -> Result<Self> {
+        Self::upload_with_tv(gpu, patches, &[])
+    }
+
+    /// As [`Self::upload`], plus the `timeVaryingMappedFixedValue` rules of
+    /// SPEC-LIT 120.11.
+    pub fn upload_with_tv(
+        gpu: &Gpu,
+        patches: &[TimedPatch],
+        tv: &[crate::field::tvmapped::TvMappedRule],
+    ) -> Result<Self> {
         Ok(Self {
             patches: patches
                 .iter()
                 .map(|p| DeviceTimedPatch::upload(gpu, p))
                 .collect::<Result<Vec<_>>>()?,
+            tv: tv
+                .iter()
+                .map(|r| DeviceTvMapped::upload(gpu, r))
+                .collect::<Result<Vec<_>>>()?,
         })
     }
 
     pub fn len(&self) -> usize {
-        self.patches.len()
+        self.patches.len() + self.tv.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.patches.is_empty()
+        self.patches.is_empty() && self.tv.is_empty()
     }
 
     /// Each patch writes `f.ref_value` or `f.ref_grad` by its `F1Target`.
@@ -524,6 +549,9 @@ impl TimedBcs {
                 F1Target::RefValue => p.apply_scalar(gpu, k, clock, &mut f.ref_value)?,
                 F1Target::RefGrad => p.apply_scalar(gpu, k, clock, &mut f.ref_grad)?,
             }
+        }
+        for p in &self.tv {
+            p.apply_scalar(gpu, k, clock, &mut f.ref_value)?;
         }
         Ok(())
     }
@@ -541,6 +569,9 @@ impl TimedBcs {
                 F1Target::RefValue => p.apply_vector(gpu, k, clock, &mut f.ref_value)?,
                 F1Target::RefGrad => p.apply_vector(gpu, k, clock, &mut f.ref_grad)?,
             }
+        }
+        for p in &self.tv {
+            p.apply_vector(gpu, k, clock, &mut f.ref_value)?;
         }
         Ok(())
     }
@@ -1532,6 +1563,26 @@ fn scalar_patch(
         }
         out.mapped_rules.extend(seed.mapped);
         out.turbulent_rules.extend(seed.turbulent);
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.11: the inflow database, before the static arms for the
+    // same reason - the name maps to `FixedValue`. The face is a fixed value
+    // seeded at t_start and rewritten after each `F1Clock::advance` by the
+    // returned `TimedBcs`; a path with no clock refuses it by name.
+    if spec.type_name == "timeVaryingMappedFixedValue" {
+        let rule =
+            crate::field::tvmapped::build_rule(spec, at, patch, field, 1, &aux.bc_f, f1)?;
+        let v = rule.host_values(f1.map_or(0.0, |s| s.t_start));
+        for i in 0..n {
+            let x = v[i];
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = x;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = x;
+        }
+        out.tv_rules.push(rule);
         return Ok(());
     }
 
@@ -4160,6 +4211,26 @@ fn vector_patch(
         return Ok(());
     }
 
+    // SPEC-LIT 120.11: the inflow database, before the static arms for the
+    // same reason - the name maps to `FixedValue`. The face is a fixed value
+    // seeded at t_start and rewritten after each `F1Clock::advance` by the
+    // returned `TimedBcs`; a path with no clock refuses it by name.
+    if spec.type_name == "timeVaryingMappedFixedValue" {
+        let rule =
+            crate::field::tvmapped::build_rule(spec, at, patch, field, 3, &aux.bc_f, f1)?;
+        let v = rule.host_values(f1.map_or(0.0, |s| s.t_start));
+        for i in 0..n {
+            let x = Vec3::new(v[3 * i], v[3 * i + 1], v[3 * i + 2]);
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = x;
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = x;
+        }
+        out.tv_rules.push(rule);
+        return Ok(());
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
@@ -4930,7 +5001,8 @@ pub fn setup_scalar_field_timed(
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
-    TimedBcs::upload(gpu, &timed)
+    // SPEC-LIT 120.11: the inflow-database patches ride the same clock.
+    TimedBcs::upload_with_tv(gpu, &timed, &b.tv_rules)
 }
 
 /// As [`setup_vector_field_with`], plus the timed patches uploaded (SPEC-LIT
@@ -4961,7 +5033,8 @@ pub fn setup_vector_field_timed(
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
-    TimedBcs::upload(gpu, &timed)
+    // SPEC-LIT 120.11: the inflow-database patches ride the same clock.
+    TimedBcs::upload_with_tv(gpu, &timed, &b.tv_rules)
 }
 
 /// Copy a device scalar field's numbers back into a case field for writing.

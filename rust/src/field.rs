@@ -655,6 +655,9 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "mapped",
     "mappedFixedValue",
     "turbulentInlet",
+    // SPEC-LIT 120.11: the inflow database. A `FixedValue` whose refValue
+    // the `TimedBcs` of the `*_timed` setup rewrites after each clock step.
+    "timeVaryingMappedFixedValue",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -1017,6 +1020,11 @@ impl BcKind {
             // fluctuation - so all three names are this kind; `field_setup`
             // builds the rule and refuses where no caller refreshes it.
             "mapped" | "mappedFixedValue" | "turbulentInlet" => Self::FixedValue,
+            // SPEC-LIT 120.11: a fixedValue read from
+            // `constant/boundaryData/<patch>`, interpolated in space at setup
+            // and in time on the device; `field_setup` builds the rule and
+            // refuses it on a setup path that does not advance the clock.
+            "timeVaryingMappedFixedValue" => Self::FixedValue,
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
             "epsilonWallFunction" => Self::EpsilonWallFunction,
             "omegaWallFunction" => Self::OmegaWallFunction,
@@ -1814,6 +1822,11 @@ pub mod patch_mean;
 /// [`mapped::turbulent_advance`].
 pub mod mapped;
 
+/// The inflow database of SPEC-LIT 120.11: `timeVaryingMappedFixedValue`'s
+/// planar Delaunay triangulation, barycentric face weights and per-time face
+/// slabs - see [`tvmapped::build_rule`] and [`tvmapped::TvMappedRule`].
+pub mod tvmapped;
+
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
 /// [`mod@tests`].
@@ -2000,7 +2013,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [92, 5, 13, 10, 10], "the per-status counts");
+        assert_eq!(counts, [93, 5, 12, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]
