@@ -250,10 +250,31 @@ impl ResultWriter for VtuWriter {
 //  NvdbWriter / VdbWriter - the Cartesian box, or the lattice
 // ==========================================================================
 
+/// SPEC-LIT 117.12's refusal at the write itself: a volume format on a mesh
+/// that is not a uniform Cartesian box, with no lattice laid
+/// (`ctx.vox` is `None`). A driver lays the lattice of
+/// `output.visualisation.lattice` before the loop, and refuses there
+/// (`OutputPlan::refuse_visualisation_without_a_lattice`) when it lays
+/// none; this is the late copy of that refusal. `-permissive` skips the
+/// write and says so.
+fn no_lattice(format: &str) -> Result<()> {
+    contract::unsupported_note(
+        &format!("-output {format}"),
+        "a non-Cartesian mesh with no lattice",
+        &["foam", "vtu", "usda (boundary surface only)"],
+        &format!(
+            "a .{format} file is a voxel grid; on a mesh that is not a uniform Cartesian box it is sampled onto the lattice of output.visualisation.lattice (SPEC-LIT 117.3), and no lattice was laid for this run"
+        ),
+        &format!("skipping the {format} write for this mesh"),
+        (),
+    )
+}
+
 /// Writes one NanoVDB (`.nvdb`) file per step: the cells themselves on a
 /// recognised uniform Cartesian box (`ctx.cart`), else the lattice of
 /// `ctx.vox` (SPEC-LIT 117.6, `nvdb::write_lattice`). With neither it
-/// refuses - per SPEC-LIT §13.4 - because the mesh has no voxels to write.
+/// refuses - per SPEC-LIT §13.4 and 117.12 - because no lattice was laid,
+/// so there are no voxels to write ([`no_lattice`]).
 pub struct NvdbWriter {
     dir: PathBuf,
     stem: String,
@@ -278,13 +299,7 @@ impl ResultWriter for NvdbWriter {
             if let Some(vm) = ctx.vox {
                 return nvdb::write_lattice(&path, vm, ctx.fields, self.precision);
             }
-            return contract::unsupported(
-                "-output nvdb",
-                "a non-Cartesian mesh",
-                &["foam", "vtu", "usda (boundary surface only)"],
-                "skipping the nvdb write for this mesh",
-                (),
-            );
+            return no_lattice("nvdb");
         };
         nvdb::write(&path, cart, ctx.fields, self.precision)
     }
@@ -327,13 +342,7 @@ impl ResultWriter for VdbWriter {
             if let Some(vm) = ctx.vox {
                 return vdb::write_lattice(&path, vm, ctx.fields, self.precision);
             }
-            return contract::unsupported(
-                "-output vdb",
-                "a non-Cartesian mesh",
-                &["foam", "vtu", "usda (boundary surface only)"],
-                "skipping the vdb write for this mesh",
-                (),
-            );
+            return no_lattice("vdb");
         };
         vdb::write(&path, cart, ctx.fields, self.precision)
     }
@@ -567,8 +576,12 @@ mod tests {
 
     #[test]
     fn nvdb_writer_refuses_a_non_cartesian_mesh_by_default() {
+        // SPEC-LIT 117.12: rewritten from "every non-Cartesian mesh is
+        // refused" to the named refusal of a write with no lattice laid;
+        // `-permissive` still skips the write (§13.4).
+        let _g = crate::io::contract::permissive_test_guard();
+        crate::io::contract::set_permissive(false);
         let dir = tmp("nvdb_refuse");
-        let mut w = NvdbWriter::new(&dir, "t", nvdb::Precision::F32).unwrap();
         let m = mesh_2x1x1();
         let vals = vec![1.0 as Scalar; m.n_cells];
         let fields = [OutputField::scalar("p", &vals)];
@@ -583,8 +596,31 @@ mod tests {
             fields: &fields,
             foam: &foam,
         };
-        let err = w.write_step(&ctx).unwrap_err();
-        assert!(err.to_string().contains("nvdb"), "{err}");
+        let mut writers: [(&str, Box<dyn ResultWriter>); 2] = [
+            ("nvdb", Box::new(NvdbWriter::new(&dir, "t", nvdb::Precision::F32).unwrap())),
+            ("vdb", Box::new(VdbWriter::new(&dir, "t", nvdb::Precision::F32).unwrap())),
+        ];
+        for (fmt, w) in writers.iter_mut() {
+            let err = w.write_step(&ctx).unwrap_err().to_string();
+            for want in [
+                format!("-output {fmt}"),
+                "a non-Cartesian mesh with no lattice".to_string(),
+                "output.visualisation.lattice".to_string(),
+                "no lattice was laid for this run".to_string(),
+                "vtu".to_string(),
+                "-permissive".to_string(),
+            ] {
+                assert!(err.contains(&want), "{fmt} must say {want:?}: {err}");
+            }
+        }
+        crate::io::contract::reset_warnings();
+        crate::io::contract::set_permissive(true);
+        for (fmt, w) in writers.iter_mut() {
+            w.write_step(&ctx).expect("permissive skips the write");
+            assert!(!dir.join(format!("t_000000.{fmt}")).exists(), "{fmt}: nothing written");
+            assert!(crate::io::contract::warned(&format!("-output {fmt}")));
+        }
+        crate::io::contract::set_permissive(false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1420,3 +1420,205 @@ extern "C" __global__ void fldTurbulentInlet
     }
     step[0] = n;
 }
+
+
+// ==========================================================================
+//  SPEC-LIT 120.12 - the synthetic LES inflow: turbulentDigitalFilterInlet
+//  and turbulentDFSEMInlet. A section-4 FIXED VALUE on a vector field whose
+//  refValue (`[3 f + c]`) one of the two per-face kernels rewrites, after
+//  which the one-thread fldSyntheticStep moves the rule's state [n, X] on.
+//  Everything is double in both builds; each face value rounds once. Host
+//  twins: field::synthetic::df_values and field::synthetic::dfsem_values,
+//  in the same operation order.
+// ==========================================================================
+
+//- (120.12a): the SplitMix64 finaliser of z + 0x9E3779B97F4A7C15.
+__device__ __forceinline__ unsigned long long fldSynMix(unsigned long long z)
+{
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+//- (120.12a): u in [0, 1) for the key (seed, tag, a, b, c, d), the
+//  finaliser chained over the six words - field::synthetic::unit.
+__device__ __forceinline__ double fldSynUnit
+(
+    unsigned long long seed,
+    unsigned long long tag,
+    unsigned long long a,
+    unsigned long long b,
+    unsigned long long c,
+    unsigned long long d
+)
+{
+    unsigned long long h = fldSynMix(seed ^ 0x243F6A8885A308D3ull);
+    h = fldSynMix(h ^ tag);
+    h = fldSynMix(h ^ a);
+    h = fldSynMix(h ^ b);
+    h = fldSynMix(h ^ c);
+    h = fldSynMix(h ^ d);
+    return (double)(h >> 11) * (1.0 / 9007199254740992.0);
+}
+
+__device__ __forceinline__ double fldSynEps
+(
+    unsigned long long seed,
+    unsigned long long tag,
+    unsigned long long a,
+    unsigned long long b,
+    unsigned long long c,
+    unsigned long long d
+)
+{
+    return 1.7320508075688772 * (2.0 * fldSynUnit(seed, tag, a, b, c, d) - 1.0);
+}
+
+//- (120.12c)-(120.12e): one thread per face. Step n = state[0] + 1; the
+//  time filter of component c has n_t = L_x,c / (Ubulk dt) and half-width
+//  ntc (the launcher's N_t = ceil(2 n_t)); the e_y / e_z tables are the
+//  parameter block's. u'_c = SUM_a bt_a SUM_b by_b SUM_d bz_d eps, then
+//  UMean + a u' rounded once.
+extern "C" __global__ void fldDigitalFilterInlet
+(
+    ofscalar* __restrict__ refValue,
+    const double* __restrict__ prm,
+    const oflabel* __restrict__ node,
+    const double* __restrict__ state,
+    oflabel start,
+    oflabel size,
+    double dt,
+    unsigned long long seed,
+    oflabel nt0,
+    oflabel nt1,
+    oflabel nt2
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= size) return;
+    const long long n = (long long)state[0] + 1;
+    const long long j = (long long)node[2 * i];
+    const long long k = (long long)node[2 * i + 1];
+    const oflabel ntc[3] = {nt0, nt1, nt2};
+    double up[3] = {0, 0, 0};
+    for (int c = 0; c < 3; ++c)
+    {
+        const double nt = prm[10 + c] / (prm[9] * dt);
+        const int ht = ntc[c];
+        double s2 = 0;
+        for (int a = -ht; a <= ht; ++a)
+        {
+            const double b = (ht > 0) ? exp(-(3.141592653589793 * (double)(a * a)) / (2.0 * nt * nt)) : 1.0;
+            s2 += b * b;
+        }
+        const double norm = sqrt(s2);
+        const int hy = (int)prm[13 + c];
+        const int hz = (int)prm[16 + c];
+        const double* by = prm + (long long)prm[19 + c];
+        const double* bz = prm + (long long)prm[22 + c];
+        double sum = 0;
+        for (int a = -ht; a <= ht; ++a)
+        {
+            const double ba = (ht > 0) ? exp(-(3.141592653589793 * (double)(a * a)) / (2.0 * nt * nt)) / norm : 1.0;
+            const unsigned long long m = (unsigned long long)(n + a);
+            double sa = 0;
+            for (int b = -hy; b <= hy; ++b)
+            {
+                const unsigned long long jj = (unsigned long long)(j + b);
+                double sb = 0;
+                for (int d = -hz; d <= hz; ++d)
+                {
+                    const unsigned long long kk = (unsigned long long)(k + d);
+                    sb += bz[d + hz] * fldSynEps(seed, 1ull, m, jj, kk, (unsigned long long)c);
+                }
+                sa += by[b + hy] * sb;
+            }
+            sum += ba * sa;
+        }
+        up[c] = sum;
+    }
+    const double u0 = prm[0] * up[0];
+    const double u1 = prm[1] * up[0] + prm[2] * up[1];
+    const double u2 = prm[3] * up[0] + prm[4] * up[1] + prm[5] * up[2];
+    const oflabel f = start + i;
+    refValue[3 * f]     = (ofscalar)(prm[6] + u0);
+    refValue[3 * f + 1] = (ofscalar)(prm[7] + u1);
+    refValue[3 * f + 2] = (ofscalar)(prm[8] + u2);
+}
+
+//- (120.12g)-(120.12k): one thread per face. X = fma(Ubulk, dt, state[1]);
+//  every eddy k is placed by (120.12k) and adds F(q) (d x alpha) where
+//  q = |d|^2 < 1, d = (x_f - x_k)/sigma; UMean + scale SUM rounded once.
+extern "C" __global__ void fldDfsemInlet
+(
+    ofscalar* __restrict__ refValue,
+    const double* __restrict__ prm,
+    const double* __restrict__ rel,
+    const double* __restrict__ state,
+    oflabel start,
+    oflabel size,
+    double dt,
+    unsigned long long seed
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= size) return;
+    const double X = fma(prm[9], dt, state[1]);
+    const double sg = prm[19];
+    const double two = 2.0 * sg;
+    const long long ne = (long long)prm[25];
+    const double p0 = rel[3 * i], p1 = rel[3 * i + 1], p2 = rel[3 * i + 2];
+    double u[3] = {0, 0, 0};
+    for (long long e = 0; e < ne; ++e)
+    {
+        const unsigned long long kk = (unsigned long long)e;
+        const double s0 = -sg + two * fldSynUnit(seed, 2ull, kk, 0ull, 0ull, 0ull);
+        const double w = s0 + sg + X;
+        const double g = floor(w / two);
+        const double s = -sg + (w - two * g);
+        const unsigned long long gg = (unsigned long long)(long long)g;
+        const double eta = prm[20] + prm[21] * fldSynUnit(seed, 2ull, kk, gg, 1ull, 0ull);
+        const double zeta = prm[22] + prm[23] * fldSynUnit(seed, 2ull, kk, gg, 2ull, 0ull);
+        const double e0 = fldSynEps(seed, 2ull, kk, gg, 3ull, 0ull);
+        const double e1 = fldSynEps(seed, 2ull, kk, gg, 4ull, 0ull);
+        const double e2 = fldSynEps(seed, 2ull, kk, gg, 5ull, 0ull);
+        const double a0 = prm[0] * e0;
+        const double a1 = prm[1] * e0 + prm[2] * e1;
+        const double a2 = prm[3] * e0 + prm[4] * e1 + prm[5] * e2;
+        const double x0 = s * prm[10] + eta * prm[13] + zeta * prm[16];
+        const double x1 = s * prm[11] + eta * prm[14] + zeta * prm[17];
+        const double x2 = s * prm[12] + eta * prm[15] + zeta * prm[18];
+        const double d0 = (p0 - x0) / sg;
+        const double d1 = (p1 - x1) / sg;
+        const double d2 = (p2 - x2) / sg;
+        const double q = d0 * d0 + d1 * d1 + d2 * d2;
+        if (q < 1.0)
+        {
+            const double F = (1.0 - q) * (1.0 - q);
+            u[0] += F * (d1 * a2 - d2 * a1);
+            u[1] += F * (d2 * a0 - d0 * a2);
+            u[2] += F * (d0 * a1 - d1 * a0);
+        }
+    }
+    const double sc = prm[24];
+    const oflabel f = start + i;
+    refValue[3 * f]     = (ofscalar)(prm[6] + sc * u[0]);
+    refValue[3 * f + 1] = (ofscalar)(prm[7] + sc * u[1]);
+    refValue[3 * f + 2] = (ofscalar)(prm[8] + sc * u[2]);
+}
+
+//- (120.12k): the rule's state moves on after its per-face kernel -
+//  state[0] += 1, state[1] = fma(Ubulk, dt, state[1]) (field::synthetic::
+//  convect). One thread.
+extern "C" __global__ void fldSyntheticStep
+(
+    double* __restrict__ state,
+    const double* __restrict__ prm,
+    double dt
+)
+{
+    if (OFGPU_TID != 0) return;
+    state[0] = state[0] + 1.0;
+    state[1] = fma(prm[9], dt, state[1]);
+}

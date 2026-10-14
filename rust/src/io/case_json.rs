@@ -1128,7 +1128,7 @@ pub struct JsonRun {
 /// The dense voxel grid a renderer reads - SPEC-LIT S44.1.
 ///
 /// Resolved by [`crate::io::output_plan::OutputPlan::from_json`], which is
-/// where every S13.4 refusal about these five entries lives; nothing here
+/// where every S13.4 refusal about these six entries lives; nothing here
 /// validates, exactly as nothing else in this file does.
 pub struct JsonVisualisation {
     /// `vdb`, `nvdb`, or a comma list of them. A format from `exact`'s
@@ -1150,6 +1150,41 @@ pub struct JsonVisualisation {
     /// Also write a `.usda` scene referencing the volume files.
     #[serde(rename = "usdScene", default)]
     pub usd_scene: bool,
+    /// The lattice a mesh that is not a uniform Cartesian box is sampled
+    /// onto - SPEC-LIT 117.3. Absent is every default of that table. A
+    /// uniform Cartesian box is written on its own cells and never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lattice: Option<JsonLattice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// `output.visualisation.lattice` - SPEC-LIT 117.3's six keys, every one
+/// optional. Resolved, and every 117.12 refusal raised, by
+/// [`crate::io::output_plan::OutputPlan::from_json`]; nothing here
+/// validates.
+pub struct JsonLattice {
+    /// The voxel edge `h`, in metres; voxels are cubes. Absent is
+    /// `(min_c V_c)^(1/3)`, the cube root of the smallest cell volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voxel: Option<f64>,
+    /// `[xlo, ylo, zlo, xhi, yhi, zhi]`, metres. Absent is the bounding box
+    /// of the mesh points.
+    #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<[f64; 6]>,
+    /// The voxel budget; absent is 8 000 000. An explicit `voxel` the
+    /// budget would coarsen more than 16 times is refused (117.3).
+    #[serde(rename = "maxVoxels", default, skip_serializing_if = "Option::is_none")]
+    pub max_voxels: Option<usize>,
+    /// `cell` (the default) or `linear` - SPEC-LIT 117.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+    /// `dense` (the default) or `fluid` - SPEC-LIT 117.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<String>,
+    /// The value of a voxel no cell claims; absent is `0.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1568,6 +1603,17 @@ impl LoweredCase {
         match self.parcels {
             Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
             None => Ok(()),
+        }
+    }
+
+    /// The raw polyMesh [`Self::build_host_mesh`] builds its mesh from - the
+    /// lattice of SPEC-LIT 117.4 is laid from it (VIO-05a). The patch names
+    /// are the builder's; the map reads the faces and points only, in the
+    /// mesh's own face order.
+    pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
+        match &self.wedge {
+            None => crate::blockgen::raw_mesh(&self.block),
+            Some(w) => crate::blockgen::raw_wedge_mesh(w),
         }
     }
 

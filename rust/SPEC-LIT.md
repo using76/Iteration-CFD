@@ -1510,10 +1510,10 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `cyclicAMI` (no interpolation weights — **was silent**, paired by position), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`); for the two named: calculated, position-paired cyclic | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::the_two_conditions_that_are_not_their_alias_are_refused_by_name`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `cyclicAMI` → cyclic, its two patches imprinted conformal as the polyMesh is read (§120.13); `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`) | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::cyclic_ami_is_the_conformal_cyclic_its_imprint_makes`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
-| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; the FIELD's `cyclicAMI` is refused above | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
+| polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; a `cyclicAMI` pair is imprinted into a conformal one by `io::polymesh` first (§120.13) | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
 | JSONC `motion` block (`src/io/case_json.rs`, `JsonMotion::lower`; §105.12) | `patches[]` rules `fixed`, `slide`, `move` with a `linear` or `sine` law, and `walls`, in `ofgpu-lowmach` on a transient laminar run | none | an unknown key; a law on `fixed`/`slide`; a `move` without one; a sine period that is not positive; a law that moves nothing; in `ofgpu-lowmach` a steady run, `-restartFrom`, `-restartWrite`, `-heaterPower`, `-sealed`, a turbulence model, `sources`, the `output` block, `-output` other than `foam`, a cyclic pair, a wall whose `U` is not a fixed value, a wall whose `U` value is not its law's velocity at `t = 0`, a moving fixed-velocity patch not in `walls`; the whole block in `ofgpu-k-epsilon`, `ofgpu-sample`, `ofgpu-decompose` | NOT downgradable | `io::case_json::tests::{a_motion_block_lowers_to_its_rule_table, a_motion_law_that_moves_nothing_or_has_no_period_is_refused_by_name, the_motion_reader_refuses_a_law_on_a_fixed_patch_and_a_move_without_one}`; `ofgpu-lowmach`'s `the_motion_block_is_refused_by_name_where_it_cannot_be_honoured` and `the_motion_block_changes_what_the_run_writes_and_the_stroke_follows_its_law` |
 
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
@@ -30362,7 +30362,7 @@ are runtime refusals, proved with the driver.
 | 14 | `"mode": "stress"` with no region carrying `mechanics`; `mechanics` present with `"mode": "thermal"` - both directions (§13.4.1) |
 | 15 | `"mode": "stress"` with a fluid region - the fluid side of a thermo-elastic run is docs/10's address 106 (WF-B) |
 | 16 | `"mode": "stress"` on a transient case - the §93 verdict is a steady residual; time in a stress run is docs/10's address 103 |
-| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once: `output.visualisation` (a multi-region mesh is not one Cartesian lattice), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
+| 17 | the `output` block accepts exactly `exact.format: "vtu"`, once, and `output.visualisation` in `vdb`/`nvdb`, one file per region on the region's own lattice (§117.12, VIO-05b); refused: `visualisation.usdScene` (no multi-region scene), a lattice that cannot be laid on some region (named), `output.restart` (the driver writes no checkpoint - run the case again), `exact.format` naming `openfoam`/`foam` (one polyMesh per region is docs/10's address 97 layout), a positive interval (steady: §44.4's refusal; transient: the driver's `run_case` returns one state) |
 | 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
 | 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
 | 22 | `mechanics.solver.coupled: true` with `materials` - §109's block operator carries one material per region; the bond face as a 3x3 block is not built |
@@ -37889,6 +37889,47 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
 0.005. The bound 0.005 is the plan's. It is ten times tighter than `isaac_export.py`'s
 `FREESTREAM_TOL` of 0.05, and it is not loosened to 0.05.
 
+**As built (VIO-06).** The full command is `ofgpu-sample volume <case> <time|latest> [-vdb]
+[-nvdb] [-usda] [-lattice JSON] [-fields a,b,...] [-precision fp32|fp16] [-freestream Ux]
+[-out DIR] [-stem NAME]`. The code makes these choices where the text above leaves room.
+
+- **The keys.** A JSONC case's `output.visualisation` is resolved by `OutputPlan::from_json`, as a
+  run resolves it: formats, `fields`, `precision` and `lattice`. Each flag replaces its key:
+  `-vdb`/`-nvdb`/`-usda` the formats, in command-line order; `-lattice` the whole lattice block,
+  given as the block's own JSON; `-fields` the selection of §44.2; `-precision` the voxel
+  precision. `-lattice` and `-precision` go through `OutputPlan::from_json` too, so a flag is
+  refused for exactly what the same key is refused for in a case (§117.12). An OpenFOAM case has
+  no `output` block, so its keys are the flags and the defaults of §117.3.
+- **The fields.** Every file of `<output root>/<time>` whose `FoamFile` header names
+  `volScalarField` or `volVectorField` is read, in byte order of file name (`U` before `p`).
+  Every other file (`phi`, for one) is skipped and named in one line. `latest` is the time
+  directory with the largest numeric name. A run hands its writers the fields in its own order,
+  so the files equal a run's byte for byte when `fields` names that order.
+- **The mesh.** An OpenFOAM case's polyMesh is read and built in world coordinates in both builds
+  (`build_host_mesh`, not the local origin of §118.7). The map of §117.4 is therefore laid in
+  world coordinates with no shift to add (§117.2 item 4). A uniform Cartesian box is written on
+  its own cells (§117.6) and no lattice is laid. Under `single`, the Cartesian origin of a box far
+  from the axis can differ in its last f32 bit from a run's, because a run's centres are local.
+  A JSONC case on a mesh that is not a Cartesian box is refused by name: its block mesh is built
+  in memory and there is no polyMesh to lay a lattice from.
+- **The write.** `build_writers(out, stem, formats, precision)` and one `WriteCtx` with
+  `step = 0`, `name = <time>`, `time` = the directory name parsed and rounded once to `Scalar`, and
+  `cart` or `vox` as above. That is what `OutputPipeline::write` hands its writers at a run's
+  first write. The files are `<out>/VDB/<stem>_000000.vdb|.nvdb` and `<out>/<stem>.usda`, with
+  `out` defaulting to `<output root>/volume_<time>` and `stem` to `volume`, so a run's own series
+  is never overwritten.
+- **The free stream.** `-freestream Ux` prints `m`, the median of the sampled `U.x` over the fluid
+  voxels (`M[v] != NONE`) of the lattice's last x plane `i = n_x - 1`, and `|m - Ux| / |Ux|`. The
+  median is numpy's: the middle value, or the mean of the two middle values. The samples are
+  `VoxelMap::sample` of the cells' `U.x` under the lattice's `sample` key. On a Cartesian box the
+  plane is the box's last cell plane. This is `isaac_export.py`'s G-FREESTREAM. That tool's xMax
+  plane is the last node of a node lattice (`lo + h i`), and this plane is the last voxel centre
+  of (117.2)'s lattice.
+- **Refused by name.** No format; `-usda` with neither `-vdb` nor `-nvdb`; `-isaac`, because the
+  profile of §117.9 is VIO-09's and not in this tree; a missing time directory; a directory with
+  no `volScalarField` or `volVectorField`; `-freestream` that is zero or not finite, with no
+  `volVectorField U`, or with no fluid voxel on the plane; and an unknown argument.
+
 ### 117.12 The boundary surface, and what is refused
 
 **The true face polygons (VIO-07).** When the raw mesh is available,
@@ -37941,6 +37982,67 @@ disappears silently, and `-permissive` keeps its §44.1 behaviour.
 | `kind: massFraction` on a run with no density field | (117.14) has no `rho` |
 | a mesh whose points move, or whose cells change, during the run | the map would be stale; it is built once (§117.4) |
 
+**Where the refusals live (VIO-04).** `OutputPlan::from_json` (`io/output_plan.rs`) parses
+`output.visualisation.lattice` into `VisSpec.lattice`, a `voxelmap::LatticeSpec`. When the case
+is read, on every mesh, it raises the rows that need only the block: the first three rows, an
+unknown `sample` or `activation`, and the `s > 16` row when the case names both `voxel` and
+`box`. The rows that need the mesh (the default box or the default voxel) are
+`VisSpec::lattice_refusal`, which runs `voxelmap::lattice_shape`. That is the first step of
+`VoxelMap::build`, so the two cannot disagree, and it visits no voxel. Either reason goes to
+`OutputPlan::refuse_visualisation_without_a_lattice`, which replaced
+`refuse_visualisation_on_a_non_cartesian_mesh`. Strict, it is an error naming
+`output.visualisation.format`, the reason and `output.exact`; under `-permissive` the run writes
+no visualisation output, as in §44.1. A driver that lays no lattice passes its own reason. At
+VIO-04 that is every driver that reads the block (`ofgpu-lowmach`, `ofgpu-k-epsilon`,
+`ofgpu-cht`), so their refusal now names the driver rather than claiming that no lattice exists;
+VIO-05a's row wires `ofgpu-lowmach` and `ofgpu-k-omega`. The writers keep a late copy for a write with neither `ctx.cart` nor
+`ctx.vox`: it names `-output nvdb` or `-output vdb` and `output.visualisation.lattice`. The
+rewritten `nvdb_writer_refuses_a_non_cartesian_mesh_by_default` tests it for both writers, strict
+and `-permissive`; `output_plan::tests::lattice_parses` and `::lattice_refusals` test each text
+above.
+
+**Where the lattice is laid (VIO-05a).** `output_plan::volume_target(raw, hm, cart, spec)` returns
+`VolumeTarget::Cartesian` when `cart` is given (the driver's `cartesian::detect` as a
+`CartesianInfo`), whose bytes §117.6 keeps, and otherwise `VolumeTarget::Lattice`, the `VoxelMap`
+of `spec`. A driver calls it once, before the time loop and only when `vdb` or `nvdb` is written,
+prints the report of §117.7, and passes `vox()` as `WriteCtx.vox` at every write. `spec` is the
+case's `output.visualisation.lattice` on the case route and the defaults of §117.3 on the
+command-line route, which states no lattice. On the command-line route
+`drop_volume_formats_without_a_lattice` takes the place of
+`drop_volume_formats_on_a_non_cartesian_mesh`: `-output vdb` and `-output nvdb` are refused only
+when `voxelmap::lattice_shape` refuses the defaults, with its reason, and `-permissive` drops only
+those two formats. The polyMesh the map is laid from is the one `common::load_case` does not keep.
+`common::case_raw_mesh` reads it again on an OpenFOAM case and rebuilds it from the lowering
+(`LoweredCase::build_raw_mesh`) on a JSONC case, and only when the mesh is not a uniform Cartesian
+box; the copy is dropped once the map is built. Item 4 of §117.2 is met this way: when the
+driver's mesh is stored about a local origin (F32-10's OpenFOAM route under `single`), the map is
+built on a world `HostMesh` built from the same polyMesh, so it is the f64 build's map bit for bit
+(item 1). A moving mesh is refused before this point (§105.12), as the last row of the table
+requires. `ofgpu-lowmach` and `ofgpu-k-omega` are wired. The report is printed and not copied
+into a run summary, because neither driver writes a summary file.
+
+**Every driver (VIO-05b).** `ofgpu-k-epsilon` reads the case block and is wired as
+`ofgpu-lowmach` is: its own refusal ("lays no output.visualisation.lattice") and its
+`drop_volume_formats_on_a_non_cartesian_mesh` call are gone, and that function and its test went
+with its last caller. `ofgpu-sa`, `ofgpu-vof` and `ofgpu-buoyant` read their polyMesh themselves
+and have no `output` block. Each calls `common::command_line_volume` once, after the mesh is read
+and before the loop: the 117.3 defaults, `drop_volume_formats_without_a_lattice`, and the target
+whose `cart()`/`vox()` every write passes. Before VIO-05b these three met only the writers' late
+refusal, at the first write. `ofgpu-cht` lays the lattice **per region**, which is the default
+box of §117.3 in a CHT case. `io::case_cht` accepts `output.visualisation` in `vdb` and `nvdb`
+and refuses `usdScene`, because a multi-region `.usda` scene is not built. Its `fields` are checked against the
+cell fields of the region VTU (`T`, plus `u, sigma, vonMises, sigmaPrincipal, magU` in a stress
+run), and a positive `interval` is refused as the exact interval is. The case's lattice is
+checked on every region that `cartesian::detect` refuses, and the first region with no lattice
+is refused by name (`region '<name>': <reason>`). The driver builds one `volume_target` per
+region before the solve, from `LoweredChtCase.raw[r]` and `meshes[r]`, and prints each report
+under the region's name. After the solve it writes `<root>/VDB/<region>_000000.vdb` (or
+`.nvdb`) for each region. Each file holds that region's cell fields, in the selection's order and
+restricted to the names the region has. A region with none of them writes no file and says so.
+The region VTU belongs to `output.exact`, so a block that names only `visualisation` writes the
+volume files alone.
+The flow path of a CHT case still refuses any `output` block (§96.3 row 17).
+
 ### 117.13 Gates, their precision classes, and what has been measured
 
 The bars below are fixed before measurement. A missed bar is a finding, never a widened band.
@@ -37987,6 +38089,13 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-08 | Isaac Sim omni.volume `openvdb.readAll` (12.0.0, module format 224) on that file | 10 grids, named `T`, `U.mag`, `U.x`, `U.y`, `U.z`, `epsilon`, `k`, `nut`, `p`, `rho`; each with 150 active voxels, box (0,0,0)-(9,4,2), voxel (0.04, 0.01, 0.0167), class fog volume; no warning; 0.2 s | this unit |
 | VIO-08 | Blender 5.1.2's `openvdb.readAll` (13.0.0, module format 225) on that file | the same ten grids, with the same per-grid active count, box, voxel size, class, min, max and sum as Isaac's read | this unit |
 | VIO-08 | the same file before VIO-08, under both readers | ten unnamed grids with 0 active voxels each, "multi-buffer trees are no longer supported" | this unit |
+| VIO-06 | the drone at `t = 0.5 s` (fluid fraction against 0.999906, free-stream `U.x` against 0.005, 2 min) | **NOT RUN**. The solve is not on disk: no `write.json`, `x500_assembled.blend`, `drone_flow*.usda` or `rotors.json` was found under `C:/Users/sdd32`, `C:/bulc_runs`, `C:/Temp`, `C:/isaac` or `C:/iss`. Re-running the drone solve was not authorised for this unit. The gate stays open for the run that has the solve (VIO-11) | VIO-06 |
+| VIO-06 | `tests/sample_volume_cli.rs`, both builds: a 6 x 4 x 3 Cartesian box; the 2:1 mesh of `refined_core([4,4,4], 1/4, 0.3, 1)` with `-lattice` `h` = 1/16 over `[-1/4, 3/4] x [-1/4, 5/4]^2`, `linear`, `fluid`, background -7.5 | the `.vdb`, `.nvdb` and `.usda` equal `build_writers` on one `WriteCtx` byte for byte, on both meshes; the lattice is 16 x 24 x 24 = 9 216 voxels, 3 072 fluid, fluid fraction 1/3 as printed; the free-stream median is over 12 cells (box) and 256 voxels (2:1), equal to the test's own; 8 refusals by name | VIO-06 |
+| VIO-06 | stand-in at the drone lattice's size, f64 build: the box-sphere automesher example (15 376 cells, snapped, 2 layers), `h` = 4/138 over `[3, 7]^3` (138^3 = 2 628 072 voxels against the drone's 2 650 021), uniform `U = (2, 0, 0)`, `-vdb -nvdb -usda -freestream 2` | fluid fraction 0.9363335555494674 against `1 - V_s/V_b` = 0.934550 of the true sphere, a difference of 1.8e-3 under `A_s h / V_b` = 5.7e-3 (the snapped sphere is faceted); 4 360 voxels gap-filled; median 2 over 19 044 voxels, relative error 0; map 0.09 s, whole command 0.4 s (`cell`) and 0.5 s (`linear`); `.vdb` 64.9 MB, `.nvdb` 65.2 MB | VIO-06 |
+| VIO-05a | the box-sphere automesher example (15 376 cells, snapped, 2 layers, regenerated by this tree), `ofgpu-lowmach` (kEpsilon), 20 iterations, `-output vdb` on the command line, so the defaults of §117.3; f64 build | `h` = 0.0249043 m needs 64 964 808 voxels, so (117.3) coarsens to `h'` = 10/200 = 0.05 m (`s` = 2.00768): 200 x 200 x 200 = 8 000 000 voxels, as predicted for `L_a` = 10 m and `maxVoxels` 8 000 000; 7 967 360 fluid, 616 gap-filled, fluid fraction 0.99592 against `1 - V_s/V_b` = 0.995811 (bar `A_s h'/V_b` = 6.3e-4); map 0.20 s; the 343 MB `.vdb` read by Blender 5.1's `openvdb.readAll`: 10 grids, each with 8 000 000 active voxels, box (0,0,0)-(199,199,199), voxel 0.05; whole run 1.8 s | VIO-05a |
+| VIO-05a | the same mesh, `ofgpu-k-omega` (kOmega), 20 iterations, `-output vdb` | the same lattice and report; the 103 MB `.vdb`: 3 grids (`k`, `nut`, `omega`), each with 8 000 000 active voxels; whole run 1.0 s | VIO-05a |
+| VIO-05a | `tests/volume_drivers.rs` (GPU, `--ignored`): `ofgpu-generate-mesh channel 8 6 4 -grading x=2`, both drivers, 20 iterations | the printed lattice is (117.1)'s prediction from `min_c V_c`, 58 x 29 x 2 = 3 364 voxels, and one non-empty `.vdb` each. On this thin mesh (0.1 m deep) the default `h` = 0.0697 m is coarser than the depth allows: `n_z` = 2 covers 0.139 m, the excess lies on the `hi` side as (117.1) says, and the fluid fraction is 0.491 (`volume_error` -0.301). That is the default doing what §117.3 says, and a case on such a mesh should state `voxel` | VIO-05a |
+| VIO-05a | `tests/volume_lattice.rs`, both builds: the 2:1 mesh moved to (1000, -2000, 500), `h` = 1/24, through `volume_target` on `build_host_mesh_local` | the map equals the world mesh's map owner for owner on 13 824 voxels, with the same world origin; the `single` build shifts the mesh and the f64 build does not | VIO-05a |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
@@ -40267,7 +40376,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 95 names of
+accepts it on the field the row is asked on, and it is one of the 102 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -40388,16 +40497,16 @@ row, row for row.
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
-| synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
-| coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
+| synthetic inflow | `turbulentDFSEMInlet` | implemented | — | — | (120.12g)-(120.12k), divergence-free spherical eddies of radius `sigma` convected at `Ubulk`, intensities from `R`; vector fields only |
+| synthetic inflow | `turbulentDigitalFilterInlet` | implemented | — | — | (120.12c)-(120.12f), Klein's Gaussian filter over a random lattice on `planeDivisions` and in time, lengths `L`, Lund's transformation to `R`; vector fields only |
+| coupled | `cyclicAMI` | implemented | — | — | static: the polyMesh reader imprints its two sides into a conformal cyclic (§120.13); a moving mesh refuses it by name |
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
 | compressible | `fixedPressureCompressibleDensity` | planned | BC-20 | — | — |
-| VOF | `variableHeightFlowRate` | planned | BC-21 | — | — |
-| VOF | `variableHeightFlowRateInletVelocity` | planned | BC-21 | — | — |
-| VOF | `outletPhaseMeanVelocity` | planned | BC-21 | — | — |
-| VOF | `phaseHydrostaticPressure` | planned | BC-21 | — | — |
+| VOF | `variableHeightFlowRate` | implemented | — | — | (120.14a): `alpha_b = clamp(alpha_P, lowerBound, upperBound)`; the phase fraction only (§120.14) |
+| VOF | `variableHeightFlowRateInletVelocity` | implemented | — | — | (120.14b): `U_f = -n_f a_f Q / sum a^2 \|S\|`, the liquid flux is the constant `flowRate`; vector fields only (§120.14) |
+| VOF | `outletPhaseMeanVelocity` | implemented | — | — | (120.14c): the cell profile shifted along `n_f` so the phase-weighted mean outflow is the constant `Umean`; vector fields only (§120.14) |
+| VOF | `phaseHydrostaticPressure` | implemented | — | — | (120.14d): `fr = a_f` and the phase's hydrostatic level in `p_rgh`; `p_rgh` only (§120.14) |
 | compressible | `totalTemperature` | owned | CMP-16 | — | — |
 | compressible | `waveTransmissive` | owned | CMP-17 | — | an absorbing outlet, OUTSIDE the `wave*` refusal |
 | compressible | `characteristicFarfield` | owned | CMP-18 | — | — |
@@ -40431,8 +40540,8 @@ existing behaviour, recorded here and not changed by this unit.
 uncovered part into wall faces face by face; this solver couples conformal
 faces only, so a partly overlapping interface cannot be answered truthfully.
 Mesh the two sides so they match and write `cyclic`. A static interface whose
-two sides overlap FULLY is `cyclicAMI`, which is planned (BC-19, by imprint)
-rather than refused; the partial overlap stays refused.
+two sides overlap FULLY is `cyclicAMI`, which is implemented by imprint
+(§120.13) rather than refused; the partial overlap stays refused.
 
 `cyclicRepeatAMI` maps a patch onto copies of another one repeated around a
 sector; it needs interpolation weights and a repeat transform this solver
@@ -40441,8 +40550,8 @@ does not have. A conformal cyclic pair written as `cyclic` is what stands.
 The `nonConformal*` family (`nonConformalCyclic`, `nonConformalError`,
 `nonConformalMappedWall`) intersects its two coupled sides while the case
 runs, moving meshes included - the mesh topology changing under the solver,
-which this solver never does. A static non-conformal interface is `cyclicAMI`
-and is refused until its faces are imprinted; a conformal one is `cyclic`.
+which this solver never does. A static non-conformal interface is `cyclicAMI`,
+imprinted as the polyMesh is read (§120.13); a conformal one is `cyclic`.
 
 `v2WallFunction` and `fWallFunction` are the wall functions of the v2-f
 turbulence model, which this solver does not have - the model registry
@@ -40472,8 +40581,8 @@ the fallback that refusal names (§13.4): `calculated` for the generic refusal
 of a name outside the catalogue and for every permanent refusal except
 `compressible::turbulentTemperatureRadCoupledMixed`, which keeps its own arm's
 fallback `coupledTemperature` (the conjugate coupling without the radiative
-term, §50.8); the planned name refused by its own arm today keeps its own
-(`cyclicAMI` a position-paired `cyclic`).
+term, §50.8). No planned name has an arm of its own any more: `cyclicAMI`,
+the last one, is implemented (§120.13).
 
 ### 120.1 Function1 - a profile of time or of one coordinate, evaluated on the device
 
@@ -41562,7 +41671,8 @@ initial `alpha`, `U_f` from the initial velocity), as `totalPressure` is.
 That is exact while the face's phase and velocity do not change - the open
 top of a tank in the light phase, a side opening in one fluid. A face whose
 `alpha` changes during the run keeps its initial `rho_f`; the per-step
-refresh belongs to the VOF family unit (BC-21), which depends on this one.
+refresh was left to the VOF family unit (BC-21), which did not take it -
+it would change existing runs, the user's decision (§120.14).
 
 **Inputs and refusals.** `BcInputs::prgh: Option<PrghInputs>` carries
 `g` (the solver's own gravity), `rho_b` (per flattened boundary face, the
@@ -42315,10 +42425,511 @@ of `function1.cubin` are SASS-identical in both builds; two are added.
 
 No GPL-licensed source was consulted.
 
+### 120.12 The synthetic LES inflow - a digital filter and divergence-free eddies with a prescribed Reynolds stress
+
+BC-16 implements the two synthetic-inflow names of the §120 table,
+`turbulentDigitalFilterInlet` and `turbulentDFSEMInlet`. The names are taken
+from the user guides of §120 by name only; every equation below is cited, or
+is ours and marked DESIGN.
+
+Both are a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`, `refGrad = 0`) on
+a VECTOR field whose `refValue` a kernel rewrites once per TIME step - no new
+evaluation branch (§5.2 of the completion plan). On a scalar field both names
+are refused as vector conditions. The face value is the mean velocity `UMean`
+plus a fluctuation `u'` whose one-point covariance is the prescribed Reynolds
+stress `R`. Both draws are counter-based, so a run with the same `seed` draws
+the same inflow, and a captured graph advances them (§81): the rule's state
+`[n, X]` - the last step drawn and the distance convected - lives on the
+device and is moved on by a one-thread kernel after the per-face one.
+
+**The opt-in.** It is `BcInputs::turbulent_inlet`, the one `turbulentInlet`
+uses (§120.10): the caller draws once per time step, through
+`field_ops::advance_synthetic_inlet_vector(gpu, k, U, dt)`, which
+`Simple::begin_time_step` calls with its `dt`. No driver passes the opt-in
+today - the steady modes of `ofgpu-lowmach` and `ofgpu-buoyant` call
+`begin_time_step` every outer iteration, which would redraw the inflow every
+iteration - so every driver refuses both names by name, as BC-14 recorded for
+`turbulentInlet`. A transient driver path that passes `turbulent_inlet = true`
+makes them usable in a run.
+
+**The draw** *(DESIGN - ours)*. With `mix` the SplitMix64 finaliser of
+`z + 0x9E3779B97F4A7C15` (Steele, Lea & Flood 2014) and `w_0 = 0x243F6A8885A308D3`:
+
+```
+h = mix(seed ^ w_0); h = mix(h ^ t); h = mix(h ^ a); h = mix(h ^ b);
+h = mix(h ^ c); h = mix(h ^ d);   u = (h >> 11) / 2^53,
+eps(t, a, b, c, d) = sqrt(3) (2u - 1)                                 (120.12a)
+```
+
+zero mean and unit variance; the digital filter uses the tag `t = 1`, the
+eddies `t = 2`. Signed integers enter as their two's-complement words.
+
+**The patch frame** *(DESIGN - ours)*. With the f64 face centres `x_f`, unit
+outward normals `n_f` and areas `|S_f|` (§118.2):
+
+```
+nin = -SUM |S_f| n_f / |SUM |S_f| n_f|,   x0 = mean of x_f,
+e_y = the global axis (x, y, z order) other than the one most aligned with
+      nin, projected on the plane and normalised;  e_z = nin x e_y,
+eta_f = e_y . (x_f - x0),   zeta_f = e_z . (x_f - x0)                 (120.12b)
+```
+
+and the patch must be planar: every `|nin . (x_f - x0)|` at most `1e-6` of
+the patch diagonal in `(eta, zeta)`, or the name is refused. A face normal
+to `x` gives `e_y = y`, `e_z = z`.
+
+**The digital filter** (Klein, Sadiki & Janicka 2003). The plane carries a
+lattice of `ny x nz` nodes (`planeDivisions`) spanning the face centres'
+`(eta, zeta)` range, spacing `Delta_y = (eta_max - eta_min)/(ny - 1)` (zero
+when `ny = 1`) and the same in `z`; each face takes its nearest node. Time is
+the third lattice direction through Taylor's hypothesis, spacing
+`Delta_x = Ubulk dt`. For a length `L` and spacing `Delta`, Klein's filter:
+
+```
+n = L/Delta,   N = ceil(2n),   b~_k = exp(-pi k^2 / (2 n^2)),
+b_k = b~_k / sqrt(SUM_{j=-N}^{N} b~_j^2),   k = -N..N                 (120.12c)
+```
+
+(`n = 0` gives `b_0 = 1`). Component `c` of the filtered field at step `n`,
+node `(j, k)`, is the separable sum over a random lattice:
+
+```
+u'_c = SUM_a bt_a SUM_b by_b SUM_d bz_d eps(1, n + a, j + b, k + d, c)  (120.12d)
+```
+
+each filter of (120.12c) with component `c`'s length in that direction -
+`L` is component-major, `(L_ux L_uy L_uz L_vx ... L_wz)`, its direction index
+`x` the streamwise `nin`, `y` and `z` the frame's `e_y` and `e_z`; the
+components are the global ones. `u'` has zero mean and unit variance per
+component (`SUM b^2 = 1` in each direction). The prescribed stress follows
+from Lund, Wu & Squires (1998)'s transformation:
+
+```
+u = UMean + a u',   a = the lower Cholesky factor of R:
+a11 = sqrt(R11), a21 = R21/a11, a22 = sqrt(R22 - a21^2), a31 = R31/a11,
+a32 = (R32 - a21 a31)/a22, a33 = sqrt(R33 - a31^2 - a32^2)            (120.12e)
+```
+
+so `E[(u - UMean)(u - UMean)^T] = a a^T = R`. A zero pivot whose column is
+zero gives a zero column (a stress with a vanishing component); an `R` that
+is not positive semi-definite is refused by name. The correlation of `u'_c`
+at a lag of `k` lattice cells in one direction is `rho(k) = SUM_j b_j b_{j+k}`,
+and by the Poisson sum `SUM_k rho(k) = (SUM_j b_j)^2 = 2n` to within
+`exp(-2 pi)` truncation, so the one-sided integral length is
+
+```
+Delta (rho(0)/2 + SUM_{k>=1} rho(k)) = n Delta = L                   (120.12f)
+```
+
+- the prescribed length, for every component the Cholesky mixing leaves
+unmixed (`a_cj = 0` for `j < c`), and a mixture of lengths otherwise. The
+first time step's `dt` sets the time filter, so the setup's seed face value
+is `UMean`; each launch re-forms the time filter from its own `dt` (a change
+of `dt` changes the time correlation from that step on). A filter half-width
+above 128 cells, or more than `2^22` taps of one component a face, is refused
+by name (at setup for the plane, at the launch for time).
+
+**The divergence-free eddies** (the idea is Poletto, Craft & Revell 2013: a
+sum of eddies, each a radial shape times `r x alpha`, divergence-free by
+construction, with intensities from the Reynolds stress; the spherical shape,
+its constant and the intensity rule below are *DESIGN - ours*). With `N`
+eddies of radius `sigma` in a box of volume `V_B`:
+
+```
+u'(x) = sqrt(V_B / (N sigma^3)) SUM_k F(|r_k|^2) (r_k x alpha_k),
+r_k = (x - x_k)/sigma,   F(q) = (1 - q)^2 for q < 1, 0 otherwise    (120.12g)
+```
+
+`F` and `F'` vanish at `q = 1`, so `u'` is C1. Each term is divergence-free:
+with `d = r_k`, `div (F(|d|^2) d x alpha) = 2 F'(q) d . (d x alpha)/sigma +
+F div(d x alpha) = 0`, both terms zero for any `alpha`:
+
+```
+div u' = SUM_k 2 F'(|r_k|^2) r_k . (r_k x alpha_k) / sigma = 0        (120.12h)
+```
+
+exactly, because the shape is radial and `sigma` is one number per eddy (an
+eddy stretched differently per direction would lose this). With the eddy
+centres uniform in a box that holds every face's support ball, independent
+`alpha_k` of zero mean and covariance `A`, and
+`eps_ijl eps_mjp = delta_lp delta_im - delta_lm delta_ip`:
+
+```
+E[u' u'^T] = G (tr A I - A),
+G = (1/3) INT F(|r|^2)^2 |r|^2 d^3r = (4 pi/3) INT_0^1 r^4 (1 - r^2)^4 dr
+  = (4 pi/3)(128/15015) = 512 pi/45045 = 0.0357082...                 (120.12i)
+```
+
+(the sum `1/5 - 4/7 + 6/9 - 4/11 + 1/13 = 128/15015`). Inverting,
+`tr R = 2 G tr A`, so
+
+```
+A = (tr R/2 I - R) / G,   alpha_k = C eps_k,   C = chol(A)            (120.12j)
+```
+
+with `eps_k` three draws of (120.12a). `A` is positive semi-definite exactly
+when every principal stress is at most the sum of the other two,
+`lambda_i <= lambda_j + lambda_k`; an `R` outside that set - for example the
+strongly one-component stress near a wall - is refused by name, naming
+(120.12j). The limit is this design's own, derived here; Poletto, Craft &
+Revell's abstract says their method reproduces almost all states of
+anisotropy, and their own intensity rule is not used.
+The box and the convection:
+
+```
+s in [-sigma, sigma),  eta in [eta_min - sigma, eta_max + sigma),
+zeta in [zeta_min - sigma, zeta_max + sigma),  V_B = 2 sigma W_eta W_zeta;
+eddy k:  s0_k = -sigma + 2 sigma u(2, k, 0, 0, 0),  w = s0_k + sigma + X,
+g = floor(w / (2 sigma)),  s_k = -sigma + (w - 2 sigma g),
+eta_k, zeta_k from u(2, k, g, 1|2, 0),  eps_k from eps(2, k, g, 3..5, 0),
+x_k = x0 + s_k nin + eta_k e_y + zeta_k e_z,
+X^n = fma(Ubulk, dt, X^(n-1))                                         (120.12k)
+```
+
+so an eddy is carried downstream at `Ubulk` and, on leaving at `s = sigma`,
+re-enters at `s = -sigma` with a new place across the plane and a new
+`alpha`: the streamwise positions stay uniform and the field is stationary.
+`nEddy` defaults to `ceil(V_B / sigma^3)` (about four eddies over a point)
+and is capped at `2^20`. The setup's seed is (120.12g) at `X = 0`.
+
+**Entries** (this solver's own names; each constant, refused by name when
+missing, not finite or of the wrong length). Both: `R` `(xx xy xz yy yz zz)`,
+`UMean` (a vector), `Ubulk` (optional, `UMean . nin` when absent; it must be
+positive), `seed` (optional, 0). The filter: `L` (nine lengths) and
+`planeDivisions` `(ny nz)`. The eddies: `sigma` (positive) and `nEddy`
+(optional). Profiles of `R` or `UMean` are not built.
+
+**Precision.** Everything is f64 in both builds - the draw, the filter sums,
+the eddy sums and the state - and each face value rounds once into `Scalar`
+(§118). The host twins `field::synthetic::df_values` and `dfsem_values` run
+in the device kernels' operation order; the device contracts FMAs and its
+`exp` is not the host's, so the two agree to round-off.
+
+**Tests** (`tests/bc_synthetic.rs`, both builds; the statistics run on the f64
+host twins and are class P, the device rows class R; [brackets] are the
+single build).
+`digital_filter_reproduces_r_and_l` - a 40 x 40 lattice of unit cells,
+400 steps of `Ubulk dt = 1`, `R = (1 0.3 0 0.5 0 0.25)`, lengths `u (2, 1.5,
+2.5)`, `v 1.5`, `w (1.5, 2.5, 1.5)`: every `R_ij` within 0.56 % [0.56 %] of
+`sqrt(R_ii R_jj)` (band 5 %); the integral lengths of `u` and `w` in time,
+`e_y` and `e_z` within 0.78-2.48 % [the same] (band 10 %).
+`dfsem_reproduces_r` - a 2 x 2 plane of 32 x 32 faces, `sigma = 0.25`, 191
+eddies, 6000 steps of `Ubulk dt = 0.05`, `R = (0.8 0.1 0.05 0.6 0.05 0.5)`:
+every `R_ij` within 0.44 % [0.44 %] (band 5 %).
+`dfsem_is_divergence_free` - at 1979 points over 20 convected distances,
+`|div u'| / max|grad u'|` at most 6.5e-16 [6.5e-16] (bound 1e-10), and the
+analytic gradient equals central differences of the velocity to 6.3e-10
+[6.3e-10] of `max|grad u'|` (bound 1e-5).
+`synthetic_device_matches_host` - an 8 x 8 inlet, 6 steps of `dt = 0.025`:
+the filter's device faces equal the twin to 3.3e-16 [0] of `max|u'|`,
+the eddies' to 6.9e-16 [0] (<= 1e-12, class R; the single build rounds both to the same f32); the seeds are `UMean`
+and the `X = 0` field, bit for bit.
+`synthetic_refusals_name_their_reason` - no opt-in, a scalar field, an
+unrealisable `R` for the eddies (accepted by the filter), an `R` that is not
+positive semi-definite, a missing `L`, a bulk velocity out of the domain.
+The correlation-length gate is the filter's: the eddies prescribe a radius,
+not a length, and their two-point correlation is what (120.12g) makes of it.
+
+* **Klein, M., Sadiki, A. & Janicka, J.** A digital filter based generation
+  of inflow data for spatially developing direct numerical or large eddy
+  simulations. *J. Comput. Phys.* 186 (2003) 652-665,
+  doi:10.1016/S0021-9991(03)00090-1 - the Gaussian filter (120.12c) and the
+  filtered random lattice in space and, through Taylor's hypothesis, time.
+* **Lund, T. S., Wu, X. & Squires, K. D.** Generation of turbulent inflow data
+  for spatially-developing boundary layer simulations. *J. Comput. Phys.* 140
+  (1998) 233-258, doi:10.1006/jcph.1998.5882 - the Cholesky transformation
+  (120.12e).
+* **Poletto, R., Craft, T. & Revell, A.** A new divergence free synthetic
+  eddy method for the reproduction of inlet flow conditions for LES. *Flow
+  Turbul. Combust.* 91 (2013) 519-539, doi:10.1007/s10494-013-9488-2 - the
+  divergence-free eddy idea.
+* **Steele, G. L., Lea, D. & Flood, C. H.** Fast splittable pseudorandom
+  number generators. *OOPSLA 2014*, doi:10.1145/2660193.2660195 - the
+  SplitMix64 finaliser of (120.12a).
+
+No GPL-licensed source was consulted.
+
+### 120.13 `cyclicAMI` - a static arbitrary mesh interface, imprinted into a conformal cyclic as the mesh is read (BC-19)
+
+A `cyclicAMI` pair couples two patches that cover the same surface with
+faces that do not match. This solver has no interpolation weights; instead
+`io::polymesh::read_poly_mesh` imprints every such pair with §120.18's
+`mesh::imprint::imprint` before anything else sees the mesh, so the pair
+leaves the reader as two conformal patches written face for face, which is
+what every cyclic is downstream (§31.1): `PatchKind::Cyclic`, the
+`nbr_patch` index, `cyclic_pairing` by position, the §31.1 invariants in
+`build_host_mesh`, and every coupled kernel branch, none of them changed.
+The field name `cyclicAMI` is `BcKind::Cyclic` (it is in
+`IMPLEMENTED_BC_NAMES`, catalogue row implemented). The patch keeps its
+type string `cyclicAMI` verbatim. The type names `cyclicAMI`,
+`neighbourPatch` and `transform rotational` are taken by name only from the
+public user guides of §120; no AMI code was opened.
+
+**The reader.** For each `cyclicAMI` patch `k` whose `neighbourPatch` names
+patch `j`: `j` must be `cyclicAMI` and must name `k` back, else the boundary
+file is refused by name; a `transform rotational` on either side is refused
+by name, because a cyclic pair here maps one side onto the other by a
+translation only (§31.1); the patch that comes first in the file is `A`. A
+missing or unknown `neighbourPatch` falls to §31.1's own refusal. An imprint
+refusal (§120.18: a partial overlap is `cyclicACMI`, a non-planar face, ...)
+is reported with the boundary file's path and the pair. Reading the written
+imprint again re-imprints a matching pair: no new point, the same face and
+patch counts.
+
+**The map handed to the imprint** ((120.18.1) with `R = I`). With `X_P` the
+area centroid of patch `P` (each face fanned into triangles about its vertex
+mean, each triangle at the mean of its three points with area `|Newell|/2`),
+`S_A` the summed area vector of `A` and `n_A = S_A/|S_A|`:
+
+```
+t = 0            if |(y - X_A) . n_A| <= tau for every point y of B   (120.13a)
+t = X_A - X_B    otherwise
+```
+
+with §120.18's `tau`. Two blocks that meet are coplanar and get the identity
+exactly, so an in-plane offset stays an offset and is refused by the
+coverage rule (120.18.5) as `cyclicACMI`; a periodic pair is translated by
+the centroid difference, the translation §31.1's invariant check recovers.
+The stated limit: an in-plane offset of a PERIODIC pair is read as part of
+its translation.
+
+**A moving mesh.** The imprint is made once, from the points at rest.
+`HostMesh::refuse_a_moving_cyclic_ami(who)` refuses any mesh with a
+`cyclicAMI` patch by name, naming `who` and the patch, and both moving-mesh
+entry points call it first: `MeshMotion::new` (§105.9) and `AleMesh::new`.
+
+**The coupled separation.** `mesh/geometry.rs` measures a coupled face
+through both halves, `d = (Cf_own - C_P) + (C_N - Cf_nbr)`, and stores
+`Delta = 1/(n . d)` and `k = n - d Delta` (§2.4). The device least-squares
+gradient (§3.5, `fvGradScalarLeastSquares`, `boundarySeparation` in
+`cuda/fv.cu`) uses for a coupled face
+
+```
+d_dev = Sf / (|Sf| Delta) = n (n . d) = d + k / Delta                 (120.13b)
+```
+
+the normal projection of `d`, which is `d` itself only where the couple is
+orthogonal. On an imprinted 3:2 interface the sub-face pairs are skewed, so
+the fit (§3.5, `w = 1/|d|^2`)
+
+```
+G = sum_f w d d^T,   b = sum_f w d (psi_N - psi_P),   grad = G^-1 b   (120.13c)
+```
+
+with `d_dev` in place of `d` is not exact for a linear field there. This
+unit does not change it: the cure (`d = d_dev - k/Delta` in the kernel) moves
+the coupled least-squares result of every non-orthogonal cyclic, an existing
+path, and is the user's decision (docs/17 §5.3.4).
+
+**The gate (`tests/bc_cyclic_ami.rs`, both builds).** Block A is
+`[0,1] x [0,1]` with 8 x 12 cells, block B `[1,2] x [0,1]` with 8 x 8 (the 3:2
+interface `amiA`/`amiB` at `x = 1`) or 8 x 12 (a conformal one); the ends
+`perA`/`perB` are a second 3:2 `cyclicAMI` pair, translated by 2. Each mesh
+is written by `write_poly_mesh_raw` and read back by `read_poly_mesh`. The
+channel is laminar, `nu = 0.01`, driven by the body force `0.12` along `x`
+(bulk 1, Re 100), `p = 0` on `lowA`, SIMPLE to a cell change below `1e-14`
+(4000 at most); the single blocks are §31.1 periodic channels of 16 x 12 and
+16 x 8 cells over `[0,2] x [0,1]`. `tol(t)` is `t` in f64 and D-F32-1's
+`max(t, min(t 2^29, 1e-5))` under `single`.
+
+| row | claim | class | f64 | single |
+|---|---|---|---|---|
+| pairs | each 3:2 pair 16 + 16 sub-faces on one layer, mutual `nbr_patch`, kind cyclic, type `cyclicAMI`, area 0.1 to `tol(1e-12)`; 160 cells; a second read keeps the counts | D, R | pass | pass |
+| refusals | `transform rotational`; a `cyclicAMI` facing a `cyclic`; B lifted 0.1 (`cyclicACMI`, through the reader); a moving mesh at both entry points | D | pass | pass |
+| oracle | (120.13c) with `d` over the coupled stencil, `psi = (1.7, -0.9, 0.35) . x + 0.42`, two layers: `max |g - a|/|a| <= 1e-11` | A | 2.4e-15 | 2.4e-15 |
+| device LS, off the interface | `<= tol(1e-11)` | R | 2.4e-15 | 9.8e-7 |
+| device LS, at the interface | `<= 1e-11` - **MISSED** 5.1e-2; the device equals its (120.13b) twin to `tol(1e-11)` (2.4e-16 / 1.6e-7), which is the cause | R | MISSED | MISSED |
+| flux | each pair, `max |phi_A + phi_B| <= tol(1e-14) max |phi_A|` | R | 1.5e-16, 4.2e-15 of max | 0 |
+| conformal AMI | both block columns against the 16 x 12 single block, `<= tol(1e-12)` of the peak | R | 3.0e-16 | 2.4e-7 |
+| 3:2 channel | each block's middle column (`x = 0.4375`, `1.5625`) against the single block of its own `ny`, `<= 0.5 %` of the peak - **MISSED** 6.7 % and 7.5 % | P | MISSED | MISSED |
+
+The 3:2 channel's bulk is 0.959 and 0.963 against the single blocks' 1.014
+(ny 12) and 1.031 (ny 8), whose own departures from Poiseuille
+`1.5 (1 - (2y - 1)^2)` are 0.69 % and 1.56 % of the peak. The conformal AMI
+pair matching the single block to round-off through the same reader,
+imprint, field name and coupling says the miss is the discretisation of a
+skewed coupled face, not the wiring: the face value is the linear
+interpolation along `d` with no skewness correction, and the gradients its
+non-orthogonal correction reads are not exact across it ((120.13b)). Under
+`single` every SIMPLE loop stops on the 4000 cap (the f32 SIMPLE floor of
+the BC-07 family); the f64 loops stop on the change after 1439 (3:2), 1786
+(conformal, ny 12) and 1623 (ny 8) iterations.
+
+No GPL-licensed source was consulted.
+
+### 120.14 The VOF family - a clamped phase fraction, a liquid flow rate, a phase-weighted outlet and a phase-weighted hydrostatic level (BC-21)
+
+BC-21 implements the four VOF names of the §120 table:
+`variableHeightFlowRate`, `variableHeightFlowRateInletVelocity`,
+`outletPhaseMeanVelocity` and `phaseHydrostaticPressure`. The names, and the
+entry keys `lowerBound`, `upperBound`, `flowRate`, `Umean`, `alpha`, `rho`,
+`pRefValue`, `pRefPoint` and `phaseFraction`, are taken from the user guides
+of §120 by name only; no description, formula or source was read. Every
+equation below is ours (*DESIGN*), written on the phase fraction of §20.1,
+the mixture density of §20.3 and the `p_rgh` decomposition of §20.5 and
+(120.7a). Each is a §4 triple with no new evaluation branch and no kernel:
+the phase fraction's clamp and the hydrostatic level ride `BcKind::Mixed`,
+the two velocities `BcKind::FixedValue`, and what is new is that the triple
+FOLLOWS the liquid - it is rewritten from the current `alpha` once per time
+step.
+
+**The face phase fraction.** With `alpha_b,f` the evaluated face value of
+the solver's phase fraction, the weight the last three conditions use is
+
+```
+a_f = clamp(alpha_b,f, 0, 1)
+```
+
+so a round-off excursion of `alpha` out of `[0, 1]` cannot make a weight
+negative. `S_f` is the outward face area vector, `|S_f|` its magnitude,
+`n_f = S_f/|S_f|` (both f64 from `geom64`, §118.2) and `P` the cell behind
+the face.
+
+```
+variableHeightFlowRate (on alpha), 0 <= l <= u <= 1:
+    alpha_P > u :  fr = 1, refValue = u
+    alpha_P < l :  fr = 1, refValue = l                                   (120.14a)
+    otherwise   :  fr = 0              (refGrad = 0 throughout)
+  => alpha_b,f = clamp(alpha_P, l, u)
+
+variableHeightFlowRateInletVelocity (on U), the liquid rate Q > 0 into the domain:
+    D   = sum_f a_f^2 |S_f|
+    U_f = -n_f (a_f Q / D)          (U_f = 0 on every face when D = 0)    (120.14b)
+  => -sum_f a_f (U_f . S_f) = Q
+
+outletPhaseMeanVelocity (on U), the phase-weighted mean outward velocity Umean:
+    A   = sum_f a_f |S_f|,   M = sum_f a_f (U_P . n_f) |S_f|
+    U_f = U_P + (Umean - M/A) n_f   (U_f = U_P when A = 0)                (120.14c)
+  => sum_f a_f (U_f . n_f) |S_f| / A = Umean
+
+phaseHydrostaticPressure (on p_rgh), the phase density rho, p_ref at x_ref:
+    fr = a_f,  refGrad = 0
+    refValue = (p_ref + rho g . (x_f - x_ref)) - rho_f g . (x_f - O)     (120.14d)
+```
+
+(120.14a) bounds the face value: inside `[l, u]` the face is zero-gradient
+and the height of the liquid at the patch follows the interior; outside it
+the face is held at the bound crossed. With `fr` exactly 0 or 1, §4's
+`fr r + (1 - fr) alpha_P` is the clamp bit for bit. (120.14b) makes the
+inflow velocity proportional to the face's liquid fraction - a dry face
+takes in nothing, so the gas above a liquid inlet is not pushed in - and
+normalises it so the LIQUID flux, the alpha-weighted face flux, is exactly
+`Q`; the identity follows from `n_f . S_f = |S_f|`. (120.14c) keeps the
+outlet's cell profile and shifts its normal component by one constant, so
+the liquid's area-weighted mean outflow velocity is exactly `Umean` - the
+outlet takes the liquid at the rate it is given and the free surface finds
+the level that carries it. (120.14d) is (120.7e) with `rhoRef = rho`, made
+Dirichlet only where the phase is: in it (`a_f = 1`, `rho_f = rho`) the face
+holds `p = p_ref + rho g . (x_f - x_ref)`, the phase's own hydrostatic
+column, written in the solved `p_rgh` exactly as (120.7e) writes it -
+`x_f - x_ref` in world coordinates, `x_f - O` the stored centre the
+solver's body force reads (§118.7); out of it (`a_f = 0`) the face is
+zero-gradient; a mixed face is weighted between the two. `rho_f` is the
+face's mixture density, the value `update_properties` writes from the
+face's current `alpha` (§20.3).
+
+**When the triples are written** *(DESIGN - ours)*. `Vof::refresh_vof_family`
+rewrites every VOF-family patch once per time step, at the start of
+`Vof::step` after the flux-switched fractions and before any boundary value
+is evaluated, and first in `Vof::initialise_flux_from_velocity` and
+`Vof::initialise` (so the first step's inlet flux is the condition's, and
+the pressure-pinning test reads the written `fr`). In order: (120.14a) on
+`alpha` from its cells and `alpha`'s faces re-evaluated; then (120.14b) and
+(120.14c) on `U` from those faces (and `U`'s cells); then `rho` refreshed
+to those faces and (120.14d) on `p_rgh`, after which the pressure reference
+is re-decided - a phase-weighted Dirichlet fixes the level only where the
+phase is. The refresh runs on the HOST: each field carrying a rule is
+downloaded, rewritten on the rule's faces and uploaded; a run with none of
+the four names returns at once and is bit for bit what it was. All
+arithmetic is f64 from the widened `Scalar` inputs and the f64 `geom64`
+face data, sums in face order, each triple entry rounded once into
+`Scalar` (§118.2); the operation order is the order written above, `g . d =
+g_x d_x + g_y d_y + g_z d_z`. The two rates are constants: `flowRate` and
+`Umean` are read through §120.1's Function1 reader, and a time-varying one
+is refused, because the refresh runs from the solver's state and no clock.
+
+The liquid flux the alpha equation transports through the inlet is
+`phi_b alpha_b` (§20.2's low-order boundary flux), where `phi_b = U_f . S_f`
+is the flux the previous step's pressure correction prescribed. It equals
+`Q` exactly when the inlet's `alpha_b` does not change from one step to the
+next - every face of a (120.14a) inlet held at a bound, or a fixed-value
+inlet `alpha` - and with one alpha sub-cycle per step; a free face inside
+the bounds moves the transported rate off `Q` by the step's change in
+`alpha_b`, the one-step lag every explicit boundary update carries, and
+sub-cycles move `alpha_b` within the step. The face flux is deliberately
+NOT rewritten before the alpha solve: a boundary flux changed without the
+interior flux that balances it would break §20.2's boundedness.
+
+**Inputs and refusals.** `BcInputs::vof_family: Option<&str>` names the
+solver's phase-fraction field; `ofgpu-vof` passes it for `alpha`, `U` and
+`p_rgh`, and every other setup passes `None`. Refused by name, each message
+naming the condition and "SPEC-LIT 120.14": any of the four with
+`vof_family = None` (a seed nothing rewrites would freeze a rate or a level
+the name promises follows the liquid, §13.4); `variableHeightFlowRate` on
+any field but the phase fraction and `phaseHydrostaticPressure` on any
+field but `p_rgh`; a velocity name on a scalar field and a scalar name on a
+vector field; a missing `lowerBound`, `upperBound`, `flowRate`, `Umean`,
+`rho`, `pRefValue` or `pRefPoint`; bounds outside `0 <= l <= u <= 1`; a
+time-varying `flowRate` or `Umean`; an `alpha` or `phaseFraction` entry
+naming any field but the solver's phase fraction.
+
+Not taken: §120.7 left the per-step refresh of the four buoyant-pressure
+names' `rho_f` to this unit. Refreshing them would change what an existing
+`prghPressure` run computes wherever the face's `alpha` moves, which is a
+numerics change of an existing path (docs/17 §5.3.4) and the user's
+decision; they keep their setup-time `rho_f`.
+
+**Gates** (`tests/bc_vof_family.rs`, both builds; class per docs/17 §5.1,
+D-F32-1, R rows at `max(t, min(2^29 t, 1e-5))`).
+
+`vof_family_triples_are_the_closed_forms` - a 4 x 3 x 2 box: every rule's
+face data is the mesh's (cells, normals, areas, both centres, class D); a
+cell `alpha` visiting all three branches of (120.14a) gives its `fr`,
+`refValue` and the clamp bit for bit; a face `alpha` with values 1.25 and
+-0.125 among them gives (120.14b), (120.14c) and (120.14d) bit for bit
+against an oracle in the same order (class D); the inlet carries `Q` = 0.3
+to 0 (f64; `single` 1.0e-8) and the outlet's phase mean is 0.25 to 2.2e-16
+(`single` 9.1e-9) relative (class R); a dry patch writes 0 and the cell
+value. `vof_family_refusals_are_by_name` - every refusal above (class D).
+`a_channel_fed_at_a_variable_height_carries_the_liquid_rate` - THE gate:
+`Vof` on a 24 x 1 x 12 channel 2 x 1, water (1000) under air (1) to z =
+0.5, fed on `xMin` by (120.14b) at `Q = 0.1 x 0.5 x (1/12)` with
+(120.14a) at `[0.05, 0.95]` on `alpha`, drained on `xMax` by (120.14c) at
+`Umean` 0.1, a slip floor and an open top (`prghPressure p 1000`), 20 steps
+of 5e-3 with one sub-cycle: the liquid the alpha equation transports
+through the inlet each step is `Q` within 1.0e-15 relative (`single`
+2.6e-8), the inlet identity within 1.0e-15 (`single` 4.1e-9), the outlet's
+phase mean within 2.8e-16 (`single` 3.4e-8), `alpha_b` on the inlet is the
+clamp exactly, and `alpha` stays in `[-5.3e-23, 1 + 1.5e-13]` (`single`
+`[-2.8e-14, 1 + 7.2e-6]`), all against 1e-12 (class R).
+`a_tank_open_at_a_phase_hydrostatic_side_stays_at_rest` - a 24 x 1 x 24
+tank, water under air to z = 0.5, `prghPressure p 1000` on the top and
+(120.14d) with `rho 1000`, `pRefValue 1004.905` and `pRefPoint (0 0 0.5)`
+on the side `xMax` (the column's level at the interface): wet side faces
+are Dirichlet, dry ones zero-gradient; after 20 steps of 2.5e-4 `max |U|`
+is 1.2e-13 and `p = p_rgh + rho (g . x)` is the two-layer column within
+1.1e-12 of 5705.53 (`single` 4.6e-6 and 7.6e-4, 1.3e-7 relative; class R);
+the control - `pRefValue 1000`, 4.905 Pa short - moves at 8.5e-4. Four
+tests, four pass in each build; the driver knob test
+`phase_hydrostatic_pressure_on_the_atmosphere_changes_what_the_run_writes`
+(`ofgpu-vof` on the dam break's dry atmosphere) runs and changes what the
+run writes.
+
+* **Hirt, C. W. & Nichols, B. D.** "Volume of fluid (VOF) method for the
+  dynamics of free boundaries", *J. Comput. Phys.* 39 (1981) 201-225,
+  doi:10.1016/0021-9991(81)90145-5 - the phase fraction whose face value
+  weights every condition here.
+* **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
+  at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
+  the modified pressure `p - rho (g . x)` the hydrostatic level is written
+  in, as in §120.7.
+
+No GPL-licensed source was consulted.
+
 ### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
 
-`cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
-operation BC-19 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
+`cyclicAMI` is accepted on it since BC-19 (§120.13); this subsection is the
+mesh operation §120.13 builds on. `mesh::imprint::imprint(raw, a, b, opts)` takes a
 `PolyMeshRaw` and two of its patches, `A` and `B`, whose faces cover the same
 surface but do not match, and returns a new `PolyMeshRaw` in which both
 patches are replaced by SUB-FACES: every overlapping pair `(a, b)` of an `A`

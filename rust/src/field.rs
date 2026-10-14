@@ -553,6 +553,7 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "cyclic",
     "cyclicSlip",
     "processor",
+    "cyclicAMI",
     "inletOutlet",
     "turbulentIntensityKineticEnergyInlet",
     "turbulentMixingLengthDissipationRateInlet",
@@ -655,6 +656,12 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "mapped",
     "mappedFixedValue",
     "turbulentInlet",
+    // SPEC-LIT 120.12: the synthetic LES inflow. Both ride
+    // `BcKind::FixedValue` on a vector field; their refValue is rewritten by
+    // `fldDigitalFilterInlet` / `fldDfsemInlet` every time step
+    // (BcInputs::turbulent_inlet).
+    "turbulentDigitalFilterInlet",
+    "turbulentDFSEMInlet",
     // SPEC-LIT 120.11: the inflow database. A `FixedValue` whose refValue
     // the `TimedBcs` of the `*_timed` setup rewrites after each clock step.
     "timeVaryingMappedFixedValue",
@@ -664,6 +671,14 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     // names anywhere else.
     "fixedJump",
     "uniformJump",
+    // SPEC-LIT 120.14: the VOF family. Each rides a plain triple kind -
+    // `Mixed` on the phase fraction and on `p_rgh`, `FixedValue` on the
+    // velocity - whose triple `Vof::refresh_vof_family` rewrites from the
+    // current phase fraction once per time step (BcInputs::vof_family).
+    "variableHeightFlowRate",
+    "variableHeightFlowRateInletVelocity",
+    "outletPhaseMeanVelocity",
+    "phaseHydrostaticPressure",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -913,6 +928,11 @@ impl BcKind {
             "symmetry" | "symmetryPlane" | "slip" => Self::Symmetry,
             "wedge" => Self::Wedge,
             "cyclic" | "cyclicSlip" | "processor" => Self::Cyclic,
+            // SPEC-LIT 120.13: a static arbitrary mesh interface. The polyMesh
+            // reader imprints its two patches into one conformal pair
+            // (SPEC-LIT 120.18), so on the field it IS the conformal cyclic;
+            // a moving mesh refuses it by name (`HostMesh::refuse_a_moving_cyclic_ami`).
+            "cyclicAMI" => Self::Cyclic,
             "inletOutlet" | "freestreamPressure" | "uniformInletOutlet" => Self::InletOutlet,
 
             "turbulentIntensityKineticEnergyInlet" => {
@@ -980,6 +1000,14 @@ impl BcKind {
             "prghPressure" | "uniformDensityHydrostaticPressure" => Self::FixedValue,
             "prghTotalPressure" | "prghTotalHydrostaticPressure" => Self::TotalPressure,
 
+            // SPEC-LIT 120.14: the VOF family. A section-4 triple with no new
+            // evaluation branch: the phase fraction's clamp and the
+            // phase-weighted hydrostatic pressure are `Mixed`, the two
+            // velocities a `FixedValue`; `field_setup` refuses them unless
+            // the caller promises the per-step refresh.
+            "variableHeightFlowRate" | "phaseHydrostaticPressure" => Self::Mixed,
+            "variableHeightFlowRateInletVelocity" | "outletPhaseMeanVelocity" => Self::FixedValue,
+
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
             // formula (SPEC-LIT 15.1), so the name is an alias, printed once -
@@ -1026,6 +1054,11 @@ impl BcKind {
             // fluctuation - so all three names are this kind; `field_setup`
             // builds the rule and refuses where no caller refreshes it.
             "mapped" | "mappedFixedValue" | "turbulentInlet" => Self::FixedValue,
+            // SPEC-LIT 120.12: the synthetic LES inflow, a fixedValue whose
+            // refValue the digital filter or the eddies rewrite every time
+            // step; `field_setup` builds the rule and refuses it where no
+            // caller draws it.
+            "turbulentDigitalFilterInlet" | "turbulentDFSEMInlet" => Self::FixedValue,
             // SPEC-LIT 120.11: a fixedValue read from
             // `constant/boundaryData/<patch>`, interpolated in space at setup
             // and in time on the device; `field_setup` builds the rule and
@@ -1344,17 +1377,6 @@ impl BcKind {
             // today and the condition is reached through the API.
             "advective" => Self::Advective,
 
-            "cyclicAMI" => {
-                return unsupported_note(
-                    &format!("{field}: boundaryField/{patch}/type"),
-                    name,
-                    IMPLEMENTED_BC_NAMES,
-                    "an arbitrary mesh interface couples two NON-conformal patches through interpolation weights, which this solver does not have; its cyclic couples two conformal patches face by face by position (SPEC-LIT 31.1); write cyclic when the two patches are conformal",
-                    "cyclic, paired face by face by position with no AMI weights (wrong unless the two patches are conformal)",
-                    Self::Cyclic,
-                );
-            }
-
             // SPEC-LIT §120: the permanent refusals. Each of these names is
             // catalogue row `refused`: it cannot be made meaningful by any
             // unit of the completion plan, so instead of the generic menu it
@@ -1379,7 +1401,7 @@ impl BcKind {
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
                     &["cyclic"],
-                    "cyclicACMI couples two patches that only partly overlap and turns the uncovered part into a wall face by face; this solver couples conformal faces only, and a static, fully overlapping interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "cyclicACMI couples two patches that only partly overlap and turns the uncovered part into a wall face by face; this solver couples conformal faces only, and a static, fully overlapping interface is cyclicAMI, which the polyMesh reader imprints into a conformal cyclic (SPEC-LIT 120.13)",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
                 );
@@ -1401,7 +1423,7 @@ impl BcKind {
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
                     &["cyclic"],
-                    "the non-conformal coupled patch family intersects its two sides while the case runs, moving meshes included; this solver couples conformal faces only, and a static non-conformal interface is cyclicAMI, which stays refused until its faces are imprinted (SPEC-LIT §120)",
+                    "the non-conformal coupled patch family intersects its two sides while the case runs, moving meshes included; this solver couples conformal faces only, and a static non-conformal interface is cyclicAMI, which the polyMesh reader imprints into a conformal cyclic (SPEC-LIT 120.13)",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
                 );
@@ -1688,6 +1710,11 @@ pub struct GpuScalarField {
     /// `ldu_ops::add_jump_source`; its flux laws (fan, porousBafflePressure)
     /// are re-evaluated from the face flux by `refresh` once per corrector.
     pub cyclic_jump: Option<crate::function1::DeviceCyclicJumps>,
+    /// SPEC-LIT 120.14: the VOF-family patches (`variableHeightFlowRate`,
+    /// `phaseHydrostaticPressure`), rewritten on the host from the current
+    /// phase fraction once per time step by `Vof::refresh_vof_family`;
+    /// none, nothing.
+    pub vof_rules: Vec<vof_family::VofFamilyRule>,
 }
 
 impl GpuScalarField {
@@ -1713,6 +1740,7 @@ impl GpuScalarField {
             turbulent: Vec::new(),
             jump: gpu.zeros(m.n_boundary_faces)?,
             cyclic_jump: None,
+            vof_rules: Vec::new(),
         })
     }
 
@@ -1777,6 +1805,13 @@ pub struct GpuVectorField {
     /// SPEC-LIT 120.10: as [`GpuScalarField::turbulent`], advanced by
     /// `advance_turbulent_inlet_vector`.
     pub turbulent: Vec<mapped::GpuTurbulentInlet>,
+    /// SPEC-LIT 120.12: the synthetic LES inflow patches, each with its
+    /// parameters and its state on the device, drawn once per TIME step by
+    /// `advance_synthetic_inlet_vector`; none, nothing.
+    pub synthetic: Vec<synthetic::GpuSynthetic>,
+    /// SPEC-LIT 120.14: as [`GpuScalarField::vof_rules`], for
+    /// `variableHeightFlowRateInletVelocity` and `outletPhaseMeanVelocity`.
+    pub vof_rules: Vec<vof_family::VofFamilyRule>,
 }
 
 impl GpuVectorField {
@@ -1798,6 +1833,8 @@ impl GpuVectorField {
             mean_rules: Vec::new(),
             mapped: Vec::new(),
             turbulent: Vec::new(),
+            synthetic: Vec::new(),
+            vof_rules: Vec::new(),
         })
     }
 }
@@ -1872,6 +1909,14 @@ pub mod patch_mean;
 /// [`mapped::turbulent_advance`].
 pub mod mapped;
 
+/// The VOF family of SPEC-LIT 120.14: the [`vof_family::VofFamilyRule`] the
+/// setup holds per patch, and the four host rewrites `Vof` runs once per
+/// time step - see [`vof_family::variable_height_alpha`],
+/// [`vof_family::variable_height_inlet_velocity`],
+/// [`vof_family::outlet_phase_mean_velocity`] and
+/// [`vof_family::phase_hydrostatic_pressure`].
+pub mod vof_family;
+
 /// The cyclic jumps of SPEC-LIT 120.2: the [`cyclic_jump::CyclicJumpRule`]
 /// a fan or porousBafflePressure pair carries, and the host twin of the
 /// `f1CyclicJump` kernel - see [`cyclic_jump::CyclicJumpRule::jumps`].
@@ -1881,6 +1926,12 @@ pub mod cyclic_jump;
 /// planar Delaunay triangulation, barycentric face weights and per-time face
 /// slabs - see [`tvmapped::build_rule`] and [`tvmapped::TvMappedRule`].
 pub mod tvmapped;
+
+/// The synthetic LES inflow of SPEC-LIT 120.12: the digital filter and the
+/// divergence-free eddies, their rules, their host twins of the
+/// `fldDigitalFilterInlet` / `fldDfsemInlet` kernels and their device state -
+/// see [`synthetic::df_values`] and [`synthetic::dfsem_values`].
+pub mod synthetic;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -1970,38 +2021,26 @@ mod tests {
         assert!(f.has_a_dirichlet(&gpu).expect("has_a_dirichlet"));
     }
 
-    /// SPEC-LIT §13.4 and §13.4.4's audit. `cyclicAMI` used to be an alias
-    /// to a condition that is NOT what it names: it needs interpolation
-    /// weights the solver does not have. (`outletInlet` was the second until
-    /// SPEC-LIT 120.4 made it a condition of its own, and `uniformFixedValue`
-    /// the third until SPEC-LIT 120.1 made it read its `uniformValue`
-    /// Function1.) Refused by name; `-permissive` substitutes the documented
-    /// fallback and warns once per setting.
+    /// SPEC-LIT 120.13 (and §13.4.4's audit): `cyclicAMI` was refused by
+    /// name, because pairing a NON-conformal interface by position is not
+    /// what it names. The polyMesh reader now imprints the pair into a
+    /// conformal one (SPEC-LIT 120.18), so the field name IS the conformal
+    /// cyclic, accepted with no warning and no `-permissive`.
     #[test]
-    fn the_condition_that_is_not_its_alias_is_refused_by_name() {
+    fn cyclic_ami_is_the_conformal_cyclic_its_imprint_makes() {
         let _guard = crate::io::contract::permissive_test_guard();
         crate::io::contract::set_permissive(false);
         crate::io::contract::reset_warnings();
 
-        let (name, word) = ("cyclicAMI", "cyclic");
-        let e = BcKind::from_name(name, "U", "inlet")
-            .expect_err(&format!("{name} must be refused by name"));
-        let msg = e.to_string();
-        assert!(msg.contains(name), "{msg}");
-        assert!(msg.contains("U: boundaryField/inlet/type"), "{msg}");
-        assert!(msg.contains("-permissive"), "{msg}");
-        assert!(msg.contains(word), "{msg}");
-
-        crate::io::contract::set_permissive(true);
         assert!(matches!(
-            BcKind::from_name("cyclicAMI", "U", "inlet").expect("permissive"),
+            BcKind::from_name("cyclicAMI", "U", "inlet").expect("accepted"),
             BcKind::Cyclic
         ));
+        assert!(IMPLEMENTED_BC_NAMES.contains(&"cyclicAMI"));
         assert!(
-            crate::io::contract::warned("U: boundaryField/inlet/type"),
-            "the substitution must be announced"
+            !crate::io::contract::warned("U: boundaryField/inlet/type"),
+            "an implemented name is not a substitution"
         );
-        crate::io::contract::set_permissive(false);
     }
 
     /// SPEC-LIT 120.4: the two outlets are conditions of their OWN, on any
@@ -2068,7 +2107,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [95, 5, 10, 10, 10], "the per-status counts");
+        assert_eq!(counts, [102, 5, 3, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

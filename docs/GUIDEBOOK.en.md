@@ -892,6 +892,41 @@ convergence suffers, raise the non-orthogonal corrector count in `fvSolution`.
 | `nvdb` / `vdb` | NanoVDB / OpenVDB volume |
 | `usda` | USD ASCII |
 
+### The voxel lattice of a volume file — `output.visualisation.lattice`
+
+A `.vdb`/`.nvdb` file is a voxel grid. On a uniform Cartesian box the voxels are the cells.
+Any other mesh is sampled onto a lattice of cubic voxels, which a JSONC case describes inside
+`output.visualisation`:
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "lattice": { "voxel": 0.01, "box": [0, 0, 0, 2, 1, 1], "maxVoxels": 8000000,
+               "sample": "cell", "activation": "dense", "background": 0.0 } } }
+```
+
+| key | meaning | default |
+|---|---|---|
+| `voxel` | voxel edge, m | cube root of the smallest cell volume |
+| `box` | `[xlo, ylo, zlo, xhi, yhi, zhi]`, m | bounding box of the mesh |
+| `maxVoxels` | voxel budget; a larger lattice is coarsened to fit | 8 000 000 |
+| `sample` | `cell` (the cell value) or `linear` (plus a clipped gradient) | `cell` |
+| `activation` | `dense` (every voxel) or `fluid` (only voxels inside a cell) | `dense` |
+| `background` | value of a voxel no cell covers | `0.0` |
+
+Every key is optional. The run refuses the block by name, before the loop, when no lattice can be
+built from it: a `box` with `lo >= hi` on an axis, a `voxel` of zero or less, `maxVoxels: 0`, an
+explicit `voxel` that the budget would have to coarsen more than 16 times, or an unknown `sample`
+or `activation`. With `-permissive` the run writes no visualisation output instead.
+
+Every driver (`ofgpu-lowmach`, `ofgpu-k-omega`, `ofgpu-k-epsilon`, `ofgpu-sa`, `ofgpu-vof`,
+`ofgpu-buoyant`, `ofgpu-cht`) lays the lattice on any mesh. A driver that reads the case block
+uses it. On the command line (`-output vdb`), which states no lattice, the defaults above apply.
+The lattice is built once before the loop and its size, voxel and fluid fraction are printed. On
+a thin or strongly graded mesh the default voxel (the cube root of the smallest cell) can be
+coarser than the domain is deep, so state `voxel` there. `ofgpu-cht` lays one lattice per region,
+whose default box is the region's own, and writes `VDB/<region>_000000.vdb` for each region. A
+multi-region `.usda` scene is not built, so that format refuses `usdScene`.
+
 ### The Studio 3D viewer
 
 Slices, arbitrary planes, iso-surfaces, streamlines and vector glyphs, drawn on
@@ -1154,9 +1189,10 @@ equations and changes the solution.
 
 ### `-output nvdb` is refused on a cut-cell or graded mesh
 
-`nvdb`/`vdb` are voxel grids that exist only on a uniform Cartesian box. On any
-other mesh the solver refuses before the loop, naming the reason (for example
-`cell volumes are not uniform`). Take a cut-cell run's results with `-output
+`nvdb`/`vdb` are voxel grids. On a uniform Cartesian box the voxels are the cells;
+any other mesh needs the voxel lattice of `output.visualisation.lattice` (section 8).
+Every driver lays it and refuses before the loop, with the reason, only when no lattice can be
+laid. Take a cut-cell run's results with `-output
 foam,vtu`. With `-permissive`, only `nvdb` is dropped from the list and the other
 formats are written as asked.
 

@@ -26,7 +26,8 @@
 //!     §7.5 - body forces on faces
 //!   ofgpu `SPEC-LIT.md` §20 (all five subsections) and §22 (the tests),
 //!     together with §2.4, §3, §4, §5.1 and §5.4, which the assembly here is
-//!     built out of.
+//!     built out of; §120.14, the VOF-family boundary conditions this
+//!     solver rewrites once per time step.
 //! No GPL-licensed source was consulted.
 //!
 //! # What this module owns
@@ -134,6 +135,7 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
+use crate::field::vof_family::{self, VofFamilyKind};
 use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, FvKernels};
@@ -871,6 +873,11 @@ impl<'m> Vof<'m> {
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
         let m = self.m;
 
+        // SPEC-LIT 120.14: the VOF-family triples from the initial alpha,
+        // before any face is evaluated and before the pinning test reads
+        // `p_rgh`'s `fr`.
+        self.refresh_vof_family(gpu)?;
+
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.alpha, m)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p_rgh, m)?;
@@ -908,11 +915,110 @@ impl<'m> Vof<'m> {
         // The face values first: this reads `U.bf`, and a field that has been
         // written through `u_mut` but never evaluated carries whatever its
         // file's `value` entry held - which for a `zeroGradient` patch is
-        // nothing at all.
+        // nothing at all. SPEC-LIT 120.14: a VOF-family velocity is written
+        // from the initial alpha first, so the first step's inlet flux is
+        // the condition's and not its seed's.
+        self.refresh_vof_family(gpu)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, self.m)?;
 
         let Self { fvk, phi, u, m, .. } = self;
         fv::interpolate_vector_flux(gpu, fvk, phi, u, m)
+    }
+
+    /// SPEC-LIT 120.14: rewrite the triples of every VOF-family patch from
+    /// the CURRENT phase fraction - (120.14a) on `alpha` from its cells, then
+    /// `alpha`'s faces re-evaluated, then (120.14b)/(120.14c) on `U` and
+    /// (120.14d) on `p_rgh` from those faces (and `p_rgh`'s mixture density
+    /// refreshed to them). On the host: each field carrying a rule is
+    /// downloaded, rewritten on the rule's faces only and uploaded. A run
+    /// with no rule returns at once and changes nothing, bit for bit.
+    ///
+    /// [`Vof::step`] calls it once per step, before the boundary values are
+    /// evaluated; [`Vof::initialise_flux_from_velocity`] and
+    /// [`Vof::initialise`] call it first. Calling it again with nothing
+    /// moved rewrites the same numbers.
+    pub fn refresh_vof_family(&mut self, gpu: &Gpu) -> Result<()> {
+        let (has_a, has_u, has_p) = (
+            !self.alpha.vof_rules.is_empty(),
+            !self.u.vof_rules.is_empty(),
+            !self.p_rgh.vof_rules.is_empty(),
+        );
+        if !(has_a || has_u || has_p) {
+            return Ok(());
+        }
+        let m = self.m;
+
+        if has_a {
+            let cells = gpu.download(&self.alpha.f)?;
+            let mut fr = gpu.download(&self.alpha.fr)?;
+            let mut rv = gpu.download(&self.alpha.ref_value)?;
+            let mut rg = gpu.download(&self.alpha.ref_grad)?;
+            for r in &self.alpha.vof_rules {
+                vof_family::variable_height_alpha(r, &cells, &mut fr, &mut rv, &mut rg);
+            }
+            gpu.write(&mut self.alpha.fr, &fr)?;
+            gpu.write(&mut self.alpha.ref_value, &rv)?;
+            gpu.write(&mut self.alpha.ref_grad, &rg)?;
+            field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.alpha, m)?;
+        }
+        if !(has_u || has_p) {
+            return Ok(());
+        }
+        let alpha_b = gpu.download(&self.alpha.bf)?;
+
+        if has_u {
+            let cells = gpu.download(&self.u.f)?;
+            let mut fr = gpu.download(&self.u.fr)?;
+            let mut rv = gpu.download(&self.u.ref_value)?;
+            let mut rg = gpu.download(&self.u.ref_grad)?;
+            for r in &self.u.vof_rules {
+                match r.kind {
+                    VofFamilyKind::VariableHeightFlowRateInletVelocity { .. } => {
+                        vof_family::variable_height_inlet_velocity(r, &alpha_b, &mut fr, &mut rv, &mut rg)
+                    }
+                    VofFamilyKind::OutletPhaseMeanVelocity { .. } => {
+                        vof_family::outlet_phase_mean_velocity(r, &alpha_b, &cells, &mut fr, &mut rv, &mut rg)
+                    }
+                    _ => {
+                        return Err(Error::Config(format!(
+                            "Vof::refresh_vof_family: patch {} of U carries a scalar VOF-family rule (SPEC-LIT 120.14)",
+                            r.patch
+                        )))
+                    }
+                }
+            }
+            gpu.write(&mut self.u.fr, &fr)?;
+            gpu.write(&mut self.u.ref_value, &rv)?;
+            gpu.write(&mut self.u.ref_grad, &rg)?;
+        }
+
+        if has_p {
+            // `rho_f` of (120.14d) is the mixture density of the face's
+            // CURRENT alpha - the value `update_properties` writes (§20.3).
+            self.update_properties(gpu)?;
+            let rho_b = gpu.download(&self.rho.bf)?;
+            let mut fr = gpu.download(&self.p_rgh.fr)?;
+            let mut rv = gpu.download(&self.p_rgh.ref_value)?;
+            let mut rg = gpu.download(&self.p_rgh.ref_grad)?;
+            for r in &self.p_rgh.vof_rules {
+                vof_family::phase_hydrostatic_pressure(
+                    r,
+                    self.props.g,
+                    &alpha_b,
+                    &rho_b,
+                    &mut fr,
+                    &mut rv,
+                    &mut rg,
+                );
+            }
+            gpu.write(&mut self.p_rgh.fr, &fr)?;
+            gpu.write(&mut self.p_rgh.ref_value, &rv)?;
+            gpu.write(&mut self.p_rgh.ref_grad, &rg)?;
+            // A phase-weighted Dirichlet fixes the level only where the
+            // phase is: the reference level follows it.
+            self.pinned = !self.pressure_has_a_dirichlet(gpu)?;
+        }
+        Ok(())
     }
 
     /// Does any boundary face give `p_rgh` a value rather than a gradient?
@@ -2434,6 +2540,9 @@ impl<'m> Vof<'m> {
         field_ops::update_inlet_outlet_vector(gpu, &self.fldk, &mut self.u, &self.phi)?;
         field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.p_rgh, &self.phi)?;
         field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, &mut self.alpha, &self.phi)?;
+        // SPEC-LIT 120.14: the VOF-family triples follow the alpha the last
+        // step left, once per step, before the faces are evaluated.
+        self.refresh_vof_family(gpu)?;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p_rgh, m)?;
 

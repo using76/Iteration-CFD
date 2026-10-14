@@ -191,6 +191,7 @@ impl AleMesh {
         csr: &FacePointCsr,
         cubin: &[u8],
     ) -> Result<Self> {
+        m.refuse_a_moving_cyclic_ami("AleMesh::new")?;
         if gm.n_cells != m.n_cells
             || gm.n_internal_faces != m.n_internal_faces
             || gm.n_boundary_faces != m.n_boundary_faces

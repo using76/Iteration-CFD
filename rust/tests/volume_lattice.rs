@@ -21,6 +21,11 @@
 //!    `io::vdb::tests::voxmap_round_trip_*` and
 //!    `io::nvdb::tests::voxmap_round_trip`.
 //!
+//! 3. `volume_target_lays_the_world_lattice_on_a_local_mesh` (VIO-05a):
+//!    `output_plan::volume_target` on a mesh the `single` build stores about
+//!    a local origin lays the world mesh's map, owner for owner (117.2
+//!    item 4).
+//!
 //! Written from SPEC-LIT section 117 (117.2, 117.6, 117.8).
 //! Provenance: ORIGINAL.
 //! No GPL-licensed source was consulted.
@@ -29,7 +34,8 @@ use std::path::PathBuf;
 
 use ofgpu::io::nvdb::{self, Precision, UniformGrid};
 use ofgpu::io::output_types::OutputField;
-use ofgpu::io::polymesh::{build_host_mesh, PolyMeshRaw};
+use ofgpu::io::output_plan::volume_target;
+use ofgpu::io::polymesh::{build_host_mesh, build_host_mesh_local, PolyMeshRaw};
 use ofgpu::io::vdb;
 use ofgpu::io::voxelmap::{LatticeActivation, LatticeSample, LatticeSpec, VoxelMap};
 use ofgpu::mesh::refined::refined_core;
@@ -207,4 +213,44 @@ fn lattice_bytes_same_in_both_builds() {
     let want: Vec<(String, String)> =
         LATTICE_PINS.iter().map(|(l, h)| (l.to_string(), h.to_string())).collect();
     assert_eq!(got, want, "the lattice bytes (left: written now, right: the pins)");
+}
+
+// ==========================================================================
+//  3. VIO-05a: the lattice is laid in world coordinates on a local mesh
+// ==========================================================================
+
+/// SPEC-LIT 117.2 item 4 through `output_plan::volume_target`: the 2:1 mesh
+/// moved to `(1000, -2000, 500)`, which the `single` build stores about a
+/// local origin (F32-10, `build_host_mesh_local`). The map laid from that
+/// mesh is the map of the world mesh, owner for owner, with the same world
+/// transform - in both builds, so the `single` map is the f64 one.
+#[test]
+fn volume_target_lays_the_world_lattice_on_a_local_mesh() {
+    let (raw, _) = refined();
+    let shift = DVec3::new(1000.0, -2000.0, 500.0);
+    let raw = PolyMeshRaw { points: raw.points.iter().map(|&p| p + shift).collect(), ..raw };
+    let local = build_host_mesh_local(&raw).expect("build_host_mesh_local");
+    #[cfg(feature = "single")]
+    assert_ne!(local.origin, DVec3::ZERO, "the single build shifts this mesh");
+    #[cfg(not(feature = "single"))]
+    assert_eq!(local.origin, DVec3::ZERO, "the f64 build never shifts");
+    let spec = LatticeSpec { voxel: Some(1.0 / 24.0), ..LatticeSpec::default() };
+    let t = volume_target(Some(&raw), &local, None, &spec).expect("volume_target");
+    let vm = t.vox().expect("a lattice, not a Cartesian box");
+    let world = VoxelMap::build(&raw, &build_host_mesh(&raw).expect("build_host_mesh"), &spec).expect("build");
+    assert_eq!(vm.n, [24, 24, 24]);
+    assert_eq!(vm.n, world.n);
+    assert_eq!(vm.origin(), world.origin(), "the world transform");
+    assert_eq!(vm.origin(), DVec3::new(1000.0 + 1.0 / 48.0, -2000.0 + 1.0 / 48.0, 500.0 + 1.0 / 48.0));
+    let mut owned = 0;
+    for k in 0..24 {
+        for j in 0..24 {
+            for i in 0..24 {
+                assert_eq!(vm.owner(i, j, k), world.owner(i, j, k), "voxel ({i}, {j}, {k})");
+                owned += usize::from(vm.owner(i, j, k).is_some());
+            }
+        }
+    }
+    assert_eq!(owned, 24 * 24 * 24, "the default box is the mesh's own");
+    assert_eq!(vm.report.n_fluid, world.report.n_fluid);
 }

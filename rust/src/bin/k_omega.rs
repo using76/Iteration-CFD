@@ -63,6 +63,7 @@ use ofgpu::field_setup::{
 use ofgpu::io::case::{find_start_time, model_coeff, read_case_controls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField};
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
+use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::models::{select_turbulence_model, KOmega, KOmegaCoeffs, RasModel};
 use ofgpu::turbulence::FlowState;
 use ofgpu::{Error, GpuMesh, Label, Result, Scalar};
@@ -196,6 +197,31 @@ fn run(o: &Options) -> Result<()> {
     gpu.sync()?;
 
     println!("mesh uploaded in {} s", g(t0.elapsed().as_secs_f64()));
+
+    // ---- volume output (SPEC-LIT 117.6 / 117.12, VIO-05a) -----------------
+    //
+    // `-output vdb`/`nvdb` sample onto the cells of a uniform Cartesian box,
+    // or else onto the lattice of 117.3 on its defaults - the command line
+    // states no lattice. Laid once, here, before a kernel runs, so a lattice
+    // that cannot be laid is refused before the loop rather than at the
+    // final write; `-permissive` drops only the volume formats.
+    let cart = ofgpu::pressure::cartesian::detect(&hm).ok().map(|c| ofgpu::io::cartesian_info(&hm, &c));
+    let mut output = o.output.clone();
+    if o.do_write && cart.is_none() && ofgpu::io::has_volume_format(&output) {
+        let no_lattice = ofgpu::io::voxelmap::lattice_shape(&raw_mesh, &hm, &LatticeSpec::default())
+            .err()
+            .map(|e| e.to_string());
+        output = ofgpu::io::output_plan::drop_volume_formats_without_a_lattice(&output, no_lattice.as_deref())?;
+    }
+    let volume = if o.do_write && ofgpu::io::has_volume_format(&output) {
+        let t = ofgpu::io::volume_target(Some(&raw_mesh), &hm, cart, &LatticeSpec::default())?;
+        for line in t.report_lines() {
+            println!("{line}");
+        }
+        Some(t)
+    } else {
+        None
+    };
 
     // ---- controls ---------------------------------------------------------
     let mut cc = read_case_controls(&o.case_dir)?;
@@ -506,20 +532,17 @@ fn run(o: &Options) -> Result<()> {
             ofgpu::io::OutputField::scalar("omega", &out_w.internal),
             ofgpu::io::OutputField::scalar("nut", &out_nut.internal),
         ];
-        let cart = ofgpu::pressure::cartesian::detect(&hm)
-            .ok()
-            .map(|c| ofgpu::io::cartesian_info(&hm, &c));
         let ctx = ofgpu::io::WriteCtx {
             time: 0.0,
             step: done as usize,
             name: &wt,
             mesh: &hm,
             cart: cart.as_ref(),
-            vox: None,
+            vox: volume.as_ref().and_then(|v| v.vox()),
             fields: &vis_fields,
             foam: &foam_fields,
         };
-        let mut writers = build_writers(&o.case_dir, "kOmega", &o.output, ofgpu::io::nvdb::Precision::F32)?;
+        let mut writers = build_writers(&o.case_dir, "kOmega", &output, ofgpu::io::nvdb::Precision::F32)?;
         for w in &mut writers {
             w.write_step(&ctx)?;
         }
