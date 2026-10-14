@@ -23,9 +23,12 @@
   one direction per launch into ofacc accumulators, then one rounding into
   the ofscalar outputs (§118.1) - the only kernels here that do not read
   and write ofscalar alone.
+
+  The in-scattering sum (CHR-21, SPEC-LIT §136.8): (sigma_s/4pi)
+  (G + A_1 Omega_l . q) per cell from the lagged G and q, ofscalar.
   ==========================================================================
 
-  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6, §136.7
+  Written from: SPEC-LIT.md §135.3-§135.7, §137.1, §136.2, §136.6-§136.8
   No GPL-licensed source was consulted. Provenance: see PROVENANCE.md.
 
   Every kernel but the solve's sums is ofscalar in, ofscalar out - the
@@ -374,9 +377,9 @@ extern "C" __global__ void domSetTriple
 }
 
 //- (136.3)'s emission source per cell, before the volume the operator
-//  multiplies it by: kappa sigma T_P^4/pi. The in-scattering sum is
-//  CHR-21's - this unit solves a non-scattering medium, so the source is
-//  exactly this (SPEC-LIT §136.6, "Who must be named"). -
+//  multiplies it by: kappa sigma T_P^4/pi. A scattering medium's
+//  in-scattering sum is added after it by domInScatter (CHR-21), so this
+//  kernel is the emission alone (SPEC-LIT §136.6, §136.8). -
 extern "C" __global__ void domEmission
 (
     ofscalar* __restrict__ su,
@@ -493,4 +496,33 @@ extern "C" __global__ void domRoundFaces
     const oflabel i = OFGPU_TID;
     if (i >= nbf) return;
     wf[i] = (ofscalar)wfAcc[i];
+}
+
+// ==========================================================================
+//  The in-scattering sum (CHR-21, SPEC-LIT §136.2 and §136.8): (136.3)'s
+//  (sigma_s/4pi) sum_l' w_l' Phi I^l', which for linearAnisotropic is
+//  exactly (sigma_s/4pi) (G_P + A_1 Omega_l . q_P), from the LAGGED G and q
+//  of the source iteration. One thread per cell, ofscalar in and out.
+// ==========================================================================
+
+//- su[c] = c0 G_P + c1 (Omega_l . q_P), with c0 = sigma_s/4pi and
+//  c1 = sigma_s A_1/4pi formed in f64 on the host and cast once; the
+//  operator multiplies the cell volume in (fvm_su), as for domEmission. -
+extern "C" __global__ void domInScatter
+(
+    ofscalar* __restrict__ su,
+    const ofscalar* __restrict__ g,
+    const ofvec3* __restrict__ q,
+    ofscalar ox,
+    ofscalar oy,
+    ofscalar oz,
+    ofscalar c0,
+    ofscalar c1,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    const ofvec3 qc = q[c];
+    su[c] = c0*g[c] + c1*(ox*qc.x + oy*qc.y + oz*qc.z);
 }

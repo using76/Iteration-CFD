@@ -8,12 +8,15 @@
 //! The discrete-ordinates rows of the fvDOM radiation model (SPEC-LIT
 //! §136.2, §136.6): one first-order upwind row per direction - the step
 //! scheme - with the boundary intensities of §136.2's table, for one
-//! uniform grey NON-scattering medium on one mesh.
+//! uniform grey medium on one mesh, absorbing and, since CHR-21, scattering
+//! isotropically or linear-anisotropically.
 //!
-//! The row is (136.3) with no in-scattering sum (scattering is CHR-21's and
-//! is refused until then): `diag`-side `sum_f max(Omega.S_f, 0) + kappa V`,
-//! off-diagonals `min(Omega.S_f, 0)`, source `kappa (sigma T_P^4/pi) V` plus
-//! the incoming boundary faces' `-min(Omega.S_b, 0) I_b^l`. It is NOT a new
+//! The row is (136.3): `diag`-side `sum_f max(Omega.S_f, 0) + beta V` with
+//! `beta = kappa + sigma_s`, off-diagonals `min(Omega.S_f, 0)`, source
+//! `kappa (sigma T_P^4/pi) V` plus the incoming boundary faces'
+//! `-min(Omega.S_b, 0) I_b^l`, plus - from [`DomRows::add_in_scatter`] - the
+//! lagged in-scattering sum `(sigma_s/4pi) (G_P + A_1 Omega_l . q_P) V`
+//! (§136.2, source iteration; SPEC-LIT §136.8). It is NOT a new
 //! discretisation: the convection is the crate's own Gauss upwind
 //! ([`crate::fv::fvm_div_gauss`] under [`crate::fv::DivScheme::Upwind`]) of
 //! the face flux `phi_f = Omega_l . S_f`, the sink is
@@ -30,10 +33,12 @@
 //! both capture into a CUDA graph (SPEC-LIT §81); the gate is
 //! [`tests::dom_replays_under_capture`].
 //!
-//! [`DomSolve`] (CHR-20, SPEC-LIT §136.7) solves the rows: one sweep updates
-//! the boundary intensities, assembles and solves every direction with the
-//! crate's own Krylov solver (PBiCGStab; PCG and DIC are refused, the rows
-//! being asymmetric), and sums (136.4)'s `G`, `q` and wall flux in `ofacc`
+//! [`DomSolve`] (CHR-20, SPEC-LIT §136.7; scattering CHR-21, §136.8) solves
+//! the rows: one sweep updates the boundary intensities, assembles every
+//! direction, adds the in-scattering sum from the previous sweep's `G` and
+//! `q` (zero on the first sweep), solves it with the crate's own Krylov
+//! solver (PBiCGStab; PCG and DIC are refused, the rows being asymmetric),
+//! and sums (136.4)'s `G`, `q` and wall flux in `ofacc`
 //! (§118.1); [`DomSolve::solve`] repeats the sweep until `G` stops changing
 //! by `tol` or the sweep cap is met, which is reported, never accepted
 //! silently. [`DomSolve::sweep`] is launches only under `fixed_iters`
@@ -67,12 +72,12 @@ use super::props;
 //  The medium and the boundary conditions
 // ==========================================================================
 
-/// The uniform grey non-scattering medium the discrete-ordinates rows solve
-/// for: the absorption coefficient `kappa` (1/m - `kappa = 0` IS accepted, a
+/// The uniform grey medium the discrete-ordinates rows solve for: the
+/// absorption coefficient `kappa` (1/m - `kappa = 0` IS accepted, a
 /// transparent medium's row is finite, unlike P1's), the scattering
-/// coefficient `sigma_s` (0 in this unit - the in-scattering sum is CHR-21's),
-/// and the linear-anisotropic phase function's `a1` (dimensionless,
-/// `|a1| <= 1`).
+/// coefficient `sigma_s` (1/m, `>= 0`; the in-scattering sum is lagged
+/// source iteration, CHR-21, SPEC-LIT §136.8), and the linear-anisotropic
+/// phase function's `a1` (dimensionless, `|a1| <= 1`; 0 is isotropic).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DomMedium {
     pub kappa: f64,
@@ -163,7 +168,7 @@ const KIND_NONE: Label = 3;
 //  The device kernels of cuda/radiation.cu
 // ==========================================================================
 
-/// The six dom kernels of `cuda/radiation.cu`, loaded once per [`DomRows`].
+/// The seven row kernels of `cuda/radiation.cu`, loaded once per [`DomRows`].
 struct DomKernels {
     flux_internal: CudaFunction,
     flux_boundary: CudaFunction,
@@ -171,6 +176,7 @@ struct DomKernels {
     boundary_intensity: CudaFunction,
     set_triple: CudaFunction,
     emission: CudaFunction,
+    in_scatter: CudaFunction,
 }
 
 impl DomKernels {
@@ -183,6 +189,7 @@ impl DomKernels {
             boundary_intensity: k.func("domBoundaryIntensity")?,
             set_triple: k.func("domSetTriple")?,
             emission: k.func("domEmission")?,
+            in_scatter: k.func("domInScatter")?,
         })
     }
 }
@@ -245,9 +252,11 @@ pub struct DomRows {
     bw_if: DevBuf<Scalar>,
     /// The wall rows' reflection sum, reused per update.
     refl_sum: DevBuf<Scalar>,
-    /// `[n_cells]` kappa, uniform - [`crate::fv::fvm_sp`]'s per-cell operand.
-    kappa_cells: DevBuf<Scalar>,
-    /// `[n_cells]` the emission `kappa sigma T^4/pi`, rewritten per assemble.
+    /// `[n_cells]` the extinction `beta = kappa + sigma_s`, uniform -
+    /// [`crate::fv::fvm_sp`]'s per-cell operand.
+    beta_cells: DevBuf<Scalar>,
+    /// `[n_cells]` the emission `kappa sigma T^4/pi`, rewritten per assemble,
+    /// then the in-scattering sum per [`DomRows::add_in_scatter`].
     su: DevBuf<Scalar>,
 
     k: DomKernels,
@@ -283,14 +292,11 @@ impl DomRows {
                  must be non-negative and finite (SPEC-LIT §136.2)"
             )));
         }
-        if !sigma_s.is_finite() || sigma_s != 0.0 {
+        if !sigma_s.is_finite() || sigma_s < 0.0 {
             return Err(Error::Config(format!(
                 "radiation::dom::DomMedium: sigma_s {sigma_s} is refused - \
-                 scattering until CHR-21: the in-scattering sum of (136.3) \
-                 is lagged source iteration and is not built yet, so a row \
-                 with beta = kappa + sigma_s and no in-scattering source \
-                 would be pure extinction, a different medium (SPEC-LIT \
-                 §136.6)"
+                 the scattering coefficient must be non-negative and finite \
+                 (SPEC-LIT §136.2)"
             )));
         }
         if a1.abs() > 1.0 {
@@ -325,7 +331,10 @@ impl DomRows {
             intensities.push(GpuScalarField::zeros(gpu, m, &format!("I{l}"))?);
             boundary.push(gpu.zeros(hm.n_boundary_faces)?);
         }
-        let kappa_h = vec![kappa as Scalar; hm.n_cells];
+        // beta = kappa + sigma_s, formed in f64 and cast once: with
+        // sigma_s = 0 it is kappa bitwise, so a non-scattering medium's rows
+        // are CHR-19's exactly.
+        let beta_h = vec![(kappa + sigma_s) as Scalar; hm.n_cells];
         Ok(Self {
             medium: *medium,
             quad: quad.clone(),
@@ -347,7 +356,7 @@ impl DomRows {
             w_if: gpu.zeros(m.n_internal_faces.max(1))?,
             bw_if: gpu.zeros(hm.n_boundary_faces.max(1))?,
             refl_sum: gpu.zeros(hm.n_boundary_faces)?,
-            kappa_cells: gpu.upload(&kappa_h)?,
+            beta_cells: gpu.upload(&beta_h)?,
             su: gpu.zeros(hm.n_cells)?,
             k: DomKernels::new(gpu)?,
             fvk: FvKernels::new(gpu)?,
@@ -626,9 +635,11 @@ impl DomRows {
     /// other equation in this crate does - and then a solve. The Gauss
     /// upwind of the face flux `phi_f = Omega_l . S_f` IS (136.3)'s
     /// convection (SPEC-LIT §136.6, "The row on the crate's operators");
-    /// `fvm_sp` adds the implicit sink `kappa V` and `fvm_su` the emission
-    /// `kappa sigma T_P^4/pi V`. Pure launches: no allocation, no download,
-    /// no host write (SPEC-LIT §81).
+    /// `fvm_sp` adds the implicit sink `beta V` (`beta = kappa + sigma_s`)
+    /// and `fvm_su` the emission `kappa sigma T_P^4/pi V`. A scattering
+    /// medium's in-scattering sum is NOT here: it needs the lagged `G` and
+    /// `q`, and [`DomRows::add_in_scatter`] adds it after this call. Pure
+    /// launches: no allocation, no download, no host write (SPEC-LIT §81).
     pub fn assemble(
         &mut self,
         gpu: &Gpu,
@@ -720,9 +731,8 @@ impl DomRows {
             &self.intensities[l],
             1.0,
         )?;
-        // The implicit absorption sink: beta V with beta = kappa, the only
-        // non-zero part of beta until CHR-21 lands the scattering sum.
-        fv::fvm_sp(gpu, &self.fvk, a, m, &self.kappa_cells, 1.0)?;
+        // The implicit extinction sink beta V, beta = kappa + sigma_s.
+        fv::fvm_sp(gpu, &self.fvk, a, m, &self.beta_cells, 1.0)?;
         // The emission kappa sigma T_P^4/pi per cell; fvm_su multiplies the
         // cell volume in.
         if self.n_cells > 0 {
@@ -773,6 +783,73 @@ impl DomRows {
     /// [`DomRows::update_boundaries`].
     pub fn boundary_intensity(&self, l: usize) -> &DevBuf<Scalar> {
         &self.boundary[l]
+    }
+
+    /// Add (136.3)'s in-scattering sum to direction `l`'s row, which
+    /// [`DomRows::assemble`] has just built in `a`: the source gains
+    /// `(sigma_s/4pi) (G_P + A_1 Omega_l . q_P) V_P`, with `g` and `q` the
+    /// LAGGED `G` and `q` of SPEC-LIT §136.2's source iteration (the previous
+    /// sweep's, §136.8). For `linearAnisotropic`, `sum_l' w_l' Phi I^l'` is
+    /// exactly `G + A_1 Omega_l . q` (§136.2), so no per-pair phase matrix
+    /// exists. A non-scattering medium (`sigma_s == 0`) launches nothing, so
+    /// its rows are CHR-19's bitwise. Pure launches (SPEC-LIT §81).
+    pub fn add_in_scatter(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        l: usize,
+        g: &DevBuf<Scalar>,
+        q: &DevBuf<Vec3>,
+        a: &mut GpuLduMatrix,
+    ) -> Result<()> {
+        Self::check_mesh(
+            m,
+            self.n_cells,
+            self.n_internal_faces,
+            self.n_bf,
+            "DomRows::add_in_scatter",
+        )?;
+        if l >= self.n_dirs {
+            return Err(Error::Config(format!(
+                "DomRows::add_in_scatter: direction {l} is out of range - the \
+                 quadrature has {} directions (SPEC-LIT §136.1)",
+                self.n_dirs
+            )));
+        }
+        if g.len() != self.n_cells || q.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "DomRows::add_in_scatter: G has {} and q has {} entries, the \
+                 mesh {} cells (SPEC-LIT §136.2)",
+                g.len(),
+                q.len(),
+                self.n_cells
+            )));
+        }
+        if self.medium.sigma_s == 0.0 || self.n_cells == 0 {
+            return Ok(());
+        }
+        // The two coefficients in f64, cast once (§136.5's rule for every
+        // number the host hands the kernels).
+        let four_pi = 4.0 * std::f64::consts::PI;
+        let c0 = (self.medium.sigma_s / four_pi) as Scalar;
+        let c1 = (self.medium.sigma_s * self.medium.a1 / four_pi) as Scalar;
+        let [ox, oy, oz] = self.omega_host[l];
+        let nl = self.n_cells as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.k.in_scatter)
+                .arg(&mut self.su)
+                .arg(g)
+                .arg(q)
+                .arg(&ox)
+                .arg(&oy)
+                .arg(&oz)
+                .arg(&c0)
+                .arg(&c1)
+                .arg(&nl)
+                .launch(cfg_for(self.n_cells))?;
+        }
+        fv::fvm_su(gpu, &self.fvk, a, m, &self.su, 1.0)
     }
 }
 
@@ -841,7 +918,8 @@ impl DomSolveKernels {
     }
 }
 
-/// The fvDOM solve of a non-scattering grey medium (SPEC-LIT §136.7): the
+/// The fvDOM solve of a grey medium (SPEC-LIT §136.7), scattering by lagged
+/// source iteration (§136.2, CHR-21's §136.8): the
 /// rows of [`DomRows`], one matrix reused by every direction, the linear
 /// solver's workspace, and (136.4)'s outputs `G`, `q` and wall flux with
 /// their `ofacc` accumulators - every buffer allocated in [`DomSolve::new`],
@@ -955,8 +1033,10 @@ impl DomSolve {
     }
 
     /// One sweep, SPEC-LIT §136.7 steps 1-4: the boundary intensities from
-    /// the current `I^l`; every direction assembled, folded and solved into
-    /// `I^l` (warm-started from it); then (136.4)'s `G`, `q` and wall flux
+    /// the current `I^l`; every direction assembled, given the in-scattering
+    /// sum of the previous sweep's `G` and `q` (§136.8; nothing when
+    /// `sigma_s = 0`), folded and solved into `I^l` (warm-started from it);
+    /// then (136.4)'s `G`, `q` and wall flux
     /// summed in `ofacc` from the boundary values the rows were assembled
     /// with, and rounded once. Returns the number of direction solves that
     /// did not report convergence. Launches only - no host read or write -
@@ -970,6 +1050,10 @@ impl DomSolve {
         let mut unconverged = 0usize;
         for l in 0..self.rows.n_dirs {
             self.rows.assemble(gpu, m, t, l, &mut self.a)?;
+            // The lagged in-scattering sum from the previous sweep's G and q
+            // (still in self.g/self.q: step 3 rewrites them only after every
+            // direction is solved) - SPEC-LIT §136.2's source iteration.
+            self.rows.add_in_scatter(gpu, m, l, &self.g, &self.q, &mut self.a)?;
             ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
             let perf = solver::solve(
                 gpu,
@@ -1211,14 +1295,16 @@ mod tests {
     }
 
     /// The registry's gate (`src/capture/registry.rs`, row
-    /// `src/radiation/dom.rs`), in two captures. First, the boundary update
+    /// `src/radiation/dom.rs`), in three captures. First, the boundary update
     /// and the assembly of EVERY direction of S4 - one matrix per
     /// direction, so the compared state covers every direction's boundary
     /// intensities and every direction's assembled diag/upper/lower/source/
     /// internal_coeffs/boundary_coeffs - capture into a CUDA graph and
     /// replay bitwise against the per-launch path, on mesh B with
     /// non-uniform intensities. Second, one whole [`DomSolve::sweep`] with
-    /// fixed-iteration linear controls (SPEC-LIT §136.7).
+    /// fixed-iteration linear controls (SPEC-LIT §136.7). Third, two sweeps
+    /// of a scattering medium, the second reading the first's `G` and `q`
+    /// through [`DomRows::add_in_scatter`] (§136.8).
     #[test]
     fn dom_replays_under_capture() {
         let Some(gpu) = gpu() else { return };
@@ -1372,6 +1458,63 @@ mod tests {
         )
         .expect("SPEC-LIT 81.7: the fvDOM sweep must capture and replay bitwise");
         println!("  DOM sweep: {report}");
+
+        // CHR-21 (SPEC-LIT §136.8): a scattering medium's step is TWO
+        // sweeps, so the second reads the first's non-zero G and q through
+        // the in-scattering launches; the compared state is every I^l, G,
+        // q and the wall flux.
+        let report = crate::capture::capture_replays_bitwise(
+            &gpu,
+            "the scattering fvDOM sweeps and their in-scattering sums (SPEC-LIT 136.8)",
+            || {
+                let (hm, m) = mesh_b(&gpu)?;
+                let quad = Quadrature::new(SnOrder::S4)?;
+                let ctrl = DomControls {
+                    linear: SolverControls {
+                        solver: LinearSolverKind::PBiCGStab,
+                        precon: Preconditioner::Diagonal,
+                        fixed_iters: true,
+                        report_residuals: false,
+                        max_iter: 20,
+                        ..SolverControls::default()
+                    },
+                    ..DomControls::default()
+                };
+                let dom = DomSolve::new(
+                    &gpu,
+                    &hm,
+                    &m,
+                    &DomMedium { kappa: 2.0, sigma_s: 1.0, a1: 0.5 },
+                    &quad,
+                    &patches_b(0.5, WallTemperature::Fixed(1000.0), 1000.0),
+                    ctrl,
+                )?;
+                let t = uniform_t(&gpu, &m, 1000.0)?;
+                Ok((dom, m, t))
+            },
+            |(dom, m, t): &mut (DomSolve, GpuMesh, GpuScalarField)| {
+                dom.sweep(&gpu, m, t)?;
+                dom.sweep(&gpu, m, t)?;
+                Ok(())
+            },
+            |(dom, _m, _t): &(DomSolve, GpuMesh, GpuScalarField)| {
+                let mut state: crate::capture::Snapshot = Vec::new();
+                let mut inten = Vec::new();
+                for l in 0..dom.rows().n_dirs() {
+                    inten.extend(gpu.download(&dom.rows().intensity(l).f)?);
+                }
+                state.push(("dom scatter intensities", inten));
+                state.push(("dom scatter G", gpu.download(dom.g())?));
+                let q = gpu.download(dom.q())?;
+                state.push(("dom scatter q x", q.iter().map(|v| v.x).collect()));
+                state.push(("dom scatter q y", q.iter().map(|v| v.y).collect()));
+                state.push(("dom scatter q z", q.iter().map(|v| v.z).collect()));
+                state.push(("dom scatter wall flux", gpu.download(dom.wall_flux())?));
+                Ok(state)
+            },
+        )
+        .expect("SPEC-LIT 81.7: the scattering fvDOM sweeps must capture and replay bitwise");
+        println!("  DOM scatter sweeps: {report}");
     }
 }
 

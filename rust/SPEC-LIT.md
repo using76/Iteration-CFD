@@ -45332,9 +45332,9 @@ class.
 | `dom_refuses_oblique_symmetry` | a symmetry face normal off-axis by more than 1e-12 | refused | D |
 | `dom_slab_exact` | 3-D slab with symmetry sides, `ω = 0`: `Ψ` against (135.6) at `τ` = 0.1, 1, 10 | S8 within 2 % on the fine mesh (`τ = 0.1` MISSED by S8's own angular error, §136.7; the miss was accepted by the user on 2026-10-14) | P |
 | `dom_error_falls_with_order` | the same, S4 then S8 | error non-increasing | P |
-| `dom_scatter_slab` (the plan's `dom_scatter_heaslet_warming`, renamed: Heaslet & Warming is not this case) | `ω = 0.5`, `τ = 1`, `A_1 = 0`, then `±0.5`: against (136.5) solved in the test | S8 within 2 % | P |
+| `dom_scatter_slab` (the plan's `dom_scatter_heaslet_warming`, renamed: Heaslet & Warming is not this case) | `ω = 0.5`, `τ = 1`, `A_1 = 0`, then `±0.5`: against (136.5) solved in the test | S8 within 2 % (on `N = 32`, the stricter mesh; `N = 256` measured, §136.8) | P |
 | `scatter_oracle_reduces_to_e3` | (136.5) with `ω = 0` against (135.6) | 1e-12 relative | A |
-| `dom_cube_exact_integral` | cube centre-wall flux at `κL` = 0.1, 1, 10 against (136.6) in the test, REDUCED to `24^3` | S8 within 3 %, S4 within 6 % | P |
+| `dom_cube_exact_integral` | cube centre-wall flux at `κL` = 0.1, 1, 10 against (136.6) in the test, REDUCED to `24^3` | S8 within 3 %, S4 within 6 % (`κL = 0.1` MISSED in both sets, S8 by the step scheme's spatial error and S4 by its own angular limit, §136.8) | P |
 | `cube_integral_matches_jamaluddin_smith` | transcription cross-check | NAMED, NOT RUN (closed source) | — |
 | `dom_scatter_cap_is_reported` | a case that hits `maxScatterIterations` | counted and printed | D |
 | `wsgg_slab_sum_of_grey_gases` | homogeneous slab: per-gas DOM against `Σ a_j (1 - 2E_3(κ_j L))`; the per-gas P1 sum against `Σ_j a_j` times the grey P1 solve at `κ_j` | DOM: within the method's own grey-slab error at the same mesh and set; P1: round-off (`tol32` in f32) | P / R |
@@ -45626,6 +45626,188 @@ gated.
 | `dom_replays_under_capture` | extended to one `DomSolve::sweep` | bitwise | D |
 
 Labels: (136.1)-(136.13).
+
+### 136.8 Scattering by source iteration, and the isothermal cube (CHR-21)
+
+**ORIGINAL.** Nothing here is a new discretisation. The row is (136.3),
+the lag is §136.2's source iteration, and the loop is §136.7's. Both
+references, (136.5) and (136.6), are computed in the test (§136.3).
+
+**The row with scattering.** The extinction sink is `β V_P` with
+`β = κ + σ_s`, formed in f64 and cast once. With `σ_s = 0` it is `κ`
+bitwise, and no in-scattering launch runs, so a non-scattering medium's
+rows are CHR-19's bit for bit. In sweep `k`, direction `l`'s source gains
+the in-scattering sum of the previous sweep's `G` and `q`:
+
+```
+S_P^l = κ I_b,P + (σ_s / 4π) ( G_P^(k-1) + A_1 Ω_l · q_P^(k-1) )               (136.14)
+```
+
+`G^(0) = q^(0) = 0`. For `linearAnisotropic`,
+`Σ_l' w_l' Φ(Ω_l', Ω_l) I^l' = G + A_1 Ω_l·q` exactly (§136.2), so no
+per-pair phase matrix is formed. The two coefficients `σ_s/4π` and
+`σ_s A_1/4π` are formed in f64 and cast once. The kernel evaluates the
+sum per cell in `ofscalar`. `DomRows::add_in_scatter` adds it after
+`DomRows::assemble`, and `DomSolve::sweep` calls it with its own `G` and
+`q`, which step 3 rewrites only after every direction is solved. The loop
+stops on §136.7's `change`, which is §136.2's `scatterTol`.
+
+**On the slab** (§136.7's mesh, `τ = β L`, `ω = σ_s/β`), the mirror faces
+cancel at the fixed point, as in §136.7, and `q` is along `x`. (136.14)
+then gives the host recurrence
+`I_j = (μ I_(j-1) + Δx S_j^l)/(μ + β Δx)`, iterated in the test until `G`
+changes by less than 1e-15. That is the R twin of the device slab.
+
+**The energy balance with the lag.** Repeat §136.7's sum with (136.14)'s
+source. The in-scattering term gives `σ_s G^(k-1)` per unit volume
+(`Σ w = 4π`, `Σ w Ω = 0`), and the extinction gives `σ_s G^(k)`:
+
+```
+Σ_b (q_w·n)_b |S_b| = Σ_P V_P [ κ (4σT_P^4 - G_P^(k)) + σ_s (G_P^(k-1) - G_P^(k)) ]  (136.15)
+```
+
+It is exact for every sweep's rows, so the test takes the `G` of a
+converged solve as `G^(k-1)`, runs one more sweep, and checks (136.15) to
+the linear solve's residual. The `A_1` term is kept in the host sum through
+the quadrature's own `Σ w Ω`, which is zero to round-off.
+
+**The product integration of (136.5).** On a panel `[s_p, s_(p+1)]` of
+length `h` that does not contain `t_i`, write `x` for `|t_i - s|`. Let
+`x_0` be the distance of the panel node nearer to `t_i` and `x_1` that of
+the farther one. Then, for the linear hat functions,
+
+```
+M_0 = E_(n+1)(x_0) - E_(n+1)(x_1)
+M_1 = x_0 E_(n+1)(x_0) + E_(n+2)(x_0) - x_1 E_(n+1)(x_1) - E_(n+2)(x_1)
+∫ E_n(x) φ_near = (x_1 M_0 - M_1)/h,     ∫ E_n(x) φ_far = (M_1 - x_0 M_0)/h     (136.16)
+```
+
+from `∫ E_n = -E_(n+1)` and `∫ x E_n = -x E_(n+1) - E_(n+2)`, which
+follow from `E_n(x) = ∫_1^∞ e^(-xt) t^(-n) dt` and A&S 5.1.14.
+`E_n(0) = 1/(n - 1)`.
+The nodes are `s_j = τ (1 - cos(π j/M))/2`. The `2(M+1)` linear equations
+for `a` and `b` are solved densely, and `M = 200` and `400` are Richardson
+extrapolated at second order. The test's numbers, in f64:
+
+| `ω` | `A_1` | `Ψ` (test) | §136.3's table |
+|---|---|---|---|
+| 0 | 0 | 0.780616065604 (= (135.6) to 1e-12, the A row) | 0.7806160656 |
+| 0.5 | 0 | 0.5591260094 | 0.5591260 |
+| 0.5 | +0.5 | 0.5621486383 | 0.5621486 |
+| 0.5 | -0.5 | 0.5561463739 | 0.5561464 |
+
+**The scattering slab (S8, `τ = 1`, `ω = 0.5`).** The device, both walls
+equal, with the error against (136.5):
+
+| `A_1` | `N = 32` (device, test) | sweeps | `N = 256` (host (136.14)) |
+|---|---|---|---|
+| 0 | 0.5545332021, -8.2143e-3 | 55 | -3.4386e-3 (device, measured: 0.5572033854, 169 sweeps) |
+| +0.5 | 0.5573287329, -8.5741e-3 | 54 | -3.5355e-3 |
+| -0.5 | 0.5517850892, -7.8420e-3 | 55 | -3.3408e-3 |
+
+The error falls monotonically with `N` (`A_1 = 0`: -8.21e-3 at 32,
+-5.48e-3 at 64, -3.44e-3 at 256), so `N = 32` is the stricter mesh, and
+it holds the 2 % row with a wide margin. The gate runs at `N = 32` in both
+builds. At `N = 256` the lagged mirror coupling and the scattering lag
+together take 169 sweeps at the test's `tol` of 1e-12. That is about ten
+minutes per solve on the shared GPU. It is a supervisor-measured run (the
+`A_1 = 0` row above), not a test. S4 at `N = 32` is -1.79e-3 (`A_1 = 0`),
+-2.15e-3 (+0.5) and -1.42e-3 (-0.5). Every device slab matches (136.14)
+within the R row's 1e-10 in f64.
+
+**The cube (136.6) on `24^3`, cold black walls.** The wall-centre value is
+the mean of the four zMin faces that meet at the centre. Every zMin face
+is also checked against a host step scheme in f64 on the same mesh: with
+nothing entering, each direction's rows are lower-triangular in the order
+of `Ω·c`, and one upwind pass solves them. The device matches it at the R
+class. The ordinates' own value at the wall centre, each direction
+integrated exactly along its ray, is what the step scheme approaches as
+the mesh is refined:
+
+```
+Ψ_Sn = (1/π) Σ_{Ω_z<0} w |Ω_z| [ 1 - exp(-κ s_l) ],   s_l = min(1/|Ω_z|, 0.5/|Ω_x|, 0.5/|Ω_y|)   (136.17)
+```
+
+The test's adaptive Simpson evaluation of (136.6) gives 0.079153243991,
+0.553727788763 and 0.998939481554, which are §136.3's table to 1e-9. The
+errors against (136.6):
+
+| `κ L` | S4, `24^3` | S4 limit (136.17) | S8, `24^3` | S8 limit (136.17) |
+|---|---|---|---|---|
+| 0.1 | +4.4485e-2 | **+6.4497e-2** | **-3.1005e-2** | +8.0137e-3 |
+| 1 | +1.2098e-2 | +3.1484e-2 | -2.8276e-2 | +1.1283e-2 |
+| 10 | -2.6126e-3 | -5.5411e-4 | -1.7247e-3 | +2.2017e-4 |
+
+Each solve takes 2 or 3 sweeps (no reflection, no symmetry lag).
+
+**`dom_cube_exact_integral` is MISSED at `κ L = 0.1`, in both sets.**
+
+* **S8 is outside 3 % on `24^3`** (-3.10 %). The cause is the step
+  scheme's spatial error. S8's own limit (136.17) is +0.80 %, inside
+  3 %, and refining approaches it: `32^3` gives -2.63 % (in the test),
+  and the supervisor's host probe gives -2.08 % at `48^3`. `24^3` is the
+  plan's REDUCED size. The tolerance is not widened, and the mesh is not
+  changed to pass (docs/17 §5.3).
+* **S4 is inside 6 % on `24^3` (+4.45 %) only by cancellation.** S4's own
+  angular limit (136.17) is +6.45 %, outside 6 %, and the step scheme
+  approaches it from below (host probe: +5.36 % at `32^3`, +6.15 % at
+  `48^3`). As at §136.7's `τ = 0.1`, the coarse mesh "passes" because its
+  spatial error cancels part of the angular one. That is not a pass.
+
+The test asserts both misses and their causes: for S8, `e < -3 %`,
+`|e_limit| <= 3 %` and `|e_32| < |e_24|`; for S4, `|e| <= 6 %`,
+`e_limit > 6 %` and `e < e_limit`. It prints both rows as MISSED. At
+`κ L = 1` and `10` both sets hold their bands. The choice of what to do
+with the `κ L = 0.1` row (a finer mesh for S8, or a higher-order set
+for S4) is the user's (docs/17 §11).
+
+**Under `single`** every CHR-21 row holds at the same P bands and at the
+R class's `tol32`. That includes the `24^3` and `32^3` cube solves: the
+f32 PBiCGStab converges on these 24- and 32-cell chains, and §136.7's f32
+miss begins on longer ones. The cube errors equal the f64 ones to the
+printed digits (S8, `κ L = 1`: -2.8276e-2), and the solves stop after 2
+sweeps. S8 on the `N = 32` scattering slab gives -8.2161e-3, -8.5758e-3
+and -7.8434e-3 (`A_1 = 0`, +0.5, -0.5).
+
+**The sweep tolerance of the scattering slab under `single` is 1e-6, a
+test control.** The mirror lag and the scattering lag together contract
+by about 0.6 per sweep on this slab (55 sweeps to 1e-12 in f64). Stopping
+at `change < tol` therefore leaves an iteration error of up to about
+`1.5 tol`. At §136.7's f32 default of 1e-5, the measured solve stopped
+after 23 sweeps, 1.18e-5 away from (136.14), outside the R row's 1e-5.
+At 1e-6 (about 17 f32 ulps of `G`) the solves take 25 to 28 sweeps and
+hold the row. The R tolerance is unchanged. The library default stays
+1e-5, as §136.7 states. `change` bounds the last step, not the distance
+to the fixed point, and a caller that needs `G` closer than that sets
+`tol` lower.
+
+**`cube_integral_matches_jamaluddin_smith` is NAMED and NOT RUN**
+(§136.3): the paper is closed and was not read. The test asserts that
+`reference/jamaluddin-smith1988/` does not exist and prints the row. The
+day a read copy lands, the test fails until the transcription check is
+built.
+
+**Against the plan (the tree wins).** docs/17's row names the test
+`dom_scatter_heaslet_warming` and the file `src/radiation/tests_cube.rs`.
+The test is `dom_scatter_slab`, as §136.5 renamed it. Every CHR-21 test
+lives in `tests/radiation_dom.rs`, because the library's own test target
+does not compile under `single` and the f32 arm must run.
+
+**CHR-21's rows** (classes as §136.5; R rows use `tol32` under `single`):
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `scatter_oracle_reduces_to_e3` | (136.5) at `ω = 0` against (135.6); the `ω = 0.5` values against §136.3's table | 1e-12 relative; 1e-7 | A |
+| `dom_scatter_slab` | S8, `N = 32`, `ω = 0.5`, `τ = 1`, `A_1 = 0, ±0.5`, both walls, against (136.5) | 2 % | P |
+| `dom_scatter_slab_is_the_step_recurrence` | the device scattering slab against (136.14), S4 and S8, `N = 32` (asserted on every scattering slab solve) | 1e-10 relative | R |
+| `dom_scatter_energy_balance` | (136.15) on mesh B, `κ = 2`, `σ_s = 1`, `A_1 = 0.5` | 1e-10 relative to `Σ κ V 4σT^4` | R |
+| `dom_scatter_cap_is_reported` | `max_sweeps = 2` with scattering on mesh B | `converged = false`, two sweeps, `change` reported and printed | D |
+| `dom_cube_exact_integral` | cube centre-wall flux, `κ L = 0.1, 1, 10`, `24^3`, against (136.6); every zMin face against the host step scheme | S8 3 %, S4 6 %; `κ L = 0.1` MISSED in both sets, asserted as above; faces 1e-10 of the largest | P / R |
+| `cube_integral_matches_jamaluddin_smith` | the transcription cross-check | NAMED, NOT RUN | — |
+| `dom_refuses_negative_scattering` | `σ_s < 0` or not finite | refused by name | D |
+| `dom_replays_under_capture` | extended to two sweeps of a scattering medium | bitwise | D |
+
+Labels: (136.14)-(136.17).
 
 ---
 
