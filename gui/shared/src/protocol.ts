@@ -860,6 +860,8 @@ export const REST = {
   llmSettings: '/api/llm/settings',
   registry: '/api/registry',
   caseSchema: '/api/schema/case-1.json',
+  /** POST {path, content}: validate an editor buffer as case_validate would, without writing (save_case). */
+  caseValidate: '/api/case/validate',
   fsTree: '/api/fs/tree',
   fsFile: '/api/fs/file',
   fsSearch: '/api/fs/search',

@@ -157,9 +157,6 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  new_case: 'STU-05',
-  validate_case: 'STU-05',
-  save_case: 'STU-05',
   open_mesh_dialog: 'STU-06a',
   start_mesh: 'STU-06a',
   open_mesh_view: 'STU-06b',

@@ -4,10 +4,13 @@
 // session carries the commands. The run commands are the exception:
 // set_run_setting / start_run / stop_run (and the legacy run command) are
 // applied on the server through guiRun.ts's delegation to run_start /
-// run_stop, never forwarded to the window.
+// run_stop, never forwarded to the window. So are new_case / validate_case,
+// through guiCase.ts's delegation to case_create / case_validate; save_case
+// goes to the window, which owns the editor buffer it writes.
 import { UiCommandSchema, type UiState } from '@cfd/shared'
 import { z } from 'zod'
 import { okResult, type ToolDef } from './context.js'
+import { guiCasePreview, guiNewCase, guiValidateCase } from './guiCase.js'
 import { applyRunSetting, guiRunDelegate, guiRunPreview, guiStartRun, guiStopRun } from './guiRun.js'
 
 const UI_COMMAND_TIMEOUT_MS = 5_000
@@ -24,6 +27,9 @@ export const guiControl: ToolDef<typeof UiCommandSchema> = {
     const delegate = guiRunDelegate(cmd)
     if (delegate === 'run_start') return guiStartRun(ctx)
     if (delegate === 'run_stop') return guiStopRun(cmd.type === 'stop_run' ? (cmd.runId ?? null) : null, ctx)
+    // The case commands likewise (guiCase.ts): case_create / case_validate.
+    if (cmd.type === 'new_case') return guiNewCase(cmd, ctx)
+    if (cmd.type === 'validate_case') return guiValidateCase(cmd, ctx)
     const res = await ctx.hub.requestUi(cmd, { timeoutMs: UI_COMMAND_TIMEOUT_MS, sessionId: ctx.sessionId })
     if (!res.ok) {
       const code = res.error?.code ?? 'UI_ERROR'
@@ -32,9 +38,9 @@ export const guiControl: ToolDef<typeof UiCommandSchema> = {
     }
     return okResult({ ok: true, command: cmd.type, state: res.state })
   },
-  // The approval card for a delegated run command; null for every other
-  // gui_control command, which policy classifies as auto anyway.
-  preview: (cmd, ctx) => guiRunPreview(cmd, ctx),
+  // The approval card for a delegated run command or new_case; null for every
+  // other gui_control command, which policy classifies as auto anyway.
+  preview: async (cmd, ctx) => (await guiRunPreview(cmd, ctx)) ?? guiCasePreview(cmd, ctx),
 }
 
 export const guiState: ToolDef<z.ZodObject<Record<string, never>>> = {

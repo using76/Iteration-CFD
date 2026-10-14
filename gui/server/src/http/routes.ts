@@ -17,6 +17,7 @@ import { whereSchema } from '../tools/ontology.js'
 import { geometryService } from '../tools/geometry.js'
 import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
 import { geometryStlBoolean } from '../tools/geometryBoolean.js'
+import { validateCaseBuffer } from '../tools/guiCase.js'
 import type { ToolContext, ToolResult } from '../tools/context.js'
 import type { CaseSchema } from '../registry/schema.js'
 import { readCaseJsonc } from '../formats/casejsonc.js'
@@ -121,6 +122,7 @@ const StartRunSchema = z.object({
 })
 
 const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash: z.string().nullable().default(null) })
+const CaseValidateSchema = z.object({ path: z.string(), content: z.string() })
 const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
@@ -199,6 +201,15 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     const out = await writeWorkspaceFile(root, body)
     deps.hub.broadcast({ t: 'fs.changed', paths: [out.path] })
     return out
+  })
+  // save_case's check (STU-05): the buffer lives in the browser's editor, so
+  // the window posts its text here; nothing is written, the findings go to
+  // the Problems list as case_validate's do.
+  router.post('/api/case/validate', async (rc) => {
+    const body = await rc.json(CaseValidateSchema)
+    const r = await validateCaseBuffer(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
   })
   router.get('/api/fs/search', async ({ query }) => {
     const q = query.get('q') ?? ''

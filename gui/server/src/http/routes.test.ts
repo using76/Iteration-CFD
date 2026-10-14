@@ -126,6 +126,21 @@ describe('api routes', () => {
     expect((await put({ path: 'cases/x', content: 5, baseHash: null })).status).toBe(400)
   })
 
+  it('validates an editor buffer without writing it (save_case, STU-05)', async () => {
+    const disk = fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')
+    const bad = disk.replace('"cells":  [98, 42, 20]', '"cells":  "eight"')
+    expect(bad).not.toBe(disk)
+    const res = await postJson(`${base}/api/case/validate`, { path: 'cases/plume.jsonc', content: bad })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Loose
+    expect(body.ok).toBe(false)
+    expect(body.errors).toHaveLength(1)
+    expect(broadcasts.some((m) => m.t === 'problems' && m.path === 'cases/plume.jsonc' && m.items.length === 1)).toBe(true)
+    expect(fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')).toBe(disk)
+    expect((await postJson(`${base}/api/case/validate`, { path: '../x.jsonc', content: '{}' })).status).toBe(403)
+    expect((await postJson(`${base}/api/case/validate`, { path: 'README.md', content: '' })).status).toBe(400)
+  })
+
   it('exposes runs, logs, residuals and stop', async () => {
     expect((await json('/api/runs')).map((r: { id: string }) => r.id)).toEqual(['r_1'])
     expect((await json('/api/runs/r_1')).status).toBe('done')
