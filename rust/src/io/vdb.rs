@@ -76,8 +76,22 @@
 //! full dense array, every time. This is also why a Lower/Upper
 //! `InternalNode`'s "value" array is written even though this writer never
 //! places a value there (every non-child slot is simply background/off):
-//! the format writes the full `NUM_VALUES`-length array regardless, so it
-//! is trivially all zero here.
+//! the format writes the full `NUM_VALUES`-length array regardless, every
+//! entry the background - zero on the Cartesian path.
+//!
+//! # The lattice: `write_lattice` - SPEC-LIT 117.6 (VIO-03)
+//!
+//! [`write_lattice`] writes a `VoxelMap`'s lattice through the same tree
+//! code: each grid is `VoxelMap::sample` of a cell component, rounded once
+//! here; the `AffineMap` is the map's f64 origin (the centre of voxel
+//! `(0,0,0)`) and voxel. Under `dense` every voxel is active; under `fluid`
+//! only the owned ones, and a leaf, Lower or Upper node with no active voxel
+//! is not written at all, so the file grows with the fluid. The root
+//! background, every inactive leaf slot and every internal slot without a
+//! child hold `background`, so a reader sampling an inactive voxel gets the
+//! number a `dense` file stores there. [`write`], the Cartesian path, is the
+//! same code with every voxel active and a zero background, and its bytes
+//! are those of the tree before VIO-03 (`tests/volume_lattice.rs`).
 //!
 //! # `RootNode`'s child order must be `Coord`-sorted; `InternalNode`'s must
 //! not be
@@ -119,14 +133,15 @@
 //!
 //! What does NOT change: `RootNode::writeTopology` writes its background
 //! through `io::truncateRealToHalf` and then as `sizeof(ValueType)` - four
-//! bytes still, rounded to half precision, which for this writer's `0.0`
-//! background is the identity. Masks, the `AffineMap` transform, the
+//! bytes still, rounded to half precision (the Cartesian path's `0.0` is
+//! the identity; a lattice's background goes through the same `f16` round
+//! trip). Masks, the `AffineMap` transform, the
 //! stream-position triple and the `COMPRESS_NONE` word are all untouched.
 //!
 //! Point 2 is the trap: an internal node's value array is written by
 //! `writeTopology`, not `writeBuffers`, and it is easy to halve only the leaf
-//! buffers. The contents there are all zero either way (binary16 zero is
-//! `0x0000`, and this writer places no constant tiles), so only the LENGTH
+//! buffers. On the Cartesian path the contents are all zero either way
+//! (binary16 zero is `0x0000`, and this writer places no constant tiles), so only the LENGTH
 //! changes - which a value-comparing test cannot see and [`reader`]'s
 //! position asserts can.
 //!
@@ -147,8 +162,12 @@
 //! No GPL-licensed source was consulted.
 
 use crate::error::{Error, IoContext, Result};
-use crate::io::nvdb::{f32_to_f16_bits, Precision, UniformGrid};
-use crate::io::output_types::{FieldValues, OutputField};
+use crate::io::nvdb::{
+    f16_bits_to_f32, f32_to_f16_bits, for_each_grid, lattice_active, refuse_an_empty_fluid_lattice,
+    Occupancy, Precision, UniformGrid, Volume,
+};
+use crate::io::output_types::OutputField;
+use crate::io::voxelmap::VoxelMap;
 use crate::Scalar;
 use std::path::Path;
 
@@ -226,6 +245,7 @@ const LEAF_DIM: usize = 1 << LEAF_LOG2DIM; // 8
 const LOWER_DIM: usize = LEAF_DIM << LOWER_LOG2DIM; // 128
 const UPPER_DIM: usize = LOWER_DIM << UPPER_LOG2DIM; // 4096
 
+#[cfg(test)]
 #[inline]
 fn ceil_div(a: usize, b: usize) -> usize {
     (a + b - 1) / b
@@ -262,56 +282,65 @@ pub fn write(
     if fields.is_empty() {
         return Err(Error::Config("vdb: no fields to write".into()));
     }
+    let vol = Volume::cartesian(grid);
+    write_volume(path, &vol, fields, grid.n(), precision, |v| Ok(v.iter().map(|&x| x as f64).collect()))
+}
 
-    let n = grid.n();
-    let mut segments: Vec<(String, Vec<Scalar>)> = Vec::new();
-    for field in fields {
-        match &field.values {
-            FieldValues::Scalar(v) => {
-                check_len(field.name, v.len(), n)?;
-                segments.push((field.name.to_string(), v.to_vec()));
-            }
-            FieldValues::Vector(v) => {
-                check_len(field.name, v.len(), n)?;
-                segments.push((format!("{}.x", field.name), v.iter().map(|p| p.x).collect()));
-                segments.push((format!("{}.y", field.name), v.iter().map(|p| p.y).collect()));
-                segments.push((format!("{}.z", field.name), v.iter().map(|p| p.z).collect()));
-                segments.push((format!("{}.mag", field.name), v.iter().map(|p| p.mag()).collect()));
-            }
-            FieldValues::Tensor(v) => {
-                check_len(field.name, v.len(), n)?;
-                crate::io::nvdb::check_symmetric("vdb", field.name, v)?;
-                segments.push((format!("{}.xx", field.name), v.iter().map(|t| t.xx).collect()));
-                segments.push((format!("{}.xy", field.name), v.iter().map(|t| t.xy).collect()));
-                segments.push((format!("{}.xz", field.name), v.iter().map(|t| t.xz).collect()));
-                segments.push((format!("{}.yy", field.name), v.iter().map(|t| t.yy).collect()));
-                segments.push((format!("{}.yz", field.name), v.iter().map(|t| t.yz).collect()));
-                segments.push((format!("{}.zz", field.name), v.iter().map(|t| t.zz).collect()));
-            }
-        }
+/// Write `fields` - cell values, `vm.n_cells` per field - on the lattice of
+/// `vm` (SPEC-LIT 117.6) as one `.vdb` archive, one grid per scalar exactly
+/// as [`write`] splits them. Each grid is `vm.sample` of its cell component
+/// (117.5): f64, rounded once here to `precision` (117.2 item 2); a vector's
+/// `.mag` grid samples the cells' own magnitudes. The `AffineMap` carries
+/// `vm.origin()` and `vm.voxel` in f64 (117.2 item 3, 117.3). Under
+/// `LatticeActivation::Dense` every voxel is active; under `Fluid` only the
+/// voxels a cell owns, and a leaf or internal node with none is not written.
+/// The tree's background is `vm.spec.background` in both (117.6). A `fluid`
+/// lattice no cell reaches is refused by name.
+pub fn write_lattice(
+    path: impl AsRef<Path>,
+    vm: &VoxelMap,
+    fields: &[OutputField],
+    precision: Precision,
+) -> Result<()> {
+    let path = path.as_ref();
+    if fields.is_empty() {
+        return Err(Error::Config("vdb: no fields to write".into()));
     }
+    let active = lattice_active(vm);
+    let vol = Volume::lattice(vm, active.as_deref());
+    write_volume(path, &vol, fields, vm.n_cells, precision, |v| vm.sample(v))
+}
+
+/// The archive both entry points write: the header, no file metadata, the
+/// grid count (patched once the grids are known) and one grid per scalar,
+/// each sampled by `sample` from its `n` source values, one at a time.
+fn write_volume(
+    path: &Path,
+    vol: &Volume,
+    fields: &[OutputField],
+    n: usize,
+    precision: Precision,
+    sample: impl Fn(&[Scalar]) -> Result<Vec<f64>>,
+) -> Result<()> {
+    let occ = Occupancy::new(vol);
+    refuse_an_empty_fluid_lattice("vdb", &occ)?;
 
     let mut buf = Vec::new();
     write_header(&mut buf);
     put_u32(&mut buf, 0); // file-level MetaMap: no global metadata
 
-    put_i32(&mut buf, segments.len() as i32); // grid count
-
-    for (name, values) in &segments {
-        write_grid(&mut buf, grid, name, values, precision);
-    }
+    let count_pos = buf.len();
+    put_i32(&mut buf, 0); // grid count, patched below
+    let mut count = 0i32;
+    for_each_grid("vdb", fields, n, |name, v| {
+        let values = sample(v)?;
+        write_grid(&mut buf, vol, &occ, name, &values, precision);
+        count += 1;
+        Ok(())
+    })?;
+    buf[count_pos..count_pos + 4].copy_from_slice(&count.to_le_bytes());
 
     std::fs::write(path, &buf).path(path)
-}
-
-fn check_len(field: &str, got: usize, want: usize) -> Result<()> {
-    if got != want {
-        return Err(Error::Field {
-            field: field.to_string(),
-            msg: format!("{got} values but the grid has {want} cells"),
-        });
-    }
-    Ok(())
 }
 
 // ============================================================================
@@ -392,9 +421,10 @@ fn write_header(b: &mut Vec<u8>) {
 /// `writeTransform`, `writeTopology`, `writeBuffers`), in that order.
 fn write_grid(
     b: &mut Vec<u8>,
-    grid: &UniformGrid,
+    vol: &Volume,
+    occ: &Occupancy,
     name: &str,
-    values: &[Scalar],
+    values: &[f64],
     precision: Precision,
 ) {
     put_string(b, name); // GridDescriptor::mUniqueName
@@ -418,10 +448,11 @@ fn write_grid(
     put_u32(b, COMPRESS_NONE); // Archive::setGridCompression's stream word
 
     write_grid_metadata(b, name, precision);
-    write_transform(b, grid);
-    write_topology(b, grid, values, precision);
+    write_transform(b, vol);
+    let tree = Tree { vol, occ, values, precision };
+    write_topology(b, &tree);
     let block_pos = b.len() as i64;
-    write_buffers(b, grid, values, precision);
+    write_buffers(b, &tree);
     let end_pos = b.len() as i64;
 
     patch_i64(b, offset_pos, grid_pos);
@@ -483,10 +514,10 @@ fn write_grid_metadata(b: &mut Vec<u8>, name: &str, precision: Precision) {
 /// doc for the `origin`/`spacing` convention this encodes (same one
 /// `nvdb.rs` uses: `origin` is the world position of cell `(0,0,0)`'s
 /// centre).
-fn write_transform(b: &mut Vec<u8>, grid: &UniformGrid) {
+fn write_transform(b: &mut Vec<u8>, vol: &Volume) {
     put_string(b, "AffineMap");
-    let (dx, dy, dz) = (grid.spacing.x as f64, grid.spacing.y as f64, grid.spacing.z as f64);
-    let (ox, oy, oz) = (grid.origin.x as f64, grid.origin.y as f64, grid.origin.z as f64);
+    let [dx, dy, dz] = vol.spacing;
+    let [ox, oy, oz] = vol.origin;
     #[rustfmt::skip]
     let m: [f64; 16] = [
         dx,  0.0, 0.0, 0.0,
@@ -499,6 +530,8 @@ fn write_transform(b: &mut Vec<u8>, grid: &UniformGrid) {
     }
 }
 
+/// The dense node counts; the fp16 size test checks the file length by them.
+#[cfg(test)]
 fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
     let n_leaf = [
         ceil_div(grid.nx, LEAF_DIM), ceil_div(grid.ny, LEAF_DIM), ceil_div(grid.nz, LEAF_DIM),
@@ -512,6 +545,46 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
     (n_leaf, n_lower, n_upper)
 }
 
+/// What one grid's tree is written from: the volume, which nodes are
+/// present (117.6), the grid's values (f64, one per voxel) and the width.
+struct Tree<'a> {
+    vol: &'a Volume<'a>,
+    occ: &'a Occupancy,
+    values: &'a [f64],
+    precision: Precision,
+}
+
+impl Tree<'_> {
+    /// The tree's background as it goes into a node's value slot: the f32
+    /// rounding of `background` (0 on the Cartesian path).
+    fn background(&self) -> f32 {
+        self.vol.background as f32
+    }
+
+    /// Is the child at child-node index `c` of a node of `log2dim` present?
+    fn child_present(&self, log2dim: u32, c: [usize; 3]) -> bool {
+        if log2dim == UPPER_LOG2DIM {
+            self.occ.lower(c)
+        } else {
+            self.occ.leaf(c)
+        }
+    }
+}
+
+/// `width` bytes of `v` per slot, `slots` times - an internal node's value
+/// array or a leaf's buffer, every slot the background (117.6). With a zero
+/// background these are the zero bytes this writer has always written.
+fn put_background_values(b: &mut Vec<u8>, slots: usize, v: f32, precision: Precision) {
+    let w = value_width(precision);
+    let at = b.len();
+    put_bytes(b, &vec![0u8; slots * w]);
+    if v.to_bits() != 0 {
+        for s in 0..slots {
+            put_value(b, at + s * w, v, precision);
+        }
+    }
+}
+
 // ============================================================================
 //  Topology - RootNode::writeTopology / InternalNode::writeTopology /
 //  LeafNode::writeTopology (tree/{Root,Internal,Leaf}Node.h)
@@ -522,53 +595,60 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
 /// always 0 - this writer never places a root-level constant tile) +
 /// `numChildren`(u32), then, per child (`std::map<Coord,_>` order -
 /// lexicographic by `(x,y,z)`, see the module doc): `origin`(3x`i32`) +
-/// the child's own `writeTopology`.
-fn write_topology(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precision: Precision) {
-    let (_n_leaf, n_lower, n_upper) = node_counts(grid);
+/// the child's own `writeTopology`. Only the Upper nodes [`Occupancy`] marks
+/// present are children (117.6); with every voxel active that is all of
+/// them.
+fn write_topology(b: &mut Vec<u8>, t: &Tree) {
+    let n_upper = t.occ.n_upper;
     // `Tree::writeTopology` = `TreeBase::writeTopology` (`tree/Tree.h`: an
     // `int32_t bufferCount = 1`) then `RootNode::writeTopology`. Without the
     // word, OpenVDB warns "multi-buffer trees are no longer supported" and
     // reads every field of the root four bytes early (SPEC-LIT §117.8).
     put_i32(b, 1); // bufferCount
-    put_f32(b, 0.0); // background
+    // `RootNode::writeTopology` writes the background through
+    // `io::truncateRealToHalf` under `toHalf`, as a full float (module doc).
+    let bg = match t.precision {
+        Precision::F32 => t.background(),
+        Precision::F16 => f16_bits_to_f32(f32_to_f16_bits(t.background())),
+    };
+    put_f32(b, bg); // background
     put_u32(b, 0); // numTiles
-    put_u32(b, (n_upper[0] * n_upper[1] * n_upper[2]) as u32); // numChildren
-
+    let mut present = Vec::new();
     // x outermost, z innermost: ascending Coord order.
     for ux in 0..n_upper[0] {
         for uy in 0..n_upper[1] {
             for uz in 0..n_upper[2] {
-                let origin = [ux * UPPER_DIM, uy * UPPER_DIM, uz * UPPER_DIM];
-                put_i32(b, origin[0] as i32);
-                put_i32(b, origin[1] as i32);
-                put_i32(b, origin[2] as i32);
-                write_internal_topology(
-                    b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true, precision,
-                );
+                if t.occ.upper([ux, uy, uz]) {
+                    present.push([ux * UPPER_DIM, uy * UPPER_DIM, uz * UPPER_DIM]);
+                }
             }
         }
+    }
+    put_u32(b, present.len() as u32); // numChildren
+    for origin in present {
+        put_i32(b, origin[0] as i32);
+        put_i32(b, origin[1] as i32);
+        put_i32(b, origin[2] as i32);
+        write_internal_topology(b, t, origin, UPPER_LOG2DIM, LOWER_DIM, t.occ.n_lower, true);
     }
 }
 
 /// `InternalNode<ChildT,Log2Dim>::writeTopology`: `mChildMask.save` (raw
 /// words) + `mValueMask.save` (raw words, always all-zero here - no
-/// Lower/Upper-level constant tiles in a dense box) + `io::
-/// writeCompressedValues` on the full `NUM_VALUES` array under
-/// `COMPRESS_NONE` (metadata byte `NO_MASK_AND_ALL_VALS` + `NUM_VALUES` raw
-/// `f32`s, all zero: every non-child slot is background), then each ON
-/// child in bit-packed offset order (`coordToOffset`/`cbeginChildOn`, *not*
-/// `Coord`-sorted - see the module doc).
-#[allow(clippy::too_many_arguments)]
+/// Lower/Upper-level active tiles) + `io::writeCompressedValues` on the full
+/// `NUM_VALUES` array under `COMPRESS_NONE` (metadata byte
+/// `NO_MASK_AND_ALL_VALS` + `NUM_VALUES` raw values, every non-child slot the
+/// background, 117.6), then each present child in bit-packed offset order
+/// (`coordToOffset`/`cbeginChildOn`, *not* `Coord`-sorted - see the module
+/// doc).
 fn write_internal_topology(
     b: &mut Vec<u8>,
-    grid: &UniformGrid,
-    values: &[Scalar],
+    t: &Tree,
     origin: [usize; 3],
     log2dim: u32,
     child_span: usize,
     n_child: [usize; 3], // child-grid dimensions in the CHILD's own units (Lower or Leaf)
     is_upper: bool,
-    precision: Precision,
 ) {
     let slots = 1usize << (3 * log2dim);
     let mask_words = slots / 64;
@@ -577,13 +657,12 @@ fn write_internal_topology(
     put_bytes(b, &vec![0u8; mask_words * 8]); // mValueMask: always zero
 
     put_u8(b, NO_MASK_AND_ALL_VALS as u8);
-    // NUM_VALUES entries, all zero (no tiles) - and `toHalf` reaches THIS
-    // array too, through `InternalNode::writeTopology`'s own
+    // NUM_VALUES entries, every one the background (no tiles) - and `toHalf`
+    // reaches THIS array too, through `InternalNode::writeTopology`'s own
     // `io::writeCompressedValues` call, so under fp16 it is half as long.
-    // Binary16 zero is 0x0000, so only the length changes. SPEC-LIT S45.1(2).
-    put_bytes(b, &vec![0u8; slots * value_width(precision)]);
+    // SPEC-LIT S45.1(2).
+    put_background_values(b, slots, t.background(), t.precision);
 
-    let (n_leaf, _, _) = node_counts(grid);
     let fan = 1usize << log2dim;
     for a in 0..fan {
         let cx = origin[0] / child_span + a;
@@ -597,7 +676,7 @@ fn write_internal_topology(
             }
             for c in 0..fan {
                 let cz = origin[2] / child_span + c;
-                if cz >= n_child[2] {
+                if cz >= n_child[2] || !t.child_present(log2dim, [cx, cy, cz]) {
                     continue;
                 }
                 let n = ((a as u32) << (2 * log2dim)) | ((bb as u32) << log2dim) | (c as u32);
@@ -605,11 +684,39 @@ fn write_internal_topology(
                 let child_origin = [cx * child_span, cy * child_span, cz * child_span];
                 if is_upper {
                     write_internal_topology(
-                        b, grid, values, child_origin, LOWER_LOG2DIM, LEAF_DIM, n_leaf, false,
-                        precision,
+                        b, t, child_origin, LOWER_LOG2DIM, LEAF_DIM, t.occ.n_leaf, false,
                     );
                 } else {
-                    write_leaf_topology(b, grid, child_origin);
+                    write_leaf_topology(b, t, child_origin);
+                }
+            }
+        }
+    }
+}
+
+/// Visit the active voxels of the leaf at `origin`: `f(n, v)` with `n =
+/// (x<<6)|(y<<3)|z` (`LeafNode::coordToOffset`, identical convention to
+/// NanoVDB's) and `v` the voxel's flat index.
+fn for_each_active_in_leaf(t: &Tree, origin: [usize; 3], mut f: impl FnMut(u32, usize)) {
+    let vol = t.vol;
+    for lx in 0..LEAF_DIM {
+        let gx = origin[0] + lx;
+        if gx >= vol.n[0] {
+            continue;
+        }
+        for ly in 0..LEAF_DIM {
+            let gy = origin[1] + ly;
+            if gy >= vol.n[1] {
+                continue;
+            }
+            for lz in 0..LEAF_DIM {
+                let gz = origin[2] + lz;
+                if gz >= vol.n[2] {
+                    continue;
+                }
+                let v = vol.idx(gx, gy, gz);
+                if vol.is_active(v) {
+                    f(((lx as u32) << 6) | ((ly as u32) << 3) | (lz as u32), v);
                 }
             }
         }
@@ -617,31 +724,11 @@ fn write_internal_topology(
 }
 
 /// `LeafNode::writeTopology`: just `mValueMask.save` - the raw 64-byte
-/// (8-word) bit array, bit `n = (x<<6)|(y<<3)|z` (`LeafNode::coordToOffset`,
-/// identical convention to NanoVDB's).
-fn write_leaf_topology(b: &mut Vec<u8>, grid: &UniformGrid, origin: [usize; 3]) {
+/// (8-word) bit array of the active voxels.
+fn write_leaf_topology(b: &mut Vec<u8>, t: &Tree, origin: [usize; 3]) {
     let mask_off = b.len();
     put_bytes(b, &[0u8; 64]);
-    for lx in 0..LEAF_DIM {
-        let gx = origin[0] + lx;
-        if gx >= grid.nx {
-            continue;
-        }
-        for ly in 0..LEAF_DIM {
-            let gy = origin[1] + ly;
-            if gy >= grid.ny {
-                continue;
-            }
-            for lz in 0..LEAF_DIM {
-                let gz = origin[2] + lz;
-                if gz >= grid.nz {
-                    continue;
-                }
-                let n = ((lx as u32) << 6) | ((ly as u32) << 3) | (lz as u32);
-                set_mask_bit(b, mask_off, n);
-            }
-        }
-    }
+    for_each_active_in_leaf(t, origin, |n, _| set_mask_bit(b, mask_off, n));
 }
 
 // ============================================================================
@@ -651,16 +738,16 @@ fn write_leaf_topology(b: &mut Vec<u8>, grid: &UniformGrid, origin: [usize; 3]) 
 
 /// `RootNode::writeBuffers`: recurse into children only (a root has no
 /// buffer of its own), same order as `write_topology`.
-fn write_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precision: Precision) {
-    let (n_leaf, n_lower, n_upper) = node_counts(grid);
+fn write_buffers(b: &mut Vec<u8>, t: &Tree) {
+    let n_upper = t.occ.n_upper;
     for ux in 0..n_upper[0] {
         for uy in 0..n_upper[1] {
             for uz in 0..n_upper[2] {
+                if !t.occ.upper([ux, uy, uz]) {
+                    continue;
+                }
                 let origin = [ux * UPPER_DIM, uy * UPPER_DIM, uz * UPPER_DIM];
-                write_internal_buffers(
-                    b, grid, values, origin, UPPER_LOG2DIM, LOWER_DIM, n_lower, true, n_leaf,
-                    precision,
-                );
+                write_internal_buffers(b, t, origin, UPPER_LOG2DIM, LOWER_DIM, t.occ.n_lower, true);
             }
         }
     }
@@ -668,18 +755,14 @@ fn write_buffers(b: &mut Vec<u8>, grid: &UniformGrid, values: &[Scalar], precisi
 
 /// `InternalNode::writeBuffers`: recurse into children only, in bit-packed
 /// offset order (must match `write_internal_topology`'s child order).
-#[allow(clippy::too_many_arguments)]
 fn write_internal_buffers(
     b: &mut Vec<u8>,
-    grid: &UniformGrid,
-    values: &[Scalar],
+    t: &Tree,
     origin: [usize; 3],
     log2dim: u32,
     child_span: usize,
     n_child: [usize; 3],
     is_upper: bool,
-    n_leaf: [usize; 3],
-    precision: Precision,
 ) {
     let fan = 1usize << log2dim;
     for a in 0..fan {
@@ -694,17 +777,16 @@ fn write_internal_buffers(
             }
             for c in 0..fan {
                 let cz = origin[2] / child_span + c;
-                if cz >= n_child[2] {
+                if cz >= n_child[2] || !t.child_present(log2dim, [cx, cy, cz]) {
                     continue;
                 }
                 let child_origin = [cx * child_span, cy * child_span, cz * child_span];
                 if is_upper {
                     write_internal_buffers(
-                        b, grid, values, child_origin, LOWER_LOG2DIM, LEAF_DIM, n_leaf, false,
-                        n_leaf, precision,
+                        b, t, child_origin, LOWER_LOG2DIM, LEAF_DIM, t.occ.n_leaf, false,
                     );
                 } else {
-                    write_leaf_buffers(b, grid, values, child_origin, precision);
+                    write_leaf_buffers(b, t, child_origin);
                 }
             }
         }
@@ -715,44 +797,20 @@ fn write_internal_buffers(
 /// OpenVDB's multi-pass I/O writes topology and buffers as two full tree
 /// traversals, and the mask happens to be needed, and written, in both) +
 /// `io::writeCompressedValues`: metadata byte `NO_MASK_AND_ALL_VALS` + all
-/// 512 values raw, background (`0.0`) where inactive.
-fn write_leaf_buffers(
-    b: &mut Vec<u8>,
-    grid: &UniformGrid,
-    values: &[Scalar],
-    origin: [usize; 3],
-    precision: Precision,
-) {
-    let w = value_width(precision);
+/// 512 values raw, the background where inactive (117.6).
+fn write_leaf_buffers(b: &mut Vec<u8>, t: &Tree, origin: [usize; 3]) {
+    let w = value_width(t.precision);
     let mask_off = b.len();
     put_bytes(b, &[0u8; 64]);
     let values_off = b.len();
     put_u8(b, NO_MASK_AND_ALL_VALS as u8);
-    put_bytes(b, &vec![0u8; 512 * w]);
+    put_background_values(b, 512, t.background(), t.precision);
 
-    for lx in 0..LEAF_DIM {
-        let gx = origin[0] + lx;
-        if gx >= grid.nx {
-            continue;
-        }
-        for ly in 0..LEAF_DIM {
-            let gy = origin[1] + ly;
-            if gy >= grid.ny {
-                continue;
-            }
-            for lz in 0..LEAF_DIM {
-                let gz = origin[2] + lz;
-                if gz >= grid.nz {
-                    continue;
-                }
-                let n = ((lx as u32) << 6) | ((ly as u32) << 3) | (lz as u32);
-                set_mask_bit(b, mask_off, n);
-                let v = values[grid.idx(gx, gy, gz)] as f32;
-                let at = values_off + 1 + (n as usize) * w;
-                put_value(b, at, v, precision);
-            }
-        }
-    }
+    for_each_active_in_leaf(t, origin, |n, v| {
+        set_mask_bit(b, mask_off, n);
+        let at = values_off + 1 + (n as usize) * w;
+        put_value(b, at, t.values[v] as f32, t.precision);
+    });
 }
 
 // ============================================================================
@@ -792,6 +850,14 @@ mod reader {
         pub ny: usize,
         pub nz: usize,
         pub values: Vec<f64>, // dense, idx = i + nx*(j + ny*k); NaN where inactive
+        /// `RootNode`'s background, as the float the file holds.
+        pub background: f32,
+        /// The leaves the topology pass read (VIO-03).
+        pub leaf_count: usize,
+        /// The values of every inactive slot of every leaf read, and of
+        /// every internal node slot that holds no child.
+        pub inactive: Vec<f64>,
+        pub tiles: Vec<f64>,
     }
 
     fn get_u32(b: &[u8], off: usize) -> u32 {
@@ -949,7 +1015,6 @@ mod reader {
             // even under `toHalf` - `RootNode::writeTopology` truncates the
             // VALUE to half precision and writes it back as a float.
             let background = get_f32(bytes, pos);
-            assert_eq!(background, 0.0, "this writer's background is always 0");
             pos += 4;
             let num_tiles = get_u32(bytes, pos);
             pos += 4;
@@ -958,13 +1023,15 @@ mod reader {
             assert_eq!(num_tiles, 0, "reader only handles a tile-free root");
 
             let mut max_xyz = [0i32; 3];
+            let mut tiles = Vec::new();
             let mut roots = Vec::new();
             for _ in 0..num_children {
                 let child_origin =
                     [get_i32(bytes, pos), get_i32(bytes, pos + 4), get_i32(bytes, pos + 8)];
                 pos += 12;
                 let (node, new_pos) = read_internal_topology(
-                    bytes, pos, UPPER_LOG2DIM, child_origin, &mut max_xyz, width,
+                    bytes, pos, UPPER_LOG2DIM, child_origin, &mut max_xyz, width, precision,
+                    &mut tiles,
                 );
                 pos = new_pos;
                 roots.push(node);
@@ -976,16 +1043,24 @@ mod reader {
             let mut values = vec![f64::NAN; nx * ny * nz];
 
             let mut bpos = block_pos;
+            let mut inactive = Vec::new();
             for node in &roots {
-                bpos = read_buffers(bytes, bpos, node, nx, ny, &mut values, precision);
+                bpos = read_buffers(bytes, bpos, node, nx, ny, &mut values, precision, &mut inactive);
             }
+            fn leaves(n: &Node) -> usize {
+                match n {
+                    Node::Internal { children } => children.iter().map(leaves).sum(),
+                    Node::Leaf { .. } => 1,
+                }
+            }
+            let leaf_count = roots.iter().map(leaves).sum();
             assert_eq!(bpos, end_pos, "buffers must end exactly at endPos");
 
             pos = end_pos;
             out.push(ReadGrid {
                 name, grid_type, precision, class_metadata, name_metadata, half_metadata,
                 voxel_size, origin,
-                nx, ny, nz, values,
+                nx, ny, nz, values, background, leaf_count, inactive, tiles,
             });
         }
         out
@@ -996,6 +1071,7 @@ mod reader {
     /// writeTopology`), recursing into each ON child in the same
     /// bit-packed order the writer used, and return the reconstructed
     /// subtree plus the byte position right after it.
+    #[allow(clippy::too_many_arguments)]
     fn read_internal_topology(
         bytes: &[u8],
         pos: usize,
@@ -1003,6 +1079,8 @@ mod reader {
         origin: [i32; 3],
         max_xyz: &mut [i32; 3],
         width: usize,
+        precision: Precision,
+        tiles: &mut Vec<f64>,
     ) -> (Node, usize) {
         let slots = 1usize << (3 * log2dim);
         let mask_words = slots / 8;
@@ -1020,6 +1098,7 @@ mod reader {
         let mut children = Vec::new();
         for n in 0..slots as u32 {
             if !mask_bit(bytes, child_mask_off, n) {
+                tiles.push(get_value(bytes, value_off + 1 + (n as usize) * width, precision));
                 continue;
             }
             let a = n >> (2 * log2dim);
@@ -1032,7 +1111,7 @@ mod reader {
             ];
             if log2dim == UPPER_LOG2DIM {
                 let (node, new_cursor) = read_internal_topology(
-                    bytes, cursor, LOWER_LOG2DIM, child_origin, max_xyz, width,
+                    bytes, cursor, LOWER_LOG2DIM, child_origin, max_xyz, width, precision, tiles,
                 );
                 children.push(node);
                 cursor = new_cursor;
@@ -1074,6 +1153,7 @@ mod reader {
     /// own; `LeafNode::writeBuffers` repeats the value mask then the
     /// `NO_MASK_AND_ALL_VALS` value array) and scattering active values
     /// into the dense `values` array.
+    #[allow(clippy::too_many_arguments)]
     fn read_buffers(
         bytes: &[u8],
         pos: usize,
@@ -1082,12 +1162,13 @@ mod reader {
         ny: usize,
         values: &mut [f64],
         precision: Precision,
+        inactive: &mut Vec<f64>,
     ) -> usize {
         match node {
             Node::Internal { children } => {
                 let mut cursor = pos;
                 for child in children {
-                    cursor = read_buffers(bytes, cursor, child, nx, ny, values, precision);
+                    cursor = read_buffers(bytes, cursor, child, nx, ny, values, precision, inactive);
                 }
                 cursor
             }
@@ -1108,6 +1189,8 @@ mod reader {
                 let values_start = value_off + 1;
                 for n in 0..512u32 {
                     if !active[n as usize] {
+                        let w = value_width(precision);
+                        inactive.push(get_value(bytes, values_start + (n as usize) * w, precision));
                         continue;
                     }
                     let lx = (n >> 6) as i32;
@@ -1529,5 +1612,114 @@ mod tests {
             let r = std::panic::catch_unwind(|| read_all(&b));
             assert!(r.is_err(), "the reader must refuse file version {v}");
         }
+    }
+
+    // ---- the lattice (VIO-03, SPEC-LIT 117.6) ---------------------------
+
+    use crate::io::nvdb::lattice_fixture as lf;
+    use crate::io::voxelmap::{LatticeActivation, LatticeSample, VoxelMap, NONE};
+
+    /// The value `precision` stores for the f64 sample `s`: one rounding to
+    /// f32 (117.2 item 2), then f16 under `fp16`.
+    fn stored(s: f64, precision: Precision) -> f64 {
+        let f = s as f32;
+        match precision {
+            Precision::F32 => f as f64,
+            Precision::F16 => crate::io::nvdb::f16_bits_to_f32(f32_to_f16_bits(f)) as f64,
+        }
+    }
+
+    /// Write the fixture's `p` and `U` on `vm` and check every grid: the
+    /// names, the active set (exactly the fluid voxels, or every voxel), each
+    /// active value the stored sample bit for bit, every inactive leaf slot,
+    /// every childless internal slot and the root's background equal to the
+    /// stored background, the f64 transform, and the leaf count.
+    fn round_trip(sample: LatticeSample, activation: LatticeActivation, precision: Precision) {
+        let (raw, hm) = lf::refined();
+        let vm: VoxelMap = lf::map(&raw, &hm, sample, activation);
+        let phi = lf::scalar(&hm);
+        let u = lf::vector(&hm);
+        let grids = lf::grids(&vm, &phi, &u);
+        let path = scratch(&format!("voxmap_{activation:?}_{sample:?}_{precision:?}"));
+        let fields = [OutputField::scalar("p", &phi), OutputField::vector("U", &u)];
+        write_lattice(&path, &vm, &fields, precision).expect("write_lattice");
+        let read = read_all(&std::fs::read(&path).unwrap());
+        let _ = std::fs::remove_file(&path);
+
+        let fluid = activation == LatticeActivation::Fluid;
+        let want_active = if fluid { vm.report.n_fluid } else { vm.n_voxels() };
+        let bg = stored(vm.spec.background, precision);
+        let want_leaves = if fluid { lf::fluid_leaves(&vm) } else { 20 * 6 * 6 };
+        assert_eq!(read.len(), grids.len());
+        for (g, (name, s)) in read.iter().zip(&grids) {
+            assert_eq!(&g.name, name);
+            assert_eq!(g.name_metadata.as_deref(), Some(name.as_str()));
+            assert_eq!(g.precision, precision);
+            let o = vm.origin();
+            assert_eq!(g.origin, [o.x, o.y, o.z], "{name}: the f64 transform (117.2 item 3)");
+            assert_eq!(g.voxel_size, [vm.voxel; 3]);
+            assert_eq!((g.background as f64).to_bits(), bg.to_bits(), "{name}: background");
+            assert_eq!(g.leaf_count, want_leaves, "{name}: leaves");
+            let mut n_active = 0usize;
+            for k in 0..vm.n[2] {
+                for j in 0..vm.n[1] {
+                    for i in 0..vm.n[0] {
+                        let v = vm.index(i, j, k);
+                        let got = if i < g.nx && j < g.ny && k < g.nz {
+                            g.values[i + g.nx * (j + g.ny * k)]
+                        } else {
+                            f64::NAN
+                        };
+                        if !fluid || vm.cell[v] != NONE {
+                            n_active += 1;
+                            assert_eq!(got.to_bits(), stored(s[v], precision).to_bits(), "{name} voxel {v}");
+                        } else {
+                            assert!(got.is_nan(), "{name}: voxel {v} is not fluid but is active");
+                        }
+                    }
+                }
+            }
+            assert_eq!(n_active, want_active, "{name}: active count");
+            assert!(g.inactive.iter().all(|x| x.to_bits() == bg.to_bits()), "{name}: inactive slots");
+            assert!(!g.tiles.is_empty() && g.tiles.iter().all(|x| x.to_bits() == bg.to_bits()));
+        }
+    }
+
+    #[test]
+    fn voxmap_round_trip_fluid() {
+        round_trip(LatticeSample::Linear, LatticeActivation::Fluid, Precision::F32);
+        round_trip(LatticeSample::Cell, LatticeActivation::Fluid, Precision::F32);
+    }
+
+    #[test]
+    fn voxmap_round_trip_dense() {
+        round_trip(LatticeSample::Cell, LatticeActivation::Dense, Precision::F32);
+        round_trip(LatticeSample::Linear, LatticeActivation::Dense, Precision::F32);
+    }
+
+    #[test]
+    fn voxmap_round_trip_fp16() {
+        round_trip(LatticeSample::Linear, LatticeActivation::Fluid, Precision::F16);
+        round_trip(LatticeSample::Cell, LatticeActivation::Dense, Precision::F16);
+    }
+
+    /// A `fluid` file holds only the fluid leaves: smaller than the `dense`
+    /// file of the same lattice, which holds all 720.
+    #[test]
+    fn voxmap_fluid_file_grows_with_the_fluid_voxels() {
+        let (raw, hm) = lf::refined();
+        let phi = lf::scalar(&hm);
+        let mut len = Vec::new();
+        for a in [LatticeActivation::Fluid, LatticeActivation::Dense] {
+            let vm = lf::map(&raw, &hm, LatticeSample::Cell, a);
+            let path = scratch(&format!("voxmap_size_{a:?}"));
+            write_lattice(&path, &vm, &[OutputField::scalar("p", &phi)], Precision::F32).unwrap();
+            len.push(std::fs::metadata(&path).unwrap().len());
+            let _ = std::fs::remove_file(&path);
+        }
+        // A leaf is 64 + 64 + 1 + 512 * 4 bytes over both passes.
+        let leaf = (64 + 64 + 1 + 512 * 4) as u64;
+        let lower = (2 * 512 + 1 + 4096 * 4) as u64;
+        assert_eq!(len[1] - len[0], (720 - 64) * leaf + lower);
     }
 }

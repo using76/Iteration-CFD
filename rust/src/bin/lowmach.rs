@@ -749,6 +749,7 @@ fn write_time(
         name: &name,
         mesh: hm,
         cart: cart.as_ref(),
+        vox: None,
         fields: &vis_fields,
         foam: &foam_fields,
     };
