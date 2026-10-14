@@ -36523,6 +36523,67 @@ sum_{T kept} V(T) = V_box - V_enclosed          relative 1e-12                  
 This is §92.4's R4 (pocket removal) on tetrahedra. A dropped component is reported by its
 bounding box.
 
+**The carve, as TET-08 builds it.** `carve::carve(surface, recovery, start)` takes a face
+recovery of §116.11 and its surface. The domain box enters the triangulation as its eight corner
+points, on no triangle. The convex hull of the points is then the box, its hull faces tile the
+box planes with no recovery, and a hull face is the domain boundary. The **regions** are the live
+tetrahedra, finite and hull, joined across every face that is not a subtriangle of the split
+surface. A face through the infinite vertex is never a subtriangle, so the hull tetrahedra share
+one region. "The wrong side" had no definition before this unit. It is fixed by the normals, as
+an STL shell's are read: a subtriangle `s = (a, b, c)`, wound as its input triangle, faces a
+tetrahedron `T` with its **front** iff
+
+```
+orient3d(a, b, c, d) < 0,     d the apex of T opposite s                                   (116.16a)
+```
+
+that is, iff `d` lies on the side of the right-hand normal (§116.4's sign). A region is
+**fluid** when every subtriangle that bounds it faces it with its front, **solid** when every
+one faces it with its back, and **mixed** otherwise. The normals point out of the solid and into
+the fluid. §116.9's outward-wound shells are therefore solid inside, as (92.23)'s parity makes
+them in the hex path, and a shell wound inward holds fluid inside: an internal flow, kept from a
+seed. A mixed region is a surface that does not separate the domain, because it is open or wound
+inconsistently.
+
+`CarveStart::Hull` keeps the region holding the hull tetrahedra. `CarveStart::Seed(p)` keeps the
+region of the finite tetrahedron that §116.6's visibility walk locates `p` in, so a seed exactly
+on the surface takes the side of that tetrahedron. The refusals, each by name:
+
+- `carve/seed`: a seed that is not finite; a seed the walk places in a hull tetrahedron, which
+  lies outside the domain hull; and a seed whose region is solid. That last one is **the wrong
+  side**, and the refusal names the first subtriangle that faces the region with its back,
+  with its input triangle and patch;
+- `carve/hull`: a solid hull region;
+- `carve/side`: a mixed kept region, naming one subtriangle of each side;
+- `carve/empty`: a kept region without a finite tetrahedron. Every hull face is then a surface
+  face, so no domain box surrounds the surface;
+- `carve/input`: a subtriangle that is not a face of exactly two tetrahedra, or that is coplanar
+  with an apex.
+
+The kept tetrahedra keep their stored order, so (116.2) holds for each one. The kept region's
+boundary faces are its faces onto a hull tetrahedron (the domain boundary) and its subtriangles.
+Each is wound outward from the region by §116.4's table, and the region's volume closes by the
+divergence theorem, (116.13) taken on the region's own boundary about the first face's first
+point `o`:
+
+```
+V(R) = (1/6) sum_{f in dR} (x_0(f) - o) . ((x_1(f) - o) x (x_2(f) - o)),   f wound outward of R   (116.16b)
+```
+
+Every other region is reported with its side, its finite tetrahedron count, its volume by
+(116.2) and the bounding box of its vertices. The fluid ones are R4's dropped pockets.
+
+The gate definitions (TET-08):
+
+- **(116.16)** at relative 1e-12, with `V_enclosed` the split body surface's (116.13a);
+- **(116.16b)** equal to the kept volume at relative 1e-12, and the kept and solid regions
+  summing to the box at relative 1e-12;
+- **patch face counts**: per patch, the kept region's boundary faces number the patch's
+  subtriangles, each the reverse of its input winding, and the hull faces number the
+  triangulation's;
+- **seed**: a seed in the fluid keeps the same tetrahedra bit for bit as the hull start, and a
+  seed inside the sphere is the `carve/seed` wrong-side refusal that names the patch.
+
 ### 116.13 Delaunay refinement
 
 **Implemented by TET-09** (`tetmesh/refine.rs`).
@@ -36818,6 +36879,13 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-07b | the 30 degree wedge, the 10 degree spike (both `h = 0.1`) and the L-shaped prism (`h = 0.2`), default spec | wedge: 682 triangles become 766 subtriangles, 42 Steiner points (34 ball, 1 split, 5 encroachment splits, 2 facet points), 5 passes (2 of the edge half), 25 boundary faces beyond the split surface, all on flat tetrahedra (116.15i). Spike: 88 become 142, 27 Steiner points (18 ball, 6 split, 2 encroachment splits, 1 facet point, a centroid), 4 passes, 44 faces beyond. Prism: 782 become 790, 4 split Steiner points, 3 passes, none beyond. The worst Steiner point of the three is 4.4e-16 `h` off its triangle, against the bar of 1e-12 | the TET-07b commit |
 | TET-07b | the cap on the wedge at `h = 0.1`, which needs 5 passes | `max_passes = 5` gives the same points; 4 is the refusal `recover/cap: 0 of 1063 subsegments and 4 of 762 subtriangles missing after 4 passes, first subtriangle [378, 380, 381] of triangle 0` | the TET-07b commit |
 | TET-07b | termination at `h = 0.05` and `h = 0.2` for the cube, wedge, spike and prism, not a plan gate | every run 100 %; at most 11 passes (the prism at `h = 0.05`, 8 of them the edge half) against the cap of 64; the faces beyond the split surface number 0 on the cube and prism and up to 81 on the spike, all on flat tetrahedra with `6 V / L^3` at most 1.2e-15 | the TET-07b commit |
+| TET-08 | §116.12, changed by this unit | the paragraph "The carve, as TET-08 builds it", (116.16a)-(116.16b), the side rule and the gate definitions were added; "a seed on the wrong side" had no definition in the tree, and the side rule (normals out of the solid, into the fluid) fixes it | the TET-08 commit |
+| TET-08 | sphere in a box: the level-3 icosphere (650 points with the box corners, 1 280 subtriangles, no Steiner point) in `[-2, 2]^3`, `CarveStart::Hull` | 2 regions; 1 436 kept tetrahedra; `V` = 59.847259182906903 against `64 - V_enclosed` = 59.847259182906932, relative 4.75e-16; (116.16b) 5.94e-16; the solid region against `V_enclosed` 4.28e-16; kept plus solid against the box 4.44e-16; 1 292 boundary faces (1 280 sphere, 12 hull) | the TET-08 commit |
+| TET-08 | the same sphere remeshed at `h = 0.15`; the 30 degree wedge remeshed at `h = 0.1` in `[-1, 2]^3` (766 subtriangles, 42 Steiner points); the cube `[-0.5, 0.5]^3` with a patch per face in `[-2, 2]^3` | remeshed sphere: 1 448 kept, relative 5.94e-16, (116.16b) 4.75e-16. Wedge: 905 kept, `V` = 26.75 against 26.75, relative 0, (116.16b) 1.33e-16, solid 1.33e-15. Cube: 22 points, 60 kept, `V` = 63 against 63, every relative 0. A fluid seed kept the hull start's tetrahedra bit for bit in all four | the TET-08 commit |
+| TET-08 | the refusals on the sphere in a box | seed `(0, 0, 0)`: `carve/seed: the seed point (0, 0, 0) is on the wrong side: its region (1934 tetrahedra, volume 4.152740817093066e0) lies behind subtriangle 0 [0, 162, 164] of input triangle 0 (patch "sphere"), ...`; seed `(5, 0, 0)`: `carve/seed: ... lies outside the domain hull (the convex hull of the 650 points)`; the sphere wound inward: `carve/hull` from the hull start, and a seed at the origin keeps the sphere, `V` relative 4.28e-16 to `-V_enclosed` | the TET-08 commit |
+| TET-08 | patch face counts: the cube with 6 patches, and the level-2 icosphere with a patch per hemisphere, each in `[-2, 2]^3` | cube: 4 faces per patch against 4 subtriangles each, 12 hull faces of 12; sphere: 168 and 152 against 168 and 152, 12 hull faces of 12; every face once, each subtriangle face the reverse of its input winding | the TET-08 commit |
+| TET-08 | R4 on a hollow cube (outer `[-1, 1]^3` outward, inner `[-0.5, 0.5]^3` inward) in `[-2, 2]^3`, not a plan gate | 3 regions. The hull start keeps `V` = 56.000000000000000 (printed to 15 places); the pocket is dropped and reported: fluid, 24 tetrahedra, volume 1, box `[-0.5, 0.5]^3` exactly; the solid shell: 72 tetrahedra, volume 7, box `[-1, 1]^3`. A seed at `(0.1, 0.2, 0.3)` keeps the pocket (1); a seed at `(0.75, 0, 0)` in the shell is the wrong-side refusal naming patch `out_xmin` | the TET-08 commit |
+| TET-08 | the f32 arm | `rust/tests/tetmesh_carve.rs`, 3 tests (the `Scalar` width; the sphere in a box with (116.16), (116.16b), the face counts and the fluid seed; the seed and hull refusals) pass under `--features single` with every printed number identical to the f64 build | the TET-08 commit |
 
 ### 116.19 References
 
