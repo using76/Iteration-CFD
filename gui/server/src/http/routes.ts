@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, UiCommandSchema, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, RunPrecisionSchema, UiCommandSchema, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { LlmSettingsHandle } from '../agent/llmSettings.js'
 import type { ServerConfig } from '../config.js'
@@ -120,6 +120,8 @@ const StartRunSchema = z.object({
   positionals: z.array(z.string()).default([]),
   label: z.string().nullable().default(null),
   sessionId: z.string().nullable().default(null),
+  /** F32-19: double (default) or single, the f32 build in rust/target/single/release. */
+  precision: RunPrecisionSchema.nullable().default(null),
 })
 
 const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash: z.string().nullable().default(null) })

@@ -6,7 +6,7 @@
 // command) stand in for the run_start / run_stop tools: the same refusals,
 // the same run manager call, the same approval. Every other gui_control
 // command is forwarded to the screen unchanged.
-import { checkArgValue, getBinary, type UiCommand } from '@cfd/shared'
+import { checkArgValue, getBinary, type RunPrecision, type UiCommand } from '@cfd/shared'
 import type { z } from 'zod'
 import { fail, okResult, type ToolContext, type ToolResult } from './context.js'
 import { runStart, runStop } from './run.js'
@@ -19,6 +19,8 @@ export interface RunDraftArg {
 export interface RunDraft {
   binary: string | null
   args: RunDraftArg[]
+  /** The build to run (F32-19); absent = `double`, until set_run_setting {precision} says otherwise. */
+  precision?: RunPrecision
 }
 
 /** Session id -> draft. Memory only: a server restart forgets every draft. */
@@ -29,7 +31,7 @@ const keyOf = (sessionId: string | null): string => sessionId ?? ''
 /** The session's run draft (a fresh empty one when none); a copy, never the stored object. */
 export function getRunDraft(sessionId: string | null): RunDraft {
   const d = drafts.get(keyOf(sessionId))
-  return d ? { binary: d.binary, args: d.args.map((a) => ({ ...a })) } : { binary: null, args: [] }
+  return d ? { binary: d.binary, args: d.args.map((a) => ({ ...a })), ...(d.precision ? { precision: d.precision } : {}) } : { binary: null, args: [] }
 }
 
 /** Tests only: forget every session's draft. */
@@ -54,14 +56,17 @@ export function applyRunSetting(cmd: Extract<UiCommand, { type: 'set_run_setting
   const key = keyOf(ctx.sessionId)
   // A failed call never changes the stored draft: edit a copy, done() commits it.
   const prev = drafts.get(key)
-  const cur: RunDraft = prev ? { binary: prev.binary, args: prev.args.map((a) => ({ ...a })) } : { binary: null, args: [] }
+  const cur: RunDraft = prev ? { binary: prev.binary, args: prev.args.map((a) => ({ ...a })), ...(prev.precision ? { precision: prev.precision } : {}) } : { binary: null, args: [] }
   const done = (): ToolResult => {
     drafts.set(key, cur)
     return okResult({ ok: true, command: 'set_run_setting', draft: getRunDraft(ctx.sessionId), state: ctx.hub.getUiState(ctx.sessionId) })
   }
   const binary = cmd.binary ?? null
   const flag = cmd.flag ?? null
-  if (binary === null && flag === null) return fail('RUN_SETTING_EMPTY', 'set_run_setting needs a binary or a flag')
+  const precision = cmd.precision ?? null
+  if (binary === null && flag === null && precision === null) return fail('RUN_SETTING_EMPTY', 'set_run_setting needs a binary, a flag or a precision')
+  // The precision belongs to the run, not to one binary: a new binary keeps it.
+  if (precision !== null) cur.precision = precision
   if (binary !== null) {
     if (getBinary(binary) === undefined) return fail('UNKNOWN_BINARY', `unknown binary ${binary}`)
     if (cur.binary !== binary) {
@@ -106,7 +111,7 @@ export function resolveStartInput(ctx: ToolContext): { input: z.infer<typeof run
   const casePath = ctx.hub.getUiState(ctx.sessionId)?.case?.path ?? null
   if ((getBinary(draft.binary)?.accepts.length ?? 0) > 0 && casePath === null)
     return { refusal: fail('NO_CASE', 'no case is open on the screen (gui_state case is null); open_case first') }
-  return { input: { binary: draft.binary, casePath, args: draft.args.map((a) => ({ ...a })), positionals: null, label: null } }
+  return { input: { binary: draft.binary, casePath, args: draft.args.map((a) => ({ ...a })), positionals: null, label: null, ...(draft.precision ? { precision: draft.precision } : {}) } }
 }
 
 /** start_run (and run {action:'run'}): resolveStartInput, then runStart.refuse, then runStart.run; then a best-effort follow_run on screen. */
@@ -140,7 +145,7 @@ export async function guiRunPreview(cmd: UiCommand, ctx: ToolContext): Promise<s
     const r = resolveStartInput(ctx)
     if ('refusal' in r) return null
     // The exact line approvalPreview draws for run_start.
-    return [r.input.binary, r.input.casePath ?? '', ...r.input.args.map((a) => (a.value === true || a.value === null ? a.flag : `${a.flag} ${String(a.value)}`))]
+    return [r.input.binary, r.input.casePath ?? '', ...r.input.args.map((a) => (a.value === true || a.value === null ? a.flag : `${a.flag} ${String(a.value)}`)), r.input.precision === 'single' ? '(precision single)' : '']
       .filter(Boolean)
       .join(' ')
   }

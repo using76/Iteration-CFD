@@ -66,6 +66,7 @@ export function RunProgressCard({ runId }: { runId: string }) {
         </button>
         <span className="faint mono" style={{ marginLeft: 'auto', fontSize: 'var(--fs-xs)' }}>
           {run.binary}
+          {run.precision === 'single' ? ' · single' : ''}
         </span>
       </div>
     </div>

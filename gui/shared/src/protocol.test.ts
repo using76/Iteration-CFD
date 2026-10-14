@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, GpuStateSchema, REST, RunInfoSchema, ServerMsgSchema, activeTurnWarning, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
+import { CHAT_TIMEOUT_MAX_MS, ChatRequestSchema, ClientMsgSchema, DEFAULT_RUN_PRECISION, GpuStateSchema, REST, RUN_PRECISIONS, RunInfoSchema, ServerMsgSchema, activeTurnWarning, type ClientMsg, type ServerMsg, type UiState } from './protocol.js'
 
 // A wire frame must survive JSON.stringify -> parse -> zod parse unchanged:
 // that is exactly the path every message takes in the browser and the server.
@@ -163,6 +163,13 @@ describe('run info provenance', () => {
     expect(RunInfoSchema.parse(round).endWord).toBe('refused')
     expect(RunInfoSchema.safeParse({ ...legacyRunInfo, endWord: 'timeout' }).success).toBe(false)
     expect(RunInfoSchema.safeParse({ ...legacyRunInfo, endWord: null }).success).toBe(false)
+  })
+  it('F32-19: a legacy record has no precision (it ran double); single round-trips and anything else is refused', () => {
+    expect(RunInfoSchema.parse(legacyRunInfo).precision).toBeUndefined()
+    expect(DEFAULT_RUN_PRECISION).toBe('double')
+    expect(RUN_PRECISIONS).toEqual(['double', 'single'])
+    expect(RunInfoSchema.parse(JSON.parse(JSON.stringify({ ...legacyRunInfo, precision: 'single' }))).precision).toBe('single')
+    expect(RunInfoSchema.safeParse({ ...legacyRunInfo, precision: 'half' }).success).toBe(false)
   })
 })
 
