@@ -228,7 +228,7 @@ extern "C" __global__ void fldCorrectBcScalar
             //- The face sits between two cells exactly as an internal face
             //  does, so it is interpolated exactly as one: SPEC-LIT 2.3, with
             //  bWeights the weight of THIS side - against the far cell as
-            //  this side sees it, psi_N + j_f (SPEC-LIT 120.2b).
+            //  this side sees it, psi_N + j_f, (120.2b) of SPEC-LIT 120.2.
             const ofscalar w = bWeights[i];
             bf[i] = w*psiP + ((ofscalar)1 - w)*fldCoupledNbr(psi[nbr], bJump[i]);
         }
