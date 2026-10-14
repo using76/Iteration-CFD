@@ -39568,7 +39568,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 89 names of
+accepts it on the field the row is asked on, and it is one of the 95 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -39678,19 +39678,19 @@ row, row for row.
 | atmospheric | `atmBoundaryLayerInletOmega` | implemented | — | — | (120.9e), `epsilon/(C_mu k)` |
 | atmospheric | `nutkAtmRoughWallFunction` | implemented | — | — | (120.9g), the k-based ground in the roughness length `z0`; the wall shear is `u*^2` on the profile |
 | atmospheric | `nutUBlendedWallFunction` | implemented | — | — | (120.9h), the binomial blend of the viscous and log-law friction velocities, exponent `n` |
+| mapped inflow | `mapped` | implemented | — | — | (120.10a)-(120.10c), the cells of the plane `offset` downstream, `setAverage` to an area mean |
+| mapped inflow | `mappedFixedValue` | implemented | — | — | `mapped`'s other spelling, the same condition |
+| mapped inflow | `turbulentInlet` | implemented | — | — | (120.10e)-(120.10h), `referenceField` plus a seeded fluctuation of RMS `fluctuationScale` times the reference's magnitude and memory `1 - alpha` |
+| mapped inflow | `timeVaryingMappedFixedValue` | implemented | — | — | (120.11a)-(120.11d), `constant/boundaryData/<patch>` interpolated by a planar Delaunay with barycentric weights at setup, and linearly in time on the device clock |
+| jump | `fixedJump` | implemented | — | — | (120.2a)-(120.2e), a pressure jump across a cyclic pair, carried by the per-face jump array |
+| jump | `uniformJump` | implemented | — | — | (120.2f), the jump a Function1 of time on the device clock |
 | thermal | `compressible::alphatJayatillekeWallFunction` | alias | `thermalWallFunction` | — | this solver has no alphat field; the Jayatilleke correction lands on `T` |
 | thermal | `compressible::turbulentTemperatureCoupledBaffleMixed` | alias | `coupledTemperature` | — | OpenFOAM's spelling of the conjugate interface |
 | wall function | `nutUSpaldingWallFunction` | alias | `nutUWallFunction` | — | `nutUWallFunction` already applies Spalding's formula (§15.1) |
 | thermal | `alphatWallFunction` | alias | `calculated` | — | on `alphat` only; this solver has no alphat field, and `k_eff` already carries `rho cp nu_t/Pr_t` from `nut`'s wall value (§120.8) |
 | thermal | `compressible::alphatWallFunction` | alias | `calculated` | — | on `alphat` only, as `alphatWallFunction` |
-| mapped inflow | `mapped` | planned | BC-14 | — | — |
-| mapped inflow | `mappedFixedValue` | planned | BC-14 | — | — |
-| mapped inflow | `turbulentInlet` | planned | BC-14 | — | — |
-| mapped inflow | `timeVaryingMappedFixedValue` | planned | BC-15 | — | — |
 | synthetic inflow | `turbulentDFSEMInlet` | planned | BC-16 | — | — |
 | synthetic inflow | `turbulentDigitalFilterInlet` | planned | BC-16 | — | — |
-| jump | `fixedJump` | planned | BC-17 | — | — |
-| jump | `uniformJump` | planned | BC-17 | — | — |
 | coupled | `cyclicAMI` | planned | BC-19 | — | refused until its two sides are imprinted conformal |
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
@@ -39955,6 +39955,156 @@ its count by one). `S2`/`C2` agree with `sin(2 pi c)`/`cos(2 pi c)` to
 2e-15 absolute on `c in [0, 1)` (`function1::tests::s2_c2_match_std_to_2e_15`).
 
 No GPL-licensed source was consulted.
+
+### 120.2 Cyclic jumps - a pressure jump across a cyclic pair, fixed, timed, or a function of the face flux
+
+BC-17 implements `fixedJump` and `uniformJump`, and gives `fan` and
+`porousBafflePressure` their second meaning: on one half of a cyclic pair they
+are a jump across the couple whose size is a function of the face flux. On an
+open patch the two keep their §52 and §53.3 meaning, unchanged; the patch kind
+of `constant/polyMesh/boundary` is what tells the two meanings apart. The names
+are from the §120 user guides, by name only. The algebra below is ours. It is
+the §34 couple with a known offset, and the porous law is the one §53.1
+already derives from
+
+* J. C. Ward, "Turbulent flow in porous media", *J. Hydraulics Division, ASCE*
+  **90**(5) (1964) 1-12, DOI `10.1061/JYCEAJ.0001096` - the Darcy-Forchheimer
+  drop of (S53.1), integrated through a sheet of thickness `L`.
+
+No GPL-licensed source was consulted, and no description or formula was taken
+from either user guide.
+
+**The pair and the sign.** A cyclic pair `(a, b)` has `a` as the patch of the
+lower index in the boundary list, its owner. Face `k` of `a` pairs face `k`
+of `b`, as `mesh::geometry::cyclic_pairing` pairs them. The jump is the rise
+crossing from `a` into `b`:
+
+```
+    J = psi(b side) - psi(a side)                                   (120.2a)
+    j_a = -J ,   j_b = +J
+```
+
+`j_f` is the field's per-face jump array, `GpuScalarField::jump`. It is the
+amount by which the far cell of coupled face `f` is offset as this side sees
+it. The negation is exact, so the pair stays antisymmetric after any rounding.
+Whether OpenFOAM's own sign convention for `jump` is this one was not checked,
+because its source is not read. A case ported from OpenFOAM whose jump comes
+out reversed should flip the sign of `jump`.
+
+**Where the jump enters.** A coupled face's only change is that the far cell
+is seen at `psi_N + j_f`:
+
+```
+    psi_f   = w psi_P + (1 - w)(psi_N + j_f)                        (120.2b)
+    snGrad  = Delta_b (psi_N + j_f - psi_P)                         (120.2c)
+```
+
+(120.2b) is `fldCorrectBcScalar`'s cyclic branch. (120.2c) is the coupled
+branch of `fvSnGradFluxBoundary`, the flux `Simple` corrects `phi` with and
+builds the pressure force from. It is also the orthogonal part that the two
+non-orthogonal kernels compare their correction against, the least-squares
+gradient's coupled difference, and the limiter's coupled bound. The matrix
+keeps the coupled term `-bc_f psi_N` inside `lduAmul`, unchanged, so the
+matrix and its §48 symmetry are what they were. The known half moves to the
+source:
+
+```
+    source_P += bc_f j_f      over every coupled face f of cell P   (120.2d)
+```
+
+This is `lduAddJumpSource`, the jump source on both rows of the couple, with
+`j_b = -j_a`. A face with `j_f = 0` is skipped, and every read above is a
+select (`j != 0 ? psi_N + j : psi_N`) rather than `psi_N + 0`. A plain cyclic
+face therefore reads exactly what it read before: the `ofgpu-validate
+-sections 1-40` rows are identical to the pre-unit build, 877 of 877
+(`tools/f64_identity.py rows`).
+
+The jump is a separate array rather than the coupled face's unused `refValue`.
+Drivers and validation fixtures write the triple wholesale, and a stray value
+there would become a jump. This is the one condition in §120 that is not a §4
+triple rewrite, because a coupled face reads no triple. docs/17 §5.2.1 is
+departed from here for that reason.
+
+**The four jumps.** All four are read from `a`'s entry. `b` may carry the same
+type with the defining entries absent or textually equal, as OpenFOAM's own
+cases write both halves, or it may be plain `cyclic`.
+
+```
+    fixedJump:   J_k = jump_k  (`jump`, uniform or a per-face list)  (120.2e)
+    uniformJump: J   = F(t),   F the `jumpTable` Function1 of time   (120.2f)
+    fan:         J_k = F(u_k), F the `jumpTable` Function1 of u      (120.2g)
+    porousBafflePressure:
+                 J_k = -(nu D L + (1/2) I L |u_k|) u_k               (120.2h)
+    u_k = phi_{a,k} / |S_{a,k}|    (the owner face's normal velocity; 0 on a
+                                    face of no area)
+```
+
+(120.2f) is BC-06's device Function1 on the clock. It is applied as a
+`TimedPatch` with target `F1Target::Jump`, base 0, and `w = -1` on `a` and
+`+1` on `b`, so both halves round the same `F(t)` (§120.1). A constant
+`jumpTable` is its fixedJump twin.
+
+(120.2h) is (S53.1) in kinematic units, with `D = 1/alpha` (1/m^2), `I = C2`
+(1/m) and `L = length` (m); `nu` comes from `BcInputs::nu`. (120.2g) and
+(120.2h) are re-evaluated once per corrector from the flux the last corrector
+left, by `f1CyclicJump` in `cuda/function1.cu` (f64, fmad-off). The host twin
+`CyclicJumpRule::jumps` matches it bit for bit.
+
+**The flux law is a Picard step.** The new jump is computed from the old flux,
+explicitly. In a pressure-driven loop the iteration contracts when `|dJ/du|`
+is below the conductance of the path it drives, which is the ratio 0.25 of the
+fan gate and 0.6 of the porous gate below. A stiff baffle that a pressure
+difference drives should use §53.2's implicit internal-face form, which is
+unconditionally stable. Where the flux is set by an inlet, as in the SIMPLE
+gate, the step converges at once. The fan's argument is the owner face's
+normal velocity, not the patch flow rate of §52, so the curve does not depend
+on the mesh. A `jumpTable` whose table asks to `error` or `warn` outside its
+points is refused, naming `outOfBounds clamp`, because the range of `u` is not
+known at setup.
+
+**Refused by name.** The following are refused, each with an error that names
+it:
+
+* `fixedJump` or `uniformJump` on a patch that is not half of a cyclic pair.
+* Any of the four on a field that is not the pressure (`BcKind::from_name`
+  and the setup). The jump source enters the pressure assembly only.
+* A pair whose jump is written on `b` only.
+* Halves that name different jumps, or whose defining entries differ.
+* `fanPressure` or `porousJumpPressure` on a pair (the coupled spellings are
+  `fan` and `porousBafflePressure`).
+* A jump on a vector field.
+* A cyclic patch with no partner, or paired with itself.
+* A negative `D`, `I` or `length`.
+* `D > 0` with no `nu`.
+* A time-varying `uniformJump` on a setup path with no clock.
+* Any jump when the caller's `BcInputs::jumps` is false.
+
+`BcInputs::jumps` promises that the pressure loop adds `ldu_ops::add_jump_source`
+and refreshes the flux laws each corrector. `Simple::correct_outer` does both,
+and no driver passes it yet: every driver refuses the four names on a cyclic
+pair, as with BC-06's timed path and BC-09's `advective`.
+
+**Gate (tests/bc_cyclic_jump.rs, both builds).** The duct is 16 cells on
+`[0, 1]` with its internal face at `x = 0.5` split into a baffle pair, `p = 1`
+and `p = 0` at the ends, and `laplacian(1, p) = 0`. Its answer is the
+piecewise-linear `p = 1 - G x (+ J past the baffle)`, `G = 1 + J`, with the
+flow `u = G` through every face.
+
+| test | measured (f64) | measured (single) | held to (class R) |
+|---|---|---|---|
+| fixedJump `J = 0.25`: cells against the line | 6.1e-16 | 6.0e-8 | 1e-12 / 1e-5 |
+| the two baffle face values `J` apart | 0 | 0 | 1e-12 / 1e-5 |
+| every face's flow against `G A` | 4.5e-17 | 1.2e-8 | 1e-10 / 1e-5 |
+| matrix symmetric (§48) | yes | yes | exact |
+| `J = 0` against the plain cyclic pair | bitwise | bitwise | bitwise |
+| uniformJump `table ((0 0.125) (1 0.375))` at `t = 0.5` | jump array `-0.25/+0.25` bitwise, cells 6.1e-16 | bitwise, 6.0e-8 | 1e-12 / 1e-5 |
+| porousBafflePressure, `nu D L = I L/2 = 0.25`: `u` against `(-(1+a) + sqrt((1+a)^2 + 4b))/(2b)` | 0.701562118716444, 2.0e-14 off, 61 steps | 2.0e-6 off | 1e-10 / 1e-5 |
+| fan `J = 0.5 - 0.25 u`: `u` against `1.5/1.25 = 1.2` | 1.6e-14 off, 23 steps | 8.3e-8 off | 1e-10 / 1e-5 |
+| device refresh against `CyclicJumpRule::jumps` | bitwise at every step | bitwise | bitwise |
+| SIMPLE duct, inlet `U0 = 1`, porous `nu D L = I L/2 = 0.1`: upstream `p = -J(U0) = 0.2`, downstream 0 | 3.3e-15, `U` 6.7e-16, 102 iterations | 2.4e-7, `U` 6.0e-8, 95 iterations | 1e-10 / 1e-5 |
+
+Reversing the ends reverses both the flow and the drop. The refusals above
+are each tested by name.
 
 ### 120.3 The wall and slip family - one tensorial mixed condition, a rotating wall, and a shear-stress wall
 
@@ -41143,6 +41293,313 @@ why the gate selects it.
 
 No GPL-licensed source was consulted.
 
+### 120.10 The recycled inflow - an offset plane copied onto an inlet, and a seeded fluctuation
+
+BC-14 implements the three recycled-inflow names of the §120 table. The
+names are taken from the user guides of §120 by name only; every equation
+below is cited, or is ours and marked DESIGN.
+
+All three are a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`,
+`refGrad = 0`) whose `refValue` a refresh kernel rewrites - no new
+evaluation branch (§5.2 of the completion plan), and every kernel that asks
+whether a face's flux is prescribed sees the fixed value it is.
+
+**`mapped` and `mappedFixedValue`** (one condition, two spellings). The
+recycling idea - take the inflow from a plane inside the domain and feed
+it back at the inlet, so that a short domain carries a developed profile -
+is Lund, Wu & Squires (1998). For each face `f` of the patch, with the
+LOCAL f64 face centre `x_f` (§118.7) and the patch entry `offset` `d`:
+
+```
+x_s,f = x_f + d,   c(f) = the cell that holds x_s,f                   (120.10a)
+psi*_f = psi_c(f)                                                     (120.10b)
+```
+
+`c(f)` is found once, at setup, by the parcel walk's point location
+(`parcels::locate_cell64`, the half-space test of §66.6 on the f64
+`geom64` view), so a point on a shared face goes to the lower-numbered
+cell. (120.10b) is the cell value - the sample is not interpolated. With
+`setAverage` the samples are rescaled to the area mean `a` (`average`, the
+field's rank) *(DESIGN - ours)*:
+
+```
+A = SUM_f |S_f|,   m = SUM_f |S_f| psi*_f / A
+s = |a|/|m|  if |a| > 0 and |m| >= |a|/2,   s = 1 otherwise
+psi_f = s psi*_f + (a - s m)                                          (120.10c)
+```
+
+so `SUM_f |S_f| psi_f / A = a` whatever the branch: the factor keeps the
+sampled profile's shape where its mean is comparable with the target, and
+where it is not (a sample near rest, or a target of zero) the shift alone
+moves the mean without amplifying the sample. On a vector field `|.|` is
+the magnitude, so the factor is one number and the shift removes the part
+of `m` across `a`. On a planar patch with outward normal `n`, (120.10c)
+holds the flux:
+
+```
+SUM_f psi_f . S_f = A a . n                                           (120.10d)
+```
+
+The refresh is `field_ops::update_mapped_scalar`/`_vector`: one
+`fldMapped` launch per patch, once per outer iteration before the boundary
+evaluation, the sums in `ofacc` (§118.1) in face order and each value
+rounded once; without `setAverage` the face value is the cell value, bit
+for bit. `Simple::correct_outer` runs it for `U` and `p`;
+`BcInputs::mapped` is the caller's promise, and `ofgpu-lowmach` and
+`ofgpu-buoyant` give it for both. Without it - every other setup, and every
+field outside `Simple` (`T`, `k`, `epsilon`, species) - the two names are
+refused by name, because a seed nobody refreshes would freeze the face at
+the plane's first sample (§13.4). The setup seeds the face from the
+initial cells through the same host twin, `field::mapped::mapped_values`.
+
+Entries: `offset` (required; a constant - a time-varying Function1 is
+refused by name), `setAverage` (a switch, false when absent), `average`
+(required when `setAverage` is on). This solver reads the sampling from
+the field's patch entry, not from a mapped patch in
+`constant/polyMesh/boundary`. Refused by name: `sampleMode` other than
+`nearestCell`; any `sampleRegion` or `samplePatch` (another region or a
+patch-to-patch sample is not built); `interpolationScheme` other than
+`cell`; `fieldName` or `field` naming another field; a sample point in no
+cell of the mesh.
+
+**`turbulentInlet`** *(DESIGN - ours, on Gillespie's update)*. The face
+value is a reference plus a fluctuation with a set RMS and a set memory,
+drawn from a counter-based generator so that a run is reproducible and the
+device and the host twin draw the same numbers. The unit-variance draw for
+step `n`, global boundary face `g` and component `c`:
+
+```
+k = seed XOR (n << 32) XOR (3 g + c),   h = SplitMix64(k + 0x9E3779B97F4A7C15)
+u = 2^-53 floor(h / 2^11),   eps = sqrt(3) (2u - 1)                   (120.10e)
+```
+
+`SplitMix64` is the finaliser of Steele, Lea & Flood (2014) -
+`z = (z XOR z>>30) 0xBF58476D1CE4E5B9`, `z = (z XOR z>>27)
+0x94D049BB133111EB`, `z XOR z>>31`, in wrapping 64-bit arithmetic - and
+`eps` is uniform on `[-sqrt 3, sqrt 3)`, mean 0 and variance 1. With
+`s = fluctuationScale` (the field's rank) and the reference `psi_ref`
+(`referenceField`, uniform or per face):
+
+```
+sigma_f,c = s_c |psi_ref,f|                                           (120.10f)
+x^0 = sigma eps^0,   x^n = mu x^(n-1) + sqrt(1 - mu^2) sigma eps^n,
+mu = 1 - alpha                                                        (120.10g)
+psi_f^n = psi_ref,f + x^n                                             (120.10h)
+```
+
+(120.10g) is Gillespie's (1996) exact update of an Ornstein-Uhlenbeck
+process over a step, `mu = exp(-dt/tau)`, here with `mu` given through
+`alpha` rather than through a correlation time: started from a stationary
+draw, `x` keeps the RMS `sigma` at every step and its lag-1
+autocorrelation is `mu`. `alpha = 1` is white. `|psi_ref,f|` is the vector
+magnitude, or the absolute value on a scalar field. The update runs in
+f64 in both builds and rounds once; `x^(n-1)` is read back as
+`refValue - psi_ref`. Entries: `referenceField` and `fluctuationScale`
+(required, `fluctuationScale >= 0`), `alpha` (`0 < alpha <= 1`, 0.1 when
+absent), `seed` (a non-negative integer, 0 when absent - this solver's key).
+
+The draw is `field_ops::advance_turbulent_inlet_scalar`/`_vector`: one
+`fldTurbulentInlet` launch per patch, once per TIME step, with the step
+counter in a device buffer so a captured graph advances it (§81).
+`Simple::begin_time_step` runs it for `U`. `BcInputs::turbulent_inlet` is
+the caller's promise; no driver gives it today - the steady modes of
+`ofgpu-lowmach` and `ofgpu-buoyant` open a time step every outer unit,
+which would redraw the fluctuation every iteration - so every driver
+refuses the name, as §120.4 records for `advective`; the API carries it.
+
+**Gates** - `tests/bc_mapped.rs`, both builds (f64 [single]), 5 tests.
+`mapped_copies_the_sampled_cell` - 4 x 3 x 2 cells over [0,2] x [0,1]^2,
+xMin `offset (1.25 0 0)`: every face value is the cell centred at
+`x_f + d`, found by a direct search on the centres, bit for bit in both
+builds, scalar and vector, for both spellings (class D).
+`set_average_holds_the_mean_and_the_flux` - `T = 1 + x + 2y^2 + 0.5z`:
+`average 5` takes the factor branch (one ratio over the patch, spread 0
+[5.0e-8]), `average 100` the shift branch (spread 0 [5.0e-6]); the area
+mean within 1.4e-16 [1.5e-8] of `a` relative (tol(1e-12), class R); the
+device against `mapped_values` within 8.9e-16 [0]. `U = (1 + x, y - z,
+2z)` with `average (2 0 0)` against a sample mean of `(2.25 0 1)`: each
+component's mean within 0 [3.1e-9] of `a` and the inflow (120.10d)
+`2.00000000000000` [`2.00000000000000`] against `2 A = 2` (tol(1e-12),
+class R). `a_recycled_channel_is_the_cyclic_channel` - THE gate: 16 x 16 x 1
+cells over [0,2] x [0,1] x [0,1/16], `nu = 0.01` (Re = 100 on the height).
+The cyclic channel is driven by the uniform body force `b = 12 nu U_b/H^2 =
+0.12` (the density-ratio form at `T_ref/T = 2`), `p = 0` on one wall. The
+recycled channel has xMin `mappedFixedValue offset (1.0625 0 0) setAverage
+true average (1 0 0)`, xMax `zeroGradient` with `p = 0`. Steady SIMPLE
+stops on a cell change of `U` below 1e-14 in 2037 (cyclic) and 303 (recycled) iterations
+[the 4000-iteration cap, the f32 SIMPLE floor of §118]. At the sample
+plane, each profile by its own bulk: the worst difference 1.559e-4 [1.557e-4]
+of the peak 1.4884 (<= 1 %, class P); the inflow `-SUM phi` within
+0 [5.6e-9] of `A` relative (the f64 sum prints `0.062500000000000`) (tol(1e-12), class R).
+`turbulent_inlet_rms_is_the_prescribed_scale` - 100 faces, reference
+`(2 0 0)`, scale `(0.1 0.2 0.05)`: `alpha 1`, the seed and 99 steps, 1e4
+samples a component - `RMS/sigma` 1.00659, 0.99826, 0.99776 and
+`mean/sigma` -0.00076, -0.00019, 0.00270 in both builds (RMS within 5 %,
+mean within 0.05, class P); the device against `turbulent_advance` over
+all 3e4 draws 0 [0]; the same seed draws the same field bit for bit and
+another seed does not; `alpha 0.1` over 1000 steps - `RMS/sigma` 0.99402,
+1.00313, 1.00159 and lag-1 autocorrelation 0.89835, 0.90040, 0.90024
+against `mu = 0.9` (within 0.05); a scalar `T` about 300 at scale 0.02,
+`RMS/sigma` 0.99916. `mapped_and_turbulent_inlet_refusals_are_by_name` -
+18 refusals, each naming its entry and this section, and the seed of an
+accepted `mapped` patch is its sample bit for bit. 5 of 5 in each build.
+
+Control, measured once and not kept as a test: the same recycled channel
+with a UNIFORM `fixedValue (1 0 0)` inlet is 2.1e-1 of the peak off the
+cyclic profile at the sample plane (at `nu = 0.1`, Re = 10, it was only
+7.2e-3 - inside the band - which is why the gate runs at Re = 100: there
+the band sees the recycling, not a short entry length).
+
+Finding (for the §118 owner, F32-13/14/15): under `single` neither channel
+reaches the 1e-14 change; both run to the 4000 cap. The profiles still
+agree to 1.557e-4 of the peak - the f32 SIMPLE floor family of §120.3-§120.6.
+
+* **Lund, T. S., Wu, X., Squires, K. D.** Generation of turbulent inflow
+  data for spatially-developing boundary layer simulations. *J. Comput.
+  Phys.* 140 (1998) 233-258, doi:10.1006/jcph.1998.5882 - the recycled
+  inflow taken from a plane downstream (the idea; their rescaling of a
+  boundary layer is not (120.10c)).
+* **Gillespie, D. T.** Exact numerical simulation of the Ornstein-Uhlenbeck
+  process and its integral. *Phys. Rev. E* 54 (1996) 2084-2091,
+  doi:10.1103/PhysRevE.54.2084 - the exact one-step update (120.10g).
+* **Steele, G. L., Lea, D., Flood, C. H.** Fast splittable pseudorandom
+  number generators. *Proc. OOPSLA 2014* (SPLASH '14), 453-472,
+  doi:10.1145/2660193.2660195 - the SplitMix64 finaliser of (120.10e).
+
+No GPL-licensed source was consulted.
+
+### 120.11 The inflow database - `timeVaryingMappedFixedValue`, a planar Delaunay in space and linear in time
+
+BC-15 implements the last mapped-inflow name of the §120 table. The name and
+the database layout - `constant/boundaryData/<patch>/points` and one folder
+per time holding `<field>` - are taken by name and as a file FORMAT only from
+the user guides of §120; every equation below is cited, or is ours and marked
+DESIGN.
+
+The condition is a §4 FIXED VALUE (`BcKind::FixedValue`, `fr = 1`,
+`refGrad = 0`) whose `refValue` a timed apply rewrites after each
+`F1Clock::advance` (§120.1) - no new evaluation branch (§5.2 of the
+completion plan). Space is settled once at setup on the host; time runs on
+the device.
+
+**Space** *(DESIGN - ours, on the cited triangulation)*. With the samples
+`p_k` (k = 0..N-1, WORLD f64, §118.7) and a face centre `x_f` (WORLD f64):
+
+```
+c = (1/N) SUM_k p_k,   a = argmax_k |p_k - c| (lowest index),   L = |p_a - c|
+e1 = (p_a - c)/L,   r_k = (p_k - c) - ((p_k - c).e1) e1,   b = argmax_k |r_k|
+collinear if |r_b| <= 1e-9 L, otherwise e2 = r_b/|r_b|
+(u, v)(x) = ((x - c).e1/L, (x - c).e2/L)                              (120.11a)
+```
+
+The samples' triangulation `T` in `(u, v)` is Delaunay - no sample strictly
+inside any triangle's circumcircle (Delaunay 1934):
+
+```
+|q_k - z_t| >= r_t  for every triangle t of T and every sample k that is
+not a vertex of t, (z_t, r_t) the circumcircle of t                    (120.11b)
+```
+
+It is built by Bowyer-Watson insertion (Bowyer 1981; Watson 1981): a super
+triangle of half-size 1e3, then for each sample in file order the cavity of
+the triangles whose circumcircle holds it strictly (`d^2 < r^2 (1 - 1e-12)`),
+grown from the triangle holding the sample through shared edges, then shrunk -
+a triangle dropped and the component re-grown - until every cavity edge
+`a -> b` has `orient(a, b, p) > 0`, and refilled by the fan from the sample.
+Round-off can then leave a triangle not quite Delaunay, never an invalid one.
+The super triangles are removed and the boundary completed to the convex
+hull: wherever the counter-clockwise boundary turns right at `b`
+(`orient(a, b, c) < 0` for boundary edges `a -> b -> c`), the triangle
+`(a, c, b)` is added when it holds no sample. The net is checked: every
+triangle counter-clockwise and the areas summing to the hull's (Andrew's
+monotone chain) within 1e-9, else refused by name. The setup costs `O(N^2)`
+for the triangulation and `O(F N)` for the location; none of it runs per step.
+
+```
+orient(P, Q, R) = (Q_u - P_u)(R_v - P_v) - (Q_v - P_v)(R_u - P_u)
+D = orient(A, B, C) > 0
+l_A = orient(x, B, C)/D,  l_B = orient(A, x, C)/D,  l_C = orient(A, B, x)/D
+phi_f = l_A phi_A + l_B phi_B + l_C phi_C  (f64, in this order)         (120.11c)
+```
+
+for the first triangle with `min(l) >= -1e-10`. A face outside the hull takes
+the nearest point of the nearest boundary edge `a b`,
+`s = clamp(((x - a).(b - a))/|b - a|^2, 0, 1)`, `phi_f = (1 - s) phi_a +
+s phi_b`. Collinear samples are interpolated the same way along `u` between
+neighbours, clamped at the ends; one sample is a constant. Barycentric weights
+sum to one and reproduce `x`, so (120.11c) is EXACT for a linear field on a
+planar patch, which is the gate. `mapMethod nearest` takes the sample nearest
+in 3-D (`|p_k - x_f|^2`, the lowest index on a tie).
+
+**Time** (the clamp form of (120.2), §120.1). The time folders are the
+sub-folders whose names parse as numbers, `t_0 < ... < t_{K-1}`; slab `k` is
+(120.11c) of folder `k`, `V_{k,f,c}` in f64. At the clock's `t`:
+
+```
+K = 1 or t <= t_0:  V_0;      t >= t_{K-1}:  V_{K-1}
+t_j <= t < t_{j+1}:  V_j + ((t - t_j)/(t_{j+1} - t_j)) (V_{j+1} - V_j)    (120.11d)
+```
+
+in double in both builds, rounded ONCE into `Scalar`. The kernels are
+`f1TvApplyScalar`/`f1TvApplyVector` in `cuda/function1.cu` (`-fmad=false`),
+reading `t` from the device clock so a captured step replays with the time
+moving (§81.1 defect (b)); `TvMappedRule::values64` is their host twin, the
+same operations in the same order, so the two agree bit for bit. Every
+folder's slab is on the card: `K F n_c` doubles.
+
+**Which runs carry it.** As a time-varying Function1 (§120.1): only the
+`setup_*_field_timed` entry points, which read the database from
+`<case_dir>/constant/boundaryData/<patch>`, seed the triple at `t_start` and
+return the patch inside the `TimedBcs` the driver applies after each clock
+step. Every other setup path refuses the name, naming the timed entry point,
+because a frozen first folder would be the silent substitution §13.4 forbids.
+No driver is wired yet (the gap §120.1 records).
+
+Entries: `mapMethod` (`planarInterpolation`, the default, or `nearest`),
+`fieldTable` (the file name in each time folder; the field's name when
+absent), `perturb` (a number, accepted and unused - (120.11b) does not
+perturb the samples), `setAverage` (`false` accepted). A value file may carry
+one value of the field's rank before its list - the file's average - which is
+read past. Refused by name: `setAverage` on; `offset`; another `mapMethod`;
+no case directory; an unreadable `points` or value file; a value count that
+is not the point count; two samples at one point (1e-12 in `(u, v)`); two
+folders naming one time; no time folder; with two folders or more, a run
+`[t_start, t_end]` not inside `[t_0, t_{K-1}]`.
+
+**Gates** - `tests/bc_tvmapped.rs`, both builds (f64 [single]), 4 tests.
+`a_linear_field_from_200_scattered_points_is_exact_on_the_faces` - THE gate:
+2 x 6 x 5 cells over the unit cube, xMin sampled at its 4 corners and 196
+seeded interior points; `T = 1.5 + 3y - 2z`, worst `|phi_f - phi(x_f)|` over
+the 30 faces 1.97e-16 [1.97e-16] of `max|T|`; `U = (1 + y/2, 2 - z,
+y/4 + 3z/4)` 2.22e-16 [2.22e-16] of `max|U|` (<= 1e-12, class R); the triple
+is the slab rounded once, bit for bit.
+`the_triangulation_is_delaunay_and_exact_on_linear_data` - on the 200
+samples 394 = 2N - 2 - h triangles and no in-circle determinant above 0 [0];
+a cocircular 30 x 30 grid gives 2N - 2 - 116 triangles; an 11 x 11 grid on a
+tilted plane reproduces a linear field at 50 interior targets to 1.8e-15
+[1.8e-15]; collinear samples, the hull clamp and `nearest` give the closed
+forms. `time_interpolation_is_exact_at_the_midpoints` - folders 0, 0.5 and 2:
+at each folder time the value is the slab bit for bit, at t = 0.25 and 1.25
+it is the slabs' midpoint within 0 [1.1e-16] relative (<= 2 eps); on the
+device, 16 steps of dt 0.125 to t = 2, every scalar and vector face equals
+the host twin bit for bit (class D).
+`time_varying_mapped_refusals_are_by_name` - 11 refusals, each naming the
+condition and this section. 4 of 4 in each build. The four existing kernels
+of `function1.cubin` are SASS-identical in both builds; two are added.
+
+* **Bowyer, A.** Computing Dirichlet tessellations. *Comput. J.* 24 (1981)
+  162-166, doi:10.1093/comjnl/24.2.162 - the incremental insertion.
+* **Watson, D. F.** Computing the n-dimensional Delaunay tessellation with
+  application to Voronoi polytopes. *Comput. J.* 24 (1981) 167-172,
+  doi:10.1093/comjnl/24.2.167 - the circumcircle cavity and its refill.
+* **Delaunay, B.** Sur la sphere vide. *Bull. Acad. Sci. URSS, Classe Sci.
+  Math. Nat.* 6 (1934) 793-800 - the empty-circle property.
+* **Andrew, A. M.** Another efficient algorithm for convex hulls in two
+  dimensions. *Inf. Process. Lett.* 9 (1979) 216-219,
+  doi:10.1016/0020-0190(79)90072-3 - the monotone chain of the net check.
+
+No GPL-licensed source was consulted.
+
 ### 120.18 Imprinting a static non-conformal interface - two patches clipped into one conformal pair (BC-18)
 
 `cyclicAMI` stays refused (BC-19 lifts it); this subsection is the mesh
@@ -41297,6 +41754,7 @@ measurement's round-off, not the imprint's). The 60 x 60 pair imprints in
 0.36 s. The candidate search is all pairs with a box test and the weld and
 edge tables are linear scans, so the cost grows with the square of the face
 count; binning them is left to the unit that needs larger interfaces.
+
 
 No GPL-licensed source was consulted.
 

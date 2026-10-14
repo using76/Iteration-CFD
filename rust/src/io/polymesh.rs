@@ -587,7 +587,7 @@ fn open(path: &Path) -> Result<Tokenizer> {
 }
 
 /// `N ( (x y z) ... )`, or a bare `( ... )` when the writer omitted the count.
-fn read_points_file(path: &Path) -> Result<Vec<DVec3>> {
+pub(crate) fn read_points_file(path: &Path) -> Result<Vec<DVec3>> {
     let mut ts = open(path)?;
     let mut pts = Vec::new();
 
