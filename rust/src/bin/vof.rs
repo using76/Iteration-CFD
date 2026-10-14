@@ -78,8 +78,8 @@ use std::time::Instant;
 
 use ofgpu::field_ops::{self, FieldKernels};
 use ofgpu::field_setup::{
-    harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_scalar_field_with,
-    setup_vector_field, BcInputs, PrghInputs,
+    harvest_scalar_field, harvest_vector_field, setup_scalar_field_with, setup_vector_field_with,
+    BcInputs, PrghInputs,
 };
 use ofgpu::io::case::{find_start_time, format_time_name};
 use ofgpu::io::dict::FoamDict;
@@ -527,8 +527,16 @@ fn run(o: &Options) -> Result<()> {
 
     let mut vof = Vof::new(&gpu, &hm, &m, props, ctrl)?;
 
-    setup_scalar_field(&gpu, vof.alpha_mut(), &raw_alpha, &hm)?;
-    setup_vector_field(&gpu, vof.u_mut(), &raw_u, &hm)?;
+    // SPEC-LIT 120.14: this driver runs `Vof::refresh_vof_family` every
+    // step, so it - and only it - honours the four VOF-family names, each
+    // weighted by this case's own phase fraction. A case naming none of the
+    // four takes the plain path it always took, bit for bit.
+    let vof_family = BcInputs {
+        vof_family: Some(alpha_name.as_str()),
+        ..BcInputs::default()
+    };
+    setup_scalar_field_with(&gpu, vof.alpha_mut(), &raw_alpha, &hm, vof_family)?;
+    setup_vector_field_with(&gpu, vof.u_mut(), &raw_u, &hm, vof_family)?;
 
     // SPEC-LIT 120.7: `p_rgh` is the one field the buoyant pressure family
     // can be written in, so this driver - and only this driver - honours the
@@ -544,6 +552,9 @@ fn run(o: &Options) -> Result<()> {
         "uniformDensityHydrostaticPressure",
     ];
     if raw_p.boundary.values().any(|s| PRGH_NAMES.contains(&s.type_name.as_str())) {
+        // SPEC-LIT 120.14: the faces the family reads are the VOF-family
+        // conditions' own values, not their seeds (nothing, without one).
+        vof.refresh_vof_family(&gpu)?;
         let fk = FieldKernels::new(&gpu)?;
         let ub = {
             let u = vof.u_mut();
@@ -564,11 +575,11 @@ fn run(o: &Options) -> Result<()> {
                     u_b: Some(&ub),
                     ph_rgh_b: None,
                 }),
-                ..BcInputs::default()
+                ..vof_family
             },
         )?;
     } else {
-        setup_scalar_field(&gpu, vof.p_rgh_mut(), &raw_p, &hm)?;
+        setup_scalar_field_with(&gpu, vof.p_rgh_mut(), &raw_p, &hm, vof_family)?;
     }
 
     // SPEC-LIT S39: the contact angle, out of the SAME alpha field entries
@@ -1118,6 +1129,34 @@ mod vof_tests {
             solution_only(run_knob(&k, true, "prghab")),
             "prghPressure on the atmosphere wrote the same run as a plain \
              fixedValue of the same static pressure"
+        );
+    }
+
+    /// **SPEC-LIT 120.14's driver gate.** This driver passes
+    /// `BcInputs::vof_family` and runs `Vof::refresh_vof_family` every step,
+    /// so a VOF-family name in a case is read and run, not refused. The knob
+    /// turns the atmosphere's `fixedValue 0` into (120.14d): the face is in
+    /// the AIR, so `fr = alpha_f = 0` and the patch is zero-gradient - the
+    /// level is no longer fixed there, and the run writes something else.
+    /// The closed forms, the refusals and the gates are
+    /// `tests/bc_vof_family.rs`'s.
+    #[test]
+    fn phase_hydrostatic_pressure_on_the_atmosphere_changes_what_the_run_writes() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let k = Knob {
+            label: "0/p_rgh atmosphere phaseHydrostaticPressure",
+            file: "0/p_rgh",
+            from: "    atmosphere\n    {\n        type            fixedValue;\n        value           uniform 0;\n    }",
+            to: "    atmosphere\n    {\n        type            phaseHydrostaticPressure;\n        rho             1000;\n        pRefValue       0;\n        pRefPoint       (0 0 0);\n        value           uniform 0;\n    }",
+            pre: NO_PRE,
+        };
+        assert_ne!(
+            solution_only(run_knob(&k, false, "phhaa")),
+            solution_only(run_knob(&k, true, "phhab")),
+            "phaseHydrostaticPressure on the dry atmosphere wrote the same run \
+             as a fixedValue level"
         );
     }
 

@@ -61,6 +61,10 @@
 //! | `uniformDensityHydrostaticPressure` | 1 | `p_ref + rho_ref g . (x_f - x_ref) - rho_f gh` | 0 |
 //! | `movingWallVelocity` | 1 | the wall velocity, normal component removed | 0 |
 //! | `flowRateInletVelocity` | 1 | `-n Q/A` | 0 |
+//! | `variableHeightFlowRate` | 1 outside `[lower, upper]`, else 0 | the bound crossed (SPEC-LIT 120.14) | 0 |
+//! | `variableHeightFlowRateInletVelocity` | 1 | `-n a_f Q / sum a^2 \|S\|` | 0 |
+//! | `outletPhaseMeanVelocity` | 1 | `U_P + (Umean - Ubar_alpha) n` | 0 |
+//! | `phaseHydrostaticPressure` | `a_f` | `p_ref + rho g.(x_f - x_ref) - rho_f gh` | 0 |
 //!
 //! # When the derived conditions are evaluated
 //!
@@ -80,6 +84,11 @@
 //! same sense: evaluated once, here, from the case's initial fields - `rho_f`
 //! from the initial `alpha` (or 1, the kinematic form), `U_f` from the initial
 //! velocity - through [`BcInputs::prgh`], and never refreshed.
+//!
+//! SPEC-LIT 120.14's four VOF-family names are NOT evaluated here: the setup
+//! seeds them and builds a [`VofFamilyRule`] per patch, and
+//! `Vof::refresh_vof_family` rewrites their triple from the current phase
+//! fraction once per time step, through [`BcInputs::vof_family`].
 //!
 //! `symmetry`, `empty` and `cyclic` are not points on that line at all - they
 //! are topology, and the kernels branch on [`BcKind`] for them. That is why
@@ -105,6 +114,7 @@ use crate::device::Gpu;
 use crate::error::{Error, Result};
 use crate::field::mapped::{MappedRule, TurbulentInletRule};
 use crate::field::patch_mean::PatchMeanRule;
+use crate::field::vof_family::{VofFamilyKind, VofFamilyRule};
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::function1::{
     DeviceTimedPatch, DeviceTvMapped, F1, F1Clock, F1Kernels, F1Target, TimedPatch,
@@ -171,6 +181,11 @@ pub struct BoundaryTriple<T> {
     /// SPEC-LIT 120.2: the field carries a jump pair of any kind, so its
     /// pressure assembly must add the jump source.
     pub has_jump: bool,
+    /// SPEC-LIT 120.14: the VOF-family rules, one per patch carrying one of
+    /// the four names; rewritten once per time step by
+    /// `Vof::refresh_vof_family`. Empty unless the caller passed
+    /// [`BcInputs::vof_family`].
+    pub vof_rules: Vec<VofFamilyRule>,
 }
 
 impl<T: Copy + Default> BoundaryTriple<T> {
@@ -190,6 +205,7 @@ impl<T: Copy + Default> BoundaryTriple<T> {
             jump: vec![0.0; n],
             jump_rules: Vec::new(),
             has_jump: false,
+            vof_rules: Vec::new(),
         }
     }
 }
@@ -322,6 +338,14 @@ pub struct BcInputs<'a> {
     /// read by the face value and the flux but not by the equation, a
     /// condition half applied (SPEC-LIT 13.4).
     pub jumps: bool,
+    /// SPEC-LIT 120.14: the solver's phase-fraction field name, given by a
+    /// caller that rewrites the four VOF-family names from the current phase
+    /// fraction once per time step - `Vof::refresh_vof_family`, which
+    /// `ofgpu-vof` runs. `None` - the default, which every other setup
+    /// passes - refuses the four names: a seed nothing rewrites would freeze
+    /// a rate or a level that the names promise follows the liquid
+    /// (SPEC-LIT 13.4).
+    pub vof_family: Option<&'a str>,
 }
 
 impl<'a> BcInputs<'a> {
@@ -360,6 +384,8 @@ struct PatchAux<'a> {
     normal64: Vec<DVec3>,
     /// Where this patch starts in the flattened boundary arrays.
     at: usize,
+    /// SPEC-LIT 120.14: `[n]` the cell behind each face (`b_face_cells`).
+    cells: Vec<usize>,
     inputs: BcInputs<'a>,
 }
 
@@ -428,6 +454,9 @@ impl<'a> PatchAux<'a> {
             delta_b,
             normal64,
             at: p.start,
+            cells: (0..p.size)
+                .map(|i| m.b_face_cells.get(p.start + i).copied().unwrap_or(0) as usize)
+                .collect(),
             inputs,
         }
     }
@@ -1418,6 +1447,167 @@ fn prgh_face_value(name: &str, aux: &PatchAux<'_>, i: usize, e: &PrghEntry, prgh
 }
 
 // ==========================================================================
+//  The VOF family (SPEC-LIT 120.14)
+// ==========================================================================
+
+/// The four VOF-family names (SPEC-LIT 120.14).
+fn is_vof_family(name: &str) -> bool {
+    matches!(
+        name,
+        "variableHeightFlowRate"
+            | "variableHeightFlowRateInletVelocity"
+            | "outletPhaseMeanVelocity"
+            | "phaseHydrostaticPressure"
+    )
+}
+
+/// SPEC-LIT 120.14's refusal shape: the field, the patch, the name, and the
+/// section.
+fn vof_refused(field: &str, patch: &str, name: &str, why: String) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!("{field}: boundaryField/{patch}: `{name}` {why} (SPEC-LIT 120.14)"),
+    }
+}
+
+/// One patch's [`VofFamilyRule`], every refusal of SPEC-LIT 120.14 checked
+/// once for the patch: the caller's opt-in, the field the name belongs on,
+/// the entries the name is defined by, and an `alpha` / `phaseFraction`
+/// entry naming the solver's own phase fraction.
+fn vof_family_rule(
+    spec: &PatchFieldSpec,
+    n: usize,
+    patch: &str,
+    field: &str,
+    aux: &PatchAux,
+    vector: bool,
+) -> Result<VofFamilyRule> {
+    let name = spec.type_name.as_str();
+    let Some(alpha) = aux.inputs.vof_family else {
+        return Err(vof_refused(
+            field,
+            patch,
+            name,
+            "is refused - its triple is rewritten from the current phase \
+             fraction once per time step by Vof::refresh_vof_family, and this \
+             setup was given BcInputs::vof_family = None, so nothing would"
+                .into(),
+        ));
+    };
+    let on_vector = matches!(
+        name,
+        "variableHeightFlowRateInletVelocity" | "outletPhaseMeanVelocity"
+    );
+    if on_vector != vector {
+        let (is, other) = if on_vector { ("vector", "scalar") } else { ("scalar", "vector") };
+        return Err(vof_refused(
+            field,
+            patch,
+            name,
+            format!("is a {is} condition and {field} is a {other} field"),
+        ));
+    }
+    if name == "variableHeightFlowRate" && field != alpha {
+        return Err(vof_refused(
+            field,
+            patch,
+            name,
+            format!("is the phase fraction's own condition and belongs on {alpha}, not {field}"),
+        ));
+    }
+    if name == "phaseHydrostaticPressure" && field != "p_rgh" {
+        return Err(vof_refused(
+            field,
+            patch,
+            name,
+            format!("is written in the solved p_rgh and belongs on p_rgh, not {field}"),
+        ));
+    }
+    // The phase fraction the rates and the level are weighted by is the
+    // solver's own: an entry naming any other field is a substitution
+    // SPEC-LIT 13.4 forbids.
+    for key in ["alpha", "phaseFraction"] {
+        if let Some(raw) = spec.extra.get(key) {
+            let given = raw.split_whitespace().next_back().unwrap_or(raw);
+            if given != alpha {
+                return Err(vof_refused(
+                    field,
+                    patch,
+                    name,
+                    format!("reads the solver's own phase fraction {alpha}, and its `{key}` names `{given}`"),
+                ));
+            }
+        }
+    }
+    let number = |key: &str| -> Result<Scalar> {
+        spec.number(key, patch)?.ok_or_else(|| {
+            vof_refused(field, patch, name, format!("needs a `{key}` entry and the patch has none"))
+        })
+    };
+    // The two rates are Function1 entries (SPEC-LIT 120.1), CONSTANT here:
+    // the refresh runs on the host from the solver's state and no clock.
+    let rate = |key: &str| -> Result<f64> {
+        let setting = format!("{field}: boundaryField/{patch}/{key}");
+        let entries = crate::function1::patch_entries(spec, &format!("{field}: boundaryField/{patch}"))?;
+        let Some(f) = F1::parse(&entries, key, 1, &setting, None)? else {
+            return Err(vof_refused(field, patch, name, format!("needs a `{key}` entry and the patch has none")));
+        };
+        if !f.is_constant() {
+            return Err(vof_refused(
+                field,
+                patch,
+                name,
+                format!("takes a constant `{key}`; a time-varying Function1 is not read here"),
+            ));
+        }
+        Ok(f.eval(0.0)[0])
+    };
+    let kind = match name {
+        "variableHeightFlowRate" => {
+            let lower = number("lowerBound")?;
+            let upper = number("upperBound")?;
+            if !(0.0 <= lower && lower <= upper && upper <= 1.0) {
+                return Err(vof_refused(
+                    field,
+                    patch,
+                    name,
+                    format!(
+                        "needs 0 <= lowerBound <= upperBound <= 1, and the patch gives \
+                         lowerBound {lower} and upperBound {upper}"
+                    ),
+                ));
+            }
+            VofFamilyKind::VariableHeightFlowRate { lower, upper }
+        }
+        "variableHeightFlowRateInletVelocity" => {
+            VofFamilyKind::VariableHeightFlowRateInletVelocity { flow_rate: rate("flowRate")? }
+        }
+        "outletPhaseMeanVelocity" => VofFamilyKind::OutletPhaseMeanVelocity { u_mean: rate("Umean")? },
+        _ => {
+            let rho = number("rho")? as f64;
+            let p_ref = number("pRefValue")? as f64;
+            if !spec.extra.contains_key("pRefPoint") {
+                return Err(vof_refused(field, patch, name, "needs a `pRefPoint` entry and the patch has none".into()));
+            }
+            let v = required_vec3(spec, "pRefPoint", patch, field, name)?;
+            let x_ref = DVec3::new(v.x as f64, v.y as f64, v.z as f64);
+            VofFamilyKind::PhaseHydrostaticPressure { rho, p_ref, x_ref }
+        }
+    };
+    Ok(VofFamilyRule {
+        kind,
+        patch: patch.to_string(),
+        start: aux.at,
+        size: n,
+        cells: aux.cells.clone(),
+        normal: aux.normal64.clone(),
+        mag_sf: aux.mag64.clone(),
+        x_world: aux.bc_f.clone(),
+        x_local: aux.bc_f_local.clone(),
+    })
+}
+
+// ==========================================================================
 //  The thermal family (SPEC-LIT 120.8)
 // ==========================================================================
 
@@ -1973,6 +2163,25 @@ fn scalar_patch(
             out.value[at + i] = x;
         }
         out.tv_rules.push(rule);
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.14: the VOF family's two scalar names, before the static
+    // arms for the same reason - both map to `Mixed`, and their triple is
+    // rewritten from the current phase fraction once per time step by
+    // `Vof::refresh_vof_family`, which the caller's `BcInputs::vof_family`
+    // promises. The seed is zero-gradient (`fr = 0`); the refresh runs
+    // before any face is evaluated.
+    if is_vof_family(spec.type_name.as_str()) {
+        let rule = vof_family_rule(spec, n, patch, field, aux, false)?;
+        for i in 0..n {
+            out.kind[at + i] = BcKind::Mixed as Label;
+            out.fr[at + i] = 0.0;
+            out.ref_value[at + i] = 0.0;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = internal[i];
+        }
+        out.vof_rules.push(rule);
         return Ok(());
     }
 
@@ -2704,6 +2913,7 @@ pub fn upload_scalar(
         turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
         jump: gpu.upload(&b.jump)?,
         cyclic_jump,
+        vof_rules: b.vof_rules,
     })
 }
 
@@ -4696,6 +4906,25 @@ fn vector_patch(
         return Ok(());
     }
 
+    // SPEC-LIT 120.14: the VOF family's two velocity names, before the
+    // static arms for the same reason - both map to `FixedValue`, and their
+    // refValue is rewritten from the current phase fraction once per time
+    // step by `Vof::refresh_vof_family` (BcInputs::vof_family). The seed is
+    // the cell value with `fr = 1`; the refresh runs before any face is
+    // evaluated.
+    if is_vof_family(spec.type_name.as_str()) {
+        let rule = vof_family_rule(spec, n, patch, field, aux, true)?;
+        for i in 0..n {
+            out.kind[at + i] = BcKind::FixedValue as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = internal[i];
+            out.ref_grad[at + i] = zero;
+            out.value[at + i] = internal[i];
+        }
+        out.vof_rules.push(rule);
+        return Ok(());
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
@@ -5286,6 +5515,7 @@ pub fn upload_vector(
         mapped: crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?,
         turbulent: crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?,
         synthetic: crate::field::synthetic::upload_synthetic(gpu, b.synthetic_rules)?,
+        vof_rules: b.vof_rules,
     })
 }
 
@@ -5382,6 +5612,8 @@ pub fn setup_scalar_field_with(
     gpu.write(&mut f.bc_kind, &b.kind)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.14: the VOF-family rules, rewritten by `Vof` per step.
+    f.vof_rules = b.vof_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     // SPEC-LIT 120.2: the cyclic jump array and its flux laws.
@@ -5413,6 +5645,8 @@ pub fn setup_vector_field_with(
     gpu.write(&mut f.dm, &b.dm)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.14: the VOF-family rules, rewritten by `Vof` per step.
+    f.vof_rules = b.vof_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;
@@ -5474,6 +5708,8 @@ pub fn setup_scalar_field_timed(
     gpu.write(&mut f.bc_kind, &b.kind)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.14: the VOF-family rules, rewritten by `Vof` per step.
+    f.vof_rules = b.vof_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     // SPEC-LIT 120.2: the cyclic jump array and its flux laws.
@@ -5509,6 +5745,8 @@ pub fn setup_vector_field_timed(
     gpu.write(&mut f.dm, &b.dm)?;
     // SPEC-LIT 120.6: the Outlets II rules the triple's seed came with.
     f.mean_rules = b.mean_rules;
+    // SPEC-LIT 120.14: the VOF-family rules, rewritten by `Vof` per step.
+    f.vof_rules = b.vof_rules;
     // SPEC-LIT 120.10: the recycled-inflow rules, onto the device.
     f.mapped = crate::field::mapped::upload_mapped(gpu, b.mapped_rules)?;
     f.turbulent = crate::field::mapped::upload_turbulent(gpu, b.turbulent_rules)?;

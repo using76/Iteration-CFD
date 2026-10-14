@@ -671,6 +671,14 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     // names anywhere else.
     "fixedJump",
     "uniformJump",
+    // SPEC-LIT 120.14: the VOF family. Each rides a plain triple kind -
+    // `Mixed` on the phase fraction and on `p_rgh`, `FixedValue` on the
+    // velocity - whose triple `Vof::refresh_vof_family` rewrites from the
+    // current phase fraction once per time step (BcInputs::vof_family).
+    "variableHeightFlowRate",
+    "variableHeightFlowRateInletVelocity",
+    "outletPhaseMeanVelocity",
+    "phaseHydrostaticPressure",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -991,6 +999,14 @@ impl BcKind {
             // total forms ride `TotalPressure`, as `totalPressure` does.
             "prghPressure" | "uniformDensityHydrostaticPressure" => Self::FixedValue,
             "prghTotalPressure" | "prghTotalHydrostaticPressure" => Self::TotalPressure,
+
+            // SPEC-LIT 120.14: the VOF family. A section-4 triple with no new
+            // evaluation branch: the phase fraction's clamp and the
+            // phase-weighted hydrostatic pressure are `Mixed`, the two
+            // velocities a `FixedValue`; `field_setup` refuses them unless
+            // the caller promises the per-step refresh.
+            "variableHeightFlowRate" | "phaseHydrostaticPressure" => Self::Mixed,
+            "variableHeightFlowRateInletVelocity" | "outletPhaseMeanVelocity" => Self::FixedValue,
 
             // SPEC-LIT 120.3: OpenFOAM's Spalding spelling of the nut-U wall
             // function. `nutUWallFunction` already applies Spalding's single
@@ -1694,6 +1710,11 @@ pub struct GpuScalarField {
     /// `ldu_ops::add_jump_source`; its flux laws (fan, porousBafflePressure)
     /// are re-evaluated from the face flux by `refresh` once per corrector.
     pub cyclic_jump: Option<crate::function1::DeviceCyclicJumps>,
+    /// SPEC-LIT 120.14: the VOF-family patches (`variableHeightFlowRate`,
+    /// `phaseHydrostaticPressure`), rewritten on the host from the current
+    /// phase fraction once per time step by `Vof::refresh_vof_family`;
+    /// none, nothing.
+    pub vof_rules: Vec<vof_family::VofFamilyRule>,
 }
 
 impl GpuScalarField {
@@ -1719,6 +1740,7 @@ impl GpuScalarField {
             turbulent: Vec::new(),
             jump: gpu.zeros(m.n_boundary_faces)?,
             cyclic_jump: None,
+            vof_rules: Vec::new(),
         })
     }
 
@@ -1787,6 +1809,9 @@ pub struct GpuVectorField {
     /// parameters and its state on the device, drawn once per TIME step by
     /// `advance_synthetic_inlet_vector`; none, nothing.
     pub synthetic: Vec<synthetic::GpuSynthetic>,
+    /// SPEC-LIT 120.14: as [`GpuScalarField::vof_rules`], for
+    /// `variableHeightFlowRateInletVelocity` and `outletPhaseMeanVelocity`.
+    pub vof_rules: Vec<vof_family::VofFamilyRule>,
 }
 
 impl GpuVectorField {
@@ -1809,6 +1834,7 @@ impl GpuVectorField {
             mapped: Vec::new(),
             turbulent: Vec::new(),
             synthetic: Vec::new(),
+            vof_rules: Vec::new(),
         })
     }
 }
@@ -1882,6 +1908,14 @@ pub mod patch_mean;
 /// [`mapped::mapped_values`], [`mapped::turbulent_seed`] and
 /// [`mapped::turbulent_advance`].
 pub mod mapped;
+
+/// The VOF family of SPEC-LIT 120.14: the [`vof_family::VofFamilyRule`] the
+/// setup holds per patch, and the four host rewrites `Vof` runs once per
+/// time step - see [`vof_family::variable_height_alpha`],
+/// [`vof_family::variable_height_inlet_velocity`],
+/// [`vof_family::outlet_phase_mean_velocity`] and
+/// [`vof_family::phase_hydrostatic_pressure`].
+pub mod vof_family;
 
 /// The cyclic jumps of SPEC-LIT 120.2: the [`cyclic_jump::CyclicJumpRule`]
 /// a fan or porousBafflePressure pair carries, and the host twin of the
@@ -2073,7 +2107,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [98, 5, 7, 10, 10], "the per-status counts");
+        assert_eq!(counts, [102, 5, 3, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

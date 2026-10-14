@@ -39890,7 +39890,7 @@ either guide, and every equation a later boundary-condition unit adds is taken
 from the open literature it cites.
 
 A name is in exactly one of five states. **implemented** - `BcKind::from_name`
-accepts it on the field the row is asked on, and it is one of the 98 names of
+accepts it on the field the row is asked on, and it is one of the 102 names of
 `IMPLEMENTED_BC_NAMES`. **alias** - `from_name` accepts it with a printed
 mapping onto an implemented name, though it is not itself in
 `IMPLEMENTED_BC_NAMES`. **planned** - refused today; a `BC-NN` unit of the
@@ -40017,10 +40017,10 @@ row, row for row.
 | compressible | `inletOutletTotalTemperature` | planned | BC-20 | — | — |
 | compressible | `supersonicFreestream` | planned | BC-20 | — | — |
 | compressible | `fixedPressureCompressibleDensity` | planned | BC-20 | — | — |
-| VOF | `variableHeightFlowRate` | planned | BC-21 | — | — |
-| VOF | `variableHeightFlowRateInletVelocity` | planned | BC-21 | — | — |
-| VOF | `outletPhaseMeanVelocity` | planned | BC-21 | — | — |
-| VOF | `phaseHydrostaticPressure` | planned | BC-21 | — | — |
+| VOF | `variableHeightFlowRate` | implemented | — | — | (120.14a): `alpha_b = clamp(alpha_P, lowerBound, upperBound)`; the phase fraction only (§120.14) |
+| VOF | `variableHeightFlowRateInletVelocity` | implemented | — | — | (120.14b): `U_f = -n_f a_f Q / sum a^2 \|S\|`, the liquid flux is the constant `flowRate`; vector fields only (§120.14) |
+| VOF | `outletPhaseMeanVelocity` | implemented | — | — | (120.14c): the cell profile shifted along `n_f` so the phase-weighted mean outflow is the constant `Umean`; vector fields only (§120.14) |
+| VOF | `phaseHydrostaticPressure` | implemented | — | — | (120.14d): `fr = a_f` and the phase's hydrostatic level in `p_rgh`; `p_rgh` only (§120.14) |
 | compressible | `totalTemperature` | owned | CMP-16 | — | — |
 | compressible | `waveTransmissive` | owned | CMP-17 | — | an absorbing outlet, OUTSIDE the `wave*` refusal |
 | compressible | `characteristicFarfield` | owned | CMP-18 | — | — |
@@ -41185,7 +41185,8 @@ initial `alpha`, `U_f` from the initial velocity), as `totalPressure` is.
 That is exact while the face's phase and velocity do not change - the open
 top of a tank in the light phase, a side opening in one fluid. A face whose
 `alpha` changes during the run keeps its initial `rho_f`; the per-step
-refresh belongs to the VOF family unit (BC-21), which depends on this one.
+refresh was left to the VOF family unit (BC-21), which did not take it -
+it would change existing runs, the user's decision (§120.14).
 
 **Inputs and refusals.** `BcInputs::prgh: Option<PrghInputs>` carries
 `g` (the solver's own gravity), `rho_b` (per flattened boundary face, the
@@ -42267,6 +42268,175 @@ non-orthogonal correction reads are not exact across it ((120.13b)). Under
 `single` every SIMPLE loop stops on the 4000 cap (the f32 SIMPLE floor of
 the BC-07 family); the f64 loops stop on the change after 1439 (3:2), 1786
 (conformal, ny 12) and 1623 (ny 8) iterations.
+
+No GPL-licensed source was consulted.
+
+### 120.14 The VOF family - a clamped phase fraction, a liquid flow rate, a phase-weighted outlet and a phase-weighted hydrostatic level (BC-21)
+
+BC-21 implements the four VOF names of the §120 table:
+`variableHeightFlowRate`, `variableHeightFlowRateInletVelocity`,
+`outletPhaseMeanVelocity` and `phaseHydrostaticPressure`. The names, and the
+entry keys `lowerBound`, `upperBound`, `flowRate`, `Umean`, `alpha`, `rho`,
+`pRefValue`, `pRefPoint` and `phaseFraction`, are taken from the user guides
+of §120 by name only; no description, formula or source was read. Every
+equation below is ours (*DESIGN*), written on the phase fraction of §20.1,
+the mixture density of §20.3 and the `p_rgh` decomposition of §20.5 and
+(120.7a). Each is a §4 triple with no new evaluation branch and no kernel:
+the phase fraction's clamp and the hydrostatic level ride `BcKind::Mixed`,
+the two velocities `BcKind::FixedValue`, and what is new is that the triple
+FOLLOWS the liquid - it is rewritten from the current `alpha` once per time
+step.
+
+**The face phase fraction.** With `alpha_b,f` the evaluated face value of
+the solver's phase fraction, the weight the last three conditions use is
+
+```
+a_f = clamp(alpha_b,f, 0, 1)
+```
+
+so a round-off excursion of `alpha` out of `[0, 1]` cannot make a weight
+negative. `S_f` is the outward face area vector, `|S_f|` its magnitude,
+`n_f = S_f/|S_f|` (both f64 from `geom64`, §118.2) and `P` the cell behind
+the face.
+
+```
+variableHeightFlowRate (on alpha), 0 <= l <= u <= 1:
+    alpha_P > u :  fr = 1, refValue = u
+    alpha_P < l :  fr = 1, refValue = l                                   (120.14a)
+    otherwise   :  fr = 0              (refGrad = 0 throughout)
+  => alpha_b,f = clamp(alpha_P, l, u)
+
+variableHeightFlowRateInletVelocity (on U), the liquid rate Q > 0 into the domain:
+    D   = sum_f a_f^2 |S_f|
+    U_f = -n_f (a_f Q / D)          (U_f = 0 on every face when D = 0)    (120.14b)
+  => -sum_f a_f (U_f . S_f) = Q
+
+outletPhaseMeanVelocity (on U), the phase-weighted mean outward velocity Umean:
+    A   = sum_f a_f |S_f|,   M = sum_f a_f (U_P . n_f) |S_f|
+    U_f = U_P + (Umean - M/A) n_f   (U_f = U_P when A = 0)                (120.14c)
+  => sum_f a_f (U_f . n_f) |S_f| / A = Umean
+
+phaseHydrostaticPressure (on p_rgh), the phase density rho, p_ref at x_ref:
+    fr = a_f,  refGrad = 0
+    refValue = (p_ref + rho g . (x_f - x_ref)) - rho_f g . (x_f - O)     (120.14d)
+```
+
+(120.14a) bounds the face value: inside `[l, u]` the face is zero-gradient
+and the height of the liquid at the patch follows the interior; outside it
+the face is held at the bound crossed. With `fr` exactly 0 or 1, §4's
+`fr r + (1 - fr) alpha_P` is the clamp bit for bit. (120.14b) makes the
+inflow velocity proportional to the face's liquid fraction - a dry face
+takes in nothing, so the gas above a liquid inlet is not pushed in - and
+normalises it so the LIQUID flux, the alpha-weighted face flux, is exactly
+`Q`; the identity follows from `n_f . S_f = |S_f|`. (120.14c) keeps the
+outlet's cell profile and shifts its normal component by one constant, so
+the liquid's area-weighted mean outflow velocity is exactly `Umean` - the
+outlet takes the liquid at the rate it is given and the free surface finds
+the level that carries it. (120.14d) is (120.7e) with `rhoRef = rho`, made
+Dirichlet only where the phase is: in it (`a_f = 1`, `rho_f = rho`) the face
+holds `p = p_ref + rho g . (x_f - x_ref)`, the phase's own hydrostatic
+column, written in the solved `p_rgh` exactly as (120.7e) writes it -
+`x_f - x_ref` in world coordinates, `x_f - O` the stored centre the
+solver's body force reads (§118.7); out of it (`a_f = 0`) the face is
+zero-gradient; a mixed face is weighted between the two. `rho_f` is the
+face's mixture density, the value `update_properties` writes from the
+face's current `alpha` (§20.3).
+
+**When the triples are written** *(DESIGN - ours)*. `Vof::refresh_vof_family`
+rewrites every VOF-family patch once per time step, at the start of
+`Vof::step` after the flux-switched fractions and before any boundary value
+is evaluated, and first in `Vof::initialise_flux_from_velocity` and
+`Vof::initialise` (so the first step's inlet flux is the condition's, and
+the pressure-pinning test reads the written `fr`). In order: (120.14a) on
+`alpha` from its cells and `alpha`'s faces re-evaluated; then (120.14b) and
+(120.14c) on `U` from those faces (and `U`'s cells); then `rho` refreshed
+to those faces and (120.14d) on `p_rgh`, after which the pressure reference
+is re-decided - a phase-weighted Dirichlet fixes the level only where the
+phase is. The refresh runs on the HOST: each field carrying a rule is
+downloaded, rewritten on the rule's faces and uploaded; a run with none of
+the four names returns at once and is bit for bit what it was. All
+arithmetic is f64 from the widened `Scalar` inputs and the f64 `geom64`
+face data, sums in face order, each triple entry rounded once into
+`Scalar` (§118.2); the operation order is the order written above, `g . d =
+g_x d_x + g_y d_y + g_z d_z`. The two rates are constants: `flowRate` and
+`Umean` are read through §120.1's Function1 reader, and a time-varying one
+is refused, because the refresh runs from the solver's state and no clock.
+
+The liquid flux the alpha equation transports through the inlet is
+`phi_b alpha_b` (§20.2's low-order boundary flux), where `phi_b = U_f . S_f`
+is the flux the previous step's pressure correction prescribed. It equals
+`Q` exactly when the inlet's `alpha_b` does not change from one step to the
+next - every face of a (120.14a) inlet held at a bound, or a fixed-value
+inlet `alpha` - and with one alpha sub-cycle per step; a free face inside
+the bounds moves the transported rate off `Q` by the step's change in
+`alpha_b`, the one-step lag every explicit boundary update carries, and
+sub-cycles move `alpha_b` within the step. The face flux is deliberately
+NOT rewritten before the alpha solve: a boundary flux changed without the
+interior flux that balances it would break §20.2's boundedness.
+
+**Inputs and refusals.** `BcInputs::vof_family: Option<&str>` names the
+solver's phase-fraction field; `ofgpu-vof` passes it for `alpha`, `U` and
+`p_rgh`, and every other setup passes `None`. Refused by name, each message
+naming the condition and "SPEC-LIT 120.14": any of the four with
+`vof_family = None` (a seed nothing rewrites would freeze a rate or a level
+the name promises follows the liquid, §13.4); `variableHeightFlowRate` on
+any field but the phase fraction and `phaseHydrostaticPressure` on any
+field but `p_rgh`; a velocity name on a scalar field and a scalar name on a
+vector field; a missing `lowerBound`, `upperBound`, `flowRate`, `Umean`,
+`rho`, `pRefValue` or `pRefPoint`; bounds outside `0 <= l <= u <= 1`; a
+time-varying `flowRate` or `Umean`; an `alpha` or `phaseFraction` entry
+naming any field but the solver's phase fraction.
+
+Not taken: §120.7 left the per-step refresh of the four buoyant-pressure
+names' `rho_f` to this unit. Refreshing them would change what an existing
+`prghPressure` run computes wherever the face's `alpha` moves, which is a
+numerics change of an existing path (docs/17 §5.3.4) and the user's
+decision; they keep their setup-time `rho_f`.
+
+**Gates** (`tests/bc_vof_family.rs`, both builds; class per docs/17 §5.1,
+D-F32-1, R rows at `max(t, min(2^29 t, 1e-5))`).
+
+`vof_family_triples_are_the_closed_forms` - a 4 x 3 x 2 box: every rule's
+face data is the mesh's (cells, normals, areas, both centres, class D); a
+cell `alpha` visiting all three branches of (120.14a) gives its `fr`,
+`refValue` and the clamp bit for bit; a face `alpha` with values 1.25 and
+-0.125 among them gives (120.14b), (120.14c) and (120.14d) bit for bit
+against an oracle in the same order (class D); the inlet carries `Q` = 0.3
+to 0 (f64; `single` 1.0e-8) and the outlet's phase mean is 0.25 to 2.2e-16
+(`single` 9.1e-9) relative (class R); a dry patch writes 0 and the cell
+value. `vof_family_refusals_are_by_name` - every refusal above (class D).
+`a_channel_fed_at_a_variable_height_carries_the_liquid_rate` - THE gate:
+`Vof` on a 24 x 1 x 12 channel 2 x 1, water (1000) under air (1) to z =
+0.5, fed on `xMin` by (120.14b) at `Q = 0.1 x 0.5 x (1/12)` with
+(120.14a) at `[0.05, 0.95]` on `alpha`, drained on `xMax` by (120.14c) at
+`Umean` 0.1, a slip floor and an open top (`prghPressure p 1000`), 20 steps
+of 5e-3 with one sub-cycle: the liquid the alpha equation transports
+through the inlet each step is `Q` within 1.0e-15 relative (`single`
+2.6e-8), the inlet identity within 1.0e-15 (`single` 4.1e-9), the outlet's
+phase mean within 2.8e-16 (`single` 3.4e-8), `alpha_b` on the inlet is the
+clamp exactly, and `alpha` stays in `[-5.3e-23, 1 + 1.5e-13]` (`single`
+`[-2.8e-14, 1 + 7.2e-6]`), all against 1e-12 (class R).
+`a_tank_open_at_a_phase_hydrostatic_side_stays_at_rest` - a 24 x 1 x 24
+tank, water under air to z = 0.5, `prghPressure p 1000` on the top and
+(120.14d) with `rho 1000`, `pRefValue 1004.905` and `pRefPoint (0 0 0.5)`
+on the side `xMax` (the column's level at the interface): wet side faces
+are Dirichlet, dry ones zero-gradient; after 20 steps of 2.5e-4 `max |U|`
+is 1.2e-13 and `p = p_rgh + rho (g . x)` is the two-layer column within
+1.1e-12 of 5705.53 (`single` 4.6e-6 and 7.6e-4, 1.3e-7 relative; class R);
+the control - `pRefValue 1000`, 4.905 Pa short - moves at 8.5e-4. Four
+tests, four pass in each build; the driver knob test
+`phase_hydrostatic_pressure_on_the_atmosphere_changes_what_the_run_writes`
+(`ofgpu-vof` on the dam break's dry atmosphere) runs and changes what the
+run writes.
+
+* **Hirt, C. W. & Nichols, B. D.** "Volume of fluid (VOF) method for the
+  dynamics of free boundaries", *J. Comput. Phys.* 39 (1981) 201-225,
+  doi:10.1016/0021-9991(81)90145-5 - the phase fraction whose face value
+  weights every condition here.
+* **Rusche, H.** *Computational Fluid Dynamics of Dispersed Two-Phase Flows
+  at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
+  the modified pressure `p - rho (g . x)` the hydrostatic level is written
+  in, as in §120.7.
 
 No GPL-licensed source was consulted.
 
