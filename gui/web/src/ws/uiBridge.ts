@@ -527,6 +527,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'new_case':
       case 'validate_case':
         return unsupported(cmd.type, 'gui_control applies this on the server through case_create / case_validate; this window should not receive it')
+      case 'start_mesh':
+        return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
       case 'set_locale':
         u.setLocale(cmd.locale)
         actions.setSettings({ locale: cmd.locale })
