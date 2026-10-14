@@ -433,7 +433,7 @@ export async function runTurn(rec: SessionRecord, turnId: string, signal: AbortS
         settle(tu, call, tu.input, fail('INVALID_INPUT', `invalid input for ${tu.name}: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`))
         continue
       }
-      const policy = classifyTool(tu.name, parsed.data, { settings: rec.settings, allowedTools: rec.allowedTools, overrides: deps.overrides })
+      const policy = classifyTool(tu.name, parsed.data, { settings: rec.settings, allowedTools: rec.allowedTools, overrides: deps.overrides, sessionId })
       call.policy = policy
       if (policy === 'never') {
         settle(tu, call, parsed.data, fail('DENIED', `${tu.name} is disabled by policy (config/policy.json can set it to "ask"); do not retry it`))

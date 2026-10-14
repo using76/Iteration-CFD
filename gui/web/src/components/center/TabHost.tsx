@@ -1,6 +1,7 @@
 // Keeps every open tab mounted (editors, the viewer and the chart are
 // expensive to re-create) and hides the inactive ones.
 import { lazy, Suspense } from 'react'
+import { CenterlineChart } from '../../chart/CenterlineChart'
 import { ResidualsChart } from '../../chart/ResidualsChart'
 import { useUiStore } from '../../state/uiStore'
 import { EmptyState } from './EmptyState'
@@ -34,6 +35,8 @@ export function TabHost() {
                 <GeometryTab path={tab.path} active={active} />
               ) : tab.kind === 'campaign' ? (
                 <CampaignTab path={tab.path} active={active} />
+              ) : tab.kind === 'centerline' ? (
+                <CenterlineChart line={tab.line} active={active} />
               ) : (
                 <DiffEditorTab id={tab.id} />
               )}

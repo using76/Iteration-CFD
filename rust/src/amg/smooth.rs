@@ -599,6 +599,21 @@ impl SmootherSetup {
     /// stored: the kind's constants, then `sigma`, then the rows
     /// (SPEC-LIT §141.3). `n_cells == 0` gives an empty setup.
     pub fn new(rows: &HostRows, kind: SmootherKind) -> Result<Self> {
+        let mut s = Self::without_interval(rows, kind)?;
+        if kind_is_chebyshev(kind) && s.n_cells > 0 {
+            let (theta, ran) = lanczos_lambda_max(rows, LANCZOS_STEPS)?;
+            let g = s.gershgorin;
+            s.set_interval(theta, ran, g)?;
+        }
+        Ok(s)
+    }
+
+    /// Everything of [`Self::new`] but the Chebyshev interval: the kind's
+    /// constants, `sigma`, the row checks, `m` and the rows' own Gershgorin
+    /// bound, with `chebyshev` left `None`. The distributed hierarchy
+    /// (SPEC-LIT §141.11) calls it on a part's rows, whose off-diagonal
+    /// columns may name halo cells; it reads no column, only values.
+    pub fn without_interval(rows: &HostRows, kind: SmootherKind) -> Result<Self> {
         if let SmootherKind::WeightedJacobi { omega } = kind {
             if !(omega > 0.0 && omega < 2.0) {
                 return Err(Error::Config(format!(
@@ -671,30 +686,37 @@ impl SmootherSetup {
             };
             m.push(m_c as Scalar);
         }
-        let chebyshev = if kind_is_chebyshev(kind) {
-            let (theta, ran) = lanczos_lambda_max(rows, LANCZOS_STEPS)?;
-            let beta = (LAMBDA_SAFETY * theta).min(gershgorin);
-            let alpha = fraction * beta;
-            if !(beta > 0.0 && beta.is_finite())
-                || !(alpha > 0.0 && alpha.is_finite())
-            {
-                return Err(Error::Config(format!(
-                    "amg::smooth: the interval is [{alpha}, {beta}], which \
-                     is not positive and finite; the interval is refused"
-                )));
-            }
-            Some(chebyshev_coefficients(degree, alpha, beta, theta, ran))
-        } else {
-            None
-        };
         Ok(Self {
             kind,
             n_cells: n,
             sigma,
             gershgorin,
             m,
-            chebyshev,
+            chebyshev: None,
         })
+    }
+
+    /// The Chebyshev interval of (141.3.7) and the coefficients of
+    /// (141.3.5), from the Ritz value `theta`, the Lanczos steps `ran`
+    /// that produced it and Gershgorin's bound `gershgorin` (stored), for a
+    /// Chebyshev kind; any other kind is left as it is (SPEC-LIT §141.3).
+    /// [`Self::new`] passes its own rows' values; the distributed hierarchy
+    /// passes the whole level's (SPEC-LIT §141.11).
+    pub fn set_interval(&mut self, theta: f64, ran: usize, gershgorin: f64) -> Result<()> {
+        let SmootherKind::Chebyshev { degree, fraction } = self.kind else {
+            return Ok(());
+        };
+        let beta = (LAMBDA_SAFETY * theta).min(gershgorin);
+        let alpha = fraction * beta;
+        if !(beta > 0.0 && beta.is_finite()) || !(alpha > 0.0 && alpha.is_finite()) {
+            return Err(Error::Config(format!(
+                "amg::smooth: the interval is [{alpha}, {beta}], which \
+                 is not positive and finite; the interval is refused"
+            )));
+        }
+        self.gershgorin = gershgorin;
+        self.chebyshev = Some(chebyshev_coefficients(degree, alpha, beta, theta, ran));
+        Ok(())
     }
 }
 
@@ -1112,6 +1134,38 @@ impl GpuSmoother {
         for _ in 0..sweeps {
             for step in 0..self.degree.max(1) {
                 ldu_ops::amul(gpu, k, &mut self.y, x, a, mesh)?;
+                self.update(gpu, step, x, b, nl)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A level whose product the caller forms (SPEC-LIT §141.11): per step
+    /// `amul(y, x)` writes `y = A x` into the smoother's scratch, then the
+    /// same update as [`Self::smooth_level`]. `x` is `&mut` in the product
+    /// because a decomposed level fills its halo slots there first. `cells`
+    /// is the level's owned-cell count; `sweeps == 0` and `n_cells == 0`
+    /// call nothing.
+    pub fn smooth_with<F>(
+        &mut self,
+        gpu: &Gpu,
+        cells: usize,
+        x: &mut DevBuf<Scalar>,
+        b: &DevBuf<Scalar>,
+        sweeps: usize,
+        mut amul: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut DevBuf<Scalar>, &mut DevBuf<Scalar>) -> Result<()>,
+    {
+        self.check(cells, x, b)?;
+        if self.n_cells == 0 || sweeps == 0 {
+            return Ok(());
+        }
+        let nl = self.n_cells as Label;
+        for _ in 0..sweeps {
+            for step in 0..self.degree.max(1) {
+                amul(&mut self.y, x)?;
                 self.update(gpu, step, x, b, nl)?;
             }
         }

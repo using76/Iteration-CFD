@@ -43,6 +43,17 @@
         }
       ]
     },
+    "parcels": {
+      "description": "SPEC-LIT §137.2: the parcel model (`crate::io::case_parcels`). Absent\n(the default) is every case this reader has ever built; present, it\nlowers to [`LoweredCase::parcels`] and every driver refuses the case\nuntil CHR-26 wires `ofgpu-lowmach` (§137.6).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonParcels"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "patches": {
       "description": "ORDERED, matched first-to-last - section 4.1 point 1. A JSON object's\nkeys cannot carry this, which is the entire reason this is an array of\n`{match, ...}` records rather than a `{\"pattern\": {...}}` map.",
       "type": "array",
@@ -190,6 +201,85 @@
         "max"
       ]
     },
+    "JsonCompressible": {
+      "description": "`physics.compressible` - SPEC-LIT §122.6, the JSONC statement of §122.1's\ngas: `gamma` and `W` state it, a stated `cp` must agree with (122.5) to\n`1e-6` relative, `Pr` defaults to 0.71, and `pOperating` (§122.2's\n`p_op`, Pa) has no default.",
+      "type": "object",
+      "properties": {
+        "Pr": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "W": {
+          "description": "Molar mass, kg/mol.",
+          "type": "number",
+          "format": "double"
+        },
+        "cp": {
+          "description": "J/(kg K); checked against (122.5), never used in its place.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "gamma": {
+          "type": "number",
+          "format": "double"
+        },
+        "pOperating": {
+          "type": "number",
+          "format": "double"
+        },
+        "viscosity": {
+          "$ref": "#/$defs/JsonViscosity"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gamma",
+        "W",
+        "viscosity",
+        "pOperating"
+      ]
+    },
+    "JsonCoupling": {
+      "description": "`parcels.coupling` - `CouplingControls`, and the species `vapour` names.",
+      "type": "object",
+      "properties": {
+        "energy": {
+          "description": "`off` (default) | `explicit` | `semiImplicit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mass": {
+          "description": "`none` (default) | `evaporation`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "momentum": {
+          "description": "`off` (default) | `explicit` | `semiImplicit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vapour": {
+          "description": "The species that receives the vapour; required with `mass\nevaporation`, and one of `species.names`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "JsonCyclicPair": {
       "description": "One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six\n`mesh.boundaries` values, and must name the two opposite slots of one\naxis (`xmin`/`xmax`, `ymin`/`ymax` or `zmin`/`zmax`) - `build_block`\nchecks that, not this type.\n\n`transform` takes only `\"translate\"` - the transform\n[`crate::blockgen::BlockSpec::set_cyclic_axis`] knows how to build a\npairing from, implied by the block's own extent along that axis. A\nrotational pair (`\"rotate\"`, with an axis and an angle) needs a different\nface-matching search and a vector transform on `Sf` that nothing here\nimplements yet, so it deserialises fine (it is a *known* setting) and is\nrefused in `build_block` with a SPEC-LIT §13.4 error naming `translate` -\nexactly like any other recognised-but-unimplemented setting, not a parse\nfailure.",
       "type": "object",
@@ -266,6 +356,61 @@
           ]
         }
       ]
+    },
+    "JsonEvaporation": {
+      "description": "`parcels.evaporation` - `EvaporationControls`, field by field.",
+      "type": "object",
+      "properties": {
+        "cfl": {
+          "description": "The largest fraction of `d^2` one sub-step may remove (76.10).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "liquid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonLiquid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pAmbient": {
+          "description": "Thermodynamic pressure, Pa.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "saturation": {
+          "description": "`clausiusClapeyron` | `hylandWexler` (default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transfer": {
+          "description": "`ranzMarshall` | `spalding` | `abramzonSirignano` (default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wCarrier": {
+          "description": "Carrier-gas molar mass, kg/mol.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "JsonExact": {
       "description": "Interchange with the polyhedra preserved - SPEC-LIT S44.1.",
@@ -350,6 +495,35 @@
         "TRef"
       ]
     },
+    "JsonFreestream": {
+      "description": "A `farfield` or `supersonicInlet` rule's stated state (SPEC-LIT §122.6):\n`p` is GAUGE, in the `p` field's datum (§122.2), `T` in kelvin.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "type": "number",
+          "format": "double"
+        },
+        "U": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "p": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "U",
+        "p",
+        "T"
+      ]
+    },
     "JsonGrading": {
       "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
       "type": "object",
@@ -405,6 +579,71 @@
       "required": [
         "expansion"
       ]
+    },
+    "JsonImpact": {
+      "description": "`parcels.impact` - `WallImpactControls`, field by field.",
+      "type": "object",
+      "properties": {
+        "kCrit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "muLiquid": {
+          "description": "Pa s.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sigma": {
+          "description": "N/m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "splash": {
+          "description": "`mundo` (default) | `baiGosman`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "splashA": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tension": {
+          "description": "`constant` (default) | `iapwsR1-76`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weSpread": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "weStick": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "JsonInitial": {
       "type": "object",
@@ -466,6 +705,100 @@
         "p"
       ]
     },
+    "JsonInjector": {
+      "description": "One `parcels.injectors[]` entry - an `Injector`. `position` and\n`massFlow` are required; every other field is `Injector::default()`'s.",
+      "type": "object",
+      "properties": {
+        "axis": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "coneHalfAngle": {
+          "description": "rad.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "diameter": {
+          "description": "m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "interval": {
+          "description": "s.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "massFlow": {
+          "description": "kg/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "parcelsPerEvent": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "position": {
+          "description": "m.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "speed": {
+          "description": "m/s.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "standoff": {
+          "description": "m.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "temperature": {
+          "description": "K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "massFlow"
+      ]
+    },
     "JsonLaplacian": {
       "type": "object",
       "properties": {
@@ -484,6 +817,90 @@
         "snGrad",
         "nonOrthogonalCorrectors"
       ]
+    },
+    "JsonLiquid": {
+      "description": "`parcels.evaporation.liquid` - a preset (`water`, the default, or\n`benzene`) and any of its nine properties overridden.",
+      "type": "object",
+      "properties": {
+        "cpVapour": {
+          "description": "J/(kg K).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "dExponent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "dVapour": {
+          "description": "m2/s at `tRefD` and 1 atm.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "hVBoil": {
+          "description": "J/kg.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "pBoil": {
+          "description": "Pa.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tBoil": {
+          "description": "K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tCrit": {
+          "description": "K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tRefD": {
+          "description": "K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "wVapour": {
+          "description": "kg/mol.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "JsonMesh": {
       "type": "object",
@@ -661,6 +1078,192 @@
       },
       "additionalProperties": false
     },
+    "JsonParcels": {
+      "description": "The `parcels` block. Every key but `capacity` and `injectors` is optional,\nand an absent key is the library's `Default` (SPEC-LIT §137.2), except\nwhere §137.6 says otherwise.",
+      "type": "object",
+      "properties": {
+        "addedMass": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cLiquid": {
+          "description": "J/(kg K); read by `heating` and `evaporating` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "capacity": {
+          "description": "Slots in the parcel pool (`ParcelControls::capacity`).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "cfl": {
+          "description": "The motion sub-step's fraction of a cell (66.7).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "coupling": {
+          "description": "SPEC-LIT §68.6 and §77; absent is no coupling at all.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCoupling"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cpGas": {
+          "description": "J/(kg K); read by `heating` and `evaporating` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "drag": {
+          "description": "`none` | `stokes` | `schillerNaumann` (default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evaporation": {
+          "description": "SPEC-LIT §76; only with `physics evaporating`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonEvaporation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gravity": {
+          "description": "m/s2. Absent: the case's `physics.gravity` on the JSONC route.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "impact": {
+          "description": "SPEC-LIT §78; only with `wall weber`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonImpact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "injectors": {
+          "description": "One entry per nozzle, at least one (SPEC-LIT §66.8).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonInjector"
+          }
+        },
+        "kGas": {
+          "description": "W/(m K); read by `heating` and `evaporating` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "maxSubsteps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxWalk": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "muGas": {
+          "description": "Pa s.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "persistentBlocks": {
+          "description": "Blocks in the persistent grid; absent derives it from `capacity`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "physics": {
+          "description": "`inert` (default) | `heating` | `evaporating`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "restitution": {
+          "description": "Normal restitution, `[0, 1]`; read by `rebound` and `weber` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "rhoLiquid": {
+          "description": "kg/m3.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tangentialLoss": {
+          "description": "Tangential loss, `[0, 1]`; read by `rebound` and `weber` only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "wall": {
+          "description": "`remove` (default) | `rebound` | `stick` | `weber`; `film`, `spread`\nand `splash` are refused with their SPEC-LIT §78 reasons.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "capacity",
+        "injectors"
+      ]
+    },
     "JsonPatchMotion": {
       "description": "One `motion.patches[]` entry, tagged on `rule`.",
       "oneOf": [
@@ -771,6 +1374,17 @@
             }
           ]
         },
+        "freestream": {
+          "description": "SPEC-LIT §122.6: the state a `farfield` or `supersonicInlet` rule\nstates, required there and refused on every other kind.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonFreestream"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "k": {
           "description": "`k`'s own condition. Only required when `initial.k` is given (this\ncase solves `k`) - see [`turb_field_spec`].",
           "anyOf": [
@@ -870,6 +1484,17 @@
       "properties": {
         "buoyancy": {
           "$ref": "#/$defs/BuoyancyModel"
+        },
+        "compressible": {
+          "description": "SPEC-LIT §122.6: the perfect gas of §122.1. Absent (the default) is\nevery case this reader has ever built; present, it lowers to\n[`LoweredCase::compressible`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCompressible"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "fluid": {
           "$ref": "#/$defs/JsonFluid"
@@ -1283,6 +1908,52 @@
         "wallFunctions"
       ]
     },
+    "JsonViscosity": {
+      "description": "`physics.compressible.viscosity` - (122.6) or a constant `mu`.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "As": {
+              "type": "number",
+              "format": "double"
+            },
+            "Ts": {
+              "type": "number",
+              "format": "double"
+            },
+            "model": {
+              "type": "string",
+              "const": "sutherland"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "As",
+            "Ts"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "const": "const"
+            },
+            "mu": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "model",
+            "mu"
+          ]
+        }
+      ]
+    },
     "JsonVisualisation": {
       "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
       "type": "object",
@@ -1389,6 +2060,16 @@
           "description": "SPEC-LIT 119.3: `PatchKind::Wedge` - the third CONSTRAINT kind. Needs\na mesh that has wedge sides (`mesh.wedge`, the 119.0 block): the\nreader refuses a `wedge` rule on a mesh without one, and on a wedge\nmesh holds `ymin`/`ymax` to a `wedge` rule and every other slot away\nfrom one. Same per-field refusal as [`Self::Empty`] and\n[`Self::Symmetry`] - the constraint decides every field,\nturbulence fields included - and 119.2's `BcKind::Wedge` is what the\nfield seed and `field_setup::topology_override` force on its faces.",
           "type": "string",
           "const": "wedge"
+        },
+        {
+          "description": "SPEC-LIT §122.6 and §126.6: the characteristic far field. Its rule\nstates the free stream (`freestream`), and `U`, `p` and `T` all lower\nto `characteristicFarfield` at that state; only in a case with\n`physics.compressible`.",
+          "type": "string",
+          "const": "farfield"
+        },
+        {
+          "description": "SPEC-LIT §122.6 and §126.2: supersonic inflow, `p`, `U` and `T` all\n`fixedValue` at the rule's `freestream`; only in a case with\n`physics.compressible`.",
+          "type": "string",
+          "const": "supersonicInlet"
         }
       ]
     },

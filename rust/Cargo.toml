@@ -138,6 +138,10 @@ name = "ofgpu-decompose"
 path = "src/bin/decompose.rs"
 
 [[bin]]
+name = "ofgpu-par"
+path = "src/bin/par.rs"
+
+[[bin]]
 name = "ofgpu-automesher"
 path = "src/bin/automesher.rs"
 

@@ -5,7 +5,7 @@
 // same void. Commands this web app can genuinely apply are applied here;
 // everything else is refused immediately with UNSUPPORTED so the model can
 // tell the operator the truth instead of waiting.
-import type { ClientMsg, MetricRecord, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
+import type { ClientMsg, MeshDraft, MetricRecord, OpenMeshDialog, UiCommand, UiSelection, UiState, ViewId, ViewerCommand } from '@cfd/shared'
 import { ViewerCommandSchema } from '@cfd/shared'
 import { getViewerApi } from '../viewer'
 import type { ProbeOutcome, ViewerTool, ViewportRect } from '../viewer'
@@ -13,10 +13,12 @@ import { linkCameras } from '../viewer/api/cameraLink'
 import { actions, activeCasePath } from './actions'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
 import type { useSessionStore } from '../state/sessionStore'
+// Type-only: the value import would pull monaco into the node tests (see editor below).
+import type { SaveCaseOutcome } from '../state/editorStore'
 // tabStateLabel / tabScreenLabel are value imports; uiStore has no DOM imports,
 // so this stays node-test safe. useUiStore itself must NOT be imported here
 // (the bridge takes its store through deps so tests can inject fakes).
-import { tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
+import { selectionOfProbe, tabScreenLabel, tabStateLabel, type LogStream, type useUiStore } from '../state/uiStore'
 // Pure series helpers (metric matching, surface keys); series.ts only type-imports
 // the store, so this value import stays node-test safe too.
 import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
@@ -37,7 +39,13 @@ export interface UiBridgeDeps {
   /** close_tab's bookkeeping on the editor store. Injected by client.ts; kept
    *  optional and behind this interface because importing editorStore here
    *  would pull monaco into the node tests. */
-  editor?: { isDirty(path: string): boolean; closeBuffer(path: string): void; removeDiff(id: string): void }
+  editor?: {
+    isDirty(path: string): boolean
+    closeBuffer(path: string): void
+    removeDiff(id: string): void
+    /** save_case: validate the buffer on the server, refuse on errors unless force, then write it (editorStore.saveCase). */
+    saveCase?(path: string, force: boolean): Promise<SaveCaseOutcome>
+  }
 }
 
 /** set_camera / fit_view always answer within this, below the hub's 5 s UI_TIMEOUT_MS. */
@@ -53,6 +61,38 @@ const FIELD_MAP: Record<string, { name: string; component: 'magnitude' | null }>
 /** The four geometry edit ui.commands this screen applies through the
  *  geometry studio store (E1). */
 type GeometryUiCommand = Extract<UiCommand, { type: 'geometry_part' | 'geometry_transform' | 'geometry_boolean' | 'geometry_save' }>
+
+// ---- open_mesh_dialog / open_mesh_view (STU-06b) ---------------------------
+
+/** An empty draft, as the server's guiMesh.ts starts one. */
+const EMPTY_MESH_DRAFT: MeshDraft = { mode: 'preset', preset: null, cells: null, outputDir: null, config: null, layoutDir: null, check: null, dryRun: false }
+
+/** open_mesh_dialog -> the whole draft the Mesh dialog shows. The server sends
+ *  its whole draft; a field a command leaves out keeps the shown draft's value,
+ *  one cell count fills three axes, and an absent mode follows the given form
+ *  as guiMesh.ts infers it. Pure. */
+export function meshDraftOf(cmd: OpenMeshDialog, prev: MeshDraft | null): MeshDraft {
+  const d: MeshDraft = { ...(prev ?? EMPTY_MESH_DRAFT) }
+  if (cmd.preset != null) d.preset = cmd.preset
+  if (cmd.outputDir != null) d.outputDir = cmd.outputDir
+  if (cmd.config != null) d.config = cmd.config
+  if (cmd.layoutDir != null) d.layoutDir = cmd.layoutDir
+  if (cmd.check != null) d.check = cmd.check
+  if (cmd.dryRun != null) d.dryRun = cmd.dryRun
+  if (cmd.cells != null) d.cells = typeof cmd.cells === 'number' ? [cmd.cells, cmd.cells, cmd.cells] : [cmd.cells[0], cmd.cells[1], cmd.cells[2]]
+  else if (d.cells) d.cells = [d.cells[0], d.cells[1], d.cells[2]]
+  d.mode = cmd.mode ?? (cmd.layoutDir != null ? 'regions' : cmd.config != null ? 'automesher' : cmd.preset != null ? 'preset' : d.mode)
+  return d
+}
+
+/** The directory a draft's mesh lands in, for open_mesh_view: the preset form's
+ *  outputDir, the automesher's -check case, the regions form's layout root; null
+ *  when the draft names none. */
+export function meshOutputOf(d: MeshDraft | null): string | null {
+  if (!d) return null
+  const p = d.mode === 'regions' ? d.layoutDir : d.mode === 'automesher' ? d.check : d.outputDir
+  return p && p.trim() ? p.trim() : null
+}
 
 // ---- add_layer / remove_layer (STU-04) -------------------------------------
 // A weaker model names layers loosely ("iso-surface", "ARROWS") and packs its
@@ -228,7 +268,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
     return {
       activeTab: u.activeTabId,
       activeStep: null,
-      rightTab: u.assistantVisible ? 'AI Assistant' : null,
+      rightTab: u.assistantVisible ? (u.rightTab ?? 'AI Assistant') : null,
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
       projection: vs.camera.projection === 'orthographic' ? 'Orthographic' : 'Perspective',
@@ -240,7 +280,8 @@ export function createUiBridge(deps: UiBridgeDeps) {
       metricPick: Array.isArray(u.metricSlots)
         ? { left: u.metricSlots[0] ?? null, right: u.metricSlots[1] ?? null, mode: u.metricMode ?? 'metrics' }
         : null,
-      selection: lastSelection,
+      // The store's selection also follows a pick on the screen (Viewer3D); a fake ui without it reports the probe's.
+      selection: u.selection !== undefined ? u.selection : lastSelection,
       runId: u.activeRunId,
       sim: null,
       case: casePath ? { path: casePath, name: null, dirty: null } : null,
@@ -330,9 +371,12 @@ export function createUiBridge(deps: UiBridgeDeps) {
         return { ok: true }
       }
       case 'geometry_boolean': {
+        // A STEP tab goes to geom_tool edit, an STL tab to the server's
+        // Manifold route (STU-17); an OBJ has neither.
         const cur = g.byPath[path]
-        if (!cur || cur.info == null || cur.info.source?.kind !== 'step') {
-          return unsupported('geometry_boolean', 'booleans run only on a STEP geometry; this tab opened ' + path + ' - geometry_import_step a .step first')
+        const info = cur?.info ?? null
+        if (info == null || (info.source?.kind !== 'step' && info.format !== 'stl-ascii' && info.format !== 'stl-binary')) {
+          return unsupported('geometry_boolean', 'booleans run on an STL or STEP geometry; this tab opened ' + path + ' - geometry_open a .stl or geometry_import_step a .step first')
         }
         const { out } = await g.boolean(path, cmd.op, cmd.a, cmd.b)
         ui.getState().openGeometryTab(out)
@@ -416,17 +460,17 @@ export function createUiBridge(deps: UiBridgeDeps) {
 
   /** A probe outcome becomes the answer and the selection ui.state reports. */
   function probeAnswer(outcome: ProbeOutcome): { ok: true } | { ok: false; error: string } {
-    if (outcome.ok) {
-      const h = outcome.hit
-      lastSelection = { kind: 'cell', id: h.cell, center: h.center, value: h.value, field: h.field, patch: null }
-      return { ok: true }
+    const selection = selectionOfProbe(outcome)
+    if (selection !== null) {
+      // Inspector shows the store's selection (STU-08a).
+      lastSelection = selection
+      ui.getState().setSelection(selection)
     }
-    if (outcome.code === 'MISS') {
-      lastSelection = { kind: 'none' }
-      return { ok: false, error: `MISS (probe): ${outcome.message}` }
-    }
+    if (outcome.ok) return { ok: true }
+    if (outcome.code === 'MISS') return { ok: false, error: `MISS (probe): ${outcome.message}` }
     if (outcome.code === 'NO_STRUCTURED_GRID') return { ok: false, error: `UNSUPPORTED (probe): ${outcome.message}` }
     if (outcome.code === 'NO_DATASET') return { ok: false, error: `NO_DATASET (probe): ${outcome.message}` }
+    if (outcome.code === 'LOCATE_FAILED') return { ok: false, error: `LOCATE_FAILED (probe): ${outcome.message}` }
     return { ok: false, error: `NO_VIEWER (probe): ${outcome.message}` }
   }
 
@@ -493,6 +537,59 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'open_case':
         u.openFile(cmd.path)
         return { ok: true }
+      case 'save_case': {
+        // The open editor buffer of the screen's case, validated before it is written (STU-05).
+        const path = activeCasePath()
+        if (path === null) return { ok: false, error: 'NO_CASE (save_case): no case is open in the editor; open_case first' }
+        if (!deps.editor?.saveCase) return { ok: false, error: 'NO_EDITOR (save_case): this window has no case editor to save from' }
+        const showProblems = () => {
+          u.setBottomVisible(true)
+          u.setBottomTab('problems')
+        }
+        const r = await deps.editor.saveCase(path, cmd.force === true)
+        if (r.ok) {
+          if (r.errors > 0) showProblems()
+          return { ok: true }
+        }
+        if (r.code === 'CASE_INVALID') {
+          showProblems()
+          return {
+            ok: false,
+            error: `CASE_INVALID (save_case): ${r.message}; nothing was written. The findings are in the Problems list: fix them, or send save_case {force: true} to save anyway`,
+          }
+        }
+        return { ok: false, error: `${r.code} (save_case): ${r.message}` }
+      }
+      case 'new_case':
+      case 'validate_case':
+        return unsupported(cmd.type, 'gui_control applies this on the server through case_create / case_validate; this window should not receive it')
+      case 'start_mesh':
+        return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
+      case 'set_patch':
+        return unsupported(cmd.type, 'gui_control applies this on the server through case_edit; this window should not receive it')
+      case 'open_boundary_editor': {
+        // The editor reads the case's table itself (GET /api/case/boundary); an open one reads it again.
+        const path = activeCasePath()
+        if (path === null) return { ok: false, error: 'NO_CASE (open_boundary_editor): no case is open; open_case first' }
+        u.showBoundaryEditor(path)
+        return { ok: true }
+      }
+      case 'open_mesh_dialog':
+        // The server keeps the draft (guiMesh.ts); the dialog shows what it sent.
+        u.showMeshDialog(meshDraftOf(cmd, u.meshDialog?.draft ?? null))
+        return { ok: true }
+      case 'open_mesh_view': {
+        // The mesh the dialog's draft made, else the open case's own mesh.
+        const path = meshOutputOf(u.meshDialog?.draft ?? null) ?? activeCasePath()
+        if (path === null)
+          return { ok: false, error: 'NO_MESH (open_mesh_view): no mesh to open: the Mesh dialog shows no draft with an output directory and no case is open; open_mesh_dialog or open_case first' }
+        u.openViewerTab()
+        const v = getViewerApi()
+        const loaded = await v.execute({ type: 'load', path, timeIndex: 'last', field: 'none', region: null })
+        if (!loaded.ok) return { ok: false, error: loaded.error?.message ?? `the mesh at ${path} could not be opened` }
+        const r = await v.execute({ type: 'setRepresentation', mode: cmd.representation ?? 'surfaceEdges', opacity: null, patches: cmd.patches ?? null })
+        return r.ok ? { ok: true } : { ok: false, error: r.error?.message ?? 'the viewer refused the representation' }
+      }
       case 'set_locale':
         u.setLocale(cmd.locale)
         actions.setSettings({ locale: cmd.locale })
@@ -708,11 +805,9 @@ export function createUiBridge(deps: UiBridgeDeps) {
         // The studio's own edits (E1): real edits through the geometry store.
         return geometryCommand(cmd)
       case 'open_panel':
-        if (cmd.panel === 'AI Assistant') {
-          if (!ui.getState().assistantVisible) ui.getState().toggleAssistant()
-          return { ok: true }
-        }
-        return unsupported('open_panel', `panel "${cmd.panel}" does not exist on this screen (AI Assistant only)`)
+        // The right column's four panels (STU-08a); the column shows if it was hidden.
+        u.openPanel(cmd.panel)
+        return { ok: true }
       case 'run':
       case 'start_run':
       case 'stop_run':
@@ -748,7 +843,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
           ui.getState().openViewerTab()
           return noViewer(cmd.type)
         }
-        if (cmd.point != null) return probeAnswer(v.probePoint(cmd.point))
+        if (cmd.point != null) return probeAnswer(await v.probePoint(cmd.point))
         const t = probeTarget(cmd, rect)
         if ('error' in t) return { ok: false, error: t.error }
         return probeAnswer(v.probePixel(t.x, t.y))
@@ -812,11 +907,20 @@ export function createUiBridge(deps: UiBridgeDeps) {
       case 'show_overlay':
         u.setOverlay(cmd.what, cmd.on)
         return { ok: true }
-      case 'set_centerline':
+      case 'set_centerline': {
+        // gui_control resolves the result, field, time and line on the server
+        // (guiCenterline.ts); the chart fetches the samples on exactly that line.
+        if (!cmd.path || !cmd.p0 || !cmd.p1) return { ok: false, error: 'NO_LINE (set_centerline): the server resolves the result and the line before this window receives it; send set_centerline through gui_control' }
+        u.openCenterlineTab({ path: cmd.path, field: cmd.quantity, component: cmd.component ?? 'magnitude', time: cmd.time ?? null, p0: [cmd.p0[0], cmd.p0[1], cmd.p0[2]], p1: [cmd.p1[0], cmd.p1[1], cmd.p1[2]] })
+        return { ok: true }
+      }
+      case 'run_custom_tool':
+        return unsupported(cmd.type, 'gui_control runs this on the server as custom_tool_run; this window should not receive it')
       case 'select_step':
         return unsupported(cmd.type, 'this screen does not implement it')
       default:
-        return unsupported(cmd.type, 'this screen does not implement it')
+        // Every type has a case now; a type a newer server sends still answers by name.
+        return unsupported((cmd as { type: string }).type, 'this screen does not implement it')
     }
   }
 

@@ -65,6 +65,19 @@ export interface BinarySpec {
    * list it.
    */
   pending?: boolean
+  /**
+   * Flags the studio shows together as one run option (the run draft still
+   * sets each flag by name through set_run_setting). `ranksTransport` is
+   * ofgpu-par's ranks / transport pair, -np and -comm (PAR-17).
+   */
+  runOptions?: RunOptionGroup[]
+}
+
+export interface RunOptionGroup {
+  /** The i18n key suffix of the group's label: `cfd.runOption.<key>`. */
+  key: 'ranksTransport'
+  /** Names of flags of the same binary, in display order. */
+  flags: string[]
 }
 
 const OUTPUT_LIST: FlagSpec = {
@@ -397,6 +410,30 @@ export const BINARIES: BinarySpec[] = [
     longRunning: false,
     gpu: true,
     usageKind: 'constUsage',
+  },
+  {
+    name: 'ofgpu-par',
+    source: 'src/bin/par.rs',
+    purpose: 'Run the halo, reduction and Krylov gates SPMD, one rank per part on its own GPU handle, against the whole mesh bit for bit (SPEC-LIT 138.8).',
+    summary: 'Parallel (SPMD) gate driver.',
+    kind: 'analysis',
+    positionals: [{ name: 'case', type: 'path', description: 'OpenFOAM case directory or .jsonc case.' }],
+    flags: [
+      { name: '-np', type: 'list', default: '2,3,4', description: 'Ranks: a comma list of rank counts, one SPMD world per count (e.g. 2 or 2,3,4).' },
+      { name: '-comm', type: 'enum', values: ['threads'], default: 'threads', description: 'Transport: threads, one process with one thread per rank. MPI is not offered: the driver refuses it until PAR-06 (deferred).' },
+      { name: '-method', type: 'enum', values: ['hilbert', 'linear', 'roundrobin', 'all'], default: 'all', description: 'Partitioner.' },
+      { name: '-sweeps', type: 'int', default: 8, description: 'Jacobi sweeps in the halo gate.' },
+      { name: '-alpha', type: 'float', default: 0.5, description: 'Under-relaxation factor.' },
+      { name: '-quiet', type: 'flag', description: 'Print only the gate lines and the verdict.' },
+    ],
+    accepts: ['foamDir', 'jsonc'],
+    builds: [],
+    residualStyle: 'none',
+    writes: { formats: [], restart: false, csv: false },
+    longRunning: false,
+    gpu: true,
+    usageKind: 'constUsage',
+    runOptions: [{ key: 'ranksTransport', flags: ['-np', '-comm'] }],
   },
   {
     name: 'ofgpu-validate',

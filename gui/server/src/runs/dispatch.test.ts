@@ -2,10 +2,13 @@
 // separators are live outside quotes, so every argument is quoted - the one
 // place a run request's free string (a --tag value) could otherwise become a
 // second command.
+import { spawn } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
-import { BINARIES } from '@cfd/shared'
+import { BINARIES, checkArgValue, getBinary } from '@cfd/shared'
 import { STATIC_SYSTEM } from '../prompts/system.js'
-import { availableBinaries, buildArgv, pipelineCommandLine, pipelineSpawn, quoteForCmd } from './dispatch.js'
+import { availableBinaries, buildArgv, pipelineCommandLine, pipelineSpawn, quoteForCmd, type DispatchOptions } from './dispatch.js'
+import { createRunManager } from './manager.js'
+import { makeTempWorkspace } from './test-helpers.js'
 
 describe('pipeline command line', () => {
   it('quotes every argument, doubling embedded quotes, so cmd separators stay literal', () => {
@@ -48,5 +51,51 @@ describe('arrived binaries', () => {
     expect(STATIC_SYSTEM).toContain('ofgpu-regions')
     expect(STATIC_SYSTEM).toContain('ofgpu-sample')
     expect(BINARIES.some((b) => b.pending === true)).toBe(false)
+  })
+})
+
+// PAR-17: the studio launches a parallel run through the ranks / transport
+// run option (-np, -comm). The transport is threads only: PAR-06 (MPI) is
+// deferred, so the registry offers no mpi and a request for it is refused
+// before anything is spawned.
+describe('ofgpu-par dispatch', () => {
+  it('builds `ofgpu-par case -np 2 -comm threads` and refuses -comm mpi', () => {
+    const par = getBinary('ofgpu-par')!
+    const req = { casePath: 'cases/plume.jsonc', positionals: [], args: [{ flag: '-np', value: '2' }, { flag: '-comm', value: 'threads' }] }
+    for (const a of req.args) expect(checkArgValue(par.flags.find((f) => f.name === a.flag)!, a.value)).toBeNull()
+    expect(buildArgv(req)).toEqual(['cases/plume.jsonc', '-np', '2', '-comm', 'threads'])
+    expect(checkArgValue(par.flags.find((f) => f.name === '-comm')!, 'mpi')).toMatch(/must be one of threads/)
+    expect(par.runOptions?.[0].flags).toEqual(['-np', '-comm'])
+    expect(availableBinaries({ binDir: null, workspaceRoot: '/nowhere', demo: true }, ['ofgpu-par'])).toEqual(['ofgpu-par'])
+    expect(availableBinaries({ binDir: null, workspaceRoot: '/nowhere', demo: false }, ['ofgpu-par'])).toEqual([])
+  })
+
+  it('the run manager hands the dispatcher that argv, and refuses -comm mpi before anything is spawned', async () => {
+    const ws = await makeTempWorkspace()
+    try {
+      const seen: DispatchOptions[] = []
+      const runs = await createRunManager({
+        config: ws.config,
+        dispatch: (opts) => {
+          seen.push(opts)
+          const child = spawn(process.execPath, ['-e', ''], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+          return { child, argv: [opts.binary, ...opts.argv], mode: 'real' as const }
+        },
+      })
+      try {
+        const base = { binary: 'ofgpu-par', casePath: 'cases/plume.jsonc', positionals: [], label: null }
+        await expect(runs.start({ ...base, args: [{ flag: '-np', value: '2' }, { flag: '-comm', value: 'mpi' }] })).rejects.toThrow(/-comm must be one of threads/)
+        const run = await runs.start({ ...base, args: [{ flag: '-np', value: '2' }, { flag: '-comm', value: 'threads' }] })
+        for (let i = 0; i < 100 && seen.length === 0; i++) await new Promise((r) => setTimeout(r, 20))
+        expect(seen).toHaveLength(1)
+        expect(seen[0].binary).toBe('ofgpu-par')
+        expect(seen[0].argv).toEqual(['cases/plume.jsonc', '-np', '2', '-comm', 'threads'])
+        expect(run.binary).toBe('ofgpu-par')
+      } finally {
+        await runs.shutdown()
+      }
+    } finally {
+      await ws.cleanup()
+    }
   })
 })

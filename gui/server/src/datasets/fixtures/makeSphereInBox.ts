@@ -2,6 +2,8 @@
 // No GPL-licensed source was consulted.
 // A sphere-in-a-box polyMesh case (the 8x8x8 box minus the 56 cells the body occupies): the 3-D
 // case whose body wall hides the far-field box. Mirrors the web demo syntheticSphereInBox.
+// With `warp` every point off the box surface is moved by a bubble displacement, so the same cells
+// no longer form a lattice (the non-lattice polyMesh of STU-12b's plane cuts).
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { writeFoamField } from '../../formats/foam.js'
@@ -50,7 +52,14 @@ function facePoints(cell: Vec, axis: 0 | 1 | 2, side: 0 | 1): number[] {
   return side === 1 ? [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)] : [at(u0, v0), at(u0, v1), at(u1, v1), at(u1, v0)]
 }
 
-function buildMesh(): PolyMesh {
+/** The warp of `{ warp: true }`: b = (1-x^2)(1-y^2)(1-z^2) is 0 on the box faces, so the box stays [-1,1]^3. */
+const WARP_EPS = 0.1
+function warpPoint(x: number, y: number, z: number): Vec {
+  const b = WARP_EPS * (1 - x * x) * (1 - y * y) * (1 - z * z)
+  return [x + b * (y + 0.5 * z), y + b * (z - 0.3 * x), z + b * (x + 0.4 * y)]
+}
+
+function buildMesh(warp: boolean): PolyMesh {
   const removed = removedCells()
   const cellOfSite: number[] = new Array(N * N * N).fill(-1)
   let nCells = 0
@@ -66,9 +75,11 @@ function buildMesh(): PolyMesh {
     for (let j = 0; j < P; j++) {
       for (let i = 0; i < P; i++) {
         const id = pointId(i, j, k)
-        points[3 * id] = -1 + H * i
-        points[3 * id + 1] = -1 + H * j
-        points[3 * id + 2] = -1 + H * k
+        const lattice: Vec = [-1 + H * i, -1 + H * j, -1 + H * k]
+        const [x, y, z] = warp ? warpPoint(...lattice) : lattice
+        points[3 * id] = x
+        points[3 * id + 1] = y
+        points[3 * id + 2] = z
       }
     }
   }
@@ -154,9 +165,10 @@ function buildMesh(): PolyMesh {
   }
 }
 
-/** `<dir>/constant/polyMesh`, `<dir>/system/controlDict` (`application ofgpu;`) and `<dir>/0/p` (p of cell c = c). */
-export async function makeSphereInBox(dir: string): Promise<void> {
-  await writePolyMesh(path.join(dir, 'constant', 'polyMesh'), buildMesh())
+/** `<dir>/constant/polyMesh`, `<dir>/system/controlDict` (`application ofgpu;`) and `<dir>/0/p` (p of cell c = c).
+ *  `warp` moves the interior points (same cells, faces and patches; no lattice). */
+export async function makeSphereInBox(dir: string, opts: { warp?: boolean } = {}): Promise<void> {
+  await writePolyMesh(path.join(dir, 'constant', 'polyMesh'), buildMesh(opts.warp ?? false))
   await fs.mkdir(path.join(dir, 'system'), { recursive: true })
   await fs.writeFile(path.join(dir, 'system', 'controlDict'), 'application ofgpu;\n')
   const p = new Float64Array(456)

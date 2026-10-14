@@ -94,6 +94,20 @@
 //! path picks it up by default; this is a rendering hint, not a physical
 //! claim, and is ours to choose.
 //!
+//! # The lattice: `write_lattice` - SPEC-LIT 117.6 (VIO-03)
+//!
+//! [`write_lattice`] writes a `VoxelMap`'s lattice through the same node
+//! builders: each grid is `VoxelMap::sample` of a cell component, rounded
+//! once here, and the `Map` is the map's f64 origin and voxel. Under `fluid`
+//! only the owned voxels are active and only the nodes that hold one are
+//! laid out, each level contiguous in ascending flat order; `voxelCount` is
+//! the active count, the index box the active voxels' box and the world box
+//! that box widened by half a voxel. The root background, every inactive
+//! leaf slot and every childless tile hold `background`. [`write`], the
+//! Cartesian path, is the same code with every voxel and node present and a
+//! zero background, and its bytes are those of the tree before VIO-03
+//! (`tests/volume_lattice.rs`).
+//!
 //! Fields are read in this crate's existing Cartesian flattening,
 //! `idx(i,j,k) = i + nx*(j + ny*k)` (matching `pressure::cartesian`'s
 //! `CartesianGrid::ijk`), and `nx*ny*nz` must equal every field's length.
@@ -102,6 +116,7 @@
 
 use crate::error::{Error, IoContext, Result};
 use crate::io::output_types::{FieldValues, OutputField};
+use crate::io::voxelmap::{LatticeActivation, VoxelMap, NONE};
 use crate::{Scalar, Tensor, Vec3};
 use std::path::Path;
 
@@ -180,45 +195,273 @@ pub fn write(
         return Err(Error::Config("nvdb: no fields to write".into()));
     }
 
-    let n = grid.n();
+    let vol = Volume::cartesian(grid);
+    let occ = Occupancy::new(&vol);
     let mut out = Vec::new();
-    for field in fields {
-        match &field.values {
-            FieldValues::Scalar(v) => {
-                check_len(field.name, v.len(), n)?;
-                append_segment(&mut out, grid, field.name, v, precision)?;
-            }
-            FieldValues::Vector(v) => {
-                check_len(field.name, v.len(), n)?;
-                let xs: Vec<Scalar> = v.iter().map(|p| p.x).collect();
-                let ys: Vec<Scalar> = v.iter().map(|p| p.y).collect();
-                let zs: Vec<Scalar> = v.iter().map(|p| p.z).collect();
-                let mags: Vec<Scalar> = v.iter().map(|p| p.mag()).collect();
-                append_segment(&mut out, grid, &format!("{}.x", field.name), &xs, precision)?;
-                append_segment(&mut out, grid, &format!("{}.y", field.name), &ys, precision)?;
-                append_segment(&mut out, grid, &format!("{}.z", field.name), &zs, precision)?;
-                append_segment(&mut out, grid, &format!("{}.mag", field.name), &mags, precision)?;
-            }
-            FieldValues::Tensor(v) => {
-                check_len(field.name, v.len(), n)?;
-                check_symmetric("nvdb", field.name, v)?;
-                let xx: Vec<Scalar> = v.iter().map(|t| t.xx).collect();
-                let xy: Vec<Scalar> = v.iter().map(|t| t.xy).collect();
-                let xz: Vec<Scalar> = v.iter().map(|t| t.xz).collect();
-                let yy: Vec<Scalar> = v.iter().map(|t| t.yy).collect();
-                let yz: Vec<Scalar> = v.iter().map(|t| t.yz).collect();
-                let zz: Vec<Scalar> = v.iter().map(|t| t.zz).collect();
-                append_segment(&mut out, grid, &format!("{}.xx", field.name), &xx, precision)?;
-                append_segment(&mut out, grid, &format!("{}.xy", field.name), &xy, precision)?;
-                append_segment(&mut out, grid, &format!("{}.xz", field.name), &xz, precision)?;
-                append_segment(&mut out, grid, &format!("{}.yy", field.name), &yy, precision)?;
-                append_segment(&mut out, grid, &format!("{}.yz", field.name), &yz, precision)?;
-                append_segment(&mut out, grid, &format!("{}.zz", field.name), &zz, precision)?;
-            }
+    for_each_grid("nvdb", fields, grid.n(), |name, v| {
+        let wide: Vec<f64> = v.iter().map(|&x| x as f64).collect();
+        append_segment(&mut out, &vol, &occ, name, &wide, precision)
+    })?;
+
+    std::fs::write(path, &out).path(path)
+}
+
+/// Write `fields` - cell values, `vm.n_cells` per field - on the lattice of
+/// `vm` (SPEC-LIT 117.6) as one NanoVDB segment per grid, split exactly as
+/// [`write`] splits them. Each grid is `vm.sample` of its cell component
+/// (117.5): f64, rounded once here to `precision` (117.2 item 2). A vector's
+/// `.mag` grid samples the cells' own magnitudes. The transform is
+/// `vm.origin()` and `vm.voxel` in f64 (117.2 item 3, 117.3). Under
+/// `LatticeActivation::Dense` every voxel is active; under `Fluid` only the
+/// voxels a cell owns, and a leaf or internal node with none is not written.
+/// The background is `vm.spec.background` in both (117.6). A `fluid`
+/// lattice no cell reaches is refused by name: it has nothing to write.
+pub fn write_lattice(
+    path: impl AsRef<Path>,
+    vm: &VoxelMap,
+    fields: &[OutputField],
+    precision: Precision,
+) -> Result<()> {
+    let path = path.as_ref();
+    if fields.is_empty() {
+        return Err(Error::Config("nvdb: no fields to write".into()));
+    }
+    let active = lattice_active(vm);
+    let vol = Volume::lattice(vm, active.as_deref());
+    let occ = Occupancy::new(&vol);
+    refuse_an_empty_fluid_lattice("nvdb", &occ)?;
+    let mut out = Vec::new();
+    for_each_grid("nvdb", fields, vm.n_cells, |name, v| {
+        let s = vm.sample(v)?;
+        append_segment(&mut out, &vol, &occ, name, &s, precision)
+    })?;
+
+    std::fs::write(path, &out).path(path)
+}
+
+// ============================================================================
+//  The volume both writers lay out (SPEC-LIT 117.6)
+// ============================================================================
+
+/// What `nvdb` and `vdb` lay out: a box of `n` voxels, `origin` the world
+/// position of voxel `(0,0,0)`'s centre and `spacing` the voxel edge per
+/// axis, both f64 (117.2 item 3), the tree's `background`, and which voxels
+/// are active. [`Volume::cartesian`] is the Cartesian path: every voxel
+/// active and a background of 0, as every file before tranche 17.
+pub(crate) struct Volume<'a> {
+    pub n: [usize; 3],
+    pub origin: [f64; 3],
+    pub spacing: [f64; 3],
+    pub background: f64,
+    /// `None`: every voxel is active (`dense`, and the Cartesian path).
+    /// `Some(a)`: voxel `v` is active iff `a[v]` (`fluid`, 117.6).
+    pub active: Option<&'a [bool]>,
+}
+
+impl Volume<'_> {
+    /// The Cartesian block, widened exactly from its `Vec3`s.
+    pub fn cartesian(grid: &UniformGrid) -> Volume<'static> {
+        Volume {
+            n: [grid.nx, grid.ny, grid.nz],
+            origin: [grid.origin.x as f64, grid.origin.y as f64, grid.origin.z as f64],
+            spacing: [grid.spacing.x as f64, grid.spacing.y as f64, grid.spacing.z as f64],
+            background: 0.0,
+            active: None,
         }
     }
 
-    std::fs::write(path, &out).path(path)
+    /// The lattice of `vm` (117.2, 117.3): `origin = lo + h/2`, cubic `h'`.
+    pub fn lattice<'b>(vm: &VoxelMap, active: Option<&'b [bool]>) -> Volume<'b> {
+        let o = vm.origin();
+        Volume {
+            n: vm.n,
+            origin: [o.x, o.y, o.z],
+            spacing: [vm.voxel; 3],
+            background: vm.spec.background,
+            active,
+        }
+    }
+
+    pub fn n_voxels(&self) -> usize {
+        self.n[0] * self.n[1] * self.n[2]
+    }
+
+    /// `i + n_x (j + n_y k)`, this crate's Cartesian order.
+    #[inline]
+    pub fn idx(&self, i: usize, j: usize, k: usize) -> usize {
+        i + self.n[0] * (j + self.n[1] * k)
+    }
+
+    #[inline]
+    pub fn is_active(&self, v: usize) -> bool {
+        self.active.is_none_or(|a| a[v])
+    }
+}
+
+/// The active mask of 117.6: `None` under `dense` (every voxel), and
+/// `M[v] != NONE` under `fluid`.
+pub(crate) fn lattice_active(vm: &VoxelMap) -> Option<Vec<bool>> {
+    match vm.spec.activation {
+        LatticeActivation::Dense => None,
+        LatticeActivation::Fluid => Some(vm.cell.iter().map(|&c| c != NONE).collect()),
+    }
+}
+
+/// A `fluid` lattice with no owned voxel has no tree to write.
+pub(crate) fn refuse_an_empty_fluid_lattice(what: &str, occ: &Occupancy) -> Result<()> {
+    if occ.n_active == 0 {
+        return Err(Error::Config(format!(
+            "{what}: output.visualisation.lattice.activation is fluid but no cell owns any voxel \
+             of the lattice, so there is nothing to write - move lattice.box onto the mesh, or \
+             use activation dense"
+        )));
+    }
+    Ok(())
+}
+
+/// Which nodes of the `5-4-3` tree hold an active voxel (117.6), per level
+/// in the node's own 3-D index (flat `x + n_x (y + n_y z)` over the
+/// `n_leaf`, `n_lower`, `n_upper` boxes), the active count, and the active
+/// voxels' index box. With every voxel active, every node inside the box is
+/// present and the box is `0 ..= n - 1`, which is what the Cartesian path
+/// has always written.
+pub(crate) struct Occupancy {
+    pub n_leaf: [usize; 3],
+    pub n_lower: [usize; 3],
+    pub n_upper: [usize; 3],
+    leaf: Vec<bool>,
+    lower: Vec<bool>,
+    upper: Vec<bool>,
+    pub n_active: u64,
+    /// `[x0, y0, z0, x1, y1, z1]`, inclusive; meaningful when `n_active > 0`.
+    pub bbox: [usize; 6],
+}
+
+fn flat3(c: [usize; 3], n: [usize; 3]) -> usize {
+    c[0] + n[0] * (c[1] + n[1] * c[2])
+}
+
+impl Occupancy {
+    pub fn new(vol: &Volume) -> Occupancy {
+        let n = vol.n;
+        let n_leaf = [ceil_div(n[0], LEAF_DIM), ceil_div(n[1], LEAF_DIM), ceil_div(n[2], LEAF_DIM)];
+        let n_lower = [ceil_div(n[0], LOWER_DIM), ceil_div(n[1], LOWER_DIM), ceil_div(n[2], LOWER_DIM)];
+        let n_upper = [ceil_div(n[0], UPPER_DIM), ceil_div(n[1], UPPER_DIM), ceil_div(n[2], UPPER_DIM)];
+        let all = vol.active.is_none();
+        let mut occ = Occupancy {
+            n_leaf,
+            n_lower,
+            n_upper,
+            leaf: vec![all; n_leaf[0] * n_leaf[1] * n_leaf[2]],
+            lower: vec![all; n_lower[0] * n_lower[1] * n_lower[2]],
+            upper: vec![all; n_upper[0] * n_upper[1] * n_upper[2]],
+            n_active: 0,
+            bbox: [0, 0, 0, n[0].saturating_sub(1), n[1].saturating_sub(1), n[2].saturating_sub(1)],
+        };
+        let Some(active) = vol.active else {
+            occ.n_active = vol.n_voxels() as u64;
+            return occ;
+        };
+        let mut lo = [usize::MAX; 3];
+        let mut hi = [0usize; 3];
+        for k in 0..n[2] {
+            for j in 0..n[1] {
+                for i in 0..n[0] {
+                    if !active[vol.idx(i, j, k)] {
+                        continue;
+                    }
+                    occ.n_active += 1;
+                    for (a, c) in [i, j, k].into_iter().enumerate() {
+                        lo[a] = lo[a].min(c);
+                        hi[a] = hi[a].max(c);
+                    }
+                    occ.leaf[flat3([i / LEAF_DIM, j / LEAF_DIM, k / LEAF_DIM], n_leaf)] = true;
+                    occ.lower[flat3([i / LOWER_DIM, j / LOWER_DIM, k / LOWER_DIM], n_lower)] = true;
+                    occ.upper[flat3([i / UPPER_DIM, j / UPPER_DIM, k / UPPER_DIM], n_upper)] = true;
+                }
+            }
+        }
+        if occ.n_active > 0 {
+            occ.bbox = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
+        }
+        occ
+    }
+
+    /// Is the leaf / lower / upper node at node index `c` written?
+    pub fn leaf(&self, c: [usize; 3]) -> bool {
+        self.leaf[flat3(c, self.n_leaf)]
+    }
+    pub fn lower(&self, c: [usize; 3]) -> bool {
+        self.lower[flat3(c, self.n_lower)]
+    }
+    pub fn upper(&self, c: [usize; 3]) -> bool {
+        self.upper[flat3(c, self.n_upper)]
+    }
+}
+
+/// `rank[f]` = the number of present nodes before flat index `f`: a node's
+/// slot in its level's contiguous block (`IsBreadthFirst`), and the total.
+/// With every node present, `rank[f] = f`.
+fn ranks(present: &[bool]) -> (Vec<usize>, usize) {
+    let mut rank = Vec::with_capacity(present.len());
+    let mut r = 0usize;
+    for &p in present {
+        rank.push(r);
+        if p {
+            r += 1;
+        }
+    }
+    (rank, r)
+}
+
+/// One component of a vector or tensor field: its suffix and its getter.
+type Component<T> = (&'static str, fn(&T) -> Scalar);
+
+/// Split `fields` into the scalar grids both writers write, in the fixed
+/// order: a scalar as itself, a vector as `.x .y .z .mag`, a symmetric
+/// tensor as `.xx .xy .xz .yy .yz .zz`. Every field is checked first -
+/// length `n`, then symmetry - so nothing is emitted from a bad list; then
+/// `emit(name, values)` runs once per grid, in order, one grid at a time.
+pub(crate) fn for_each_grid(
+    what: &str,
+    fields: &[OutputField],
+    n: usize,
+    mut emit: impl FnMut(&str, &[Scalar]) -> Result<()>,
+) -> Result<()> {
+    for field in fields {
+        check_len(field.name, field.len(), n)?;
+        if let FieldValues::Tensor(v) = &field.values {
+            check_symmetric(what, field.name, v)?;
+        }
+    }
+    for field in fields {
+        match &field.values {
+            FieldValues::Scalar(v) => emit(field.name, v)?,
+            FieldValues::Vector(v) => {
+                let comps: [Component<Vec3>; 4] =
+                    [("x", |p| p.x), ("y", |p| p.y), ("z", |p| p.z), ("mag", |p| p.mag())];
+                for (suffix, get) in comps {
+                    let c: Vec<Scalar> = v.iter().map(get).collect();
+                    emit(&format!("{}.{suffix}", field.name), &c)?;
+                }
+            }
+            FieldValues::Tensor(v) => {
+                let comps: [Component<Tensor>; 6] = [
+                    ("xx", |t| t.xx),
+                    ("xy", |t| t.xy),
+                    ("xz", |t| t.xz),
+                    ("yy", |t| t.yy),
+                    ("yz", |t| t.yz),
+                    ("zz", |t| t.zz),
+                ];
+                for (suffix, get) in comps {
+                    let c: Vec<Scalar> = v.iter().map(get).collect();
+                    emit(&format!("{}.{suffix}", field.name), &c)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_len(field: &str, got: usize, want: usize) -> Result<()> {
@@ -424,7 +667,6 @@ struct InternalLayout {
     /// where it needs it (the `0..32`/`0..16` loops in `build_upper`/
     /// `build_lower`); only the reader walks the table generically by
     /// `slots`.
-    #[allow(dead_code)]
     slots: usize,
     size: usize,
 }
@@ -583,7 +825,6 @@ fn set_mask_bit(b: &mut [u8], mask_off: usize, n: u32) {
     w |= 1u64 << bit;
     put_u64(b, word_off, w);
 }
-#[cfg(test)]
 fn mask_bit(b: &[u8], mask_off: usize, n: u32) -> bool {
     let word_off = mask_off + 8 * (n as usize / 64);
     let w = get_u64(b, word_off);
@@ -673,9 +914,9 @@ fn round_shift_rne(value: u32, shift: u32) -> u32 {
 /// product) is exactly representable and exactly computed in binary
 /// floating point.
 ///
-/// Only the reader and the half-conversion tests need the reverse
-/// direction - the writer only ever narrows - so this is `#[cfg(test)]`.
-#[cfg(test)]
+/// The readers and the half-conversion tests need the reverse direction, and
+/// so does `vdb`'s root background under `fp16`, which OpenVDB truncates to
+/// half and writes back as a float (`io::truncateRealToHalf`, SPEC-LIT 117.6).
 pub(crate) fn f16_bits_to_f32(bits: u16) -> f32 {
     let sign: f64 = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = ((bits >> 10) & 0x1f) as i32;
@@ -759,9 +1000,10 @@ impl Stats {
 
 fn append_segment(
     out: &mut Vec<u8>,
-    grid: &UniformGrid,
+    vol: &Volume,
+    occ: &Occupancy,
     name: &str,
-    values: &[Scalar],
+    values: &[f64],
     precision: Precision,
 ) -> Result<()> {
     if name.as_bytes().len() >= 256 {
@@ -773,24 +1015,10 @@ fn append_segment(
         });
     }
 
-    let blob = build_blob(grid, name, values, precision);
+    let (blob, node_count) = build_blob(vol, occ, name, values, precision);
 
-    let n = grid.n() as u64;
-    let (ox, oy, oz) = (grid.origin.x as f64, grid.origin.y as f64, grid.origin.z as f64);
-    let (dx, dy, dz) = (grid.spacing.x as f64, grid.spacing.y as f64, grid.spacing.z as f64);
-    let world_min = [ox - 0.5 * dx, oy - 0.5 * dy, oz - 0.5 * dz];
-    let world_max = [
-        ox + dx * (grid.nx as f64 - 0.5),
-        oy + dy * (grid.ny as f64 - 0.5),
-        oz + dz * (grid.nz as f64 - 0.5),
-    ];
-    let (n_leaf, n_lower, n_upper) = node_counts(grid);
-    let node_count = [
-        (n_leaf[0] * n_leaf[1] * n_leaf[2]) as u32,
-        (n_lower[0] * n_lower[1] * n_lower[2]) as u32,
-        (n_upper[0] * n_upper[1] * n_upper[2]) as u32,
-        1,
-    ];
+    let [dx, dy, dz] = vol.spacing;
+    let (world_min, world_max) = world_bbox(vol, occ);
 
     // ---- FileHeader (16 B) -------------------------------------------------
     let mut header = [0u8; FILE_HEADER_SIZE];
@@ -805,7 +1033,7 @@ fn append_segment(
     put_u64(&mut meta, 0, blob.len() as u64); // gridSize
     put_u64(&mut meta, 8, blob.len() as u64); // fileSize
     put_u64(&mut meta, 16, string_hash(name)); // nameKey
-    put_u64(&mut meta, 24, n); // voxelCount
+    put_u64(&mut meta, 24, occ.n_active); // voxelCount: the ACTIVE voxels
     let grid_type = match precision {
         Precision::F32 => GRID_TYPE_FLOAT,
         Precision::F16 => GRID_TYPE_HALF,
@@ -818,12 +1046,9 @@ fn append_segment(
     put_f64(&mut meta, 64, world_max[0]);
     put_f64(&mut meta, 72, world_max[1]);
     put_f64(&mut meta, 80, world_max[2]);
-    put_i32(&mut meta, 88, 0);
-    put_i32(&mut meta, 92, 0);
-    put_i32(&mut meta, 96, 0);
-    put_i32(&mut meta, 100, grid.nx as i32 - 1);
-    put_i32(&mut meta, 104, grid.ny as i32 - 1);
-    put_i32(&mut meta, 108, grid.nz as i32 - 1);
+    for (a, &c) in occ.bbox.iter().enumerate() {
+        put_i32(&mut meta, 88 + 4 * a, c as i32);
+    }
     put_f64(&mut meta, 112, dx);
     put_f64(&mut meta, 120, dy);
     put_f64(&mut meta, 128, dz);
@@ -848,6 +1073,21 @@ fn append_segment(
     Ok(())
 }
 
+/// The world box of the active voxels' index box, widened by half a voxel on
+/// each side (see the module doc). On the Cartesian path the index box is
+/// `0 ..= n - 1`, and the two expressions are the ones this writer has
+/// always evaluated: `o - 0.5 d` and `o + d (n - 0.5)`.
+fn world_bbox(vol: &Volume, occ: &Occupancy) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [0.0; 3];
+    let mut hi = [0.0; 3];
+    for a in 0..3 {
+        let (o, d) = (vol.origin[a], vol.spacing[a]);
+        lo[a] = o - d * (0.5 - occ.bbox[a] as f64);
+        hi[a] = o + d * ((occ.bbox[3 + a] + 1) as f64 - 0.5);
+    }
+    (lo, hi)
+}
+
 /// FNV-1a, 64-bit - `FileMetaData::nameKey` is only ever used by readers as
 /// a fast pre-filter before comparing the actual name string, so any stable
 /// hash is a legal choice; FNV-1a is public-domain-grade generic algorithm,
@@ -861,6 +1101,8 @@ fn string_hash(s: &str) -> u64 {
     h
 }
 
+/// The dense node counts; the tests check them against the analytic ceiling.
+#[cfg(test)]
 fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
     let n_leaf = [
         ceil_div(grid.nx, LEAF_DIM),
@@ -881,26 +1123,51 @@ fn node_counts(grid: &UniformGrid) -> ([usize; 3], [usize; 3], [usize; 3]) {
 }
 
 /// Everything the recursive node builders need, gathered so their
-/// signatures stay readable.
+/// signatures stay readable. `*_rank` maps a node's flat index to its slot
+/// in its level's block ([`ranks`]).
 struct Ctx<'a> {
-    grid: &'a UniformGrid,
-    values: &'a [Scalar],
+    vol: &'a Volume<'a>,
+    occ: &'a Occupancy,
+    values: &'a [f64],
     precision: Precision,
     leaf: LeafLayout,
     lower: InternalLayout,
     upper: InternalLayout,
-    n_leaf: [usize; 3],
-    n_lower: [usize; 3],
+    leaf_rank: Vec<usize>,
+    lower_rank: Vec<usize>,
     leaf_block_off: usize,
     lower_block_off: usize,
 }
 
-fn build_blob(grid: &UniformGrid, name: &str, values: &[Scalar], precision: Precision) -> Vec<u8> {
+/// An inclusive index box, merged from the children; `None` = no active
+/// voxel below.
+type IBox = Option<[usize; 6]>;
+
+fn merge_box(a: IBox, b: IBox) -> IBox {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(p), Some(q)) => Some([
+            p[0].min(q[0]), p[1].min(q[1]), p[2].min(q[2]),
+            p[3].max(q[3]), p[4].max(q[4]), p[5].max(q[5]),
+        ]),
+    }
+}
+
+/// The grid blob and `[leaf, lower, upper, 1]` node counts. Only the nodes
+/// [`Occupancy`] marks present are laid out, each level in ascending flat
+/// order, so with every node present the blob is the dense one.
+fn build_blob(
+    vol: &Volume,
+    occ: &Occupancy,
+    name: &str,
+    values: &[f64],
+    precision: Precision,
+) -> (Vec<u8>, [u32; 4]) {
     let w = precision.width();
-    let (n_leaf, n_lower, n_upper) = node_counts(grid);
-    let n_leaf_total = n_leaf[0] * n_leaf[1] * n_leaf[2];
-    let n_lower_total = n_lower[0] * n_lower[1] * n_lower[2];
-    let n_upper_total = n_upper[0] * n_upper[1] * n_upper[2];
+    let n_upper = occ.n_upper;
+    let (leaf_rank, n_leaf_total) = ranks(&occ.leaf);
+    let (lower_rank, n_lower_total) = ranks(&occ.lower);
+    let (upper_rank, n_upper_total) = ranks(&occ.upper);
 
     let leaf_lay = leaf_layout(w);
     let lower_lay = internal_layout(w, LOWER_LOG2DIM);
@@ -929,15 +1196,15 @@ fn build_blob(grid: &UniformGrid, name: &str, values: &[Scalar], precision: Prec
     let name_bytes = name.as_bytes();
     blob[40..40 + name_bytes.len()].copy_from_slice(name_bytes);
     // blob[40+name_bytes.len()] is already 0 (the NUL) from the zero-init.
-    write_map(&mut blob, 296, grid);
-    let (ox, oy, oz) = (grid.origin.x as f64, grid.origin.y as f64, grid.origin.z as f64);
-    let (dx, dy, dz) = (grid.spacing.x as f64, grid.spacing.y as f64, grid.spacing.z as f64);
-    put_f64(&mut blob, 560, ox - 0.5 * dx);
-    put_f64(&mut blob, 568, oy - 0.5 * dy);
-    put_f64(&mut blob, 576, oz - 0.5 * dz);
-    put_f64(&mut blob, 584, ox + dx * (grid.nx as f64 - 0.5));
-    put_f64(&mut blob, 592, oy + dy * (grid.ny as f64 - 0.5));
-    put_f64(&mut blob, 600, oz + dz * (grid.nz as f64 - 0.5));
+    write_map(&mut blob, 296, vol);
+    let [dx, dy, dz] = vol.spacing;
+    let (world_min, world_max) = world_bbox(vol, occ);
+    put_f64(&mut blob, 560, world_min[0]);
+    put_f64(&mut blob, 568, world_min[1]);
+    put_f64(&mut blob, 576, world_min[2]);
+    put_f64(&mut blob, 584, world_max[0]);
+    put_f64(&mut blob, 592, world_max[1]);
+    put_f64(&mut blob, 600, world_max[2]);
     put_f64(&mut blob, 608, dx);
     put_f64(&mut blob, 616, dy);
     put_f64(&mut blob, 624, dz);
@@ -967,18 +1234,19 @@ fn build_blob(grid: &UniformGrid, name: &str, values: &[Scalar], precision: Prec
     put_u32(&mut blob, tree_off + 44, 0);
     put_u32(&mut blob, tree_off + 48, 0);
     put_u32(&mut blob, tree_off + 52, 0);
-    put_u64(&mut blob, tree_off + 56, grid.n() as u64);
+    put_u64(&mut blob, tree_off + 56, occ.n_active);
 
     // ---- Root, Upper, Lower, Leaf (bottom-up stats, top-down bytes) -------
     let ctx = Ctx {
-        grid,
+        vol,
+        occ,
         values,
         precision,
         leaf: leaf_lay,
         lower: lower_lay,
         upper: upper_lay,
-        n_leaf,
-        n_lower,
+        leaf_rank,
+        lower_rank,
         leaf_block_off,
         lower_block_off,
     };
@@ -987,7 +1255,10 @@ fn build_blob(grid: &UniformGrid, name: &str, values: &[Scalar], precision: Prec
     for uz in 0..n_upper[2] {
         for uy in 0..n_upper[1] {
             for ux in 0..n_upper[0] {
-                let upper_idx = ux + n_upper[0] * (uy + n_upper[1] * uz);
+                if !occ.upper([ux, uy, uz]) {
+                    continue;
+                }
+                let upper_idx = upper_rank[ux + n_upper[0] * (uy + n_upper[1] * uz)];
                 let upper_off = upper_block_off + upper_idx * ctx.upper.size;
                 let origin = [ux * UPPER_DIM, uy * UPPER_DIM, uz * UPPER_DIM];
                 let stats = build_upper(&ctx, &mut blob, upper_off, origin);
@@ -997,34 +1268,32 @@ fn build_blob(grid: &UniformGrid, name: &str, values: &[Scalar], precision: Prec
                 put_u64(&mut blob, tile_off + tile_lay.key, coord_to_key(origin, UPPER_TOTAL));
                 put_i64(&mut blob, tile_off + tile_lay.child, (upper_off as i64) - (root_off as i64));
                 put_u32(&mut blob, tile_off + tile_lay.state, 0);
-                put_value(&mut blob, tile_off + tile_lay.value, 0.0, precision);
+                put_value(&mut blob, tile_off + tile_lay.value, vol.background, precision);
             }
         }
     }
 
-    put_i32(&mut blob, root_off + root_lay.bbox, 0);
-    put_i32(&mut blob, root_off + root_lay.bbox + 4, 0);
-    put_i32(&mut blob, root_off + root_lay.bbox + 8, 0);
-    put_i32(&mut blob, root_off + root_lay.bbox + 12, grid.nx as i32 - 1);
-    put_i32(&mut blob, root_off + root_lay.bbox + 16, grid.ny as i32 - 1);
-    put_i32(&mut blob, root_off + root_lay.bbox + 20, grid.nz as i32 - 1);
+    for (a, &c) in occ.bbox.iter().enumerate() {
+        put_i32(&mut blob, root_off + root_lay.bbox + 4 * a, c as i32);
+    }
     put_u32(&mut blob, root_off + root_lay.table_size, n_upper_total as u32);
-    put_value(&mut blob, root_off + root_lay.background, 0.0, precision);
+    put_value(&mut blob, root_off + root_lay.background, vol.background, precision);
     let (mn, mx, avg, sd) = root_stats.finalize();
     put_value(&mut blob, root_off + root_lay.minimum, mn, precision);
     put_value(&mut blob, root_off + root_lay.maximum, mx, precision);
     put_f32(&mut blob, root_off + root_lay.average, avg);
     put_f32(&mut blob, root_off + root_lay.stddev, sd);
 
-    blob
+    let node_count = [n_leaf_total as u32, n_lower_total as u32, n_upper_total as u32, 1];
+    (blob, node_count)
 }
 
 /// `Map`: a uniform scale-plus-translation affine transform (see the module
 /// doc for the index<->world convention). `map_off` is 296, the fixed
 /// `GridData::mMap` offset.
-fn write_map(blob: &mut [u8], map_off: usize, grid: &UniformGrid) {
-    let (dx, dy, dz) = (grid.spacing.x as f64, grid.spacing.y as f64, grid.spacing.z as f64);
-    let (ox, oy, oz) = (grid.origin.x as f64, grid.origin.y as f64, grid.origin.z as f64);
+fn write_map(blob: &mut [u8], map_off: usize, vol: &Volume) {
+    let [dx, dy, dz] = vol.spacing;
+    let [ox, oy, oz] = vol.origin;
     let mat_f = [dx as f32, 0.0, 0.0, 0.0, dy as f32, 0.0, 0.0, 0.0, dz as f32];
     let inv_f = [
         1.0 / dx as f32, 0.0, 0.0, 0.0, 1.0 / dy as f32, 0.0, 0.0, 0.0, 1.0 / dz as f32,
@@ -1076,27 +1345,30 @@ fn coord_to_key(origin: [usize; 3], total: u32) -> u64 {
 
 fn build_upper(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> Stats {
     let lay = &ctx.upper;
+    let n_lower = ctx.occ.n_lower;
     let mut stats = Stats::empty();
+    let mut bbox: IBox = None;
     for c in 0..32usize {
         let lz = origin[2] / LOWER_DIM + c;
-        if lz >= ctx.n_lower[2] {
+        if lz >= n_lower[2] {
             continue;
         }
         for b in 0..32usize {
             let ly = origin[1] / LOWER_DIM + b;
-            if ly >= ctx.n_lower[1] {
+            if ly >= n_lower[1] {
                 continue;
             }
             for a in 0..32usize {
                 let lx = origin[0] / LOWER_DIM + a;
-                if lx >= ctx.n_lower[0] {
+                if lx >= n_lower[0] || !ctx.occ.lower([lx, ly, lz]) {
                     continue;
                 }
-                let lower_idx = lx + ctx.n_lower[0] * (ly + ctx.n_lower[1] * lz);
+                let lower_idx = ctx.lower_rank[lx + n_lower[0] * (ly + n_lower[1] * lz)];
                 let lower_off = ctx.lower_block_off + lower_idx * ctx.lower.size;
                 let lower_origin = [lx * LOWER_DIM, ly * LOWER_DIM, lz * LOWER_DIM];
-                let child_stats = build_lower(ctx, blob, lower_off, lower_origin);
+                let (child_stats, child_box) = build_lower(ctx, blob, lower_off, lower_origin);
                 stats.merge(child_stats);
+                bbox = merge_box(bbox, child_box);
 
                 let n = ((a as u32) << 10) | ((b as u32) << 5) | (c as u32);
                 set_mask_bit(blob, off + lay.child_mask, n);
@@ -1105,34 +1377,36 @@ fn build_upper(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> St
             }
         }
     }
-    write_internal_node(blob, off, lay, ctx.precision, origin, UPPER_DIM, ctx.grid, &stats);
+    write_internal_node(blob, off, lay, ctx, bbox, &stats);
     stats
 }
 
-fn build_lower(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> Stats {
+fn build_lower(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> (Stats, IBox) {
     let lay = &ctx.lower;
+    let n_leaf = ctx.occ.n_leaf;
     let mut stats = Stats::empty();
+    let mut bbox: IBox = None;
     for f in 0..16usize {
         let fz = origin[2] / LEAF_DIM + f;
-        if fz >= ctx.n_leaf[2] {
+        if fz >= n_leaf[2] {
             continue;
         }
         for e in 0..16usize {
             let fy = origin[1] / LEAF_DIM + e;
-            if fy >= ctx.n_leaf[1] {
+            if fy >= n_leaf[1] {
                 continue;
             }
             for d in 0..16usize {
                 let fx = origin[0] / LEAF_DIM + d;
-                if fx >= ctx.n_leaf[0] {
+                if fx >= n_leaf[0] || !ctx.occ.leaf([fx, fy, fz]) {
                     continue;
                 }
-                let leaf_idx = fx + ctx.n_leaf[0] * (fy + ctx.n_leaf[1] * fz);
+                let leaf_idx = ctx.leaf_rank[fx + n_leaf[0] * (fy + n_leaf[1] * fz)];
                 let leaf_off = ctx.leaf_block_off + leaf_idx * ctx.leaf.size;
                 let leaf_origin = [fx * LEAF_DIM, fy * LEAF_DIM, fz * LEAF_DIM];
-                let leaf_stats =
-                    build_leaf(ctx, blob, leaf_off, leaf_origin);
+                let (leaf_stats, leaf_box) = build_leaf(ctx, blob, leaf_off, leaf_origin);
                 stats.merge(leaf_stats);
+                bbox = merge_box(bbox, leaf_box);
 
                 let n = ((d as u32) << 8) | ((e as u32) << 4) | (f as u32);
                 set_mask_bit(blob, off + lay.child_mask, n);
@@ -1141,86 +1415,105 @@ fn build_lower(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> St
             }
         }
     }
-    write_internal_node(blob, off, lay, ctx.precision, origin, LOWER_DIM, ctx.grid, &stats);
-    stats
+    write_internal_node(blob, off, lay, ctx, bbox, &stats);
+    (stats, bbox)
 }
 
+/// An internal node's header: its active index box (with every voxel active
+/// that is `origin ..= min(origin + span - 1, n - 1)`, the box this writer
+/// has always written), no value mask - this writer never places an active
+/// tile - the stats, and the background in every slot that holds no child,
+/// so a reader that samples an inactive tile gets `background` (117.6).
 fn write_internal_node(
     blob: &mut [u8],
     off: usize,
     lay: &InternalLayout,
-    precision: Precision,
-    origin: [usize; 3],
-    span: usize,
-    grid: &UniformGrid,
+    ctx: &Ctx,
+    bbox: IBox,
     stats: &Stats,
 ) {
-    put_i32(blob, off + lay.bbox, origin[0] as i32);
-    put_i32(blob, off + lay.bbox + 4, origin[1] as i32);
-    put_i32(blob, off + lay.bbox + 8, origin[2] as i32);
-    put_i32(blob, off + lay.bbox + 12, (origin[0] + span - 1).min(grid.nx - 1) as i32);
-    put_i32(blob, off + lay.bbox + 16, (origin[1] + span - 1).min(grid.ny - 1) as i32);
-    put_i32(blob, off + lay.bbox + 20, (origin[2] + span - 1).min(grid.nz - 1) as i32);
+    let bbox = bbox.unwrap_or([0; 6]);
+    for (a, &c) in bbox.iter().enumerate() {
+        put_i32(blob, off + lay.bbox + 4 * a, c as i32);
+    }
     put_u64(blob, off + lay.flags, 0);
-    // mValueMask stays all-zero: this writer never places a constant-value
-    // tile at Lower/Upper level (a dense box always subdivides to Leaf).
     let (mn, mx, avg, sd) = stats.finalize();
-    put_value(blob, off + lay.minimum, mn, precision);
-    put_value(blob, off + lay.maximum, mx, precision);
+    put_value(blob, off + lay.minimum, mn, ctx.precision);
+    put_value(blob, off + lay.maximum, mx, ctx.precision);
     put_f32(blob, off + lay.average, avg);
     put_f32(blob, off + lay.stddev, sd);
+    if ctx.vol.background.to_bits() != 0 {
+        for n in 0..lay.slots as u32 {
+            if !mask_bit(blob, off + lay.child_mask, n) {
+                let at = off + lay.table + (n as usize) * lay.entry_size;
+                put_value(blob, at, ctx.vol.background, ctx.precision);
+            }
+        }
+    }
 }
 
-fn build_leaf(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> Stats {
+/// A leaf: its active index box, value mask, stats and 512 values - the
+/// sample at every active voxel and `background` everywhere else (117.6).
+fn build_leaf(ctx: &Ctx, blob: &mut [u8], off: usize, origin: [usize; 3]) -> (Stats, IBox) {
     let lay = &ctx.leaf;
-    let grid = ctx.grid;
-    put_i32(blob, off + lay.bbox_min, origin[0] as i32);
-    put_i32(blob, off + lay.bbox_min + 4, origin[1] as i32);
-    put_i32(blob, off + lay.bbox_min + 8, origin[2] as i32);
-
-    let max_x = (origin[0] + LEAF_DIM - 1).min(grid.nx - 1);
-    let max_y = (origin[1] + LEAF_DIM - 1).min(grid.ny - 1);
-    let max_z = (origin[2] + LEAF_DIM - 1).min(grid.nz - 1);
-    blob[off + lay.bbox_dif] = (max_x - origin[0]) as u8;
-    blob[off + lay.bbox_dif + 1] = (max_y - origin[1]) as u8;
-    blob[off + lay.bbox_dif + 2] = (max_z - origin[2]) as u8;
-    blob[off + lay.flags] = 0x12; // hasBBox (bit1) | hasStats (bit4)
+    let vol = ctx.vol;
+    if vol.background.to_bits() != 0 {
+        for n in 0..512usize {
+            put_value(blob, off + lay.values + n * lay.value_width, vol.background, ctx.precision);
+        }
+    }
 
     let mut stats = Stats::empty();
+    let mut bbox: IBox = None;
     for lx in 0..LEAF_DIM {
         let gx = origin[0] + lx;
-        if gx >= grid.nx {
+        if gx >= vol.n[0] {
             continue;
         }
         for ly in 0..LEAF_DIM {
             let gy = origin[1] + ly;
-            if gy >= grid.ny {
+            if gy >= vol.n[1] {
                 continue;
             }
             for lz in 0..LEAF_DIM {
                 let gz = origin[2] + lz;
-                if gz >= grid.nz {
+                if gz >= vol.n[2] {
+                    continue;
+                }
+                let v_idx = vol.idx(gx, gy, gz);
+                if !vol.is_active(v_idx) {
                     continue;
                 }
                 let n = ((lx as u32) << 6) | ((ly as u32) << 3) | (lz as u32);
                 set_mask_bit(blob, off + lay.value_mask, n);
-                let v = ctx.values[grid.idx(gx, gy, gz)] as f64;
+                let v = ctx.values[v_idx];
                 put_value(blob, off + lay.values + (n as usize) * lay.value_width, v, ctx.precision);
                 if stats.count == 0 {
                     stats = Stats::one(v);
                 } else {
                     stats.add(v);
                 }
+                bbox = merge_box(bbox, Some([gx, gy, gz, gx, gy, gz]));
             }
         }
     }
+
+    // The present leaf always has an active voxel ([`Occupancy`]).
+    let b = bbox.unwrap_or([origin[0], origin[1], origin[2], origin[0], origin[1], origin[2]]);
+    put_i32(blob, off + lay.bbox_min, b[0] as i32);
+    put_i32(blob, off + lay.bbox_min + 4, b[1] as i32);
+    put_i32(blob, off + lay.bbox_min + 8, b[2] as i32);
+    blob[off + lay.bbox_dif] = (b[3] - b[0]) as u8;
+    blob[off + lay.bbox_dif + 1] = (b[4] - b[1]) as u8;
+    blob[off + lay.bbox_dif + 2] = (b[5] - b[2]) as u8;
+    blob[off + lay.flags] = 0x12; // hasBBox (bit1) | hasStats (bit4)
 
     let (mn, mx, avg, sd) = stats.finalize();
     put_value(blob, off + lay.minimum, mn, ctx.precision);
     put_value(blob, off + lay.maximum, mx, ctx.precision);
     put_f32(blob, off + lay.average, avg);
     put_f32(blob, off + lay.stddev, sd);
-    stats
+    (stats, bbox)
 }
 
 // ============================================================================
@@ -1247,6 +1540,21 @@ mod reader {
         pub ny: usize,
         pub nz: usize,
         pub values: Vec<f64>, // dense, idx = i + nx*(j + ny*k); NAN where inactive
+        /// `RootData::mBackground`.
+        pub background: f64,
+        /// The f64 translation of `Map` (`mVecD`): voxel `(0,0,0)`'s centre.
+        pub map_origin: [f64; 3],
+        /// What the tree walk saw (VIO-03).
+        pub extra: Extra,
+    }
+
+    /// The leaves the walk reached, the values of their inactive slots, and
+    /// the tile values of every internal slot that holds no child.
+    #[derive(Default)]
+    pub struct Extra {
+        pub leaf_count: usize,
+        pub inactive: Vec<f64>,
+        pub tiles: Vec<f64>,
     }
 
     /// Read every segment in an nvdb file written by [`super::write`].
@@ -1305,6 +1613,7 @@ mod reader {
             let root_off = tree_off + get_i64(bytes, tree_off + 24) as usize;
             let table_size = get_u32(bytes, root_off + root_lay.table_size) as usize;
 
+            let mut extra = Extra::default();
             for t in 0..table_size {
                 let tile_off = root_off + root_lay.size + t * tile_lay.size;
                 let key = get_u64(bytes, tile_off + tile_lay.key);
@@ -1314,13 +1623,18 @@ mod reader {
                 read_internal(
                     bytes, upper_off, &upper_lay, UPPER_LOG2DIM, upper_origin, UPPER_DIM / 32,
                     precision, index_bbox, nx, ny, &lower_lay, &leaf_lay, &mut values,
-                    NodeKind::Upper,
+                    &mut extra, NodeKind::Upper,
                 );
             }
+            let background = get_value(bytes, root_off + root_lay.background, precision);
+            let map_origin = [
+                get_f64(bytes, grid_off + 528), get_f64(bytes, grid_off + 536), get_f64(bytes, grid_off + 544),
+            ];
 
             out.push(ReadSegment {
                 name, grid_type, grid_class, voxel_count,
                 node_count, index_bbox, world_bbox, voxel_size, nx, ny, nz, values,
+                background, map_origin, extra,
             });
             pos = grid_off + grid_size as usize;
         }
@@ -1347,11 +1661,14 @@ mod reader {
         lower_lay: &InternalLayout,
         leaf_lay: &LeafLayout,
         values: &mut [f64],
+        extra: &mut Extra,
         kind: NodeKind,
     ) {
         let fan = 1u32 << log2dim;
         for n in 0..lay.slots as u32 {
             if !mask_bit(bytes, off + lay.child_mask, n) {
+                let tile_off = off + lay.table + (n as usize) * lay.entry_size;
+                extra.tiles.push(get_value(bytes, tile_off, precision));
                 continue;
             }
             let a = n >> (2 * log2dim);
@@ -1369,17 +1686,21 @@ mod reader {
                 NodeKind::Upper => {
                     read_internal(
                         bytes, child_off, lower_lay, LOWER_LOG2DIM, child_origin, LEAF_DIM,
-                        precision, index_bbox, nx, ny, lower_lay, leaf_lay, values,
+                        precision, index_bbox, nx, ny, lower_lay, leaf_lay, values, extra,
                         NodeKind::Lower,
                     );
                 }
                 NodeKind::Lower => {
-                    read_leaf(bytes, child_off, leaf_lay, child_origin, precision, index_bbox, nx, ny, values);
+                    read_leaf(
+                        bytes, child_off, leaf_lay, child_origin, precision, index_bbox, nx, ny, values,
+                        extra,
+                    );
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read_leaf(
         bytes: &[u8],
         off: usize,
@@ -1390,12 +1711,16 @@ mod reader {
         nx: usize,
         ny: usize,
         values: &mut [f64],
+        extra: &mut Extra,
     ) {
+        extra.leaf_count += 1;
         for lx in 0..LEAF_DIM as u32 {
             for ly in 0..LEAF_DIM as u32 {
                 for lz in 0..LEAF_DIM as u32 {
                     let n = (lx << 6) | (ly << 3) | lz;
                     if !mask_bit(bytes, off + lay.value_mask, n) {
+                        let at = off + lay.values + (n as usize) * lay.value_width;
+                        extra.inactive.push(get_value(bytes, at, precision));
                         continue;
                     }
                     let gx = origin[0] + lx as i32;
@@ -1800,5 +2125,220 @@ mod tests {
             other => panic!("expected Error::Config, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- the lattice (VIO-03, SPEC-LIT 117.6) ---------------------------
+
+    use super::lattice_fixture as lf;
+    use crate::io::voxelmap::{LatticeActivation, LatticeSample, NONE as VNONE};
+
+    /// The value `precision` stores for the f64 sample `s`: one rounding to
+    /// f32 (117.2 item 2), then f16 under `fp16`.
+    fn stored(s: f64, precision: Precision) -> f64 {
+        let f = s as f32;
+        match precision {
+            Precision::F32 => f as f64,
+            Precision::F16 => f16_bits_to_f32(f32_to_f16_bits(f)) as f64,
+        }
+    }
+
+    /// Every check of the gate on one file: one segment per grid, the active
+    /// voxels exactly the activation's set, each value the stored sample bit
+    /// for bit, every inactive leaf slot and every childless tile the
+    /// background, and the transform the map's f64 origin and voxel.
+    fn check_lattice_file(
+        path: &std::path::Path,
+        vm: &crate::io::voxelmap::VoxelMap,
+        grids: &[(String, Vec<f64>)],
+        precision: Precision,
+    ) {
+        let segs = read_all(&std::fs::read(path).unwrap());
+        assert_eq!(segs.len(), grids.len());
+        let fluid = vm.spec.activation == LatticeActivation::Fluid;
+        let want_active = if fluid { vm.report.n_fluid } else { vm.n_voxels() };
+        let bg = stored(vm.spec.background, precision);
+        for (seg, (name, s)) in segs.iter().zip(grids) {
+            assert_eq!(&seg.name, name);
+            assert_eq!(seg.voxel_count as usize, want_active, "{name}: voxelCount");
+            assert_eq!(seg.map_origin, [vm.origin().x, vm.origin().y, vm.origin().z]);
+            assert_eq!(seg.voxel_size, [vm.voxel; 3]);
+            assert_eq!(seg.background.to_bits(), bg.to_bits());
+            let mut n_active = 0usize;
+            for k in 0..vm.n[2] {
+                for j in 0..vm.n[1] {
+                    for i in 0..vm.n[0] {
+                        let v = vm.index(i, j, k);
+                        let active = !fluid || vm.cell[v] != VNONE;
+                        let b = seg.index_bbox;
+                        let (gi, gj, gk) = (i as i32 - b[0], j as i32 - b[1], k as i32 - b[2]);
+                        let inside = gi >= 0 && gj >= 0 && gk >= 0
+                            && (gi as usize) < seg.nx && (gj as usize) < seg.ny && (gk as usize) < seg.nz;
+                        let got = if inside {
+                            seg.values[gi as usize + seg.nx * (gj as usize + seg.ny * gk as usize)]
+                        } else {
+                            f64::NAN
+                        };
+                        if active {
+                            n_active += 1;
+                            assert_eq!(got.to_bits(), stored(s[v], precision).to_bits(), "{name} voxel {v}");
+                        } else {
+                            assert!(got.is_nan(), "{name}: voxel {v} is not fluid but is active");
+                        }
+                    }
+                }
+            }
+            assert_eq!(n_active, want_active);
+            assert!(seg.extra.inactive.iter().all(|x| x.to_bits() == bg.to_bits()));
+            assert!(seg.extra.tiles.iter().all(|x| x.to_bits() == bg.to_bits()));
+            assert!(!seg.extra.tiles.is_empty());
+        }
+    }
+
+    #[test]
+    fn voxmap_round_trip() {
+        let (raw, hm) = lf::refined();
+        let phi = lf::scalar(&hm);
+        let u = lf::vector(&hm);
+        let fields = [OutputField::scalar("p", &phi), OutputField::vector("U", &u)];
+        for (activation, sample) in [
+            (LatticeActivation::Fluid, LatticeSample::Linear),
+            (LatticeActivation::Dense, LatticeSample::Cell),
+        ] {
+            let vm = lf::map(&raw, &hm, sample, activation);
+            let grids = lf::grids(&vm, &phi, &u);
+            for precision in [Precision::F32, Precision::F16] {
+                let path = scratch(&format!("voxmap_{activation:?}_{precision:?}"));
+                write_lattice(&path, &vm, &fields, precision).expect("write_lattice");
+                check_lattice_file(&path, &vm, &grids, precision);
+                // The pruned tree (117.6): under fluid only the 64 leaves and
+                // the one Lower node the 2:1 mesh reaches are written, out of
+                // 20 x 6 x 6 leaves and 2 Lower nodes in the box.
+                let segs = read_all(&std::fs::read(&path).unwrap());
+                let (leaves, lowers) = match activation {
+                    LatticeActivation::Fluid => (lf::fluid_leaves(&vm), 1),
+                    LatticeActivation::Dense => (20 * 6 * 6, 2),
+                };
+                assert_eq!(segs[0].node_count, [leaves as u32, lowers, 1, 1]);
+                assert_eq!(segs[0].extra.leaf_count, leaves);
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn voxmap_fluid_leaves_are_the_64_blocks_of_the_mesh() {
+        let (raw, hm) = lf::refined();
+        let vm = lf::map(&raw, &hm, LatticeSample::Cell, LatticeActivation::Fluid);
+        assert_eq!(vm.n, [156, 48, 48]);
+        assert_eq!(vm.report.n_fluid, 24 * 24 * 24);
+        assert_eq!(lf::fluid_leaves(&vm), 64);
+    }
+
+    #[test]
+    fn voxmap_empty_fluid_lattice_is_refused_by_name() {
+        let (raw, hm) = lf::refined();
+        let mut spec = lf::spec(LatticeSample::Cell, LatticeActivation::Fluid);
+        spec.bbox = Some([2.0, 2.0, 2.0, 3.0, 3.0, 3.0]);
+        let vm = crate::io::voxelmap::VoxelMap::build(&raw, &hm, &spec).expect("build");
+        let phi = lf::scalar(&hm);
+        let path = scratch("voxmap_empty");
+        let _ = std::fs::remove_file(&path);
+        let err = write_lattice(&path, &vm, &[OutputField::scalar("p", &phi)], Precision::F32)
+            .expect_err("an all-NONE fluid lattice has nothing to write");
+        let msg = err.to_string();
+        assert!(msg.contains("activation is fluid but no cell owns any voxel"), "{msg}");
+        assert!(!path.exists());
+    }
+}
+
+/// The lattice fixture of VIO-03's round trips (`nvdb`, `vdb` and `writer`
+/// tests): the 2:1 mesh of `mesh/refined.rs` on `[0, 1]^3` (120 cells) under
+/// a lattice of `h = 1/24` over `[-1/2, 6] x [-1/2, 3/2]^2` - 156 x 48 x 48
+/// voxels, two Lower nodes along x, the 24^3 fluid voxels inside one of them
+/// - with background -7.5 (exact in f16).
+#[cfg(test)]
+pub(crate) mod lattice_fixture {
+    use crate::io::polymesh::{build_host_mesh, PolyMeshRaw};
+    use crate::io::voxelmap::{
+        LatticeActivation, LatticeSample, LatticeSpec, VoxelMap, DEFAULT_MAX_VOXELS, NONE,
+    };
+    use crate::mesh::refined::refined_core;
+    use crate::mesh::HostMesh;
+    use crate::types::{DVec3, Vec3};
+    use crate::Scalar;
+
+    pub fn refined() -> (PolyMeshRaw, HostMesh) {
+        let rb = refined_core([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), 0.3, 1).expect("refined_core");
+        let points: Vec<DVec3> =
+            rb.points.iter().map(|&p| DVec3::new(p.x as f64, p.y as f64, p.z as f64)).collect();
+        let mut owner = rb.mesh.owner.clone();
+        owner.extend(rb.mesh.b_face_cells.iter().copied());
+        let raw = PolyMeshRaw {
+            points,
+            faces: rb.faces.clone(),
+            owner,
+            neighbour: rb.mesh.neighbour.clone(),
+            patches: rb.mesh.patches.clone(),
+        };
+        let hm = build_host_mesh(&raw).expect("build_host_mesh");
+        (raw, hm)
+    }
+
+    pub fn spec(sample: LatticeSample, activation: LatticeActivation) -> LatticeSpec {
+        LatticeSpec {
+            voxel: Some(1.0 / 24.0),
+            bbox: Some([-0.5, -0.5, -0.5, 6.0, 1.5, 1.5]),
+            max_voxels: DEFAULT_MAX_VOXELS,
+            sample,
+            activation,
+            background: -7.5,
+        }
+    }
+
+    pub fn map(raw: &PolyMeshRaw, hm: &HostMesh, sample: LatticeSample, activation: LatticeActivation) -> VoxelMap {
+        VoxelMap::build(raw, hm, &spec(sample, activation)).expect("VoxelMap::build")
+    }
+
+    /// Cell values exact in f32: `((37 c) mod 101) / 8 - 3`.
+    pub fn scalar(hm: &HostMesh) -> Vec<Scalar> {
+        (0..hm.n_cells).map(|c| ((37 * c) % 101) as Scalar * 0.125 - 3.0).collect()
+    }
+
+    pub fn vector(hm: &HostMesh) -> Vec<Vec3> {
+        (0..hm.n_cells)
+            .map(|c| {
+                let t = c as Scalar / 16.0;
+                Vec3::new(t, -2.0 * t, 0.5)
+            })
+            .collect()
+    }
+
+    /// The grids the writers must store, in their order: `p`, then `U.x`,
+    /// `U.y`, `U.z` and `U.mag`, each `vm.sample` of its cell component.
+    pub fn grids(vm: &VoxelMap, phi: &[Scalar], u: &[Vec3]) -> Vec<(String, Vec<f64>)> {
+        let comp = |f: fn(&Vec3) -> Scalar| u.iter().map(f).collect::<Vec<Scalar>>();
+        vec![
+            ("p".to_string(), vm.sample(phi).unwrap()),
+            ("U.x".to_string(), vm.sample(&comp(|v| v.x)).unwrap()),
+            ("U.y".to_string(), vm.sample(&comp(|v| v.y)).unwrap()),
+            ("U.z".to_string(), vm.sample(&comp(|v| v.z)).unwrap()),
+            ("U.mag".to_string(), vm.sample(&comp(|v| v.mag())).unwrap()),
+        ]
+    }
+
+    /// The 8^3 blocks of the lattice that hold a voxel some cell owns,
+    /// counted from the map itself.
+    pub fn fluid_leaves(vm: &VoxelMap) -> usize {
+        let mut seen = std::collections::BTreeSet::new();
+        for k in 0..vm.n[2] {
+            for j in 0..vm.n[1] {
+                for i in 0..vm.n[0] {
+                    if vm.cell[vm.index(i, j, k)] != NONE {
+                        seen.insert((i / 8, j / 8, k / 8));
+                    }
+                }
+            }
+        }
+        seen.len()
     }
 }

@@ -63,6 +63,9 @@ pub struct FieldKernels {
     patch_mean_scalar: CudaFunction,
     patch_mean_vector: CudaFunction,
     extrapolated_sn_grad: CudaFunction,
+    // SPEC-LIT 120.10: the recycled inflow's two refresh kernels.
+    mapped: CudaFunction,
+    turbulent_inlet: CudaFunction,
 
     copy: CudaFunction,
     copy_vector: CudaFunction,
@@ -102,6 +105,8 @@ impl FieldKernels {
             patch_mean_scalar: k.func("fldPatchMeanScalar")?,
             patch_mean_vector: k.func("fldPatchMeanVector")?,
             extrapolated_sn_grad: k.func("fldExtrapolatedSnGrad")?,
+            mapped: k.func("fldMapped")?,
+            turbulent_inlet: k.func("fldTurbulentInlet")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -183,6 +188,8 @@ pub fn correct_boundary_conditions(
             .arg(&m.b_delta_coeffs)
             .arg(&m.b_nbr_cell)
             .arg(&m.b_weights)
+            // SPEC-LIT (120.2b): the cyclic jump a coupled face sees.
+            .arg(&f.jump)
             .arg(&nl)
             .launch(cfg_for(n))?;
     }
@@ -668,6 +675,190 @@ pub fn update_patch_means_vector(
             // 48 is a scalar condition; a vector rule never carries it.
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// One `fldMapped` launch (SPEC-LIT 120.10): `ncomp` 1 for a scalar field,
+/// 3 for a vector field, whose `ofvec3` buffers the kernel reads as three
+/// `ofscalar` a face.
+#[allow(clippy::too_many_arguments)]
+fn launch_mapped<T: cudarc::driver::DeviceRepr>(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    name: &str,
+    fr: &mut DevBuf<Scalar>,
+    ref_value: &mut DevBuf<T>,
+    ref_grad: &mut DevBuf<T>,
+    psi: &DevBuf<T>,
+    mp: &crate::field::mapped::GpuMapped,
+    m: &GpuMesh,
+    ncomp: Label,
+) -> Result<()> {
+    let r = &mp.rule;
+    let n = m.n_boundary_faces;
+    if r.start + r.size > n || mp.cells.len() < r.size || r.cells.len() != r.size {
+        return Err(Error::Config(format!(
+            "update_mapped: field {name} carries a mapped rule on faces {}..{} \
+             with {} sampled cells, but the boundary has {n} faces (SPEC-LIT \
+             120.10)",
+            r.start,
+            r.start + r.size,
+            r.cells.len()
+        )));
+    }
+    if r.size == 0 {
+        return Ok(());
+    }
+    let start = r.start as Label;
+    let size = r.size as Label;
+    let set_average: Label = r.set_average.into();
+    let (ax, ay, az) = (r.average.x, r.average.y, r.average.z);
+    let func = k.mapped.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(fr)
+            .arg(ref_value)
+            .arg(ref_grad)
+            .arg(psi)
+            .arg(&mp.cells)
+            .arg(&m.b_mag_sf)
+            .arg(&start)
+            .arg(&size)
+            .arg(&ncomp)
+            .arg(&set_average)
+            .arg(&ax)
+            .arg(&ay)
+            .arg(&az)
+            .launch(cfg_for(1))?;
+    }
+    Ok(())
+}
+
+/// Rewrite the `refValue` of every `mapped`/`mappedFixedValue` patch of a
+/// scalar field from the cells its offset plane samples - (120.10a)-
+/// (120.10c) of SPEC-LIT 120.10 - one launch per rule in `f.mapped`, no
+/// host sync (it runs inside CUDA-graph capture, SPEC-LIT 81). Run it once
+/// per outer iteration, before [`correct_boundary_conditions`], wherever
+/// the setup opted in with `BcInputs::mapped`. A field with no rule
+/// launches nothing, which keeps every existing case's results bitwise.
+/// The host twin is [`crate::field::mapped::mapped_values`].
+pub fn update_mapped_scalar(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    f: &mut GpuScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    if f.mapped.is_empty() {
+        return Ok(());
+    }
+    check_sizes(&f.name, f.n_cells, f.n_boundary_faces, m, "update_mapped_scalar")?;
+    for mp in &f.mapped {
+        launch_mapped(
+            gpu, k, &f.name, &mut f.fr, &mut f.ref_value, &mut f.ref_grad, &f.f, mp, m, 1,
+        )?;
+    }
+    Ok(())
+}
+
+/// [`update_mapped_scalar`] for a vector field, componentwise (120.10c)
+/// with the vector magnitudes of `a` and `m`.
+pub fn update_mapped_vector(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    f: &mut GpuVectorField,
+    m: &GpuMesh,
+) -> Result<()> {
+    if f.mapped.is_empty() {
+        return Ok(());
+    }
+    check_sizes(&f.name, f.n_cells, f.n_boundary_faces, m, "update_mapped_vector")?;
+    for mp in &f.mapped {
+        launch_mapped(
+            gpu, k, &f.name, &mut f.fr, &mut f.ref_value, &mut f.ref_grad, &f.f, mp, m, 3,
+        )?;
+    }
+    Ok(())
+}
+
+/// One `fldTurbulentInlet` launch (SPEC-LIT 120.10).
+fn launch_turbulent<T: cudarc::driver::DeviceRepr>(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    name: &str,
+    n_bf: usize,
+    ref_value: &mut DevBuf<T>,
+    ti: &mut crate::field::mapped::GpuTurbulentInlet,
+) -> Result<()> {
+    let r = &ti.rule;
+    if r.start + r.size > n_bf || r.reference.len() != r.size * r.ncomp {
+        return Err(Error::Config(format!(
+            "advance_turbulent_inlet: field {name} carries a turbulentInlet \
+             rule on faces {}..{} with {} reference values, but the boundary \
+             has {n_bf} faces (SPEC-LIT 120.10)",
+            r.start,
+            r.start + r.size,
+            r.reference.len()
+        )));
+    }
+    if r.size == 0 {
+        return Ok(());
+    }
+    let start = r.start as Label;
+    let size = r.size as Label;
+    let ncomp = r.ncomp as Label;
+    let (sx, sy, sz) = (r.scale.x, r.scale.y, r.scale.z);
+    let alpha = r.alpha;
+    let seed = r.seed;
+    let func = k.turbulent_inlet.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(ref_value)
+            .arg(&ti.reference)
+            .arg(&mut ti.step)
+            .arg(&start)
+            .arg(&size)
+            .arg(&ncomp)
+            .arg(&sx)
+            .arg(&sy)
+            .arg(&sz)
+            .arg(&alpha)
+            .arg(&seed)
+            .launch(cfg_for(1))?;
+    }
+    Ok(())
+}
+
+/// Draw the next step of every `turbulentInlet` patch of a scalar field -
+/// (120.10g)-(120.10h) of SPEC-LIT 120.10 - one launch per rule in
+/// `f.turbulent`, no host sync; the step counter lives on the device. Run
+/// it once per TIME STEP, before the step's first outer iteration,
+/// wherever the setup opted in with `BcInputs::turbulent_inlet`. A field
+/// with no rule launches nothing. The host twin is
+/// [`crate::field::mapped::turbulent_advance`].
+pub fn advance_turbulent_inlet_scalar(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    f: &mut GpuScalarField,
+) -> Result<()> {
+    let n_bf = f.n_boundary_faces;
+    for ti in &mut f.turbulent {
+        launch_turbulent(gpu, k, &f.name, n_bf, &mut f.ref_value, ti)?;
+    }
+    Ok(())
+}
+
+/// [`advance_turbulent_inlet_scalar`] for a vector field, componentwise.
+pub fn advance_turbulent_inlet_vector(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    f: &mut GpuVectorField,
+) -> Result<()> {
+    let n_bf = f.n_boundary_faces;
+    for ti in &mut f.turbulent {
+        launch_turbulent(gpu, k, &f.name, n_bf, &mut f.ref_value, ti)?;
     }
     Ok(())
 }

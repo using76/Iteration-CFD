@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, UiCommandSchema, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { LlmSettingsHandle } from '../agent/llmSettings.js'
 import type { ServerConfig } from '../config.js'
@@ -17,6 +17,8 @@ import { whereSchema } from '../tools/ontology.js'
 import { geometryService } from '../tools/geometry.js'
 import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
 import { geometryStlBoolean } from '../tools/geometryBoolean.js'
+import { readBoundaryTable, setPatchAt } from '../tools/guiBoundary.js'
+import { validateCaseBuffer } from '../tools/guiCase.js'
 import type { ToolContext, ToolResult } from '../tools/context.js'
 import type { CaseSchema } from '../registry/schema.js'
 import { readCaseJsonc } from '../formats/casejsonc.js'
@@ -121,7 +123,12 @@ const StartRunSchema = z.object({
 })
 
 const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash: z.string().nullable().default(null) })
+const CaseValidateSchema = z.object({ path: z.string(), content: z.string() })
+const CasePatchSchema = z.object({ path: z.string(), edit: z.unknown() })
 const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
+const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
+const DatasetCutSchema = z.object({ origin: Vec3Schema, normal: Vec3Schema })
+const DatasetLocateSchema = z.object({ point: Vec3Schema })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
   path: z.string(),
@@ -199,6 +206,33 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     const out = await writeWorkspaceFile(root, body)
     deps.hub.broadcast({ t: 'fs.changed', paths: [out.path] })
     return out
+  })
+  // save_case's check (STU-05): the buffer lives in the browser's editor, so
+  // the window posts its text here; nothing is written, the findings go to
+  // the Problems list as case_validate's do.
+  router.post('/api/case/validate', async (rc) => {
+    const body = await rc.json(CaseValidateSchema)
+    const r = await validateCaseBuffer(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  // The studio's Boundary editor (STU-07b): its table, and the operator's
+  // set_patch on the case it shows - the same plan and case_edit as
+  // gui_control's set_patch; the operator's own press asks no approval card.
+  router.get('/api/case/boundary', async ({ query }) => {
+    const p = query.get('path')
+    if (!p) throw new HttpError(400, 'path is required')
+    const r = await readBoundaryTable(p, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  router.post('/api/case/patch', async (rc) => {
+    const body = await rc.json(CasePatchSchema)
+    const cmd = UiCommandSchema.safeParse(body.edit)
+    if (!cmd.success || cmd.data.type !== 'set_patch') throw new HttpError(400, 'edit must be one set_patch command', { code: 'INVALID' })
+    const r = await setPatchAt(cmd.data, body.path, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
   })
   router.get('/api/fs/search', async ({ query }) => {
     const q = query.get('q') ?? ''
@@ -287,6 +321,26 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': buf.length, 'cache-control': 'private, max-age=3600' })
     res.end(buf)
     return RESPONDED
+  })
+  // An exact plane cut of a non-lattice polyMesh (SPEC-LIT §148.1); the answer names the two blobs.
+  router.post('/api/datasets/:id/cut', async (ctx) => {
+    const body = await ctx.json(DatasetCutSchema)
+    if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
+    try {
+      return await datasets.cut(ctx.params.id, body)
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : String(err))
+    }
+  })
+  // The cell of a polyMesh that holds a point (docs/17 STU-13); `cell` null is a miss, not an error.
+  router.post('/api/datasets/:id/locate', async (ctx) => {
+    const body = await ctx.json(DatasetLocateSchema)
+    if (!datasets.get(ctx.params.id)) throw new HttpError(404, `no such dataset: ${ctx.params.id}`)
+    try {
+      return await datasets.locate(ctx.params.id, body.point)
+    } catch (err) {
+      throw new HttpError(400, err instanceof Error ? err.message : String(err))
+    }
   })
   router.delete('/api/datasets/:id', ({ params }) => {
     datasets.evict(params.id)

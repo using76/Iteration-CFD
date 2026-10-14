@@ -24,6 +24,13 @@ function srgbToLinear(c: number): number {
   return c < 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
 }
 
+/** max(1e-9, speeds...) by a loop: a spread passes one argument per point and overflows the stack at ~10^5 points. */
+function maxSpeed(speeds: Float32Array): number {
+  let m = 1e-9
+  for (let i = 0; i < speeds.length; i++) m = Math.max(m, speeds[i])
+  return m
+}
+
 export class StreamlineLayer {
   readonly group = new Group()
   private lines: LineSegments2 | null = null
@@ -44,7 +51,7 @@ export class StreamlineLayer {
   update(data: StreamlineData, style: 'line' | 'tube', table: ColorTable, speedRange: [number, number] | null, tubeRadius: number): void {
     this.data = data
     this.table = table
-    this.range = speedRange ?? [0, Math.max(1e-9, ...data.speeds)]
+    this.range = speedRange ?? [0, maxSpeed(data.speeds)]
     this.clear()
     if (style === 'tube') this.buildTubes(tubeRadius)
     else this.buildLines()

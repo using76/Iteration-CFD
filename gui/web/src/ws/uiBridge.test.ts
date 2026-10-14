@@ -131,7 +131,7 @@ const fakeApiB = {
 
 vi.mock('../viewer', () => ({ getViewerApi: (view: 'A' | 'B' = 'A') => (view === 'B' ? fakeApiB : fakeApi), setViewerApi: () => {} }))
 vi.mock('./actions', () => ({ actions: { setSettings: () => true, openSession: () => true }, activeCasePath: () => null }))
-vi.mock('../api/rest', () => ({ api: { geometrySave: vi.fn(), geometryEdit: vi.fn() }, ApiError: class extends Error {} }))
+vi.mock('../api/rest', () => ({ api: { geometrySave: vi.fn(), geometryEdit: vi.fn(), geometryStlBoolean: vi.fn() }, ApiError: class extends Error {} }))
 
 import { api } from '../api/rest'
 import { uiGeometryState, useGeometryStore } from '../state/geometryStore'
@@ -228,6 +228,7 @@ function harness(tabs: (GeoTab | ResTab)[] = [], cameraBudgetMs?: number) {
     viewSplit: false,
     focusedView: 'A' as 'A' | 'B',
     camerasLinked: false,
+    setSelection: vi.fn(),
     openGeometryTab: vi.fn(),
     openViewerTab: vi.fn(),
     setActiveRun(runId: string | null) {
@@ -291,6 +292,7 @@ beforeEach(() => {
   useGeometryStore.setState({ byPath: {} })
   vi.mocked(api.geometrySave).mockReset()
   vi.mocked(api.geometryEdit).mockReset()
+  vi.mocked(api.geometryStlBoolean).mockReset()
   vi.mocked(api.geometrySave).mockResolvedValue({ id: 'g2', info: { ...INFO, id: 'g2', path: 'cases/y.stl' } })
   vi.mocked(api.geometryEdit).mockResolvedValue({ path: 'cases/car-common.step', solids: [], applied: [], stdout: [], toolMs: 1 })
 })
@@ -298,11 +300,11 @@ beforeEach(() => {
 describe('the four geometry edit commands', () => {
   it('an unlisted command is still refused by name', async () => {
     const h = harness([])
-    // set_centerline: still unimplemented on this screen (STU-09); show_overlay
-    // stopped being the sample here when STU-02 implemented it.
-    const r = await h.run({ type: 'set_centerline', quantity: 'p' })
+    // select_step: still unimplemented on this screen (STU-08b); set_centerline
+    // stopped being the sample here when STU-09 implemented it.
+    const r = await h.run({ type: 'select_step', step: 'step-1' })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('UNSUPPORTED (set_centerline): this screen does not implement it')
+    expect(r.error).toBe('UNSUPPORTED (select_step): this screen does not implement it')
   })
 
   it('without a geometry tab the four commands refuse and the snapshot has no geometry', async () => {
@@ -404,13 +406,24 @@ describe('the four geometry edit commands', () => {
     expect(r2.error).toBe('cases/y.stl already exists; pass overwrite: true to replace it')
   })
 
-  it('geometry_boolean runs only on a STEP and re-imports the result', async () => {
+  it('geometry_boolean runs on an STL or a STEP and opens the result as a new tab', async () => {
+    // STU-17: an STL tab goes to the server's Manifold route.
+    vi.mocked(api.geometryStlBoolean).mockResolvedValue({ path: 'cases/x-common.stl', op: 'common', a: 'a', b: 'b', volume: 0.5, volumeA: 1, volumeB: 1, triangles: 12, vertices: 8, openEdges: 0, nonManifoldEdges: 0 })
     const h = harness([geoTab('cases/x.stl')])
     load('cases/x.stl', INFO)
     const r = await h.run({ type: 'geometry_boolean', op: 'common', a: 'a', b: 'b' })
-    expect(r.ok).toBe(false)
-    expect(r.error?.startsWith('UNSUPPORTED (geometry_boolean): ')).toBe(true)
+    expect(r.error ?? null).toBeNull()
+    expect(r.ok).toBe(true)
+    expect(api.geometryStlBoolean).toHaveBeenCalledWith({ path: 'cases/x.stl', op: 'common', a: 'a', b: 'b', out: null, overwrite: true })
+    expect(h.ui.openGeometryTab).toHaveBeenCalledWith('cases/x-common.stl')
     expect(api.geometryEdit).not.toHaveBeenCalled()
+    // An OBJ has neither route.
+    const ho = harness([geoTab('cases/x.obj')])
+    load('cases/x.obj', { ...INFO, path: 'cases/x.obj', format: 'obj' })
+    const ro = await ho.run({ type: 'geometry_boolean', op: 'common', a: 'a', b: 'b' })
+    expect(ro.ok).toBe(false)
+    expect(ro.error?.startsWith('UNSUPPORTED (geometry_boolean): booleans run on an STL or STEP geometry')).toBe(true)
+    expect(api.geometryStlBoolean).toHaveBeenCalledTimes(1)
     const h2 = harness([geoTab('cases/car.step')])
     load('cases/car.step', STEP_INFO)
     const r2 = await h2.run({ type: 'geometry_boolean', op: 'common', a: 'body', b: 'wing' })

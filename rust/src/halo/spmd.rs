@@ -41,6 +41,7 @@ use crate::comm::Comm;
 use crate::decompose::PartMesh;
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
+use crate::halo::LevelHalo;
 use crate::{Label, Scalar, Tensor, Vec3};
 
 /// The one tag every halo message travels under (SPEC-LIT §138.3).
@@ -103,6 +104,13 @@ impl SpmdHalo {
     /// Build the rank's plan from its part and the rank count. Rank `r` holds
     /// part `r` (SPEC-LIT §138.3).
     pub fn new(gpu: &Gpu, part: &PartMesh, n_ranks: usize) -> Result<Self> {
+        Self::from_level(gpu, &LevelHalo::of_part(part), n_ranks)
+    }
+
+    /// Build the rank's plan for one level: the fine level's
+    /// ([`LevelHalo::of_part`], which is [`Self::new`]) or a coarse level's
+    /// of the distributed GAMG (SPEC-LIT §141.10). Rank `r` holds part `r`.
+    pub fn from_level(gpu: &Gpu, part: &LevelHalo, n_ranks: usize) -> Result<Self> {
         // ---- the refusals of §138.3, in the table's order ------------------
         let p = part.part;
         if p >= n_ranks {
@@ -181,12 +189,14 @@ impl SpmdHalo {
             )));
         }
 
+        part.check_send_index()?;
+
         // ---- the pack kernels and the plan, loaded once --------------------
         let ks = KernelSet::new(gpu, crate::kernels::HALO)?;
         let plan = Plan {
             part: p,
             n_ranks,
-            n_cells: part.mesh.n_cells,
+            n_cells: part.n_cells,
             n_halo: part.n_halo,
             nbr: part.nbr_parts.clone(),
             send_offset: part.send_offset.iter().map(|&x| x as usize).collect(),

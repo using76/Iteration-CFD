@@ -301,6 +301,15 @@ pub trait PressureBackend {
         let _ = probe;
         "not applicable to this system".to_string()
     }
+
+    /// The double solution of the last solve, for a backend that refines
+    /// it (SPEC-LIT §118.12) - what the selector compares and measures under
+    /// `single`. Defaulted to `None`: such a backend is compared through its
+    /// float field, whose storage is its floor. `single` only.
+    #[cfg(feature = "single")]
+    fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        None
+    }
 }
 
 // ==========================================================================
@@ -434,6 +443,16 @@ impl PressureBackend for PbicgstabBackend {
         }
 
         solver::solve(gpu, k, p, a, m, w, &self.ctrl)
+    }
+
+    /// The workspace's refined solution (SPEC-LIT §118.4), unless these
+    /// controls are `fixed_iters`, which is never refined.
+    #[cfg(feature = "single")]
+    fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        if self.ctrl.fixed_iters {
+            return None;
+        }
+        self.ws.as_ref()?.refined_solution()
     }
 }
 
@@ -585,8 +604,8 @@ pub fn choose_pressure_backend(
 
     // `!(x <= tol)` rather than `x > tol`, here and at every other gate below:
     // a NaN residual must FAIL the test, and `NaN > tol` is false.
-    let ref_residual = residual_norm(gpu, &solk, &mut resw, &psi, a, m)?;
-    let mut ref_solution = gpu.download(&psi)?;
+    let ref_residual = measured_residual(gpu, &solk, &mut resw, &*reference, &psi, a, m)?;
+    let mut ref_solution = answer_of(gpu, &*reference, &psi)?;
     let mut truth_residual = ref_residual;
     let mut ref_note = format!("(reference)  residual {ref_residual:.2e}");
 
@@ -600,7 +619,7 @@ pub fn choose_pressure_backend(
         tight.setup(gpu, hm, m, probe)?;
         gpu.fill_zero(&mut psi)?;
         tight.solve(gpu, &mut psi, a, m)?;
-        truth_residual = residual_norm(gpu, &solk, &mut resw, &psi, a, m)?;
+        truth_residual = measured_residual(gpu, &solk, &mut resw, &tight, &psi, a, m)?;
 
         if !(truth_residual <= REFERENCE_RESIDUAL_MAX) {
             return Err(Error::Config(format!(
@@ -612,7 +631,7 @@ pub fn choose_pressure_backend(
             )));
         }
 
-        ref_solution = gpu.download(&psi)?;
+        ref_solution = answer_of(gpu, &tight, &psi)?;
         ref_note = format!(
             "(reference)  its own solve left {ref_residual:.2e}, so a tight one \
              ({truth_residual:.2e}) is the yardstick"
@@ -620,7 +639,7 @@ pub fn choose_pressure_backend(
     }
 
     let agree_tol = agreement_tolerance(truth_residual);
-    let ref_scale = inf_norm(&ref_solution).max(Scalar::MIN_POSITIVE);
+    let ref_scale = inf_norm64(&ref_solution).max(f64::MIN_POSITIVE);
 
     gpu.fill_zero(&mut psi)?;
     let t0 = Instant::now();
@@ -661,10 +680,10 @@ pub fn choose_pressure_backend(
         };
         let _ = trial;
 
-        let got = gpu.download(&psi)?;
-        let disagreement = inf_diff(&got, &ref_solution) / ref_scale;
+        let got = answer_of(gpu, &*cand, &psi)?;
+        let disagreement = inf_diff64(&got, &ref_solution) / ref_scale;
 
-        if !(disagreement <= agree_tol) {
+        if !(disagreement <= agree_tol as f64) {
             choice.considered.push((name, true, None));
             choice.notes.push(format!(
                 "DISQUALIFIED: disagrees with the reference by {disagreement:.2e} \
@@ -676,7 +695,7 @@ pub fn choose_pressure_backend(
         // A second, independent check. Agreeing with the reference and
         // satisfying the equation are not the same statement, and a backend
         // has to do both.
-        let res = residual_norm(gpu, &solk, &mut resw, &psi, a, m)?;
+        let res = measured_residual(gpu, &solk, &mut resw, &*cand, &psi, a, m)?;
         if !(res <= REFERENCE_RESIDUAL_MAX) {
             choice.considered.push((name, true, None));
             choice.notes.push(format!(
@@ -768,10 +787,108 @@ pub fn residual_norm(
     Ok(if nf > 0.0 { res / nf } else { res })
 }
 
+/// The answer a backend's last solve produced, as the selector compares
+/// it: the solution field. In the f64 build that is all there is.
+#[cfg(not(feature = "single"))]
+fn answer_of(gpu: &Gpu, _b: &dyn PressureBackend, psi: &DevBuf<Scalar>) -> Result<Vec<f64>> {
+    gpu.download(psi)
+}
+
+/// The answer a backend's last solve produced, `single`: its refined double
+/// solution when it has one (SPEC-LIT §118.12), so the agreement test
+/// compares answers and not two float roundings of them; otherwise the
+/// float field, widened.
+#[cfg(feature = "single")]
+fn answer_of(gpu: &Gpu, b: &dyn PressureBackend, psi: &DevBuf<Scalar>) -> Result<Vec<f64>> {
+    match b.refined_solution() {
+        Some(x) => {
+            let mut v = gpu.download(x)?;
+            v.truncate(psi.len());
+            Ok(v)
+        }
+        None => Ok(gpu.download(psi)?.into_iter().map(f64::from).collect()),
+    }
+}
+
+/// The §8.4 residual the selector gates on: [`residual_norm`] of the field.
+#[cfg(not(feature = "single"))]
+fn measured_residual(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    _b: &dyn PressureBackend,
+    psi: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<Scalar> {
+    residual_norm(gpu, k, w, psi, a, m)
+}
+
+/// The §8.4 residual the selector gates on, `single`: [`residual_norm64`]
+/// of the refined answer when the backend has one, else [`residual_norm`].
+#[cfg(feature = "single")]
+fn measured_residual(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    b: &dyn PressureBackend,
+    psi: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<Scalar> {
+    match b.refined_solution() {
+        Some(x) => Ok(residual_norm64(gpu, k, w, x, a, m)? as Scalar),
+        None => residual_norm(gpu, k, w, psi, a, m),
+    }
+}
+
+/// [`residual_norm`] at a DOUBLE field `x`: `sum|b - A x| / N` with the
+/// rows, the sum and the §8.4 factor all in double, SPEC-LIT (118.4.2) and
+/// (118.4.3) - the measure of a refined answer (§118.12). Setup-time only:
+/// it allocates three slots and ends in one read-back. `single` only.
+#[cfg(feature = "single")]
+pub fn residual_norm64(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    w: &mut SolverWorkspace,
+    x: &DevBuf<f64>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+) -> Result<f64> {
+    let n = a.n_cells;
+    if n == 0 {
+        return Ok(0.0);
+    }
+    let mut scal: DevBuf<f64> = gpu.zeros(3)?;
+    let c = solver::sum64_stage1(gpu, k, &mut w.partials, x, n)?;
+    solver::sum2_to64(gpu, k, &mut scal.slice_mut(0..1), &w.partials, c, 0.0)?;
+    let c = solver::norm_factor64_stage1(gpu, k, &mut w.partials, x, &scal, 1.0 / (n as f64), a, m)?;
+    solver::sum2_to64(gpu, k, &mut scal.slice_mut(1..2), &w.partials, c, f64::MIN_POSITIVE)?;
+    let c = solver::residual64_sum_stage1(gpu, k, &mut w.partials, x, a, m)?;
+    solver::sum2_to64(gpu, k, &mut scal.slice_mut(2..3), &w.partials, c, 0.0)?;
+    let h = gpu.download(&scal)?;
+    Ok(h[2] / h[1])
+}
+
+fn inf_norm64(v: &[f64]) -> f64 {
+    v.iter().fold(0.0f64, |m, x| m.max(x.abs()))
+}
+
+fn inf_diff64(a: &[f64], b: &[f64]) -> f64 {
+    if a.len() != b.len() {
+        return f64::INFINITY;
+    }
+    a.iter()
+        .zip(b)
+        .fold(0.0f64, |m, (x, y)| m.max((x - y).abs()))
+}
+
+#[cfg(test)]
 fn inf_norm(v: &[Scalar]) -> Scalar {
     v.iter().fold(0.0 as Scalar, |m, x| m.max(x.abs()))
 }
 
+#[cfg(test)]
 fn inf_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
     if a.len() != b.len() {
         return Scalar::INFINITY;

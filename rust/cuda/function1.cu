@@ -14,6 +14,13 @@
       evaluated in double in BOTH builds with -fmad=false, so this file is
       bit for bit the host twin in src/function1.rs, and the device-resident
       clock [t, dt] a captured time step advances on the device
+    ofgpu SPEC-LIT.md 120.11 - (120.11d), timeVaryingMappedFixedValue's
+      per-face time slabs on the same clock (f1TvApplyScalar/Vector), the
+      host twin TvMappedRule::values64 in src/field/tvmapped.rs
+    ofgpu SPEC-LIT.md 120.2 - (120.2g)/(120.2h), a cyclic pair's jump from
+      the face flux (f1CyclicJump), the host twin CyclicJumpRule::jumps in
+      src/field/cyclic_jump.rs; the porous law is Ward, J. Hydraulics Div.
+      ASCE 90(5) (1964) 1-12, as SPEC-LIT (S53.1) integrates it
   No GPL-licensed source was consulted.
 
   The flattened form, documented identically in src/function1/device.rs
@@ -403,4 +410,124 @@ extern "C" __global__ void f1ApplyVector
     const ofscalar y = (ofscalar)(base[3*i + 1] + w[3*i + 1] * v[j1]);
     const ofscalar z = (ofscalar)(base[3*i + 2] + w[3*i + 2] * v[j2]);
     dst[start + i] = mkvec(x, y, z);
+}
+
+//- SPEC-LIT 120.11 (120.11d): a timeVaryingMappedFixedValue patch's face
+//  value at the clock's time, the clamp form of (120.2) on per-face slabs.
+//  vals holds nk slabs of m = n*nc doubles (slab k the face values of time
+//  folder k, component-fastest); the result for entry e < m is
+//    nk == 1 or t <= times[0]:  vals[e]
+//    t >= times[nk-1]:          vals[(nk-1)*m + e]
+//    else, times[j] <= t < times[j+1]:
+//      a + ((t - times[j])/(times[j+1] - times[j]))*(b - a)
+//  in double, the same operations in the same order as the host twin
+//  TvMappedRule::values64 (src/field/tvmapped.rs); this unit is fmad-off.
+OFGPU_DEV double f1TvValue
+(
+    const double* times,
+    const int nk,
+    const double* vals,
+    const int m,
+    const int e,
+    const double t
+)
+{
+    if (nk == 1 || t <= times[0]) return vals[e];
+    if (t >= times[nk - 1]) return vals[(nk - 1)*m + e];
+    int j = 0;
+    while (j + 1 < nk && times[j + 1] <= t) ++j;
+    const double lam = (t - times[j]) / (times[j + 1] - times[j]);
+    const double a = vals[j*m + e];
+    const double b = vals[(j + 1)*m + e];
+    return a + lam * (b - a);
+}
+
+//- dst[start + i] = (ofscalar) f1TvValue(entry i) for a scalar field's faces;
+//  the time is read from the device clock, never passed as an argument.
+extern "C" __global__ void f1TvApplyScalar
+(
+    const double* times,
+    const int nk,
+    const double* vals,
+    const double* clock,
+    const int start,
+    const int n,
+    ofscalar* dst
+)
+{
+    const int i = OFGPU_TID;
+    if (i >= n) return;
+    dst[start + i] = (ofscalar)f1TvValue(times, nk, vals, n, i, clock[0]);
+}
+
+//- dst[start + i] = the three entries 3i, 3i+1, 3i+2, each rounded once.
+extern "C" __global__ void f1TvApplyVector
+(
+    const double* times,
+    const int nk,
+    const double* vals,
+    const double* clock,
+    const int start,
+    const int n,
+    ofvec3* dst
+)
+{
+    const int i = OFGPU_TID;
+    if (i >= n) return;
+    const double t = clock[0];
+    const int m = 3*n;
+    const ofscalar x = (ofscalar)f1TvValue(times, nk, vals, m, 3*i + 0, t);
+    const ofscalar y = (ofscalar)f1TvValue(times, nk, vals, m, 3*i + 1, t);
+    const ofscalar z = (ofscalar)f1TvValue(times, nk, vals, m, 3*i + 2, t);
+    dst[start + i] = mkvec(x, y, z);
+}
+
+
+//- SPEC-LIT 120.2, (120.2g)/(120.2h): a cyclic pair's jump from the face
+//  flux. For pair face i, a = a0 + i on the owner patch and b = b0 + i on its
+//  partner:
+//    u = phi[a]/magSf[a]            in double (0 on a face of no area)
+//    mode 0 (fan):    J = F(u), F the pair's jumpTable
+//    mode 1 (porous): J = -(rVisc + rInert*|u|)*u
+//    jump[a] = (ofscalar)(-J),  jump[b] = (ofscalar)J      (120.2a)
+//  The same operations in the same order as CyclicJumpRule::jumps in
+//  src/field/cyclic_jump.rs; this unit is fmad-off, so the two agree bit for
+//  bit. Negation is exact, so the pair stays antisymmetric after the cast.
+extern "C" __global__ void f1CyclicJump
+(
+    const int* code,
+    const double* coef,
+    const int mode,
+    const double rVisc,
+    const double rInert,
+    const int a0,
+    const int b0,
+    const int n,
+    const ofscalar* phi,
+    const ofscalar* magSf,
+    ofscalar* jump
+)
+{
+    const int i = OFGPU_TID;
+    if (i >= n) return;
+    const int a = a0 + i;
+    const int b = b0 + i;
+    const double mag = (double)magSf[a];
+    const double u = mag > 0.0 ? (double)phi[a]/mag : 0.0;
+    double J;
+    if (mode == 0)
+    {
+        int pc = 0, cc = 0;
+        double v[3];
+        f1Eval(code, coef, &pc, &cc, u, v);
+        J = v[0];
+    }
+    else
+    {
+        // fabs, as the host twin's f64::abs: both clear the sign bit, so a
+        // u of -0.0 reads the same on both sides.
+        J = -(rVisc + rInert*fabs(u))*u;
+    }
+    jump[a] = (ofscalar)(-J);
+    jump[b] = (ofscalar)J;
 }

@@ -796,6 +796,7 @@ impl OutputPipeline {
                 name: ctx.name,
                 mesh: ctx.mesh,
                 cart: ctx.cart,
+                vox: ctx.vox,
                 fields: &selected,
                 foam: ctx.foam,
             };

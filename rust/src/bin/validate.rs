@@ -125,8 +125,8 @@ mod json;
 #[path = "validate_key/mod.rs"]
 mod key;
 
-#[path = "validate_gates/blasius_plate.rs"]
-mod blasius_plate;
+#[path = "validate_gates/mod.rs"]
+mod validate_gates;
 
 use common::sci;
 
@@ -2164,8 +2164,59 @@ fn check_fft_poisson(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             max_abs_diff(&got, &want) / max_abs(&want).max(1e-30),
             1e-10,
         );
+
+        // Under `single` both solves are refined (SPEC-LIT 118.12): the row
+        // above compares the two float fields, this one the answers.
+        #[cfg(feature = "single")]
+        check_fft_refined(c, gpu, what, &fft, &iter, n_c, dirichlet.is_empty())?;
     }
 
+    Ok(())
+}
+
+/// `single` only: the cuFFT solve's refined double answer against the
+/// refined PBiCGStab's, both de-meaned on the sealed box (SPEC-LIT 118.12).
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+fn check_fft_refined(
+    c: &mut Checks,
+    gpu: &Gpu,
+    what: &str,
+    fft: &FftBackend,
+    iter: &PbicgstabBackend,
+    n_c: usize,
+    sealed: bool,
+) -> Result<()> {
+    let (Some(xf), Some(xi)) = (fft.refined_solution(), iter.refined_solution()) else {
+        c.require(&format!("cuFFT and PBiCGStab refined, {what} (SPEC-LIT 118.12)"), false);
+        return Ok(());
+    };
+    let mut got = gpu.download(xf)?;
+    let mut want = gpu.download(xi)?;
+    got.truncate(n_c);
+    want.truncate(n_c);
+    if sealed {
+        for v in [&mut got, &mut want] {
+            let mean = v.iter().sum::<f64>() / (n_c as f64);
+            for x in v.iter_mut() {
+                *x -= mean;
+            }
+        }
+    }
+    // A NaN anywhere fails the row: `f64::max` would drop it and pass.
+    let finite = got.iter().chain(&want).all(|v| v.is_finite());
+    let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(f64::MIN_POSITIVE);
+    let worst = got.iter().zip(&want).fold(0.0f64, |m, (g, w)| m.max((g - w).abs()));
+    c.note(&format!(
+        "cuFFT refinement, {what}: {} transform solves{}",
+        fft.ir_outer_steps(),
+        if finite { "" } else { "; an answer is not finite" }
+    ));
+    c.check(
+        &format!("cuFFT refined == iterative refined, {what} (SPEC-LIT 118.12)"),
+        if finite { (worst / scale) as Scalar } else { Scalar::NAN },
+        1e-10,
+    );
     Ok(())
 }
 
@@ -3622,11 +3673,25 @@ fn run(c: &mut Checks) -> Result<()> {
     check_wedge_gate(c, &gpu)?;
     c.leave_gate();
     }
+    // SPEC-LIT 145.2 - Gate 145-A: the dam break against Martin & Moyce's
+    // Table 2, live on three meshes (src/bin/validate_gates/martin_moyce.rs).
+    if c.section("Gate 145-A: the dam break against Martin & Moyce 1952 Table 2, three meshes (SPEC-LIT 145.2)") {
+    c.enter_gate(validate_gates::martin_moyce::GATE);
+    validate_gates::martin_moyce::check_martin_moyce(c, &gpu)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 146.2 - Gate 78-D's measured leg: each splash criterion of
+    // SPEC-LIT 78.4 against Riboux & Gordillo's (2014) threshold speeds,
+    // host only (src/bin/validate_gates/splash.rs); it opens one gate scope
+    // per criterion itself.
+    if c.section("Gate 78-D measured leg: the two splash criteria against Riboux & Gordillo 2014's threshold speeds, eight liquids (SPEC-LIT 146.2)") {
+    validate_gates::splash::check_splash_thresholds(c)?;
+    }
     // SPEC-LIT 144.2 - Gate 132-L: the flat-plate harness against Blasius,
     // three meshes live, in src/bin/validate_gates/blasius_plate.rs.
     if c.section("Gate 132-L: the laminar flat plate against Blasius, three meshes (SPEC-LIT 144.2)") {
-    c.enter_gate(blasius_plate::GATE);
-    blasius_plate::check_blasius_plate(c, &gpu)?;
+    c.enter_gate(validate_gates::blasius_plate::GATE);
+    validate_gates::blasius_plate::check_blasius_plate(c, &gpu)?;
     c.leave_gate();
     }
 
@@ -8031,6 +8096,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
                     name: "x",
                     mesh: &hm,
                     cart: None,
+                    vox: None,
                     fields: &[],
                     foam: &[],
                 },
@@ -8055,6 +8121,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
                 name: "0",
                 mesh: &hm,
                 cart: Some(&cart),
+                vox: None,
                 fields: &all,
                 foam: &[],
             },
@@ -8139,6 +8206,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
             name: "0",
             mesh: &hm,
             cart: Some(&cart),
+            vox: None,
             fields: &all,
             foam: &[],
         },
@@ -8252,6 +8320,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
             name: "0",
             mesh: &hm,
             cart: Some(&cart),
+            vox: None,
             fields: &all,
             foam: &[],
         },
@@ -8275,6 +8344,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
             name: "0",
             mesh: &hm,
             cart: Some(&cart),
+            vox: None,
             fields: &all,
             foam: &[],
         },

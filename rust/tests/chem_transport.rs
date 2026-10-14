@@ -380,9 +380,9 @@ fn transport_out_of_range_is_refused() {
     let n2 = &r[0];
     let set = air_set();
     let y = air_y();
-    let msg = format!("{}", n2.viscosity_at(299.0).unwrap_err());
+    let msg = format!("{}", n2.viscosity_at(199.0).unwrap_err());
     assert!(
-        msg.contains("N2") && msg.contains("viscosity") && msg.contains("299"),
+        msg.contains("N2") && msg.contains("viscosity") && msg.contains("199"),
         "{msg}"
     );
     let msg = format!("{}", n2.conductivity_at(5000.5).unwrap_err());
@@ -390,7 +390,7 @@ fn transport_out_of_range_is_refused() {
         msg.contains("N2") && msg.contains("conductivity") && msg.contains("5000.5"),
         "{msg}"
     );
-    let msg = format!("{}", set.mixture_ty(250.0, &y).unwrap_err());
+    let msg = format!("{}", set.mixture_ty(150.0, &y).unwrap_err());
     assert!(msg.contains("N2"), "{msg}");
     for t in [f64::NAN, 0.0] {
         assert!(set.mixture_ty(t, &y).is_err());
@@ -610,7 +610,7 @@ fn transport_device_matches_host() {
 }
 
 /// The per-cell refusals, in the host's order of checks: NaN T -> 2,
-/// T -1 -> 2, a negative Y -> 3, no species present -> 4, T 250 and
+/// T -1 -> 2, a negative Y -> 3, no species present -> 4, T 150 and
 /// T 6000 -> 10 outside the fits' range, and a valid cell -> 0 with the
 /// host's values; a refused cell's mu and lambda are NaN.
 #[test]
@@ -625,13 +625,13 @@ fn transport_device_refuses_by_status() {
     let air = air_y();
     let mut tv = vec![0.0 as Scalar; n];
     let mut yv = vec![0.0 as Scalar; ks * n];
-    // c0 NaN, c1 -1, c2 a negative Y, c3 all zero, c4 250 K, c5 6000 K,
+    // c0 NaN, c1 -1, c2 a negative Y, c3 all zero, c4 150 K, c5 6000 K,
     // c6 a valid air cell at 1000 K.
     tv[0] = f64::NAN as Scalar;
     tv[1] = -1.0;
     tv[2] = 1000.0;
     tv[3] = 1000.0;
-    tv[4] = 250.0;
+    tv[4] = 150.0;
     tv[5] = 6000.0;
     tv[6] = 1000.0;
     for c in [2usize, 4, 5, 6] {

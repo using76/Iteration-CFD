@@ -76,7 +76,7 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
   // The agent's gui_control drives this screen through ui.command; the bridge
   // applies what it can and answers every command, so the model never waits
   // out the hub's 5 s timeout on a frame nothing would ever answer.
-  const uiBridge = createUiBridge({ send, ui, session, subscribeRun, editor: { isDirty: (path) => !!useEditorStore.getState().buffers[path]?.dirty, closeBuffer: (path) => useEditorStore.getState().closeBuffer(path), removeDiff: (id) => useEditorStore.getState().removeDiff(id) } })
+  const uiBridge = createUiBridge({ send, ui, session, subscribeRun, editor: { isDirty: (path) => !!useEditorStore.getState().buffers[path]?.dirty, closeBuffer: (path) => useEditorStore.getState().closeBuffer(path), removeDiff: (id) => useEditorStore.getState().removeDiff(id), saveCase: (path, force) => useEditorStore.getState().saveCase(path, { force }) } })
 
   function subscribeRun(runId: string) {
     const data = session.getState().runData[runId]
@@ -292,6 +292,11 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
       // so the bridge answers it before the batcher ever sees it.
       if (msg.t === 'ui.command') {
         void uiBridge.handleCommand(msg.requestId, msg.cmd)
+        return
+      }
+      // The Mesh dialog's answer is screen state, not session state.
+      if (msg.t === 'mesh.status') {
+        ui.getState().setMeshStatus({ action: msg.action, ok: msg.ok, code: msg.code, error: msg.error }, msg.runId)
         return
       }
       enqueue(msg)

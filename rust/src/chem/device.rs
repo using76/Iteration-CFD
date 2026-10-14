@@ -52,8 +52,9 @@ pub mod status {
     pub const BELOW_NEGATIVE_ATOL: i32 = 8;
     /// `h_in` not finite or not above 0 (R5's `h0`).
     pub const BAD_STEP: i32 = 9;
-    /// A present species' T outside its TM-4513 eq. (10) transport range
-    /// (SPEC-LIT 133.4's transport kernels).
+    /// A present species' T outside its accepted TM-4513 eq. (10) transport
+    /// range: below the 200 K floor or above the last fit (SPEC-LIT 133.4's
+    /// transport kernels, 133.7 T1).
     pub const OUTSIDE_TRANSPORT_RANGE: i32 = 10;
 }
 

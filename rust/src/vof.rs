@@ -329,6 +329,13 @@ pub struct VofControls {
     /// Print nothing; the driver does the printing. Kept so a caller can ask
     /// for the continuity error without paying for it in a timed run.
     pub report_continuity: bool,
+
+    /// `-forceSplitDouble` (SPEC-LIT 120.7). Single build only: form the
+    /// internal-face force `phib - |Sf| snGrad(p_rgh)` in f64 and round once
+    /// (`vofForceFluxSplit64`), so the gravity and pressure terms cancel
+    /// before any f32 rounding at a large density jump. Off by default; the
+    /// f64 build ignores it, and so does a run with the Marangoni model on.
+    pub force_split_double: bool,
 }
 
 impl Default for VofControls {
@@ -353,6 +360,7 @@ impl Default for VofControls {
             max_co: 0.0,
             max_delta_t: Scalar::INFINITY,
             report_continuity: true,
+            force_split_double: false,
         }
     }
 }
@@ -469,6 +477,9 @@ struct VofKernels {
     phi_hbya_boundary: CudaFunction,
     force_flux: CudaFunction,
     force_flux_boundary: CudaFunction,
+    /// `vofForceFluxSplit64`, compiled under `single` only (SPEC-LIT 120.7).
+    #[cfg(feature = "single")]
+    force_flux_split64: CudaFunction,
     correct_flux: CudaFunction,
     correct_flux_boundary: CudaFunction,
     correct_velocity: CudaFunction,
@@ -519,6 +530,8 @@ impl VofKernels {
             phi_hbya_boundary: m.func("momPhiHbyABoundary")?,
             force_flux: m.func("momForceFlux")?,
             force_flux_boundary: m.func("momForceFluxBoundary")?,
+            #[cfg(feature = "single")]
+            force_flux_split64: v.func("vofForceFluxSplit64")?,
             correct_flux: m.func("momCorrectFlux")?,
             correct_flux_boundary: m.func("momCorrectFluxBoundary")?,
             correct_velocity: m.func("momCorrectVelocity")?,
@@ -1806,7 +1819,16 @@ impl<'m> Vof<'m> {
             )?;
         }
 
-        if nif > 0 {
+        // SPEC-LIT 120.7, `forceSplitDouble`: under `single` only, the
+        // internal faces' force may be formed in f64 and rounded once.
+        let split64 = cfg!(feature = "single")
+            && self.ctrl.force_split_double
+            && self.marangoni.is_none();
+
+        if nif > 0 && split64 {
+            #[cfg(feature = "single")]
+            self.launch_force_flux_split64(gpu)?;
+        } else if nif > 0 {
             let nl = nif as Label;
             let f = self.vk.force_flux.clone();
             unsafe {
@@ -1839,6 +1861,60 @@ impl<'m> Vof<'m> {
 
         let Self { fvk, force, force_flux, .. } = self;
         fv::fvc_reconstruct(gpu, fvk, force, force_flux, m)
+    }
+
+    /// `vofForceFluxSplit64` on the internal faces (SPEC-LIT 120.7,
+    /// `forceSplitDouble`). The kernel reads the non-orthogonal correction of
+    /// `|Sf| snGrad(p_rgh)` alone from `force_flux.f`, so it is built there
+    /// first, from a zeroed buffer and the `grad_p` that
+    /// [`Vof::update_force`] has just formed. The correction also adds into
+    /// `force_flux.bf`, which `momForceFluxBoundary` then overwrites whole.
+    #[cfg(feature = "single")]
+    fn launch_force_flux_split64(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        let nif = m.n_internal_faces;
+
+        gpu.fill_zero(&mut self.force_flux.f)?;
+        if self.ctrl.sn_grad.applies() {
+            let Self { fvk, force_flux, p_rgh, grad_p, ctrl, .. } = self;
+            fv::sn_grad_flux_correction(
+                gpu,
+                fvk,
+                force_flux,
+                p_rgh,
+                &m.mag_sf,
+                &m.b_mag_sf,
+                grad_p,
+                ctrl.sn_grad,
+                m,
+            )?;
+        }
+
+        let g = self.props.g;
+        let sigma = self.props.sigma;
+        let nl = nif as Label;
+        let f = self.vk.force_flux_split64.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.force_flux.f)
+                .arg(&self.rho.f)
+                .arg(&self.p_rgh.f)
+                .arg(&self.sn_grad_alpha.f)
+                .arg(&self.kappa_f.f)
+                .arg(&m.cf)
+                .arg(&m.delta_coeffs)
+                .arg(&m.mag_sf)
+                .arg(&m.owner)
+                .arg(&m.neighbour)
+                .arg(&g.x)
+                .arg(&g.y)
+                .arg(&g.z)
+                .arg(&sigma)
+                .arg(&nl)
+                .launch(cfg_for(nif))?;
+        }
+        Ok(())
     }
 
     // ---- momentum ---------------------------------------------------------
@@ -4949,12 +5025,11 @@ mod tests {
     ///
     /// **What this asserts, and what it does not.** Martin & Moyce photographed
     /// the surge front of exactly this experiment and tabulated `Z = z/a`
-    /// against a dimensionless time. Their table is NOT transcribed here,
-    /// because nobody working on this file has the paper in front of them, and
-    /// a table of numbers attributed to a 1952 experiment and actually
-    /// remembered would be worse than no table at all. What the test prints is
-    /// the solver's own `Z(T)` in those variables, so a reader who does have
-    /// the paper can lay one on the other.
+    /// against a dimensionless time. Their table is NOT in this test: it is
+    /// the answer key `reference/martin_moyce_1952/surge_front.csv` (SPEC-LIT
+    /// §145.1), and the comparison against it is `ofgpu-validate`'s Gate 145-A
+    /// (§145.2). What the test prints is the solver's own `Z(T)`, with `T`
+    /// WITHOUT the key's factor `n = 2^(1/2)` (145.2).
     ///
     /// What it *asserts* is three things that are true independently of any
     /// experiment:

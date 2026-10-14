@@ -3,7 +3,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { fakeDatasets, fakeRuns, makeWorkspace, type TempWorkspace } from '../agent/test-fakes.js'
 import type { UiRequestResult } from '../ws/types.js'
 import type { Hub } from '../ws/types.js'
+import { approvalPreview } from '../agent/loop.js'
+import { classifyTool, type PolicyInput } from '../agent/policy.js'
 import type { ToolContext } from './context.js'
+import { saveCustomTools } from './custom.js'
 import { guiControl, guiState } from './gui.js'
 import { runTool, toolDefinitions, TOOLS } from './index.js'
 
@@ -143,6 +146,59 @@ describe('gui_state', () => {
     expect(r.ok).toBe(true)
     expect((r.data as { state: UiState | null }).state).toBeNull()
     expect((r.data as { notice: string }).notice).toMatch(/no GUI/)
+  })
+})
+
+// STU-09: run_custom_tool is custom_tool_run itself - the same run, result,
+// refusal, approval card and policy class under every setting.
+describe('run_custom_tool', () => {
+  const cmd = (name: string, input?: Record<string, unknown>): UiCommand => ({ type: 'run_custom_tool', name, ...(input ? { input } : {}) })
+
+  it('runs the registered tool exactly as custom_tool_run does', async () => {
+    await saveCustomTools(ws.config.configDir, [{ name: 'double_it', description: 'twice a', inputSchema: { type: 'object', properties: { a: { type: 'number' } }, required: ['a'] }, impl: { kind: 'js', source: 'return input.a * 2' }, createdAt: '2026-10-14T00:00:00.000Z' }])
+    const fake = fakeUiHub()
+    const viaGui = await runTool('gui_control', cmd('double_it', { a: 21 }), ctx(fake.hub))
+    const direct = await runTool('custom_tool_run', { name: 'double_it', inputJson: '{"a":21}' }, ctx(fake.hub))
+    expect(viaGui.ok).toBe(true)
+    const pick = (d: unknown) => ({ ...(d as Record<string, unknown>), ms: 0 })
+    expect(pick(viaGui.data)).toEqual(pick(direct.data))
+    expect((viaGui.data as { result: unknown }).result).toBe(42)
+    // An omitted input is {} for custom_tool_run, so the same required-input refusal answers.
+    const missing = await runTool('gui_control', cmd('double_it'), ctx(fake.hub))
+    expect(missing.error).toEqual((await runTool('custom_tool_run', { name: 'double_it', inputJson: '{}' }, ctx(fake.hub))).error)
+    expect((await runTool('gui_control', cmd('no_such'), ctx(fake.hub))).error?.code).toBe('NO_SUCH_TOOL')
+    expect(fake.pending).toHaveLength(0)
+  })
+
+  it('carries the refusal and approval card of custom_tool_run', async () => {
+    const p = 'tools/autonomy/gates.lock'
+    const viaGui = guiControl.refuse?.(cmd('anything', { path: p }), ctx(fakeUiHub().hub)) ?? null
+    const direct = TOOLS.find((t) => t.name === 'custom_tool_run')!.refuse?.({ name: 'anything', inputJson: JSON.stringify({ path: p }) }, ctx(fakeUiHub().hub)) ?? null
+    expect(direct).not.toBeNull()
+    expect(viaGui).toEqual(direct)
+    const card = await guiControl.preview!(cmd('double_it', { a: 21 }) as never, ctx(fakeUiHub().hub))
+    expect(card).toBe(await approvalPreview('custom_tool_run', { name: 'double_it', inputJson: '{"a":21}' }, ws.root))
+  })
+
+  it('is classified as custom_tool_run under every setting, allowlist and override', () => {
+    const settingsOf = (autoApprove: 'none' | 'reads' | 'all') => ({ autoApprove, effort: 'high' as const, notifyOnRunEnd: true, locale: 'en' as const })
+    const inputs: PolicyInput[] = []
+    for (const a of ['none', 'reads', 'all'] as const) {
+      inputs.push({ settings: settingsOf(a), allowedTools: [], overrides: {} })
+      inputs.push({ settings: settingsOf(a), allowedTools: ['custom_tool_run'], overrides: {} })
+      inputs.push({ settings: settingsOf(a), allowedTools: [], overrides: { custom_tool_run: 'never' } })
+      inputs.push({ settings: settingsOf(a), allowedTools: [], overrides: { custom_tool_run: 'auto' } })
+      inputs.push({ settings: settingsOf(a), allowedTools: ['gui_control'], overrides: {} })
+    }
+    const seen = new Set<string>()
+    for (const p of inputs) {
+      const want = classifyTool('custom_tool_run', { name: 'double_it', inputJson: '{"a":21}' }, p)
+      expect(classifyTool('gui_control', cmd('double_it', { a: 21 }), p)).toBe(want)
+      seen.add(want)
+    }
+    // custom_tool_run asks by default (a mutate tool), so 'reads' does not relax it.
+    expect(classifyTool('gui_control', cmd('double_it'), inputs[5]!)).toBe('ask')
+    expect([...seen].sort()).toEqual(['ask', 'auto', 'never'])
   })
 })
 

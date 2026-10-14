@@ -82,12 +82,17 @@ export function fmt(v: number): string {
   return String(Number(v.toPrecision(4)))
 }
 
+/** An exact cut of a non-lattice mesh says so, with its size; a lattice image slice says nothing more. */
+function cutNote(result: ComputeResult | null): string {
+  return result && result.op === 'cut' ? ` (cut, ${result.triangleCount} tris)` : ''
+}
+
 export function summarize(spec: LayerSpec, result: ComputeResult | null): string {
   switch (spec.type) {
     case 'slice':
-      return `slice ${spec.axis}=${fmt(spec.position)}`
+      return `slice ${spec.axis}=${fmt(spec.position)}${cutNote(result)}`
     case 'plane':
-      return `plane o=(${spec.origin.map(fmt).join(',')}) n=(${spec.normal.map(fmt).join(',')})`
+      return `plane o=(${spec.origin.map(fmt).join(',')}) n=(${spec.normal.map(fmt).join(',')})${cutNote(result)}`
     case 'iso':
       return `iso ${spec.field}=${spec.values.map(fmt).join(',')}${result && result.op === 'iso' ? ` (${result.triangleCount} tris)` : ''}`
     case 'streamlines': {

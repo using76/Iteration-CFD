@@ -331,7 +331,7 @@ export async function validateCaseText(text: string, relPath: string, workspaceR
   return { ok: errors.length === 0, format, errors, warnings, suggestedDrivers, problems, model: info.model }
 }
 
-function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[]): void {
+export function broadcastProblems(ctx: ToolContext, relPath: string, problems: Problem[]): void {
   ctx.hub.broadcast({ t: 'problems', source: 'schema', path: relPath, runId: null, items: problems.filter((p) => p.source === 'schema') })
   ctx.hub.broadcast({ t: 'problems', source: 'semantic', path: relPath, runId: null, items: problems.filter((p) => p.source === 'semantic') })
 }
@@ -474,7 +474,8 @@ export const caseValidate: ToolDef<typeof ValidateSchema> = {
 
 export interface CaseEdit {
   pointer: string
-  op: 'set' | 'remove'
+  /** insert: the value goes in before the array element the pointer names (or at the end for "/-"). */
+  op: 'set' | 'remove' | 'insert'
   valueJson: string | null
 }
 
@@ -487,9 +488,9 @@ export function applyCaseEdits(text: string, edits: CaseEdit[]): { text: string;
       continue
     }
     let value: unknown
-    if (e.op === 'set') {
+    if (e.op === 'set' || e.op === 'insert') {
       if (e.valueJson === null) {
-        errors.push(`${e.pointer}: set needs valueJson`)
+        errors.push(`${e.pointer}: ${e.op} needs valueJson`)
         continue
       }
       try {
@@ -505,8 +506,16 @@ export function applyCaseEdits(text: string, edits: CaseEdit[]): { text: string;
       errors.push(`${e.pointer}: nothing to remove`)
       continue
     }
+    if (e.op === 'insert') {
+      const parent = root ? findNodeAtLocation(root, jsonPath.slice(0, -1)) : undefined
+      const at = jsonPath[jsonPath.length - 1]
+      if (parent?.type !== 'array' || typeof at !== 'number' || at < 0 || at > (parent.children?.length ?? 0)) {
+        errors.push(`${e.pointer}: insert needs an index of an existing array`)
+        continue
+      }
+    }
     try {
-      const appending = e.pointer.endsWith('/-')
+      const appending = e.pointer.endsWith('/-') || e.op === 'insert'
       const edits = modify(cur, jsonPath, value, { formattingOptions: FORMATTING, isArrayInsertion: appending }).map((ed) => ({ ...ed, content: compactArrays(ed.content) }))
       cur = applyEdits(cur, edits)
     } catch (err) {
@@ -522,7 +531,7 @@ const EditSchema = z.object({
     .array(
       z.object({
         pointer: z.string().describe('JSON pointer, e.g. /run/endTime, /numerics/relaxation/p, /patches/0/U, /mesh/cells/2'),
-        op: z.enum(['set', 'remove']),
+        op: z.enum(['set', 'remove', 'insert']).describe('insert puts the value before the array element the pointer names (/patches/0 = first)'),
         valueJson: z.string().nullable().describe('New value as a JSON string ("0.3", "\\"kOmegaSST\\"", "[0,0,-9.81]"); null for remove'),
       }),
     )

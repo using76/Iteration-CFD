@@ -15,6 +15,9 @@
     Hirsch, "Numerical Computation of Internal and External Flows", 2nd ed.
       (2007), on Robin/mixed boundary treatment
     Jasak (1996) section 3.2 for the symmetry-plane condition
+    ofgpu SPEC-LIT.md section 120.2 - the cyclic jump: a coupled face sees
+      its neighbour at psi_N + j_f (120.2b), j_f the field's per-face jump
+      array; fldCoupledNbr below
     ofgpu SPEC-LIT.md section 13.4 - the flux-switched block below is a RANGE
       rather than one value because the turbulence inlets and
       pressureInletOutletVelocity all switch on the sign of the same flux and
@@ -152,6 +155,18 @@
 #define OFGPU_BC_INLET_OUTLET_LAST  12
 
 
+//- SPEC-LIT 120.2, (120.2b): the neighbour value a coupled face sees. j is
+//  the field's per-face jump array (`GpuScalarField::jump`), nonzero only on
+//  the faces of a fixedJump / uniformJump / fan / porousBafflePressure pair,
+//  where the far cell is seen at psi_N + j_f. A face with no jump holds
+//  j = 0 and reads psi_N itself - a select, not psi_N + 0, so a -0.0 stays
+//  -0.0 and every plain cyclic face is bit for bit what it was.
+OFGPU_DEV ofscalar fldCoupledNbr(ofscalar psiN, ofscalar j)
+{
+    return (j != (ofscalar)0) ? psiN + j : psiN;
+}
+
+
 //- The mixed expression of SPEC-LIT section 4, for one component.
 //
 //  Delta_b is the boundary delta coefficient of SPEC-LIT section 2.4 and is
@@ -190,6 +205,7 @@ extern "C" __global__ void fldCorrectBcScalar
     const ofscalar* __restrict__ bDeltaCoeffs,
     const oflabel* __restrict__ bNbrCell,
     const ofscalar* __restrict__ bWeights,
+    const ofscalar* __restrict__ bJump,
     oflabel nBoundaryFaces
 )
 {
@@ -211,9 +227,10 @@ extern "C" __global__ void fldCorrectBcScalar
         {
             //- The face sits between two cells exactly as an internal face
             //  does, so it is interpolated exactly as one: SPEC-LIT 2.3, with
-            //  bWeights the weight of THIS side.
+            //  bWeights the weight of THIS side - against the far cell as
+            //  this side sees it, psi_N + j_f, (120.2b) of SPEC-LIT 120.2.
             const ofscalar w = bWeights[i];
-            bf[i] = w*psiP + ((ofscalar)1 - w)*psi[nbr];
+            bf[i] = w*psiP + ((ofscalar)1 - w)*fldCoupledNbr(psi[nbr], bJump[i]);
         }
         else
         {
@@ -1237,4 +1254,169 @@ extern "C" __global__ void fldScale
     const oflabel i = OFGPU_TID;
     if (i >= n) return;
     dst[i] *= s;
+}
+
+
+// ==========================================================================
+//  SPEC-LIT 120.10 - the recycled inflow: mapped / mappedFixedValue and
+//  turbulentInlet. Both are a section-4 FIXED VALUE (fr = 1, refGrad = 0)
+//  whose refValue these two kernels rewrite - no new evaluation branch.
+//  Both run on ONE thread (thread 0 of a 1-thread launch) and index the
+//  boundary arrays component-fastest, `[f * ncomp + c]`, so one kernel
+//  serves a scalar field (ncomp 1) and a vector field (ncomp 3, an ofvec3
+//  being three ofscalar). Host twins: field::mapped::mapped_values and
+//  field::mapped::turbulent_advance, in the same operation order.
+// ==========================================================================
+
+extern "C" __global__ void fldMapped
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ psi,
+    const oflabel* __restrict__ cells,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel size,
+    oflabel ncomp,
+    oflabel setAverage,
+    ofscalar ax,
+    ofscalar ay,
+    ofscalar az
+)
+{
+    if (OFGPU_TID != 0) return;
+
+    //- (120.10c): A = SUM |S_f| and M = SUM |S_f| psi*_f, in face order,
+    //  in ofacc (SPEC-LIT 118.1).
+    const ofacc avg[3] = {(ofacc)ax, (ofacc)ay, (ofacc)az};
+    ofacc area = 0;
+    ofacc sum[3] = {0, 0, 0};
+    if (setAverage)
+    {
+        for (oflabel i = 0; i < size; ++i)
+        {
+            const ofacc s = (ofacc)bMagSf[start + i];
+            const oflabel c = cells[i];
+            area += s;
+            for (oflabel k = 0; k < ncomp; ++k)
+                sum[k] += s * (ofacc)psi[c * ncomp + k];
+        }
+    }
+
+    if (!setAverage || area <= 0)
+    {
+        //- (120.10b): the sampled cell's value, copied.
+        for (oflabel i = 0; i < size; ++i)
+        {
+            const oflabel c = cells[i];
+            const oflabel f = start + i;
+            fr[f] = 1;
+            for (oflabel k = 0; k < ncomp; ++k)
+            {
+                refValue[f * ncomp + k] = psi[c * ncomp + k];
+                refGrad[f * ncomp + k] = 0;
+            }
+        }
+        return;
+    }
+
+    //- (120.10c): m = M/A, s = |a|/|m| where |a| > 0 and |m| >= |a|/2,
+    //  else 1, and every face s psi* + (a - s m), rounded once.
+    ofacc mbar[3] = {0, 0, 0};
+    ofacc m2 = 0, a2 = 0;
+    for (oflabel k = 0; k < ncomp; ++k)
+    {
+        mbar[k] = sum[k] / area;
+        m2 += mbar[k] * mbar[k];
+        a2 += avg[k] * avg[k];
+    }
+    const ofacc mm = sqrt(m2);
+    const ofacc am = sqrt(a2);
+    const ofacc fac = (am > 0 && mm >= 0.5 * am) ? am / mm : (ofacc)1;
+    ofacc shift[3] = {0, 0, 0};
+    for (oflabel k = 0; k < ncomp; ++k)
+        shift[k] = avg[k] - fac * mbar[k];
+
+    for (oflabel i = 0; i < size; ++i)
+    {
+        const oflabel c = cells[i];
+        const oflabel f = start + i;
+        fr[f] = 1;
+        for (oflabel k = 0; k < ncomp; ++k)
+        {
+            const ofacc v = (ofacc)psi[c * ncomp + k];
+            refValue[f * ncomp + k] = (ofscalar)(fac * v + shift[k]);
+            refGrad[f * ncomp + k] = 0;
+        }
+    }
+}
+
+//- (120.10e): the SplitMix64 finaliser of the key, its top 53 bits as u in
+//  [0, 1), and sqrt(3) (2u - 1) - integer arithmetic and one product, the
+//  same bits as field::mapped::turbulent_eps.
+__device__ __forceinline__ double fldTurbulentEps
+(
+    unsigned long long seed,
+    unsigned long long n,
+    unsigned long long g,
+    unsigned long long c
+)
+{
+    unsigned long long z = seed ^ (n << 32) ^ (3ull * g + c);
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    const double u = (double)(z >> 11) * (1.0 / 9007199254740992.0);
+    return 1.7320508075688772 * (2.0 * u - 1.0);
+}
+
+extern "C" __global__ void fldTurbulentInlet
+(
+    ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ reference,
+    oflabel* __restrict__ step,
+    oflabel start,
+    oflabel size,
+    oflabel ncomp,
+    ofscalar sx,
+    ofscalar sy,
+    ofscalar sz,
+    ofscalar alpha,
+    unsigned long long seed
+)
+{
+    if (OFGPU_TID != 0) return;
+
+    //- (120.10g): step n = step[0] + 1, mu = 1 - alpha, in double in both
+    //  builds; x^(n-1) = refValue - psi_ref, x^n = mu x^(n-1) +
+    //  sqrt(1 - mu^2) sigma eps^n, sigma = s_c |psi_ref,f| (120.10f), and
+    //  (120.10h) the face value psi_ref + x^n rounded once.
+    const oflabel n = step[0] + 1;
+    const double mu = 1.0 - (double)alpha;
+    const double q = sqrt(1.0 - mu * mu);
+    const double scale[3] = {(double)sx, (double)sy, (double)sz};
+    for (oflabel i = 0; i < size; ++i)
+    {
+        double r2 = 0;
+        for (oflabel k = 0; k < ncomp; ++k)
+        {
+            const double r = (double)reference[i * ncomp + k];
+            r2 += r * r;
+        }
+        const double mag = sqrt(r2);
+        const unsigned long long g = (unsigned long long)(start + i);
+        for (oflabel k = 0; k < ncomp; ++k)
+        {
+            const oflabel j = (start + i) * ncomp + k;
+            const double r = (double)reference[i * ncomp + k];
+            const double sigma = scale[k] * mag;
+            const double xOld = (double)refValue[j] - r;
+            const double x = mu * xOld
+                + q * sigma * fldTurbulentEps(seed, (unsigned long long)n, g, (unsigned long long)k);
+            refValue[j] = (ofscalar)(r + x);
+        }
+    }
+    step[0] = n;
 }

@@ -20,6 +20,12 @@
 //!                     dimensionless variables of Martin & Moyce (1952)
 //!   -a A              the column width those variables are scaled by; the
 //!                     default is read from the initial alpha field
+//!   -forceSplitDouble single build only: evaluate the VOF face
+//!                     pressure/gravity force split in double precision, to
+//!                     cut the small spurious velocity (about 1e-5 m/s) that
+//!                     f32 round-off leaves at a large density jump such as
+//!                     water/air; a little slower. Off by default; no effect
+//!                     in the f64 build (SPEC-LIT 120.7)
 //!   -permissive       SPEC-LIT 13.4's escape hatch
 //! ```
 //!
@@ -48,11 +54,14 @@
 //! and `-surge` prints exactly those, together with the raw `t` and `z` in
 //! seconds and metres so a reader can rescale into whichever convention the
 //! copy of the paper in front of them uses. **The paper's tabulated data is
-//! not reproduced in this source**, because nobody here has the paper to
-//! transcribe it from, and a table of numbers attributed to a 1952 experiment
-//! and actually remembered is worse than no table at all.
+//! not reproduced in this source.** It is in the tree as an answer key,
+//! `reference/martin_moyce_1952/surge_front.csv` (Table 2, `n^2 = 2`, copied
+//! as printed, SPEC-LIT §145.1), whose `T` carries the factor `n` this report
+//! does not: `T_key = 2^(1/2) T` here (145.2). `ofgpu-validate`'s Gate 145-A
+//! (SPEC-LIT §145.2, `src/bin/validate_gates/martin_moyce.rs`) runs this
+//! sampler's dam break live and holds it against that key.
 //!
-//! What the code *does* assert about the surge front is in
+//! What the code *also* asserts about the surge front is in
 //! `ofgpu::vof`'s tests and in `ofgpu-validate`: the phase volume is conserved,
 //! `alpha` stays in `[0, 1]`, and the front never outruns `2 sqrt(g h0)`, the
 //! characteristic speed limit of the frictionless shallow-water dam break
@@ -118,6 +127,8 @@ struct Options {
     /// `-reportEvery N` - print the per-step residual line every N steps
     /// (always also on step 1 and the last step).
     report_every: u64,
+    /// `-forceSplitDouble` - `VofControls::force_split_double`.
+    force_split_double: bool,
 }
 
 fn usage() {
@@ -125,7 +136,12 @@ fn usage() {
         "usage: ofgpu-vof <caseDir> [-endTime T] [-deltaT dt] [-maxCo C] \
          [-maxDeltaT dt]\n       \
          [-writeInterval W] [-noWrite] [-surge] [-a A] [-output LIST]\n       \
-         [-restartWrite N] [-restartFrom FILE] [-reportEvery N]\n\
+         [-restartWrite N] [-restartFrom FILE] [-reportEvery N]\n       \
+         [-forceSplitDouble]\n\
+         -forceSplitDouble: single build only - evaluate the VOF face pressure/gravity \
+         force split in double precision, to cut the ~1e-5 m/s spurious velocity f32 \
+         round-off leaves at a water/air density jump; a little slower. Off by default; \
+         no effect in the f64 build.\n\
          {}",
         ofgpu::io::contract::PERMISSIVE_USAGE
     );
@@ -165,6 +181,7 @@ fn parse(args: &[String]) -> Result<Options> {
         restart_write: None,
         restart_from: None,
         report_every: 20,
+        force_split_double: false,
     };
 
     let mut i = 2;
@@ -181,6 +198,7 @@ fn parse(args: &[String]) -> Result<Options> {
             }
             "-noWrite" => o.do_write = false,
             "-surge" => o.surge = true,
+            "-forceSplitDouble" => o.force_split_double = true,
             "-a" => o.column_width = parse_number("-a", &next_arg(args, &mut i)?)?,
             "-output" => o.output = parse_output_formats(&next_arg(args, &mut i)?)?,
             "-restartWrite" => {
@@ -394,6 +412,13 @@ fn run(o: &Options) -> Result<()> {
 
     if o.delta_t > 0.0 {
         ctrl.delta_t = o.delta_t as Scalar;
+    }
+    ctrl.force_split_double = o.force_split_double;
+    if o.force_split_double && !cfg!(feature = "single") {
+        println!(
+            "-forceSplitDouble: this is the f64 build, where the split is \
+             already double; nothing changes"
+        );
     }
     let end_time = if o.end_time > 0.0 {
         o.end_time as Scalar
@@ -871,6 +896,7 @@ fn write_time(
         name: &name,
         mesh: hm,
         cart: cart.as_ref(),
+        vox: None,
         fields: &vis_fields,
         foam: &foam_fields,
     };

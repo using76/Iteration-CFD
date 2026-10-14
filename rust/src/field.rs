@@ -648,6 +648,22 @@ pub const IMPLEMENTED_BC_NAMES: &[&str] = &[
     "atmBoundaryLayerInletOmega",
     "nutkAtmRoughWallFunction",
     "nutUBlendedWallFunction",
+    // SPEC-LIT 120.10: the recycled inflow. All three ride
+    // `BcKind::FixedValue`; their refValue is rewritten by `fldMapped`
+    // every outer iteration (BcInputs::mapped) or by `fldTurbulentInlet`
+    // every time step (BcInputs::turbulent_inlet).
+    "mapped",
+    "mappedFixedValue",
+    "turbulentInlet",
+    // SPEC-LIT 120.11: the inflow database. A `FixedValue` whose refValue
+    // the `TimedBcs` of the `*_timed` setup rewrites after each clock step.
+    "timeVaryingMappedFixedValue",
+    // SPEC-LIT 120.2: the two cyclic jumps. Both ride `BcKind::Cyclic` on a
+    // pressure: the pair's per-face jump array, not the triple, carries the
+    // jump, and `field_setup` builds it on a cyclic pair and refuses the
+    // names anywhere else.
+    "fixedJump",
+    "uniformJump",
 ];
 
 /// The host twin of the device evaluation of (120.3a) - SPEC-LIT 120.3.
@@ -1004,6 +1020,45 @@ impl BcKind {
             | "atmBoundaryLayerInletK"
             | "atmBoundaryLayerInletEpsilon"
             | "atmBoundaryLayerInletOmega" => Self::FixedValue,
+            // SPEC-LIT 120.10: the recycled inflow is a fixedValue whose
+            // refValue a refresh kernel rewrites - `fldMapped` from the
+            // offset plane's cells, `fldTurbulentInlet` from the seeded
+            // fluctuation - so all three names are this kind; `field_setup`
+            // builds the rule and refuses where no caller refreshes it.
+            "mapped" | "mappedFixedValue" | "turbulentInlet" => Self::FixedValue,
+            // SPEC-LIT 120.11: a fixedValue read from
+            // `constant/boundaryData/<patch>`, interpolated in space at setup
+            // and in time on the device; `field_setup` builds the rule and
+            // refuses it on a setup path that does not advance the clock.
+            "timeVaryingMappedFixedValue" => Self::FixedValue,
+
+            // SPEC-LIT 120.2: a jump across a cyclic pair is a coupled face
+            // whose far cell is seen at psi_N + j_f. The face is the cyclic
+            // couple it always was, so the kind is `Cyclic`; `field_setup`
+            // writes the pair's jump array and refuses both names on a patch
+            // that is not one half of a cyclic pair.
+            //
+            // ONLY on the pressure: the jump source enters the PRESSURE
+            // assembly (`Simple`'s, through `ldu_ops::add_jump_source`) and
+            // no other equation's, so on any other field the jump would be
+            // read by the face value and the gradient but never by the
+            // matrix - a condition half applied (SPEC-LIT 13.4.1).
+            "fixedJump" | "uniformJump" => {
+                if !is_pressure_field(field) {
+                    return unsupported(
+                        &format!("{field}: boundaryField/{patch}/type"),
+                        name,
+                        &["cyclic"],
+                        "cyclic - but note that a cyclic jump belongs on the \
+                         PRESSURE field `p`, whose assembly is the only one that \
+                         adds the jump source (SPEC-LIT 120.2); on any other \
+                         field the jump would reach the face value and never \
+                         the matrix",
+                        Self::Cyclic,
+                    );
+                }
+                Self::Cyclic
+            }
             "nutLowReWallFunction" => Self::NutLowReWallFunction,
             "epsilonWallFunction" => Self::EpsilonWallFunction,
             "omegaWallFunction" => Self::OmegaWallFunction,
@@ -1562,7 +1617,7 @@ impl BcKind {
 /// [`is_temperature_field`] - `p` is this solver's kinematic pressure and
 /// `p_rgh` / `p.<region>` are the spellings a case may write, while `pRef`
 /// and `p0` are PARAMETERS and must not match.
-fn is_pressure_field(field: &str) -> bool {
+pub(crate) fn is_pressure_field(field: &str) -> bool {
     field == "p"
         || field == "p_rgh"
         || field
@@ -1611,6 +1666,28 @@ pub struct GpuScalarField {
     /// kernel per rule once per outer iteration; a field with no rule
     /// launches nothing.
     pub mean_rules: Vec<patch_mean::PatchMeanRule>,
+    /// SPEC-LIT 120.10: the `mapped`/`mappedFixedValue` patches, each with
+    /// its sampled cells on the device - `update_mapped_scalar` launches one
+    /// kernel per rule once per outer iteration; none, nothing.
+    pub mapped: Vec<mapped::GpuMapped>,
+    /// SPEC-LIT 120.10: the `turbulentInlet` patches, each with its
+    /// reference and step counter on the device - advanced once per time
+    /// step by `advance_turbulent_inlet_scalar`; none, nothing.
+    pub turbulent: Vec<mapped::GpuTurbulentInlet>,
+    /// SPEC-LIT 120.2: `[n_bf]` the cyclic jump `j_f` - the amount the far
+    /// cell of a coupled face is offset by as this side sees it,
+    /// `psi_N + j_f` (120.2b). Zero on every face that is not one half of a
+    /// fixedJump / uniformJump / fan / porousBafflePressure pair, and on
+    /// every face of a field with none, so a plain cyclic face reads exactly
+    /// what it always read. A separate array rather than the coupled face's
+    /// unused `ref_value`, because drivers and fixtures write the triple
+    /// wholesale and a stray value there would become a jump.
+    pub jump: DevBuf<Scalar>,
+    /// SPEC-LIT 120.2: the field's jump pairs on the device - `Some` exactly
+    /// when the field carries one, which is when a pressure assembly adds
+    /// `ldu_ops::add_jump_source`; its flux laws (fan, porousBafflePressure)
+    /// are re-evaluated from the face flux by `refresh` once per corrector.
+    pub cyclic_jump: Option<crate::function1::DeviceCyclicJumps>,
 }
 
 impl GpuScalarField {
@@ -1632,6 +1709,10 @@ impl GpuScalarField {
             ref_grad: gpu.zeros(m.n_boundary_faces)?,
             bc_kind: gpu.upload(&kinds)?,
             mean_rules: Vec::new(),
+            mapped: Vec::new(),
+            turbulent: Vec::new(),
+            jump: gpu.zeros(m.n_boundary_faces)?,
+            cyclic_jump: None,
         })
     }
 
@@ -1690,6 +1771,12 @@ pub struct GpuVectorField {
     /// as on [`GpuScalarField::mean_rules`] - `update_patch_means_vector`
     /// launches one kernel per rule once per outer iteration.
     pub mean_rules: Vec<patch_mean::PatchMeanRule>,
+    /// SPEC-LIT 120.10: as [`GpuScalarField::mapped`], refreshed by
+    /// `update_mapped_vector`.
+    pub mapped: Vec<mapped::GpuMapped>,
+    /// SPEC-LIT 120.10: as [`GpuScalarField::turbulent`], advanced by
+    /// `advance_turbulent_inlet_vector`.
+    pub turbulent: Vec<mapped::GpuTurbulentInlet>,
 }
 
 impl GpuVectorField {
@@ -1709,6 +1796,8 @@ impl GpuVectorField {
             bc_kind: gpu.upload(&kinds)?,
             dm: gpu.zeros(12 * m.n_boundary_faces)?,
             mean_rules: Vec::new(),
+            mapped: Vec::new(),
+            turbulent: Vec::new(),
         })
     }
 }
@@ -1775,6 +1864,23 @@ pub mod advective;
 /// [`patch_mean::patch_mean_values_vector`] and
 /// [`patch_mean::extrapolated_sn_grad`].
 pub mod patch_mean;
+
+/// The recycled inflow of SPEC-LIT 120.10: the [`mapped::MappedRule`] and
+/// [`mapped::TurbulentInletRule`] the setup holds per patch, and the host
+/// twins of the `fldMapped` and `fldTurbulentInlet` kernels - see
+/// [`mapped::mapped_values`], [`mapped::turbulent_seed`] and
+/// [`mapped::turbulent_advance`].
+pub mod mapped;
+
+/// The cyclic jumps of SPEC-LIT 120.2: the [`cyclic_jump::CyclicJumpRule`]
+/// a fan or porousBafflePressure pair carries, and the host twin of the
+/// `f1CyclicJump` kernel - see [`cyclic_jump::CyclicJumpRule::jumps`].
+pub mod cyclic_jump;
+
+/// The inflow database of SPEC-LIT 120.11: `timeVaryingMappedFixedValue`'s
+/// planar Delaunay triangulation, barycentric face weights and per-time face
+/// slabs - see [`tvmapped::build_rule`] and [`tvmapped::TvMappedRule`].
+pub mod tvmapped;
 
 /// The boundary-condition catalogue of SPEC-LIT §120, test-only; see
 /// [`catalogue::CATALOGUE`]. Held to `from_name` by the three §120 tests of
@@ -1962,7 +2068,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [89, 5, 16, 10, 10], "the per-status counts");
+        assert_eq!(counts, [95, 5, 10, 10, 10], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]

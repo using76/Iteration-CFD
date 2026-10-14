@@ -5,6 +5,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { TOOL_META, ToolPolicySchema, type SessionSettings, type ToolPolicy } from '@cfd/shared'
+import { guiBoundaryDelegate } from '../tools/guiBoundary.js'
+import { customRunInput, guiCustomDelegate } from '../tools/gui.js'
+import { guiCaseDelegate } from '../tools/guiCase.js'
+import { guiMeshDelegate } from '../tools/guiMesh.js'
 import { guiRunDelegate } from '../tools/guiRun.js'
 
 export const POLICY_FILE = 'policy.json'
@@ -42,6 +46,8 @@ export interface PolicyInput {
   settings: SessionSettings
   allowedTools: ReadonlySet<string> | string[]
   overrides: PolicyOverrides
+  /** The session whose mesh draft decides start_mesh's delegate (mesh_generate, or mesh_regions for the regions form). */
+  sessionId?: string | null
 }
 
 function baseKind(name: string): 'read' | 'mutate' | 'long' | 'ui' | null {
@@ -52,11 +58,14 @@ function baseKind(name: string): 'read' | 'mutate' | 'long' | 'ui' | null {
 export const ALWAYS_ASK: ReadonlySet<string> = new Set(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose', 'cad_template_freeze'])
 
 export function classifyTool(name: string, input: unknown, ctx: PolicyInput): ToolPolicy {
-  // A gui_control command that stands in for run_start / run_stop is approved
-  // exactly as that tool: policy.json overrides, TOOL_META, ALWAYS_ASK, the
-  // per-session allowlist and autoApprove all apply to the delegate's name.
+  // A gui_control command that stands in for run_start / run_stop,
+  // case_create / case_validate, mesh_generate / mesh_regions, (set_patch)
+  // case_edit or (run_custom_tool) custom_tool_run is approved exactly as that
+  // tool: policy.json overrides, TOOL_META, ALWAYS_ASK, the per-session
+  // allowlist and autoApprove all apply to the delegate's name.
   if (name === 'gui_control') {
-    const delegate = guiRunDelegate(input)
+    if (guiCustomDelegate(input) !== null) return classifyTool('custom_tool_run', customRunInput(input as { name?: unknown; input?: unknown }), ctx)
+    const delegate = guiRunDelegate(input) ?? guiCaseDelegate(input) ?? guiBoundaryDelegate(input) ?? guiMeshDelegate(input, ctx.sessionId)
     if (delegate !== null) return classifyTool(delegate, input, ctx)
   }
   const base: ToolPolicy = ctx.overrides[name] ?? (TOOL_META as Record<string, { policy: ToolPolicy } | undefined>)[name]?.policy ?? 'ask'

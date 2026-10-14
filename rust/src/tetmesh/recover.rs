@@ -86,7 +86,7 @@ fn norm(a: Point) -> f64 {
 }
 
 /// The undirected edge key `(min, max)`.
-fn key(a: u32, b: u32) -> (u32, u32) {
+pub(super) fn key(a: u32, b: u32) -> (u32, u32) {
     if a < b {
         (a, b)
     } else {
@@ -95,7 +95,7 @@ fn key(a: u32, b: u32) -> (u32, u32) {
 }
 
 /// `p + t (q - p)`, the point at parameter `t` on `[p, q]`.
-fn lerp(p: Point, q: Point, t: f64) -> Point {
+pub(super) fn lerp(p: Point, q: Point, t: f64) -> Point {
     [
         p[0] + t * (q[0] - p[0]),
         p[1] + t * (q[1] - p[1]),
@@ -606,6 +606,9 @@ pub enum SteinerSite {
     /// Inside input triangle `tri = (a, b, c)`, at `a + u (b - a) + v (c - a)`
     /// (116.15f)-(116.15g).
     Facet { tri: u32, u: f64, v: f64 },
+    /// A point of the Delaunay refinement of §116.13 that lies on no input
+    /// triangle: inside the domain, or on the domain box.
+    Volume,
 }
 
 /// What the face recovery built (SPEC-LIT §116.11): the edge recovery's
@@ -691,6 +694,7 @@ impl FaceRecovery {
                     edge_tris[&(e[0], e[1])].clone()
                 }
                 SteinerSite::Facet { tri, .. } => vec![tri],
+                SteinerSite::Volume => Vec::new(),
             };
         }
         on
@@ -756,7 +760,7 @@ fn on_plane(a: [f64; 2]) -> Point {
 /// The exact 2D orientation, positive when `a, b, c` turn counter-clockwise:
 /// (116.1) of the three points on `z = 0` and `(0, 0, -1)`, whose
 /// determinant is the 2D one exactly.
-fn orient2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+pub(super) fn orient2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     orient3d(&on_plane(a), &on_plane(b), &on_plane(c), &LIFT)
 }
 
@@ -768,16 +772,16 @@ fn incircle2(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> f64 {
 }
 
 /// The plane frame of input triangle `(a, b, c)` (116.15f).
-struct Frame {
-    a: Point,
-    e1: Point,
-    e2: Point,
+pub(super) struct Frame {
+    pub(super) a: Point,
+    pub(super) e1: Point,
+    pub(super) e2: Point,
     /// The corners in the plane: `(0, 0)`, `(|e1|, 0)`, `(e2 . e1 / |e1|, |e1 x e2| / |e1|)`.
-    c2: [[f64; 2]; 3],
+    pub(super) c2: [[f64; 2]; 3],
 }
 
 impl Frame {
-    fn new(p: [Point; 3]) -> Frame {
+    pub(super) fn new(p: [Point; 3]) -> Frame {
         let e1 = sub(p[1], p[0]);
         let e2 = sub(p[2], p[0]);
         let l = norm(e1);
@@ -789,16 +793,16 @@ impl Frame {
         }
     }
 
-    fn at2(&self, u: f64, v: f64) -> [f64; 2] {
+    pub(super) fn at2(&self, u: f64, v: f64) -> [f64; 2] {
         [u * self.c2[1][0] + v * self.c2[2][0], v * self.c2[2][1]]
     }
 
-    fn uv(&self, x: [f64; 2]) -> (f64, f64) {
+    pub(super) fn uv(&self, x: [f64; 2]) -> (f64, f64) {
         let v = x[1] / self.c2[2][1];
         ((x[0] - v * self.c2[2][0]) / self.c2[1][0], v)
     }
 
-    fn at3(&self, u: f64, v: f64) -> Point {
+    pub(super) fn at3(&self, u: f64, v: f64) -> Point {
         [
             self.a[0] + u * self.e1[0] + v * self.e2[0],
             self.a[1] + u * self.e1[1] + v * self.e2[1],
@@ -811,19 +815,19 @@ impl Frame {
 /// first (corner `a`, the chain to `b`, `b`, the chain to `c`, `c`, the
 /// chain back), then its interior points; `side[k]` is the
 /// `(edge, reversed)` of side `k` and `start[k]` its corner's position.
-struct FacetPoints {
-    ids: Vec<u32>,
-    xy: Vec<[f64; 2]>,
-    nb: usize,
-    start: [usize; 3],
-    side: [(usize, bool); 3],
+pub(super) struct FacetPoints {
+    pub(super) ids: Vec<u32>,
+    pub(super) xy: Vec<[f64; 2]>,
+    pub(super) nb: usize,
+    pub(super) start: [usize; 3],
+    pub(super) side: [(usize, bool); 3],
 }
 
 /// The 2D triangulation of (116.15f): boundary points by edge splits,
 /// interior points by location, then Lawson flips of every non-boundary
 /// edge that fails the exact in-circle test. Counter-clockwise local
 /// triangles, or `None` when a point cannot be placed.
-fn triangulate_facet(fp: &FacetPoints) -> Option<Vec<[usize; 3]>> {
+pub(super) fn triangulate_facet(fp: &FacetPoints) -> Option<Vec<[usize; 3]>> {
     let xy = &fp.xy;
     let nb = fp.nb;
     let n = xy.len();
@@ -938,7 +942,7 @@ fn triangulate_facet(fp: &FacetPoints) -> Option<Vec<[usize; 3]>> {
 }
 
 /// The 2D circumcentre of `p, q, r`.
-fn circumcentre2(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> [f64; 2] {
+pub(super) fn circumcentre2(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> [f64; 2] {
     let (bx, by) = (q[0] - p[0], q[1] - p[1]);
     let (cx, cy) = (r[0] - p[0], r[1] - p[1]);
     let d = 2.0 * (bx * cy - by * cx);
@@ -947,7 +951,7 @@ fn circumcentre2(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> [f64; 2] {
 }
 
 /// The 3D circumcentre and circumradius of a triangle.
-fn circumsphere3(a: Point, b: Point, c: Point) -> (Point, f64) {
+pub(super) fn circumsphere3(a: Point, b: Point, c: Point) -> (Point, f64) {
     let ab = sub(b, a);
     let ac = sub(c, a);
     let n = cross(ab, ac);

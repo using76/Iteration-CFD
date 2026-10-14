@@ -1,10 +1,11 @@
 import { useMemo } from 'react'
-import type { RunInfo } from '@cfd/shared'
-import { formatDuration, useNow, useT } from '../../app/hooks'
-import { pickActiveRun, sortRuns, useSessionStore } from '../../state/sessionStore'
+import { parseParReport, type RunInfo } from '@cfd/shared'
+import { formatDuration, useLocale, useNow, useT } from '../../app/hooks'
+import { pickActiveRun, selectRunData, sortRuns, useSessionStore } from '../../state/sessionStore'
 import { useUiStore } from '../../state/uiStore'
 import { actions } from '../../ws/actions'
 import { Icon } from '../common/Icon'
+import { ParReport } from './ParReport'
 
 export function runStatusPill(status: RunInfo['status']): string {
   switch (status) {
@@ -60,6 +61,12 @@ export function RunsPane() {
   const anyRunning = list.some((r) => r.status === 'running' || r.status === 'queued')
   const now = useNow(anyRunning ? 1000 : null)
   const active = pickActiveRun(list, activeRunId)
+  const locale = useLocale()
+  // ofgpu-par is a gate driver: its decomposition report is read from the
+  // active run's log (PAR-17), and only for that binary.
+  const parRunId = active?.binary === 'ofgpu-par' ? active.id : null
+  const parLogs = useSessionStore(selectRunData(parRunId)).logs
+  const parReport = useMemo(() => (parRunId ? parseParReport(parLogs.map((l) => l.text)) : null), [parRunId, parLogs])
   if (!list.length) return <div className="empty-note">{t('runs.empty')}</div>
   return (
     <div data-testid="runs-pane">
@@ -100,6 +107,7 @@ export function RunsPane() {
               </button>
             ) : null}
           </div>
+          {parReport && r.id === parRunId ? <ParReport locale={locale} report={parReport} /> : null}
         </div>
       ))}
     </div>

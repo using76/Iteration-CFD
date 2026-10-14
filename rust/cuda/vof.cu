@@ -1079,6 +1079,61 @@ extern "C" __global__ void vofBodyForceFluxBoundary
 }
 
 
+#ifdef OFGPU_SINGLE
+//- forceSplitDouble (SPEC-LIT 120.7, single build only, opt-in): the face
+//  force phib - |Sf| snGrad(p_rgh) of momForceFlux, internal faces, with the
+//  whole split formed in double from the stored f32 inputs and rounded once:
+//
+//      out = -(g.x)_f dC (rho_N - rho_P) |Sf|  +  sigma kappa_f |Sf| snGrad(alpha)
+//            - |Sf| dC (p_N - p_P)  -  corr_f
+//
+//  At a 1000:1 jump the gravity and pressure terms are equal and opposite,
+//  and in f32 each is rounded before they cancel. The factors are those of
+//  vofSnGradMagSf, vofBodyForceFlux and fvSnGradFluxInternal. `corrInOut`
+//  holds, on entry, the non-orthogonal correction of |Sf| snGrad(p_rgh) alone
+//  (fv::sn_grad_flux_correction into a zeroed buffer; zero where the scheme
+//  applies none) and is overwritten with the force. The f64 build does not
+//  compile this kernel.
+extern "C" __global__ void vofForceFluxSplit64
+(
+    ofscalar* corrInOut,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ pRgh,
+    const ofscalar* __restrict__ snGradAlphaMagSf,
+    const ofscalar* __restrict__ kappaf,
+    const ofvec3* __restrict__ Cf,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofscalar* __restrict__ magSf,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    ofscalar gx,
+    ofscalar gy,
+    ofscalar gz,
+    ofscalar sigma,
+    oflabel n
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= n) return;
+
+    const oflabel P = owner[f];
+    const oflabel N = neighbour[f];
+    const ofvec3 c = Cf[f];
+    const double dC = (double)deltaCoeffs[f];
+    const double sf = (double)magSf[f];
+
+    const double gh = (double)gx*(double)c.x + (double)gy*(double)c.y
+                    + (double)gz*(double)c.z;
+    const double gravity = -gh*(dC*((double)rho[N] - (double)rho[P])*sf);
+    const double st =
+        (double)sigma*(double)kappaf[f]*(double)snGradAlphaMagSf[f];
+    const double orth = (sf*dC)*((double)pRgh[N] - (double)pRgh[P]);
+
+    corrInOut[f] = (ofscalar)(gravity + st - orth - (double)corrInOut[f]);
+}
+#endif
+
+
 // ==========================================================================
 //  S20.2  Sub-cycling: the Courant number the alpha equation is limited by
 // ==========================================================================

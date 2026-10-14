@@ -54,6 +54,7 @@ use crate::error::Result;
 use crate::io::contract;
 use crate::io::fields::{RawScalarField, RawVectorField};
 use crate::io::output_types::{FieldValues, OutputField};
+use crate::io::voxelmap::VoxelMap;
 use crate::io::{nvdb, usda, vdb, vtu};
 use crate::mesh::HostMesh;
 use crate::types::{to_vec3, DVec3};
@@ -140,9 +141,14 @@ pub struct WriteCtx<'a> {
     /// computes it (e.g. `format_time_name(t)` or a fixed `-write` name).
     pub name: &'a str,
     pub mesh: &'a HostMesh,
-    /// `Some` only when the mesh is a recognised uniform Cartesian box -
-    /// required by [`NvdbWriter`] and [`VdbWriter`], refused otherwise.
+    /// `Some` only when the mesh is a recognised uniform Cartesian box. When
+    /// it is, [`NvdbWriter`] and [`VdbWriter`] write the cells as voxels,
+    /// byte for byte as before tranche 17 (SPEC-LIT 117.6).
     pub cart: Option<&'a CartesianInfo>,
+    /// The visualisation lattice of SPEC-LIT 117.3, built once before the
+    /// time loop. Read by [`NvdbWriter`] and [`VdbWriter`] only when `cart`
+    /// is `None`; with both `None` they refuse, as before.
+    pub vox: Option<&'a VoxelMap>,
     /// Cell-centred fields for the visualisation writers
     /// (`vtu`/`nvdb`/`vdb`/`usda`).
     pub fields: &'a [OutputField<'a>],
@@ -241,12 +247,13 @@ impl ResultWriter for VtuWriter {
 }
 
 // ==========================================================================
-//  NvdbWriter / VdbWriter - uniform Cartesian only
+//  NvdbWriter / VdbWriter - the Cartesian box, or the lattice
 // ==========================================================================
 
-/// Writes one NanoVDB (`.nvdb`) file per step. Refuses - per SPEC-LIT §13.4 -
-/// on any mesh that is not a recognised uniform Cartesian box, because a
-/// dense voxel grid has no meaning otherwise.
+/// Writes one NanoVDB (`.nvdb`) file per step: the cells themselves on a
+/// recognised uniform Cartesian box (`ctx.cart`), else the lattice of
+/// `ctx.vox` (SPEC-LIT 117.6, `nvdb::write_lattice`). With neither it
+/// refuses - per SPEC-LIT §13.4 - because the mesh has no voxels to write.
 pub struct NvdbWriter {
     dir: PathBuf,
     stem: String,
@@ -266,7 +273,11 @@ impl NvdbWriter {
 
 impl ResultWriter for NvdbWriter {
     fn write_step(&mut self, ctx: &WriteCtx) -> Result<()> {
+        let path = self.dir.join(format!("{}_{:06}.nvdb", self.stem, ctx.step));
         let Some(cart) = ctx.cart else {
+            if let Some(vm) = ctx.vox {
+                return nvdb::write_lattice(&path, vm, ctx.fields, self.precision);
+            }
             return contract::unsupported(
                 "-output nvdb",
                 "a non-Cartesian mesh",
@@ -275,13 +286,13 @@ impl ResultWriter for NvdbWriter {
                 (),
             );
         };
-        let path = self.dir.join(format!("{}_{:06}.nvdb", self.stem, ctx.step));
         nvdb::write(&path, cart, ctx.fields, self.precision)
     }
 }
 
-/// Writes one OpenVDB (`.vdb`) file per step. Same Cartesian-only refusal as
-/// [`NvdbWriter`].
+/// Writes one OpenVDB (`.vdb`) file per step. Same choice as
+/// [`NvdbWriter`]: `ctx.cart`, else `ctx.vox` (`vdb::write_lattice`), else
+/// the same refusal.
 ///
 /// `precision` is SPEC-LIT S44.3's `output.visualisation.precision`:
 /// `F32` is the plain `FloatTree` and the default everywhere, `F16` is
@@ -311,7 +322,11 @@ impl VdbWriter {
 
 impl ResultWriter for VdbWriter {
     fn write_step(&mut self, ctx: &WriteCtx) -> Result<()> {
+        let path = self.dir.join(format!("{}_{:06}.vdb", self.stem, ctx.step));
         let Some(cart) = ctx.cart else {
+            if let Some(vm) = ctx.vox {
+                return vdb::write_lattice(&path, vm, ctx.fields, self.precision);
+            }
             return contract::unsupported(
                 "-output vdb",
                 "a non-Cartesian mesh",
@@ -320,7 +335,6 @@ impl ResultWriter for VdbWriter {
                 (),
             );
         };
-        let path = self.dir.join(format!("{}_{:06}.vdb", self.stem, ctx.step));
         vdb::write(&path, cart, ctx.fields, self.precision)
     }
 }
@@ -470,6 +484,7 @@ mod tests {
             name: "0.1",
             mesh: &m,
             cart: None,
+            vox: None,
             fields: &fields,
             foam: &foam,
         };
@@ -505,6 +520,7 @@ mod tests {
             name: "0.2",
             mesh: &m,
             cart: None,
+            vox: None,
             fields: &fields,
             foam: &foam,
         };
@@ -534,6 +550,7 @@ mod tests {
                 name: "ignored",
                 mesh: &m,
                 cart: None,
+                vox: None,
                 fields: &fields,
                 foam: &foam,
             };
@@ -562,6 +579,7 @@ mod tests {
             name: "0",
             mesh: &m,
             cart: None,
+            vox: None,
             fields: &fields,
             foam: &foam,
         };
@@ -591,6 +609,7 @@ mod tests {
             name: "0",
             mesh: &m,
             cart: Some(&cart),
+            vox: None,
             fields: &fields,
             foam: &foam,
         };
@@ -617,6 +636,7 @@ mod tests {
                 name: "ignored",
                 mesh: &m,
                 cart: None,
+                vox: None,
                 fields: &fields,
                 foam: &foam,
             };
@@ -652,6 +672,7 @@ mod tests {
             name: "ignored",
             mesh: &m,
             cart: None,
+            vox: None,
             fields: &fields,
             foam: &foam,
         };
@@ -661,6 +682,81 @@ mod tests {
         assert!(text.contains("def Volume \"S_xx\""), "scene: {text}");
         assert!(text.contains("def Volume \"S_zz\""), "scene: {text}");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// VIO-03 (SPEC-LIT 117.6): with `cart` set the volume writers write the
+    /// Cartesian file - byte for byte what `vdb::write` / `nvdb::write`
+    /// write, even when a lattice is also in hand - and with `cart` `None`
+    /// they write `ctx.vox`'s lattice, byte for byte `write_lattice`. The
+    /// SHA-256 of the Cartesian bytes is pinned against the tree before
+    /// VIO-03 by `tests/volume_lattice.rs`, in both builds.
+    #[test]
+    fn cartesian_bytes_unchanged() {
+        use crate::io::nvdb::lattice_fixture as lf;
+        use crate::io::voxelmap::{LatticeActivation, LatticeSample};
+
+        let (raw, hm) = lf::refined();
+        let vm = lf::map(&raw, &hm, LatticeSample::Linear, LatticeActivation::Fluid);
+        let phi = lf::scalar(&hm);
+        let lattice_fields = [OutputField::scalar("p", &phi)];
+        let cart = CartesianInfo {
+            nx: 4,
+            ny: 3,
+            nz: 2,
+            origin: Vec3::new(0.5, 0.25, -1.0),
+            spacing: Vec3::new(0.25, 0.5, 0.125),
+        };
+        let box_vals: Vec<Scalar> = (0..cart.n()).map(|i| i as Scalar * 0.5 - 2.0).collect();
+        let box_fields = [OutputField::scalar("p", &box_vals)];
+        let foam: [FoamField; 0] = [];
+        let dir = tmp("volume_bytes");
+
+        for precision in [nvdb::Precision::F32, nvdb::Precision::F16] {
+            for ext in ["vdb", "nvdb"] {
+                let mut w: Box<dyn ResultWriter> = match ext {
+                    "vdb" => Box::new(VdbWriter::new(&dir, "w", precision).unwrap()),
+                    _ => Box::new(NvdbWriter::new(&dir, "w", precision).unwrap()),
+                };
+                // Step 0: the Cartesian box, with the lattice in hand too.
+                w.write_step(&WriteCtx {
+                    time: 0.0,
+                    step: 0,
+                    name: "0",
+                    mesh: &hm,
+                    cart: Some(&cart),
+                    vox: Some(&vm),
+                    fields: &box_fields,
+                    foam: &foam,
+                })
+                .unwrap();
+                // Step 1: no box, so the lattice.
+                w.write_step(&WriteCtx {
+                    time: 1.0,
+                    step: 1,
+                    name: "1",
+                    mesh: &hm,
+                    cart: None,
+                    vox: Some(&vm),
+                    fields: &lattice_fields,
+                    foam: &foam,
+                })
+                .unwrap();
+
+                let direct_box = dir.join(format!("direct_box.{ext}"));
+                let direct_lat = dir.join(format!("direct_lattice.{ext}"));
+                if ext == "vdb" {
+                    vdb::write(&direct_box, &cart, &box_fields, precision).unwrap();
+                    vdb::write_lattice(&direct_lat, &vm, &lattice_fields, precision).unwrap();
+                } else {
+                    nvdb::write(&direct_box, &cart, &box_fields, precision).unwrap();
+                    nvdb::write_lattice(&direct_lat, &vm, &lattice_fields, precision).unwrap();
+                }
+                let read = |p: PathBuf| std::fs::read(p).unwrap();
+                assert_eq!(read(dir.join(format!("w_000000.{ext}"))), read(direct_box), "{ext} {precision:?}: cart");
+                assert_eq!(read(dir.join(format!("w_000001.{ext}"))), read(direct_lat), "{ext} {precision:?}: vox");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

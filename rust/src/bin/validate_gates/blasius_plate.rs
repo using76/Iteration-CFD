@@ -38,10 +38,10 @@ use ofgpu::simple::{nan_propagating_max, Simple, SimpleControls};
 use ofgpu::vv::{self, GridStudy, Level};
 use ofgpu::{Error, Gpu, GpuMesh, Label, Result, Scalar, Vec3};
 
-use super::{Checks, GateReport, How, Uncertainty, Verdict};
+use crate::{Checks, GateReport, How, Uncertainty, Verdict};
 
 /// The gate's scope and registry name.
-pub(super) const GATE: &str = "SPEC-LIT 144.2 Gate 132-L Blasius flat plate";
+pub(crate) const GATE: &str = "SPEC-LIT 144.2 Gate 132-L Blasius flat plate";
 
 /// The three meshes, finest first: `(n_upstream, n_plate, n_y)` on
 /// `FlatPlateSpec::laminar()`'s box, end-cell ratios and free stream. Each
@@ -470,7 +470,7 @@ fn run_level(gpu: &Gpu, n: (usize, usize, usize)) -> Result<PlateRun> {
 
 /// Gate 132-L, live: the reference row, three solves, the finest mesh's two
 /// rows and §94's study at `Re_x = 1e5`.
-pub(super) fn check_blasius_plate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
+pub(crate) fn check_blasius_plate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let b = Blasius::solve();
     c.note(&format!(
         "Gate 132-L: Blasius shot f''(0) = {:.8} (eta_max 10, RK4 h 1e-3), so C_f sqrt(Re_x) = {:.6}",

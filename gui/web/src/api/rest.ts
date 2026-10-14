@@ -1,6 +1,6 @@
 // Thin fetch wrappers over the REST routes in shared/protocol.ts.
-import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type GeometryOpenResponse, type GeometrySaveRequest, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
-import type { BinarySpec, MeshPreset, ModelSpec } from '@cfd/shared'
+import { REST, type BoundaryTable, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type GeometryOpenResponse, type GeometrySaveRequest, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
+import type { BinarySpec, MeshPreset, ModelSpec, UiCommand } from '@cfd/shared'
 
 export class ApiError extends Error {
   constructor(
@@ -65,6 +65,28 @@ export interface SearchResponse {
   filesScanned: number
 }
 
+/** Reply of POST /api/case/validate (save_case's check): the case_validate report for an editor buffer. */
+export interface CaseBufferReport {
+  path: string
+  ok: boolean
+  errors: Array<{ pointer: string; message: string }>
+  warnings: Array<{ pointer: string; message: string }>
+}
+
+/** Reply of POST /api/case/patch: case_edit's answer for the planned edit. */
+export interface CasePatchReply {
+  path: string
+  applied: boolean
+  unchanged?: boolean
+  diff: string
+  valid: boolean
+  errors: Array<{ pointer: string; message: string }>
+  patch: string
+  rule: number
+  inserted: boolean
+  warning?: string
+}
+
 /** Reply of POST /api/geometry/edit (geom_tool edit): no id — re-import `path`. */
 export interface GeometryEditResponse {
   path: string
@@ -74,10 +96,44 @@ export interface GeometryEditResponse {
   toolMs: number
 }
 
+/** Reply of POST /api/geometry/boolean (STU-16, Manifold): the new STL's
+ *  workspace path, Manifold's volumes and the result's re-read edge counts. */
+export interface GeometryStlBooleanResponse {
+  path: string
+  op: 'fuse' | 'cut' | 'common'
+  a: string
+  b: string
+  volume: number
+  volumeA: number
+  volumeB: number
+  triangles: number
+  vertices: number
+  openEdges: number
+  nonManifoldEdges: number
+}
+
+/** GET /api/results/sample: line_sample's parallel arrays (s 0..1, x metres from p0, values). */
+export interface LineSampleReply {
+  s: number[]
+  x: number[]
+  values: number[]
+  field: string
+  time: string
+  cells: number
+}
+
 export const api = {
   tree: (path: string, depth = 1) => request<FsTreeNode>('GET', withQuery(REST.fsTree, { path, depth })),
   readFile: (path: string) => request<FsFileResponse>('GET', withQuery(REST.fsFile, { path })),
   writeFile: (path: string, content: string, baseHash: string | null) => request<FsFileResponse>('PUT', REST.fsFile, { path, content, baseHash }),
+  validateCase: (path: string, content: string) => request<CaseBufferReport>('POST', REST.caseValidate, { path, content }),
+  /** The Boundary editor's table for a .jsonc case or a foam case directory (STU-07b). */
+  caseBoundary: (path: string) => request<BoundaryTable>('GET', withQuery(REST.caseBoundary, { path })),
+  /** One set_patch on that case, applied as gui_control's set_patch is; the reply is case_edit's (its diff). */
+  casePatch: (path: string, edit: Extract<UiCommand, { type: 'set_patch' }>) => request<CasePatchReply>('POST', REST.casePatch, { path, edit }),
+  /** The centreline chart's samples (STU-09): the route line_sample serves, on the line set_centerline resolved. */
+  resultsSample: (q: { dir: string; field: string; component: string; time: string | null; p0: readonly number[]; p1: readonly number[] }) =>
+    request<LineSampleReply>('GET', withQuery(`${REST.results}/sample`, { dir: q.dir, field: q.field, component: q.component, time: q.time, p0: q.p0.join(','), p1: q.p1.join(',') })),
   search: (q: string, opts: { glob?: string | null; regex?: boolean; caseSensitive?: boolean; max?: number } = {}) =>
     request<SearchResponse>('GET', withQuery(REST.fsSearch, { q, glob: opts.glob ?? null, regex: opts.regex ? 1 : null, case: opts.caseSensitive ? 1 : null, max: opts.max ?? 300 })),
   gitStatus: () => request<GitStatusResponse>('GET', REST.gitStatus),
@@ -107,4 +163,7 @@ export const api = {
   /** Run a geom_edit boolean on a STEP; the reply carries no id — re-import `path`. */
   geometryEdit: (body: { path: string; ops: string; out: string; overwrite: boolean | null }) =>
     request<GeometryEditResponse>('POST', `${REST.geometry}/edit`, body),
+  /** Fuse, cut or common two named parts of one STL (out null: <stem>-<op>.stl beside it). */
+  geometryStlBoolean: (body: { path: string; op: 'fuse' | 'cut' | 'common'; a: string; b: string; out: string | null; overwrite: boolean | null }) =>
+    request<GeometryStlBooleanResponse>('POST', `${REST.geometry}/boolean`, body),
 }

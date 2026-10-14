@@ -107,6 +107,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("vcycle_replays_under_capture"),
     ),
     (
+        "src/amg/distcycle.rs",
+        Stance::Refused(
+            "the distributed V-cycle fills every level's halo through \
+             SpmdHalo and allgathervs the coarsest right-hand side on every \
+             cycle - host round trips by construction; DistGamg::cycle \
+             refuses a capture by name (SPEC-LIT 141.11, \
+             a_distributed_gamg_request_that_cannot_be_served_is_refused_by_name). \
+             Alternative: the one-process V-cycle amg::Gamg, gated by \
+             vcycle_replays_under_capture",
+        ),
+    ),
+    (
         "src/amg/galerkin.rs",
         Stance::Gate("galerkin_replays_under_capture"),
     ),
@@ -410,6 +422,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     (
         "src/radiation/p1.rs",
         Stance::Gate("p1_solve_replays_under_capture"),
+    ),
+    (
+        "src/radiation/wsgg.rs",
+        Stance::Gate("wsgg_p1_replays_under_capture"),
     ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
     (

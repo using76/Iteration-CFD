@@ -21,6 +21,8 @@
 //!   does not have (SPEC-LIT §13.4)
 //! * [`schemes`] — `system/fvSchemes`, read one equation at a time
 //! * [`case`] — pulling a whole case directory together
+//! * [`boundary_data`] — `constant/boundaryData/<patch>`, the inflow database
+//!   of `timeVaryingMappedFixedValue` (SPEC-LIT 120.11)
 //!
 //! Binary-format files are refused up front, before tokenising, with the
 //! `foamFormatConvert` incantation that fixes them.
@@ -66,9 +68,12 @@ pub mod regions;
 pub mod case_dc;
 pub mod output_types;
 pub mod pointfield;
+pub mod boundary_data;
 pub mod writer;
 pub mod output_plan;
 pub mod voxelmap;
+pub mod thermo_dict;
+pub mod case_parcels;
 
 pub use writer::{
     cartesian_info, CartesianInfo, FoamField, FoamPayload, FoamWriter, NvdbWriter, ResultWriter,

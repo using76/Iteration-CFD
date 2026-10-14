@@ -36,6 +36,11 @@ export interface RevealRequest {
   nonce: number
 }
 
+/** save_case's answer (STU-05): written, or the named reason it was not. */
+export type SaveCaseOutcome =
+  | { ok: true; path: string; errors: number; warnings: number }
+  | { ok: false; code: 'NO_BUFFER' | 'CASE_INVALID' | 'VALIDATE_FAILED' | 'CHANGED' | 'CONFLICT' | 'SAVE_FAILED'; message: string; errors: number | null }
+
 export interface EditorStore {
   buffers: Record<string, EditorBuffer>
   diffs: Record<string, DiffPayload>
@@ -44,6 +49,8 @@ export interface EditorStore {
   reloadBuffer(path: string): Promise<void>
   setContent(path: string, content: string): void
   save(path: string, opts?: { overwrite?: boolean }): Promise<boolean>
+  /** Validate the buffer's text on the server (findings go to Problems), refuse CASE_INVALID on errors unless force, then save it. */
+  saveCase(path: string, opts?: { force?: boolean }): Promise<SaveCaseOutcome>
   unlock(path: string): void
   closeBuffer(path: string): void
   dismissConflict(path: string): void
@@ -173,6 +180,28 @@ export const useEditorStore = create<EditorStore>()((set, get) => {
         }
         return false
       }
+    },
+    async saveCase(path, opts = {}) {
+      const b = get().buffers[path]
+      if (!b || b.loading) return { ok: false, code: 'NO_BUFFER', message: `no editor buffer is open for ${path}`, errors: null }
+      const content = b.content
+      let report: Awaited<ReturnType<typeof api.validateCase>>
+      try {
+        report = await api.validateCase(path, content)
+      } catch (err) {
+        return { ok: false, code: 'VALIDATE_FAILED', message: err instanceof Error ? err.message : String(err), errors: null }
+      }
+      const errors = report.errors.length
+      if (errors > 0 && opts.force !== true)
+        return { ok: false, code: 'CASE_INVALID', message: `validation found ${errors} error${errors === 1 ? '' : 's'} in ${path}`, errors }
+      // The bytes written must be the bytes validated.
+      if (get().buffers[path]?.content !== content) return { ok: false, code: 'CHANGED', message: `${path} changed while it was validated; save again`, errors }
+      if (!(await get().save(path))) {
+        const cur = get().buffers[path]
+        if (cur?.conflict) return { ok: false, code: 'CONFLICT', message: `${path} changed on disk since it was opened; reload it or overwrite on screen`, errors }
+        return { ok: false, code: 'SAVE_FAILED', message: cur?.error ?? `${path} was not saved`, errors }
+      }
+      return { ok: true, path, errors, warnings: report.warnings.length }
     },
     unlock(path) {
       patch(path, { readOnly: false })

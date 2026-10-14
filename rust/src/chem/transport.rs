@@ -30,6 +30,13 @@ pub const MICROPOISE: f64 = 1.0e-7;
 /// microwatt/(cm K).
 pub const MICROWATT_PER_CM_K: f64 = 1.0e-4;
 
+/// The lowest accepted temperature, K (SPEC-LIT 133.7 T1, the user's
+/// decision of 2026-10-14). Between this floor and the first fit's `t_lo`
+/// (TM-4513 publishes from 300 K) the first fit is evaluated outside its
+/// published range, an extrapolation; below it a cell is refused. The
+/// device twin is `CHEM_TRANSPORT_FLOOR_K` in `cuda/chem.cu`.
+pub const TRANSPORT_FLOOR_K: f64 = 200.0;
+
 /// One TM-4513 eq. (10) fit over one temperature interval: `ln q = a ln T
 /// + b/T + c/T^2 + d`, with `q` the viscosity in micropoise or the
 /// conductivity in microwatt/(cm K).
@@ -84,13 +91,15 @@ impl SpeciesTransport {
     }
 
     /// The species' viscosity at T (eq. (10), Pa s), on the FIRST fit with
-    /// `t_lo <= T <= t_hi`.
+    /// `t_lo <= T <= t_hi`, or on the first fit, extrapolated, for
+    /// [`TRANSPORT_FLOOR_K`] `<= T <` its `t_lo`.
     pub fn viscosity_at(&self, t: f64) -> Result<f64> {
         self.value_at(t, &self.viscosity, "viscosity", MICROPOISE)
     }
 
     /// The species' conductivity at T (eq. (10), W/(m K)), on the FIRST fit
-    /// with `t_lo <= T <= t_hi`.
+    /// with `t_lo <= T <= t_hi`, or on the first fit, extrapolated, for
+    /// [`TRANSPORT_FLOOR_K`] `<= T <` its `t_lo`.
     pub fn conductivity_at(&self, t: f64) -> Result<f64> {
         self.value_at(t, &self.conductivity, "conductivity", MICROWATT_PER_CM_K)
     }
@@ -111,14 +120,21 @@ impl SpeciesTransport {
                 self.name, property
             )));
         }
-        let Some(f) = fits.iter().find(|f| f.t_lo <= t && t <= f.t_hi) else {
+        let pick = fits
+            .iter()
+            .find(|f| f.t_lo <= t && t <= f.t_hi)
+            .or_else(|| (TRANSPORT_FLOOR_K <= t && t < fits[0].t_lo).then_some(&fits[0]));
+        let Some(f) = pick else {
             return Err(Error::Config(format!(
-                "species {}: T = {t} K is outside the {} fits' range [{:e}, {:e}] K of \
-                 TM-4513 eq. (10)",
+                "species {}: T = {t} K is outside the {} fits' accepted range [{:e}, {:e}] K \
+                 of TM-4513 eq. (10) (published from {:e} K, extrapolated down to the \
+                 {:e} K floor)",
                 self.name,
                 property,
+                TRANSPORT_FLOOR_K.min(fits[0].t_lo),
+                fits[fits.len() - 1].t_hi,
                 fits[0].t_lo,
-                fits[fits.len() - 1].t_hi
+                TRANSPORT_FLOOR_K
             )));
         };
         Ok(f.ln_value(t).exp() * scale)

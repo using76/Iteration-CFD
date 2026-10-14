@@ -103,6 +103,21 @@ function writePixel(rgba: Uint8Array, px: number, value: number, mapper: MapperS
   rgba[px + 3] = 255
 }
 
+/** Per-triangle cell values and flat per-vertex RGBA of a plane cut: value t is cellScalar[cells[t]], bit for bit. */
+export function cutColors(cells: Uint32Array, cellScalar: Float32Array, mapper: MapperSpec): { values: Float32Array; colors: Uint8Array } {
+  const n = cells.length
+  const values = new Float32Array(n)
+  const colors = new Uint8Array(n * 12)
+  for (let t = 0; t < n; t++) {
+    const v = cellScalar[cells[t]]
+    values[t] = v
+    writePixel(colors, t * 12, v, mapper)
+    colors.copyWithin(t * 12 + 4, t * 12, t * 12 + 4)
+    colors.copyWithin(t * 12 + 8, t * 12, t * 12 + 4)
+  }
+  return { values, colors }
+}
+
 export interface SampledImage {
   width: number
   height: number

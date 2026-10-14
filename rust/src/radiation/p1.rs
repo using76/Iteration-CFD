@@ -86,7 +86,7 @@ pub struct P1Medium {
 impl P1Medium {
     /// Read a participating medium that [`P1`] can solve: the model must be
     /// [`crate::radiation::RadiationModel::P1`], the absorption a constant
-    /// grey `κ` (the WSGG sets are CHR-22's, and this solve is grey), and
+    /// grey `κ` (the WSGG sets are [`super::wsgg::WsggP1`]'s, and this solve is grey), and
     /// the scattering any of §137.2's three. Every refusal names the entry
     /// it is about.
     pub fn from_config(c: &props::ParticipatingConfig) -> Result<Self> {
@@ -104,8 +104,8 @@ impl P1Medium {
                 return Err(Error::Config(format!(
                     "absorptionEmissionModel {} is refused: the P1 solve of \
                      SPEC-LIT §135.3 is grey, and the WSGG sets are a \
-                     superposition of grey solves CHR-22 will build - not \
-                     this one",
+                     superposition of grey solves, radiation::wsgg::WsggP1 \
+                     (SPEC-LIT §136.9) - not this one",
                     other.kind().name()
                 )));
             }
@@ -166,6 +166,12 @@ impl RadiationKernels {
 /// attached, and a guess is not a boundary condition.
 pub struct P1 {
     medium: P1Medium,
+    /// The emission weight `w` that multiplies `σ` everywhere the solve
+    /// emits - the medium's `4κσT^4`, the Marshak wall's `4σT_w^4` and
+    /// (137.2)'s source pair. 1 for a grey medium (`σ·1` is exact, so the
+    /// grey solve is unchanged); WSGG's `a_i` for one grey gas of
+    /// [`super::wsgg::WsggP1`] (SPEC-LIT §136.9).
+    weight: Scalar,
 
     n_cells: usize,
     n_internal_faces: usize,
@@ -308,6 +314,7 @@ impl P1 {
         let kappa_h = vec![kappa as Scalar; hm.n_cells];
         Ok(Self {
             medium: *medium,
+            weight: 1.0,
             n_cells: hm.n_cells,
             n_internal_faces: m.n_internal_faces,
             n_bf,
@@ -452,7 +459,7 @@ impl P1 {
         let kappa = self.medium.kappa as Scalar;
         let sigma_s = self.medium.sigma_s as Scalar;
         let a1 = self.medium.a1 as Scalar;
-        let sigma = SIGMA_SB as Scalar;
+        let sigma = SIGMA_SB * self.weight;
 
         // (135.7), then (135.14): Γ first, because the Marshak triple reads
         // its owner's cell value. Then (135.13)'s two face products. All
@@ -604,7 +611,7 @@ impl P1 {
         let n = self.n_cells;
         let nl = n as Label;
         let kappa = self.medium.kappa as Scalar;
-        let sigma = SIGMA_SB as Scalar;
+        let sigma = SIGMA_SB * self.weight;
         unsafe {
             gpu.stream()
                 .launch_builder(&self.k.source_pair)
@@ -620,6 +627,44 @@ impl P1 {
         sources.register_explicit(gpu, &self.q_src)?;
         sources.register_implicit_sink(gpu, &self.sp_src)?;
         Ok(())
+    }
+
+    /// Make the solve ONE grey gas of a weighted sum (SPEC-LIT §136.4,
+    /// §136.9): the absorption becomes `kappa` (scattering and `A_1` stay
+    /// the medium's) and every emission term is weighted by `weight` -
+    /// (136.10)'s `a_i κ_i I_b` in the medium and `a_i` on the Marshak walls'
+    /// `4σT_w^4` and in (137.2)'s pair. `G` is zeroed, so the next
+    /// [`P1::solve`] is the solve a fresh [`P1::new`] at this `kappa` would
+    /// run. `kappa` is refused as [`P1::new`] refuses it (finite, positive);
+    /// `weight` must be finite - a fitted WSGG weight may be negative inside
+    /// its range and is used as published (§136.9). Launches only, so it
+    /// captures with the step (SPEC-LIT §81).
+    pub fn set_grey_gas(&mut self, gpu: &Gpu, kappa: f64, weight: f64) -> Result<()> {
+        if !kappa.is_finite() || kappa <= 0.0 {
+            return Err(Error::Config(format!(
+                "radiation::p1::P1::set_grey_gas: kappa {kappa} is refused - a \
+                 grey gas's κ must be positive and finite (SPEC-LIT §135.3, \
+                 §136.4)"
+            )));
+        }
+        if !weight.is_finite() {
+            return Err(Error::Config(format!(
+                "radiation::p1::P1::set_grey_gas: weight {weight} is refused - \
+                 the grey gas's a_i must be finite (SPEC-LIT §136.4)"
+            )));
+        }
+        self.medium.kappa = kappa;
+        self.weight = weight as Scalar;
+        field_ops::set_field(gpu, &self.fldk, &mut self.kappa_cells, kappa as Scalar, self.n_cells)?;
+        gpu.fill_zero(&mut self.g.f)?;
+        gpu.fill_zero(&mut self.g.bf)?;
+        Ok(())
+    }
+
+    /// The medium the next [`P1::solve`] runs - [`P1::set_grey_gas`]'s
+    /// `kappa` once it was called.
+    pub fn medium(&self) -> &P1Medium {
+        &self.medium
     }
 
     /// The incident radiation field `G`, internal and boundary values.

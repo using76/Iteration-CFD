@@ -8,9 +8,12 @@ import {
   hiddenPatches,
   visibleBounds,
   type CameraPreset,
+  type CutPlaneSpec,
   type FieldComponent,
   type FieldInfo,
   type GeometryBounds,
+  type PlaneCutInfo,
+  type PointLocateInfo,
   type ViewerCommand,
   type ViewerErrorCode,
   type ViewerResult,
@@ -59,11 +62,17 @@ export interface ProbeHit {
   field: string | null
   /** Cell centre when known; see centerFor(). */
   center: [number, number, number] | null
+  /**
+   * How a world point found the cell, when the server located it (docs/17 STU-13): 'contains' when a
+   * convex cell holds the point exactly, 'nearest-centre' when only warped or non-convex cells could
+   * and the nearest centre among them answers. Absent for a pixel pick or a lattice lookup.
+   */
+  located?: 'contains' | 'nearest-centre'
 }
 
 export type ProbeOutcome =
   | { ok: true; hit: ProbeHit }
-  | { ok: false; code: 'NO_VIEWER' | 'NO_DATASET' | 'NO_STRUCTURED_GRID' | 'MISS'; message: string }
+  | { ok: false; code: 'NO_VIEWER' | 'NO_DATASET' | 'NO_STRUCTURED_GRID' | 'MISS' | 'LOCATE_FAILED'; message: string }
 
 type Listener = (state: ViewerState) => void
 
@@ -95,6 +104,8 @@ export class ViewerController {
   private readonly mountWaiters: ((mounted: boolean) => void)[] = []
   private readonly observedRanges = new Map<string, [number, number]>()
   private readonly speedRanges = new Map<string, [number, number]>()
+  /** Plane cuts the server already made for the loaded dataset, by plane (a non-lattice polyMesh). */
+  private readonly cuts = new Map<string, PlaneCutInfo>()
   private layerSeq = 0
   private overlayLines: () => string[] = () => []
   private readonly requireMount: boolean
@@ -193,6 +204,26 @@ export class ViewerController {
     const cell = g.cellIndex(i, j, k)
     if (cell < 0) return { ok: false, code: 'MISS', message: 'the point lies inside a body (no cell there)' }
     return { ok: true, hit: { cell, value: this.valueAt(cell), field: this.field?.name ?? null, center: this.centerFor(cell, [i, j, k]) } }
+  }
+
+  /**
+   * Cell containing a world point on any dataset: the structured grid when there is one (probePoint),
+   * else the server's cells when it can locate in them (a polyMesh, docs/17 STU-13). A hit there says
+   * how it was found (`located`); a point in no cell is a MISS.
+   */
+  async locatePoint(point: [number, number, number]): Promise<ProbeOutcome> {
+    const ds = this.dataset
+    if (!ds || ds.grid || !this.loader.canLocate(ds.manifest)) return this.probePoint(point)
+    let info: PointLocateInfo
+    try {
+      info = await this.loader.locate(ds.manifest, point)
+    } catch (err) {
+      return { ok: false, code: 'LOCATE_FAILED', message: err instanceof Error ? err.message : String(err) }
+    }
+    if (this.dataset !== ds) return { ok: false, code: 'NO_DATASET', message: 'the result in the viewer changed while the point was being located' }
+    if (info.cell === null) return { ok: false, code: 'MISS', message: 'the point lies in no cell of the mesh (outside it, or in a hole)' }
+    const located = info.method === 'nearest-centre' ? 'nearest-centre' : 'contains'
+    return { ok: true, hit: { cell: info.cell, value: this.valueAt(info.cell), field: this.field?.name ?? null, center: info.center, located } }
   }
 
   /** Attach the renderer; rebuilds everything the model already holds. */
@@ -328,6 +359,7 @@ export class ViewerController {
       this.displayRange = null
       this.observedRanges.clear()
       this.speedRanges.clear()
+      this.cuts.clear()
       this.timeIndex = this.resolveTime(cmd.timeIndex ?? 'last')
       this.display.patches = this.defaultPatches()
       const wanted = cmd.field ?? 'U'
@@ -488,13 +520,13 @@ export class ViewerController {
   // ---- layers -------------------------------------------------------------
 
   private async addSlice(cmd: Extract<ViewerCommand, { type: 'addSlice' }>): Promise<void> {
-    this.requireGrid()
+    this.requireSliceable()
     const position = this.resolvePosition(cmd.axis, cmd.position)
     await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'slice'), type: 'slice', axis: cmd.axis, position })
   }
 
   private async addPlane(cmd: Extract<ViewerCommand, { type: 'addPlane' }>): Promise<void> {
-    this.requireGrid()
+    this.requireSliceable()
     if (Math.hypot(...cmd.normal) === 0) throw new ViewerError('INVALID', 'plane normal must be non-zero')
     await this.upsertLayer({ id: this.layerId(cmd.id ?? null, 'plane'), type: 'plane', origin: cmd.origin, normal: cmd.normal })
   }
@@ -552,16 +584,62 @@ export class ViewerController {
   }
 
   private async computeLayer(entry: LayerEntry): Promise<void> {
-    const req = this.layerRequest(entry.spec)
+    const req = this.isCutMesh() && (entry.spec.type === 'slice' || entry.spec.type === 'plane') ? await this.cutRequest(entry.spec) : this.layerRequest(entry.spec)
     if (!req) {
       entry.result = null
       return
     }
     const result = await this.compute().run(req)
     if (result.op === 'plane' && result.width === 0) throw new ViewerError('INVALID', 'the plane does not intersect the domain')
+    if (result.op === 'cut' && result.triangleCount === 0) throw new ViewerError('INVALID', 'the plane does not intersect the domain (a plane on a domain wall must face away from the domain)')
     entry.result = result
     entry.summary = summarize(entry.spec, result)
     this.view?.upsertLayer(entry, this.layerContext(entry.spec))
+  }
+
+  /** A dataset with no lattice whose slices and planes are the server's exact cuts (SPEC-LIT §148.1). */
+  private isCutMesh(): boolean {
+    const ds = this.dataset
+    return !!ds && !ds.grid && this.loader.canCut(ds.manifest)
+  }
+
+  /**
+   * The cut plane of a slice or plane layer. An axis slice faces +axis, except on the domain's min
+   * wall, where it faces -axis: a face lying in the plane belongs to the cell on its - side
+   * (SPEC-LIT §148.1), so a plane on a wall must face away from the domain to show the wall's cells.
+   */
+  private cutPlaneOf(spec: Extract<LayerSpec, { type: 'slice' | 'plane' }>): CutPlaneSpec {
+    if (spec.type === 'plane') return { origin: [...spec.origin], normal: [...spec.normal] }
+    const b = this.requireDataset().manifest.bounds
+    const a = AXIS_INDEX[spec.axis]
+    const origin: [number, number, number] = [0.5 * (b.min[0] + b.max[0]), 0.5 * (b.min[1] + b.max[1]), 0.5 * (b.min[2] + b.max[2])]
+    origin[a] = spec.position
+    const normal: [number, number, number] = [0, 0, 0]
+    normal[a] = spec.position <= b.min[a] ? -1 : 1
+    return { origin, normal }
+  }
+
+  private async cutRequest(spec: Extract<LayerSpec, { type: 'slice' | 'plane' }>): Promise<ComputeRequest | null> {
+    const ds = this.requireDataset()
+    if (!this.mapper || !this.field) return null
+    const plane = this.cutPlaneOf(spec)
+    const planeKey = JSON.stringify(plane)
+    let info = this.cuts.get(planeKey)
+    if (!info) {
+      try {
+        info = await this.loader.planeCut(ds.manifest, plane)
+      } catch (e) {
+        throw new ViewerError('LOAD_FAILED', `the server could not cut ${ds.manifest.name}: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      this.cuts.set(planeKey, info)
+    }
+    return {
+      op: 'cut',
+      positions: scopedKey(ds.manifest.id, info.positions.key),
+      cells: scopedKey(ds.manifest.id, info.cells.key),
+      field: this.fieldRef(this.field.name)!,
+      mapper: this.mapper,
+    }
   }
 
   private layerRequest(spec: LayerSpec): ComputeRequest | null {
@@ -703,9 +781,17 @@ export class ViewerController {
     return this.dataset
   }
 
+  /** A lattice, or a non-lattice polyMesh the server cuts exactly: what slices and planes need. */
+  private requireSliceable(): LoadedDataset {
+    const ds = this.requireDataset()
+    if (ds.grid && ds.gridKeys) return ds
+    if (this.loader.canCut(ds.manifest)) return ds
+    throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}) and cannot be cut by a plane; slices and planes need one or the other`)
+  }
+
   private requireGrid(): LoadedDataset {
     const ds = this.requireDataset()
-    if (!ds.grid || !ds.gridKeys) throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); slices, planes, iso-surfaces, streamlines and glyphs need one`)
+    if (!ds.grid || !ds.gridKeys) throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); iso-surfaces, streamlines and glyphs need one${this.loader.canCut(ds.manifest) ? ' (slices and planes are exact cuts here)' : ''}`)
     return ds
   }
 

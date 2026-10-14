@@ -60,6 +60,14 @@ pub fn cfg_for(n: usize) -> LaunchConfig {
     }
 }
 
+/// One device context and one stream on it.
+///
+/// **A buffer belongs to the `Gpu` that allocated it**, and is passed only to
+/// that `Gpu`'s methods and kernels. Two `Gpu`s on one device (an SPMD rank
+/// thread each, SPEC-LIT §138.7) have two streams, and with event tracking
+/// off nothing orders work across them: a buffer allocated on one stream and
+/// read on the other can be read before it exists (compute-sanitizer reports
+/// an illegal address). [`Gpu::owns`] answers the question for a buffer.
 pub struct Gpu {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -96,12 +104,19 @@ impl Gpu {
         // cudarc only skips it for buffers created afterwards. With it on,
         // every `.arg(&buf)` can drop a `SyncOnDrop` that synchronises the
         // stream, which is illegal mid-capture and pointless here anyway -
-        // this crate uses exactly one stream, so there is no cross-stream
-        // hazard for cudarc to guard against.
+        // a `Gpu` uses exactly one stream, so there is no cross-stream hazard
+        // for cudarc to guard against.
+        //
+        // `CudaContext::new` returns a new handle on the device's primary
+        // context each call, with its own tracking flag, so this switches off
+        // tracking for this `Gpu`'s buffers alone. Several `Gpu`s on one
+        // device (one per SPMD rank thread, SPEC-LIT §138.7) are several
+        // handles, each with tracking off and its own stream.
         //
         // SAFETY: the contract is "the user manages stream synchronisation".
-        // There is one stream and it is created immediately below; no buffer
-        // is ever touched from another.
+        // This `Gpu` has one stream, created immediately below, and every
+        // buffer it allocates is touched only through it (the rule on
+        // [`Gpu`]); another `Gpu`'s buffers are never passed here.
         unsafe { ctx.disable_event_tracking() };
 
         // A dedicated non-blocking stream, NOT `default_stream()`.
@@ -116,6 +131,43 @@ impl Gpu {
         let stream = ctx.new_stream()?;
 
         Ok(Self { ctx, stream, capturing: AtomicBool::new(false) })
+    }
+
+    /// The number of CUDA devices the driver sees.
+    pub fn device_count() -> Result<usize> {
+        let n = CudaContext::device_count()?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    }
+
+    /// The `Gpu` for SPMD rank `rank`: device `placement.device_of(rank)`,
+    /// SPEC-LIT §138.7. A device the driver does not have is refused by
+    /// name, which a placement built from a faked count can ask for.
+    pub fn for_rank(placement: &crate::comm::Placement, rank: usize) -> Result<Self> {
+        let d = placement.device_of(rank);
+        let n = Self::device_count()?;
+        if d >= n {
+            return Err(Error::Config(format!(
+                "placement: rank {rank} is placed on device {d}, but the driver sees {n} device(s)"
+            )));
+        }
+        Self::new(d)
+    }
+
+    /// The ordinal of the device this `Gpu` is on.
+    pub fn ordinal(&self) -> usize {
+        self.ctx.ordinal()
+    }
+
+    /// True when `buf` was allocated on this `Gpu`'s stream, so that this
+    /// `Gpu` may use it (the rule on [`Gpu`]).
+    pub fn owns<T>(&self, buf: &DevBuf<T>) -> bool {
+        Arc::ptr_eq(buf.stream(), &self.stream)
+    }
+
+    /// Whether cudarc tracks events for this `Gpu`'s buffers: always `false`,
+    /// [`Gpu::new`] switches it off.
+    pub fn event_tracking(&self) -> bool {
+        self.ctx.is_event_tracking()
     }
 
     pub fn ctx(&self) -> &Arc<CudaContext> {

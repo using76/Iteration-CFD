@@ -7,13 +7,14 @@ import type { LoadedDataset } from '../data/DatasetLoader'
 import { colormapTable, type ColorTable } from '../gpu/colormaps'
 import { GlyphLayer } from '../layers/GlyphLayer'
 import { ImageLayer } from '../layers/ImageLayer'
+import { UnstructuredSliceLayer } from '../layers/UnstructuredSliceLayer'
 import { IsoLayer } from '../layers/IsoLayer'
 import { StreamlineLayer } from '../layers/StreamlineLayer'
 import { SurfaceLayer } from '../layers/SurfaceLayer'
 import { Engine, type EngineOptions } from './Engine'
 import { composeScreenshot, downscale, toPngBase64 } from './screenshot'
 
-type SceneLayer = ImageLayer | IsoLayer | StreamlineLayer | GlyphLayer
+type SceneLayer = ImageLayer | UnstructuredSliceLayer | IsoLayer | StreamlineLayer | GlyphLayer
 
 const ISO_PALETTE = [0x4f93f0, 0xf2a33a, 0x22a35c, 0x8a4fd6, 0xe0483f, 0x0ea5b7]
 
@@ -89,6 +90,10 @@ export class ThreeSceneView implements SceneView {
     if (result.op === 'slice' || result.op === 'plane') {
       const layer = object instanceof ImageLayer ? object : new ImageLayer()
       layer.update(result, this.display?.interpolate ?? true)
+      object = layer
+    } else if (result.op === 'cut') {
+      const layer = object instanceof UnstructuredSliceLayer ? object : new UnstructuredSliceLayer()
+      layer.update(result)
       object = layer
     } else if (result.op === 'iso' && spec.type === 'iso') {
       const layer = object instanceof IsoLayer ? object : new IsoLayer()

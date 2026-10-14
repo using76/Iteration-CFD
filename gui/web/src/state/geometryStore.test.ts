@@ -210,10 +210,7 @@ describe('the geometry store', () => {
     expect(api.geometrySave).not.toHaveBeenCalled()
   })
 
-  it('a boolean runs only on a STEP and sends geom_edit the tags', async () => {
-    load('cases/x.stl', INFO)
-    await expect(st().boolean('cases/x.stl', 'fuse', 'a', 'b')).rejects.toThrow('booleans run only on a STEP geometry')
-    expect(api.geometryEdit).not.toHaveBeenCalled()
+  it('a STEP boolean sends geom_edit the tags (an STL one: geometryStore.boolean.test.ts)', async () => {
     load('cases/car.step', STEP_INFO)
     vi.mocked(api.geometryEdit).mockResolvedValue({ path: 'cases/car-common.step', solids: [], applied: [], stdout: [], toolMs: 1 })
     await expect(st().boolean('cases/car.step', 'common', 'body', 'wing')).resolves.toEqual({ out: 'cases/car-common.step' })

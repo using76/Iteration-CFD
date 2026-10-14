@@ -1416,4 +1416,51 @@ extern "C" __global__ void solSumStage2To64
     if (threadIdx.x == 0) out[0] = acc + offset;
 }
 
+
+//- (118.12.1) A double carried through a FLOAT halo exchange as three
+//  floats: hi = fl32(x), mid = fl32(x - hi), lo = fl32(x - hi - mid). Both
+//  subtractions are exact in double (the remainder of a round-to-nearest
+//  holds the low bits of x and nothing else), and lo is exact whenever
+//  ulp64(x) >= 2^-149, i.e. for 2^-97 <= |x| < 2^128, and for x = 0. No FTZ:
+//  this build has no --use_fast_math, so a subnormal lo is kept.
+extern "C" __global__ void solSplit3
+(
+    ofscalar* __restrict__ hi,
+    ofscalar* __restrict__ mid,
+    ofscalar* __restrict__ lo,
+    const double* __restrict__ x,
+    oflabel n
+)
+{
+    const oflabel i = (oflabel)OFGPU_TID;
+    if (i >= n) return;
+    const double v = x[i];
+    const ofscalar h = (ofscalar)v;
+    const double e1 = v - (double)h;
+    const ofscalar m = (ofscalar)e1;
+    const double e2 = e1 - (double)m;
+    hi[i] = h;
+    mid[i] = m;
+    lo[i] = (ofscalar)e2;
+}
+
+
+//- (118.12.2) x = (hi + mid) + lo on the cells [begin, end) - the halo the
+//  exchange has just filled. hi + mid = x - e2 is representable, so both
+//  sums are exact and x comes back to the bit within (118.12.1)'s range.
+extern "C" __global__ void solJoin3
+(
+    double* __restrict__ x,
+    const ofscalar* __restrict__ hi,
+    const ofscalar* __restrict__ mid,
+    const ofscalar* __restrict__ lo,
+    oflabel begin,
+    oflabel end
+)
+{
+    const oflabel i = begin + (oflabel)OFGPU_TID;
+    if (i >= end) return;
+    x[i] = ((double)hi[i] + (double)mid[i]) + (double)lo[i];
+}
+
 #endif  // OFGPU_SINGLE

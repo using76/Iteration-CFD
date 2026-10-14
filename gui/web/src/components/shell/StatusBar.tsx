@@ -42,7 +42,7 @@ export function StatusBar() {
   const gpuMem = gpu && gpu.memTotalMB !== null ? ` ${formatGB(gpu.memUsedMB)}/${formatGB(gpu.memTotalMB)} GB` : ''
   const view = useMemo(() => gpuProcessView(gpu, ownRunPids(runs), t), [gpu, runs, t])
   const connText = connection === 'online' ? t('conn.online') : connection === 'offline' ? t('conn.offline') : t('conn.connecting')
-  const lang = tab?.kind === 'file' ? (LANG_LABEL[languageFor(tab.path)] ?? languageFor(tab.path)) : tab?.kind === 'diff' ? (LANG_LABEL[languageFor(tab.path)] ?? 'Diff') : tab?.kind === 'viewer' ? '3D' : tab?.kind === 'residuals' ? 'Chart' : ''
+  const lang = tab?.kind === 'file' ? (LANG_LABEL[languageFor(tab.path)] ?? languageFor(tab.path)) : tab?.kind === 'diff' ? (LANG_LABEL[languageFor(tab.path)] ?? 'Diff') : tab?.kind === 'viewer' ? '3D' : tab?.kind === 'residuals' || tab?.kind === 'centerline' ? 'Chart' : ''
 
   return (
     <footer className="statusbar">
