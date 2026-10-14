@@ -164,6 +164,48 @@ impl Gamg {
         })
     }
 
+    /// SPEC-LIT §141.8 (AMG-05): the same hierarchy on new values. The
+    /// aggregation, the plans, the row maps and every device buffer stay;
+    /// [`HostHierarchy::regather`] gives the levels and smoother setups of
+    /// `a`, they are written into the device levels and smoothers as
+    /// [`Gamg::new`] writes them, and the coarsest level is factored again
+    /// (§141.4). `m` must be the mesh of the build. Allocates (the
+    /// smoothers and the coarsest solve are set up again), so it runs
+    /// outside a capture.
+    pub fn regather(
+        &mut self,
+        gpu: &Gpu,
+        m: &HostMesh,
+        a: &crate::ldu::HostLduMatrix,
+        permissive: bool,
+    ) -> Result<()> {
+        self.host.regather(m, a)?;
+        let coarse = match self.host.levels.last() {
+            Some(l) => CoarseSetup::general(&HostRows::of_level(l)?, permissive)?,
+            None => CoarseSetup::general(&HostRows::of_matrix(m, a)?, permissive)?,
+        };
+        for (hl, gl) in self.host.levels.iter().zip(self.gpu_h.levels.iter_mut()) {
+            if !hl.diag.is_empty() {
+                gpu.write(&mut gl.diag, &hl.diag)?;
+            }
+            if !hl.upper.is_empty() {
+                gpu.write(&mut gl.upper, &hl.upper)?;
+            }
+            if !hl.lower.is_empty() {
+                gpu.write(&mut gl.lower, &hl.lower)?;
+            }
+        }
+        self.gpu_h.smoothers = self
+            .host
+            .smoothers
+            .iter()
+            .map(|s| crate::amg::smooth::GpuSmoother::new(gpu, s))
+            .collect::<Result<Vec<_>>>()?;
+        self.gpu_c = GpuCoarse::new(gpu, &coarse)?;
+        self.coarse = coarse;
+        Ok(())
+    }
+
     /// The config the cycle was built with.
     pub fn config(&self) -> &GamgConfig {
         &self.cfg

@@ -18,7 +18,7 @@
 //! the only place in the solver where the backend actually matters, so it is
 //! the only place with more than one.
 //!
-//! # The three backends
+//! # The four backends
 //!
 //! * [`PbicgstabBackend`] wraps [`crate::solver::solve_pbicgstab`]. Always
 //!   applicable, always correct, and therefore both the fallback and the
@@ -27,6 +27,9 @@
 //!   mesh is a uniform Cartesian box and the boundary conditions separate.
 //!   No iteration at all; `O(N log N)` once. This is how FDS gets a cheap
 //!   pressure solve.
+//! * [`gamg::GamgBackend`] is the native aggregation multigrid of
+//!   [`crate::amg`] (SPEC-LIT §141.8): the aggregation is built once and
+//!   kept, and every later matrix is re-gathered onto it.
 //! * [`amgx::AmgxBackend`] hands the CSR that [`crate::ldu::CsrPattern`]
 //!   already builds to NVIDIA AMGX. Behind the `amgx` Cargo feature, OFF by
 //!   default; with the feature off it still appears in the decision table, as
@@ -79,12 +82,14 @@ use crate::{Label, Scalar};
 pub mod amgx;
 pub mod cartesian;
 pub mod fft;
+pub mod gamg;
 
 pub use amgx::AmgxBackend;
 pub use cartesian::{CartesianGrid, SideBc};
 pub use fft::FftBackend;
+pub use gamg::GamgBackend;
 
-/// The three backends, in the order the decision table should list them.
+/// The four backends, in the order the decision table should list them.
 ///
 /// `ctrl` is the case's own `fvSolution` entry for `p`, so the PBiCGStab row -
 /// which is both the reference and the fallback - is timed with the settings
@@ -95,6 +100,7 @@ pub use fft::FftBackend;
 pub fn default_candidates(ctrl: SolverControls) -> Vec<Box<dyn PressureBackend>> {
     vec![
         Box::new(PbicgstabBackend::new(ctrl)),
+        Box::new(GamgBackend::new(ctrl)),
         Box::new(FftBackend::new()),
         Box::new(AmgxBackend::new()),
     ]
@@ -310,6 +316,30 @@ pub trait PressureBackend {
     fn refined_solution(&self) -> Option<&DevBuf<f64>> {
         None
     }
+
+    /// SPEC-LIT §141.8: the selector turns this on for a candidate's
+    /// agreement trial and off before the timed solve. An iterative
+    /// backend solves the trial to [`reference_controls`]' tolerance, so
+    /// the trial certifies its method rather than the case's stopping
+    /// rule; the timed solve keeps the run's controls. Defaulted to a
+    /// no-op: a direct solve has no tolerance to tighten.
+    fn set_agreement_trial(&mut self, on: bool) {
+        let _ = on;
+    }
+
+    /// Wall seconds the backend's last set-up of the system took inside
+    /// its solves (a hierarchy, a factorisation), for the decision
+    /// table's set-up column (SPEC-LIT §141.8). Defaulted to `None`: the
+    /// table then shows the `setup` call alone.
+    fn setup_secs(&self) -> Option<f64> {
+        None
+    }
+
+    /// One line for the end of a run, for a backend with set-up costs
+    /// worth reporting (SPEC-LIT §141.8). Defaulted to `None`.
+    fn run_summary(&self) -> Option<String> {
+        None
+    }
 }
 
 // ==========================================================================
@@ -516,6 +546,12 @@ pub struct BackendChoice {
     /// than inside the tuple so `considered` stays exactly the shape the
     /// specification fixes.
     pub notes: Vec<String>,
+
+    /// One set-up time per entry of [`Self::considered`], seconds: the
+    /// `setup` call plus what the backend reports of its own set-up
+    /// inside the first solve ([`PressureBackend::setup_secs`]), `None`
+    /// where the candidate was never set up (SPEC-LIT §141.8).
+    pub setup: Vec<Option<f64>>,
 }
 
 impl BackendChoice {
@@ -543,12 +579,16 @@ impl BackendChoice {
                 (false, _) => "unavailable",
             };
             let timing = match secs {
-                Some(s) => format!("{:9.2} ms", s * 1e3),
-                None => " ".repeat(12),
+                Some(s) => format!("solve {:9.2} ms", s * 1e3),
+                None => " ".repeat(18),
+            };
+            let setup = match self.setup.get(i).copied().flatten() {
+                Some(s) => format!("set-up {:9.2} ms", s * 1e3),
+                None => " ".repeat(19),
             };
             let note = self.notes.get(i).map(String::as_str).unwrap_or("");
             out.push_str(&format!(
-                "{lead}  {name:<width$}  {verdict:<12} {timing}   {note}\n"
+                "{lead}  {name:<width$}  {verdict:<12} {setup}  {timing}   {note}\n"
             ));
         }
         out
@@ -642,9 +682,12 @@ pub fn choose_pressure_backend(
         Error::Config("choose_pressure_backend: no candidates".into())
     })?;
 
+    let t_setup = Instant::now();
     reference.setup(gpu, hm, m, probe)?;
+    let ref_setup = t_setup.elapsed().as_secs_f64();
     gpu.fill_zero(&mut psi)?;
     reference.solve(gpu, &mut psi, a, m)?;
+    let ref_setup = ref_setup + reference.setup_secs().unwrap_or(0.0);
 
     // `!(x <= tol)` rather than `x > tol`, here and at every other gate below:
     // a NaN residual must FAIL the test, and `NaN > tol` is false.
@@ -693,6 +736,7 @@ pub fn choose_pressure_backend(
 
     choice.considered.push((reference.name(), true, Some(ref_secs)));
     choice.notes.push(ref_note);
+    choice.setup.push(Some(ref_setup));
 
     let mut best: (usize, f64) = (0, ref_secs);
     let mut survivors: Vec<Box<dyn PressureBackend>> = vec![reference];
@@ -704,31 +748,41 @@ pub fn choose_pressure_backend(
         if !cand.applicable(probe) {
             choice.considered.push((name, false, None));
             choice.notes.push(cand.why_not(probe));
+            choice.setup.push(None);
             continue;
         }
 
+        let t_setup = Instant::now();
         if let Err(e) = cand.setup(gpu, hm, m, probe) {
             choice.considered.push((name, false, None));
             choice.notes.push(format!("setup failed: {e}"));
+            choice.setup.push(None);
             continue;
         }
+        let setup_secs = t_setup.elapsed().as_secs_f64();
 
+        // SPEC-LIT §141.8: a backend with a tolerance solves the trial to
+        // the reference's own; the timed solve below keeps the run's.
+        cand.set_agreement_trial(true);
         gpu.fill_zero(&mut psi)?;
         let trial = match cand.solve(gpu, &mut psi, a, m) {
             Ok(p) => p,
             Err(e) => {
                 choice.considered.push((name, false, None));
                 choice.notes.push(format!("solve failed: {e}"));
+                choice.setup.push(None);
                 continue;
             }
         };
         let _ = trial;
+        let setup_secs = setup_secs + cand.setup_secs().unwrap_or(0.0);
 
         let got = answer_of(gpu, &*cand, &psi)?;
         let disagreement = inf_diff64(&got, &ref_solution) / ref_scale;
 
         if !(disagreement <= agree_tol as f64) {
             choice.considered.push((name, true, None));
+            choice.setup.push(Some(setup_secs));
             choice.notes.push(format!(
                 "DISQUALIFIED: disagrees with the reference by {disagreement:.2e} \
                  relative, tolerance {agree_tol:.1e}"
@@ -742,6 +796,7 @@ pub fn choose_pressure_backend(
         let res = measured_residual(gpu, &solk, &mut resw, &*cand, &psi, a, m)?;
         if !(res <= REFERENCE_RESIDUAL_MAX) {
             choice.considered.push((name, true, None));
+            choice.setup.push(Some(setup_secs));
             choice.notes.push(format!(
                 "DISQUALIFIED: left a residual of {res:.2e}, above \
                  {REFERENCE_RESIDUAL_MAX:.0e}"
@@ -749,6 +804,7 @@ pub fn choose_pressure_backend(
             continue;
         }
 
+        cand.set_agreement_trial(false);
         gpu.fill_zero(&mut psi)?;
         let t0 = Instant::now();
         cand.solve(gpu, &mut psi, a, m)?;
@@ -756,6 +812,7 @@ pub fn choose_pressure_backend(
         let secs = t0.elapsed().as_secs_f64();
 
         choice.considered.push((name, true, Some(secs)));
+        choice.setup.push(Some(setup_secs));
         choice
             .notes
             .push(format!("agrees to {disagreement:.1e}"));
@@ -1661,6 +1718,7 @@ mod tests {
                 "DISQUALIFIED: disagrees with the reference by 3.0e-02".into(),
                 "feature 'amgx' not enabled".into(),
             ],
+            setup: Vec::new(),
         };
 
         let text = c.report();

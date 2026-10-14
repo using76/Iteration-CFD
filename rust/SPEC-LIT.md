@@ -49189,8 +49189,9 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5), and since AMG-04b a case asks
-for it and its settings (§141.7).
+AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5), since AMG-04b a case asks
+for it and its settings (§141.7), and since AMG-05 it is a pressure backend the selector measures
+(§141.8).
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -50062,9 +50063,10 @@ it (§13.4.1).
 `cacheAgglomeration` is on and the matrix is bit for bit (diag, upper, lower, boundary_coeffs: every
 array the hierarchy reads) the one the attached hierarchy was built from, in which case the attached one
 is used again. The cache therefore never changes an answer: a hierarchy built twice from one matrix is
-the same hierarchy, and the gate holds the two answers bitwise equal. AMG-05 changes what
-`cacheAgglomeration true` keeps (the aggregation, with the Galerkin values re-gathered per solve);
-until then every changed matrix costs one host build, which is the cost AMG-05 exists to remove. No
+the same hierarchy, and the gate holds the two answers bitwise equal. AMG-05 left this cache as it
+stands, so a GAMG case solved through `PbicgstabBackend` keeps its numbers, and put the re-gather into
+the backend of its own, `GamgBackend` (§141.8): there `cacheAgglomeration true` keeps the aggregation
+and re-gathers the Galerkin values per solve; here every changed matrix still costs one host build. No
 default moves: a case that names no GAMG keeps its controls, its backend and its numbers.
 
 #### 141.7.1 The gates
@@ -50099,6 +50101,84 @@ is that of the §118.4-refined solve):
 
 The two builds coarsen `POI(16)` differently below 256 cells for the reason §141.3 gives for
 `POI(64)`: the f64 face coefficients differ in the last bits and move the tie-breaks.
+
+### 141.8 GAMG as a pressure backend: the kept aggregation, the re-gather, and the measurement (AMG-05)
+
+`No GPL-licensed source was consulted.` `pressure::GamgBackend` (`src/pressure/gamg.rs`) is the
+native GAMG of §141.5 as a backend of the measuring selector of `src/pressure/mod.rs`
+(`choose_pressure_backend`), beside PBiCGStab, cuFFT and AMGX:
+`default_candidates` lists it second, `ofgpu-buoyant`'s `-backend auto` measures it, and
+`-backend gamg` names it. Sources: no new literature; the numerics are those of §141.1-§141.5,
+cited there. OpenFOAM's GAMG was not opened.
+
+**The re-gather.** The first solve builds the hierarchy of §141.3 from the matrix it receives
+(aggregation §141.1, plans and coarse levels §141.2, smoothers §141.3, coarsest factor §141.4). A
+later solve whose matrix is bit for bit the held one (diag, upper, lower, boundary_coeffs) reuses it.
+Any other matrix, with `cacheAgglomeration true`, is RE-GATHERED: `agg(c)` and each level's
+`GalerkinPlan` and row map are kept, and level `l + 1`'s coefficients are the coarse operator
+(141.14)-(141.16) of the new level `l` through the kept plan, level by level from the fine matrix in
+the order of (141.3.1); no stop test is evaluated again, because the level sizes are those of the kept
+aggregation. Every smoother setup ((141.3.3), (141.3.4), (141.3.7)) and the coarsest factorisation
+of §141.4 are redone from the re-gathered levels (`HostHierarchy::regather`, `Gamg::regather`). The
+strength of §141.1 reads the couplings, so a matrix that differs only in its diagonal aggregates as
+the held one did, and its re-gather is the fresh build bit for bit. With `cacheAgglomeration false`
+every solve builds from scratch, as §141.7's key says. A failed re-gather drops the hierarchy, so the next solve
+builds a fresh one.
+
+**The controls** (*DESIGN*). A `p` entry that names GAMG (solver or preconditioner, §141.7) is used as
+it stands. Any other keeps its `tolerance`, `relTol`, `maxIter`, `minIter` and check interval and
+runs PCG with the GAMG cycle as its preconditioner when the probe finds the system symmetric and
+`nPreSweeps == nPostSweeps` (§141.5's condition for a symmetric cycle), and PBiCGStab with it
+otherwise, under the default settings of §141.7.
+
+**The measurement** (*DESIGN*). Two defaulted methods join the backend trait; the other backends keep
+their defaults, so their behaviour is unchanged. `set_agreement_trial`: the selector turns it on for a
+candidate's agreement solve and off before the timed solve. An iterative backend solves the trial to
+`reference_controls()`'s tolerance (`1e-14`, `relTol 0`), so the selector's 1e-8 agreement certifies the
+method rather than the case's stopping rule; the timed solve keeps the run's controls. GAMG's trial
+builds the hierarchy, and its timed solve re-gathers once more on the same matrix, so the time it
+reports is what a solve in a time loop costs: the matrix download, the re-gather and the Krylov solve.
+`setup_secs`: the time the backend's last set-up inside a solve took. The decision table prints a
+`set-up` column (the `setup` call plus that time) beside the `solve` column. A third defaulted method,
+`run_summary`, gives `ofgpu-buoyant` the line it prints at the end of a run: aggregations built,
+re-gathers and the mean of each. `auto` still picks the fastest survivor by measurement only. No
+default moves: `-backend` is `auto` as before, and no backend is preferred by a rule.
+
+#### 141.8.1 The gates
+
+| test (`tests/gamg_backend.rs` unless marked) | what | class |
+|---|---|---|
+| `a_regather_on_the_same_aggregation_is_the_fresh_build` | `POI(16)` of (141.5.5), `b = 1`, then the same matrix with its diagonal times 1.5, through one backend (`1e-8`, `relTol 0`): 1 build and 1 re-gather; the answer and the level sizes bit for bit a fresh backend's on the scaled matrix; the controls resolve to PCG with GAMG | P, D |
+| `a_changed_coupling_is_regathered_onto_the_kept_aggregation` | `POI(16)`, then its face coefficients times `1 + x_f/16`: 1 build, 1 re-gather, the level sizes kept, both solves converged to `1e-8`; `cacheAgglomeration no` builds 2; the same matrix twice is 1 build and no re-gather | P, D |
+| `the_selector_measures_gamg_with_its_set_up` | `default_candidates` lists PBiCGStab, GAMG, cuFFT, AMGX; under a loose entry (`1e-3`, `relTol 0.1`) the GAMG row is applicable, timed, agrees to `1e-8` and carries a set-up time | D |
+| `the_backend_flag_takes_five_names_and_nothing_else` (`ofgpu-buoyant`) | `-backend GAMG` (any case) is the GAMG backend; `gamgx` is refused | D |
+
+All three integration tests run in both builds. **Measured** (supervisor's runs, 2026-10-15; one card
+shared with two other lanes, so the times move by up to 2x between runs; the gate is the
+agreement, the times are reported). `POI(16)`, f64 / `single`: the changed coupling takes 10, 10 /
+9, 11 iterations, the diagonal times 1.5 takes 3 / 3, and the selector's GAMG row agrees to 2.6e-15 /
+3.4e-15. The `ofgpu-buoyant -iters 1` decision tables (f64, the case's own `p` entry, PBiCGStab with
+DIC, `relTol 0.01`), two runs each:
+
+| case | cells | PBiCGStab set-up / solve, ms | GAMG set-up / solve, ms | GAMG agrees to | `auto` picks |
+|---|---|---|---|---|---|
+| `plume` (`cases/plumeB`, 98 × 42 × 20) | 82,320 | 10.45 / 25.66; 9.38 / 27.22 | 236.83 / 90.23; 278.31 / 88.20 | 8.0e-15 | PBiCGStab |
+| `gb_800000` (`ofgpu-generate-mesh big` 500 × 400 × 4) | 800,000 | 33.04 / 931.73; 32.78 / 965.11 | 1821.29 / 596.75; 1736.38 / 491.85 | 2.8e-14 | GAMG, 1.6x and 2.0x |
+
+In the time loop (`-backend gamg`): on `plume` one aggregation build of 208-253 ms and 39 re-gathers
+of 42 ms each over 20 iterations; on `gb_800000` (5 iterations) one build of 1698 ms and 9 re-gathers
+of 320 ms each, the time loop taking 6.15 s against PBiCGStab's 9.00 s, with 20 and 19 p iterations
+against 233 and 482.
+
+**The 20-iteration comparison.** `plume`, `-iters 20`, `-backend pbicgstab` against `-backend gamg`,
+both with the `p` entry tightened to `tolerance 1e-12; relTol 0; maxIter 5000` (an input, the same in
+both runs), the states compared through `-restartWrite 20`: the largest `max|diff| / max|field|` over
+`U`, `p`, `k`, `epsilon`, `nut`, `T` and `phi` is **8.4e-12** (`U`; `p` 1.1e-12, `T` 1.0e-12), inside
+the 1e-8 gate. With the case's own `relTol 0.01` the two runs differ by 1.4e-1 after 20 iterations:
+the two solvers stop at different points of an unconverged SIMPLE iteration, which is the stopping
+rule's difference and not the backend's. The comparison ran in the f64 build; the single build's
+drivers were not run (`--features single` builds the library, and the three integration tests run
+there).
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 
