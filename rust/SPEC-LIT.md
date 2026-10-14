@@ -49881,11 +49881,12 @@ quality of the measurement beyond what the host page states.
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
-answer key) and VAL-60 (§145.2, the live gate, not yet written). §22's table has named this
+answer key) and VAL-60 (§145.2, the live gate, Gate 145-A). §22's table has named this
 benchmark since the first release ("Dam break — surge front position vs time") without a
-number to hold it against: `ofgpu-vof -surge` and `vof::tests` say why at `bin/vof.rs` and
-`vof.rs` ("nobody here has the paper"). This section is the key that closes that gap. No
-solver, gate or test that existed before it changes.
+number to hold it against: `ofgpu-vof -surge` and `vof::tests` said why at `bin/vof.rs` and
+`vof.rs` ("nobody here has the paper"), and VAL-60 replaced both sentences with pointers to
+this section. This section is the key that closes that gap. No solver, gate or test that
+existed before it changes.
 
 Source: **J. C. Martin and W. J. Moyce, "Part IV. An experimental study of the collapse of
 liquid columns on a rigid horizontal plane", *Phil. Trans. R. Soc. Lond. A* 244 (1952)
@@ -49984,6 +49985,109 @@ must be the manifest's, and asserts:
 A misread digit that breaks a series' order, a dropped or doubled row, or a mean copied into
 the wrong series fails the test. A misread digit that keeps every order is not caught; the
 re-reading above is the only guard against it.
+
+### 145.2 Gate 145-A: the dam break, live, against the key
+
+`ofgpu-validate`'s section "Gate 145-A" (`src/bin/validate_gates/martin_moyce.rs`, the first
+file of docs/17's `validate_gates/`; VAL-60) runs §22's dam break through the `ofgpu::vof`
+library exactly as `ofgpu-vof -surge` runs it, and holds the surge front against §145.1's
+key. docs/17's VAL-60 row calls this "Gate 133-A"; §133 of this file is the mixture-averaged
+transport, and the gate takes this section's number.
+
+**The case, fixed before any run.** `a = 2 1/4 in. = 0.05715 m`, the scale of the nine-record
+series. The column is `a` wide and `n^2 a = 2a` high against the `x = 0` wall, which is the
+plane of symmetry of §145.1. The tank is `9a x 3a` and two-dimensional (one cell deep, `empty`
+front and back). The column's wall, the far wall and the floor are no-slip walls (`U = 0`,
+`alpha` and `p_rgh` zero-gradient). The top is open: `U` is zero-gradient and `p_rgh = 0`.
+Water and air are `998.2 / 1.2 kg/m^3`, `1.002e-3 / 1.8e-5 Pa s`, `sigma = 0.0728 N/m`,
+`g = 9.81 m/s^2` along `-y`, and `c_alpha = 1`. Three uniform meshes are run, `h = a/12, a/18,
+a/27` (`r = 1.5`), with the time step `dt = 0.25 h / (2 (g h0)^(1/2))`, `h0 = 2a`, up to
+`T = 6` in (145.1). The controls are `vof::tests`' dam break: PISO with 3 correctors, `U` to
+`1e-8` (relTol 0, 200 iterations), `p_rgh` to `1e-9` (relTol `1e-3`, DIC, 2000 iterations),
+and uncorrected `snGrad`. The front is `bin/vof.rs`'s sampler on the bottom row of cells: the
+last cell with `alpha >= 1/2`, linear to the first one below, measured from the column's wall
+in world coordinates (`HostMesh::world`, §118.7). It is sampled after every step.
+
+**The time origin.** The run starts its clock when the column is released, and the paper's
+clock is unknown (§145.1). The gate puts the run's own `Z = 1.44` at the key's `T = 1.19`:
+
+```
+  T_S(t) = 2^(1/2) t (g/a)^(1/2),    dT = 1.19 - T_S(t_1.44),    Z_S(T) = Z(t) at T_S(t) + dT = T   (145.5)
+```
+
+with `t_1.44` the first time the sampled front reaches `Z = 1.44`, linear between the two
+steps either side of it, and `Z_S` linear between steps.
+
+**The band.** At station `k` of a printed-mean series, `|Z_S(T_k) - Z_k| <= b_k` with
+
+```
+  b_k = max( u_D,T |dZ/dT|_k , 0.1 Z_k ),    u_D,T = 0.17 (145.4)                                      (145.6)
+```
+
+and `|dZ/dT|_k` the secant of that series' printed means through station `k`'s neighbours
+(one-sided at the series' last station). The first term is (145.4) converted to `Z` by §145.1's
+rule. The second is docs/17's VAL-60 row. The window is every station with
+`1.44 < Z_k <= 7.0`. `Z = 1.44` itself holds by (145.5), and `Z = 7.0` is two column widths
+short of the far wall. Both printed means are compared on the finest mesh: 12 stations of the
+`1 1/8 in.` series and 15 of the `2 1/4 in.` series. The row is `max_k |Z_S(T_k) - Z_k| / b_k <= 1`
+per series. A station the run never reaches counts as infinite.
+
+**What must hold, besides.** On every mesh and after every step, the front is behind
+Ritter's (1892) frictionless front, started from the column's edge, plus the one cell that the
+sampler resolves:
+
+```
+  z(t) <= a + 2 (g h0)^(1/2) t + h                                                                     (145.7)
+```
+
+The bound is the classical one: along the characteristic from the still reservoir the
+shallow-water invariant `u + 2c = 2 (g h0)^(1/2)` holds, and `c = (g h)^(1/2) = 0` at a dry
+front (A. Ritter, *Z. Ver. Dtsch. Ing.* 36 (1892) 947, cited as `vof::tests` cites it; the
+paper was not re-read for this section).
+
+The water volume `sum_c alpha_c V_c` is conserved over the run to `1e-12` relative. That row
+is precision class R (docs/17 §5.1 rule 4), so its tolerance is `tol32 = 1e-5` under `single`.
+The §94 study takes `Z_S(T = 2)` on the three meshes through `vv::grid_study`, and its (94.10)
+line is printed against `D`, the `2 1/4 in.` mean at `T = 2`. `D` is interpolated linearly
+between `(2.33, 1.98)` and `(2.56, 2.20)` to `D = 2.3509`, with `u_D = 0.17 x 0.23/0.22 = 0.1777`.
+A row requires the study to be computed. A comparison row that fails also registers the
+verdict `MISSES` with the study, which is Gate 105-C's pattern. A missing key registers
+`OPEN`, as Gate 94-D does.
+
+**What was measured** (f64, 2026-10-14, RTX 5070 Ti sm_120, shared with two other lanes, section
+63 alone, `1 m 16 s` wall):
+
+| mesh | cells | steps | Ritter margin `min(bound - z)/a` | volume change | `max(alpha) - 1` |
+|---|---|---|---|---|---|
+| a/27 | 19683 | 1296 | 0.0463 | 0 | 4.7e-7 |
+| a/18 | 8748 | 864 | 0.0694 | 0 | 2.5e-7 |
+| a/12 | 3888 | 576 | 0.1042 | 0 | 1.4e-7 |
+
+On a/27 the front reaches `Z = 1.44` at `T_S = 0.9151`, so `dT = +0.2749`. The worst
+`|dZ|/b` is **0.934** against the `1 1/8 in.` mean (at `T = 2.23`, `Z_key = 2.78`, `Z_S =
+2.520`) and **0.531** against the `2 1/4 in.` mean (at `T = 2.32`, `Z_key = 2.78`, `Z_S =
+2.632`). Both rows pass. Between `T = 1.6` and `3.3` the run trails both means by
+2-10 % of `Z`. From `T = 4.0` on it is within 2.4 % of the larger-scale series, and past
+`T = 4.3` it leads the smaller-scale one by up to 6.8 %. `Z_S(T = 2)` is `2.2483, 2.2548, 2.2741` on a/27, a/18 and a/12: the study is
+monotone with `p = 2.708`, `phi_ext = 2.2412` and `U_fine = 2.115e-2` (Fs 3). Against `D`,
+`E = -0.1026 +/- 0.1790` (`-4.36 % +/- 7.61 %`), so `|E| <= u_val`: at this resolution the
+comparison cannot see a modelling error. The verdict is a pass, and the gate registers
+nothing.
+
+Under `single` (the same GPU, `1 m 20 s`), the volume changes by `2.6e-7`, `1.8e-7` and
+`2.3e-7` on a/27, a/18 and a/12. These are class-R rows held to `1e-5`, and they pass. The
+alpha excursions are `1.5e-8` below 0 and at most `2.9e-6` above 1. The Ritter margins are the
+same to four digits (a/18 takes 865 steps, one more than f64's 864, because its `dt` is
+rounded to f32). `dT`, both worst ratios (`0.934`, `0.531`), the study's three values and
+the (94.10) line are the f64 run's to the digits printed; `phi_ext` differs in the seventh
+digit.
+
+**What this gate does not do.** It does not model the release of the column, and that is
+the reason for (145.5). It does not put `u_num` into the band (145.6): the band is the
+datum's alone, and the study is printed beside it. It compares the `1 1/8 in.` series at the
+`2 1/4 in.` scale. The scale gap between the two series is the larger part of (145.4)'s `0.17`,
+and no surface-tension scaling is applied. Tables 1 and 3 (`n^2 = 1, 4`) are not
+transcribed, so they are not gated.
 
 ---
 

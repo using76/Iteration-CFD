@@ -48,11 +48,14 @@
 //! and `-surge` prints exactly those, together with the raw `t` and `z` in
 //! seconds and metres so a reader can rescale into whichever convention the
 //! copy of the paper in front of them uses. **The paper's tabulated data is
-//! not reproduced in this source**, because nobody here has the paper to
-//! transcribe it from, and a table of numbers attributed to a 1952 experiment
-//! and actually remembered is worse than no table at all.
+//! not reproduced in this source.** It is in the tree as an answer key,
+//! `reference/martin_moyce_1952/surge_front.csv` (Table 2, `n^2 = 2`, copied
+//! as printed, SPEC-LIT §145.1), whose `T` carries the factor `n` this report
+//! does not: `T_key = 2^(1/2) T` here (145.2). `ofgpu-validate`'s Gate 145-A
+//! (SPEC-LIT §145.2, `src/bin/validate_gates/martin_moyce.rs`) runs this
+//! sampler's dam break live and holds it against that key.
 //!
-//! What the code *does* assert about the surge front is in
+//! What the code *also* asserts about the surge front is in
 //! `ofgpu::vof`'s tests and in `ofgpu-validate`: the phase volume is conserved,
 //! `alpha` stays in `[0, 1]`, and the front never outruns `2 sqrt(g h0)`, the
 //! characteristic speed limit of the frictionless shallow-water dam break

@@ -125,6 +125,9 @@ mod json;
 #[path = "validate_key/mod.rs"]
 mod key;
 
+#[path = "validate_gates/mod.rs"]
+mod validate_gates;
+
 use common::sci;
 
 // ==========================================================================
@@ -3617,6 +3620,13 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)") {
     c.enter_gate("SPEC-LIT 119.3 Gate 119-A the wedge");
     check_wedge_gate(c, &gpu)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 145.2 - Gate 145-A: the dam break against Martin & Moyce's
+    // Table 2, live on three meshes (src/bin/validate_gates/martin_moyce.rs).
+    if c.section("Gate 145-A: the dam break against Martin & Moyce 1952 Table 2, three meshes (SPEC-LIT 145.2)") {
+    c.enter_gate(validate_gates::martin_moyce::GATE);
+    validate_gates::martin_moyce::check_martin_moyce(c, &gpu)?;
     c.leave_gate();
     }
 

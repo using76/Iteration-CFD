@@ -4949,12 +4949,11 @@ mod tests {
     ///
     /// **What this asserts, and what it does not.** Martin & Moyce photographed
     /// the surge front of exactly this experiment and tabulated `Z = z/a`
-    /// against a dimensionless time. Their table is NOT transcribed here,
-    /// because nobody working on this file has the paper in front of them, and
-    /// a table of numbers attributed to a 1952 experiment and actually
-    /// remembered would be worse than no table at all. What the test prints is
-    /// the solver's own `Z(T)` in those variables, so a reader who does have
-    /// the paper can lay one on the other.
+    /// against a dimensionless time. Their table is NOT in this test: it is
+    /// the answer key `reference/martin_moyce_1952/surge_front.csv` (SPEC-LIT
+    /// §145.1), and the comparison against it is `ofgpu-validate`'s Gate 145-A
+    /// (§145.2). What the test prints is the solver's own `Z(T)`, with `T`
+    /// WITHOUT the key's factor `n = 2^(1/2)` (145.2).
     ///
     /// What it *asserts* is three things that are true independently of any
     /// experiment:
