@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldComponent, FieldTimeInfo, GeometryFidelity, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, RegionEntry, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, DatasetSource, DatasetStage, FieldComponent, FieldTimeInfo, GeometryFidelity, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, RegionEntry, ResultsResponse, StreamlineInfo, StreamlineSpec, ViewerDataset } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { buildCartesianGrid, cartesianBoundarySurface, cartesianCellCenters, type CartesianGrid } from '../formats/cartesian.js'
 import { readCaseJsonc, type CaseJsoncInfo } from '../formats/casejsonc.js'
@@ -77,6 +77,8 @@ interface Entry {
   cuts: Map<string, Promise<PlaneCutInfo>>
   /** Iso-surfaces already stored, by blob key prefix (in flight or done). */
   isos: Map<string, Promise<IsoSurfaceInfo>>
+  /** Streamlines already stored, by blob key prefix (in flight or done). */
+  streams: Map<string, Promise<StreamlineInfo>>
   ready: Promise<ViewerDataset>
   resolveReady: (m: ViewerDataset) => void
   rejectReady: (e: Error) => void
@@ -109,7 +111,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
       rejectReady = rej
     })
     ready.catch(() => {})
-    const entry: Entry = { id, rel, root, series, caseInfo, status: 'loading', error: null, manifest: null, geometry: null, cuts: new Map(), isos: new Map(), ready, resolveReady, rejectReady }
+    const entry: Entry = { id, rel, root, series, caseInfo, status: 'loading', error: null, manifest: null, geometry: null, cuts: new Map(), isos: new Map(), streams: new Map(), ready, resolveReady, rejectReady }
     entries.set(id, entry)
     return entry
   }
@@ -157,7 +159,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
         warnings.push(`structured block recovered from the cut-cell mesh: ${block.grid.dims.join(' x ')}, ${block.holes.toLocaleString()} site(s) inside the body`)
         return { geometry: { source: 'polymesh', fidelity: 'exact', grid: block.grid, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters, lattice: { index: block.index, holes: block.holes } }, surface: r.surface, warnings }
       }
-      warnings.push('polyMesh is not a structured lattice: slices and planes are exact cuts of its cells and iso-surfaces are contoured on them; streamlines and glyphs are unavailable')
+      warnings.push('polyMesh is not a structured lattice: slices and planes are exact cuts of its cells, iso-surfaces are contoured and streamlines traced on them; glyphs are unavailable')
       return { geometry: { source: 'polymesh', fidelity: 'exact', grid: null, cellCount: r.nCells, pointCount: r.nPoints, cellCenters: r.cellCenters }, surface: r.surface, warnings }
     }
     const vtuTime = series.times.find((t) => t.source.kind === 'vtu')
@@ -428,6 +430,59 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     return task
   }
 
+  /**
+   * The streamlines of a cell vector field on a non-lattice polyMesh (SPEC-LIT §148.3), traced in the
+   * worker pool and stored as three blobs. A seed outside the domain is refused (its line is empty);
+   * when every seed is, the request is refused `OUTSIDE`.
+   */
+  async function streamlines(id: string, spec: StreamlineSpec): Promise<StreamlineInfo> {
+    const entry = entries.get(id)
+    if (!entry) throw new Error(`unknown dataset ${id}`)
+    const manifest = await entry.ready
+    const dir = entry.root.polyMeshDirAbs
+    if (!manifest.planeCut || !dir) throw new Error(`NO_POLY_STREAM: ${manifest.name} is not a non-lattice polyMesh (${manifest.source}${manifest.grid ? ', structured grid' : ''}); its streamlines are traced on the lattice`)
+    if (spec.seeds.length === 0 || spec.seeds.length % 3 !== 0 || !spec.seeds.every(Number.isFinite)) throw new Error('INVALID: streamlines need one or more finite seed points (xyz each)')
+    if (spec.maxLength !== null && !(spec.maxLength > 0)) throw new Error('INVALID: maxLength must be positive')
+    const info = manifest.fields.find((f) => f.name === spec.field)
+    if (!info) throw new Error(`INVALID: no field "${spec.field}" (available: ${manifest.fields.map((f) => f.name).join(', ') || 'none'})`)
+    if (info.location === 'point') throw new Error(`INVALID: ${spec.field} is a point field; streamlines on a polyMesh trace cell fields`)
+    if (info.components !== 3) throw new Error(`INVALID: ${spec.field} has ${info.components} components; streamlines need a vector field`)
+    const seeds = [...spec.seeds]
+    const key = `stream.${createHash('sha1').update(JSON.stringify([spec.field, spec.timeIndex, seeds, spec.direction, spec.maxLength])).digest('hex').slice(0, 16)}`
+    const known = entry.streams.get(key)
+    if (known) return known
+    const task = (async (): Promise<StreamlineInfo> => {
+      const pt = await ensureField(id, spec.field, spec.timeIndex)
+      const buf = await blobs.get(id, pt.blob.key)
+      if (!buf) throw new Error(`${entry.rel}: the blob of "${spec.field}" at time index ${spec.timeIndex} is gone`)
+      const cellU = Float64Array.from(f32(buf))
+      const r = await pool.run({ op: 'polyStream', dir, cellU, seeds, direction: spec.direction, maxLength: spec.maxLength })
+      const lineCount = r.offsets.length - 1
+      if (r.refusedSeeds.length === lineCount) throw new Error(`OUTSIDE: every seed (${lineCount}) is outside the domain of ${manifest.name}`)
+      const pointCount = r.speeds.length
+      await blobs.put(id, `${key}.points`, r.points)
+      await blobs.put(id, `${key}.speeds`, r.speeds)
+      await blobs.put(id, `${key}.offsets`, r.offsets)
+      return {
+        key,
+        field: spec.field,
+        timeIndex: spec.timeIndex,
+        lineCount,
+        pointCount,
+        points: { key: `${key}.points`, dtype: 'f32', count: pointCount, components: 3, bytes: r.points.byteLength },
+        speeds: { key: `${key}.speeds`, dtype: 'f32', count: pointCount, components: 1, bytes: r.speeds.byteLength },
+        offsets: { key: `${key}.offsets`, dtype: 'u32', count: lineCount + 1, components: 1, bytes: r.offsets.byteLength },
+        refusedSeeds: r.refusedSeeds,
+        ends: r.ends,
+        fallbackPoints: r.fallbackPoints,
+        invertedTets: r.invertedTets,
+      }
+    })()
+    entry.streams.set(key, task)
+    task.catch(() => entry.streams.delete(key))
+    return task
+  }
+
   function f32(buf: Buffer): Float32Array {
     const aligned = buf.byteOffset % 4 === 0 ? buf : Buffer.from(buf)
     return new Float32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 4)
@@ -639,6 +694,7 @@ export function createDatasetService(deps: DatasetServiceDeps): DatasetServiceHa
     discover,
     cut,
     iso,
+    streamlines,
     locate,
     whenReady,
     onProgress(handler) {

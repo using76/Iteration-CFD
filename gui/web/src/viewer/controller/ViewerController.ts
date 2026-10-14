@@ -13,6 +13,7 @@ import {
   type FieldInfo,
   type GeometryBounds,
   type IsoSurfaceInfo,
+  type StreamlineInfo,
   type PlaneCutInfo,
   type PointLocateInfo,
   type ViewerCommand,
@@ -109,6 +110,8 @@ export class ViewerController {
   private readonly cuts = new Map<string, PlaneCutInfo>()
   /** Iso-surfaces the server already contoured for the loaded dataset, by field, time and values (a non-lattice polyMesh). */
   private readonly isos = new Map<string, IsoSurfaceInfo>()
+  /** Streamlines the server already traced for the loaded dataset, by request (a non-lattice polyMesh). */
+  private readonly streams = new Map<string, StreamlineInfo>()
   private layerSeq = 0
   private overlayLines: () => string[] = () => []
   private readonly requireMount: boolean
@@ -364,6 +367,7 @@ export class ViewerController {
       this.speedRanges.clear()
       this.cuts.clear()
       this.isos.clear()
+      this.streams.clear()
       this.timeIndex = this.resolveTime(cmd.timeIndex ?? 'last')
       this.display.patches = this.defaultPatches()
       const wanted = cmd.field ?? 'U'
@@ -554,7 +558,8 @@ export class ViewerController {
   }
 
   private async addStreamlines(cmd: Extract<ViewerCommand, { type: 'addStreamlines' }>): Promise<void> {
-    this.requireGrid()
+    // A polyMesh with no lattice is traced on the server (SPEC-LIT §148.3).
+    if (!this.isServerStream()) this.requireGrid()
     const info = this.requireVector(cmd.field ?? 'U')
     const seed = 'line' in cmd.seed ? { line: cmd.seed.line, count: cmd.seed.count } : { plane: cmd.seed.plane, position: this.resolvePosition(cmd.seed.plane, cmd.seed.position), grid: cmd.seed.grid }
     await this.upsertLayer({
@@ -600,7 +605,9 @@ export class ViewerController {
         ? await this.cutRequest(spec)
         : this.isServerIso() && spec.type === 'iso'
           ? await this.isoRequest(spec)
-          : this.layerRequest(spec)
+          : this.isServerStream() && spec.type === 'streamlines'
+            ? await this.streamRequest(spec)
+            : this.layerRequest(spec)
     if (!req) {
       entry.result = null
       return
@@ -639,6 +646,39 @@ export class ViewerController {
       this.isos.set(key, info)
     }
     return { op: 'isoMesh', positions: scopedKey(ds.manifest.id, info.positions.key), normals: scopedKey(ds.manifest.id, info.normals.key) }
+  }
+
+  /** A dataset with no lattice whose streamlines the server traces (SPEC-LIT §148.3). */
+  private isServerStream(): boolean {
+    const ds = this.dataset
+    return !!ds && !ds.grid && this.loader.canStream(ds.manifest)
+  }
+
+  /** The seeds of a streamline layer: a line rake, or a plane rake over the dataset's box. */
+  private seedsOf(spec: Extract<LayerSpec, { type: 'streamlines' }>): Float32Array {
+    const b = this.requireDataset().manifest.bounds
+    if ('line' in spec.seed) return lineSeeds(spec.seed.line[0], spec.seed.line[1], spec.seed.count)
+    return planeSeeds(b.min, b.max, AXIS_INDEX[spec.seed.plane], spec.seed.position, spec.seed.grid[0], spec.seed.grid[1])
+  }
+
+  private async streamRequest(spec: Extract<LayerSpec, { type: 'streamlines' }>): Promise<ComputeRequest> {
+    const ds = this.requireDataset()
+    const b = ds.manifest.bounds
+    const diag = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2])
+    const req = { field: spec.field, timeIndex: this.timeIndex, seeds: [...this.seedsOf(spec)], direction: spec.direction, maxLength: spec.maxLength ?? diag * 4 }
+    const key = JSON.stringify(req)
+    let info = this.streams.get(key)
+    if (!info) {
+      try {
+        info = await this.loader.polyStream(ds.manifest, req)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg.startsWith('OUTSIDE:')) throw new ViewerError('INVALID', msg)
+        throw new ViewerError('LOAD_FAILED', `the server could not trace streamlines on ${ds.manifest.name}: ${msg}`)
+      }
+      this.streams.set(key, info)
+    }
+    return { op: 'streamlineMesh', points: scopedKey(ds.manifest.id, info.points.key), speeds: scopedKey(ds.manifest.id, info.speeds.key), offsets: scopedKey(ds.manifest.id, info.offsets.key) }
   }
 
   /**
@@ -702,9 +742,7 @@ export class ViewerController {
         const empty = ds.manifest.grid?.emptyAxis ?? null
         const planarAxis = empty ? AXIS_INDEX[empty] : null
         const b = ds.manifest.bounds
-        let seeds: Float32Array
-        if ('line' in spec.seed) seeds = lineSeeds(spec.seed.line[0], spec.seed.line[1], spec.seed.count)
-        else seeds = planeSeeds(b.min, b.max, AXIS_INDEX[spec.seed.plane], spec.seed.position, spec.seed.grid[0], spec.seed.grid[1])
+        const seeds = this.seedsOf(spec)
         if (planarAxis !== null) for (let i = planarAxis; i < seeds.length; i += 3) seeds[i] = 0.5 * (b.min[planarAxis] + b.max[planarAxis])
         const diag = Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2])
         return { op: 'streamlines', grid, field: ref, seeds, direction: spec.direction, maxLength: spec.maxLength ?? diag * 4, planarAxis }
@@ -832,8 +870,12 @@ export class ViewerController {
     if (!ds.grid || !ds.gridKeys) {
       const cut = this.loader.canCut(ds.manifest)
       const iso = this.loader.canIso(ds.manifest)
-      const here = cut && iso ? ' (slices, planes and iso-surfaces are computed on its cells here)' : cut ? ' (slices and planes are exact cuts here)' : iso ? ' (iso-surfaces are computed on its cells here)' : ''
-      throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); ${iso ? '' : 'iso-surfaces, '}streamlines and glyphs need one${here}`)
+      const stream = this.loader.canStream(ds.manifest)
+      const list = (xs: string[]): string => (xs.length > 1 ? `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}` : xs[0] ?? '')
+      const served = [...(cut ? ['slices', 'planes'] : []), ...(iso ? ['iso-surfaces'] : []), ...(stream ? ['streamlines'] : [])]
+      const here = cut && !iso && !stream ? ' (slices and planes are exact cuts here)' : served.length ? ` (${list(served)} are computed on its cells here)` : ''
+      const needs = [...(iso ? [] : ['iso-surfaces']), ...(stream ? [] : ['streamlines']), 'glyphs']
+      throw new ViewerError('NO_STRUCTURED_GRID', `${ds.manifest.name} has no structured grid (${ds.manifest.source}); ${list(needs)} need${needs.length > 1 ? '' : 's'} one${here}`)
     }
     return ds
   }

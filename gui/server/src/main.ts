@@ -44,6 +44,7 @@ function unavailableDatasets(reason: string): DatasetService {
     discover: fail,
     cut: fail,
     iso: fail,
+    streamlines: fail,
     locate: fail,
     onProgress: () => () => {},
     evict: () => {},

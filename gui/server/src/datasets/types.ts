@@ -1,7 +1,7 @@
 // Dataset service interface: turns a case / result path into a ViewerDataset
 // manifest plus binary blobs, and answers result queries for the tools.
 // Implemented in datasets/service.ts.
-import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, ResultsResponse, ViewerDataset } from '@cfd/shared'
+import type { CutPlaneSpec, DatasetOpenResponse, DatasetProgress, FieldComponent, FieldTimeInfo, IsoSurfaceInfo, IsoSurfaceSpec, PlaneCutInfo, PointLocateInfo, ResultsResponse, StreamlineInfo, StreamlineSpec, ViewerDataset } from '@cfd/shared'
 import type { StatComponent } from './stats.js'
 
 export interface FieldStats {
@@ -48,6 +48,13 @@ export interface DatasetService {
    * and `INVALID: ...` for no or non-finite values, an unknown, point or tensor field.
    */
   iso(id: string, spec: IsoSurfaceSpec): Promise<IsoSurfaceInfo>
+  /**
+   * The streamlines of a cell vector field on a non-lattice polyMesh dataset (SPEC-LIT §148.3), stored
+   * as three blobs. Refuses `NO_POLY_STREAM: ...` when the dataset is not one, `INVALID: ...` for no or
+   * non-finite seeds, a bad maxLength, an unknown, point or non-vector field, and `OUTSIDE: ...` when
+   * every seed is outside the domain.
+   */
+  streamlines(id: string, spec: StreamlineSpec): Promise<StreamlineInfo>
   /**
    * The cell of a polyMesh dataset that holds a world point (docs/17 STU-13); `cell` null when none
    * does. Refuses `NO_POINT_LOCATE: ...` when the dataset is not a polyMesh read from its files

@@ -1,7 +1,7 @@
 // Opens a dataset through a transport, polls until the manifest is ready,
 // decodes blobs into typed arrays (LRU-cached) and exposes them to the
 // compute service under dataset-scoped keys.
-import { blobElementBytes, type BlobRef, type CutPlaneSpec, type IsoSurfaceInfo, type IsoSurfaceSpec, type PlaneCutInfo, type PointLocateInfo, type ViewerDataset } from '@cfd/shared'
+import { blobElementBytes, type BlobRef, type CutPlaneSpec, type IsoSurfaceInfo, type IsoSurfaceSpec, type PlaneCutInfo, type PointLocateInfo, type StreamlineInfo, type StreamlineSpec, type ViewerDataset } from '@cfd/shared'
 import { BlobCache, type TypedArray } from './BlobCache'
 import { StructuredGrid } from './StructuredGrid'
 import type { DatasetTransport } from './transport'
@@ -153,6 +153,19 @@ export class DatasetLoader {
     if (!this.transport.iso) throw new LoadError(`${manifest.name}: this transport cannot contour a mesh`)
     const info = await this.transport.iso(manifest.id, spec)
     for (const ref of [info.positions, info.normals, info.cells]) this.refs.set(scopedKey(manifest.id, ref.key), { id: manifest.id, ref })
+    return info
+  }
+
+  /** True when the transport traces this dataset's streamlines on the server (a non-lattice polyMesh, SPEC-LIT §148.3). */
+  canStream(manifest: ViewerDataset): boolean {
+    return manifest.planeCut === true && typeof this.transport.streamlines === 'function'
+  }
+
+  /** Ask the server for the streamlines of a cell vector field and make their three blobs resolvable through `provide`. */
+  async polyStream(manifest: ViewerDataset, spec: StreamlineSpec): Promise<StreamlineInfo> {
+    if (!this.transport.streamlines) throw new LoadError(`${manifest.name}: this transport cannot trace streamlines on a mesh`)
+    const info = await this.transport.streamlines(manifest.id, spec)
+    for (const ref of [info.points, info.speeds, info.offsets]) this.refs.set(scopedKey(manifest.id, ref.key), { id: manifest.id, ref })
     return info
   }
 

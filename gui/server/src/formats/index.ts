@@ -5,6 +5,7 @@
 //   polycut.ts    exact plane cut of a polyhedral polyMesh, triangulated per cell (SPEC-LIT 148.1)
 //   pointLocate.ts  the cell of a polyMesh that holds a world point (docs/17 STU-13)
 //   polyiso.ts    iso-surfaces of a cell field on a polyhedral polyMesh (SPEC-LIT 148.2)
+//   polystream.ts streamlines of a cell velocity on a polyhedral polyMesh (SPEC-LIT 148.3)
 //   cartesian.ts  JSONC `mesh` block -> graded nodes, cell centres, boundary surface (blockgen.rs)
 //   vtu.ts        VTK XML UnstructuredGrid appended-raw reader/writer, VTK_POLYHEDRON (rust/src/io/vtu.rs)
 //   pvd.ts        .pvd collections
@@ -17,6 +18,7 @@ export * from './polymesh.js'
 export * from './polycut.js'
 export * from './pointLocate.js'
 export * from './polyiso.js'
+export * from './polystream.js'
 export * from './cartesian.js'
 export * from './vtu.js'
 export * from './pvd.js'

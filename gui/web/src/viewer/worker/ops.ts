@@ -100,6 +100,13 @@ export function runCompute(req: ComputeRequest, resolve: BlobResolver): ComputeR
       const normals = need(resolve, req.normals, Float32Array).slice()
       return { op: 'iso', positions, normals, triangleCount: positions.length / 9 }
     }
+    case 'streamlineMesh': {
+      // Copies, as for a cut: the result is transferred out, and the blobs stay in the cache.
+      const points = need(resolve, req.points, Float32Array).slice()
+      const speeds = need(resolve, req.speeds, Float32Array).slice()
+      const offsets = need(resolve, req.offsets, Uint32Array).slice()
+      return { op: 'streamlines', points, speeds, offsets }
+    }
     case 'glyphs': {
       const grid = gridOf(resolve, req.grid)
       const g = sampleGlyphs(grid, vectorField(resolve, req.field), req.stride, req.cap, req.slice)
