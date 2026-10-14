@@ -28,6 +28,13 @@
 | A8 | VAL-70 | Gate 78-D 측정 레그: 두 splash 기준 모두 Riboux & Gordillo 2014 임계 속도에 미달 (`MISSES`) | 띠 ±20 %, 액체 8개 중 6개 이상이 들어와야 통과. Mundo: 17행 중 0, 액체 8개 중 0 (e −0.734 ~ −0.214). Bai & Gosman: 17행 중 3, 액체 8개 중 1(에탄올) (e −0.396 ~ +0.690). 4.78 행은 OPEN으로 남는다 | SPEC-LIT 146.2, `1280c6f` |
 | A9 | AMG-04c | single에서 K-cycle FCG의 POI(32) 답이 Jacobi-PBiCGStab과 2.37e-8 차이 (기준 1e-8) | 11회 반복에 수렴은 한다. 이 테스트는 파일 관례(AMG-06a)에 따라 single에서 ignore 상태다. AMG-06a가 켜야 한다. f64는 1.61e-9~5.38e-9로 통과 | SPEC-LIT 141.6, `a887eb3` |
 | A10 | AMG-07b | single의 SPMD GAMG(정상 상태 cycle)는 반복 정밀화가 없어서 tol 1e-6이면 정체된다 | POI 32³, 500 cycle 뒤 참 잔차 4.3e-6. 게이트는 기존 SPMD 게이트와 같은 solver tol 1e-5로 돈다 (게이트 허용오차 tol32 1e-5는 그대로). F32-07의 IR이 `spmd_gamg`도 감싸야 한다 | SPEC-LIT 141.11, `3f110b3` |
+| A11 | CMP-13 | LTS 정상 해가 CFL에 따라 달라진다 (기준: CFL 2와 20의 해 차이 1e-8) | u 차이 2.85e-6, p는 max\|p\|의 7.0e-2 (2.2e-3 Pa), T 5.5e-9. Rhie-Chow 면 flux의 rAU = V/a_P가 시간항 대각 V r ρ를 지니기 때문이다. 기존 정상 SIMPLE도 alpha_U에 따라 같은 식으로 달라진다 (0.9와 0.7: 8.4e-7). 해결책(시간 간격에 무관한 rAU, 또는 면 flux의 ddt 보정)은 Rhie-Chow 수치 변경이다. 감독 권고는 미달 수용 | SPEC-LIT 125.7, `3c16286` |
+| A12 | DST-04 | single: 확산 지배 화염관에서 연소 쪽 plateau가 1 위로 떠오른다 | σ=1 평면 1000셀에서 최대 1.5e-4, 층류에서 5e-5. float 대각 ρV/dt가 eps(1+2D)까지만 유지되기 때문이다 (D = Γdt/dx² ≈ 40). solver tol과 IR로는 바뀌지 않는다. 해결책(delta form, ddt 재스케일)은 수치 변경이다. DST-06의 긴 계산에서 누적될 수 있다 | SPEC-LIT 155.9, `4875b9d` |
+| A13 | DST-04 | 양쪽 빌드: σ=5.06에서 δ_t 오차가 메시를 세분해도 줄지 않는다 | 250/500/1000셀에서 −2.2e-4, −6.2e-4, −4.5e-4 (모두 2 % 띠 안). 원인 미정: H20의 σ≠1 정확해 주장 또는 σ에 따른 이산화 하한. single에서는 x_f와 Linf도 1000셀에서 더 줄지 않는다 (float 하한 약 4e-4) | SPEC-LIT 155.9, `4875b9d` |
+| A14 | DST-12 | f64: 스텝 안에서 T_b에 닿는 입자(4096개 중 258개)가 host 대비 m_w와 누적값에서 6 ulp 차이 (기준 4 ulp) | single은 3 ulp 이내. t_hit = −ln(1−r) m C/λ가 r 변화의 1/(1−r)배로 움직여, T_eq가 위에서 T_b에 다가갈수록 교차 시각이 ill-conditioned이다. device 초월함수(pow, cbrt, log1p)의 1 ulp 차이가 수 ulp로 커진다. 다른 분기를 잡도록 16×4 ulp 상한은 계속 단언한다 | SPEC-LIT 159.7, `26685a0` |
+| A15 | VAL-12 | Gate 95-A: 네 번째 메시(n_y=32)를 넣어도 5:1, 10:1이 미달 (21/25) | 5:1: n_y=4가 outer 673회에서 발산, p_u 1.423 (기준 1.9). 10:1: n_y=4 정체 (q_obs 0.992), p_u 1.896 (0.0037 부족). 2.5:1은 통과. n_y=4 수렴은 VAL-11(GMRES outer)의 몫이다. 5:1의 1.42는 아직 수렴한 차수가 아니며, 다섯 번째 메시가 있어야 더 알 수 있다 | SPEC-LIT 109.6-109.7, `f0a0df2` |
+| A16 | TET-09 | 리메시하지 않은 입력에서 feature가 아닌 segment 사이 각이 작으면 Delaunay refinement가 끝나지 않는다 | 면마다 삼각형 2개(대각선 45°)인 정육면체, h=0.4: 91 pass 뒤 67 289점 (예측 약 930 tet), 상한에서만 멈춘다. feature edge 각만 보호하므로 Shewchuk 1998의 90° 가정이 깨진다. 파이프라인은 항상 먼저 리메시하므로 기록만 했다 | SPEC-LIT 116.13, `0a2249d` |
+| A17 | TET-10b | 30° 쐐기 게이트(최소 이면각 ≥ 10°, 최대 ≤ 165°)를 측정할 수 없다 | TET-09 refinement가 쐐기에서 끝나지 않는다: h=0.1에서 187 pass 뒤 20 000점 상한. h=0.04~0.15와 상한 60 000에서도 상한, 240 s 제한 또는 refine/facet에 걸린다. 리메시한 정육면체−원기둥(24면)도 h=0.1에서 520 pass 뒤 60 000점 상한, h=0.0625에서는 끝난다 (71 074 tet, 346 pass). TET-10b는 h=0.0625를 쓴다 | SPEC-LIT 116.14, `7e57528` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -42,6 +49,8 @@
 | B7 | BC-11b `-forceSplitDouble`의 효과 | 사용자 규칙으로 측정하지 않았다. p_rgh가 f32로 저장되므로 효과가 제한적일 수 있다 | 원하면 single 빌드로 정지 기둥 1회 |
 | B8 | PAR-05 `peer_placement_two_devices` | GPU 2개가 필요하다 (사용자가 보류) | 두 번째 GPU가 생기면 |
 | B9 | PAR-06/16 MPI | MS-MPI 설치가 보류됐다. `-comm mpi`와 PMI 환경은 이름으로 거부한다 | MS-MPI를 설치하면 |
+| B10 | `ofgpu-validate` Gate 110-B 기록 계산 (VAL-52 준비) | VAL-50 가격 산정에서 backstep 레시피가 그대로는 돌지 않는다. 생성된 케이스의 inlet U가 10 m/s가 아닌 0.518 m/s다 (blockgen의 power-law 프로파일이 y=0, h=1 기준인데 `-extent`가 inlet을 y∈[1,9]에 놓는다). 1400×180은 24스텝(M 0.730), 2800×360은 152스텝(M 0.490)에서 Mach guard로 멈춘다 | VAL-52가 inflow를 입력으로 바로잡은 뒤 |
+| B11 | AUT-05 이후 autonomy selftest | AUT-02a/b/c의 stl_repair 변경 이후 campaign.py, prior.py, baseline.py selftest가 실패한다 (G-1-026이 non-manifold edge 12개로 SURFACE-OPEN이라고 가정). 그 뒤 그룹(replay, hooks, live)은 실행되지 않는다 | 오늘의 repair 결과로 기준을 다시 잡는 작은 fixture 단위 |
 
 ## C. 모델·설계 선택 (권고대로 진행, 검토 대기)
 
@@ -52,6 +61,11 @@
 | C3 | BC-17 | jump 부호 규약 J = ψ(이웃) − ψ(owner). OpenFOAM 소스를 읽지 않으므로 같은 규약인지 확인하지 않았다 | SPEC-LIT 120.2 |
 | C4 | BC-17 | fan/porous flux law는 lagged Picard. 강한 baffle은 §53.2의 implicit 형태가 맞다 | SPEC-LIT 120.2 |
 | C5 | VIO-08 | `.vdb` 바이트가 의도적으로 바뀌었다 (버전 224, bufferCount, 격자 이름). 이전 파일은 실제 OpenVDB에서 빈 격자로 읽혔다. Cartesian SHA 기준은 `69d21f7` 이후로 새로 잡는다 | SPEC-LIT 117.8 |
+| C6 | DST-12 | 건조·탈휘발 동안 d_p 고정. 건조는 §76의 Ranz-Marshall, 응축은 0으로 자른다. h_v(T_p)는 ISL22의 상수 2.25 MJ/kg 대신 Watson 식. 끓음은 대류 부분에 Bird 인자 ln(1+B)/B. 휘발 단계는 m_v ≤ 입자 질량의 1e-6에서 끝난다. C_p 하나, 구간별 속도 동결, 복사는 T_0 주위 선형화 | SPEC-LIT 159.7 |
+| C7 | DST-13 | char 단계에는 blowing 보정이 없다 (f = 1). ISL22 본문이 없어 논문의 처리를 확인하지 못했다 | SPEC-LIT 159.8 |
+| C8 | DST-13 → DST-15 | DST-12의 수분·휘발 누적값은 구간 안의 dm을 더하므로, single에서는 저장된 m_w/m_v의 f32 반올림만큼 질량이 어긋난다. DST-15의 1e-10 질량 게이트를 single에서 맞추려면 char처럼 저장값 차이 규칙이 필요할 수 있다 (DST-12 산술이 바뀜) | SPEC-LIT 159.8 |
+| C9 | TET-09 | `refine.size_factor` 기본값을 sqrt(6)/4에서 0.8로 바꿨다 (sqrt(6)/4에서는 평균 edge/h 0.797, 개수 +134 %로 두 게이트 모두 미달) | SPEC-LIT 116.3, 116.13 |
+| C10 | D-VAL-5 | 1-D oracle에서 Wilcox 2006이 TG0 띠를 모두 닫지 못해 트리거가 발동하지 않았다 (log-law 1.134/1.179 대 1.0, Re_tau 2358 defect −11.8 %). 그래서 VAL-22a/b/c(Wilcox 2006 device·case)를 만들지 않는다. VAL-23은 SST만 기록한다 | SPEC-LIT 143.2 |
 
 ## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
@@ -71,6 +85,12 @@
 - STU-13: 볼록하지 않거나 뒤틀린 셀은 `nearest-centre`로 답한다. snappy 계열 실제 메시에서는 대부분의 셀이 이렇게 답할 수 있다.
 - STU-17: boolean 결과 파일을 덮어써도, 이미 열린 탭은 다시 열 때까지 이전 파일을 보여준다.
 - VAL-70: README와 GUIDEBOOK이 splash 기준을 "실험과 비교하지 않았다"고 적고 있어서 새 MISSES 게이트와 맞지 않는다.
+- VAL-30: JSONC `cartesian` 메시는 축마다 GradedAxis가 하나라서 내부의 앞전 쪽으로 양쪽에서 조밀하게 할 수 없다. 그래서 `cases/flatPlateLaminar.jsonc`는 x 방향이 균일하다. 등급 메시를 JSONC에서 쓰려면 `case_json`(S 레인)에 flat-plate 메시 종류나 축별 segment가 필요하다.
+- TET-08 → TET-12/14: 내부 유동(TET-14 파이프)은 유체 쉘을 안쪽으로 감고 seed가 필요한데, surfprep(TET-05)이 cavity 쉘(V_s < 0)을 거부한다. 쉘을 뒤집거나 그 거부를 풀어야 한다.
+- TET-07a: 매 pass가 Delaunay를 처음부터 다시 만든다 (`Delaunay::insert`가 비공개였다). 큰 표면에서는 증분 삽입이 필요하다. TET-09가 `insert_point`를 열었다.
+- AUT-05: gui 카드 템플릿(`templates.json`)에 R-SNAP 항목이 없어 AUT-05 이후 캠페인 기록에서 `explainGeometry`가 'no template for rule id R-SNAP'를 돌려준다 (G 레인 vitest).
+- VAL-12/VAL-14: README의 validate 집계(1021/1026, 2026-09-27 기준)가 낡았다. Gate 95-A는 행이 3개 늘었고 실패 행은 여전히 4개다. Gate 95-G의 ring 차수 행은 이제 통과한다 (nr 48→96에서 p = 0.926).
+- DST-04: dust_progress가 공유 GPU에서 빌드마다 5~6분 걸린다 (계획 예산 8분). harness의 host 전송을 공유하면 빨라진다.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
