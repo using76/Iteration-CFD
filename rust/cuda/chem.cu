@@ -895,8 +895,13 @@ OFGPU_DEV ofchem chemFitLn(const ofchem* f, ofchem t)
     return f[2] * log(t) + f[3] / t + f[4] / (t * t) + f[5];
 }
 
-//- The FIRST fit with t_lo <= T <= t_hi, -1 when T is outside every
-//  interval - transport.rs's interval choice. n is the fit count. -
+//- The lowest accepted T, K: transport.rs's TRANSPORT_FLOOR_K (SPEC-LIT
+//  133.7 T1, the user's decision of 2026-10-14). -
+#define CHEM_TRANSPORT_FLOOR_K 200.0
+
+//- The FIRST fit with t_lo <= T <= t_hi; else fit 0, extrapolated, when
+//  CHEM_TRANSPORT_FLOOR_K <= T < fit 0's t_lo; else -1 - transport.rs's
+//  interval choice. n is the fit count (the fits ascend, contiguous). -
 OFGPU_DEV int chemFitPick(const ofchem* fits, int n, ofchem t)
 {
     for (int i = 0; i < n; ++i)
@@ -904,6 +909,7 @@ OFGPU_DEV int chemFitPick(const ofchem* fits, int n, ofchem t)
         const ofchem* f = fits + 6 * i;
         if (f[0] <= t && t <= f[1]) return i;
     }
+    if ((ofchem)CHEM_TRANSPORT_FLOOR_K <= t && t < fits[0]) return 0;
     return -1;
 }
 
@@ -913,7 +919,8 @@ OFGPU_DEV int chemFitPick(const ofchem* fits, int n, ofchem t)
 //  SPEC-LIT 133.4, choice for choice and in the host's operation order.
 //  Status, in the host's order of checks: 2 T not finite or not above 0,
 //  3 a mass fraction negative or not finite, 4 no species present, 10 a
-//  present species' T outside its viscosity or conductivity range. A
+//  present species' T outside its viscosity or conductivity accepted
+//  range (chemFitPick, 133.7 T1). A
 //  refused cell writes NaN to its mu and lambda. The sums run over the
 //  present species (y != 0) in index order exactly as the host: den = x_i,
 //  then j != i with y_j != 0, den += x_j phi_ij, then acc += x_i mu_i/den;

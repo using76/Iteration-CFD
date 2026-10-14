@@ -43993,7 +43993,8 @@ worst dT `5.95e-8` K, and 620 of 4096 cells with a different step count.
 The gate runs at **`dt = 1e-6` s**. That is the flow step at which CHR-09's
 Lie split calls this integrator, and the tolerances are unchanged. This was
 decided by recommendation. A gate across ignition inside one step needs a
-derived bound, and that is the user's decision (docs/17 §11).
+derived bound, and that is the user's decision (docs/17 §11). The user
+accepted on 2026-10-14 that the device-host `T` gate runs at `dt = 1e-6` s.
 
 **The test population.** SplitMix64 seed 20261013, per cell `c`, with the
 draws in this order: `φ = 0.6 + 0.8u`, `T0 = 1000 + 1000u`,
@@ -44279,11 +44280,11 @@ are kept as printed.
 **Design choices (ORIGINAL).**
 
 * **T1, the interval.** The first fit in increasing order with `t_lo <= T
-  <= t_hi` is used, so 1000 K takes the lower fit. A `T` outside every
-  interval is refused by name (species, property, `T`, range). There is no
-  extrapolation, so a cell below **300 K** is refused (TM-4513's range),
-  and a case at 293.15 K is refused with it. Extending the range is a model
-  change and the user's decision.
+  <= t_hi` is used, so 1000 K takes the lower fit. Below the first fit's
+  `t_lo`, down to the **200 K** floor (`TRANSPORT_FLOOR_K`), the first fit
+  is used, extrapolated (the paragraph below). A `T` below 200 K or above
+  the last fit's `t_hi` is refused by name (species, property, `T`,
+  range).
 * **T2, the sums.** (133.8) and (133.9) run over the species with `Y_k !=
   0` in index order: `den = X_i`, then `den += X_j φ_ij` (or `ψ_ij`) for
   each present `j != i`, then `acc += X_i q_i / den`. A species with `Y_k =
@@ -44311,6 +44312,16 @@ are kept as printed.
   range; a refused cell writes NaN. `chem.cu` keeps nvcc's default
   contraction (§132.9 D4). The SASS of every existing chemistry kernel is
   unchanged, and only `chem.cubin` changed.
+
+**The 200 K floor (CHR-08b).** TM-4513 Table IV publishes every fit from
+300 K, so CHR-08 refused any cell below 300 K, ambient inlets at 293.15 K
+included. The user chose on 2026-10-14 to move the accepted lower end to
+200 K, on the host (`TRANSPORT_FLOOR_K`) and on the device
+(`CHEM_TRANSPORT_FLOOR_K` in `chemFitPick`) alike. Between 200 and 300 K
+the first fit of eq. (10) is evaluated outside its published range: this
+is an extrapolation of the published fit, and it is not gated. Below
+200 K the refusal is unchanged (host `Err`, device status 10). The upper
+end is unchanged.
 
 **Gates, measured 2026-10-13 (both builds; the host is f64 in both).** The
 reference is Kadoya's eq. (3)/(5) at 0.1 MPa (§100.4's evaluation, constants
