@@ -37220,6 +37220,37 @@ TET-12 runs this path end to end as `ofgpu-automesher` with `kind: "tet"` (`-che
 and writes a summary JSON: tetrahedron and prism counts, the smallest and largest dihedral,
 Steiner counts and timings. The hex configs and their golden hashes (L1a) must not change.
 
+**The emission, as TET-11 builds it** (`tetmesh/emit.rs`). Cell `i` is `tets[i]`. The faces of
+each tetrahedron are visited in cell order through §116.4's outward table, so a triangle's first
+visit is from the lower cell, which owns it and gives it its winding; a second visit makes the
+other cell its neighbour, and a third is refused (`emit/faces`). The internal faces follow in
+strictly ascending `(owner, neighbour)`; the boundary faces follow grouped by patch, in patch
+order, each patch in `(owner, local face)` order. A boundary face takes its patch from the
+caller's list: `carved_boundary` puts a subtriangle on its parent triangle's patch
+(`tri_patch[sub_parent[s]]`) and a hull face on the caller's domain patch, and the carve's faces
+name the optimised boundary because TET-10b keeps it bit for bit (116.21b). A boundary face with
+no patch, a listed face that is not a boundary face, two patches for one face, a point index out
+of range and a tetrahedron without `orient3d > 0` are refused by name. Points that no
+tetrahedron uses are dropped, the rest kept in ascending order. The points emitted are the
+optimiser's (`Optimised.points`), which differ from the recovery's where TET-10b moved them.
+
+*Tree against §116.2.* Since F32-03, `PolyMeshRaw.points` is f64 in both builds (§118.2), so the
+emitter writes the f64 points and is no longer where a point becomes `Scalar`; that happens in
+`types::to_vec3`, the one cast every host consumer uses (docs/17 §5.1.8: the check "moves to the
+f32 cast it guards"). (116.26) therefore rounds each point by `to_vec3` and widens it back by
+`to_dvec3`, both exact apart from the one rounding, and evaluates (116.2) with the exact
+`orient3d` of §116.4. Under `single` it runs before the polyMesh is built, so the cells it names
+are the input's tetrahedron indices, which are the emitted cell numbers. A prism's three-tetrahedron
+arm of (116.26) arrives with the prisms (TET-13b).
+
+*The gate under `single`.* §92.3 is `automesher::quality::check`, which measures the `HostMesh`
+in `Scalar`. Under `--features single` its G2 sums f32-rounded area vectors, and on TET-10b's
+sphere in a box the largest closure is 4.533e-7 against the bar 1e-10, so the gate refuses every
+real tetrahedral mesh in that build (8 468 of 9 309 cells). The f64 build passes. The miss is
+recorded in §116.18 and asserted by `tests/tetmesh_optimise.rs::optimise_then_emit`; the bar is
+unchanged. A cure would evaluate §92.3's sums on the mesh's f64 shadow (`HostGeom64`), which is
+a change to the gate's evaluation, not to this unit.
+
 ### 116.17 Acceptance: Hagen-Poiseuille on tetrahedra and prisms
 
 **Implemented by TET-14.** A laminar pipe of radius `R` and length `L` is meshed with
@@ -37382,6 +37413,12 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-10b | the cube `[-0.5, 0.5]^3` minus the 24-facet cylinder of radius 0.25, at `h = 0.0625`, `H = 0.4`, `g = 1.2` in `[-1.25, 1.25]^3` (71 074 kept tetrahedra) | 66 072 tetrahedra; the smallest dihedral 0.1086 -> 24.0054 degrees, the largest 179.8283 -> 149.9348: PASS; 14 perturbation moves; volume relative 1.64e-14; surface distance 7.85e-17 (5 127 surface points moved) PASS | the TET-10b commit |
 | TET-10b | the 30-degree wedge at `h = 0.1`, the same field and box | **MISSED**: §116.13's refinement does not finish (a cap of 20 000 inserted points after 187 passes; probes at `h = 0.04-0.15` with caps up to 60 000 did not finish either), so the gate cannot be measured; the cause is the 30-degree facet angle at the apex edge in the refinement, not the optimiser. `optimise::tests::dihedral_bounds_wedge` asserts that cause | the TET-10b commit |
 | TET-10b | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 4 tests (TET-10a's 3 and `optimise_dihedral_bounds` on the sphere in a box) pass under `--features single`, and the printed optimise line is byte-identical to the f64 build's | the TET-10b commit |
+| TET-11 | §116.16, changed by this unit | the paragraph "The emission, as TET-11 builds it", with the tree note against §116.2 (points f64 since F32-03; (116.26) rounds through `types::to_vec3`) and "The gate under `single`" | the TET-11 commit |
+| TET-11 | TET-10b's sphere in a box, emitted from `Optimised.points` (2 032 of 2 262 points moved) | 9 309 cells, 17 273 internal and 2 690 boundary faces (1 156 on the sphere, 1 534 on the box), upper-triangular; `build_host_mesh` accepts; §92.3 PASS: max closure 1.224e-15, max non-orthogonality 56.266 degrees (0 past 60), min tau 0.260024, max cond 36.979, 1 region; the cell volumes sum to the optimised volume at relative 3.56e-16 | the TET-11 commit |
+| TET-11 | TET-10b's cube minus a 24-facet cylinder at `h = 0.0625` (14 173 of 14 713 points moved) | 66 072 cells, 125 213 internal and 13 862 boundary faces (11 302 on the part, 2 560 on the box); `build_host_mesh` accepts; §92.3 PASS: max closure 1.326e-15, max non-orthogonality 60.715 degrees (3 past 60), min tau 0.249885, max cond 30.983; volume relative 2.40e-16; emission and gate 0.35 s | the TET-11 commit |
+| TET-11 | the 30-degree wedge | **MISSED** upstream, as TET-10b's: refinement reaches its cap of 20 000 points after 187 passes, so there is no mesh to emit; `emit::tests::gate_passes_wedge` asserts the cause | the TET-11 commit |
+| TET-11 | the flat tetrahedron 1e4 m from the origin (base in `z = 10000`, apex `3 * 2^-13` m above it, legs `2^-7` m) | f64: accepted, (116.26) finds no cell, §92.3 PASS with tau 0.0663 and cond 230.0; `single`: refused, `emit/f32: rounding the points to f32 makes 1 of 1 tetrahedra flat or inverted by (116.26) of SPEC-LIT 116.16: cells 0; ...` | the TET-11 commit |
+| TET-11 | the sphere in a box under `single` | (116.26) finds no cell; §92.3 **MISSED**: G2 fails on 8 468 cells, max closure 4.533e-7 against 1e-10, because `quality::check` sums f32 area vectors; f64 passes | the TET-11 commit |
 
 ### 116.19 References
 
