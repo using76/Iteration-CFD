@@ -6,7 +6,7 @@ import { matchPaths } from '../../assistant/mentions'
 import { useExplorerStore } from '../../state/explorerStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { selectActiveFile, useUiStore, type Tab } from '../../state/uiStore'
-import { actions } from '../../ws/actions'
+import { actions, activeCasePath } from '../../ws/actions'
 import { Icon, type IconName } from '../common/Icon'
 
 interface Item {
@@ -93,6 +93,18 @@ export function CommandPalette() {
       },
       // The server holds the mesh draft: an empty edit makes or fetches it and opens the dialog on it.
       { id: 'c:mesh', group: 'commands', label: t('meshDialog.open'), icon: 'mesh', hint: online ? undefined : t('conn.offline'), run: () => actions.meshDraft({ type: 'open_mesh_dialog' }) },
+      // The Boundary editor reads the open case's table from the server itself.
+      {
+        id: 'c:boundary',
+        group: 'commands',
+        label: t('boundary.open'),
+        icon: 'mesh',
+        hint: activeCasePath() === null ? t('boundary.noCase') : undefined,
+        run: () => {
+          const p = activeCasePath()
+          if (p !== null) s.showBoundaryEditor(p)
+        },
+      },
       { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Alt+N', run: () => actions.newSession() },
       ...(['mesh', 'run', 'postprocess', 'validate', 'export'] as QuickAction[]).map<Item>((a) => ({
         id: `q:${a}`,

@@ -44,6 +44,12 @@ export interface MeshDialogState {
   status: MeshStatus | null
 }
 
+/** The Boundary editor on screen (STU-07b). */
+export interface BoundaryEditorState {
+  path: string
+  rev: number
+}
+
 export interface UiState {
   theme: Theme
   locale: Locale
@@ -79,6 +85,8 @@ export interface UiState {
   metricMode: MetricMode
   /** The Mesh dialog; null when it is closed. Transient: the draft lives on the server. */
   meshDialog: MeshDialogState | null
+  /** The Boundary editor (STU-07b): the case it shows, and a count that makes an open editor read its table again; null when it is closed. Transient. */
+  boundaryEditor: BoundaryEditorState | null
 }
 
 export interface UiActions {
@@ -130,6 +138,9 @@ export interface UiActions {
   closeMeshDialog(): void
   /** Records the server's mesh.status; a start that began a run points the dialog's log at it. */
   setMeshStatus(status: MeshStatus, runId: string | null): void
+  /** Opens the Boundary editor on a case, or has the open one read its table again. */
+  showBoundaryEditor(path: string): void
+  closeBoundaryEditor(): void
 }
 
 export type UiStore = UiState & UiActions
@@ -169,6 +180,7 @@ const INITIAL: UiState = {
   metricSlots: [null, null],
   metricMode: 'metrics',
   meshDialog: null,
+  boundaryEditor: null,
 }
 
 export function fileTabId(path: string): string {
@@ -439,6 +451,12 @@ export const useUiStore = create<UiStore>()(
       },
       setMeshStatus(status, runId) {
         set((s) => (s.meshDialog ? { meshDialog: { ...s.meshDialog, status, runId: runId ?? s.meshDialog.runId } } : {}))
+      },
+      showBoundaryEditor(path) {
+        set((s) => ({ boundaryEditor: { path, rev: (s.boundaryEditor?.rev ?? 0) + 1 } }))
+      },
+      closeBoundaryEditor() {
+        set({ boundaryEditor: null })
       },
     }),
     {

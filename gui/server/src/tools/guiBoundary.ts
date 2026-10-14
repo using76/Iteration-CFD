@@ -12,12 +12,19 @@
 // has that rule edited key by key; any other patch gets a rule of its own,
 // inserted just before the rule that governs it today and copied from it, so
 // no other patch changes the rule it resolves to.
+//
+// The studio's Boundary editor (STU-07b) reads this module's table (GET
+// /api/case/boundary: a .jsonc case's patches, or a foam case directory's,
+// read-only) and posts its edits through setPatchAt (POST /api/case/patch),
+// the same plan and case_edit as gui_control's set_patch.
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
-import { isJsonCase, UiCommandSchema, type PatchBc, type PatchField, type PatchPresetId, type UiCommand } from '@cfd/shared'
+import path from 'node:path'
+import { isJsonCase, PATCH_FIELDS, PATCH_PRESET_IDS, UiCommandSchema, type BoundaryCondition, type BoundaryPatchRow, type BoundaryTable, type PatchBc, type PatchField, type PatchPresetId, type UiCommand } from '@cfd/shared'
 import { parseJsonc } from '../formats/casejsonc.js'
+import { parseBoundaryText } from '../formats/polymesh.js'
 import { caseEdit, isToolResult, previewCaseEdit, type CaseEdit, type CaseEditInput } from './case.js'
-import { fail, type ToolContext, type ToolResult } from './context.js'
+import { fail, okResult, type ToolContext, type ToolResult } from './context.js'
 import { resolveTool } from './paths.js'
 import { refuseCaseEdit } from './writeGuards.js'
 
@@ -111,6 +118,32 @@ function patchFaces(mesh: Json, name: string): BoxFace[] {
   return [...faces]
 }
 
+/** The index of the patch's own rule (`match` is its name, bare or anchored); -1 when it has none. */
+function ownRuleIndex(rules: unknown[], name: string): number {
+  return rules.findIndex((r) => isObj(r) && (r.match === name || r.match === `^${escapeRegex(name)}$`))
+}
+
+/** A patch that is half of a mesh.cyclic pair: the pair decides its type and conditions. */
+function isCyclicHalf(mesh: Json, name: string): boolean {
+  return Array.isArray(mesh.cyclic) && mesh.cyclic.some((c) => isObj(c) && (c.a === name || c.b === name))
+}
+
+/** Why this mesh does not let the patch take that format kind (PATCH_KIND's message), or null when it does. */
+function kindRefusal(mesh: Json, name: string, kind: string, relPath: string): string | null {
+  const faces = patchFaces(mesh, name)
+  const wedgeMesh = mesh.wedge != null
+  const onWedgeSide = faces.some((f) => f === 'ymin' || f === 'ymax')
+  if (kind === 'wedge' && !wedgeMesh) return `wedge needs a wedge mesh (mesh.wedge); ${relPath} has none`
+  if (kind === 'wedge' && !faces.every((f) => f === 'ymin' || f === 'ymax')) return `wedge is only the ymin/ymax sides of a wedge mesh; "${name}" is on ${faces.join(', ')}`
+  if (kind !== 'wedge' && wedgeMesh && onWedgeSide) return `"${name}" is a wedge side (ymin/ymax of a wedge mesh) and stays wedge`
+  if (kind === 'empty') {
+    const cells = Array.isArray(mesh.cells) ? mesh.cells : []
+    const wide = faces.filter((f) => cells[AXIS_OF[f]] !== 1)
+    if (wide.length) return `empty is only a side one cell across; "${name}" is on ${wide.join(', ')}, whose axis has ${String(cells[AXIS_OF[wide[0]]])} cells`
+  }
+  return null
+}
+
 /** One field's condition checked against the types that field takes, reduced to the members the schema allows. */
 function checkCondition(field: PatchField, bc: PatchBc): { bc: Json } | { error: string } {
   const table = BC_TABLE[field]
@@ -153,7 +186,7 @@ export function planSetPatch(cmd: SetPatchCmd, text: string, relPath: string): S
     return refusal('NO_PATCH', `${relPath} has no patch "${name}"; its patches are: ${names.length ? names.join(', ') : '(none: the case has no mesh.boundaries)'}`, { patches: names })
   }
   const mesh = json.mesh as Json
-  if (Array.isArray(mesh.cyclic) && mesh.cyclic.some((c) => isObj(c) && (c.a === name || c.b === name))) {
+  if (isCyclicHalf(mesh, name)) {
     return refusal('PATCH_KIND', `patch "${name}" is half of a cyclic pair (mesh.cyclic); the pair decides its type and conditions`)
   }
 
@@ -168,7 +201,7 @@ export function planSetPatch(cmd: SetPatchCmd, text: string, relPath: string): S
   }
 
   const rules: unknown[] | null = Array.isArray(json.patches) ? json.patches : null
-  const own = rules ? rules.findIndex((r) => isObj(r) && (r.match === name || r.match === `^${escapeRegex(name)}$`)) : -1
+  const own = rules ? ownRuleIndex(rules, name) : -1
   const governing = rules ? rules.findIndex((r) => ruleMatches(r, name)) : -1
 
   if (cmd.reset === true) {
@@ -186,17 +219,8 @@ export function planSetPatch(cmd: SetPatchCmd, text: string, relPath: string): S
   if (kind === null) return refusal('PATCH_FIELD', `patch "${name}" has no rule yet, so its ${cmd.field} condition has no type to belong to: give a kind too`)
 
   if (cmd.kind != null) {
-    const faces = patchFaces(mesh, name)
-    const wedgeMesh = mesh.wedge != null
-    const onWedgeSide = faces.some((f) => f === 'ymin' || f === 'ymax')
-    if (kind === 'wedge' && !wedgeMesh) return refusal('PATCH_KIND', `wedge needs a wedge mesh (mesh.wedge); ${relPath} has none`)
-    if (kind === 'wedge' && !faces.every((f) => f === 'ymin' || f === 'ymax')) return refusal('PATCH_KIND', `wedge is only the ymin/ymax sides of a wedge mesh; "${name}" is on ${faces.join(', ')}`)
-    if (kind !== 'wedge' && wedgeMesh && onWedgeSide) return refusal('PATCH_KIND', `"${name}" is a wedge side (ymin/ymax of a wedge mesh) and stays wedge`)
-    if (kind === 'empty') {
-      const cells = Array.isArray(mesh.cells) ? mesh.cells : []
-      const wide = faces.filter((f) => cells[AXIS_OF[f]] !== 1)
-      if (wide.length) return refusal('PATCH_KIND', `empty is only a side one cell across; "${name}" is on ${wide.join(', ')}, whose axis has ${String(cells[AXIS_OF[wide[0]]])} cells`)
-    }
+    const why = kindRefusal(mesh, name, kind, relPath)
+    if (why !== null) return refusal('PATCH_KIND', why)
   }
   if (CONSTRAINT_KINDS.has(kind) && cmd.field != null) {
     return refusal('PATCH_FIELD', `a ${kind} patch takes no per-field condition (the constraint decides every field); ${cmd.field} cannot be set on "${name}"`)
@@ -263,14 +287,19 @@ export function planSetPatch(cmd: SetPatchCmd, text: string, relPath: string): S
   return { input: { path: relPath, edits: [{ pointer: `/patches/${at}`, op: 'insert', valueJson: JSON.stringify(rule) }], dryRun: false }, rule: at, inserted: true, shadowedBy: null }
 }
 
-/** The case on screen, resolved as case_edit resolves its path. */
-function screenCasePath(ctx: ToolContext): { rel: string; abs: string } | { refusal: ToolResult } {
-  const p = ctx.hub.getUiState(ctx.sessionId)?.case?.path ?? null
-  if (p === null) return { refusal: fail('NO_CASE', 'no case is open on the screen (gui_state case is null); open_case first, then set_patch') }
+/** A workspace .jsonc case, resolved as case_edit resolves its path. */
+function caseAt(p: string, ctx: ToolContext): { rel: string; abs: string } | { refusal: ToolResult } {
   const r = resolveTool(ctx.workspaceRoot, p, { mustExist: true })
   if (!r.ok) return { refusal: r.result }
   if (!isJsonCase(r.path.rel)) return { refusal: fail('NOT_A_CASE', `${r.path.rel} is not a .jsonc case`) }
   return { rel: r.path.rel, abs: r.path.abs }
+}
+
+/** The case on screen, resolved as case_edit resolves its path. */
+function screenCasePath(ctx: ToolContext): { rel: string; abs: string } | { refusal: ToolResult } {
+  const p = ctx.hub.getUiState(ctx.sessionId)?.case?.path ?? null
+  if (p === null) return { refusal: fail('NO_CASE', 'no case is open on the screen (gui_state case is null); open_case first, then set_patch') }
+  return caseAt(p, ctx)
 }
 
 function planFor(cmd: SetPatchCmd, text: string, rel: string): SetPatchPlan | { refusal: ToolResult } {
@@ -303,6 +332,17 @@ export function setPatchRefusal(raw: unknown, ctx?: ToolContext): ToolResult | n
 export async function guiSetPatch(cmd: SetPatchCmd, ctx: ToolContext): Promise<ToolResult> {
   const at = screenCasePath(ctx)
   if ('refusal' in at) return at.refusal
+  return applySetPatch(cmd, at, ctx)
+}
+
+/** The Boundary editor's set_patch (POST /api/case/patch): the same plan and case_edit as gui_control's, on the case the editor shows. */
+export async function setPatchAt(cmd: SetPatchCmd, casePath: string, ctx: ToolContext): Promise<ToolResult> {
+  const at = caseAt(casePath, ctx)
+  if ('refusal' in at) return at.refusal
+  return applySetPatch(cmd, at, ctx)
+}
+
+async function applySetPatch(cmd: SetPatchCmd, at: { rel: string; abs: string }, ctx: ToolContext): Promise<ToolResult> {
   const plan = planFor(cmd, await fsp.readFile(at.abs, 'utf8'), at.rel)
   if ('refusal' in plan) return plan.refusal
   const res = await caseEdit.run(plan.input, ctx)
@@ -320,5 +360,211 @@ export async function guiBoundaryPreview(cmd: UiCommand, ctx: ToolContext): Prom
   const p = await previewCaseEdit(ctx.workspaceRoot, plan.input)
   if (isToolResult(p)) return p.error?.message ?? null
   return p.errors.length ? p.errors.join('\n') : p.diff || '(no change)'
+}
+
+// ---- the Boundary editor's table (STU-07b) ----------------------------------
+
+/** The editor preset a rule's kind and conditions are, when one is. A wall
+ *  that moves (U other than fixedValue [0, 0, 0]) is no preset; slip-wall and
+ *  symmetry write the same kind, which reads back as symmetry. */
+export function presetOf(kind: string | null, rule: Json | null): PatchPresetId | null {
+  switch (kind) {
+    case 'inlet':
+      return 'velocity-inlet'
+    case 'open':
+      return 'pressure-outlet'
+    case 'symmetry':
+      return 'symmetry'
+    case 'empty':
+      return 'empty'
+    case 'wedge':
+      return 'wedge'
+    case 'wall': {
+      const u = rule && isObj(rule.U) ? rule.U : null
+      const still = u === null || (u.type === 'fixedValue' && Array.isArray(u.value) && u.value.length === 3 && u.value.every((x) => x === 0))
+      if (!still) return null
+      const t = rule && isObj(rule.T) ? rule.T.type : null
+      return t === 'fixedValue' ? 'fixed-temperature-wall' : t === 'fixedFluxTemperature' ? 'heat-flux-wall' : 'no-slip-wall'
+    }
+    default:
+      return null
+  }
+}
+
+/** The field columns: PATCH_FIELDS order first, then any other name sorted. */
+function orderFields(names: Iterable<string>): string[] {
+  const set = new Set(names)
+  const known = PATCH_FIELDS.filter((f) => set.has(f))
+  const rest = [...set].filter((f) => !(PATCH_FIELDS as readonly string[]).includes(f)).sort()
+  return [...known, ...rest]
+}
+
+/** A .jsonc case's Boundary editor table: every patch name, the rule that governs it (first match wins), its kind, preset and conditions, and the presets set_patch accepts for it.
+ *  When the case is meshed, `meshed` is its polyMesh boundary: each patch gets its face count, and a mesh patch the case does not name is listed after them with no presets (set_patch would refuse it NO_PATCH). Pure. */
+export function boundaryTable(json: unknown, relPath: string, meshed: { dir: string; patches: Array<{ name: string; nFaces: number }> } | null = null): BoundaryTable {
+  const obj: Json = isObj(json) ? json : {}
+  const mesh: Json = isObj(obj.mesh) ? obj.mesh : {}
+  const rules: unknown[] = Array.isArray(obj.patches) ? obj.patches : []
+  const named = casePatchNames(obj)
+  const extra = meshed ? meshed.patches.map((p) => p.name).filter((n) => !named.includes(n)) : []
+  const patches: BoundaryPatchRow[] = [...named, ...extra].map((name) => {
+    const own = ownRuleIndex(rules, name)
+    const governing = rules.findIndex((r) => ruleMatches(r, name))
+    const g = governing >= 0 ? (rules[governing] as Json) : null
+    const kind = g && typeof g.kind === 'string' ? g.kind : null
+    const fields: Record<string, BoundaryCondition> = {}
+    if (g) for (const f of PATCH_FIELDS) if (isObj(g[f]) && typeof (g[f] as Json).type === 'string') fields[f] = g[f] as unknown as BoundaryCondition
+    const presets = !named.includes(name) || isCyclicHalf(mesh, name) ? [] : PATCH_PRESET_IDS.filter((p) => kindRefusal(mesh, name, PRESET_KIND[p], relPath) === null)
+    const nFaces = meshed?.patches.find((p) => p.name === name)?.nFaces ?? null
+    return { name, faces: patchFaces(mesh, name), nFaces, kind, preset: presetOf(kind, g), rule: governing >= 0 ? governing : null, ownRule: own >= 0 ? own : null, match: g ? String(g.match) : null, fields, presets }
+  })
+  const used = new Set<string>(['U', 'p'])
+  if (isObj(obj.initial) && obj.initial.T != null) used.add('T')
+  for (const r of patches) for (const f of Object.keys(r.fields)) used.add(f)
+  return { path: relPath, format: 'jsonc', editable: true, meshDir: meshed?.dir ?? null, fields: orderFields(used), patches }
+}
+
+type FoamEntry = { key: string; quoted: boolean; body: string }
+
+/** A foam field file's boundaryField entries, comments stripped; null when it has none. */
+export function boundaryFieldEntries(text: string): FoamEntry[] | null {
+  const s = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+  const m = /\bboundaryField\s*\{/.exec(s)
+  if (!m) return null
+  const out: FoamEntry[] = []
+  let i = m.index + m[0].length
+  const skipSpace = () => {
+    while (i < s.length && /\s/.test(s[i])) i++
+  }
+  for (;;) {
+    skipSpace()
+    if (i >= s.length || s[i] === '}') return out
+    let key: string
+    let quoted = false
+    if (s[i] === '"') {
+      const end = s.indexOf('"', i + 1)
+      if (end < 0) return out
+      key = s.slice(i + 1, end)
+      quoted = true
+      i = end + 1
+    } else {
+      const k = /^[^\s{};]+/.exec(s.slice(i, i + 256))
+      if (!k) {
+        i++
+        continue
+      }
+      key = k[0]
+      i += key.length
+    }
+    skipSpace()
+    if (s[i] !== '{') {
+      // A directive (#includeEtc "...") ends at its line's end, `key value;` at its semicolon.
+      const end = key.startsWith('#') ? s.indexOf('\n', i) : s.indexOf(';', i)
+      i = end < 0 ? s.length : end + 1
+      continue
+    }
+    let depth = 0
+    const start = i + 1
+    for (; i < s.length; i++) {
+      if (s[i] === '{') depth++
+      else if (s[i] === '}' && --depth === 0) break
+    }
+    out.push({ key, quoted, body: s.slice(start, i) })
+    i++
+  }
+}
+
+/** Raw entry text, cut to a readable length (a nonuniform list can run to megabytes). */
+const FOAM_VALUE_MAX = 60
+function entryText(body: string, key: string): string | undefined {
+  const m = new RegExp(`(?:^|[\\s;])${key}\\s+([^;]+);`).exec(body)
+  if (!m) return undefined
+  const v = m[1].trim().replace(/\s+/g, ' ')
+  return v.length > FOAM_VALUE_MAX ? `${v.slice(0, FOAM_VALUE_MAX)}…` : v
+}
+
+/** A patch's condition in one foam field: the entry named for it, else the last quoted pattern that matches the whole name. */
+function foamCondition(entries: FoamEntry[], name: string): BoundaryCondition | null {
+  let e = entries.find((x) => x.key === name)
+  if (!e) {
+    for (const x of entries) {
+      if (!x.quoted) continue
+      try {
+        if (new RegExp(`^(?:${x.key})$`).test(name)) e = x
+      } catch {
+        // a pattern JS refuses matches nothing here
+      }
+    }
+  }
+  if (!e) return null
+  const type = entryText(e.body, 'type')
+  if (type === undefined) return null
+  const c: BoundaryCondition = { type }
+  const value = entryText(e.body, 'value')
+  if (value !== undefined) c.value = value
+  const inletValue = entryText(e.body, 'inletValue')
+  if (inletValue !== undefined) c.inletValue = inletValue
+  return c
+}
+
+/** A foam case directory's table: the polyMesh patches with their types and face counts, and each 0/ field's condition on them. Read-only: set_patch edits .jsonc cases. Pure. */
+export function foamBoundaryTable(relPath: string, boundaryText: string, fieldTexts: Record<string, string>): BoundaryTable {
+  const entries: Record<string, FoamEntry[]> = {}
+  for (const [f, text] of Object.entries(fieldTexts)) {
+    const e = boundaryFieldEntries(text)
+    if (e) entries[f] = e
+  }
+  const fields = orderFields(Object.keys(entries))
+  const patches: BoundaryPatchRow[] = parseBoundaryText(boundaryText).map((p) => {
+    const conds: Record<string, BoundaryCondition> = {}
+    for (const f of fields) {
+      const c = foamCondition(entries[f], p.name)
+      if (c) conds[f] = c
+    }
+    return { name: p.name, faces: [], nFaces: p.nFaces, kind: p.type, preset: null, rule: null, ownRule: null, match: null, fields: conds, presets: [] }
+  })
+  return { path: relPath, format: 'foamDir', editable: false, meshDir: relPath, fields, patches }
+}
+
+/** A 0/ field file larger than this is not read for the table. */
+const FOAM_FIELD_MAX_BYTES = 64 * 1024 * 1024
+
+/** GET /api/case/boundary: the table for a .jsonc case, or for a foam case directory from constant/polyMesh/boundary and 0/. */
+export async function readBoundaryTable(casePath: string, ctx: ToolContext): Promise<ToolResult> {
+  const r = resolveTool(ctx.workspaceRoot, casePath, { mustExist: true })
+  if (!r.ok) return r.result
+  const { rel, abs } = r.path
+  if ((await fsp.stat(abs)).isDirectory()) {
+    let boundary: string
+    try {
+      boundary = await fsp.readFile(path.join(abs, 'constant', 'polyMesh', 'boundary'), 'utf8')
+    } catch {
+      return fail('NO_MESH', `${rel} has no constant/polyMesh/boundary: generate the mesh first`)
+    }
+    const texts: Record<string, string> = {}
+    const zero = path.join(abs, '0')
+    for (const n of await fsp.readdir(zero).catch(() => [] as string[])) {
+      const st = await fsp.stat(path.join(zero, n)).catch(() => null)
+      if (st?.isFile() && st.size <= FOAM_FIELD_MAX_BYTES) texts[n] = await fsp.readFile(path.join(zero, n), 'utf8')
+    }
+    try {
+      return okResult(foamBoundaryTable(rel, boundary, texts))
+    } catch (err) {
+      return fail('INVALID', `${rel}/constant/polyMesh/boundary does not parse: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  if (!isJsonCase(rel)) return fail('NOT_A_CASE', `${rel} is neither a .jsonc case nor a case directory`)
+  const { json, errors } = parseJsonc(await fsp.readFile(abs, 'utf8'))
+  if (errors.length || !isObj(json)) return fail('INVALID', `${rel} does not parse as JSONC (${errors[0]?.message ?? 'not an object'})`)
+  // Meshed: the polyMesh the case's mesh is written into (datasets.discover resolves a JSONC case to it).
+  let meshed: { dir: string; patches: Array<{ name: string; nFaces: number }> } | null = null
+  try {
+    const root = (await ctx.datasets.discover(rel)).root
+    const text = await fsp.readFile(path.join(ctx.workspaceRoot, root, 'constant', 'polyMesh', 'boundary'), 'utf8')
+    meshed = { dir: root, patches: parseBoundaryText(text).map((p) => ({ name: p.name, nFaces: p.nFaces })) }
+  } catch {
+    meshed = null // not meshed yet, or a mesh that does not parse: the case's own names
+  }
+  return okResult(boundaryTable(json, rel, meshed))
 }
 

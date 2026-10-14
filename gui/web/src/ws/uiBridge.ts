@@ -563,6 +563,13 @@ export function createUiBridge(deps: UiBridgeDeps) {
         return unsupported(cmd.type, 'gui_control applies this on the server through mesh_generate / mesh_regions; this window should not receive it')
       case 'set_patch':
         return unsupported(cmd.type, 'gui_control applies this on the server through case_edit; this window should not receive it')
+      case 'open_boundary_editor': {
+        // The editor reads the case's table itself (GET /api/case/boundary); an open one reads it again.
+        const path = activeCasePath()
+        if (path === null) return { ok: false, error: 'NO_CASE (open_boundary_editor): no case is open; open_case first' }
+        u.showBoundaryEditor(path)
+        return { ok: true }
+      }
       case 'open_mesh_dialog':
         // The server keeps the draft (guiMesh.ts); the dialog shows what it sent.
         u.showMeshDialog(meshDraftOf(cmd, u.meshDialog?.draft ?? null))

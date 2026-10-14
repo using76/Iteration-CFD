@@ -141,6 +141,25 @@ describe('api routes', () => {
     expect((await postJson(`${base}/api/case/validate`, { path: 'README.md', content: '' })).status).toBe(400)
   })
 
+  it("serves the Boundary editor's table and applies its set_patch (STU-07b)", async () => {
+    const disk = fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')
+    fs.writeFileSync(path.join(ws.root, 'cases', 'bnd.jsonc'), disk)
+    const table = await json('/api/case/boundary?path=cases/bnd.jsonc')
+    expect(table.format).toBe('jsonc')
+    expect(table.patches.map((r: { name: string }) => r.name)).toEqual(['wallXMin', 'outlet', 'wallYMin', 'wallYMax', 'floor', 'ceiling', 'inlet'])
+    expect((await get('/api/case/boundary')).status).toBe(400)
+    const res = await postJson(`${base}/api/case/patch`, { path: 'cases/bnd.jsonc', edit: { type: 'set_patch', patch: 'outlet', kind: 'no-slip-wall' } })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as Loose).applied).toBe(true)
+    expect(fs.readFileSync(path.join(ws.root, 'cases', 'bnd.jsonc'), 'utf8')).not.toBe(disk)
+    expect(broadcasts.some((m) => m.t === 'fs.changed' && m.paths.includes('cases/bnd.jsonc'))).toBe(true)
+    expect((await json('/api/case/boundary?path=cases/bnd.jsonc')).patches[1]).toMatchObject({ name: 'outlet', kind: 'wall', preset: 'no-slip-wall' })
+    const refused = await postJson(`${base}/api/case/patch`, { path: 'cases/bnd.jsonc', edit: { type: 'set_patch', patch: 'nozzle', kind: 'no-slip-wall' } })
+    expect(refused.status).toBe(400)
+    expect(((await refused.json()) as Loose).code).toBe('NO_PATCH')
+    expect((await postJson(`${base}/api/case/patch`, { path: 'cases/bnd.jsonc', edit: { type: 'fit_view' } })).status).toBe(400)
+  })
+
   it('exposes runs, logs, residuals and stop', async () => {
     expect((await json('/api/runs')).map((r: { id: string }) => r.id)).toEqual(['r_1'])
     expect((await json('/api/runs/r_1')).status).toBe('done')

@@ -1,6 +1,6 @@
 // Thin fetch wrappers over the REST routes in shared/protocol.ts.
-import { REST, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type GeometryOpenResponse, type GeometrySaveRequest, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
-import type { BinarySpec, MeshPreset, ModelSpec } from '@cfd/shared'
+import { REST, type BoundaryTable, type FsFileResponse, type FsSearchHit, type FsTreeNode, type GeometryInfo, type GeometryOpenResponse, type GeometrySaveRequest, type LlmSettingsPatch, type LlmStateView, type RunInfo, type SessionState, type SessionSummary } from '@cfd/shared'
+import type { BinarySpec, MeshPreset, ModelSpec, UiCommand } from '@cfd/shared'
 
 export class ApiError extends Error {
   constructor(
@@ -73,6 +73,20 @@ export interface CaseBufferReport {
   warnings: Array<{ pointer: string; message: string }>
 }
 
+/** Reply of POST /api/case/patch: case_edit's answer for the planned edit. */
+export interface CasePatchReply {
+  path: string
+  applied: boolean
+  unchanged?: boolean
+  diff: string
+  valid: boolean
+  errors: Array<{ pointer: string; message: string }>
+  patch: string
+  rule: number
+  inserted: boolean
+  warning?: string
+}
+
 /** Reply of POST /api/geometry/edit (geom_tool edit): no id — re-import `path`. */
 export interface GeometryEditResponse {
   path: string
@@ -87,6 +101,10 @@ export const api = {
   readFile: (path: string) => request<FsFileResponse>('GET', withQuery(REST.fsFile, { path })),
   writeFile: (path: string, content: string, baseHash: string | null) => request<FsFileResponse>('PUT', REST.fsFile, { path, content, baseHash }),
   validateCase: (path: string, content: string) => request<CaseBufferReport>('POST', REST.caseValidate, { path, content }),
+  /** The Boundary editor's table for a .jsonc case or a foam case directory (STU-07b). */
+  caseBoundary: (path: string) => request<BoundaryTable>('GET', withQuery(REST.caseBoundary, { path })),
+  /** One set_patch on that case, applied as gui_control's set_patch is; the reply is case_edit's (its diff). */
+  casePatch: (path: string, edit: Extract<UiCommand, { type: 'set_patch' }>) => request<CasePatchReply>('POST', REST.casePatch, { path, edit }),
   search: (q: string, opts: { glob?: string | null; regex?: boolean; caseSensitive?: boolean; max?: number } = {}) =>
     request<SearchResponse>('GET', withQuery(REST.fsSearch, { q, glob: opts.glob ?? null, regex: opts.regex ? 1 : null, case: opts.caseSensitive ? 1 : null, max: opts.max ?? 300 })),
   gitStatus: () => request<GitStatusResponse>('GET', REST.gitStatus),

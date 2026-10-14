@@ -22,7 +22,7 @@ import { fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type FakeHub, type Temp
 import { makeDeps, toolResultsOf, until } from '../agent/test-util.js'
 import type { ToolContext } from './context.js'
 import { guiControl } from './gui.js'
-import { casePatchNames, guiBoundaryDelegate, planSetPatch } from './guiBoundary.js'
+import { boundaryFieldEntries, boundaryTable, casePatchNames, guiBoundaryDelegate, planSetPatch, readBoundaryTable, setPatchAt } from './guiBoundary.js'
 import { runTool } from './index.js'
 
 type SetPatch = Extract<UiCommand, { type: 'set_patch' }>
@@ -245,6 +245,118 @@ describe('set_patch approval', () => {
     expect(results).toHaveLength(1)
     expect(results[0].is_error).toBe(false)
     expect(rulesOf(await fsp.readFile(abs, 'utf8'))[1]).toEqual({ match: 'outlet', kind: 'wall', U: { type: 'fixedValue', value: [0, 0, 0] } })
+  })
+})
+
+// STU-07b: the studio's Boundary editor reads this table and writes through setPatchAt.
+describe('the Boundary editor table and its set_patch', () => {
+  const ALL8 = ['velocity-inlet', 'pressure-outlet', 'no-slip-wall', 'fixed-temperature-wall', 'heat-flux-wall', 'slip-wall', 'symmetry', 'empty']
+
+  it("plume's table: every patch, the rule that governs it, its kind, preset and conditions", () => {
+    const t = boundaryTable(parse(plumeText, [], { allowTrailingComma: true }), 'cases/plume.jsonc')
+    expect(t).toMatchObject({ path: 'cases/plume.jsonc', format: 'jsonc', editable: true, fields: ['U', 'p', 'T', 'k', 'epsilon', 'omega', 'nut'] })
+    expect(t.patches.map((r) => r.name)).toEqual(PLUME_PATCHES)
+    const row = (n: string) => t.patches.find((r) => r.name === n)!
+    expect(row('outlet')).toMatchObject({ faces: ['xmax'], rule: 1, ownRule: 1, match: 'outlet', kind: 'open', preset: 'pressure-outlet' })
+    expect(row('outlet').fields.U).toEqual({ type: 'inletOutlet', inletValue: [0, 0, 0] })
+    expect(row('ceiling')).toMatchObject({ faces: ['zmax'], rule: 2, ownRule: null, match: '.*', kind: 'wall', preset: 'no-slip-wall' })
+    expect(row('inlet')).toMatchObject({ faces: ['zmin'], rule: 0, ownRule: 0, kind: 'inlet', preset: 'velocity-inlet' })
+    expect(row('inlet').fields.T).toEqual({ type: 'fixedValue', value: 1173.15 })
+    // 98 x 42 x 20 cells and no mesh.wedge: no side takes empty or wedge.
+    for (const r of t.patches) expect(r.presets, r.name).toEqual(ALL8.filter((p) => p !== 'empty'))
+  })
+
+  it('a wedge side offers only wedge, a one-cell side offers empty, a cyclic half nothing', () => {
+    const json = {
+      mesh: { cells: [8, 1, 4], wedge: { angle: 5 }, boundaries: { xmin: 'axis', xmax: 'rim', ymin: 'front', ymax: 'back', zmin: 'lo', zmax: 'hi' }, cyclic: [{ a: 'lo', b: 'hi' }] },
+      patches: [{ match: 'front|back', kind: 'wedge' }, { match: 'rim', kind: 'wall', U: { type: 'fixedValue', value: [1, 0, 0] }, T: { type: 'fixedFluxTemperature', q: 50 } }],
+    }
+    const t = boundaryTable(json, 'cases/w.jsonc')
+    const row = (n: string) => t.patches.find((r) => r.name === n)!
+    expect(row('front')).toMatchObject({ presets: ['wedge'], kind: 'wedge', preset: 'wedge', rule: 0, ownRule: null })
+    expect(row('lo').presets).toEqual([])
+    expect(row('axis').presets).toEqual(ALL8.filter((p) => p !== 'empty'))
+    // A moving wall is no preset; its heat flux shows as its condition.
+    expect(row('rim')).toMatchObject({ kind: 'wall', preset: null })
+    expect(t.fields).toEqual(['U', 'p', 'T'])
+    const flat = boundaryTable({ mesh: { cells: [8, 8, 1], boundaries: { zmin: 'frontAndBack', zmax: 'frontAndBack' } } }, 'cases/f.jsonc')
+    expect(flat.patches).toHaveLength(1)
+    expect(flat.patches[0]).toMatchObject({ name: 'frontAndBack', faces: ['zmin', 'zmax'], rule: null, kind: null, preset: null, fields: {}, presets: ALL8 })
+  })
+
+  it("the editor's set_patch writes byte for byte what gui_control's set_patch writes, with the same diff", async () => {
+    const cmds = [
+      setPatch({ patch: 'outlet', kind: 'no-slip-wall' }),
+      setPatch({ patch: 'ceiling', kind: 'fixed-temperature-wall', field: 'T', value: 350 }),
+      setPatch({ patch: 'inlet', field: 'U', value: [0, 0, 3] }),
+      setPatch({ patch: 'inlet', reset: true }),
+    ]
+    for (const [i, cmd] of cmds.entries()) {
+      const viaGui = await openCopy(`g${i}`)
+      const viaEditor = await openCopy(`e${i}`)
+      const a = await runTool('gui_control', cmd, viaGui.c)
+      const b = await setPatchAt(cmd, viaEditor.rel, viaEditor.c)
+      expect(a.ok && b.ok, JSON.stringify(cmd)).toBe(true)
+      const da = String((a.data as { diff: string }).diff)
+      const db = String((b.data as { diff: string }).diff)
+      expect(db.replaceAll(viaEditor.rel, 'X')).toBe(da.replaceAll(viaGui.rel, 'X'))
+      expect(da.length).toBeGreaterThan(0)
+      const fa = await fsp.readFile(viaGui.abs, 'utf8')
+      expect(await fsp.readFile(viaEditor.abs, 'utf8')).toBe(fa)
+      expect(fa).not.toBe(plumeText)
+      expect(b.data).toMatchObject({ command: 'set_patch', patch: cmd.patch, applied: true })
+    }
+    // A refusal is the same refusal, and nothing is written.
+    const e = await openCopy('e9')
+    const r = await setPatchAt(setPatch({ patch: 'nozzle', kind: 'no-slip-wall' }), e.rel, e.c)
+    expect(r.ok).toBe(false)
+    expect(r.error?.code).toBe('NO_PATCH')
+    expect(await fsp.readFile(e.abs, 'utf8')).toBe(plumeText)
+    await fsp.writeFile(path.join(ws.root, 'notes.txt'), 'not a case', 'utf8')
+    expect((await setPatchAt(setPatch({ patch: 'outlet', kind: 'no-slip-wall' }), 'notes.txt', e.c)).error?.code).toBe('NOT_A_CASE')
+  })
+
+  it('a foam case directory lists its polyMesh patches and each 0/ field condition, read-only', async () => {
+    const dir = path.join(ws.root, 'cases', 'foamB')
+    await fsp.mkdir(path.join(dir, 'constant', 'polyMesh'), { recursive: true })
+    await fsp.mkdir(path.join(dir, '0'), { recursive: true })
+    const head = (cls: string, obj: string) => `FoamFile\n{\n    version 2.0;\n    format ascii;\n    class ${cls};\n    object ${obj};\n}\n`
+    await fsp.writeFile(path.join(dir, 'constant', 'polyMesh', 'boundary'), `${head('polyBoundaryMesh', 'boundary')}2\n(\n    inlet\n    {\n        type patch;\n        nFaces 4;\n        startFace 10;\n    }\n    walls\n    {\n        type wall;\n        nFaces 12;\n        startFace 14;\n    }\n)\n`)
+    await fsp.writeFile(path.join(dir, '0', 'U'), `${head('volVectorField', 'U')}internalField uniform (0 0 0);\n/* a comment { */\nboundaryField\n{\n    inlet\n    {\n        type fixedValue;\n        value uniform (0 0 2); // m/s\n    }\n    ".*"\n    {\n        type noSlip;\n    }\n}\n`)
+    await fsp.writeFile(path.join(dir, '0', 'p'), `${head('volScalarField', 'p')}boundaryField\n{\n    #includeEtc "caseDicts/setConstraintTypes"\n    "(inlet|walls)"\n    {\n        type zeroGradient;\n    }\n}\n`)
+    const c = (await openCopy('unused')).c
+    const r = await readBoundaryTable('cases/foamB', c)
+    expect(r.ok).toBe(true)
+    expect(r.data).toEqual({
+      path: 'cases/foamB',
+      format: 'foamDir',
+      editable: false,
+      meshDir: 'cases/foamB',
+      fields: ['U', 'p'],
+      patches: [
+        { name: 'inlet', faces: [], nFaces: 4, kind: 'patch', preset: null, rule: null, ownRule: null, match: null, fields: { U: { type: 'fixedValue', value: 'uniform (0 0 2)' }, p: { type: 'zeroGradient' } }, presets: [] },
+        { name: 'walls', faces: [], nFaces: 12, kind: 'wall', preset: null, rule: null, ownRule: null, match: null, fields: { U: { type: 'noSlip' }, p: { type: 'zeroGradient' } }, presets: [] },
+      ],
+    })
+    expect(boundaryFieldEntries('internalField uniform 0;')).toBeNull()
+    await fsp.mkdir(path.join(ws.root, 'cases', 'bare'), { recursive: true })
+    expect((await readBoundaryTable('cases/bare', c)).error?.code).toBe('NO_MESH')
+    const j = await readBoundaryTable('cases/plume.jsonc', c)
+    expect(j.ok).toBe(true)
+    expect(j.data).toMatchObject({ format: 'jsonc', meshDir: null })
+    expect((j.data as { patches: unknown[] }).patches).toHaveLength(7)
+    // Meshed: the face counts come from the polyMesh the case is written into, and a patch only the mesh names is listed last with no presets.
+    const out = path.join(ws.root, 'cases', 'plume_jsonc', 'constant', 'polyMesh')
+    await fsp.mkdir(out, { recursive: true })
+    const rows = [['outlet', 840], ['inlet', 16], ['stale', 3]] as const
+    const lines = ['FoamFile { version 2.0; format ascii; class polyBoundaryMesh; object boundary; }', String(rows.length), '(', ...rows.map(([n, f], i) => `${n} { type patch; nFaces ${f}; startFace ${i * 1000}; }`), ')']
+    await fsp.writeFile(path.join(out, 'boundary'), lines.join('\n'))
+    const meshedCtx: ToolContext = { ...c, datasets: { ...c.datasets, discover: async () => ({ root: 'cases/plume_jsonc', caseJsonc: 'cases/plume.jsonc', hasPolyMesh: true, hasVtu: false, times: [], vtk: [], cellCount: null, regions: [] }) } }
+    const m = (await readBoundaryTable('cases/plume.jsonc', meshedCtx)).data as { meshDir: string; patches: Array<{ name: string; nFaces: number | null; presets: string[]; rule: number | null }> }
+    expect(m.meshDir).toBe('cases/plume_jsonc')
+    expect(m.patches.map((r) => [r.name, r.nFaces])).toEqual([['wallXMin', null], ['outlet', 840], ['wallYMin', null], ['wallYMax', null], ['floor', null], ['ceiling', null], ['inlet', 16], ['stale', 3]])
+    expect(m.patches[7]).toMatchObject({ name: 'stale', rule: 2, presets: [] })
+    expect((await readBoundaryTable('notes.txt', c)).error?.code).toBe('NOT_A_CASE')
   })
 })
 

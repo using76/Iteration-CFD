@@ -124,6 +124,22 @@ a { color: var(--accent); }
 .mesh-log .mesh-run { text-transform: none; font-weight: 400; letter-spacing: 0; }
 .mesh-log pre { margin: 0; max-height: 220px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; }
 
+/* ---- Boundary editor (STU-07b) -------------------------------------------- */
+.bnd-dialog { width: 1240px; max-width: 96vw; }
+.bnd-path { font-family: var(--font-mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bnd-banner, .bnd-foot { font-size: var(--fs-xs); }
+.bnd-scroll { max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.bnd-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.bnd-table th { position: sticky; top: 0; background: var(--bg-panel); text-align: left; font-weight: 600; padding: 5px 6px; border-bottom: 1px solid var(--border); }
+.bnd-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.bnd-table input, .bnd-table select, .bnd-pending input { height: 26px; padding: 0 6px; border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-input); color: var(--fg); min-width: 0; width: 100%; font-family: var(--font-mono); font-size: var(--fs-xs); }
+.bnd-table input { min-width: 112px; }
+.bnd-table select { font-family: inherit; min-width: 140px; }
+.bnd-name { white-space: nowrap; }
+.bnd-note { font-size: var(--fs-xs); white-space: normal; }
+.bnd-pending { display: grid; grid-template-columns: auto minmax(120px, 1fr) auto auto; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.bnd-dialog .mesh-status:not(.error) { color: var(--success); font-size: var(--fs-sm); }
+
 /* ---- settings popover ----------------------------------------------------- */
 .settings-pop { right: 12px; top: 44px; width: 300px; padding: 12px; }
 .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; font-size: var(--fs-sm); }

@@ -382,6 +382,46 @@ export const PatchBcSchema = z
     return out
   })
 export type PatchBc = z.infer<typeof PatchBcSchema>
+/** One per-field condition as the Boundary editor shows it: a case's own JSON, or a foam field's raw entry text. */
+export interface BoundaryCondition {
+  type: string
+  value?: number | number[] | string
+  inletValue?: number | number[] | string
+  q?: number | string
+}
+/** One patch row of the Boundary editor (GET /api/case/boundary, server/src/tools/guiBoundary.ts). */
+export interface BoundaryPatchRow {
+  name: string
+  /** The box faces a case patch sits on (a region: the face it is cut from); empty for a polyMesh patch. */
+  faces: string[]
+  /** The polyMesh face count; null for a case patch. */
+  nFaces: number | null
+  /** patches[].kind of the rule that governs the patch, or the polyMesh type. */
+  kind: string | null
+  /** The editor preset that kind and those conditions are, when one is. */
+  preset: PatchPresetId | null
+  /** The patches[] index that governs the patch (first match wins); null when none does or for a polyMesh patch. */
+  rule: number | null
+  /** The patches[] index of the patch's own rule (match is its name), when it has one. */
+  ownRule: number | null
+  /** The governing rule's match. */
+  match: string | null
+  /** Field -> its condition on this patch. */
+  fields: Record<string, BoundaryCondition>
+  /** The presets set_patch accepts as this patch's kind (empty when the patch cannot be edited). */
+  presets: PatchPresetId[]
+}
+/** The Boundary editor's table: a .jsonc case's patches (editable through set_patch) or a foam case directory's (read-only). */
+export interface BoundaryTable {
+  path: string
+  format: 'jsonc' | 'foamDir'
+  editable: boolean
+  /** The case directory whose constant/polyMesh/boundary the face counts come from; null when the case is not meshed yet. */
+  meshDir: string | null
+  /** The field columns, in PATCH_FIELDS order then by name. */
+  fields: string[]
+  patches: BoundaryPatchRow[]
+}
 /** The two halves of a split viewport. */
 export const ViewIdSchema = z.enum(['A', 'B'])
 export type ViewId = z.infer<typeof ViewIdSchema>
@@ -901,6 +941,10 @@ export const REST = {
   caseSchema: '/api/schema/case-1.json',
   /** POST {path, content}: validate an editor buffer as case_validate would, without writing (save_case). */
   caseValidate: '/api/case/validate',
+  /** GET ?path=: the Boundary editor's BoundaryTable for a .jsonc case or a foam case directory. */
+  caseBoundary: '/api/case/boundary',
+  /** POST {path, edit}: one set_patch command applied to that .jsonc case as gui_control's set_patch is (STU-07b). */
+  casePatch: '/api/case/patch',
   fsTree: '/api/fs/tree',
   fsFile: '/api/fs/file',
   fsSearch: '/api/fs/search',

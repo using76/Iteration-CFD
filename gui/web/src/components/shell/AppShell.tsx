@@ -8,6 +8,7 @@ import { TabHost } from '../center/TabHost'
 import { SidePanel } from '../side/SidePanel'
 import { ActivityBar } from './ActivityBar'
 import { CommandPalette } from './CommandPalette'
+import { BoundaryEditor } from '../side/BoundaryEditor'
 import { MeshDialog } from '../side/MeshDialog'
 import { StatusBar } from './StatusBar'
 import { TitleBar } from './TitleBar'
@@ -67,6 +68,7 @@ export function AppShell() {
       <StatusBar />
       <CommandPalette />
       <MeshDialog />
+      <BoundaryEditor />
     </div>
   )
 }

@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
-import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
+import { BINARIES, ChatRequestSchema, DEFAULT_SESSION_SETTINGS, LlmSettingsPatchSchema, ONTOLOGY, PIPELINES, MESH_PRESETS, MODELS, UiCommandSchema, type LlmStateView, type Principal, type ServerHello, type StartRunRequest } from '@cfd/shared'
 import type { AgentService } from '../agent/types.js'
 import type { LlmSettingsHandle } from '../agent/llmSettings.js'
 import type { ServerConfig } from '../config.js'
@@ -17,6 +17,7 @@ import { whereSchema } from '../tools/ontology.js'
 import { geometryService } from '../tools/geometry.js'
 import { geometryEdit, geometryImportStep } from '../tools/geomTool.js'
 import { geometryStlBoolean } from '../tools/geometryBoolean.js'
+import { readBoundaryTable, setPatchAt } from '../tools/guiBoundary.js'
 import { validateCaseBuffer } from '../tools/guiCase.js'
 import type { ToolContext, ToolResult } from '../tools/context.js'
 import type { CaseSchema } from '../registry/schema.js'
@@ -123,6 +124,7 @@ const StartRunSchema = z.object({
 
 const FsWriteSchema = z.object({ path: z.string(), content: z.string(), baseHash: z.string().nullable().default(null) })
 const CaseValidateSchema = z.object({ path: z.string(), content: z.string() })
+const CasePatchSchema = z.object({ path: z.string(), edit: z.unknown() })
 const DatasetOpenSchema = z.object({ path: z.string(), timeIndex: z.union([z.number().int(), z.literal('last')]).nullable().default(null), field: z.string().nullable().default(null), region: z.string().nullable().default(null).describe('Region of a multi-region root (regions.json, regions/<name>/, or a .cht.jsonc); null = the first region that has something to open') })
 const GeometryOpenSchema = z.object({ path: z.string() })
 const GeometrySaveSchema = z.object({
@@ -208,6 +210,24 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
   router.post('/api/case/validate', async (rc) => {
     const body = await rc.json(CaseValidateSchema)
     const r = await validateCaseBuffer(body, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  // The studio's Boundary editor (STU-07b): its table, and the operator's
+  // set_patch on the case it shows - the same plan and case_edit as
+  // gui_control's set_patch; the operator's own press asks no approval card.
+  router.get('/api/case/boundary', async ({ query }) => {
+    const p = query.get('path')
+    if (!p) throw new HttpError(400, 'path is required')
+    const r = await readBoundaryTable(p, httpToolContext(deps, root))
+    if (!r.ok) throw toolHttpError(r)
+    return r.data
+  })
+  router.post('/api/case/patch', async (rc) => {
+    const body = await rc.json(CasePatchSchema)
+    const cmd = UiCommandSchema.safeParse(body.edit)
+    if (!cmd.success || cmd.data.type !== 'set_patch') throw new HttpError(400, 'edit must be one set_patch command', { code: 'INVALID' })
+    const r = await setPatchAt(cmd.data, body.path, httpToolContext(deps, root))
     if (!r.ok) throw toolHttpError(r)
     return r.data
   })
