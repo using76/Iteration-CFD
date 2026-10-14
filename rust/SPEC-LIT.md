@@ -34041,6 +34041,10 @@ ignore attribute and moves neither bold count.
 §142.1 adds another f64-only library test, `solid::coupled::tests::gate_95a_probe_the_exact_fixed_point_of_the_block_map`.
 It is `#[cfg(not(feature = "single"))]` because its subject is the f64 discrete fixed point, and it is a plain
 `#[ignore]` measurement in the f64 build. It moves neither bold count.
+§154.10 adds the dust stream's first f32 device rows. The DST-03 cases run in the `single` build as
+`tests/dust_fsc.rs`, an integration test that passes 7 of 7: the kernels are 0 float ulp from their
+f64 twins, and the zero counter matches the host. The same cases run as the lib tests
+`dust::fsc::tests` and carry no ignore attribute, so they move neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **486** library
@@ -37180,6 +37184,7 @@ subsections, by unit:
 - 118.4 — mixed-precision iterative refinement (F32-06)
 - 118.5 — delta-form transients (F32-08)
 - 118.6 — field, phi and restart I/O (F32-09)
+- 118.7 — the FSC rate constant formed once in f64 (DST-03)
 
 and, later, the local origin, moving geometry, parcels and chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -38124,6 +38129,29 @@ the ACM 11(1) 47-50, doi:10.1145/362851.362887** (checked against Crossref on
 in the section "Binary to Decimal Conversion"); **IEEE Std 754-2008 §5.12.2**
 names 9 and 17 as the binary32 / binary64 round-trip digit counts (named,
 not quoted).
+
+No GPL-licensed source was consulted.
+
+
+### 118.7 The FSC rate constant is formed once in f64
+
+The dust stream's laminar-limit source (154.1) has `exp(−Θ/T)/t_r` in it. For REMBE, t_r ≈ 3e−11 s
+(so 1/t_r ≈ 3e10 s⁻¹), and at the unburned temperature exp(−Θ/T) ≈ 1.9e−32. Below about 227 K
+exp(−Θ/T) is subnormal in float, where flush-to-zero depends on the build and its flags.
+§154.7's identity (154.10), `exp(−Θ/T)/t_r = K_b exp(θ_b (1 − T_b/T))`, moves the two extreme
+factors into one constant, `K_b = exp(−θ_b)/t_r`. That constant is formed once on the host in f64
+(`dust::fsc::FscConstants::new`) and refused by name outside [1e−3, 1e12] s⁻¹. The device
+evaluates only the bounded exponent, at most θ_b ≈ 11-13.
+
+As landed (§154.10), `cuda/dust.cu` keeps every intermediate in `ofacc` (double) in both builds
+and rounds each output once at its store. This is the pattern §132.6 set for the chemistry
+kernels, and it applies §118.1's rule (accumulate and combine in double, round once) to a
+per-cell closure. The zero rule zeroes and counts a cell where the exponent is below
+−102 ln 2 = ln(FLT_MIN·2^24), or where K falls below FLT_MIN. The rule uses one threshold in both
+builds, so the f64 build zeroes the same cells, and the f32 build never writes a subnormal word.
+Measured: the float kernel is 0 ulp from the f64 host twin rounded to float, in all five outputs
+over 4096 states and in E over 4096 temperatures in [150, 3500] K. The zero counter equals the
+host's prediction in both builds.
 
 No GPL-licensed source was consulted.
 
@@ -45781,11 +45809,13 @@ for REMBE) by 1.9e−32 at T_u, and exp(−Θ/T) alone drops into the subnormal 
 
 **The zero rule.** The kernel returns exactly 0, and counts the cell, when the exponent
 `θ_b (1 − T_b/T) < ln(FLT_MIN) + 24 ln 2` (= −70.70, so E < FLT_MIN·2^24 = 1.97e−31). Otherwise
-it evaluates E in the build's precision. No subnormal is produced. The same threshold is used in
+it evaluates E (as landed, in double in both builds, rounded once at the store: §154.10 D1). No
+subnormal is produced. The same threshold is used in
 the f64 build, so both builds zero the same cells, and the host twin predicts the counter. The
 setup refuses by name a K_b outside [1e−3, 1e12] s⁻¹, so that `K_b·E` stays above FLT_MIN·2^14
 wherever E is not zeroed. The factor `1/(1 + D_t/κ_b)` is at most 1 and is applied in the
-build's precision. §118 records this as the subsection "the FSC rate constant is formed once in
+build's precision (as landed, in double, and a K it takes below FLT_MIN is zeroed and counted too:
+§154.10 D2). §118 records this as the subsection "the FSC rate constant is formed once in
 f64" (DST-03 writes it).
 
 ### 154.8 The implicit split of Q
@@ -45823,6 +45853,91 @@ any Δt, removes the source-stiffness limit on Δt, and never multiplies (1 − 
   below, no output word is subnormal (a bit test), and the zero counter equals the host's
   prediction (D).
 * The f64 SASS of every existing cubin is unchanged (`tools/f64_identity.py`).
+
+### 154.10 What DST-03 landed
+
+`cuda/dust.cu` (a new `KERNEL_UNITS` entry, compiled with the contraction on like every unit outside
+`FMAD_OFF_UNITS`), the host twins in `src/dust/fsc.rs` (the module `dust::fsc`, f64 in both builds,
+never `Scalar`), and the launchers in `src/dust/device.rs` (`dust::device`: `FscKernels`, `fsc`,
+`arrhenius`). The tests are written once in `tests/shared/dust_fsc_cases.rs` and included twice:
+as the lib tests `dust::fsc::tests` and by `tests/dust_fsc.rs` in the default and the `single`
+build. The capture registry classifies `src/dust/device.rs` as `Gate(dust_fsc_replays_under_capture)`,
+a lib test in that file that runs §81.6's protocol with K feeding T back.
+
+**The kernels.** `dustFsc` writes D_t (154.2), U_t (154.3) or (154.7), U_t,ISP (154.4), τ_L
+(154.5) and K of (154.11) per cell, from T, k, ω and the SST's ν_t, by §154.4's mapping, and adds
+the cells the zero rule writes as 0 to a one-word `u64` counter. `dustArrhenius` writes E of
+(154.10) alone, with the same rule and counter. The host forms `FscConstants` once in f64:
+τ_f = κ_u/S_L², θ_b = Θ/T_b, K_b = exp(−θ_b)/t_r, and `e_zero = −102 ln 2` (= −70.701012), the
+bound of §154.7 written exactly, since FLT_MIN·2^24 = 2^−102. It refuses by name a K_b outside
+[1e−3, 1e12] s⁻¹, `combustion.tFlacc` with TFC, and an input that is not positive and finite. The
+bracket of (154.3) is the series below x = 0.5 and the literal closed form from 0.5 up, as §154.2
+states. The series' running product is written `__dmul_rn` on the device, so nvcc cannot fuse it
+into the sum. Every other expression is free of `a·b + c`, so device and host differ only in the
+last bit of `exp`, `expm1` and `sqrt`. D_t is `D_t,∞ · (−expm1(−x))`, the definition (154.2)
+evaluated without cancellation at small x.
+
+**Decisions (TAKEN, by recommendation).**
+
+* **D1: the kernels compute in double in both builds and round each output once at its store,**
+  as `cuda/chem.cu` does (§132.6). §154.7 had E "in the build's precision". That cannot meet
+  the R row of §154.9: the f32 spacing of an exponent near −70 is 7.6e−6, so an E formed in
+  float is tens of float ulp from its twin in the cold gas, against a bar of 4. Formed in
+  double, E keeps everything §154.7 wanted. K_b is formed on the host, the exponent is bounded,
+  the zero rule uses one threshold in both builds, and no word is subnormal.
+* **D2: a K below FLT_MIN is also written as 0 and counted, in both builds.** A K_b of at least
+  1e−3 keeps `K_b·E` above FLT_MIN·2^14, but `1/(1 + D_t/κ_b)` can divide it by more than 2^14
+  (D_t/κ_b > 1.6e4). The stored float word would then be subnormal. The host twin predicts
+  these cells too, so the counter still equals the prediction.
+* **D3: the clock is one pair of f64 kernel arguments (t_fd, t),** the global clock of §154.2.
+  The host helper `development_time(t, t_0) = max(t − t_0, 0)` gives t_fd. DST-20's local age
+  will add a per-cell path. The gate's 4096 states run as 64 launches of 64 states, each with
+  its own clock.
+* **D4: the kernels write K, not S_U, S_P or Q.** (154.11)'s split is the host function
+  `implicit_split(ρ, K) = (ρK, 0 − ρK)`; `0 − ρK` rather than `−ρK` makes S_P = +0 when K = +0.
+  `q_source(ρ, K, c~)` is a host diagnostic only. DST-04 assembles the matrix.
+* **D5: no turbulence, no turbulent closure.** A cell with k ≤ 0 or ω ≤ 0 writes
+  D_t = U_t = U_t,ISP = τ_L = 0. t_fd ≤ 0 is x = 0, so D_t = U_t = 0. ν_t = 0 with k > 0 gives
+  τ_L = 0 and x = +∞: D_t = 0, U_t = U_t,ISP, and the closed form is exactly 1 there. The gate
+  runs all three edge states on the device.
+
+**Measured** (Leeds inputs of §151.5: S_L = 0.12 m/s, κ_u = μ_u/(ρ_u·0.7), κ_b = μ_b/(ρ_b·0.7),
+Pr_t = 0.4, T_b = 1500 K, t_r by (153.2) from §153.8's Ψ = 1.5445279792249426e−4, so
+K_b = 5.03e4 s⁻¹. The extended FSC is on at t_flacc = 0.15 s in the FSC run. The 4096 states
+are T = 150 + 3350u, k = 10^(−2+4u), ω = 10^(1+4u), ν_t = (k/ω)(0.5 + 0.5u), and 63 clocks
+t_fd = 10^(−6+7u) s with t = t_fd + 1 ms, plus t_fd = 0. That puts 2432 states below the switch
+x = 0.5 and 1664 above it, with 11 clocks past t_flacc.)
+
+| row | f64 | `single` | bar |
+|---|---|---|---|
+| `device_matches_host`, FSC: worst ulp D_t / U_t / U_t,ISP / τ_L / K | 2 / 4 / 0 / 0 / 3 | 0 / 0 / 0 / 0 / 0 | 4 ulp (D-F32-1: the same ulps) |
+| `device_matches_host`, TFC: the same five | 0 / 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 / 0 | 4 ulp |
+| zero counter, FSC (device / host) | 105 / 105 | 105 / 105 | equal (D) |
+| `developed_limits`: D_t/D_t,∞ − 1 at x = 1e3; U_t/U_t,ISP − 1 at x = 1e13 | 0; 5.0e−14 | the same (host) | 1e−12 (A) |
+| U_t/U_t,ISP against `(1 − 1e−3)^{1/2}` at x = 1e3 | 2.2e−16 | the same | 1e−12 |
+| `small_time_series`: early series at x = 1e−4 | 1.67e−5 (= x/6) | the same | 1e−4 (A) |
+| series against closed form at x = 0.5; the two forms of (154.4) over 4096 states | 1.1e−16; 6.7e−16 | the same | 1e−14 (A) |
+| `arrhenius_f32_safe_no_subnormal`: worst ulp of E; cells zeroed (device / host) of 4096 | 1; 108 / 108 | 0; 108 / 108 | 4 ulp; equal (D) |
+
+The rows `tfc_has_no_q` (K, Q, S_U and S_P are +0 bitwise on the host, K is +0 on the device, and
+the counter is 0), `acceleration_off_before_t_flacc` (U_t is bitwise the plain FSC's for
+t < t_flacc on the host and on the device, and bitwise `U_t (t/t_flacc)^{1/2}` past it) and
+`fsc_refusals` pass in both builds. The D2 state (T = 240 K, which keeps E at the exponent −70.0,
+with ν_t = 1e9 m²/s developed) takes K to 2e−39, and the device writes it as +0 and counts it.
+
+**U_t sits at the bar in f64, at 4 ulp.** The cause is the bracket's conditioning just past the
+switch. At x = 0.5, `exp(−x)/x` = 1.21 cancels against `1 − 1/x` = −1 down to a bracket of 0.21,
+so one unit in the last place of `exp` becomes several of the bracket, halved again by the square
+root. A probe with the closed form written `(x + expm1(−x))/x` also measured 4, and located the
+worst states there: 4 ulp at x = 0.507, 3 ulp at x = 0.55-0.77. Since the probe gained nothing,
+the literal form of §154.2 was kept. Neither the bar nor the switch was moved.
+
+**The plan row's points, again.** §154.9 already moved the U_t limit to x = 1e13. At the plan's
+x = 1e3 the code gives `(1 − 1e−3)^{1/2}` to 2.2e−16, which shows that the miss is the limit's
+algebraic rate and not the code. The Arrhenius row's "c~ ∈ [0, 1]" adds nothing, because c~
+does not enter E and the device never forms (1 − c~) (§154.8). The row runs over T alone.
+
+No GPL-licensed source was consulted.
 
 ---
 
