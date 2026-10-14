@@ -297,14 +297,17 @@ fn the_radiative_coupled_name_is_refused_naming_both_conditions() {
     assert!(msg.contains("never"), "the message must say one or the other: {msg}");
 }
 
+/// SPEC-LIT 120.8: implemented - the condition rides `BcKind::Mixed`, whose
+/// triple `crate::energy::Energy` rewrites every outer iteration from the
+/// face's current conductance.
 #[test]
-fn external_wall_heat_flux_temperature_is_refused_naming_both_alternatives() {
+fn external_wall_heat_flux_temperature_is_a_mixed_face() {
     crate::io::contract::reset_warnings();
-    let e = BcKind::from_name("externalWallHeatFluxTemperature", "T", "wall")
-        .expect_err("not implemented");
-    let msg = e.to_string();
-    assert!(msg.contains("fixedFluxTemperature"), "{msg}");
-    assert!(msg.contains("coupledTemperature"), "{msg}");
+    assert_eq!(
+        BcKind::from_name("externalWallHeatFluxTemperature", "T", "wall")
+            .expect("implemented by SPEC-LIT 120.8"),
+        BcKind::Mixed
+    );
 }
 
 /// The OpenFOAM spelling is an ALIAS, accepted with the substitution printed

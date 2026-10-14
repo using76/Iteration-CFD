@@ -237,6 +237,15 @@ pub struct BcInputs<'a> {
     /// kinematic units inside a VOF case, and the two families keep their own
     /// densities.
     pub prgh: Option<PrghInputs<'a>>,
+    /// SPEC-LIT 120.8: the caller wires `Energy::set_thermal_walls` with
+    /// `thermal_walls(T)` and calls `Energy::advance_lumped_masses` once per
+    /// transient step. False - the default - refuses the three `Mixed`-kind
+    /// names of the thermal family: their triple is rewritten from the face's
+    /// CURRENT conductance every outer iteration, and a setup that seeds it
+    /// and walks away would freeze the face at its seed forever (SPEC-LIT
+    /// 13.4). `turbulentHeatFluxTemperature` is NOT gated on it - it rides
+    /// §32.2's fixed-flux wiring, which every `Energy` already runs.
+    pub thermal: bool,
 }
 
 impl<'a> BcInputs<'a> {
@@ -252,6 +261,10 @@ struct PatchAux<'a> {
     normal: Vec<Vec3>,
     /// Total patch area, for `flowRateInletVelocity`.
     total_area: Scalar,
+    /// The patch's face areas and their f64 sum, from `geom64` (SPEC-LIT
+    /// 118.2) - what SPEC-LIT 120.8's power modes divide `Q` by and what
+    /// a lump's `T_m^0` area-means over.
+    mag64: Vec<f64>,
     /// The patch's face centres in f64 (SPEC-LIT §118.2's `geom64` view), for
     /// the condition evaluated at a coordinate - `fixedProfile` (SPEC-LIT
     /// 120.1) - and for (120.3g)'s `a x (x_f - origin)`.
@@ -325,10 +338,15 @@ impl<'a> PatchAux<'a> {
                 }
             })
             .collect();
+        // SPEC-LIT 120.8: the f64 areas, and their f64 sum.
+        let mag64: Vec<f64> = (0..p.size)
+            .map(|i| cf.b_mag_sf.get(p.start + i).copied().unwrap_or(0.0))
+            .collect();
 
         Self {
             normal,
             total_area,
+            mag64,
             bc_f,
             bc_f_local,
             delta_b,
@@ -973,6 +991,418 @@ fn prgh_face_value(name: &str, aux: &PatchAux<'_>, i: usize, e: &PrghEntry, prgh
     }
 }
 
+// ==========================================================================
+//  The thermal family (SPEC-LIT 120.8)
+// ==========================================================================
+
+/// SPEC-LIT 120.8: which of the family's modes one patch entry names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThermalMode {
+    /// `externalWallHeatFluxTemperature` `mode flux` - `H = 0`, `q_in = q`.
+    Flux,
+    /// `mode power` (or `heatSource power`) - `H = 0`, `q_in = Q/A`.
+    Power,
+    /// `mode coefficient` - `h`/`Ta`/`emissivity`/layers, `q_in = 0`.
+    Coefficient,
+    /// `lumpedMassTemperature` - the lump's per-step film, `q_in = 0`.
+    Lump,
+    /// `totalFlowRateAdvectiveDiffusive` - (120.8h)'s `H`, `T_ref = T_in`.
+    Danckwerts,
+}
+
+/// One patch's parsed thermal entries (SPEC-LIT 120.8) - the helper BOTH
+/// `scalar_patch`'s seed and [`thermal_walls`] read, so each patch is parsed
+/// exactly once and the two can never disagree about an entry.
+struct ThermalEntry {
+    mode: ThermalMode,
+    /// The prescribed heat, W/m^2 INTO the domain: `q` (flux), `Q/A`
+    /// (power), else 0.
+    q_in: f64,
+    /// The outer film coefficient, W/(m^2 K); 0 in the flux/power modes.
+    h: f64,
+    ta: f64,
+    emissivity: f64,
+    /// (120.8a), summed by `crate::cht::layered_resistance`.
+    r_layers: f64,
+    /// A lump's `mass*Cp`, J/K.
+    mass_cp: f64,
+    /// A lump's `T_m^0`, the f64 area mean of the patch's `value`.
+    t0: f64,
+    /// A Danckwerts face's `T_in`.
+    t_in: f64,
+}
+
+/// SPEC-LIT 120.8's refusal shape: every thermal-entry refusal names the
+/// condition, the offending key or mode, and the section.
+fn thermal_refused(name: &str, patch: &str, field: &str, what: &str) -> Error {
+    Error::Field {
+        field: field.to_string(),
+        msg: format!(
+            "{field}: boundaryField/{patch}: `{name}` is refused - {what} \
+             (SPEC-LIT 120.8)"
+        ),
+    }
+}
+
+/// One NUMBER of a thermal condition (SPEC-LIT 120.8). `None` when the key
+/// is absent, so the mode decides whether that is a refusal.
+fn thermal_number(
+    spec: &PatchFieldSpec,
+    name: &str,
+    key: &str,
+    patch: &str,
+    field: &str,
+) -> Result<Option<f64>> {
+    let Some(raw) = spec.extra.get(key) else {
+        return Ok(None);
+    };
+    let last = raw
+        .split_whitespace()
+        .filter_map(|t| t.parse::<f64>().ok())
+        .next_back();
+    match last {
+        Some(v) => Ok(Some(v)),
+        None => Err(thermal_refused(
+            name,
+            patch,
+            field,
+            &format!("`{key}: \"{raw}\"` is not a number"),
+        )),
+    }
+}
+
+/// [`thermal_number`], with a refusal rather than `None` when the key is
+/// missing: a condition defined by its `h` cannot be built without one.
+fn thermal_required(
+    spec: &PatchFieldSpec,
+    name: &str,
+    key: &str,
+    patch: &str,
+    field: &str,
+) -> Result<f64> {
+    match thermal_number(spec, name, key, patch, field)? {
+        Some(v) => Ok(v),
+        None => Err(thermal_refused(
+            name,
+            patch,
+            field,
+            &format!("the condition needs a `{key}` entry and the patch has none"),
+        )),
+    }
+}
+
+/// One WORD of a thermal condition - `mode` or `heatSource`.
+fn thermal_word(
+    spec: &PatchFieldSpec,
+    name: &str,
+    key: &str,
+    patch: &str,
+    field: &str,
+) -> Result<Option<String>> {
+    match spec.extra.get(key) {
+        None => Ok(None),
+        Some(raw) => {
+            let w = raw.trim().trim_end_matches(';').trim();
+            if w.is_empty() || w.chars().any(|c| c.is_whitespace()) {
+                return Err(thermal_refused(
+                    name,
+                    patch,
+                    field,
+                    &format!("`{key}: \"{raw}\"` is not one word"),
+                ));
+            }
+            Ok(Some(w.to_string()))
+        }
+    }
+}
+
+/// One scalarList of a thermal condition - `thicknessLayers`/`kappaLayers`,
+/// written `(0.01 0.02)` or `2(0.01 0.02)`. Absent is an empty list.
+fn thermal_list(
+    spec: &PatchFieldSpec,
+    name: &str,
+    key: &str,
+    patch: &str,
+    field: &str,
+) -> Result<Vec<f64>> {
+    let Some(raw) = spec.extra.get(key) else {
+        return Ok(Vec::new());
+    };
+    let mut t = raw.trim().trim_end_matches(';').trim();
+    // An optional leading count, OpenFOAM's `2(0.01 0.02)`.
+    if let Some(open) = t.find('(') {
+        if t[..open].trim().parse::<usize>().is_ok() {
+            t = &t[open..];
+        }
+    }
+    if !(t.starts_with('(') && t.ends_with(')')) {
+        return Err(thermal_refused(
+            name,
+            patch,
+            field,
+            &format!("`{key}: \"{raw}\"` is not a list - write `(0.01 0.02)` or `2(0.01 0.02)`"),
+        ));
+    }
+    t[1..t.len() - 1]
+        .split_whitespace()
+        .map(|w| {
+            w.parse::<f64>()
+                .map_err(|_| thermal_refused(name, patch, field, &format!("`{key}: \"{w}\"` is not a number")))
+        })
+        .collect()
+}
+
+/// An entry the patch's own mode does not read (SPEC-LIT 120.8's refusal
+/// list): `h`/`Ta`/`emissivity`/the layers under `flux`/`power`, `q`/`Q`
+/// under `coefficient`.
+fn thermal_not_read(
+    spec: &PatchFieldSpec,
+    name: &str,
+    patch: &str,
+    field: &str,
+    keys: &[&str],
+) -> Result<()> {
+    for k in keys {
+        if spec.extra.contains_key(*k) {
+            return Err(thermal_refused(
+                name,
+                patch,
+                field,
+                &format!("the patch's mode does not read `{k}`, and it carries one"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// SPEC-LIT 120.8: parse one thermal patch entry, validating every input the
+/// family's "Inputs and refusals" paragraph names. `mags` is the patch's f64
+/// face areas - what a power mode divides `Q` by and what a lump's `T_m^0`
+/// area-means over.
+fn thermal_entry(
+    spec: &PatchFieldSpec,
+    n: usize,
+    mags: &[f64],
+    patch: &str,
+    field: &str,
+) -> Result<ThermalEntry> {
+    let name = spec.type_name.as_str();
+    let area: f64 = mags.iter().sum();
+    let mut e = ThermalEntry {
+        mode: ThermalMode::Flux,
+        q_in: 0.0,
+        h: 0.0,
+        ta: 0.0,
+        emissivity: 0.0,
+        r_layers: 0.0,
+        mass_cp: 0.0,
+        t0: 0.0,
+        t_in: 0.0,
+    };
+    let finite_positive = |v: f64, key: &str| -> Result<()> {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(thermal_refused(
+                name,
+                patch,
+                field,
+                &format!("`{key} = {v}` is not finite and positive"),
+            ));
+        }
+        Ok(())
+    };
+    let power_area = |q: f64| -> Result<f64> {
+        if !(area > 0.0) {
+            return Err(thermal_refused(
+                name,
+                patch,
+                field,
+                "the patch has zero area, and a power mode divides its heat by it",
+            ));
+        }
+        Ok(q / area)
+    };
+    match name {
+        "externalWallHeatFluxTemperature" => {
+            e.mode = match thermal_word(spec, name, "mode", patch, field)? {
+                None => {
+                    return Err(thermal_refused(
+                        name,
+                        patch,
+                        field,
+                        "the condition needs a `mode` entry and the patch has none",
+                    ))
+                }
+                Some(w) => match w.as_str() {
+                    "flux" => ThermalMode::Flux,
+                    "power" => ThermalMode::Power,
+                    "coefficient" => ThermalMode::Coefficient,
+                    other => {
+                        return Err(thermal_refused(
+                            name,
+                            patch,
+                            field,
+                            &format!("`mode {other}` is not one of flux, power, coefficient"),
+                        ))
+                    }
+                },
+            };
+            match e.mode {
+                ThermalMode::Flux => {
+                    thermal_not_read(
+                        spec,
+                        name,
+                        patch,
+                        field,
+                        &["h", "Ta", "emissivity", "thicknessLayers", "kappaLayers"],
+                    )?;
+                    e.q_in = thermal_required(spec, name, "q", patch, field)?;
+                }
+                ThermalMode::Power => {
+                    thermal_not_read(
+                        spec,
+                        name,
+                        patch,
+                        field,
+                        &["h", "Ta", "emissivity", "thicknessLayers", "kappaLayers"],
+                    )?;
+                    e.q_in = power_area(thermal_required(spec, name, "Q", patch, field)?)?;
+                }
+                ThermalMode::Coefficient => {
+                    thermal_not_read(spec, name, patch, field, &["q", "Q"])?;
+                    e.h = thermal_required(spec, name, "h", patch, field)?;
+                    e.ta = thermal_required(spec, name, "Ta", patch, field)?;
+                    finite_positive(e.h, "h")?;
+                    finite_positive(e.ta, "Ta")?;
+                    e.emissivity =
+                        thermal_number(spec, name, "emissivity", patch, field)?.unwrap_or(0.0);
+                    if !(0.0..=1.0).contains(&e.emissivity) {
+                        return Err(thermal_refused(
+                            name,
+                            patch,
+                            field,
+                            &format!("`emissivity = {}` is outside [0, 1]", e.emissivity),
+                        ));
+                    }
+                    // (120.8a), summed by (S47.11)'s own rule - which
+                    // refuses two lengths and a non-positive kappa.
+                    let th = thermal_list(spec, name, "thicknessLayers", patch, field)?;
+                    let ka = thermal_list(spec, name, "kappaLayers", patch, field)?;
+                    if !(th.is_empty() && ka.is_empty()) {
+                        let to_scalar = |v: &[f64]| v.iter().map(|x| *x as Scalar).collect::<Vec<_>>();
+                        e.r_layers = crate::cht::layered_resistance(&to_scalar(&th), &to_scalar(&ka))
+                            .map_err(|m| {
+                                thermal_refused(
+                                    name,
+                                    patch,
+                                    field,
+                                    &format!("the layers are refused: {m}"),
+                                )
+                            })? as f64;
+                    }
+                }
+                _ => unreachable!("externalWallHeatFluxTemperature has only three modes"),
+            }
+        }
+        "turbulentHeatFluxTemperature" => {
+            e.mode = match thermal_word(spec, name, "heatSource", patch, field)? {
+                None => {
+                    return Err(thermal_refused(
+                        name,
+                        patch,
+                        field,
+                        "the condition needs a `heatSource` entry and the patch has none",
+                    ))
+                }
+                Some(w) => match w.as_str() {
+                    "flux" => ThermalMode::Flux,
+                    "power" => ThermalMode::Power,
+                    other => {
+                        return Err(thermal_refused(
+                            name,
+                            patch,
+                            field,
+                            &format!("`heatSource {other}` is not one of flux, power"),
+                        ))
+                    }
+                },
+            };
+            let q = thermal_required(spec, name, "q", patch, field)?;
+            e.q_in = match e.mode {
+                ThermalMode::Flux => q,
+                _ => power_area(q)?,
+            };
+        }
+        "lumpedMassTemperature" => {
+            e.mode = ThermalMode::Lump;
+            let mass = thermal_required(spec, name, "mass", patch, field)?;
+            let cp = thermal_required(spec, name, "Cp", patch, field)?;
+            finite_positive(mass, "mass")?;
+            finite_positive(cp, "Cp")?;
+            e.mass_cp = mass * cp;
+            // `T_m^0`: the f64 area mean of the patch's `value`, spread
+            // over the faces. Required.
+            let vals: Vec<f64> = match spec.value.len() {
+                0 => {
+                    return Err(thermal_refused(
+                        name,
+                        patch,
+                        field,
+                        "the condition needs a `value` entry (the lump's `T_m^0`) and \
+                         the patch has none",
+                    ))
+                }
+                1 => vec![spec.value[0] as f64; n],
+                k if k == n => spec.value.iter().map(|v| *v as f64).collect(),
+                k => {
+                    return Err(thermal_refused(
+                        name,
+                        patch,
+                        field,
+                        &format!("`value` has {k} values but the patch has {n} faces"),
+                    ))
+                }
+            };
+            let (mut sa, mut sb) = (0.0f64, 0.0f64);
+            for (i, v) in vals.iter().enumerate() {
+                let a = mags.get(i).copied().unwrap_or(0.0);
+                sa += a;
+                sb += a * v;
+            }
+            if !(sa > 0.0) {
+                return Err(thermal_refused(
+                    name,
+                    patch,
+                    field,
+                    "the patch has zero area, and a lump's `T_m^0` is its area mean",
+                ));
+            }
+            e.t0 = sb / sa;
+        }
+        "totalFlowRateAdvectiveDiffusive" => {
+            e.mode = ThermalMode::Danckwerts;
+            if spec.inlet_value.is_empty() {
+                return Err(thermal_refused(
+                    name,
+                    patch,
+                    field,
+                    "the condition needs an `inletValue` entry and the patch has none",
+                ));
+            }
+            if spec.inlet_value.len() != 1 {
+                return Err(thermal_refused(
+                    name,
+                    patch,
+                    field,
+                    "`inletValue` is a uniform entry",
+                ));
+            }
+            e.t_in = spec.inlet_value[0] as f64;
+        }
+        _ => unreachable!("thermal_entry called on a non-thermal name"),
+    }
+    Ok(e)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scalar_patch(
     spec: Option<&PatchFieldSpec>,
@@ -1049,6 +1479,7 @@ fn scalar_patch(
             | "pressureDirectedInletVelocity"
             | "pressureDirectedInletOutletVelocity"
             | "pressureInletOutletParSlipVelocity"
+            | "atmBoundaryLayerInletVelocity"
     ) {
         return Err(Error::Field {
             field: field.to_string(),
@@ -1160,6 +1591,87 @@ fn scalar_patch(
         let kind = BcKind::from_name(name, field, patch)?;
         for i in 0..n {
             let rv = prgh_face_value(name, aux, i, &e, prgh) as Scalar;
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = 1.0;
+            out.ref_value[at + i] = rv;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = rv;
+        }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.8: the thermal family, before the static arms for the
+    // same reason - three of the four names ride `Mixed` with a triple
+    // `Energy` rewrites every outer iteration from the face's CURRENT
+    // conductance, and `turbulentHeatFluxTemperature` rides
+    // `FixedFluxTemperature` with a `refValue` the static arm cannot
+    // compute. The entries are parsed ONCE here, by the same helper
+    // `thermal_walls` below reads, so the seed and the walls can never
+    // disagree about an entry.
+    if matches!(
+        spec.type_name.as_str(),
+        "externalWallHeatFluxTemperature"
+            | "turbulentHeatFluxTemperature"
+            | "lumpedMassTemperature"
+            | "totalFlowRateAdvectiveDiffusive"
+    ) {
+        let name = spec.type_name.as_str();
+        // The three Mixed-kind names are refused unless the caller promised
+        // the rewrite - the same opt-in gate `advective` and
+        // `pressure_inlet` carry.
+        if name != "turbulentHeatFluxTemperature" && !aux.inputs.thermal {
+            return Err(thermal_refused(
+                name,
+                patch,
+                field,
+                "its triple must be rewritten from the face's current conductance \
+                 every outer iteration, and this setup was given \
+                 BcInputs::thermal = false, so nothing would",
+            ));
+        }
+        let e = thermal_entry(spec, n, &aux.mag64, patch, field)?;
+        let kind = BcKind::from_name(name, field, patch)?;
+        // The seed only: the kernels rewrite `(fr, refValue, refGrad)` from
+        // the face's current state every outer iteration. A fixed-flux kind
+        // carries `q` in `refValue` (the §32.2 kernel divides it by
+        // `k_eff`); a mixed kind's `refValue` is what (120.8f) linearises
+        // about, seeded at the ambient / the lump's `T_m^0` / `T_in`.
+        let rv = match e.mode {
+            ThermalMode::Coefficient => e.ta,
+            ThermalMode::Flux | ThermalMode::Power if kind == BcKind::FixedFluxTemperature => e.q_in,
+            ThermalMode::Flux | ThermalMode::Power => 0.0,
+            ThermalMode::Lump => e.t0,
+            ThermalMode::Danckwerts => e.t_in,
+        };
+        for i in 0..n {
+            out.kind[at + i] = kind as Label;
+            out.fr[at + i] = 0.0;
+            out.ref_value[at + i] = rv as Scalar;
+            out.ref_grad[at + i] = 0.0;
+            out.value[at + i] = internal[i];
+        }
+        return Ok(());
+    }
+
+    // SPEC-LIT 120.9: the three scalar Richards & Hoxey profiles, before the
+    // static arms for the same reason as 120.5's - `from_name` maps them to
+    // `FixedValue`, whose static arm would take the `value` entry instead
+    // of the profile. Each face's value is computed once, in f64 from the
+    // world face centre, and rounded once.
+    if matches!(
+        spec.type_name.as_str(),
+        "atmBoundaryLayerInletK" | "atmBoundaryLayerInletEpsilon" | "atmBoundaryLayerInletOmega"
+    ) {
+        let name = spec.type_name.as_str();
+        let e = atm_entry(spec, name, n, patch, field, f1)?;
+        let kind = BcKind::from_name(name, field, patch)?;
+        for i in 0..n {
+            let (_, k, eps, omega) = atm_face(&e, aux, i);
+            let rv = match name {
+                "atmBoundaryLayerInletK" => k,
+                "atmBoundaryLayerInletEpsilon" => eps,
+                _ => omega,
+            } as Scalar;
             out.kind[at + i] = kind as Label;
             out.fr[at + i] = 1.0;
             out.ref_value[at + i] = rv;
@@ -1367,6 +1879,8 @@ fn scalar_patch(
             | BcKind::NutUWallFunction
             | BcKind::NutkRoughWallFunction
             | BcKind::NutURoughWallFunction
+            | BcKind::NutkAtmRoughWallFunction
+            | BcKind::NutUBlendedWallFunction
             | BcKind::WernerWengleWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction => (
@@ -2119,7 +2633,30 @@ fn finished_direction_mixed(
 /// over the patch, a list whose count is not the patch's face count is an
 /// error naming both.
 fn scalar_ref_value_faces(raw: &str, n: usize, patch: &str, field: &str) -> Result<Vec<Scalar>> {
-    let setting = format!("{field}: boundaryField/{patch}/refValue");
+    scalar_entry_faces(raw, "refValue", n, patch, field)
+}
+
+/// SPEC-LIT 120.9's per-face scalar entries (`z0`, `zGround`): a bare
+/// `<number>` spreads over the patch, as OpenFOAM's own examples write `z0`,
+/// and anything else is read by [`scalar_entry_faces`].
+fn atm_faces(raw: &str, key: &str, n: usize, patch: &str, field: &str) -> Result<Vec<Scalar>> {
+    if let Ok(v) = raw.trim().parse::<f64>() {
+        return Ok(vec![v as Scalar; n]);
+    }
+    scalar_entry_faces(raw, key, n, patch, field)
+}
+
+/// [`scalar_ref_value_faces`]'s reader for any per-face SCALAR entry `key`
+/// (SPEC-LIT 120.5, 120.9): `uniform <number>` or `nonuniform List<scalar>
+/// N (...)`, one number a face.
+fn scalar_entry_faces(
+    raw: &str,
+    key: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+) -> Result<Vec<Scalar>> {
+    let setting = format!("{field}: boundaryField/{patch}/{key}");
     let mut tz = crate::io::tokenizer::Tokenizer::new(raw, &setting);
     if tz.is_word("uniform") {
         tz.next()?;
@@ -2622,6 +3159,175 @@ fn wall_slip_seed(
     }
 }
 
+// ==========================================================================
+//  The atmospheric family (SPEC-LIT 120.9)
+// ==========================================================================
+
+/// One patch's Richards & Hoxey (1993) inputs (SPEC-LIT 120.9), every number
+/// widened to f64 once.
+struct AtmEntry {
+    /// `flowDir`, normalised in f64.
+    flow_dir: DVec3,
+    /// `zDir`, normalised in f64.
+    z_dir: DVec3,
+    u_ref: f64,
+    z_ref: f64,
+    kappa: f64,
+    cmu: f64,
+    /// `z0` per face, m.
+    z0: Vec<f64>,
+    /// `zGround` per face, m (0 when absent).
+    z_ground: Vec<f64>,
+}
+
+/// The entries no (120.9) profile reads, refused by name rather than
+/// dropped: `d` is a displacement height and `C1`/`C2` are the extended
+/// `k` profile of a later paper, neither of which (120.9a)-(120.9e) has.
+const ATM_UNREAD: &[&str] = &["d", "C1", "C2"];
+
+/// One CONSTANT scalar of the family. A time-varying Function1 is refused by
+/// name, as 120.5's profiles refuse one: no driver runs the timed path for
+/// these names. `default` is used when the key is absent; `None` makes the
+/// key required.
+fn atm_scalar(
+    entries: &BTreeMap<String, String>,
+    key: &str,
+    name: &str,
+    base: &str,
+    field: &str,
+    f1: Option<&F1Setup>,
+    default: Option<f64>,
+) -> Result<f64> {
+    let setting = format!("{base}/{key}");
+    let Some(f) = F1::parse(entries, key, 1, &setting, f1.and_then(|s| s.case_dir))? else {
+        return default.ok_or_else(|| Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: {name} needs a `{key}` entry and the patch has none \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    };
+    if !f.is_constant() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{setting}: a time-varying `{key}` is refused on the atmospheric \
+                 family - no driver runs the timed path for these names \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    Ok(f.eval(0.0)[0])
+}
+
+/// A direction entry of the family, normalised in f64; zero is refused.
+fn atm_dir(spec: &PatchFieldSpec, key: &str, name: &str, patch: &str, field: &str) -> Result<DVec3> {
+    let v = required_vec3(spec, key, patch, field, name)?;
+    let d = DVec3::new(v.x as f64, v.y as f64, v.z as f64);
+    let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+    if !(len > 0.0) || !len.is_finite() {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{field}: boundaryField/{patch}/{key}: {name}'s `{key}` must be a \
+                 non-zero direction (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    Ok(d * (1.0 / len))
+}
+
+/// Parse one atmospheric patch entry (SPEC-LIT 120.9), validating every
+/// input the profile reads: `flowDir` and `zDir` non-zero, `Uref` and `Zref`
+/// constant and positive, `z0` positive at every face, `kappa` and `Cmu`
+/// positive (0.41 and 0.09 when absent), `zGround` 0 when absent, and the
+/// unread `d`/`C1`/`C2` refused by name.
+fn atm_entry(
+    spec: &PatchFieldSpec,
+    name: &str,
+    n: usize,
+    patch: &str,
+    field: &str,
+    f1: Option<&F1Setup>,
+) -> Result<AtmEntry> {
+    let base = format!("{field}: boundaryField/{patch}");
+    if let Some(key) = ATM_UNREAD.iter().find(|k| spec.extra.contains_key(**k)) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/{key}: {name} does not read `{key}` - the profile is \
+                 Richards & Hoxey's (120.9a)-(120.9e), which has no displacement \
+                 height and no extended k coefficients; remove the entry \
+                 (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    let entries = crate::function1::patch_entries(spec, &base)?;
+    let flow_dir = atm_dir(spec, "flowDir", name, patch, field)?;
+    let z_dir = atm_dir(spec, "zDir", name, patch, field)?;
+    let u_ref = atm_scalar(&entries, "Uref", name, &base, field, f1, None)?;
+    let z_ref = atm_scalar(&entries, "Zref", name, &base, field, f1, None)?;
+    let kappa = atm_scalar(&entries, "kappa", name, &base, field, f1, Some(0.41))?;
+    let cmu = atm_scalar(&entries, "Cmu", name, &base, field, f1, Some(0.09))?;
+    for (key, v) in [("Uref", u_ref), ("Zref", z_ref), ("kappa", kappa), ("Cmu", cmu)] {
+        if !(v > 0.0) || !v.is_finite() {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{base}/{key}: {name}'s `{key}` is {v}; it must be positive \
+                     (SPEC-LIT 120.9)"
+                ),
+            });
+        }
+    }
+    let Some(z0_text) = spec.extra.get("z0") else {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/z0: {name} needs the roughness length `z0` (uniform or one \
+                 per face) and the patch has none (SPEC-LIT 120.9)"
+            ),
+        });
+    };
+    let z0: Vec<f64> = atm_faces(z0_text, "z0", n, patch, field)?
+        .into_iter()
+        .map(|v| v as f64)
+        .collect();
+    if let Some((i, v)) = z0.iter().enumerate().find(|(_, v)| !(**v > 0.0)) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{base}/z0: face {i} has z0 = {v}; the roughness length must be \
+                 positive (SPEC-LIT 120.9)"
+            ),
+        });
+    }
+    let z_ground: Vec<f64> = match spec.extra.get("zGround") {
+        Some(t) => atm_faces(t, "zGround", n, patch, field)?
+            .into_iter()
+            .map(|v| v as f64)
+            .collect(),
+        None => vec![0.0; n],
+    };
+    Ok(AtmEntry { flow_dir, z_dir, u_ref, z_ref, kappa, cmu, z0, z_ground })
+}
+
+/// (120.9a)-(120.9e) at face `i`, in f64 from the WORLD face centre
+/// (SPEC-LIT 118.7): `(U, k, epsilon, omega)`. `z = max(zDir . x_f -
+/// zGround, 0)`; both logarithms are `ln_1p`, `ln((a + z0)/z0) =
+/// ln_1p(a/z0)`.
+fn atm_face(e: &AtmEntry, aux: &PatchAux, i: usize) -> (DVec3, f64, f64, f64) {
+    let z0 = e.z0[i];
+    let z = (e.z_dir.dot(aux.bc_f[i]) - e.z_ground[i]).max(0.0);
+    let u_star = e.kappa * e.u_ref / (e.z_ref / z0).ln_1p();
+    let u = e.flow_dir * (u_star / e.kappa * (z / z0).ln_1p());
+    let k = u_star * u_star / e.cmu.sqrt();
+    let eps = u_star * u_star * u_star / (e.kappa * (z + z0));
+    let omega = u_star / (e.kappa * e.cmu.sqrt() * (z + z0));
+    (u, k, eps, omega)
+}
+
 /// SPEC-LIT 120.5: the velocity-inlet family on a vector field - the three
 /// fixed-value profiles as a `FixedValue` whose per-face value the setup
 /// computes once, in f64 from the f64 face centres and unit normals
@@ -2965,6 +3671,38 @@ fn vector_patch(
         return Ok(());
     }
 
+    // SPEC-LIT 120.9: the Richards & Hoxey velocity profile (120.9b), a
+    // `FixedValue` whose per-face value is computed once in f64 from the
+    // world face centre and rounded once - before the static arms, which
+    // would take the `value` entry instead. The three scalar profiles map to
+    // `FixedValue` too, so they are refused here on the NAME.
+    match spec.type_name.as_str() {
+        "atmBoundaryLayerInletVelocity" => {
+            let e = atm_entry(spec, "atmBoundaryLayerInletVelocity", n, patch, field, f1)?;
+            for i in 0..n {
+                let (u, _, _, _) = atm_face(&e, aux, i);
+                let rv = Vec3::new(u.x as Scalar, u.y as Scalar, u.z as Scalar);
+                out.kind[at + i] = BcKind::FixedValue as Label;
+                out.fr[at + i] = 1.0;
+                out.ref_value[at + i] = rv;
+                out.ref_grad[at + i] = zero;
+                out.value[at + i] = rv;
+            }
+            return Ok(());
+        }
+        "atmBoundaryLayerInletK" | "atmBoundaryLayerInletEpsilon" | "atmBoundaryLayerInletOmega" => {
+            return Err(Error::Field {
+                field: field.to_string(),
+                msg: format!(
+                    "{patch}: `{}` is a scalar condition and {field} is a vector \
+                     field (SPEC-LIT 120.9)",
+                    spec.type_name
+                ),
+            });
+        }
+        _ => {}
+    }
+
     // SPEC-LIT 120.6: the Outlets II family, before the static arms for the
     // same reason - the triple is rewritten once per outer iteration by
     // `update_patch_means_vector` (the cell value; `fr = 1` for the plain
@@ -3109,6 +3847,27 @@ fn vector_patch(
     }
 
     let kind = BcKind::from_name(&spec.type_name, field, patch)?;
+
+    // SPEC-LIT 120.8: the thermal family is a SCALAR condition - it writes
+    // the temperature's triple. Two of the four names map to kinds a vector
+    // arm would accept without complaint, so the check is on the NAME,
+    // before any kind is derived from it.
+    if matches!(
+        spec.type_name.as_str(),
+        "externalWallHeatFluxTemperature"
+            | "turbulentHeatFluxTemperature"
+            | "lumpedMassTemperature"
+            | "totalFlowRateAdvectiveDiffusive"
+    ) {
+        return Err(Error::Field {
+            field: field.to_string(),
+            msg: format!(
+                "{patch}: `{}` is a scalar condition and {field} is a vector \
+                 field (SPEC-LIT 120.8)",
+                spec.type_name
+            ),
+        });
+    }
 
     // `noSlip` carries no value entry - the whole point of the name is that
     // the value is zero - so it must not fall through to the internal value.
@@ -3272,6 +4031,8 @@ fn vector_patch(
             | BcKind::NutUWallFunction
             | BcKind::NutkRoughWallFunction
             | BcKind::NutURoughWallFunction
+            | BcKind::NutkAtmRoughWallFunction
+            | BcKind::NutUBlendedWallFunction
             | BcKind::NutLowReWallFunction
             | BcKind::EpsilonWallFunction
             | BcKind::OmegaWallFunction
@@ -3813,6 +4574,114 @@ pub fn faces_where(
     Ok(flags)
 }
 
+/// SPEC-LIT 120.8: the thermal faces and lumps `raw`'s OWN patch types name -
+/// what [`crate::energy::Energy::set_thermal_walls`] takes. Each patch
+/// carrying one of the three `Mixed`-kind names is parsed once by the same
+/// helper [`scalar_patch`]'s seed reads, then expanded per face:
+///
+/// * `mode flux`: `h = 0`, `q_in = q`; `mode power`: `h = 0`, `q_in = Q/A`
+///   with `A` the patch area summed in f64; `mode coefficient`: `h`, `Ta`,
+///   `emissivity` and (120.8a)'s `r_layers`, `q_in = 0`;
+/// * `lumpedMassTemperature`: `h = 0`, `t_inf = T_m^0`, plus a
+///   [`crate::cht::ambient::LumpedMass`] holding the faces' boundary-face indices, their
+///   f64 areas and `mass*Cp`;
+/// * `totalFlowRateAdvectiveDiffusive`: `t_inf = T_in`, `advective`.
+///
+/// Patches with other types are skipped; a caller hands the result over
+/// unchanged, whatever else `T` carries.
+pub fn thermal_walls(
+    raw: &RawScalarField,
+    m: &HostMesh,
+) -> Result<crate::cht::ambient::ThermalWalls> {
+    use crate::cht::ambient::{LumpedMass, ThermalFace, ThermalWalls as Walls};
+    let mut walls = Walls::default();
+    let cf = m.geom64();
+    for p in &m.patches {
+        let Some(spec) = raw.spec(&p.name)? else {
+            continue;
+        };
+        if !matches!(
+            spec.type_name.as_str(),
+            "externalWallHeatFluxTemperature"
+                | "lumpedMassTemperature"
+                | "totalFlowRateAdvectiveDiffusive"
+        ) {
+            continue;
+        }
+        let n = p.size;
+        let at = p.start;
+        let mags: Vec<f64> = (0..n)
+            .map(|i| cf.b_mag_sf.get(at + i).copied().unwrap_or(0.0))
+            .collect();
+        let e = thermal_entry(spec, n, &mags, &p.name, &raw.name)?;
+        match e.mode {
+            ThermalMode::Coefficient => {
+                for i in 0..n {
+                    walls.faces.push(ThermalFace {
+                        bf: at + i,
+                        h: e.h,
+                        t_inf: e.ta,
+                        emissivity: e.emissivity,
+                        r_layers: e.r_layers,
+                        q_in: 0.0,
+                        advective: false,
+                    });
+                }
+            }
+            ThermalMode::Flux | ThermalMode::Power => {
+                for i in 0..n {
+                    walls.faces.push(ThermalFace {
+                        bf: at + i,
+                        h: 0.0,
+                        t_inf: 0.0,
+                        emissivity: 0.0,
+                        r_layers: 0.0,
+                        q_in: e.q_in,
+                        advective: false,
+                    });
+                }
+            }
+            ThermalMode::Lump => {
+                // The lump names its faces by flattened boundary-face index,
+                // as `ThermalFace::bf` does; `Energy::set_thermal_walls` maps
+                // each to its position in the face list once.
+                for i in 0..n {
+                    walls.faces.push(ThermalFace {
+                        bf: at + i,
+                        h: 0.0,
+                        t_inf: e.t0,
+                        emissivity: 0.0,
+                        r_layers: 0.0,
+                        q_in: 0.0,
+                        advective: false,
+                    });
+                }
+                walls.lumps.push(LumpedMass {
+                    patch: p.name.clone(),
+                    faces: (0..n).map(|i| at + i).collect(),
+                    area: mags.clone(),
+                    mass_cp: e.mass_cp,
+                    t0: e.t0,
+                });
+            }
+            ThermalMode::Danckwerts => {
+                for i in 0..n {
+                    walls.faces.push(ThermalFace {
+                        bf: at + i,
+                        h: 0.0,
+                        t_inf: e.t_in,
+                        emissivity: 0.0,
+                        r_layers: 0.0,
+                        q_in: 0.0,
+                        advective: true,
+                    });
+                }
+            }
+        }
+    }
+    Ok(walls)
+}
+
 /// Which faces constrain their wall-adjacent CELL, from `epsilon`'s or
 /// `omega`'s own patch types (SPEC-LIT §15.5).
 pub fn wall_cell_faces(raw: &RawScalarField, m: &HostMesh) -> Result<Vec<bool>> {
@@ -3966,6 +4835,26 @@ pub struct NutRoughness {
     /// SPEC-LIT §15.3 default for uniform sand, filled in here so a rough
     /// patch that omits `Cs` still gets it rather than a stray zero.
     pub cs: Vec<Scalar>,
+    /// SPEC-LIT §120.9: which law of the wall the face's `nu_t` comes from
+    /// beyond `u_based`'s two families. [`NutFamily::Standard`] on every face
+    /// that is not one of the two atmospheric-family names.
+    pub family: Vec<NutFamily>,
+    /// SPEC-LIT §120.9: the family's one parameter - the roughness length
+    /// `z0` (m) on a [`NutFamily::AtmRough`] face, the blend exponent `n` on
+    /// a [`NutFamily::Blended`] face, zero on every other.
+    pub par: Vec<Scalar>,
+}
+
+/// SPEC-LIT §120.9: the law of the wall a `nut` face asked for, beyond the
+/// `k`-based/velocity-based split [`NutRoughness::u_based`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NutFamily {
+    /// `nutk`, `nutU` and their rough forms (SPEC-LIT §6.4/§15).
+    Standard,
+    /// `nutkAtmRoughWallFunction`, (120.9g) - `k`-based, in `z0`.
+    AtmRough,
+    /// `nutUBlendedWallFunction`, (120.9h) - velocity-based.
+    Blended,
 }
 
 impl NutRoughness {
@@ -3977,6 +4866,8 @@ impl NutRoughness {
             u_based: vec![false; n_boundary_faces],
             ks: vec![0.0; n_boundary_faces],
             cs: vec![0.5; n_boundary_faces],
+            family: vec![NutFamily::Standard; n_boundary_faces],
+            par: vec![0.0; n_boundary_faces],
         }
     }
 
@@ -3991,6 +4882,8 @@ impl NutRoughness {
         let mut u_based = vec![false; m.n_boundary_faces];
         let mut ks = vec![0.0 as Scalar; m.n_boundary_faces];
         let mut cs = vec![0.5 as Scalar; m.n_boundary_faces];
+        let mut family = vec![NutFamily::Standard; m.n_boundary_faces];
+        let mut par = vec![0.0 as Scalar; m.n_boundary_faces];
 
         for p in &m.patches {
             let Some(spec) = raw.spec(&p.name)? else {
@@ -4014,14 +4907,62 @@ impl NutRoughness {
                 (0.0, 0.5)
             };
 
+            // SPEC-LIT §120.9: the atmospheric family's one parameter per
+            // face - `z0` for (120.9g), required and positive at every face;
+            // `n` for (120.9h), 4 when absent and positive when given.
+            let (fam, pars) = match kind {
+                BcKind::NutkAtmRoughWallFunction => {
+                    let base = format!("{}: boundaryField/{}", raw.name, p.name);
+                    let Some(text) = spec.extra.get("z0") else {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{base}/z0: nutkAtmRoughWallFunction needs the roughness \
+                                 length `z0` (uniform or one per face) and the patch has \
+                                 none (SPEC-LIT 120.9)"
+                            ),
+                        });
+                    };
+                    let z0 = atm_faces(text, "z0", p.size, &p.name, &raw.name)?;
+                    if let Some((i, v)) = z0.iter().enumerate().find(|(_, v)| !(**v > 0.0)) {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{base}/z0: face {i} has z0 = {v}; the roughness length \
+                                 must be positive (SPEC-LIT 120.9)"
+                            ),
+                        });
+                    }
+                    (NutFamily::AtmRough, z0)
+                }
+                BcKind::NutUBlendedWallFunction => {
+                    let nb = spec.number("n", &p.name)?.unwrap_or(4.0);
+                    if !(nb > 0.0) || !nb.is_finite() {
+                        return Err(Error::Field {
+                            field: raw.name.clone(),
+                            msg: format!(
+                                "{}: boundaryField/{}/n: nutUBlendedWallFunction's blend \
+                                 exponent is {nb}; it must be positive and finite \
+                                 (SPEC-LIT 120.9)",
+                                raw.name, p.name
+                            ),
+                        });
+                    }
+                    (NutFamily::Blended, vec![nb; p.size])
+                }
+                _ => (NutFamily::Standard, vec![0.0; p.size]),
+            };
+
             for i in 0..p.size {
                 u_based[p.start + i] = u_flag;
                 ks[p.start + i] = k_val;
                 cs[p.start + i] = c_val;
+                family[p.start + i] = fam;
+                par[p.start + i] = pars[i];
             }
         }
 
-        Ok(Self { u_based, ks, cs })
+        Ok(Self { u_based, ks, cs, family, par })
     }
 }
 
@@ -4192,6 +5133,8 @@ pub fn bc_kind_name(k: BcKind) -> &'static str {
         BcKind::NutUWallFunction => "nutUWallFunction",
         BcKind::NutkRoughWallFunction => "nutkRoughWallFunction",
         BcKind::NutURoughWallFunction => "nutURoughWallFunction",
+        BcKind::NutkAtmRoughWallFunction => "nutkAtmRoughWallFunction",
+        BcKind::NutUBlendedWallFunction => "nutUBlendedWallFunction",
         BcKind::NutLowReWallFunction => "nutLowReWallFunction",
         BcKind::KqRWallFunction => "kqRWallFunction",
         BcKind::KLowReWallFunction => "kLowReWallFunction",
@@ -5230,16 +6173,60 @@ mod tests {
         assert_eq!(r.u_based, vec![false; m.n_boundary_faces]);
     }
 
-    /// The atmospheric rough wall function is a different profile
-    /// (Monin-Obukhov), not a discarded parameter: it is an error naming the
-    /// two rough functions this solver does implement.
+    /// SPEC-LIT §120.9: `nutkAtmRoughWallFunction` is the `k`-based family
+    /// in the roughness length `z0`, read per face (a bare number, `uniform`
+    /// or a list), and refused by name without one or with `z0 <= 0`.
     #[test]
-    fn nutk_atm_rough_wall_function_is_an_error_naming_the_two() {
-        let err = BcKind::from_name("nutkAtmRoughWallFunction", "nut", "inlet")
-            .expect_err("not implemented");
-        let msg = format!("{err}");
-        assert!(msg.contains("nutkRoughWallFunction"), "{msg}");
-        assert!(msg.contains("nutURoughWallFunction"), "{msg}");
+    fn nutk_atm_rough_wall_function_reads_z0_and_refuses_without_it() {
+        let m = mesh();
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "uniform 0.03".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.family[0], NutFamily::AtmRough);
+        assert_eq!(r.par[0], 0.03);
+        assert_eq!(r.ks[0], 0.0, "z0 is not a sand-grain height");
+        assert!(!r.u_based[0], "the atmospheric ground is k-based");
+
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "0.1".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.par[0], 0.1);
+
+        let raw = scalar_field("inlet", spec("nutkAtmRoughWallFunction"));
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("no z0"));
+        assert!(msg.contains("z0") && msg.contains("120.9"), "{msg}");
+
+        let mut s = spec("nutkAtmRoughWallFunction");
+        s.extra.insert("z0".into(), "uniform 0".into());
+        let raw = scalar_field("inlet", s);
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("z0 = 0"));
+        assert!(msg.contains("positive"), "{msg}");
+    }
+
+    /// SPEC-LIT §120.9: `nutUBlendedWallFunction` is velocity-based, with
+    /// the blend exponent `n` defaulting to 4 and refused when not positive.
+    #[test]
+    fn nutu_blended_wall_function_reads_n_and_is_velocity_based() {
+        let m = mesh();
+        let r = NutRoughness::from_case(
+            Some(&scalar_field("inlet", spec("nutUBlendedWallFunction"))),
+            &m,
+        )
+        .expect("builds");
+        assert_eq!(r.family[0], NutFamily::Blended);
+        assert_eq!(r.par[0], 4.0);
+        assert!(r.u_based[0]);
+
+        let mut s = spec("nutUBlendedWallFunction");
+        s.extra.insert("n".into(), "2".into());
+        let r = NutRoughness::from_case(Some(&scalar_field("inlet", s)), &m).expect("builds");
+        assert_eq!(r.par[0], 2.0);
+
+        let mut s = spec("nutUBlendedWallFunction");
+        s.extra.insert("n".into(), "-1".into());
+        let raw = scalar_field("inlet", s);
+        let msg = format!("{}", NutRoughness::from_case(Some(&raw), &m).expect_err("n < 0"));
+        assert!(msg.contains("exponent"), "{msg}");
     }
 
     // ------------------------------------------------------------------

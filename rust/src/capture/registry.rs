@@ -138,6 +138,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/compressible/thermo.rs",
         Stance::Gate("the_compressible_thermo_update_replays_bitwise"),
     ),
+    (
+        "src/dust/device.rs",
+        Stance::Gate("dust_fsc_replays_under_capture"),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",

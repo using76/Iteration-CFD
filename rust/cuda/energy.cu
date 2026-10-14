@@ -232,3 +232,107 @@ extern "C" __global__ void energyFixedFluxTemperature
     fr[bf] = (ofscalar)0;
     refGrad[bf] = refValue[bf]/keff;
 }
+
+//- SPEC-LIT 120.8's thermal wall family: rewrite the Robin triple on every
+//  face `field_setup::thermal_walls` read from T's OWN patch types, so that
+//  C_b (T_P - T_b) = H (T_b - T_ref) - q_in holds AT EVERY ITERATE, with
+//  C_b = k_eff,b*Delta_b the face's CURRENT conductance - the S98 ambient
+//  triple carried from the conjugate path onto any fluid wall. The host twin
+//  of this exact operation order is cht::ambient::ThermalFace::triple;
+//  tests/bc_thermal.rs holds the two within tol(1e-14) relative (exact for
+//  a zero), not bit for bit.
+//
+//  Four names ride it, distinguished by their per-face parameters:
+//    externalWallHeatFluxTemperature  - flux/power (h = 0, qIn given) or
+//                                       coefficient (h, Ta, eps, layers)
+//    turbulentHeatFluxTemperature     - rides 32.2's kind instead
+//    lumpedMassTemperature            - h and tInf rewritten per STEP by
+//                                       Energy::advance_lumped_masses
+//    totalFlowRateAdvectiveDiffusive  - advective[s] = 1: H from (120.8h),
+//                                       off phiConvB = cp*rho_f*phi_b
+//
+//  A guard that fails (kEff or C_b not positive, a radiating face's T_o*
+//  not positive, a Danckwerts face with no area) returns WITHOUT writing -
+//  the convention of energyFixedFluxTemperature above: the face keeps
+//  whatever triple it had. Every input is widened to ofacc, the arithmetic
+//  of (120.8b)-(120.8f)/(120.8h) runs in f64 in the order written, and each
+//  of the three outputs is rounded ONCE back to ofscalar (SPEC-LIT 118.2).
+//  The five parameter arrays are f64 in BOTH builds - Energy uploads them
+//  widened once, so no per-iteration cast can drift.
+//
+//  One thread per listed face - no wall-adjacent-CELL constraint, same
+//  shape as energyFixedFluxTemperature (T is not pinned, only its triple is
+//  rewritten). No GPL-licensed source was consulted.
+extern "C" __global__ void energyThermalWall
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ tb,
+    const ofscalar* __restrict__ psi,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ kEffWall,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofscalar* __restrict__ phiConvB,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ face,
+    const ofacc* __restrict__ h,
+    const ofacc* __restrict__ tInf,
+    const ofacc* __restrict__ eps,
+    const ofacc* __restrict__ rL,
+    const ofacc* __restrict__ qIn,
+    const oflabel* __restrict__ advective,
+    ofacc sigma,
+    oflabel nFaces
+)
+{
+    const oflabel s = OFGPU_TID;
+    if (s >= nFaces) return;
+
+    const oflabel bf = face[s];
+    const ofacc keff = (ofacc)kEffWall[bf];
+    if (!(keff > (ofacc)0)) return;
+    const ofacc c = keff * (ofacc)bDeltaCoeffs[bf];
+    if (!(c > (ofacc)0)) return;
+
+    const ofacc tbv = (ofacc)tb[bf];
+    const ofacc tp = (ofacc)psi[bFaceCells[bf]];
+
+    ofacc hh, tRef;
+    if (advective[s]) {
+        // (120.8h): phiConv is positive OUT, so an inflow face carries
+        // H = -phiConv/|Sf| and an outflow face is zero-gradient (hh = 0
+        // gives fr = 0 below). refGrad stays qIn/kEff = 0.
+        const ofacc msf = (ofacc)bMagSf[bf];
+        if (!(msf > (ofacc)0)) return;
+        const ofacc pc = (ofacc)phiConvB[bf];
+        hh = pc < (ofacc)0 ? -pc/msf : (ofacc)0;
+        tRef = tInf[s];
+    } else {
+        // (120.8b): what the last solve conducted from the cell to the
+        // face; (120.8c): the outer temperature that iterate implies.
+        const ofacc qc = c*(tp - tbv);
+        const ofacc to = tbv - rL[s]*qc;
+        if (eps[s] > (ofacc)0) {
+            // (120.8d): (S98.2)'s tangent about the OUTER surface.
+            if (!(to > (ofacc)0)) return;
+            const ofacc es = eps[s]*sigma;
+            const ofacc b = (ofacc)4*es*to*to*to;
+            const ofacc ta4 = tInf[s]*tInf[s]*tInf[s]*tInf[s];
+            const ofacc a = es*(to*to*to*to - ta4) - b*to;
+            const ofacc ho = h[s] + b;
+            tRef = (h[s]*tInf[s] - a)/ho;
+            hh = ho;
+        } else {
+            // Taken, not computed - (S98.1) in every bit.
+            hh = h[s];
+            tRef = tInf[s];
+        }
+        // (120.8e): the layers in series with the outer film.
+        hh = hh/((ofacc)1 + rL[s]*hh);
+    }
+
+    fr[bf] = (ofscalar)(hh/(hh + c));
+    refValue[bf] = (ofscalar)tRef;
+    refGrad[bf] = (ofscalar)(qIn[s]/keff);
+}

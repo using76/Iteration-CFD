@@ -427,6 +427,8 @@ struct EnergyKernels {
     k_eff_kays_crawford: CudaFunction,
     target_divergence: CudaFunction,
     fixed_flux: CudaFunction,
+    /// SPEC-LIT 120.8 - the thermal wall family's triple rewrite.
+    thermal_wall: CudaFunction,
 }
 
 impl EnergyKernels {
@@ -438,6 +440,7 @@ impl EnergyKernels {
             k_eff_kays_crawford: k.func("energyKEffKaysCrawford")?,
             target_divergence: k.func("energyTargetDivergence")?,
             fixed_flux: k.func("energyFixedFluxTemperature")?,
+            thermal_wall: k.func("energyThermalWall")?,
         })
     }
 
@@ -593,6 +596,66 @@ impl EnergyKernels {
                 .arg(ref_value)
                 .arg(k_eff_wall)
                 .arg(face)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT 120.8's thermal-wall rewrite, on the `n` listed faces. The
+    /// five parameter arrays and `sigma` are f64 in both builds - the host
+    /// uploaded them widened once - and the kernel is
+    /// [`ThermalFace::triple`](crate::cht::ambient::ThermalFace::triple)'s
+    /// device twin, in the same operation order.
+    #[allow(clippy::too_many_arguments)]
+    fn thermal_wall(
+        &self,
+        gpu: &Gpu,
+        fr: &mut DevBuf<Scalar>,
+        ref_value: &mut DevBuf<Scalar>,
+        ref_grad: &mut DevBuf<Scalar>,
+        tb: &DevBuf<Scalar>,
+        psi: &DevBuf<Scalar>,
+        b_face_cells: &DevBuf<Label>,
+        k_eff_wall: &DevBuf<Scalar>,
+        b_delta_coeffs: &DevBuf<Scalar>,
+        phi_conv_b: &DevBuf<Scalar>,
+        b_mag_sf: &DevBuf<Scalar>,
+        face: &DevBuf<Label>,
+        h: &DevBuf<f64>,
+        t_inf: &DevBuf<f64>,
+        eps: &DevBuf<f64>,
+        r_layers: &DevBuf<f64>,
+        q_in: &DevBuf<f64>,
+        advective: &DevBuf<Label>,
+        sigma: f64,
+        n: usize,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.thermal_wall)
+                .arg(fr)
+                .arg(ref_value)
+                .arg(ref_grad)
+                .arg(tb)
+                .arg(psi)
+                .arg(b_face_cells)
+                .arg(k_eff_wall)
+                .arg(b_delta_coeffs)
+                .arg(phi_conv_b)
+                .arg(b_mag_sf)
+                .arg(face)
+                .arg(h)
+                .arg(t_inf)
+                .arg(eps)
+                .arg(r_layers)
+                .arg(q_in)
+                .arg(advective)
+                .arg(&sigma)
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
@@ -1368,6 +1431,55 @@ pub struct EnergyBudget {
     pub target_divergence_w: f64,
 }
 
+/// SPEC-LIT 120.8's device half: the thermal faces' parameters, uploaded ONCE
+/// by [`Energy::set_thermal_walls`] - f64 in both builds, so no per-iteration
+/// cast can drift - and rewritten per lump by
+/// [`Energy::advance_lumped_masses`] through the two host mirrors.
+struct DeviceThermalWalls {
+    /// The faces, as flattened boundary-face indices, in the order
+    /// [`crate::field_setup::thermal_walls`] produced.
+    face: DevBuf<Label>,
+    /// The same list on the host - `(120.8g)`'s area mean indexes it.
+    face_host_list: Vec<Label>,
+    h: DevBuf<f64>,
+    t_inf: DevBuf<f64>,
+    eps: DevBuf<f64>,
+    r_layers: DevBuf<f64>,
+    q_in: DevBuf<f64>,
+    advective: DevBuf<Label>,
+    n: usize,
+    /// Host mirrors of `h` and `t_inf`, face order - what
+    /// [`Energy::advance_lumped_masses`] rewrites and re-uploads.
+    h_host: Vec<f64>,
+    t_inf_host: Vec<f64>,
+}
+
+impl DeviceThermalWalls {
+    /// A face position's flattened boundary-face index, host side - the
+    /// lumps' `(120.8g)` area mean reads it.
+    fn face_host(&self, i: usize) -> usize {
+        self.face_host_list[i] as usize
+    }
+}
+
+/// SPEC-LIT 120.8's host half of one `lumpedMassTemperature` patch: the two
+/// f64 levels (120.8g) rotates, and whether the first step has run (the seed
+/// holds `t_n = t_nm1 = t0` until then).
+struct ThermalLump {
+    mass_cp: f64,
+    /// The patch area, summed in f64 - (120.8g)'s `A`.
+    area: f64,
+    t0: f64,
+    t_n: f64,
+    t_nm1: f64,
+    started: bool,
+    /// POSITIONS in [`DeviceThermalWalls`]' face list, face order - mapped
+    /// once by [`Energy::set_thermal_walls`] from the lump's boundary faces.
+    faces: Vec<usize>,
+    /// Each face's area, in the same order.
+    areas: Vec<f64>,
+}
+
 pub struct Energy<'m> {
     m: &'m GpuMesh,
     ctrl: EnergyControls,
@@ -1437,6 +1549,18 @@ pub struct Energy<'m> {
     /// `None` until then, same "nothing to do" convention as [`Self::twd`].
     ffq_faces: Option<DevBuf<Label>>,
     ffq_n: usize,
+
+    /// SPEC-LIT 120.8's thermal faces - the device buffers
+    /// [`Self::set_thermal_walls`] uploads. `None` until then, the same
+    /// "nothing to do" convention as [`Self::ffq_faces`].
+    thermal: Option<DeviceThermalWalls>,
+    /// SPEC-LIT 120.8's `lumpedMassTemperature` patches, host side - the
+    /// two f64 levels (120.8g) rotates, and whether the first step has run.
+    thermal_lumps: Vec<ThermalLump>,
+    /// SPEC-LIT 120.8: whether [`Self::advance_lumped_masses`] has run for
+    /// the step about to be solved - [`Self::correct`] refuses a lump whose
+    /// coefficients were never set.
+    lumps_ready: bool,
 
     /// SPEC-LIT §59's retarget onto §47.4's concatenated thermal mesh.
     ///
@@ -1511,6 +1635,9 @@ impl<'m> Energy<'m> {
             twd: None,
             ffq_faces: None,
             ffq_n: 0,
+            thermal: None,
+            thermal_lumps: Vec::new(),
+            lumps_ready: false,
             cht: None,
             k_curve: None,
         })
@@ -1576,6 +1703,14 @@ impl<'m> Energy<'m> {
     /// `energyFixedFluxTemperature` follows.
     pub fn k_eff_wall(&self) -> &DevBuf<Scalar> {
         &self.k_eff_face.bf
+    }
+
+    /// `phi_conv = cp rho_f phi` - S26's mass flux this equation convects
+    /// with, which (120.8h)'s Danckwerts inlet reads at its face (SPEC-LIT
+    /// 120.8). Rebuilt by [`Self::update_conv_flux`] at the top of every
+    /// [`Self::correct`].
+    pub fn conv_flux(&self) -> &GpuSurfaceScalarField {
+        &self.phi_conv
     }
 
     /// SPEC-LIT §100.10: the molecular conductivity becomes the curve `p`,
@@ -1755,6 +1890,275 @@ impl<'m> Energy<'m> {
         let padded = if list.is_empty() { vec![0 as Label] } else { list };
         self.ffq_faces = Some(gpu.upload(&padded)?);
         Ok(())
+    }
+
+    /// Wire SPEC-LIT 120.8's thermal family onto the faces and lumps
+    /// [`crate::field_setup::thermal_walls`] reads from `T`'s OWN patch types
+    /// - the same S15.5 discipline [`Self::set_fixed_flux_walls`] follows.
+    /// The per-face `h`/`Ta`/`eps`/`R_l`/`q_in` go up as f64 buffers in BOTH
+    /// builds, widened once, so the kernel never casts per iteration (SPEC-LIT
+    /// 118.2).
+    ///
+    /// **Call this after [`Self::attach_conjugate`] and before the first
+    /// [`Self::correct`]** - the interface check needs the conjugate mesh
+    /// attached, exactly as the two setters above need it (SPEC-LIT 47.6: a
+    /// face carries ONE condition).
+    ///
+    /// A `lumpedMassTemperature` lump is refused on a steady run (no `a_n`),
+    /// and a lumped step is refused at [`Self::correct`] until
+    /// [`Self::advance_lumped_masses`] has run for it. Empty walls store
+    /// nothing and every later call is a no-op, like the two setters above.
+    pub fn set_thermal_walls(&mut self, gpu: &Gpu, walls: &crate::cht::ambient::ThermalWalls) -> Result<()> {
+        let nbf = self.m.n_boundary_faces;
+        for f in &walls.faces {
+            if f.bf >= nbf {
+                return Err(Error::Config(format!(
+                    "Energy::set_thermal_walls: face {} is not a boundary face of \
+                     this mesh ({} faces) (SPEC-LIT 120.8)",
+                    f.bf, nbf
+                )));
+            }
+        }
+        let mut flags = vec![false; nbf];
+        for f in &walls.faces {
+            flags[f.bf] = true;
+        }
+        self.check_not_interface(&flags, "SPEC-LIT 120.8's thermal walls")?;
+        if !walls.lumps.is_empty() && self.ddt.scheme == DdtScheme::SteadyState {
+            return Err(Error::Config(format!(
+                "Energy::set_thermal_walls: `lumpedMassTemperature` needs the \
+                 energy equation's own ddt row `a_n T^{{n+1}} + a_0 T^n + a_00 \
+                 T^{{n-1}}` and this Energy is steady, so `a_n` is zero \
+                 (SPEC-LIT 120.8)"
+            )));
+        }
+        for l in &walls.lumps {
+            let area: f64 = l.area.iter().sum();
+            if l.faces.len() != l.area.len() || !(area > 0.0) || !area.is_finite() {
+                return Err(Error::Config(format!(
+                    "Energy::set_thermal_walls: `lumpedMassTemperature` on {} has {} \
+                     faces and {} areas summing to {area} - the areas have to match \
+                     the faces and sum to something finite and positive (SPEC-LIT \
+                     120.8)",
+                    l.patch,
+                    l.faces.len(),
+                    l.area.len()
+                )));
+            }
+        }
+        // A lump names its faces by boundary-face index; the per-step film
+        // is written at that face's POSITION in the face list, mapped here
+        // once. A lump face with no thermal face has nowhere to go.
+        let mut position: Vec<Option<usize>> = vec![None; nbf];
+        for (i, f) in walls.faces.iter().enumerate() {
+            position[f.bf].get_or_insert(i);
+        }
+        let mut lump_positions: Vec<Vec<usize>> = Vec::with_capacity(walls.lumps.len());
+        for l in &walls.lumps {
+            let mut at = Vec::with_capacity(l.faces.len());
+            for &bf in &l.faces {
+                match position.get(bf).copied().flatten() {
+                    Some(i) => at.push(i),
+                    None => {
+                        return Err(Error::Config(format!(
+                            "Energy::set_thermal_walls: `lumpedMassTemperature` on {} \
+                             names boundary face {bf}, which is not a thermal face of \
+                             this set - each of a lump's faces must also be one of the \
+                             set's faces (SPEC-LIT 120.8)",
+                            l.patch
+                        )));
+                    }
+                }
+            }
+            lump_positions.push(at);
+        }
+        if walls.faces.is_empty() && walls.lumps.is_empty() {
+            return Ok(());
+        }
+
+        let face: Vec<Label> = walls.faces.iter().map(|f| f.bf as Label).collect();
+        let h: Vec<f64> = walls.faces.iter().map(|f| f.h).collect();
+        let t_inf: Vec<f64> = walls.faces.iter().map(|f| f.t_inf).collect();
+        let eps: Vec<f64> = walls.faces.iter().map(|f| f.emissivity).collect();
+        let r_layers: Vec<f64> = walls.faces.iter().map(|f| f.r_layers).collect();
+        let q_in: Vec<f64> = walls.faces.iter().map(|f| f.q_in).collect();
+        let advective: Vec<Label> =
+            walls.faces.iter().map(|f| Label::from(f.advective)).collect();
+        let n = face.len();
+        self.thermal = Some(DeviceThermalWalls {
+            face: gpu.upload(&face)?,
+            face_host_list: face,
+            h: gpu.upload(&h)?,
+            t_inf: gpu.upload(&t_inf)?,
+            eps: gpu.upload(&eps)?,
+            r_layers: gpu.upload(&r_layers)?,
+            q_in: gpu.upload(&q_in)?,
+            advective: gpu.upload(&advective)?,
+            n,
+            h_host: h,
+            t_inf_host: t_inf,
+        });
+        self.thermal_lumps = walls
+            .lumps
+            .iter()
+            .zip(lump_positions)
+            .map(|(l, faces)| ThermalLump {
+                mass_cp: l.mass_cp,
+                area: l.area.iter().sum(),
+                t0: l.t0,
+                t_n: 0.0,
+                t_nm1: 0.0,
+                started: false,
+                faces,
+                areas: l.area.clone(),
+            })
+            .collect();
+        self.lumps_ready = false;
+        Ok(())
+    }
+
+    /// SPEC-LIT 120.8: rewrite every thermal face's `(fr, refValue, refGrad)`
+    /// by [`crate::cht::ambient::ThermalFace::triple`] from the CURRENT conductance -
+    /// a no-op without faces. Reads `self.k_eff_face.bf`, so it MUST run
+    /// after [`Self::update_k_eff`]; and it reads `self.phi_conv.bf`, so the
+    /// [`Self::correct`] launch runs right after [`Self::update_conv_flux`],
+    /// which is what makes (120.8h) read the flux it is assembled with. Both
+    /// launches sit inside the captured region of
+    /// `the_energy_correction_replays_bitwise`.
+    pub fn refresh_thermal_walls(&mut self, gpu: &Gpu) -> Result<()> {
+        let Some(tw) = &self.thermal else {
+            return Ok(());
+        };
+        if tw.n == 0 {
+            return Ok(());
+        }
+        let sigma = crate::radiation::SIGMA_SB as f64;
+        let Self { ek, t, m, k_eff_face, phi_conv, thermal, .. } = self;
+        let tw = thermal.as_ref().expect("checked above");
+        ek.thermal_wall(
+            gpu,
+            &mut t.fr,
+            &mut t.ref_value,
+            &mut t.ref_grad,
+            &t.bf,
+            &t.f,
+            &m.b_face_cells,
+            &k_eff_face.bf,
+            &m.b_delta_coeffs,
+            &phi_conv.bf,
+            &m.b_mag_sf,
+            &tw.face,
+            &tw.h,
+            &tw.t_inf,
+            &tw.eps,
+            &tw.r_layers,
+            &tw.q_in,
+            &tw.advective,
+            sigma,
+            tw.n,
+        )
+    }
+
+    /// SPEC-LIT 120.8's ONE host round trip per time step: record each
+    /// lump's `T_m` by (120.8g) - the CURRENT area mean of `T_b` - rotate
+    /// its two f64 levels, and upload the step's area-shared `H` and
+    /// `T_ref` onto the lump's faces' mirrors. Call it once per transient
+    /// step, after the step is opened and before its first [`Self::correct`]
+    /// - never once per outer corrector. A no-op without lumps.
+    pub fn advance_lumped_masses(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.thermal_lumps.is_empty() {
+            return Ok(());
+        }
+        // The energy equation's OWN ddt row, exactly as `add_ddt` assembles
+        // it - Euler, or `backward` from its Euler first step (SPEC-LIT
+        // 105.16-105.17).
+        let c = self.ddt.state.coeffs(self.ddt.scheme)?;
+        let (a_n, a_0, a_00) = (c.a_n as f64, c.a_0 as f64, c.a_00 as f64);
+        if a_n == 0.0 {
+            return Err(Error::Config(format!(
+                "Energy::advance_lumped_masses: the ddt row's `a_n` is zero, so \
+                 (120.8g)'s `H = m cp a_n / A` has nothing to divide by - a \
+                 `lumpedMassTemperature` patch needs a transient step (SPEC-LIT \
+                 120.8)"
+            )));
+        }
+        // (120.8g) reads the faces the PREVIOUS solve left; one download for
+        // every lump, and none at all before the first step has solved.
+        let bf_values: Vec<Scalar> = if self.thermal_lumps.iter().any(|l| l.started) {
+            gpu.download(&self.t.bf)?
+        } else {
+            Vec::new()
+        };
+        let Some(tw) = &mut self.thermal else {
+            return Err(Error::Config(
+                "Energy::advance_lumped_masses: lumps are wired but no thermal \
+                 faces were set (SPEC-LIT 120.8)"
+                    .to_string(),
+            ));
+        };
+        for lump in &mut self.thermal_lumps {
+            if lump.started {
+                let (mut sa, mut sb) = (0.0f64, 0.0f64);
+                for (k, &fi) in lump.faces.iter().enumerate() {
+                    let bf = tw.face_host(fi);
+                    sa += lump.areas[k];
+                    sb += lump.areas[k] * (bf_values[bf] as f64);
+                }
+                let t_new = sb / sa;
+                lump.t_nm1 = lump.t_n;
+                lump.t_n = t_new;
+            } else {
+                lump.started = true;
+                lump.t_n = lump.t0;
+                lump.t_nm1 = lump.t0;
+            }
+            let (h, t_ref) = crate::cht::ambient::lump_coefficients(
+                lump.mass_cp,
+                lump.area,
+                a_n,
+                a_0,
+                a_00,
+                lump.t_n,
+                lump.t_nm1,
+            );
+            for &fi in &lump.faces {
+                tw.h_host[fi] = h;
+                tw.t_inf_host[fi] = t_ref;
+            }
+        }
+        gpu.write(&mut tw.h, &tw.h_host)?;
+        gpu.write(&mut tw.t_inf, &tw.t_inf_host)?;
+        self.lumps_ready = true;
+        Ok(())
+    }
+
+    /// Each lump's CURRENT area mean of `T_b` - (120.8g)'s right-hand side,
+    /// as the faces stand this instant. Between corrections.
+    pub fn lumped_mass_temperatures(&self, gpu: &Gpu) -> Result<Vec<f64>> {
+        if self.thermal_lumps.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(tw) = &self.thermal else {
+            return Err(Error::Config(
+                "Energy::lumped_mass_temperatures: lumps are wired but no thermal \
+                 faces were set (SPEC-LIT 120.8)"
+                    .to_string(),
+            ));
+        };
+        let bf_values = gpu.download(&self.t.bf)?;
+        Ok(self
+            .thermal_lumps
+            .iter()
+            .map(|l| {
+                let (mut sa, mut sb) = (0.0f64, 0.0f64);
+                for (k, &fi) in l.faces.iter().enumerate() {
+                    let bf = tw.face_host(fi);
+                    sa += l.areas[k];
+                    sb += l.areas[k] * (bf_values[bf] as f64);
+                }
+                sb / sa
+            })
+            .collect())
     }
 
     /// Advance the ddt scheme's own time-step bookkeeping - call ONCE per
@@ -2757,6 +3161,9 @@ impl<'m> Energy<'m> {
         self.update_k_eff(gpu, nut, gas, nu)?;
         self.update_thermal_wall(gpu, k, &gas.rho().f, nu)?;
         self.update_fixed_flux(gpu)?;
+        // SPEC-LIT 120.8's thermal family, off the `k_eff` and the triple
+        // the two rewrites above have just rebuilt - a no-op without faces.
+        self.refresh_thermal_walls(gpu)?;
         // SPEC-LIT §47.2's triple on both sides of every interface, from the
         // conductance `update_k_eff` has just rebuilt. A no-op on the
         // single-region path, where it does not even evaluate its guard's
@@ -2843,11 +3250,23 @@ impl<'m> Energy<'m> {
         if n == 0 {
             return Ok(SolverPerformance::default());
         }
+        // SPEC-LIT 120.8: a lumped step is assembled from the coefficients
+        // `advance_lumped_masses` uploaded for THIS step; solving with the
+        // seed triple instead would freeze the lump at its `T_m^0`.
+        if !self.thermal_lumps.is_empty() && !self.lumps_ready {
+            return Err(Error::Config(format!(
+                "Energy::correct: a `lumpedMassTemperature` patch is wired but \
+                 advance_lumped_masses has not run for this step - call it once \
+                 per time step, after the step is opened and before the first \
+                 correct (SPEC-LIT 120.8)"
+            )));
+        }
 
         field_ops::store_old_time(gpu, &self.fldk, &mut self.t)?;
 
         self.prepare_coefficients(gpu, nut, k, nu, gas)?;
         self.update_conv_flux(gpu, phi)?;
+        self.refresh_thermal_walls(gpu)?;
 
         let alpha = self.ctrl.t_relax;
         let sc = self.ctrl.t_solver;

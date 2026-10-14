@@ -42,6 +42,15 @@
     Werner & Wengle, "Large-eddy simulation of turbulent flow over and
       around a cube in a plate channel", 8th Symp. Turb. Shear Flows (1991)
       - the LES wall model, SPEC-LIT.md 30.1 (wfWernerWengle, below wfYPlus)
+    Richards & Hoxey, J. Wind Eng. Ind. Aerodyn. 46-47 (1993) 145-153,
+      doi:10.1016/0167-6105(93)90124-7 - the neutral surface-layer profile
+      the atmospheric ground is held to (wfNutAtmRough, SPEC-LIT.md 120.9)
+    Hargreaves & Wright, J. Wind Eng. Ind. Aerodyn. 95 (2007) 355-369,
+      doi:10.1016/j.jweia.2006.08.002 - the rough-wall function written in
+      the roughness length z0
+    ofgpu SPEC-LIT.md 120.9 - (120.9g), and the *DESIGN* binomial blend
+      (120.9h) of the viscous and log-law friction velocities
+      (wfUTauBlended)
   No GPL-licensed source was consulted.
 
   ==========================================================================
@@ -183,12 +192,28 @@ OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrtf(a); }
 OFGPU_DEV ofscalar oflog_(ofscalar a)  { return logf(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return expf(a); }
 OFGPU_DEV ofscalar ofsin_(ofscalar a)  { return sinf(a); }
+OFGPU_DEV ofscalar oflog1p_(ofscalar a) { return log1pf(a); }
+OFGPU_DEV ofscalar ofpow_(ofscalar a, ofscalar b) { return powf(a, b); }
+//- SPEC-LIT 120.9: wfUTauLog's stopping rule, four units of the precision's
+//  own round-off (the host's U_TAU_LOG_REL = 4 Scalar::EPSILON).
+#define OFGPU_WF_LOG_REL ((ofscalar)(4.0f*1.1920928955078125e-7f))
 #else
 OFGPU_DEV ofscalar ofsqrt_(ofscalar a) { return sqrt(a); }
 OFGPU_DEV ofscalar oflog_(ofscalar a)  { return log(a); }
 OFGPU_DEV ofscalar ofexp_(ofscalar a)  { return exp(a); }
 OFGPU_DEV ofscalar ofsin_(ofscalar a)  { return sin(a); }
+OFGPU_DEV ofscalar oflog1p_(ofscalar a) { return log1p(a); }
+OFGPU_DEV ofscalar ofpow_(ofscalar a, ofscalar b) { return pow(a, b); }
+#define OFGPU_WF_LOG_REL ((ofscalar)(4.0*2.220446049250313e-16))
 #endif
+
+//- SPEC-LIT 120.9: wfNutWall's family codes, mirrored from the NUT_FAMILY_*
+//  constants of src/wallfunctions.rs. 0 and 1 are the two families that
+//  existed before 120.9 and keep their arithmetic.
+#define OFGPU_WF_NUT_K           0
+#define OFGPU_WF_NUT_U           1
+#define OFGPU_WF_NUT_K_ATM_ROUGH 2
+#define OFGPU_WF_NUT_U_BLENDED   3
 
 OFGPU_DEV ofscalar ofabs_(ofscalar a) { return a < (ofscalar)0 ? -a : a; }
 
@@ -403,11 +428,101 @@ OFGPU_DEV ofscalar wfMagUParallel
 
 
 // ==========================================================================
+//  The atmospheric family - SPEC-LIT 120.9
+//
+//  Written from Richards & Hoxey (1993) and Hargreaves & Wright (2007) (the
+//  header) and ofgpu SPEC-LIT.md 120.9. The host twins in
+//  src/wallfunctions.rs (nut_wall_atm_rough, u_tau_log, u_tau_blended) state
+//  the design; this file states the same arithmetic in the same order.
+//  No GPL-licensed source was consulted.
+// ==========================================================================
+
+//- (120.9g): nu_t,w = max(0, u* kappa y / ln(1 + y/z0) - nu), u* from k.
+OFGPU_DEV ofscalar wfNutAtmRough
+(
+    ofscalar k,
+    ofscalar y,
+    ofscalar nu,
+    ofscalar kappa,
+    ofscalar cmu25,
+    ofscalar z0
+)
+{
+    if (!(y > (ofscalar)0) || !(z0 > (ofscalar)0)) return (ofscalar)0;
+    const ofscalar uStar = wfUTauFromK(k, cmu25);
+    const ofscalar l = oflog1p_(y/z0);
+    return ofmax_(uStar*kappa*y/l - nu, (ofscalar)0);
+}
+
+
+//- The log-law friction velocity: the root of u ln(1 + E y u/nu) = kappa |U|.
+//  *DESIGN* (SPEC-LIT 120.9): the log law written ln(1 + E y+)/kappa, whose
+//  root vanishes with |U|; Newton from u_v, at most 40 steps, stopping at
+//  OFGPU_WF_LOG_REL relative.
+OFGPU_DEV ofscalar wfUTauLog
+(
+    ofscalar uMag,
+    ofscalar y,
+    ofscalar nu,
+    ofscalar kappa,
+    ofscalar E
+)
+{
+    if (!(uMag > (ofscalar)0) || !(y > (ofscalar)0)) return (ofscalar)0;
+
+    const ofscalar c = E*y/nu;
+    ofscalar u = ofsqrt_(nu*uMag/y);
+
+    for (int it = 0; it < 40; ++it)
+    {
+        const ofscalar cu = c*u;
+        const ofscalar l = oflog1p_(cu);
+        const ofscalar g = u*l - kappa*uMag;
+        const ofscalar dg = l + cu/((ofscalar)1 + cu);
+        if (!(dg > (ofscalar)0)) break;
+
+        const ofscalar next = u - g/dg;
+        const bool done = ofabs_(next - u) <= OFGPU_WF_LOG_REL*ofabs_(next);
+        u = next;
+        if (done) break;
+    }
+
+    return ofmax_(u, (ofscalar)0);
+}
+
+
+//- (120.9h), *DESIGN*: u_tau = (u_v^n + u_l^n)^{1/n}, formed as
+//  m (1 + r^n)^{1/n} with m = max(u_v, u_l) and r = min/max.
+OFGPU_DEV ofscalar wfUTauBlended
+(
+    ofscalar uMag,
+    ofscalar y,
+    ofscalar nu,
+    ofscalar kappa,
+    ofscalar E,
+    ofscalar n
+)
+{
+    if (!(uMag > (ofscalar)0) || !(y > (ofscalar)0)) return (ofscalar)0;
+
+    const ofscalar uV = ofsqrt_(nu*uMag/y);
+    const ofscalar uL = wfUTauLog(uMag, y, nu, kappa, E);
+    const ofscalar m = ofmax_(uV, uL);
+    if (!(m > (ofscalar)0)) return (ofscalar)0;
+    const ofscalar r = ofmin_(uV, uL)/m;
+    return m*ofpow_((ofscalar)1 + ofpow_(r, n), (ofscalar)1/n);
+}
+
+
+// ==========================================================================
 //  nu_t on the wall faces
 // ==========================================================================
 
-//- `uBased[i]` selects the nutU family (SPEC-LIT 15.1): velocity-based y+/
-//  u_tau via wfUTauNewton, rather than nutk's k-based one. `ks[i]`/`cs[i]`
+//- `uBased[i]` is the face's family code (SPEC-LIT 120.9): OFGPU_WF_NUT_U
+//  selects the nutU family (SPEC-LIT 15.1), velocity-based y+/u_tau via
+//  wfUTauNewton, rather than nutk's k-based one (OFGPU_WF_NUT_K); the two
+//  atmospheric codes read their one parameter (z0, or the blend exponent n)
+//  from `par[i]`. `ks[i]`/`cs[i]`
 //  carry the SPEC-LIT 15.3/29.2 roughness, zero on every smooth face - which
 //  is what makes both families collapse to their pre-roughness values to
 //  round-off (the SPEC-LIT 22 gate). All three are indexed by `i`, the same
@@ -426,6 +541,7 @@ extern "C" __global__ void wfNutWall
     const oflabel* __restrict__ uBased,
     const ofscalar* __restrict__ ks,
     const ofscalar* __restrict__ cs,
+    const ofscalar* __restrict__ par,
     ofscalar nu,
     ofscalar kappa,
     ofscalar E,
@@ -449,13 +565,33 @@ extern "C" __global__ void wfNutWall
     const ofscalar ksFace = ks[i];
     const ofscalar csFace = cs[i];
 
-    if (uBased[i])
+    const oflabel family = uBased[i];
+
+    if (family == OFGPU_WF_NUT_U)
     {
         // nutU (SPEC-LIT 15.1): y+/u_tau from the wall-parallel velocity, not
         // from k. Ks+ iterates with u_tau inside the Newton (SPEC-LIT 29.2).
         const ofscalar uMag = wfMagUParallel(U[c], Ub[bf], bSf[bf], bMagSf[bf]);
         const ofscalar uTau = wfUTauNewton(uMag, y, nu, kappa, E, ksFace, csFace);
         nutB[bf] = wfNutWU(uTau, y, nu, uMag);
+        return;
+    }
+
+    if (family == OFGPU_WF_NUT_U_BLENDED)
+    {
+        // nutUBlended (SPEC-LIT 120.9, (120.9h)): the blended u_tau from the
+        // same wall-parallel velocity; par[i] is the exponent n.
+        const ofscalar uMag = wfMagUParallel(U[c], Ub[bf], bSf[bf], bMagSf[bf]);
+        const ofscalar uTau = wfUTauBlended(uMag, y, nu, kappa, E, par[i]);
+        nutB[bf] = wfNutWU(uTau, y, nu, uMag);
+        return;
+    }
+
+    if (family == OFGPU_WF_NUT_K_ATM_ROUGH)
+    {
+        // nutkAtmRough (SPEC-LIT 120.9, (120.9g)): u* from k, the log in the
+        // roughness length; par[i] is z0.
+        nutB[bf] = wfNutAtmRough(ofmax_(k[c], kMin), y, nu, kappa, cmu25, par[i]);
         return;
     }
 
