@@ -20,9 +20,14 @@
   substitutions of the packed Cholesky factor, with the projection and
   pin of a singular level, in one thread block. amgAxpy and amgCombine
   are the K-cycle's two vector updates of SPEC-LIT 141.6 (AMG-04c).
+  amgToFloat, amgAddFloat, amgFineAmulFloat and amgFineResidualFloat
+  cross between the solve's ofscalar vectors and the float levels of the
+  f32 preconditioner of SPEC-LIT 141.12 (AMG-06b); build.rs compiles
+  this unit a second time with -DOFGPU_SINGLE for that preconditioner's
+  cycle (kernels::AMG_F32).
   ==========================================================================
 
-  Written from: SPEC-LIT.md 141.1, 141.2, 141.3, 141.6; Notay, ETNA 37 (2010)
+  Written from: SPEC-LIT.md 141.1, 141.2, 141.3, 141.6, 141.12; Notay, ETNA 37 (2010)
   123-146, eqs. (2.1)-(2.3); Baker, Falgout, Kolev & Yang, LLNL-TR-489114
   (2011), eqs. 2.2, 4.1-4.3, 6.1-6.2; Saad (2003) Algorithms 6.15
   and 12.1
@@ -462,4 +467,155 @@ extern "C" __global__ void amgCoarseLu
     {
         x[c] = (ofscalar)w[c];
     }
+}
+
+// ==========================================================================
+//  The f32 preconditioner of an f64 solve, SPEC-LIT 141.12 (AMG-06b)
+// ==========================================================================
+//
+//  Four kernels at the boundary between the solve's ofscalar vectors and
+//  the float levels of amg::single. The float types are written out as
+//  `float`, so in the f64 build they cross precisions and under
+//  OFGPU_SINGLE they are float to float. They run from the native module;
+//  the V-cycle on the float levels runs from this unit's -DOFGPU_SINGLE
+//  twin, kernels::AMG_F32. One thread per cell, no atomics, no
+//  allocation, no sync: each only launches, so it captures (SPEC-LIT 81).
+
+//- (141.45): y[c] = fl32(x[c]), round to nearest. -
+extern "C" __global__ void amgToFloat
+(
+    float* __restrict__ y,
+    const ofscalar* __restrict__ x,
+    int n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    y[c] = (float)x[c];
+}
+
+//- (141.45), (141.46): x[c] = x[c] + e[c], e widened exactly first. -
+extern "C" __global__ void amgAddFloat
+(
+    ofscalar* __restrict__ x,
+    const float* __restrict__ e,
+    int n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    x[c] = x[c] + (ofscalar)e[c];
+}
+
+//- Level 0 of the float cycle, (141.45): y = A32 x with A32 = fl32(A)
+//  entrywise. lduAmul's merged row map and its order of additions
+//  (cuda/ldu.cu), every coefficient rounded to float before its product,
+//  every product and sum in float: the product a stored float copy of the
+//  matrix would give, without the copy. -
+extern "C" __global__ void amgFineAmulFloat
+(
+    float* __restrict__ y,
+    const float* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    float sum = (float)diag[c]*x[c];
+
+    const oflabel begin = rfOffset[c];
+    const oflabel end   = rfOffset[c + 1];
+    for (oflabel j = begin; j < end; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nbr = bNbrCell[f];
+            if (nbr >= 0)
+            {
+                sum -= (float)boundaryCoeffs[f]*x[nbr];
+            }
+        }
+        else if (fl & OFGPU_RF_OWNS)
+        {
+            sum += (float)upper[f]*x[neighbour[f]];
+        }
+        else
+        {
+            sum += (float)lower[f]*x[owner[f]];
+        }
+    }
+
+    y[c] = sum;
+}
+
+//- The stationary cycle's residual, (141.46): r[c] = fl32(b[c] - (A x)[c]),
+//  A x in ofscalar exactly as lduAmul forms it (cuda/ldu.cu), the
+//  difference in ofscalar, rounded once to float. -
+extern "C" __global__ void amgFineResidualFloat
+(
+    float* __restrict__ r,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar sum = diag[c]*x[c];
+
+    const oflabel begin = rfOffset[c];
+    const oflabel end   = rfOffset[c + 1];
+    for (oflabel j = begin; j < end; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (fl & OFGPU_RF_BOUNDARY)
+        {
+            const oflabel nbr = bNbrCell[f];
+            if (nbr >= 0)
+            {
+                sum -= boundaryCoeffs[f]*x[nbr];
+            }
+        }
+        else if (fl & OFGPU_RF_OWNS)
+        {
+            sum += upper[f]*x[neighbour[f]];
+        }
+        else
+        {
+            sum += lower[f]*x[owner[f]];
+        }
+    }
+
+    r[c] = (float)(b[c] - sum);
 }

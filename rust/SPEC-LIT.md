@@ -1504,7 +1504,7 @@ that no reader asks for are listed as owed rather than hidden.
 |---|---|---|---|---|---|
 | `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2); `GAMG` on a pressure equation solved by `PbicgstabBackend`, with the sub-entries of §141.7 | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` where no hierarchy is built: every equation outside `PbicgstabBackend` (§141.7), refused by `solver::solve` naming `set_gamg` (§141.5); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_without_a_hierarchy_is_refused_by_name`; `pressure::tests::gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix`; `tests/gamg_case.rs` (§141.7); the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
 | `solvers/<var>/preconditioner` (`Preconditioner::from_name`), a bare word or OpenFOAM's `preconditioner { preconditioner <name>; ... }` sub-dictionary (§141.7; the sub-dictionary **was silent**: read by nobody, the default kept) | `none`, `diagonal`, `DIC`, `DILU`; `GAMG` on a pressure equation solved by `PbicgstabBackend` (§141.7) | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG` where no hierarchy is built (§141.5's refusal naming `set_gamg`), `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test; `tests/gamg_case.rs` (§141.7) |
-| GAMG sub-entries `smoother`, `nPreSweeps`, `nPostSweeps`, `nCellsInCoarsestLevel`, `maxLevels`, `cacheAgglomeration`, `mergeLevels`, `agglomerator` (`src/io/case.rs`, `read_gamg_controls`; JSONC `numerics.solvers[].gamg`, §141.7) | `Chebyshev`, `l1Jacobi`, `Jacobi`; whole-number counts (sweeps `>= 0` with a non-zero sum, the other two `>= 1`); a Switch; `mergeLevels 1` | — | `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DIC`, `DILU`, `FDIC` and anything else as `smoother`; `mergeLevels` other than 1; every `agglomerator`; a malformed count or switch (not downgradable); in JSONC `mergeLevels`/`agglomerator` as unknown keys and a `gamg` block on a rule naming no GAMG | Chebyshev; `mergeLevels 1`; the native aggregation | `tests/gamg_case.rs`: `every_gamg_key_reaches_the_solve` (one §13.4.1 pair per key), `unsupported_gamg_values_are_refused_by_name_with_the_alternative`; `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` |
+| GAMG sub-entries `smoother`, `nPreSweeps`, `nPostSweeps`, `nCellsInCoarsestLevel`, `maxLevels`, `cacheAgglomeration`, `precision`, `mergeLevels`, `agglomerator` (`src/io/case.rs`, `read_gamg_controls`; JSONC `numerics.solvers[].gamg`, §141.7, §141.12) | `Chebyshev`, `l1Jacobi`, `Jacobi`; whole-number counts (sweeps `>= 0` with a non-zero sum, the other two `>= 1`); a Switch; `precision` `native` or `single` (dictionary route only); `mergeLevels 1` | — | `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DIC`, `DILU`, `FDIC` and anything else as `smoother`; `mergeLevels` other than 1; every `agglomerator`; a malformed count or switch, a `precision` other than `native`/`single` (not downgradable); in JSONC `mergeLevels`/`agglomerator`/`precision` as unknown keys and a `gamg` block on a rule naming no GAMG | Chebyshev; `mergeLevels 1`; the native aggregation | `tests/gamg_case.rs`: `every_gamg_key_reaches_the_solve` (one §13.4.1 pair per key), `unsupported_gamg_values_are_refused_by_name_with_the_alternative`; `tests/amg_single.rs`: `the_gamg_precision_key_reaches_the_solve` (§141.12.1); `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` |
 | CHT `numerics.solver`, `numerics.preconditioner` (`src/io/case_cht.rs`) | `PCG`, `PBiCGStab`; `DIC`, `DILU`, `diagonal`, `none` | none | `GAMG`, anything else | PCG; DIC | `io::case_cht::tests::a_preconditioner_of_none_lowers_to_none` — `none` lowered to Jacobi, **was silent**; `io::case_cht::tests::two_cases_differing_only_in_the_preconditioner_produce_different_output` |
 | `ddtSchemes/default` (`src/timescheme.rs`, `DdtScheme::parse`) | `steadyState`, `Euler`, `backward`, `CrankNicolson <θ>` with θ in (0, 1], `localEuler`; a `bounded` prefix is accepted and ignored (documented) | `euler`; `LocalEuler`; `CrankNicholson` | `CoEuler`, `SLTS`, bare `bounded` (recognised, not implemented); anything else; per equation: `CrankNicolson` under implicit relaxation, `localEuler`/`CrankNicolson` on `T`, a steady scheme under DES; in `ofgpu-vof` everything but `Euler` — an UNPARSEABLE name **was silent** there (folded into Euler) | Euler (OpenFOAM route, `read_fv_schemes`); the JSONC route's `numerics.ddt` refusal is NOT downgradable — a stated asymmetry | `timescheme::tests`; `io::case::tests::ddt_schemes_reaches_the_controls_in_full`; `vof::tests::a_ddt_scheme_that_is_not_euler_is_refused_by_name_even_when_unparseable` |
 | `divSchemes/<key>` (`src/io/schemes.rs`, `parse_div`) | the fifteen names of `DIV_AVAILABLE`, `Gauss` integration only, `bounded` prefix honoured (refused in `ofgpu-vof`, §20.3); coefficients `limitedLinear`/`Sweby <β>` in [1, 2] (§7), `Gamma <β_m>` in [0.1, 0.5] (§11.6), `blended`/`linearUpwindBlended <γ>` in [0, 1] (§11.5); `linearUpwind grad(U)`'s trailing word is accepted and ignored (DESIGN, the field's own `gradSchemes` entry is used) | case variants (`quick`, `vanleer`, `minmod`, `superbee`, `muscl`, `gamma`, `sweby`) | the nineteen names of `DIV_KNOWN_UNIMPLEMENTED` (recognised, not implemented) and anything else; a non-`Gauss` integration; a missing coefficient; a coefficient outside its range — **was silent** (clamped in `fv.rs` with no message) | `Gauss upwind`; for a coefficient, the clamped value | `io::schemes::tests` (`every_limiter_of_section_7_is_reachable_by_name`, `an_unimplemented_scheme_is_an_error_naming_it_and_the_menu`, `a_scheme_coefficient_outside_its_range_is_refused_by_name`, `permissive_takes_the_clamped_coefficient`); every driver's `divSchemes` knobs |
@@ -39763,6 +39763,23 @@ No GPL-licensed source was consulted.
 
 ---
 
+### 118.13 The opt-in f32 GAMG preconditioner of an f64 solve
+
+The f64 build has one place where it chooses float on purpose: the GAMG hierarchy's device copy under
+the case key `precision single` (§141.12, AMG-06b). It is off by default. What stays in double there
+is what the rest of this section keeps in double:
+- the Krylov iteration and its vectors, which are the solve's;
+- the residual of a stationary cycle, (141.46);
+- the coarsest factor, which is `Acc` in both builds (§141.4);
+- the aggregation and every level's Galerkin sum, which are made on the host in f64 and rounded once
+  to float on upload.
+
+What is float is the cycle: the levels' coefficients, the smoothers' diagonals and Chebyshev
+coefficients, the per-level vectors and level 0's operator `fl32(A)`, (141.45). That is the role
+§118.4 gives the float inner method, here inside a double solve that needs no outer refinement
+loop, because the outer solve already iterates in double. Under `--features single` the key is a
+no-op: the hierarchy is float there already, and §118.4 refines the solve around it (§141.9).
+
 ## 119. The true wedge: a rotational self-couple
 
 An axisymmetric case is solved on a wedge one cell thick in the
@@ -50933,6 +50950,7 @@ names no GAMG is not read):
 | `nCellsInCoarsestLevel` | `HierarchyConfig::n_cells_coarsest` (§141.3) | whole number `>= 1` | 64 |
 | `maxLevels` | `HierarchyConfig::max_levels`, the finest level counted (§141.3) | whole number `>= 1` | 50 |
 | `cacheAgglomeration` | `GamgControls::cache_agglomeration` | an OpenFOAM Switch | `true` |
+| `precision` | `GamgControls::precision`, the device copy's precision (§141.12, AMG-06b) | `native`, `single`; anything else is refused naming the key, and `-permissive` does not downgrade it | `native` |
 | `mergeLevels` | — | `1` only: no merging, which is what the hierarchy does | — |
 | `agglomerator` | — | none: refused | — |
 
@@ -51422,6 +51440,118 @@ Measured as AMG-07b landed (f64; `single`, then at tol `1e-5` without refinement
 
 The worst iteration ratio is 47/44 = 1.07 in f64 and 6/5 = 1.2 under `single`, against the
 gate's 1.3.
+
+### 141.12 The f32 GAMG preconditioner of an f64 solve (AMG-06b)
+
+`No GPL-licensed source was consulted.` An f64 solve can take its GAMG preconditioner in single
+precision: `Gamg::new_with_precision(.., GamgPrecision::Single, ..)` builds the solve's own host
+hierarchy (§141.3) and coarsest setup (§141.4) exactly as `Gamg::new` does, and then holds them on the
+device in `f32` instead of `Scalar`. A case asks for it with the GAMG key `precision single` (§141.7;
+the default is `native`), read by the dictionary route; the pressure backends of §141.7 and §141.8
+pass it to the build. The JSONC `gamg` block does not carry the key yet, so it refuses `precision` by
+name as an unknown field (`io/case_json.rs` was another lane's file in this wave). It is opt-in: no default moves, and a case that does not write the key keeps
+its hierarchy, its counts and its answers bit for bit. Under `--features single` the hierarchy is
+already float, both values build the native one, and the key changes nothing (the gates hold this
+bitwise). The unit is AMG-06b.
+
+Sources: **Kronbichler & Ljungkvist, "Multigrid for Matrix-Free High-Order Finite Element Computations
+on Graphics Processors", *ACM Trans. Parallel Comput.* 6(1) (2019)**, DOI `10.1145/3322813`, the
+reference docs/17 names: the design idea only, a multigrid V-cycle run in single precision as the
+preconditioner of a conjugate gradient iterated in double. No equation of this section is taken from
+it, and its code was not read. The cycle is §141.5's (Saad 2003 §13.4.3, the author's open copy). The
+roundings are IEEE-754 round-to-nearest conversions.
+
+**What the f32 copy holds** (*DESIGN*, `src/amg/single.rs`). The aggregation and every level are the
+solve's own, built in f64 in the f64 build, so the f32 copy coarsens level for level as the f64
+hierarchy does. That is unlike the `single` build, where the aggregation itself reads float strengths
+(§141.9).
+- Each coarse level's `diag`, `upper` and `lower`, each smoother's diagonal `m` and its Chebyshev
+  coefficients `c1`, `c2` are rounded once to `f32` from their f64 setups.
+- The per-level cycle vectors are `f32`.
+- The coarsest factor and its work vector stay in `Acc` (f64), as under `single` (§141.4); only the
+  solve's `x` and `b` are float.
+- The transfers keep the aggregate lists of (141.11)-(141.13). The Galerkin slot lists of (141.17) are
+  not uploaded, because the levels come from the host and no device Galerkin product runs.
+- Level 0's operator is `A32 = fl32(A)` taken entrywise inside the product (`amgFineAmulFloat`), from
+  the solve's own matrix and the mesh's row map, so no copy of the fine matrix is stored.
+
+The V-cycle on the copy is `cuda/amg.cu` compiled a second time with `-DOFGPU_SINGLE`
+(`kernels::AMG_F32`, build.rs's `F32_TWIN_UNITS`); under `single` that constant names `AMG` itself.
+Four kernels cross the precisions, from the native module: `amgToFloat`, `amgAddFloat`,
+`amgFineAmulFloat` and `amgFineResidualFloat`. Each is one thread per cell and only launches, so the
+copy captures into a CUDA graph (§81; `single_cycle_replays_under_capture`).
+
+**The equations.** `M32` is the V-cycle (141.5.1) from zero on the float levels, its level-0 operator
+`A32`. The preconditioner application is
+
+```
+z = fl64( M32( fl32(r) ) )                                              (141.45)
+```
+
+where `fl32` rounds each entry to nearest and `fl64` widens it exactly. One stationary cycle from the
+caller's `x` (`Gamg::vcycle`, `Gamg::cycle`, and so `LinearSolverKind::Gamg`) is
+
+```
+x <- x + fl64( M32( fl32(b - A x) ) )                                  (141.46)
+```
+
+with `b - A x` formed in the solve's precision in `lduAmul`'s order (`amgFineResidualFloat`). For a
+linear cycle, (141.46) is one step of the same stationary method as (141.5.1), written in correction
+form. Its residual is the solve's, so the f32 levels do not floor the stationary solve. In exact
+arithmetic `M32` would be `M`; the copy changes the preconditioner by its float rounding only, and PCG
+and PBiCGStab iterate in the solve's precision around it. The memory measure is
+
+```
+rho = B(single) / B(native),  B = sum over every DevBuf a Gamg holds of len * sizeof(element)   (141.47)
+```
+
+`Gamg::device_bytes` sums the levels, transfers, row maps, smoothers, the coarsest factor and its work
+vector, the per-level cycle vectors and any K-cycle buffers. It reports them split into the
+precision-chosen arrays (`float`), the `Acc` ones and the `Label` ones. Level 0's matrix is the solve's
+and is counted in neither.
+
+**What is refused.** The K-cycle (§141.6) on the f32 copy: `set_cycle(K)` is refused naming `K-cycle`,
+`precision single` and this section, and the Gamg keeps its V-cycle. The distributed GAMG of §141.11
+has no f32 copy; `DistGamg` is unchanged.
+
+**Measured gate interpretation** (TAKEN by recommendation). The row's "the hierarchy's memory" is read
+as (141.47) over every byte, integers included. That is the strictest reading. The float-only ratio is
+reported beside it.
+
+#### 141.12.1 The gates
+
+`POI(n)` of (141.5.5), default `GamgConfig`, from zero, `relTol 0`. "Iterations" is
+`SolverPerformance::n_iterations`. All rows run in both builds.
+
+| test (`tests/amg_single.rs` unless marked) | what | class |
+|---|---|---|
+| `an_f32_gamg_preconditions_an_f64_pcg_on_poisson_128` | **the AMG-06b gate.** PCG/GAMG at tol `1e-10` on `POI(128)`, native and `precision single`. f64 build: both converge; the copy has the native level sizes; it takes `<= 1.15x` the all-f64 iterations; its answer's §8.4 residual, on the host in f64, is `<= 1e-10`; and `rho <= 0.55` by (141.47). Under `single` the two are one: equal counts, equal bytes, bitwise answers | P, R, count |
+| `the_gamg_precision_key_reaches_the_solve` | the §13.4.1 pair: fvSolution texts that differ in the one line `precision single;`, read by `read_solver_controls` and solved through `PbicgstabBackend` on `POI(16)` at `1e-8` under `PCG`/`GAMG` and the `GAMG` solver. The key lands bare, in the `preconditioner { }` sub-dictionary and under `solver GAMG`; `precision native` is the default text's controls. f64: the answers differ in their bits and all converge. `single`: bitwise one. `precision half` is refused naming `solvers/p/precision`, `half`, `native`, `single` and this section | P, D |
+| `the_single_cycle_refusals_are_named` | the K-cycle on the copy is refused by name, and the cycle stays V (f64); under `single` it is set | D |
+| `the_stationary_single_gamg_converges` | `solver GAMG` on `POI(32)` at tol `1e-10`: (141.46) converges with its §8.4 residual on the host `<= 1e-10`, in `<= 1.15x` the native cycles | P, R |
+| `amg::single::tests::single_cycle_replays_under_capture` (library) | (141.45) and two cycles of (141.46) on `POI(8)`, with one coarse level and with more, captured and replayed bitwise (§81, the registry row of `src/amg/single.rs`) | D |
+
+**Measured** (supervisor's runs, 2026-10-15; f64 build, then `single` in brackets).
+
+- `POI(128)` PCG/GAMG at `1e-10`:
+  - The levels are 2097152, 524306, 131244, 32879, 8227, 2059, 516, 129, 33 in both precisions
+    [2097152, 524288, ..., 32].
+  - Native: 45 iterations, single: 45, a ratio of 1.000 against a gate of 1.15 [39 and 39].
+  - The §8.4 residuals of the answers are 1.502986e-12 native and 1.502995e-12 single. The two
+    answers differ by 9.13e-14 relative [9.521613e-13 for both, bitwise equal].
+  - Device bytes: native 449.65 MiB (206.52 float, 0.0045 acc, 243.13 label); single 207.68 MiB
+    (103.26 float, 0.0045 acc, 104.42 label).
+  - `rho = 0.4619` by (141.47), against a gate of 0.55. The float-and-acc-only ratio is 0.5000
+    [275.15 MiB both, `rho = 1`].
+- `POI(16)` pair: PCG/GAMG 10 iterations native and 10 single, 4096 of 4096 entries differing in
+  their bits; the GAMG solver 31 and 31, 3681 of 4096 differing [9 and 9, 28 and 28, 0 differing].
+- `POI(32)` `solver GAMG` at `1e-10`: 85 cycles in both precisions, §8.4 residual 4.689e-12 [70
+  and 70, 5.619e-12].
+
+The f32 copy holds under half the bytes because it drops the Galerkin slot lists and the duplicated
+coarse addressing as well as halving every float array. Its iteration count equals the native one
+here: the preconditioner's float rounding, about `2^-24` relative, is far below the V-cycle's own
+contraction, as the cited design expects.
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 

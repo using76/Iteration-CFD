@@ -448,11 +448,12 @@ impl PbicgstabBackend {
         let hm = self.gamg_mesh.as_ref().ok_or_else(|| {
             Error::Config("PBiCGStab backend: setup() was not called".into())
         })?;
-        let g = crate::amg::Gamg::new(
+        let g = crate::amg::Gamg::new_with_precision(
             gpu,
             hm,
             &host,
             &self.ctrl.gamg.cycle,
+            self.ctrl.gamg.precision,
             crate::io::contract::permissive(),
         )?;
         let w = self
