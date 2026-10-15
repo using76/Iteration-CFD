@@ -47683,8 +47683,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
-and CHR-12a wires it from the case; this unit builds the slot and the two rows
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18)).
+CHR-12a lowers its inputs from the case (§137.7) and CHR-12b wires it in the
+driver; this unit builds the slot and the two rows
 that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
@@ -49880,10 +49881,9 @@ An injector requires `position` and `massFlow`. Its other fields default to
   or `cpGas` with `physics inert`; `evaporation` unless `physics
   evaporating`; `impact` unless `wall weber`; and `coupling.vapour` with
   `mass none`.
-* `coupling.mass evaporation` without a `species` block. The JSONC route has
-  none until CHR-12a, so `JsonCase::lower` passes no species and the mass
-  coupling is refused there. The lowering already takes `species.names` for
-  CHR-12a to pass in.
+* `coupling.mass evaporation` without a `species` block. Since CHR-12a,
+  `JsonCase::lower` passes the lowered `species.names` (§137.7), so a JSONC
+  case with a `species` block may name its vapour.
 * `coupling.mass evaporation` without a `vapour`, or with a `vapour` that is
   not in `species.names`.
 * An unknown liquid `preset`.
@@ -49907,6 +49907,134 @@ CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
 | `case_parcels_lowers_every_field` | one case sets every `ParcelControls`, `EvaporationControls`, `LiquidProperties`, `WallImpactControls`, `CouplingControls` and `Injector` field to a non-default value; each is read back; the dictionary route equals the JSONC route; serde round trip | exact | D |
 | `case_parcels_refusals` | every refusal above, the driver seam included | refused, naming the key | D |
 | `tests/case_parcels.rs` | both routes equal, and `film` refused, in both builds | exact | D |
+
+No labels.
+
+### 137.7 The `species`, `chemistry` and `combustion` blocks as built (CHR-12a)
+
+`src/io/case_chem.rs` builds §137.2's three tables. This subsection records
+the rules the tables leave open, as the code applies them. It is this
+project's own contract (ORIGINAL), with no external source.
+
+**One lowering for both routes.** The JSONC route reads the three blocks of
+`JsonCase`. The dictionary route turns each dictionary into the JSON object
+the JSONC route reads and hands it to the same `deny_unknown_fields`
+deserialiser, so an unknown key is refused by name on both routes.
+`case_chem::lower_blocks` is the only lowering. It produces one
+`LoweredChem`, which holds the species set, the chemistry and the closure, and
+`JsonCase::lower` stores it in `LoweredCase::chem`. In the dictionaries:
+
+* `constant/thermophysicalProperties` gives `species` (a list) as `names`
+  and `inertSpecie` as `inert`, and the sub-dictionary `speciesTransport`
+  gives `transport`. The file's other entries belong to other readers
+  (§122.6, §37.4) and are not looked at. `inertSpecie` or `speciesTransport`
+  without a `species` list is refused, because it would be read and ignored.
+* `constant/chemistryProperties` holds the `chemistry` keys, with the same
+  spellings (`mechanism`, `thermo`, `integrator`, `rtol`, `atol`,
+  `splitting`).
+* `constant/combustionProperties` holds the `combustion` keys. `model` may
+  also be spelled `combustionModel`, on both routes.
+* `constant/reactions` (a foam-format reaction list) is refused, naming the
+  CHEMKIN route. The mechanism is always a CHEMKIN file (§129).
+
+**Two stages.** `lower_blocks` applies every refusal that the keys alone
+decide. `LoweredChem::load(base)` reads the two files, with their paths
+taken relative to `base`, the case's directory. It applies the refusals that
+need the files, and it returns the `Mechanism`. The thermo file is read at
+CHEMKIN's `P_ATM` (§128.4) with the standard element table.
+
+**The species set.** `names` holds every species, the inert one included.
+`inert` has no default. The Lewis route of §133.4 is the one model, with
+`Le` 1 for every species the case does not name and `Sct` §19's 0.7.
+`LoweredSpecies::le` is in `names` order. On the JSONC route each SOLVED
+species gets one field (`LoweredScalarField`, dimensionless):
+
+* `initial` maps a name to a uniform mass fraction, and every solved
+  species needs one. The inert's value is `1 - sum`, so stating it is
+  refused. A value outside `[0, 1]` is refused, and so is a sum of the solved
+  values above 1, because the inert's value would then be negative. The test
+  is exact, in f64.
+* `patches` is an ordered array of `{ "match": <ERE>, "Y": { name: bc } }`.
+  The first rule whose `match` matches a boundary patch governs it, in file
+  order. A species that rule does not list gets its patch kind's default:
+  `zeroGradient` on a wall, `inletOutlet` at the species' initial value on an
+  open patch, and the constraint on an empty, symmetry or wedge patch. On an
+  inlet a species has no default, so it is refused, naming the patch and the
+  species. That is the same rule as `T`'s.
+* A condition is `fixedValue`, `inletOutlet` or `zeroGradient`. The two
+  temperature types are refused, and so is a value outside `[0, 1]`. A
+  condition on the inert species is refused, because the inert species is
+  closed by `1 - sum` on every face.
+
+On the dictionary route the fields are the case's `0/` files. A solved
+species with no `0/<name>` is refused there, because it has no initial
+value.
+
+**The chemistry.** `mechanism` and `thermo` are required with a `species`
+block. A `species` block without `chemistry` is refused, and so are
+`chemistry` or `combustion` without `species`. `integrator` goes through
+`rosenbrock::Method::from_name`, so `ros4` keeps §132.7's reason. `rtol`
+and `atol` replace `ReactorOptions::default()`'s `rtol` and `atol_y` (the
+mass-fraction tolerance, §132.8), and the rest of the reactor's controls
+keep their defaults. A `transport` (TRAN) path is always refused while the
+Lewis route is the one model, because it would be read and ignored.
+`species` together with `physics.compressible` is refused, because
+compressible reacting flow is out of scope (docs/17 §2).
+
+**The closure.** The keys of a closure that the case did not select are
+refused, for example `A` under `laminar` or `Cmix` under `EDC` (§13.4.1).
+The combination with the turbulence model is checked through
+`case_chem::MixingKind`, which names `MixingRate`'s four arms.
+`MixingKind::of_model` reads the arm from the case's `turbulence.kind` and
+`model` through `RasModel::dissipation_field`. `MixingKind::of` reads it
+from a running model's `mixing_rate()`, for the driver. Then:
+
+* EDM, EDC or PaSR with `None` (laminar, Spalart-Allmaras) is refused.
+* Any of the three with a model name this crate does not build is refused,
+  because its mixing rate is unknown.
+* EDM or EDC with `Strain` (LES) is refused.
+* PaSR's `tauMix strain` needs `Strain`. Under `Strain`, the three
+  `epsilon` mixing times are refused.
+* `Cmix` is required with `tauMix integral` and refused with the others.
+* EDC's `variant` may be written as a number or a string. `batch` keeps
+  §134.3's reason.
+* Every number is refused unless it is finite and above zero, and
+  `gammaMax` must lie in `(0, 1)`.
+
+**The file-dependent refusals** of `load` are these:
+
+* §129's own refusals. A mechanism species with no thermo record is one of
+  them, and it names the mechanism file and its line.
+* A name that is in neither the thermo file nor the mechanism's thermo
+  block (§128).
+* A mechanism species that is not in `species.names`, and a name that is not
+  a mechanism species. `ChemSource::new` (§132.11) refuses both too, so the
+  case is refused before a device is touched.
+* EDM with more than two reactions, or with a reaction that is reversible,
+  has explicit reverse parameters, or has a third body or a fall-off
+  (§134.1). The reaction is named by its line.
+
+**The driver seam.** No driver runs a reacting case before CHR-12b:
+
+* `common::load_case` refuses a JSONC case through
+  `LoweredCase::refuse_chemistry`.
+* `read_case_controls` refuses a case directory that holds
+  `constant/chemistryProperties`, `constant/combustionProperties` or
+  `constant/reactions`, or whose `thermophysicalProperties` names `species`.
+  A `thermophysicalProperties` that does not parse is left to the readers
+  that use it, so a driver that never read the file does not start failing
+  on it.
+
+CHR-12b replaces the refusal on `ofgpu-lowmach`'s path. A case without the
+three blocks lowers, serialises and runs exactly as before.
+`docs/schema/case-1.json` is regenerated (§137.2).
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_chem_lowers` | one case sets every key of the three blocks to a non-default value and each is read back; the open and wall defaults; the closures' keys and defaults; `MixingKind` by model name; the dictionary route equals the JSONC route; serde round trip; absent blocks lower to no chemistry and serialise nothing; `load` reads a mechanism | exact | D |
+| `case_chem_refusals` | every refusal above, on both routes and in `load`, the driver seam included | refused, naming the key | D |
+| `the_shipped_schema_is_the_generated_one` | `docs/schema/case-1.json` equals `emit_schema()` (the plan's `schema_matches_emit`) | exact | D |
+| `tests/case_chem.rs` | both routes equal, `load`, `ros4` and EDM under `MixingRate::None` refused, in both builds | exact | D |
 
 No labels.
 

@@ -10,6 +10,28 @@
         "null"
       ]
     },
+    "chemistry": {
+      "description": "SPEC-LIT §137.2: the mechanism, the thermo set and the integrator.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonChemistry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "combustion": {
+      "description": "SPEC-LIT §137.2: the combustion closure (§134).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonCombustion"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "initial": {
       "$ref": "#/$defs/JsonInitial"
     },
@@ -73,6 +95,17 @@
       "items": {
         "$ref": "#/$defs/JsonSource"
       }
+    },
+    "species": {
+      "description": "SPEC-LIT §137.2: the species set (`crate::io::case_chem`). Absent\n(the default) is every case this reader has ever built; present, the\nthree blocks lower to [`LoweredCase::chem`] and every driver refuses\nthe case until CHR-12b wires `ofgpu-lowmach` (§137.7).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonSpecies"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "turbulence": {
       "anyOf": [
@@ -200,6 +233,154 @@
         "min",
         "max"
       ]
+    },
+    "JsonChemistry": {
+      "description": "The `chemistry` block (SPEC-LIT §137.2).",
+      "type": "object",
+      "properties": {
+        "atol": {
+          "description": "The absolute tolerance of every mass fraction.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "integrator": {
+          "description": "`rodas3` (the default) | `ros3`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mechanism": {
+          "description": "The CHEMKIN mechanism, relative to the case.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rtol": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "splitting": {
+          "description": "`lie` (the default) | `strang`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thermo": {
+          "description": "The CHEMKIN thermo file, relative to the case.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport": {
+          "description": "A TRAN file. Refused: the Lewis route reads none (§137.2).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonCombustion": {
+      "description": "The `combustion` block (SPEC-LIT §137.2; the closures are §134).",
+      "type": "object",
+      "properties": {
+        "A": {
+          "description": "EDM's `A` (§134.2). No default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "B": {
+          "description": "EDM's `B`; absent removes the product-limiting argument.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "CD1": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "CD2": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Cmix": {
+          "description": "`C_mix` of `tauMix integral`. No default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "gammaMax": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`laminar` (the default) | `EDM` | `EDC` | `PaSR`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "psrSpan": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tauChem": {
+          "description": "PaSR's chemical time by name (§134.4). No default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tauMix": {
+          "description": "PaSR's mixing time by name (§134.4). No default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "variant": {
+          "description": "EDC's `1989` (alias `1996`) | `2005` (§134.3). No default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Word"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "JsonCompressible": {
       "description": "`physics.compressible` - SPEC-LIT §122.6, the JSONC statement of §122.1's\ngas: `gamma` and `W` state it, a stated `cp` must agree with (122.5) to\n`1e-6` relative, `Pr` defaults to 0.71, and `pOperating` (§122.2's\n`p_op`, Pa) has no default.",
@@ -2009,6 +2190,105 @@
         }
       ]
     },
+    "JsonSpecies": {
+      "description": "The `species` block (SPEC-LIT §137.2).",
+      "type": "object",
+      "properties": {
+        "inert": {
+          "description": "The species closed by `1 - sum` (SPEC-LIT §19). No default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initial": {
+          "description": "name -> the uniform initial mass fraction of every solved species.\nThe inert one's is `1 - sum` and is not stated.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "names": {
+          "description": "Every species, the inert one included.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "patches": {
+          "description": "Ordered, first-match-wins, as `patches[]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonSpeciesPatch"
+          }
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonSpeciesTransport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "names"
+      ]
+    },
+    "JsonSpeciesPatch": {
+      "description": "One `species.patches[]` rule: the mass-fraction condition of each named\nspecies on every boundary patch `match` matches.",
+      "type": "object",
+      "properties": {
+        "Y": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScalarBc"
+          },
+          "default": {}
+        },
+        "match": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "match"
+      ]
+    },
+    "JsonSpeciesTransport": {
+      "description": "`species.transport`.",
+      "type": "object",
+      "properties": {
+        "Le": {
+          "description": "name -> Lewis number; 1 for every species not named.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "Sct": {
+          "description": "The turbulent Schmidt number; SPEC-LIT §19's 0.7 when absent.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`lewis` (the default). `mixtureAveraged` is refused (§133.4).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "JsonTurbulence": {
       "type": "object",
       "properties": {
@@ -2566,6 +2846,18 @@
         "spalding",
         "rough",
         "lowRe"
+      ]
+    },
+    "Word": {
+      "description": "A word the case may write as a string or as a number (`variant 1989`).",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number",
+          "format": "double"
+        }
       ]
     }
   }

@@ -91,6 +91,8 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
         let lowered = json.lower()?;
         // SPEC-LIT §137.6: a case's parcels are refused until CHR-26.
         lowered.refuse_parcels()?;
+        // SPEC-LIT §137.7: a case's chemistry is refused until CHR-12b.
+        lowered.refuse_chemistry()?;
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below
         // always built) and the 119.0 wedge mesh - with the case's own
