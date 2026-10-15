@@ -43,6 +43,9 @@ ledger and CLI), then costbound.py --selftest (the AUT-06 lower bound: the
 hand-counted boxes F0-F5, the ancestor-only balance control, the
 192-triangle box, the 4096-centre ray test, the refusals, the recorded
 E-1-004 inputs and the byte-identical two-row report), then
+projection.py --selftest (the AUT-12 go / no-go: k* and the bar, the
+scaled McNemar, a GO and a NO-GO hand case, the L5 NO-GO 177/420 > 23,
+determinism and the CLI), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -92,7 +95,8 @@ def main():
               ("remedies.py", 13), ("explain.py", 15),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
-              ("lreplay.py", 6), ("aml.py", 7), ("costbound.py", 7))
+              ("lreplay.py", 6), ("aml.py", 7), ("costbound.py", 7),
+              ("projection.py", 5))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

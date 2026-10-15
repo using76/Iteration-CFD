@@ -1223,6 +1223,13 @@ p_fail 1 exactly where the rules' attempt 1 fails, rules 2, real 5, shuffled 5, 
 PR-RULES 2, PR-FAR 3, every voter with a non-empty path, PASS; with p_fail 0 everywhere the prior acts
 nowhere and D-6 FAILs it. The prior still ships disabled (`USER_SHIP`).
 
+**The gate rounds, run (AUT-12, 2026-10-15).** On the `aut12-rules` re-measure (2 rounds, 38 + 2 bodies):
+G-PRIOR **PASS, non-vacuous** — rules 281/420, real 337/420, shuffled 326, 328, 329 (mean 327.667); gain 56,
+margin 9.333; no losses; real PR-KNN 95 (69 reused from the rules campaign's own attempts, 26 meshed), PR-FAR
+46, PR-NOEDIT 7, PR-RULES 253. `prior/aml2/` holds the report, the model and the bundles, and `--check
+--report-dir prior/aml2` passes. The hook still reads `prior/aml` (AUT-11), so the shipped prior is unchanged;
+moving `REPORT_DIR` / `_MODEL` to `prior/aml2` is the next step and waits for the user's D-6 ratification.
+
 **Gate-driven since 2026-10-06 (AUT-11, the user's tranche-17 order).** `USER_SHIP` is no longer a ship
 decision but the recorded rule "gate-driven since 2026-10-06 (the user's tranche-17 order)": the prior
 and the optimiser are enabled only from the gate file beside their model (`G-PRIOR.json`, `G-OPT.json`).
@@ -1522,6 +1529,48 @@ layers, already misses 1.5x on tuning, while seed-1's 1.185 is below. With the 8
 5.4-7.0 x B0, so G-COST as written cannot be met by any mesh of these geometries that holds the R-WIN wall
 level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D-8's, the user's.
 
+## projection.py — the go / no-go for a fresh seed (AUT-12, pre-registered 2026-10-15)
+
+A held-out split is spent once (docs/15 §E), so a fresh seed is opened only when a tuning re-measure projects
+that the test bar would pass. `projection.py` reads a tuning `rules` or `full` bundle and the B0-template bundle
+on the same ids and projects every headline and guard of §F as the test bar would read them. Every threshold
+is `evaluate.py`'s; no rule, gate or constant changes here. D-9 (docs/17 §11 item 5, taken by recommendation):
+seed 3 is not spent on a NO-GO; AUT-13 writes and locks it only on a GO (or on the user's explicit spend).
+
+The rule, fixed before the AUT-12 L-run was scored (N = `evaluate.TEST_N` = 180):
+
+- PJ-1 `k*(N)` = the largest k in [0, N] with `clopper_pearson(k, N)[1] <= MFR_UPPER_MAX` (0.10): k*(180) = 10.
+- PJ-2 the tuning bar `bar(n) = floor(n k*(N) / N)` in integers: bar(420) = 23. G-FAIL's "95 % upper bound
+  <= 10 %" projects as held iff the tuning failures are at most bar(n).
+- PJ-3 `4 F_fail <= B_fail` (scale-free). PJ-4 McNemar: b = #(B0 fails, system passes), c = #(B0 passes, system
+  fails) on the tuning ids, each scaled to N by round-half-up of `x N / n`, then `mcnemar(b', c') < 0.01`.
+  PJ-5 no family with more system failures than B0 failures.
+- PJ-6 G-BLC-0 (tier 0 = D and F with the manifest's commensurate flag), G-BLC-1 (`baseline.TIER1`, targets 0.09 /
+  0.05), G-FID and G-COST are `evaluate.py`'s own functions on the tuning ends. G-FID reads `p99_over_hf`,
+  `pinned_frac` and `feature_capture` from the rows; `feature_share` needs the cases' summaries, which a bundle
+  does not carry, so it is not projected. G-COST's campaign wall time is scaled to N (`wall x N / n`).
+- PJ-7 G-QUAL projects the rows' edits against the knob whitelist (the configs' quality block is not in a
+  bundle); G-EXPL is the bundle's summary audit. G-DET (two runs) and G-OPT (the test ablation) are NOT-PROJECTED.
+- PJ-8 **GO** iff G-FAIL, G-BLC-0, G-BLC-1, G-QUAL, G-FID, G-COST and G-EXPL all project PASS; otherwise NO-GO,
+  with every failed gate named, G-FAIL's numbers first. A guard that fails on the tuning split would fail the
+  evaluation too, so it blocks a spend just as a headline does.
+
+The selftest reproduces the L5 verdict from the committed bundles (`aml/tuning_rules_L5.json.gz` against
+`baseline/tuning_b0-template.json.gz`): NO-GO, `G-FAIL FAIL: 177/420 > 23`; also 4 x 177 > 384, and G-FID (p99
+in B, E and G) and G-COST (cells 717000 vs 8688) fail. The reports are `projection/<name>.json` and `.md`, and
+`--check` rebuilds each byte for byte from its recorded inputs (sha256-pinned).
+
+Measured (AUT-12 L-run, 2026-10-15; docs/15 ledger): the tuning `rules` re-measure after AUT-02..AUT-11
+(`aut12-rules`, 4,993 s at 6 streams, bundle `prior/aml2/tuning_rules.json.gz`) against B0-template re-meshed on
+the same binary (`projection/tuning_b0-template_AUT12.json.gz`, 380 failures of 420) projects **NO-GO**:
+
+    G-FAIL FAIL: 71/420 > 23 (the 95 % upper bound on 180 test bodies holds at <= 10 failures)
+    G-COST FAIL: cells FAIL; cells median 52632 vs B0 9008 (ratio 5.84281 > 1.5)
+
+G-FAIL's other three conditions hold (4 x 71 <= 380, McNemar p 1.8e-40, no family worse); G-BLC-0, G-BLC-1,
+G-QUAL, G-FID and G-EXPL project PASS. Seed 3 is not spent (D-9). A GO needs at most 23 tuning failures (the 71
+are A 39, F 15, G 15, D 1, E 1) and G-COST's 1.5x, which AUT-06 showed unattainable with 8 layers (D-8, the user's).
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -1537,6 +1586,9 @@ level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D
     python tools/autonomy/costbound.py --selftest                         # the AUT-06 lower bound: the 7 groups
     python tools/autonomy/costbound.py --report --jobs 6                  # costbound/COSTBOUND.json and .md
     python tools/autonomy/costbound.py --id GID --set tuning              # one geometry's row JSON
+    python tools/autonomy/projection.py --selftest                        # the AUT-12 go / no-go: the 5 groups
+    python tools/autonomy/projection.py --project --full B.json.gz --b0 B0.json.gz --name NAME   # projection/NAME.json, .md
+    python tools/autonomy/projection.py --check                           # every projection report rebuilds
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above
