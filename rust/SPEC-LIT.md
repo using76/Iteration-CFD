@@ -46236,6 +46236,10 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-19 | CMP-SOD PISO: observed L1(`rho`) order, 200/400/800 cells (bar >= 0.6) | f64 0.015, f32 0.015 (L1 5.17e-2 / 5.21e-2 / 5.28e-2): **MISSED** (§127.6.1) | CMP-19 |
 | CMP-19 | CMP-SOD PISO: total-energy drift at `t = 0.2` (exact 0; printed, the cause) | f64 +4.90e-2, f32 +4.90e-2 on 800 cells | CMP-19 |
 | CMP-19 | CMP-SOD PIMPLE (5 outer, `alpha_p` 1; printed only), 800 cells | worst plateau f64 0.31 %, f32 0.30 % (`rho*_R`); shock f64 0.132 %, f32 0.131 %; order f64 0.696, f32 0.700; energy drift f64 +1.7e-4, f32 +1.5e-4 | CMP-19 |
+| CMP-20 | CMP-AC pulse speed, 400 cells, the solver's default coupling (`nOuterCorrectors 1`, `nCorrectors 2`) (bar within 1 % of `c_0`) | f64 1.18949 `c_0`, f32 1.18934 `c_0`: **MISSED** (§127.6.2) | CMP-20 |
+| CMP-20 | CMP-AC pulse speed, PIMPLE (5 outer, `alpha_p` 1; printed only) | f64 0.99692 `c_0`, f32 0.99666 `c_0` | CMP-20 |
+| CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(u/U - Ghia)` over Table I (bar 0.02) | f64 2.716e-3, f32 2.718e-3 | CMP-20 |
+| CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(v/U - Ghia)` over Table II (bar 0.02) | f64 7.255e-3, f32 7.257e-3 | CMP-20 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -46284,6 +46288,100 @@ coupling as PIMPLE (a gate definition, the user's), or an energy equation whose 
 `K` are taken from the previous step's corrected fields when the step has one outer
 iteration (a numerics change). A full `-sections` run of the gate takes 34 s
 (f64) and 75 s (f32) on this machine, PIMPLE leg included.
+
+#### 127.6.2 Gate CMP-AC as built (CMP-20)
+
+`src/bin/validate_gates/acoustic.rs`, one `ofgpu-validate` section after Gate CMP-SOD, live
+in both builds. **The key** is linear acoustics. Linearise the inviscid equations about a gas
+at rest, `(rho_0, 0, p_0)`, with an isentropic disturbance, `p' = c_0^2 rho'`. The result is
+the wave equation for `p'` with speed `c_0 = sqrt(gamma R_s T_0)`, which is (122.4). A
+right-running simple wave has
+
+```
+u' = p' / (rho_0 c_0),        T' = T_0 [ (1 + p'/p_0)^((gamma - 1)/gamma) - 1 ]           (127.20)
+```
+
+(derived; the textbook form is Landau & Lifshitz, *Fluid Mechanics*, 2nd ed., §64, *not
+read*). Gate CMP-NR (§126.9) starts its pulse the same way.
+
+**The run.** A closed tube, 1 m long, of 400 cells with one cell across. The four sides are
+`symmetry`. Both ends are walls (`U` fixed at 0, `p` and `T` zero-gradient). The gas is
+`PerfectGas::air`, inviscid (`Viscosity::Constant { mu: 0 }`), at rest at `T_0 = 300` K and
+`p_op = 1e5` Pa. The pulse is `p' = A exp(-((x - 0.25)/W)^2)` with `A = 1e-3 p_op` and
+`W = 10` cells, plus (127.20). The scheme is transient Euler at an acoustic CFL of 0.2 on
+`c_0` (`dt = 1.44e-6` s), solved with PBiCGStab and DILU at an absolute tolerance of
+`1e-12`. **The row's coupling is the solver's default**, `nOuterCorrectors 1` and
+`nCorrectors 2` (`CompressibleControls::default`), because docs/17's row names none
+(decision TAKEN: the gate measures the solver as a case gets it).
+
+**The measure** is the peak of `p'`, located at step 200 and at step 1000 by a parabola
+through the largest cell and its two neighbours. The speed is the distance between the two
+peaks divided by `800 dt`, taken over `c_0`. The pulse travels 200 cells by step 1000.
+Eight half-widths either side of it (`exp(-64)`) stay inside the tube, at the start and at
+step 1000, so neither wall is reached.
+The bar is within 1 %, class P, the same bar in both builds. The arrival also carries a weak
+nonlinear bias: it is `(gamma + 1)/(2 gamma) A/p_op = 8.6e-4` of `c_0` at the peak (derived),
+which is inside the bar.
+
+**Measured: the row misses in both builds** (table above). The pulse travels at 1.1895
+`c_0` (f64) and 1.1893 `c_0` (f32), about `sqrt(gamma) c_0 = 1.1832 c_0`. That is the speed
+CMP-17 measured in its own tube (§126.9). **The cause leg** is printed only, never checked,
+and runs only when the row misses. It is the same tube with PIMPLE, five outer iterations
+and `alpha_p = 1`, so the last outer iteration's energy equation sees that step's `dp/dt`
+and `K` (§127.6.1). It carries the pulse at 0.99692 `c_0` (f64) and 0.99666 `c_0` (f32),
+which meets the bar. The speed error therefore lies in the one-outer step's coupling, the
+same place §127.6.1 names for Sod: (125.1) is solved before the correctors, so its
+`dp/dt` reads `p^o`. This gate does not derive how that ordering gives `sqrt(gamma)`
+rather than another factor. Two cures are left for review, and neither is built. One is to
+restate the solver's default coupling, or the row's, as PIMPLE (a gate or default
+decision, the user's). The other is the energy-ordering change of §127.6.1 (a numerics
+change). The gate's two runs take 22 s (f64) and 93 s (f32) on this machine's GPU, PIMPLE
+leg included, and about 2.5 and 3 min when two other lanes share that GPU.
+
+#### 127.6.3 Gate CMP-LM as built (CMP-20)
+
+`src/bin/validate_gates/cavity_lm.rs`, one `ofgpu-validate` section after Gate CMP-AC, live
+in both builds. **The key** is Ghia, Ghia & Shin (1982), doi:10.1016/0021-9991(82)90058-4,
+Tables I and II at Re 100. They are read from `reference/ghia1982/` through the answer-key
+reader, with the sha256 digests printed, which is the key Gate 94-D (§94.4) reads. **The
+bar is Gate 94-D's, row for row.** The worst `|u/U - Ghia|` over Table I along `x = 0.5` and
+the worst `|v/U - Ghia|` over Table II along `y = 0.5` must each be `<= 0.02`, on the 80 x 80
+mesh (94-D's finest). The rows use 94-D's own bilinear sampler and comparison
+(`published_benchmarks::compare`, made `pub(crate)` for this). Class P, the same bar in
+both builds. At `M = 0.05` the compressible solution differs from the incompressible one by
+`O(M^2) = 2.5e-3` (derived from the low-Mach expansion; §124.3 gives the limit itself),
+inside the bar.
+
+**The run.** The unit square has 80 x 80 cells and one cell of `1/80` m in z, with both z
+sides `symmetry`. The gas is `PerfectGas::air` at rest at `T_0 = 300` K and `p_op = 1e5` Pa.
+The lid (`yMax`) moves at `U = 0.05 c_0 = 17.3611` m/s in +x, and the other three walls are
+at rest. `T` is fixed at `T_0` on all four walls, `p` is zero-gradient, and the viscosity is
+constant, `mu = rho_0 U L / 100`. `div(phi,U)` and `div(phi,T)` use the limited van Leer
+scheme, as 94-D does. The momentum and energy equations are solved with PBiCGStab and DILU
+(tolerance `1e-9`, `relTol 0.01`), and `p` with tolerance `1e-10`, `relTol 0.001`. The
+relaxation is `alpha_U = alpha_T = 0.7` and `alpha_p = 0.3`.
+
+**The march is SIMPLE with the local time step (125.2) at `CFL = 20`** (acoustic, so about 1
+on the lid speed), not plain steady SIMPLE. Decision TAKEN, inputs only: the closed box's
+pressure level is fixed only by the mass inside it, and only the `ddt(rho)` term carries that
+mass. Plain steady SIMPLE has no such term (§125.1). It passed in f64 (worst `|du|` 3.7e-3 and
+`|dv|` 8.2e-3 at its stop, 1400 iterations), but in f32 every cell's `p_abs` became NaN at
+iteration 480. Transient Euler at a lid CFL of 2 (acoustic CFL 42) with the default
+coupling stopped at step 36 on a bound (`T <= 0`). **The stop** is the field's own. The run
+goes in chunks of 200 iterations until no cell's `u/U` or `v/U` moves by more than `1e-3`
+across a chunk (a twentieth of the bar), with a cap of 4000. `residualControl` cannot stop
+this run, because the one-cell z direction leaves `Uz`'s normalised initial residual at
+`O(0.1)`. A run that stops on a bound (§122.3) fails both rows with the solver's message and
+registers the verdict.
+
+**Measured: both rows pass in both builds** (table above). The field stop is met at 2200
+iterations in both builds, and the change falls by a factor of 0.4 to 0.7 per chunk
+(`8.9e-4` and `8.8e-4` in the last chunk). The mass imbalance is 7.1e-11 (f64) and 3.4e-8
+(f32), and `M_max` is 0.0481. The LTS fixed point keeps a weak `CFL` dependence through
+`rAU` (§125.7). The profiles differ from steady SIMPLE's f64 fixed point by 1e-3 in the worst
+rows (2.7e-3 against 3.7e-3, 7.3e-3 against 8.2e-3), inside the bar either way. The run takes
+29 s (f64) and 27 s (f32) on this machine's GPU, and about 4 min in each build when two
+other lanes share that GPU.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 

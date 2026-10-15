@@ -3898,6 +3898,24 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_sod", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-AC: a small acoustic pulse's speed against
+    // (122.4)'s c_0 on 400 cells, live, in src/bin/validate_gates/acoustic.rs
+    // (CMP-20).
+    if c.section("Gate CMP-AC: a small acoustic pulse travels at c_0 = sqrt(gamma R_s T_0), 400 cells (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::acoustic::GATE);
+    let r = validate_gates::acoustic::check_acoustic(c, &gpu);
+    c.ran("check_acoustic", r)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 127.6 - Gate CMP-LM: the lid-driven cavity at Re 100 and lid
+    // Mach 0.05 against Ghia, Ghia & Shin (1982) with Gate 94-D's tolerance,
+    // live, in src/bin/validate_gates/cavity_lm.rs (CMP-20).
+    if c.section("Gate CMP-LM: the lid-driven cavity at Re 100, lid M 0.05, against Ghia (1982) (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::cavity_lm::GATE);
+    let r = validate_gates::cavity_lm::check_cavity_lm(c, &gpu);
+    c.ran("check_cavity_lm", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
@@ -14896,7 +14914,7 @@ mod published_benchmarks {
     /// `v_skip` names stations of Table II left out of the *worst-difference*
     /// figure; they are still printed, marked, so nothing is hidden. Only the
     /// Re = 400 erratum station of Table II is ever passed here.
-    fn compare(
+    pub(crate) fn compare(
         m: &HostMesh,
         u: &[Vec3],
         n: usize,

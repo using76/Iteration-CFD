@@ -36,3 +36,11 @@ pub(crate) mod zpg;
 /// SPEC-LIT §127.6, Gate CMP-SOD: Sod's shock tube on three meshes against the
 /// exact Riemann solution (CMP-19).
 pub(crate) mod sod;
+
+/// SPEC-LIT §127.6, Gate CMP-AC: a small acoustic pulse's speed against
+/// (122.4)'s `c_0` (CMP-20).
+pub(crate) mod acoustic;
+
+/// SPEC-LIT §127.6, Gate CMP-LM: the lid-driven cavity at lid Mach 0.05
+/// against Ghia, Ghia & Shin (1982) with Gate 94-D's tolerance (CMP-20).
+pub(crate) mod cavity_lm;
