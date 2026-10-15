@@ -1188,6 +1188,39 @@ user's decision of 2026-10-03 ships the prior DISABLED: while `USER_SHIP` disabl
 records PR-DISABLED "by the user's decision" on every attempt 1 of the gate's enabled model, and attempt 1
 stays the rules' config.
 
+**Gated by the surrogate, under D-6 (AUT-10, 2026-10-15).** `prior.py --gate --rules DIR --work DIR
+--surrogate [DIR]` gates the prior by AUT-09's hurdle surrogate (default `optimise/aml2`, model sha256
+`c32b43e0…3b79a`) and writes `prior/aml2/` (it refuses `prior/aml` and `prior/`). The prior acts only where
+the surrogate predicts p_fail(rules attempt 1) ≥ 0.5 (`P_FAIL_ACT`); below that it abstains **PR-RULES**
+and attempt 1 stays the rules' config. Where it acts, only neighbours of the query's edge class whose
+remedy path is non-empty vote (a neighbour that passed on the rules' own config says nothing about a
+geometry the surrogate expects to fail); the rest of the decision is unchanged (PR-FAR, PR-NOEDIT,
+PR-PARTIAL, PR-KNN). The gate stays leave-one-geometry-out with the three-seed shuffled control, and the
+surrogate is too: the p_fail that gates geometry g comes from the fold model that leaves g's fold out
+(`optimise.fold_of`, `fit_hurdle` on the train part's other folds), i.e. the out-of-fold prediction AUT-09's
+CV AUC was measured on; the real prior and its shuffles see the same p_fail. A deployed gated model
+(`attempt1`) uses the train-part model and refuses a surrogate whose sha drifted. Without `--surrogate`
+the prior, its model and its sha are byte-identical to before.
+
+**D-6, G-PRIOR's non-vacuity (every gate since AUT-10).** A PASS needs, beside `real_ge_rules` and
+`shuffled_worse`, `nv_gain`: real − rules ≥ 1 (`NV_GAIN_MIN`) and `nv_margin`: real − shuffled mean ≥ 1.0
+(`NV_MARGIN_MIN`), both in whole geometries. The report carries `conditions`, `non_vacuous` and `d6`
+(gain, margin, the two bars), and the shipped model's `gate` record carries `non_vacuous` (AUT-11 enables
+only from a PASS that is non-vacuous). On the recorded numbers: the AM-L pass (rules 241, real 241,
+shuffled 240, 241, 241) has gain 0 and margin 0.333, so it FAILs D-6; AM-13's (80, 214, mean 169.667)
+passes; the oracle (2, 5, shuffled 5 3 4) sits at the margin bar exactly (1.000) and passes. The
+thresholds are the plan's D-6 taken by recommendation (docs/17 §11 item 5, a tightening); the
+committed `prior/aml` and `prior/` records are unchanged and still `--check` PASS.
+
+**Measured here, gate rounds deferred.** The gated gate's meshing rounds run in AUT-12's L-run, on the
+tuning re-measure after AUT-02…AUT-11 (the L5 campaign measured the rules before them, and only its
+bundle is in the tree). A pre-measure on the L5 bundle's 356 attempt-1 rows (their recorded configs,
+out-of-fold p_fail): the prior would act on 112 and abstain PR-RULES on 244; of the 112, 97 failed (and
+15 passed), and 18 failures had p_fail < 0.5. The selftest (thirteen groups) adds the gated oracle: with
+p_fail 1 exactly where the rules' attempt 1 fails, rules 2, real 5, shuffled 5, 2, 4, PR-KNN 3,
+PR-RULES 2, PR-FAR 3, every voter with a non-empty path, PASS; with p_fail 0 everywhere the prior acts
+nowhere and D-6 FAILs it. The prior still ships disabled (`USER_SHIP`).
+
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
 In modes `rules+opt` and `full`, campaign.py calls `optimise.propose` only where the remedies end

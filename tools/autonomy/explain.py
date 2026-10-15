@@ -280,6 +280,10 @@ TEMPLATES = {
                     "title": "abstain: the prior ships disabled",
                     "because": "the prior did not earn its place on the tuning split, so the setup "
                                "rules decide attempt one"},
+    "PR-RULES": {"layer": "prior",
+                 "title": "keep the rules' attempt: the surrogate predicts it passes",
+                 "because": "the prior acts only where the surrogate predicts that the rules' attempt "
+                            "one fails with a probability of at least one half"},
     "OPT-PICK": {"layer": "optimiser",
                  "title": "propose the surrogate's pick from the Sobol pool",
                  "because": "the remedies are spent, and the surrogate predicts this config passes "
@@ -968,7 +972,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 56, len(TEMPLATES)
+    assert len(TEMPLATES) == 57, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -977,7 +981,7 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 7, "R": 10, "RM": 18, "PR": 6,
+    assert counts == {"PF": 11, "WL": 7, "R": 10, "RM": 18, "PR": 7,
                       "OPT": 4}, counts
     print("[ok] templates: 56 rule ids (PF 11, WL 7, R 10, RM 18, PR 6, OPT 4), "
           "each with its "
