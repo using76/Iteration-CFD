@@ -12394,6 +12394,18 @@ resistance lower than the stated configuration's by about `0.019/Kr` at every pu
 point from `Ra = 500` to `10^5`; with the conductivity ratio scaled by `1.0992489`,
 fitted at the one conduction-dominated point, every 80x80 point agrees to `0.29 %`.
 
+**§115.6's O1, recorded (docs/17 VAL-80, D-VAL-4).** D-VAL-4 was decided as
+O1 plus VAL-06's search for an open replacement key, and that search (§115.6,
+amended) found no source that gives the exact conduction value `0.357143` at
+`Kr = 0.1` within `1 %`. So O1 stands, and this is all it changes: the
+`MISSES` row's headline now ends "reference-limited at Kr <= 1, SPEC-LIT 115
+(O1, D-VAL-4)". The verdict word is still `MISSES`. The definition, the
+`3 %` bar at every ratio, the secondary-source disclosure and every number
+are unchanged. The `Kr = 10` row and Gate 59-B carry the claim, as §115.6's
+O1 says. §115.6's O5, a second row against the primary's table as
+transcribed by two open papers, changes what Gate 5 measures. D-VAL-4 did not
+decide it, so it is not built.
+
 ### 60.6 Gate 6 - Qu & Mudawar (2002)
 
 *Int. J. Heat Mass Transfer* **45** 3973-3985, DOI

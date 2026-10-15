@@ -7348,10 +7348,14 @@ fn check_conjugate_fluid(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                           square enclosure - through the open-access SECONDARY table of \
                           Belazizia et al. (2012), the primary being paywalled and never \
                           read - bar 3 % at every conductivity ratio",
+                // D-VAL-4 = O1 (docs/17 VAL-80): VAL-06's search found no open
+                // source that passes SPEC-LIT 115.6's rule, so the word stays
+                // MISSES and every number stays; the verdict at Kr <= 1 is read
+                // as reference-limited and cites S115.
                 headline: format!(
                     "worst disagreement {:.2} %, and it is at the SMALLEST conductivity \
                      ratio - the CONDUCTION-DOMINATED end - shrinking to {:.2} % at \
-                     Kr = 10",
+                     Kr = 10; reference-limited at Kr <= 1, SPEC-LIT 115 (O1, D-VAL-4)",
                     f64::from(100.0 * worst),
                     f64::from(100.0 * (nu10 / pub10 - 1.0).abs()),
                 ),
