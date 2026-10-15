@@ -62,6 +62,8 @@
 | A42 | VAL-53 | Gate 110-C (McCaffrey plume): 세 leg 모두 OPEN이고 예측보다 크게 빗나간다 | 미세 메시(0.025 m, 2.79 M셀) 중심선 dT +133.6–+212.6 %, w +34.6–+76.1 % (110.4 예측은 +16–41 %, +8–19 %). 복사만으로는 설명되지 않는다 (P4가 암시하는 chi_c 0.224). P3 기울기 -2.130 (−5/3 ± 0.25 밖). dT_c(2.00 m) study 진동 발산. P2는 P1의 study로 판정해 UNDECIDED이며, P2에 자체 study를 둘지는 사용자 결정 | `77f8626` |
 | A43 | VAL-52 | Gate 110-B MISSES: 세 메시 study가 만들어지지 않는다 | `-inflow uniform`으로 유입류를 고친 뒤 1400x180이 1232스텝에서 Mach guard(M 3.615, 셀 56, 거친 level의 재부착 지점 x ≈ 5.65H), 2800x360이 30스텝(M 1.920)에서 멈춘다. 결정적이다. 수렴한 0.2H level의 x_r/H 5.637 (6.26 ± 0.10 밖). relaxation, 벽 모델, 초기화는 바꾸지 않았다 | `5401c84` |
 | A44 | VAL-52 | single 빌드 `ofgpu-lowmach`가 step 세 level 모두 step 0에서 멈춘다 | 플래그 없는 `step` preset 700x90도 step 0 (M inf), `channel` preset은 step 19에서 멈춘다. `step 70 20 1`과 `cavity`는 20회 돈다. 이 크기의 lowmach 디렉터리 케이스 single 견고성 문제로 보이며 진단하지 않았다 (A4, A21 계열일 수 있다) | `5401c84` |
+| A45 | CMP-19 | Gate CMP-SOD MISSED (행이 정한 PISO, 양쪽 빌드): 800셀에서 최악 plateau rho*_L 45.98 % (기준 1 %), 관 안에서 shock를 찾지 못함 (t = 0.2에 이미 오른쪽 벽 도달, 기준 길이의 0.5 %), L1(rho) 차수 0.015 (기준 ≥ 0.6) | 원인 (SPEC-LIT 127.6.1): 에너지 식(125.1)을 §125.3 step 3, 즉 corrector 앞에서 푼다. outer 1회 스텝에서는 dp/dt = (p − p^o)/dt가 0이고 K 항이 예측 u를 읽는다. t = 0.2까지 전체 에너지가 4.9 % 늘어난다. PIMPLE(outer 5, alpha_p 1, 입력만)은 양쪽 빌드에서 모든 기준을 통과한다 (0.31 %, 0.13 %, 차수 0.70). 방안: (a) 행의 coupling을 PIMPLE로 다시 정하기 (게이트 정의 변경, 사용자 결정), (b) outer 1회 스텝에서 dp/dt와 K를 이전 스텝의 보정된 필드에서 가져오기 (수치 변경) | `4cb5e77` |
+| A46 | CMP-20 | Gate CMP-AC MISSED (양쪽 빌드): 기본 coupling(nOuterCorrectors 1, nCorrectors 2)에서 400셀 1e-3 p 가우시안 펄스 속도 1.18949 c_0 (f64) / 1.18934 c_0 (f32), 기준 1 % | sqrt(gamma) c_0 = 1.1832에 가깝고 CMP-17의 waveTransmissive 측정(SPEC-LIT 126.9)과 같은 속도. PIMPLE 출력 leg는 0.99692 c_0. A45와 같은 원인(에너지 식이 p^o를 읽음)으로 보이며, 한 번 고치면 CMP-17, CMP-19, CMP-20이 함께 풀릴 수 있다. 기본 coupling 변경이나 수치 변경은 사용자 결정 | `bd0bfaa` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -80,7 +82,7 @@
 | B11 | AUT-05 이후 autonomy selftest | AUT-02a/b/c의 stl_repair 변경 이후 campaign.py, prior.py, baseline.py selftest가 실패한다 (G-1-026이 non-manifold edge 12개로 SURFACE-OPEN이라고 가정). 그 뒤 그룹(replay, hooks, live)은 실행되지 않는다 | 오늘의 repair 결과로 기준을 다시 잡는 작은 fixture 단위 |
 | B12 | VIO-06 드론 레그 (VIO-11도 같은 해 필요) | t = 0.5 s 드론 해가 디스크에 없다. 지시대로 다시 풀지 않았다 | `tools/drone/solve.py`로 해를 다시 만든 뒤 `ofgpu-sample volume`으로 1회 |
 | B13 | single 빌드의 드라이버 비교 (AMG-05, AMX-02) | single에서는 라이브러리와 통합 테스트만 돌았다. `ofgpu-buoyant -backend gamg/amgx` 20회 비교는 f64에서만 했다 ('amgx single' bin 빌드 약 20분) | B1과 함께 |
-| B14 | STU-18 | GLM 주간 할당량이 2026-10-16까지 막혀 건너뛰었다 (live GLM-5.3-Flash studio 호출 필요) | 할당량이 돌아오면 G 레인에 다시 넣는다 |
+| B14 | STU-18 | GLM 주간 할당량이 2026-10-16까지 막혀 건너뛰었다 (live GLM-5.3-Flash studio 호출 필요) | 할당량이 돌아오면 G 레인에 다시 넣는다 **해결 (2026-10-16): STU-18 `396e14c`가 live GLM-5.3-Flash에서 G-LLM grounding PASS (설명 20/20, repair 후 ungrounded 0). 계획 §11 item 5의 STU-18 선택지는 결정할 필요가 없다** |
 | B15 | AUT-04, AUT-07 효과의 family별 측정 | RM-TE는 bump가 있는 모든 sharp body에서 F3 remedy 중 먼저 걸린다 (가상 F3c에서 sharp 276행 중 169행). R-ECON quick set에는 sharp body가 없어 A, D, F family와 K = 4 remedy 캠페인 효과를 재지 않았다 | AUT-12의 L-run에서 family별 실패, BLC_8, F3를 L5 규칙과 비교 |
 | B16 | AUT-13, AUT-14, AUT-16 | AUT-12 NO-GO라서 seed 3을 쓰지 않았다 (D-9 권고). AUT-13의 `--write-fresh N`/`--check-fresh N`/`--manifest testN`은 임시 디렉터리에서만 시험했다. AUT-14(봉인 평가)와 AUT-16(G-YPLUS)은 실행하지 않았다 | GO가 나오거나 사용자가 명시적으로 쓰기로 할 때: `split.py --write-fresh 3 --go <GO 투영 JSON>` 또는 `--user-spend` |
 | B17 | AUT-12 | AUT-09의 refinement round (`optimise.py --refine`, 약 1.5 h, 26 body)를 돌리지 않았다. AUT-09의 사전 등록 hurdle CV가 실패했으므로(BLC_8 RMSE 0.152787 > 0.15) round를 돌려도 optimiser를 켤 수 없고, AUT-12 행으로 다시 CV하면 사전 등록되지 않은 실행이 된다 | 사용자가 R-ECON 행으로 새 사전 등록 surrogate 실행을 원하면 |
@@ -117,6 +119,9 @@
 | C22 | VAL-52 | 유입류는 입력 수정으로 해결: `ofgpu-generate-mesh step -inflow uniform` (step 전용). 기존 preset 출력은 바이트 단위로 같다 | SPEC-LIT 110.3 |
 | C23 | VAL-53 | P2(w_c)는 110.4가 명시한 하나의 study(z = 2.00 m의 dT_c)의 상대 u_val로 판정한다 (A42) | SPEC-LIT 110.5 |
 | C24 | TET-16 | STEP 경로는 제품 밖 선택적 외부 경로로 남기고, PROVENANCE의 gmsh 문단 위치만 바로잡았다 (계획 §11 item 6, 권고대로) | PROVENANCE |
+| C25 | CMP-20 | Gate CMP-LM은 통과하지만 march를 SIMPLE + local time step (CFL 20, 입력만)으로 했다. 순수 steady SIMPLE은 f32에서 480회째 p_abs가 모든 셀에서 NaN (닫힌 압축성 상자의 압력 수준은 질량으로만 정해지는데 steady SIMPLE에는 ddt(rho)가 없다). transient Euler는 36스텝에서 T ≤ 0으로 정지. 압축성 압력식에 pRefCell/pRefValue를 두면 f32 steady SIMPLE이 가능하다 (솔버 기능, 만들지 않음) | SPEC-LIT 127.6 |
+| C26 | CMP-22 | Gate CMP-COU도 SIMPLE + LTS CFL 20 (닫힌 cyclic 채널), Re 10, field stop을 chunk당 2.5e-5로 조였다. 'T profile L-inf 0.5 %'는 정확한 상승폭 T_w − T_top으로 정규화했다 (T 자체로 정규화하면 약 20배 느슨) | SPEC-LIT 127.6 (127.21) |
+| C27 | CMP-29 | `physics.compressible`이 있는 케이스는 `ofgpu-compressible`만 제안하고, 다른 JSONC 케이스에는 제안하지 않는다. shock tube 템플릿 대신 CMP-15의 50셀 관(`cases/compressibleTube.jsonc`)을 실었다 (JSONC `initial`이 균일만 가능) | registry.ts, PROVENANCE |
 
 ## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
@@ -162,6 +167,8 @@
 - VAL-23: cyclic 패치에 wall function 이름이 붙는 버그(A39)는 `faces_where`가 패치 kind를 보도록 고치면 된다. 기존 결과가 바뀌므로 보류.
 - VAL-33: Gamma onset과 LM 난류 C_f는 네 번째(더 고운) level이나 미세 실행이 정지 규칙을 만족하면 판정된다.
 - VAL-52: gui registry의 `ofgpu-generate-mesh`에 `-inflow` 플래그를 오케스트레이터가 병합 때 추가했다 (`c9224d8`). `MESH_KINDS`의 `plate`는 여전히 없다.
+- CMP-29: Sod shock-tube 템플릿이 없다 (JSONC `initial`이 균일만 표현하므로 비균일 초기 상태가 필요, case_json.rs는 S 레인 소유). Mach contour preset도 없다 (viewer에 field preset 체계가 없고 camera preset만 있다; Mach는 이미 foam/vtu 필드로 쓰인다). `ofgpu-compressible`의 residualStyle이 'generic'이라 M_max/M_mean이 잔차로 분류된다 (전용 'compressible' style 필요).
+- validate section 번호: M 레인의 Gate 131-P(69)가 들어오면서 G W7 단위 기록의 번호가 하나씩 밀렸다. 지금은 CMP-SOD 70, CMP-AC 71, CMP-LM 72, CMP-COU 73.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
