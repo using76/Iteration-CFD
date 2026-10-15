@@ -1108,7 +1108,7 @@ fn segment_meets_box(p: Point, q: Point, lo: Point, hi: Point) -> bool {
 /// Everything the gap query needs, precomputed once per surface: the f64
 /// triangles, their unit normals (the zero normal marks a zero-area
 /// triangle), their centroids, the segment length `L`, and the BVH.
-struct GapScanner {
+pub(super) struct GapScanner {
     tri: Vec<[Point; 3]>,
     normal: Vec<Point>,
     centroid: Vec<Point>,
@@ -1118,7 +1118,7 @@ struct GapScanner {
 }
 
 impl GapScanner {
-    fn new(surf: &TetSurface) -> GapScanner {
+    pub(super) fn new(surf: &TetSurface) -> GapScanner {
         let n = surf.tris.len();
         let mut tri: Vec<[Point; 3]> = Vec::with_capacity(n);
         let mut normal = vec![[0.0; 3]; n];
@@ -1160,11 +1160,18 @@ impl GapScanner {
     /// the start triangle, zero-area triangles, misses and non-finite
     /// taus. Order-independent, so the BVH and the brute scan agree bit
     /// for bit.
-    fn scan(&self, p: Point, q: Point, v: Point, skip: usize, cands: &[u32]) -> Option<(usize, f64)> {
+    fn scan(
+        &self,
+        p: Point,
+        q: Point,
+        v: Point,
+        skip: &dyn Fn(usize) -> bool,
+        cands: &[u32],
+    ) -> Option<(usize, f64)> {
         let mut best: Option<(usize, f64)> = None;
         for &si in cands {
             let s = si as usize;
-            if s == skip || !self.ok[s] {
+            if skip(s) || !self.ok[s] {
                 continue;
             }
             if !segment_meets_triangle(&p, &q, &self.tri[s]) {
@@ -1185,6 +1192,23 @@ impl GapScanner {
 
     /// The first hit through the BVH.
     fn first_hit(&self, p: Point, q: Point, v: Point, skip: usize) -> Option<(usize, f64)> {
+        let mut cands: Vec<u32> = Vec::new();
+        self.bvh.collect(p, q, &mut cands);
+        self.scan(p, q, v, &|s| s == skip, &cands)
+    }
+
+    /// The first hit of the segment from `p` to `p + L v` (`L` of
+    /// [`GapScanner::new`]) over the triangles `skip` does not reject,
+    /// through the BVH, by the same reduction as [`GapScanner::first_hit`].
+    /// §116.15's gap (116.24a) starts at a wall point and skips every
+    /// triangle incident to it.
+    pub(super) fn first_hit_except(
+        &self,
+        p: Point,
+        v: Point,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> Option<(usize, f64)> {
+        let q = add(p, scale(v, self.len));
         let mut cands: Vec<u32> = Vec::new();
         self.bvh.collect(p, q, &mut cands);
         self.scan(p, q, v, skip, &cands)
@@ -1224,7 +1248,7 @@ impl GapScanner {
 impl GapScanner {
     fn first_hit_brute(&self, p: Point, q: Point, v: Point, skip: usize) -> Option<(usize, f64)> {
         let all: Vec<u32> = (0..self.tri.len() as u32).collect();
-        self.scan(p, q, v, skip, &all)
+        self.scan(p, q, v, &|s| s == skip, &all)
     }
 }
 

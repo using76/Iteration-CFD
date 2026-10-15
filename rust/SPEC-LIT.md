@@ -37169,7 +37169,8 @@ perturbation on with seed 1.
 n* = argmax_{|n| = 1}  min_i  n . n_i                                                      (116.22)
 ```
 
-On a sphere this is the radial direction. At a cube corner it is `(1,1,1)/sqrt 3`, which makes
+On a sphere this is the radial direction, and on a triangulated sphere it is radial where the
+star is symmetric about the radius (below). At a cube corner it is `(1,1,1)/sqrt 3`, which makes
 equal angles with the three faces.
 
 **The layer stack.** `N = layers.n` layers, first thickness `t_1 = layers.first_thickness`,
@@ -37187,6 +37188,61 @@ T(p) <= gap_fraction * gap(p)                                                   
 T(p) <= concave_fraction * rho_c(p)                                                        (116.24b)
 T(p) / T(q) <= max_neighbour_ratio      for wall-adjacent wall points p, q                (116.24c)
 ```
+
+**The normals and thicknesses, as TET-13a builds them** (`tetmesh/inflate.rs`). The wall is
+every triangle whose patch carries layers, wound so that its right-hand normal points into the
+fluid; the wall points are their points. `n*` is formed from the unit normals of a point's
+incident wall triangles of positive area. (116.22) asks for the centre of the smallest
+spherical cap that holds the `n_i`. That cap is fixed by one, two or three of them, so `n*` is
+one of the candidates
+
+```
+n_i ,     (n_i + n_j) / |n_i + n_j| ,     s / |s|  with  s = (n_j - n_i) x (n_k - n_i),  s . n_i > 0     (116.22a)
+```
+
+the last being the direction at equal angles from three. Each candidate's objective
+`min_i n . n_i` is evaluated over all the normals and the largest wins; ties keep the first
+candidate in the order above. No tolerance decides whether a candidate is valid, because a
+candidate that is not the optimum simply scores lower. A point where no candidate scores above
+0 sees no side of every incident face. It gets no normal and no layers, and TET-13c's taper owns
+it. This exhaustive solution is cubic in the distinct normals at a point. It is this section's,
+derived from the definition. Aubry & Löhner (2008) is the source of the definition, and its own
+iterative solver is not transcribed.
+
+*The sphere.* (116.22) is radial at a point of an inscribed triangulation only when the point's
+star is symmetric about the radius. At a vertex `v` the face normal `n_t` makes the angle
+`alpha_t` with the radius, where `sin alpha_t = r_t / R` and `r_t` is the triangle's circumradius.
+Unequal circumradii pull `n*` towards the larger triangles by `O(h / R)`. TET-13a's gate
+(sphere radial within `1e-6` rad) is therefore evaluated where (116.22) is radial: every point
+of the icosahedron (5-fold stars) and of its first subdivision (2-fold stars on the icosahedron
+edges' midpoints), and the 12 five-valent points of the third. Over every point of the third and
+fourth subdivisions the measured error is `4.459e-3` and `2.355e-3` rad (§116.18). It is printed
+as MISSED, and docs/17-review-later lists it. Its cause is the definition on a polyhedron, not a
+defect, and a smooth-surface normal would be a change to (116.22) that is the user's to make.
+
+*The thickness.* Each wall point starts at `T` of (116.23) and is lowered, in this order:
+
+```
+gap(p)       = tau of (116.10a) for the first triangle met by the segment p -> p + L n*(p),
+               L of (116.10a), over the triangles NOT incident to p, met from either side      (116.24d)
+1 / rho_c(p) = max over the concave non-crease edges e at p of kappa_e (116.9b);
+               e = [a, b] of t_1 and t_2 is concave when n_1 . (c_2 - a) > 0,
+               c_2 the point of t_2 off e and t_1 the lower-numbered triangle                   (116.24e)
+```
+
+Then (116.24a) and (116.24b) apply with §116.3's `gap_fraction` and `concave_fraction`. Every
+triangle of the surface counts for both (116.24d) and (116.24e), whether it is layered or not:
+a wall facing a symmetry plane is limited by it. The facing rule of (116.10a) is not applied,
+because any wall the normal meets is an obstacle to the stack. A tau that rounds below 0 is
+taken as 0. A crease (`phi_e` at least the feature angle) is not a curvature, as in §116.8, so a
+sharp concave edge is TET-13c's. Last, (116.24c) is imposed exactly by a smallest-first sweep
+over the edges of the layered triangles: the smallest unfinished `T(q)` caps each neighbour at
+`max_neighbour_ratio * T(q)`. Every point therefore ends at the smallest of its own limit and
+`ratio^k` times the limit of any point `k` edges away, and every limit only lowers `T`. A point
+with no normal, or with `T = 0`, takes no part in the sweep: a ratio to 0 would remove the
+layers from the whole wall. All of this is f64 in both builds (§116.2). The gap's segment test
+is §116.8's exact one, through the gap BVH, which now takes a skip predicate in place of one
+skipped triangle (the same answers bit for bit).
 
 **Deformation.** The volume mesh is displaced by the explicit inverse-distance interpolation of
 Luke, Collins & Blades (2012). The wall points move by `s_i = T(p_i) n*_i`, and every other
@@ -37492,6 +37548,13 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-12 | the f32 arm | `rust/tests/automesher_tet.rs` (the same two tests) under `--features single`: the refusals pass; the end-to-end run reaches the emission and §92.3 is **MISSED** as §116.16 records: G2 (closure) fails on 18 828 of the 20 309 cells, because `quality::check` sums f32 area vectors; the test asserts that cause | the TET-12 commit |
 | TET-12 | box_sphere.json's wall size, 0.125 m, on the tet path | **not finished**: in `[3, 7]^3` with `H = 1`, bands of 0.5 m at 0.125 m and 2 m at 0.25 m, the refinement of §116.13 reached a cap of 40 000 inserted points after 570 passes (168 393 kept tetrahedra, the next pass needing 4 843 more) in 34 s, and in `[0, 10]^3` with `curvature_cells = 16` and no cap it had not finished after 10 min. 0.125 m at band distance 0 in `[3, 7]^3` finishes: 368 passes, 6 425 points, 33 000 tetrahedra, dihedral 28.84 .. 149.56 degrees, 28.7 s. The example therefore uses 0.25 m; the flat band is recorded for review with TET-09's termination note | the TET-12 commit |
 | TET-12 | `make_box_sphere_stl.py`'s winding | its default sphere is wound inward: §116.9 measures the shell's volume as -4.181 and refuses it (`surface/inward`). The default output is kept byte for byte, because the hex path accepts it and `tools/autonomy`'s probe fixtures record it; `--outward` reverses every triangle | the TET-12 commit |
+| TET-13a | (116.22) where it is radial: the icosahedron (12 points), its first subdivision (42) and the third subdivision's 12 five-valent points | the largest angle to the radius 1.810e-16, 5.742e-16 and 1.329e-15 rad (the bar is 1e-6) | the TET-13a commit |
+| TET-13a | (116.22) at every point of the third (642 points) and fourth (2 562) subdivisions | **MISSED** against 1e-6: 4.458530960869125e-3 and 2.355264422117602e-3 rad, which equal the supervisor's numpy transcription outside the tree (4.45853096089773e-3 and 2.3552644221493026e-3) within 3e-14; the cause is in §116.15, and the error halves per level | the TET-13a commit |
+| TET-13a | the cube corner: the spread of the angles from `n*` to the incident triangles | 0 on the 12-triangle cube and on a 3 x 3 grid per face; 2.2e-16 on that grid rotated by 0.3 and 1.1 rad and moved by `(1e4, -2e4, 3e4)` m (the bar is 1e-9); there the 24 edge points bisect their faces (`pi/4` within 1e-9, spread 1.5e-11) and the 24 face points spread 2.1e-11 | the TET-13a commit |
+| TET-13a | the gap (116.24a) between two unit-quad plates, `T` = 7.4416e-3 (5 layers, `t_1 = 1e-3`, `r = 1.2`) | a gap of `3T`: all 30 wall points keep `T`, which is `gap/2` or less, and `gap(p) = 3T` exactly; a gap of `T`: all 30 at exactly `0.5 T`; a step from a gap of `T` to `3T` under a layered lower plate: 15 points at `gap/2`, the 3 next to them at exactly `1.5 * 0.5 T` (116.24c), and 9 at `T`; (116.24c) holds on every layered edge | the TET-13a commit |
+| TET-13a | the concave limit (116.24b) inside an open 16-sided pipe of radius 1 | all 48 points at `0.5 rho_c` = 0.331195617048069, `w / (3 phi)` with `w = 2 sin(pi/16)` and `phi = pi/8`, within 1e-12 relative, `n*` radial within 1e-12; outside the same pipe `T` is kept, with no gap and no `rho_c` | the TET-13a commit |
+| TET-13a | (116.22a) against a direct optimisation (the supervisor, outside the tree) | 300 random sets of 2 to 8 unit normals in a cap: Nelder-Mead from 20 starts never beat the candidate optimum by more than 3.3e-16 | the TET-13a commit |
+| TET-13a | the f32 arm | `rust/tests/tetmesh_inflate.rs` (the 7 shared tests) under `--features single`: all pass with the same printed numbers | the TET-13a commit |
 
 ### 116.19 References
 
