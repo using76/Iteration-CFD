@@ -1245,8 +1245,10 @@ def rules_ctx(stl, flow_name, plabels, rl, fps):
     if key not in _RULES_CTX["v"]:
         flow = plabels["flow"] if flow_name == "probe" else rl["flows"][flow_name]
         stem = stl[:-4]
+        # the labelled fixtures are AM-10's attempt-1 configs: the rules before R-ECON
+        # (AUT-07), whose bands their config_edits and labels point at
         res = rules.setup({"geometry_id": stem, "flow": flow}, fps[stl], stl,
-                          "case_" + stem, stem, flow=flow)
+                          "case_" + stem, stem, flow=flow, r_econ=False)
         if res["verdict"] != "apply":
             raise RemedyError("rules.setup refuses %s (%s)" % (stl, res["refused"]))
         _RULES_CTX["v"][key] = (flow, res["config"])

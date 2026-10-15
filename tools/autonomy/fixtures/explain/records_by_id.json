@@ -1,6 +1,6 @@
 {
  "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
- "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint); RM-SNAP-TAU apply added 2026-10-02 (AM-L: remedies.propose on the wing_a_L3 probe, whose snap pins at the default radius); R-SNAP apply, abstain and pass added 2026-10-14 (AUT-05: rules.setup on B-1-000 and cubep, and r_snap on a max_level 1 state)",
+ "note": "one real DecisionRecord per (rule_id, verdict) emitted at the mesh tree's HEAD by schema.py, preflight.py, rules.py and remedies.py (supervisor, AM-15-fixtures/build_records.py); WL-SHARP-FT0 refuse added 2026-09-26 (FEAT-CONSTRAINT: preflight on cubep_nofeat's config with the cubep fingerprint); RM-SNAP-TAU apply added 2026-10-02 (AM-L: remedies.propose on the wing_a_L3 probe, whose snap pins at the default radius); R-SNAP apply, abstain and pass added 2026-10-14 (AUT-05: rules.setup on B-1-000 and cubep, and r_snap on a max_level 1 state); R-ECON abstain, apply and pass added 2026-10-15 (AUT-07: rules.setup on cubep and B-1-000, and r_econ on a state whose bands are already the wall band alone)",
  "records": [
   {
    "cite": "gates.json cell_budget; docs/15 §D.1 F5",
@@ -940,6 +940,142 @@
    },
    "uncertainty": 0,
    "verdict": "apply"
+  },
+  {
+   "cite": "SPEC-LIT §92.2 (92.1) the distance band; §92.9 (92.21) 2:1 balance; (92.22) a leaf whose bounding sphere touches the patch takes its deepest band level; costbound.py CB-3 (AUT-06); docs/17 §12.6 AUT-07",
+   "edits": [],
+   "formula": "",
+   "inputs": [],
+   "layer": "rule",
+   "message": "R-ECON: R-PLANE owns this body: its bands stay R-PLANE's, like the rest of its config (R-ECON's quick set measured no R-PLANE body)",
+   "rule_id": "R-ECON",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-15T01:48:35Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "abstain"
+  },
+  {
+   "cite": "SPEC-LIT §92.2 (92.1) the distance band; §92.9 (92.21) 2:1 balance; (92.22) a leaf whose bounding sphere touches the patch takes its deepest band level; costbound.py CB-3 (AUT-06); docs/17 §12.6 AUT-07",
+   "edits": [
+    {
+     "from": 0.09417,
+     "pointer": "/refinement/levels/0/bands/0/distance",
+     "to": 0.022068749999999998
+    },
+    {
+     "from": 0.47085,
+     "pointer": "/refinement/levels/0/bands/1/distance",
+     "to": null
+    },
+    {
+     "from": 5,
+     "pointer": "/refinement/levels/0/bands/1/level",
+     "to": null
+    },
+    {
+     "from": 1.41255,
+     "pointer": "/refinement/levels/0/bands/2/distance",
+     "to": null
+    },
+    {
+     "from": 4,
+     "pointer": "/refinement/levels/0/bands/2/level",
+     "to": null
+    }
+   ],
+   "formula": "bands = [{distance: 3 * base_size / 2**L_w, level: L_w}] on every refinement entry, L_w = the wall level R-WIN to R-BUDGET left (the deepest band level); feature_level and max_level unchanged; the coarser shells are (92.21)'s",
+   "inputs": [
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "base_size",
+     "unit": "m",
+     "value": 0.4708
+    },
+    {
+     "name": "band_min_cells",
+     "unit": "cells",
+     "value": 3
+    },
+    {
+     "name": "distance",
+     "unit": "m",
+     "value": 0.022068749999999998
+    },
+    {
+     "name": "bands_before",
+     "unit": "1",
+     "value": 3
+    },
+    {
+     "name": "predicted_before",
+     "unit": "cells",
+     "value": 989952
+    },
+    {
+     "name": "predicted",
+     "unit": "cells",
+     "value": 104356
+    }
+   ],
+   "layer": "rule",
+   "message": "R-ECON: 3 band(s) become the wall band alone, 3 cells of level 6 (distance 0.0220687 m); no level moves and the 2:1 balance (92.21) builds the coarser shells, so the predicted cells go from 989952 to 104356",
+   "rule_id": "R-ECON",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-15T01:37:20Z",
+   "trigger": {
+    "observable": "predicted_cells",
+    "op": ">",
+    "source": "rules.predict_cells before and after the trim (docs/15 §C R-BUDGET)",
+    "threshold": 104356,
+    "value": 989952
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
+  },
+  {
+   "cite": "SPEC-LIT §92.2 (92.1) the distance band; §92.9 (92.21) 2:1 balance; (92.22) a leaf whose bounding sphere touches the patch takes its deepest band level; costbound.py CB-3 (AUT-06); docs/17 §12.6 AUT-07",
+   "edits": [],
+   "formula": "bands = [{distance: 3 * base_size / 2**L_w, level: L_w}] on every refinement entry, L_w = the wall level R-WIN to R-BUDGET left (the deepest band level); feature_level and max_level unchanged; the coarser shells are (92.21)'s",
+   "inputs": [
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "base_size",
+     "unit": "m",
+     "value": 0.5
+    },
+    {
+     "name": "band_min_cells",
+     "unit": "cells",
+     "value": 3
+    },
+    {
+     "name": "distance",
+     "unit": "m",
+     "value": 0.09375
+    },
+    {
+     "name": "bands_before",
+     "unit": "1",
+     "value": 1
+    }
+   ],
+   "layer": "rule",
+   "message": "R-ECON: the bands are already the wall band alone at 3 cells of level 4",
+   "rule_id": "R-ECON",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-15T01:37:20Z",
+   "trigger": null,
+   "uncertainty": 0,
+   "verdict": "pass"
   },
   {
    "cite": "docs/15 §C L1 R-FEAT; docs/15 §K G-PILOT caution 1",

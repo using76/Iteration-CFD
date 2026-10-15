@@ -639,7 +639,7 @@ on every candidate; `surface_facts` caches per (path, size, mtime); pass
 
 ## rules.py — L1 setup rules
 
-AM-9's attempt 1: nine pure rules run in a fixed order, each editing the config and returning one DecisionRecord
+AM-9's attempt 1: ten pure rules run in a fixed order, each editing the config and returning one DecisionRecord
 (formula, inputs with units, edits, cite). Verdicts: `apply` edited, `pass` — holds already or trigger absent,
 `abstain` — cannot act, `refuse` — no config under the rule; it sets `stop`, the config comes back None and every
 later rule abstains. Every edit goes through the locked knob table (no `/quality`, no `cell_frac`, `medial_frac`,
@@ -649,7 +649,8 @@ tau = feature_tolerance · base_size is h_f/2 (R-BUDGET re-derives it when it ch
 the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D). Since AUT-05
 (2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE. R-TE (AUT-04, 2026-10-15) is
 not an attempt-1 rule: its edit `te_config` is applied by remedies.py's RM-TE after an F3 failure, so setup and
-every attempt-1 config are unchanged.
+every attempt-1 config are unchanged. Since AUT-07 (2026-10-15) R-ECON, between R-BUDGET and R-SNAP, trims the
+bands of every config off R-PLANE to the wall band alone.
 
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
@@ -659,6 +660,7 @@ every attempt-1 config are unchanged.
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
+- R-ECON reads the wall level R-BUDGET left and, off R-PLANE, writes `/refinement/levels/*/bands` = one band, 3 cells of the wall level (`BAND_MIN_CELLS · base / 2^L_w`): no level, feature level, max_level or growth moves, and the coarser shells are (92.21)'s 2:1 balance (it passes when the bands are already that or there is none; it abstains on R-PLANE).
 - R-SNAP reads the final max_level and, off R-PLANE, writes `/snap/tolerance = 2^−max_level / 256` and `/snap/iterations = 60`: the (92.28) dead band eps = tolerance·base_size becomes h_f/256 (it passes when the default band is already inside, max_level ≤ 1; it abstains on R-PLANE).
 
 Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 as the floor on every snapped wall and, since GLB-CONFIG (2026-10-03), prefers 60/1.10 there when the margin holds after the (92.45) depth (below). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
@@ -836,6 +838,52 @@ end CAPABILITY-LIMITED on `layer:retreat_snapped`: F3-clean is not a layer pass,
 unchanged. Identity: over the tuning rows with an L5 fingerprint, the 37 R-PLANE and the 44 smooth rows propose
 the same config for a synthetic F3c with and without RM-TE. 169 of 276 sharp rows would take RM-TE on an F3
 failure. That is measured on the wings only, so the other families' effect is AUT-12's L-run.
+
+**R-ECON (AUT-07, 2026-10-15): the bands at the minimum the gates and R-WIN allow.** The full system's cells are
+G-COST's miss (docs/15: 469,898 against B0-template's 10,808 on the seed-1 both-pass bodies), and AUT-06's bound
+put the octree alone at 1.2-1.5x B0. On the 36 tuning both-pass rows the L5 rules mesh a median 717,000 cells
+against a bound of 61,055.5: the cells are the bands. §B's shape asks for the wall level within 0.1 L_ref, one level
+coarser within 0.5 L_ref and two coarser within 1.5 L_ref; at the B wall level 6 that last shell alone is about
+(1 + 3)^3 L_ref^3 of level-4 cells. No gate reads those cells. The wall level is R-WIN's (raised by R-CURV and
+R-GAP, lowered only by R-BUDGET), (92.22) puts every leaf whose bounding sphere touches the patch at the band's
+deepest level, and (92.21) builds the coarser shells out to the base grid. So R-ECON keeps one band per patch, the
+wall level, `BAND_MIN_CELLS` = 3 cells deep: the floor `bands_for` and RM-BUDGET-FAR already keep, which holds the
+wall cells' outer faces off the 2:1 transition (the (92.33) note of §92.11). It moves no level. It runs after
+R-BUDGET, so the budget's choices stand, and it recomputes the predicted cells. It abstains on R-PLANE, whose
+configs stay byte-identical. The exploration before the rule (scratch, the 12 bodies below at attempt 1) meshed three
+variants: today's bands, every band at its 3-cell floor and the wall band alone. Failure, F flags, p99/h_f, BLC_8 and
+`-check` were identical in all three on all 12, and the floor-at-every-level variant was 3-9 % above the wall band
+alone, which is the one chosen. `setup(..., r_econ=False)` is the rule set every campaign before AUT-07 was recorded
+under, and `r_econ_of(records)` tells which one a campaign used (an R-ECON record). `optimise.rows_from`,
+optimise.py's selftest and prior.py's G-PRIOR rows pass it beside `r_snap`. The FT-RADIUS, WIN-2TO1, GLB-CONFIG,
+R-SNAP and R-TE identities and quick ids rebuild with r_econ False, so their committed reports still reproduce,
+and so do remedies.py's labelled fixtures (`rules_ctx`: AM-10's attempt-1 configs, whose `config_edits` point at
+§B's three bands) and optimise.py's selftest oracle campaigns (`_before_econ`: their counts and predictions were
+written against §B's bands, which the surrogate reads, and campaign.py takes no rule-set flag). The remedy
+table is unchanged: RM-BUDGET-FAR finds nothing to halve under R-ECON, and a remedy that rebuilds the band shape (`_shift` from no band, the R-PLANE re-lattice) still writes §B's shape; that is L2's,
+measured in AUT-12. optimise.py's `l1_of` centres the L4 box on the L1 before R-ECON: the box scales the band
+distances and every row the surrogate was fitted on was meshed under §B's bands, so a box around R-ECON's
+3-cell bands would leave the training rows (on D-1-073 it finds no feasible point); a refit on R-ECON campaigns is
+AUT-12's. The optimiser ships disabled (AUT-09).
+
+G-R-ECON 2026-10-15 (`rules.py --econ-gate`, `rules/R-ECON.json` and `.md`; binary a6e15835…, git 9a6862b plus
+this unit's diff, 3 streams, 289 s): PASS. The quick set is pre-registered from the committed AUT-06 report
+(`econ_quick_ids`): its 36 tuning both-pass rows, per family in sha256("r-econ/1|id") order, round robin B, E, G:
+B-1-105, E-1-058, G-1-111, B-1-036, E-1-004, G-1-081, B-1-042, E-1-007, B-1-009, E-1-028, B-1-069, E-1-010.
+Each body is meshed at attempt 1 (remedies off) by the rules before R-ECON and by the rules with it, and each mesh
+is checked by `-check` (G1-G7, §92.3) before it is deleted, so F2 is the real one. PASS needs the median cells to
+drop, 0 new failures, no body's BLC_8 lower, `-check`, F2 and the preflight refusals equal on every body, the
+identity and zero harness errors. **Median cells 516,471.5 → 66,254.5, a factor of 7.80** (per body 2.08-38.5;
+the two bodies that deliver their layers, E-1-058 and G-1-111, by 2.08 and 2.14, where the layer cells stay).
+New failures 0, BLC_8 lower 0 (E-1-058 and G-1-111 at 1.0 in both arms, the other ten 0), `-check` exit 0 on all
+24 meshes, preflight unchanged; p99/h_f and the F flags are unchanged on every body. Against B0-template's cells on
+the same bodies (median 10,720): the rules 48.2x, R-ECON 6.18x, so G-COST's 1.5x is still out of reach (D-8, the
+user's). Against AUT-06's bound (median 63,030.5): the rules 8.19x, R-ECON 1.05x. The bound counts 8 layers on
+the whole wall; CB-8's row (fluid + BLC_8 × layer cells) holds on all 12 R-ECON meshes. Identity: over the 372
+tuning rows with an L5 fingerprint, the 37 R-PLANE configs are byte-identical, the 15 refusals do not move, and
+all 320 snapped configs change under `/refinement/levels/*/bands` alone, as `econ_bands` of their wall level, with
+max_level and every feature_level equal (median predicted factor 1.81). The quick set holds no sharp body: families
+A, D and F, and the K = 4 effect, are AUT-12's L-run.
 
 ## remedies.py — L2 remedies
 
@@ -1453,6 +1501,7 @@ level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D
     python tools/autonomy/preflight.py --gate --stl box_sphere=P --stl wing_b=P --out DIR          # G-PREFLIGHT
 
     python tools/autonomy/rules.py --id GEOMETRY_ID --out-dir DIR [--records OUT.jsonl]   # attempt 1 for a tuning row
+    python tools/autonomy/rules.py --econ-gate --out DIR [--streams 3]                    # G-R-ECON (AUT-07): the 12-body quick set
     python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]                       # G-RULES (AM-9's gate)
     python tools/autonomy/remedies.py --probe PROBE_ID [--json]                  # the tabled remedy for one probe
     python tools/autonomy/remedies.py --gate --out DIR [--parts 1,2,3,4]         # G-REMEDIES (AM-10's gate)

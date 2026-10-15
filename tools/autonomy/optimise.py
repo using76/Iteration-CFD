@@ -225,6 +225,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
     w21 = rules.win_2to1_of(bundle.get("records") or [])
     glb = rules.glb_of(bundle.get("records") or [])
     rsn = rules.r_snap_of(bundle.get("records") or [])
+    rec_on = rules.r_econ_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -237,7 +238,8 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr, win_2to1=w21, glb=glb, r_snap=rsn)
+                            ft_radius=ftr, win_2to1=w21, glb=glb, r_snap=rsn,
+                            r_econ=rec_on)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -556,11 +558,15 @@ def sobol(gid):
 
 
 def l1_of(ctx, gates, knobs):
-    """The L1 config the box is relative to, from the row-less facts only."""
+    """The L1 config the box is relative to, from the row-less facts only.  Its bands
+    are the rules' before R-ECON (AUT-07, r_econ=False): every row the surrogate was
+    fitted on was meshed under them, and the box scales the band distances, so a box
+    around R-ECON's 3-cell bands would sit outside the training rows until a refit on
+    R-ECON campaigns (AUT-12's L-run)."""
     gid = ctx["geometry_id"]
     s = rules.setup({"geometry_id": gid, "flow": ctx["flow"]}, ctx["fingerprint"],
                     campaign.stl_rel(gid), campaign.case_rel(gid), gid,
-                    flow=ctx["flow"], gates=gates, knobs=knobs)
+                    flow=ctx["flow"], gates=gates, knobs=knobs, r_econ=False)
     if s["refused"]:
         raise OptError("rules.setup refuses %s: %s" % (gid, ", ".join(s["refused"])))
     return s["config"]
@@ -2262,10 +2268,23 @@ IDS16 = prior.IDS8 + ("D-1-001", "D-1-027", "E-1-003", "E-1-011", "F-1-025",
                       "G-1-052", "E-1-014", "D-1-073")
 
 
+def _before_econ(fn, *args, **kw):
+    """fn with rules.setup on the rules before R-ECON (AUT-07, r_econ=False): the
+    oracle campaigns' counts and predictions were written against §B's bands, which
+    the surrogate reads, and campaign.py takes no rule-set flag."""
+    setup0 = rules.setup
+    rules.setup = functools.partial(setup0, r_econ=False)
+    try:
+        return fn(*args, **kw)
+    finally:
+        rules.setup = setup0
+
+
 def _oracle_run(out, ids, mode, attempt_fn):
     # r_te False: the wall oracle models G-PILOT's cure (one wall level coarser), the
     # remedy table before AUT-04's RM-TE that these selftest counts were written against
-    return campaign.run_campaign(
+    return _before_econ(
+        campaign.run_campaign,
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": mode,
          "streams": 2, "quiet": True, "r_te": False}, attempt_fn=attempt_fn,
         probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap)
@@ -2426,7 +2445,8 @@ def _g3_pool(H):
                     knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
                     win_2to1=rules.win_2to1_of(H["rb"]["records"]),
                     glb=rules.glb_of(H["rb"]["records"]),
-                    r_snap=rules.r_snap_of(H["rb"]["records"]))
+                    r_snap=rules.r_snap_of(H["rb"]["records"]),
+                    r_econ=rules.r_econ_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -2636,10 +2656,10 @@ def _g8_refine(H):
     tmp = H["tmp"]
     w8 = os.path.join(tmp, "w8")
     rep8 = os.path.join(tmp, "rep8")
-    rep = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                 attempt_fn=prior._wall_oracle,
-                 probe_fn=campaign._fake_probe(1000),
-                 snap_fn=campaign._fake_snap, quiet=True)
+    rep = _before_econ(refine, w8, sources=H["osrc"], rounds=2, streams=2,
+                       report_dir=rep8, attempt_fn=prior._wall_oracle,
+                       probe_fn=campaign._fake_probe(1000),
+                       snap_fn=campaign._fake_snap, quiet=True)
     # GLB-CONFIG: F-1-009 is banked again on the margin's level 4, and D-1-073 and
     # F-1-025 pass the wall oracle on their margined attempt 1, so the set is three
     assert rep["refinement_set"]["geometry_ids"] == \
@@ -2687,10 +2707,10 @@ def _g8_refine(H):
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
     m2 = os.stat(os.path.join(w8, "round_2", "campaign.json")).st_mtime_ns
-    rep2 = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                  attempt_fn=prior._wall_oracle,
-                  probe_fn=campaign._fake_probe(1000),
-                  snap_fn=campaign._fake_snap, quiet=True)
+    rep2 = _before_econ(refine, w8, sources=H["osrc"], rounds=2, streams=2,
+                        report_dir=rep8, attempt_fn=prior._wall_oracle,
+                        probe_fn=campaign._fake_probe(1000),
+                        snap_fn=campaign._fake_snap, quiet=True)
     assert os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns == m1
     assert os.stat(os.path.join(w8, "round_2", "campaign.json")).st_mtime_ns == m2
     a = _read_json_or_none(os.path.join(rep8, "G-OPT.json"))
@@ -2747,12 +2767,12 @@ def _g9_refine_a(H):
         baseline.write_bundle(baseline.bundle_dir(out),
                               os.path.join(srcA, name + ".json.gz"))
     rep9 = os.path.join(tmp, "rep9")
-    rep = refine(os.path.join(tmp, "w9"),
-                 sources=[os.path.join(srcA, n + ".json.gz")
-                          for n in ("rules", "tmpl", "lhs")],
-                 rounds=1, streams=2, report_dir=rep9, attempt_fn=a_oracle,
-                 probe_fn=campaign._fake_probe(1000),
-                 snap_fn=campaign._fake_snap, quiet=True)
+    rep = _before_econ(refine, os.path.join(tmp, "w9"),
+                       sources=[os.path.join(srcA, n + ".json.gz")
+                                for n in ("rules", "tmpl", "lhs")],
+                       rounds=1, streams=2, report_dir=rep9, attempt_fn=a_oracle,
+                       probe_fn=campaign._fake_probe(1000),
+                       snap_fn=campaign._fake_snap, quiet=True)
     assert rep["refinement_set"]["geometry_ids"] == ["A-1-000"]
     r1 = baseline.read_bundle(os.path.join(rep9, "refine_r1.json.gz"))
     row4 = next(r for r in r1["attempts"]
@@ -2785,7 +2805,8 @@ def _g10_live(H):
         setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
         win_2to1=rules.win_2to1_of(H["rb"]["records"]),
         glb=rules.glb_of(H["rb"]["records"]),
-        r_snap=rules.r_snap_of(H["rb"]["records"]))
+        r_snap=rules.r_snap_of(H["rb"]["records"]),
+        r_econ=rules.r_econ_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,

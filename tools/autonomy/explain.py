@@ -180,6 +180,10 @@ TEMPLATES = {
                "title": "tighten the snap dead band to a fixed fraction of the finest cell",
                "because": "a snapped wall point stops once it is inside the dead band, so the band, "
                           "not the geometry, sets the wall residual"},
+    "R-ECON": {"layer": "rule",
+               "title": "trim the distance bands to the wall band at its minimum depth",
+               "because": "the wall level carries the layers and the octree balance builds the "
+                          "coarser shells, so wider bands add cells that no gate reads"},
     "RM-BUDGET-FAR": {"layer": "remedy",
                       "title": "halve the far-field band distances",
                       "because": "a run over the cell budget or out of time sheds far-field cells "
@@ -964,7 +968,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 55, len(TEMPLATES)
+    assert len(TEMPLATES) == 56, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -973,9 +977,9 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 7, "R": 9, "RM": 18, "PR": 6,
+    assert counts == {"PF": 11, "WL": 7, "R": 10, "RM": 18, "PR": 6,
                       "OPT": 4}, counts
-    print("[ok] templates: 55 rule ids (PF 11, WL 7, R 9, RM 18, PR 6, OPT 4), "
+    print("[ok] templates: 56 rule ids (PF 11, WL 7, R 10, RM 18, PR 6, OPT 4), "
           "each with its "
           "prefix's layer, no digit in any template")
 
@@ -1004,7 +1008,7 @@ def _g2_static_scan():
 def _g3_records():
     fx = load_fixtures()
     recs = fx["records_by_id"]
-    assert len(recs) == 65, len(recs)
+    assert len(recs) == 68, len(recs)
     ids = set()
     for rec in recs:
         c = card(rec)
@@ -1015,7 +1019,7 @@ def _g3_records():
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
-    print("[ok] records: 65 fixture records of 45 ids render, every line starts with "
+    print("[ok] records: 68 fixture records of 46 ids render, every line starts with "
           "its rule id, 0 ungrounded; fmt == remedies._fmt on 9 values")
 
 
