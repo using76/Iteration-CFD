@@ -7,10 +7,11 @@
 // Fixture: cases/plume.jsonc. Patches wallXMin outlet wallYMin wallYMax floor
 // ceiling (mesh.boundaries) and inlet (a region). Rules: 0 inlet/inlet,
 // 1 outlet/open, 2 ".*"/wall.
+import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import type { BetaMessage, BetaRawMessageStreamEvent } from '@anthropic-ai/sdk/resources/beta/messages/messages'
-import type { SessionSettings, UiCommand, UiState } from '@cfd/shared'
+import { IMPLEMENTED_BC_TYPES, type SessionSettings, type UiCommand, type UiState } from '@cfd/shared'
 import { findNodeAtLocation, parse, parseTree } from 'jsonc-parser'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { LlmClient } from '../agent/llm.js'
@@ -22,7 +23,8 @@ import { fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type FakeHub, type Temp
 import { makeDeps, toolResultsOf, until } from '../agent/test-util.js'
 import type { ToolContext } from './context.js'
 import { guiControl } from './gui.js'
-import { boundaryFieldEntries, boundaryTable, casePatchNames, guiBoundaryDelegate, planSetPatch, readBoundaryTable, setPatchAt } from './guiBoundary.js'
+import { REPO_ROOT } from '../runs/test-helpers.js'
+import { boundaryFieldEntries, boundaryTable, casePatchNames, guiBoundaryDelegate, jsoncConditionTypes, planSetPatch, readBoundaryTable, setPatchAt } from './guiBoundary.js'
 import { runTool } from './index.js'
 
 type SetPatch = Extract<UiCommand, { type: 'set_patch' }>
@@ -333,6 +335,7 @@ describe('the Boundary editor table and its set_patch', () => {
       editable: false,
       meshDir: 'cases/foamB',
       fields: ['U', 'p'],
+      conditionTypes: { U: IMPLEMENTED_BC_TYPES.map((type) => ({ type, entries: null })), p: IMPLEMENTED_BC_TYPES.map((type) => ({ type, entries: null })) },
       patches: [
         { name: 'inlet', faces: [], nFaces: 4, kind: 'patch', preset: null, rule: null, ownRule: null, match: null, fields: { U: { type: 'fixedValue', value: 'uniform (0 0 2)' }, p: { type: 'zeroGradient' } }, presets: [] },
         { name: 'walls', faces: [], nFaces: 12, kind: 'wall', preset: null, rule: null, ownRule: null, match: null, fields: { U: { type: 'noSlip' }, p: { type: 'zeroGradient' } }, presets: [] },
@@ -377,3 +380,43 @@ function planLlm(plans: MockPlan[]): LlmClient {
     },
   }
 }
+
+// docs/17 BC-22: the picker's condition types come from what the solver generates - a .jsonc case's
+// from docs/schema/case-1.json, a foam case directory's from the BC catalogue (bcCatalogue.ts).
+describe("the Boundary editor's condition types (BC-22)", () => {
+  type Variant = { properties: { type: { const: string } }; required?: string[] }
+  const schema = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'docs', 'schema', 'case-1.json'), 'utf8')) as {
+    $defs: Record<string, { oneOf?: Variant[]; properties?: Record<string, { anyOf?: Array<{ $ref?: string }> }> }>
+  }
+
+  it("a .jsonc case's types and required members are case-1.json's VectorBc / ScalarBc / TurbBc, and the solver implements each", () => {
+    const rule = schema.$defs.JsonPatchRule.properties!
+    const want: Record<string, Array<{ type: string; entries: string[] }>> = {}
+    for (const f of ['U', 'p', 'T', 'k', 'epsilon', 'omega', 'nut']) {
+      const ref = rule[f].anyOf!.find((a) => a.$ref)!.$ref!
+      const def = schema.$defs[ref.replace('#/$defs/', '')]
+      want[f] = def.oneOf!.map((o) => ({ type: o.properties.type.const, entries: (o.required ?? []).filter((r) => r !== 'type') }))
+    }
+    expect(jsoncConditionTypes()).toEqual(want)
+    expect(want.U.map((t) => t.type)).toEqual(['fixedValue', 'inletOutlet', 'zeroGradient'])
+    expect(want.T.find((t) => t.type === 'fixedFluxTemperature')?.entries).toEqual(['q'])
+    for (const types of Object.values(want)) for (const t of types) expect(IMPLEMENTED_BC_TYPES, t.type).toContain(t.type)
+    const table = boundaryTable(parse(plumeText, [], { allowTrailingComma: true }), 'cases/plume.jsonc')
+    expect(table.conditionTypes).toEqual(want)
+  })
+
+  it('a condition a .jsonc field does not carry is PATCH_FIELD naming what the solver does with the name', async () => {
+    const { abs, c } = await openCopy('bc22')
+    const cases: Array<[string, string]> = [
+      ['uniformFixedValue', 'uniformFixedValue is implemented by the solver'],
+      ['codedFixedValue', 'codedFixedValue is refused by the solver (loads no user code)'],
+      ['bogusCondition', 'bogusCondition is not a boundary-condition type the solver knows'],
+    ]
+    for (const [type, says] of cases) {
+      const r = await runTool('gui_control', setPatch({ patch: 'floor', field: 'T', bc: { type } }), c)
+      expect(r.error?.code, type).toBe('PATCH_FIELD')
+      expect(r.error?.message, type).toContain(`not ${type} (${says}; a .jsonc case's T condition does not carry it)`)
+    }
+    expect(await fsp.readFile(abs, 'utf8')).toBe(plumeText)
+  })
+})

@@ -6,7 +6,7 @@
 rules.py - the L1 setup rules: attempt 1 from a geometry's fingerprint and
 flow (AM-9, docs/15 §C).
 
-Nine pure rules run in a fixed order and each returns ONE DecisionRecord:
+Ten pure rules run in a fixed order and each returns ONE DecisionRecord:
 R-YP (the a priori first layer), R-DOM (the domain in L_ref multiples),
 R-PLANE (commensurate planar bodies put on cell planes, attraction off,
 SPEC-LIT §92.15.5), R-WIN (the coarsest wall level inside the §D.3 y+ window
@@ -15,10 +15,12 @@ patch: h/2 where R-FEAT will put the sharp edges, WIN-2TO1), R-CURV (h <= r_p5/8
 R-GAP (h <= gap/3), R-FEAT (feature_level +1 on sharp edges, the attraction
 on at tau = h_f / 2: snap.feature_tolerance = 0.5 * 2**-max_level, SPEC-LIT
 §92.12's erratum), R-BUDGET (a predicted cell ladder that coarsens far-field
-bands before wall bands) and R-SNAP (off R-PLANE, the (92.28) dead band at
-h_f / 256 and 60 snap iterations).  A rule that refuses sets `stop`; the rules
-after it abstain.  On a box the delivered stack needs h <= ~42.9 t1 (the
-box-corner G5 bound measured on cubep 2026-09-24), so R-PLANE uses 0.70 of
+bands before wall bands), R-ECON (off R-PLANE, the bands trimmed to the wall
+band alone at 3 cells of the wall level, no level moved, AUT-07) and R-SNAP
+(off R-PLANE, the (92.28) dead band at h_f / 256 and 60 snap iterations).  A
+rule that refuses sets `stop`; the rules after it abstain.  On a box the
+delivered stack needs h <= ~42.9 t1 (the box-corner G5 bound measured on
+cubep 2026-09-24), so R-PLANE uses 0.70 of
 the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
 
     python tools/autonomy/rules.py --id GEOMETRY_ID --out-dir DIR [--records OUT.jsonl]
@@ -30,6 +32,8 @@ the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
     python tools/autonomy/rules.py --win-gate --campaign DIR --ref DIR
     python tools/autonomy/rules.py --glb-gate [--bundle PATH] [--report-dir DIR]
     python tools/autonomy/rules.py --snap-gate --out DIR [--streams N] [--ids A,B,...]
+    python tools/autonomy/rules.py --te-gate --campaign DIR --ref DIR
+    python tools/autonomy/rules.py --econ-gate --out DIR [--streams N] [--ids A,B,...]
 """
 
 from __future__ import annotations
@@ -58,7 +62,7 @@ REPORT_DIR = os.path.join(HERE, "rules")
 RESULT_SCHEMA = "autonomy-rules/1"
 GATE_SCHEMA = "autonomy-rules-gate/1"
 RULES = ("R-YP", "R-DOM", "R-PLANE", "R-WIN", "R-CURV", "R-GAP", "R-FEAT", "R-BUDGET",
-         "R-SNAP")
+         "R-ECON", "R-SNAP")
 CELL_FRAC = preflight.MESHER_DEFAULTS["/layers/cell_frac"]        # 0.5: a limiter (§I-5)
 G5_RATIO = preflight.REFERENCE_QUALITY["min_thickness_ratio"]     # 0.05
 G5_FACTOR = preflight.G5_FACTOR                                   # 3.0 (layers.rs:1306)
@@ -68,6 +72,7 @@ SNAP_G5_K = 1.10        # the convex-wall margin on a snapped wall's G5 edge (GL
 FT_HALF_H_F = 0.5       # R-FEAT's attraction radius tau = 0.5 h_f (SPEC-LIT §92.12 erratum)
 SNAP_TOL_DIV = 256      # R-SNAP: the (92.28) dead band eps = h_f / 256 (snap.tolerance = 2^-max_level / 256)
 SNAP_ITERATIONS = 60    # R-SNAP: the snap iteration cap (README: 60 measured as enough for the 1e-6 band)
+TE_TAU_H_F = 1.5        # R-TE (AUT-04): tau = 1.5 h_f once the feature bump is dropped
 T1_SIG = 4              # t1 floored to 4 significant digits, so the a priori y+ stays <= 1
 GROWTH_STEP_DIV = 1000  # growth steps are k / 1000
 BASE_FRAC = 0.5         # base_size = 0.5 L_ref (docs/15 §B's L4 recipe)
@@ -975,6 +980,74 @@ def r_budget(state: dict) -> dict:
                    round(target), suffix))
 
 
+# --- R-ECON (AUT-07) ------------------------------------------------------------
+
+_ECON_CITE = ("SPEC-LIT §92.2 (92.1) the distance band; §92.9 (92.21) 2:1 balance; (92.22) a "
+              "leaf whose bounding sphere touches the patch takes its deepest band level; "
+              "costbound.py CB-3 (AUT-06); docs/17 §12.6 AUT-07")
+_ECON_FORMULA = ("bands = [{distance: %d * base_size / 2**L_w, level: L_w}] on every refinement "
+                 "entry, L_w = the wall level R-WIN to R-BUDGET left (the deepest band level); "
+                 "feature_level and max_level unchanged; the coarser shells are (92.21)'s"
+                 % BAND_MIN_CELLS)
+
+
+def econ_bands(base: float, wall_level: int) -> list:
+    """R-ECON's band list: the wall band alone, BAND_MIN_CELLS cells of the wall level
+    deep (bands_for's floor, the one RM-BUDGET-FAR keeps too)."""
+    return [{"distance": BAND_MIN_CELLS * base / 2 ** wall_level, "level": wall_level}]
+
+
+def r_econ(state: dict) -> dict:
+    """The bands at the minimum the rules keep: off R-PLANE, after R-BUDGET, every
+    refinement entry's bands become the wall band alone, BAND_MIN_CELLS cells of the
+    wall level deep.  No level moves: the wall level is R-WIN's (as R-CURV, R-GAP and
+    R-BUDGET left it), feature_level and max_level stay, and the coarser shells out to
+    the base grid are the ones (92.21)'s 2:1 balance builds."""
+    if state["plane"]:
+        return _rec("R-ECON", "abstain", None, [], "", [], _ECON_CITE,
+                    "R-ECON: R-PLANE owns this body: its bands stay R-PLANE's, like the "
+                    "rest of its config (R-ECON's quick set measured no R-PLANE body)")
+    levels = (state["config"].get("refinement") or {}).get("levels") or []
+    tops = [b["level"] for e in levels for b in e.get("bands") or []]
+    pred0 = state["predicted"]
+    if not tops:
+        return _rec("R-ECON", "pass", None, [], _ECON_FORMULA, [], _ECON_CITE,
+                    "R-ECON: the config carries no distance band; nothing to trim")
+    lw = max(tops)
+    if lw != state["wall_level"]:
+        raise RulesError("R-ECON: the deepest band level %d is not the wall level %s"
+                         % (lw, state["wall_level"]))
+    want = econ_bands(state["base"], lw)
+    n_before = len(tops)
+    inputs = [{"name": "wall_level", "value": lw, "unit": "1"},
+              {"name": "base_size", "value": state["base"], "unit": "m"},
+              {"name": "band_min_cells", "value": BAND_MIN_CELLS, "unit": "cells"},
+              {"name": "distance", "value": want[0]["distance"], "unit": "m"},
+              {"name": "bands_before", "value": n_before, "unit": "1"}]
+    if all((e.get("bands") or []) == want for e in levels if e.get("bands")):
+        return _rec("R-ECON", "pass", None, inputs, _ECON_FORMULA, [], _ECON_CITE,
+                    "R-ECON: the bands are already the wall band alone at %d cells of "
+                    "level %d" % (BAND_MIN_CELLS, lw))
+    for e in levels:
+        if e.get("bands"):
+            e["bands"] = copy.deepcopy(want)
+    p = predict_cells(state["config"], state["fp"], state["n"])
+    state["predicted"] = p
+    before = round(pred0["total"]) if pred0 else None
+    trig = {"observable": "predicted_cells", "value": before,
+            "threshold": round(p["total"]), "op": ">",
+            "source": "rules.predict_cells before and after the trim (docs/15 §C R-BUDGET)"}
+    inputs += [{"name": "predicted_before", "value": before, "unit": "cells"},
+               {"name": "predicted", "value": round(p["total"]), "unit": "cells"}]
+    return _rec("R-ECON", "apply", trig, inputs, _ECON_FORMULA, _edit_records(state),
+                _ECON_CITE,
+                "R-ECON: %d band(s) become the wall band alone, %d cells of level %d "
+                "(distance %.6g m); no level moves and the 2:1 balance (92.21) builds the "
+                "coarser shells, so the predicted cells go from %s to %d"
+                % (n_before, BAND_MIN_CELLS, lw, want[0]["distance"],
+                   before if before is not None else "-", round(p["total"])))
+
+
 # --- R-SNAP (AUT-05) ------------------------------------------------------------
 
 _SNAP_CITE = ("SPEC-LIT §92.11 (92.28) the dead band eps = snap.tolerance * base_size; "
@@ -1025,16 +1098,17 @@ def r_snap(state: dict) -> dict:
 
 RULE_FN = {"R-YP": r_yp, "R-DOM": r_dom, "R-PLANE": r_plane, "R-WIN": r_win,
            "R-CURV": r_curv, "R-GAP": r_gap, "R-FEAT": r_feat, "R-BUDGET": r_budget,
-           "R-SNAP": r_snap}
+           "R-ECON": r_econ, "R-SNAP": r_snap}
 
 
 def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str, *,
           flow=None, gates=None, knobs=None, requested_growth=None,
-          ft_radius=True, win_2to1=True, glb=True, r_snap=True) -> dict:
-    """The nine L1 rules on one geometry; the autonomy-rules/1 result out.
+          ft_radius=True, win_2to1=True, glb=True, r_snap=True, r_econ=True) -> dict:
+    """The ten L1 rules on one geometry; the autonomy-rules/1 result out.
     glb=False is the rule set every committed campaign was recorded under
-    (GLB-CONFIG off); r_snap=False runs the eight rules before R-SNAP, the set
-    every campaign before AUT-05 was recorded under."""
+    (GLB-CONFIG off); r_snap=False leaves R-SNAP out, the set every campaign
+    before AUT-05 was recorded under; r_econ=False leaves R-ECON out, the set
+    every campaign before AUT-07 was recorded under."""
     gates = gates or schema.load_gates()
     knobs = knobs or schema.load_knobs()
     errs = schema.errors(fingerprint, "Fingerprint")
@@ -1058,7 +1132,8 @@ def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str,
              "ft_radius": bool(ft_radius), "ft_set": False,
              "win_2to1": bool(win_2to1), "glb": bool(glb)}
     records = []
-    for rid in (RULES if r_snap else RULES[:-1]):
+    for rid in [r for r in RULES if (r_snap or r != "R-SNAP")
+                and (r_econ or r != "R-ECON")]:
         if state["stop"] is not None:
             records.append(_stopped(rid, state["stop"]))
             continue
@@ -1150,6 +1225,87 @@ def r_snap_of(records) -> bool:
         rec = item.get("record", item) if isinstance(item, dict) else None
         if isinstance(rec, dict) and rec.get("rule_id") == "R-SNAP":
             return True
+    return False
+
+
+def r_econ_of(records) -> bool:
+    """Which rule set a recorded campaign ran under: True when one of its records is
+    an R-ECON record (AUT-07), False for a campaign recorded before it.  A reader
+    that rebuilds recorded attempt-1 configs passes setup(..., r_econ=r_econ_of(r))
+    beside r_snap_of(r) and the others."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if isinstance(rec, dict) and rec.get("rule_id") == "R-ECON":
+            return True
+    return False
+
+
+# --- R-TE (AUT-04): the trailing-edge feature level after an F3 failure ---------
+
+TE_CITE = ("docs/17 §12.6 AUT-04; SPEC-LIT §92.14.3 (92.75)-(92.76) the worst points; "
+           "§92.12 (92.37) the one-cell feature band, (92.38) tau = feature_tolerance * "
+           "base_size; §92.11 (92.28) the dead band; rules/R-TE.md")
+TE_FORMULA = ("feature_level' = wall_level on every entry above it; max_level' = the largest "
+              "level left; snap.feature_tolerance' = %g * 2**-max_level' (tau = %g h_f'); "
+              "snap.tolerance' = 2**-max_level' / %d where the config carries one "
+              "(R-SNAP's band at the new h_f')" % (TE_TAU_H_F, TE_TAU_H_F, SNAP_TOL_DIV))
+
+
+def te_config(config: dict):
+    """R-TE's edit, applied by remedies.py's RM-TE after an attempt fails F3a-F3c: the
+    feature bump is dropped to the wall level, the attraction radius becomes tau =
+    TE_TAU_H_F h_f at the new finest level, and R-SNAP's dead band follows it.  None
+    when there is no bump or the attraction is off (the R-PLANE path); else
+    (after, inputs).  AUT-03's worst points put the max residual of the tuning wings
+    1.7-3.8 h_f upstream of the trailing edge, in the wall cells just outside the
+    one-cell feature band (92.37), where the section is thinner than one wall cell."""
+    ref = config.get("refinement") or {}
+    levels = ref.get("levels") or []
+    wall = max([b["level"] for e in levels for b in e.get("bands") or []] + [0])
+    if not any(e.get("feature_level", 0) > wall for e in levels):
+        return None
+    snap = config.get("snap") or {}
+    ft = snap.get("feature_tolerance", preflight.MESHER_DEFAULTS["/snap/feature_tolerance"])
+    if ft == 0:
+        return None
+    after = copy.deepcopy(config)
+    lv = after["refinement"]["levels"]
+    fl0 = max(e.get("feature_level", 0) for e in lv)
+    for e in lv:
+        if e.get("feature_level", 0) > wall:
+            e["feature_level"] = wall
+    ml0 = ref.get("max_level", preflight.MESHER_DEFAULTS["/refinement/max_level"])
+    ml = max([wall] + [e.get("feature_level", 0) for e in lv])
+    after["refinement"]["max_level"] = ml
+    sn = after.setdefault("snap", {})
+    sn["feature_tolerance"] = TE_TAU_H_F * 2.0 ** -ml
+    if "tolerance" in sn:
+        sn["tolerance"] = 2.0 ** -ml / SNAP_TOL_DIV
+    inputs = [{"name": "wall_level", "value": wall, "unit": "1"},
+              {"name": "feature_level_before", "value": fl0, "unit": "1"},
+              {"name": "max_level_before", "value": ml0, "unit": "1"},
+              {"name": "max_level_after", "value": ml, "unit": "1"},
+              {"name": "tau_over_h_f_before", "value": ft * 2.0 ** ml0, "unit": "1"},
+              {"name": "tau_over_h_f_after", "value": TE_TAU_H_F, "unit": "1"}]
+    return after, inputs
+
+
+def r_te_of(records) -> bool:
+    """Which remedy table a recorded campaign ran under: True when one of its records
+    is an RM-TE record or lists RM-TE among its skipped remedies (AUT-04), False for
+    a campaign recorded before it.  A reader that re-proposes recorded remedies passes
+    remedies.propose(..., r_te=r_te_of(records))."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("rule_id") == "RM-TE":
+            return True
+        for i in rec.get("inputs") or []:
+            if i.get("name") == "skipped" and any(
+                    isinstance(s, dict) and s.get("rule_id") == "RM-TE"
+                    for s in i.get("value") or []):
+                return True
     return False
 
 
@@ -1702,7 +1858,7 @@ def gate(parts, out_dir: str, streams: int = 6, binary: str | None = None) -> in
 # --- the selftest (C12) --------------------------------------------------------
 
 def selftest() -> int:
-    """21 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
+    """23 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
     import random
     import shutil
     import tempfile
@@ -2021,7 +2177,7 @@ def selftest() -> int:
     def g10():
         for gid in FIVE:
             res = setup_of(gid)
-            assert len(res["records"]) == len(RULES) == 9 and res["verdict"] == "apply", gid
+            assert len(res["records"]) == len(RULES) == 10 and res["verdict"] == "apply", gid
             cfg = res["config"]
             pf = preflight.preflight(cfg, fingerprint=fp_of(gid),
                                      flow=by_id[gid]["flow"], gates=gates, knobs=knobs)
@@ -2034,7 +2190,7 @@ def selftest() -> int:
             codes = dict(ex.map(lambda t: (t[0], preflight.run_dryrun(
                 BINARY_DEFAULT, t[1])["exit_code"]), cfgs))
         assert all(c == 0 for c in codes.values()), codes
-        return ("A-1-000, B-1-000, D-1-001, E-1-000, F-1-001 -> 8 valid records each, "
+        return ("A-1-000, B-1-000, D-1-001, E-1-000, F-1-001 -> 10 valid records each, "
                 "preflight pass, -dryRun exit 0")
 
     def g11():
@@ -2091,7 +2247,7 @@ def selftest() -> int:
         p = run(["--id", "A-1-000", "--out-dir", out14])
         assert p.returncode == 0, (p.returncode, p.stderr[-800:])
         rec_lines = [l for l in p.stdout.splitlines() if l.startswith("[")]
-        assert len(rec_lines) == 9, rec_lines
+        assert len(rec_lines) == 10, rec_lines
         assert p.stdout.strip().splitlines()[-1].startswith("RULES APPLY A-1-000 ")
         lock = sp.read_lock(os.path.join(sp.MANIFEST_DIR, "split.lock"))
         tid = lock["test_ids"].split()[0]
@@ -2108,7 +2264,7 @@ def selftest() -> int:
         assert r.stdout.strip().splitlines()[-1].startswith("RULES APPLY cubep_cli ")
         with open(cfg_out, encoding="utf-8") as fh:
             json.load(fh)
-        return ("--id A-1-000 exit 0 with 9 record lines, a test id exits 2 naming "
+        return ("--id A-1-000 exit 0 with 10 record lines, a test id exits 2 naming "
                 "the seal, the STL form writes a config")
 
     def g15():
@@ -2318,9 +2474,10 @@ def selftest() -> int:
         w2 = window_level(0.0007296, 8, 0.5, 6, knobs=knobs, margin=2.0)
         assert abs(w2["hi"] - 0.021887978112) <= 1e-15, w2["hi"]
         assert (w2["level"], w2["h"], w2["growth"]) == (5, 0.015625, 1.081), w2
-        # (b) D-1-003: the margin moves the wall 5 -> 6, every floor stays at 5
+        # (b) D-1-003: the margin moves the wall 5 -> 6, every floor stays at 5 (R-BUDGET's
+        # predicted cells, so R-ECON's trim of the bands is left out: r_econ=False)
         b0 = setup_of("D-1-003", glb=False)
-        b1 = setup_of("D-1-003")
+        b1 = setup_of("D-1-003", r_econ=False)
         assert b0["summary"]["wall_level"] == 5 and b0["summary"]["growth"] == 1.17
         s = b1["summary"]
         assert s["wall_level"] == 6 and s["win_level"] == 5 and s["growth"] == 1.17 \
@@ -2431,6 +2588,166 @@ def selftest() -> int:
                 "R-SNAP, the ninth record; r_snap=False is the same config without them; "
                 "the R-PLANE cube abstains byte-identical; max_level 1 passes; r_snap_of")
 
+    def g22():
+        # (a) a bump: feature_level 6 over wall 5 -> both 5, tau = 1.5 h_f, band h_f/256
+        bands = [{"distance": 0.1, "level": 5}, {"distance": 0.2, "level": 4}]
+        cfg = {"refinement": {"levels": [{"patch": "wing", "bands": copy.deepcopy(bands),
+                                          "feature_level": 6}], "max_level": 6},
+               "snap": {"feature_tolerance": 0.0078125, "iterations": 60,
+                        "tolerance": 2.0 ** -14}}
+        before = copy.deepcopy(cfg)
+        after, inputs = te_config(cfg)
+        assert cfg == before, "te_config edited its input"
+        assert diff_edits(cfg, after) == [
+            {"pointer": "/refinement/levels/0/feature_level", "from": 6, "to": 5},
+            {"pointer": "/refinement/max_level", "from": 6, "to": 5},
+            {"pointer": "/snap/feature_tolerance", "from": 0.0078125, "to": 0.046875},
+            {"pointer": "/snap/tolerance", "from": 2.0 ** -14, "to": 0.0001220703125}], (
+            diff_edits(cfg, after))
+        assert after["refinement"]["levels"][0]["bands"] == bands
+        got = {i["name"]: i["value"] for i in inputs}
+        assert got == {"wall_level": 5, "feature_level_before": 6, "max_level_before": 6,
+                       "max_level_after": 5, "tau_over_h_f_before": 0.5,
+                       "tau_over_h_f_after": 1.5}, got
+        # (b) no snap.tolerance in the config: none is added
+        c2 = copy.deepcopy(cfg)
+        del c2["snap"]["tolerance"]
+        assert "tolerance" not in te_config(c2)[0]["snap"]
+        # (c) no bump, the attraction off (R-PLANE) -> None
+        c3 = copy.deepcopy(cfg)
+        c3["refinement"]["levels"][0]["feature_level"] = 5
+        assert te_config(c3) is None
+        c4 = copy.deepcopy(cfg)
+        c4["snap"]["feature_tolerance"] = 0.0
+        assert te_config(c4) is None
+        # (d) the cube on R-PLANE gives None; r_te_of reads an RM-TE record or a skip
+        assert te_config(cube_setup()["config"]) is None
+        assert r_te_of([{"rule_id": "RM-TE"}]) is True
+        assert r_te_of([{"record": {"rule_id": "RM-SNAP-WALL", "inputs": [
+            {"name": "skipped", "value": [{"rule_id": "RM-TE", "why": "x"}]}]}}]) is True
+        assert r_te_of([{"rule_id": "RM-SNAP-WALL", "inputs": [
+            {"name": "skipped", "value": []}]}]) is False and r_te_of([]) is False
+        assert TE_TAU_H_F >= 0.125, "tau below h_f / 8 (remedies.TAU_FLOOR)"
+        # (e) the gate's arithmetic: F3-clean, the final attempt, the verdict
+        fl = {"F1": False, "F3a": False, "F3b": False, "F3c": False, "F3d": False,
+              "F3e": False}
+        assert te_clean({"flags": fl}) and not te_clean({"flags": dict(fl, F3e=True)})
+        assert not te_clean({"flags": dict(fl, F1=True)}) and not te_clean(None)
+        sd = te_side([{"attempt": 1, "outcome": {"flags": dict(fl, F3c=True)}},
+                      {"attempt": 2, "outcome": {"flags": fl, "seconds": 2.0}}],
+                     {"terminal": "CAPABILITY-LIMITED"})
+        assert sd["f3_clean"] and sd["f3_clean_any"] and sd["chain"] == [None, None]
+        idn = {"ok": True}
+        assert te_verdict(TE_TARGET, 0, idn, 0) == "PASS"
+        assert te_verdict(TE_TARGET - 1, 0, idn, 0) == "MISSED"
+        assert te_verdict(TE_TARGET, TE_TARGET, idn, 0) == "MISSED"
+        assert te_verdict(12, 0, {"ok": False}, 0) == "MISSED"
+        assert te_verdict(12, 0, idn, 1) == "MISSED"
+        return ("a level-6 bump over wall 5: feature_level and max_level 5, "
+                "feature_tolerance 0.046875 (tau 1.5 h_f), tolerance 2^-13, bands kept; "
+                "no tolerance added; no bump, tau 0 and the R-PLANE cube give None; r_te_of; "
+                "te_clean, te_side and te_verdict (target %d)" % TE_TARGET)
+
+    def g23():
+        # (a) a curved body: R-ECON after R-BUDGET puts the wall band alone at 3 cells
+        b1 = setup_of("B-1-000")
+        b0 = setup_of("B-1-000", r_econ=False)
+        assert [r["rule_id"] for r in b1["records"]] == list(RULES)
+        assert [r["rule_id"] for r in b0["records"]] \
+            == [r for r in RULES if r != "R-ECON"]
+        rec = b1["records"][RULES.index("R-ECON")]
+        assert rec["verdict"] == "apply", rec["message"]
+        base = b1["summary"]["base_size_m"]
+        assert base == 0.4708 and b1["summary"]["wall_level"] == 6, b1["summary"]
+        assert b1["config"]["refinement"] == {
+            "levels": [{"patch": "body",
+                        "bands": [{"distance": 3 * 0.4708 / 64, "level": 6}]}],
+            "max_level": 6}, b1["config"]["refinement"]
+        assert 3 * 0.4708 / 64 == 0.022068749999999998
+        assert b0["config"]["refinement"]["levels"][0]["bands"] == [
+            {"distance": 0.09417, "level": 6}, {"distance": 0.47085, "level": 5},
+            {"distance": 1.41255, "level": 4}]
+        eds = diff_edits(b0["config"], b1["config"])
+        assert [e["pointer"] for e in eds] == [
+            "/refinement/levels/0/bands/0/distance", "/refinement/levels/0/bands/1/distance",
+            "/refinement/levels/0/bands/1/level", "/refinement/levels/0/bands/2/distance",
+            "/refinement/levels/0/bands/2/level"], eds
+        assert eds == rec["edits"]
+        c0, c1 = copy.deepcopy(b0["config"]), copy.deepcopy(b1["config"])
+        del c0["refinement"], c1["refinement"]
+        assert c0 == c1
+        assert (b1["summary"]["predicted_total"], b0["summary"]["predicted_total"]) \
+            == (104356, 989952), b1["summary"]
+        # (b) a sharp body: feature_level and max_level stay, the bands are trimmed
+        a1, a0 = setup_of("A-1-000"), setup_of("A-1-000", r_econ=False)
+        assert a1["config"]["refinement"] == {
+            "levels": [{"patch": "wing", "bands": [{"distance": 0.052725, "level": 5}],
+                        "feature_level": 6}], "max_level": 6}, a1["config"]["refinement"]
+        assert a0["config"]["refinement"]["levels"][0]["feature_level"] == 6
+        assert a1["summary"]["growth"] == a0["summary"]["growth"]
+        assert a1["config"]["snap"] == a0["config"]["snap"]
+        # (c) R-PLANE: abstain, no edit, the config byte-identical
+        cu1, cu0 = cube_setup(), cube_setup(r_econ=False)
+        rc = cu1["records"][RULES.index("R-ECON")]
+        assert rc["rule_id"] == "R-ECON" and rc["verdict"] == "abstain" and rc["edits"] == []
+        assert cu1["config_sha256"] == cu0["config_sha256"]
+        # (d) pass: the bands already the wall band alone, and no band at all
+        st = {"plane": None, "base": 0.5, "wall_level": 4, "predicted": None, "fp": None,
+              "n": 8, "config": {"refinement": {"levels": [
+                  {"patch": "p", "bands": econ_bands(0.5, 4)}], "max_level": 4}}}
+        st["_before"] = copy.deepcopy(st["config"])
+        rp = r_econ(st)
+        assert rp["verdict"] == "pass" and rp["edits"] == [], rp["message"]
+        assert econ_bands(0.5, 4) == [{"distance": 0.09375, "level": 4}]
+        st["config"] = {"refinement": {"levels": [], "max_level": 0}}
+        st["_before"] = copy.deepcopy(st["config"])
+        assert r_econ(st)["verdict"] == "pass"
+        # (e) r_econ_of tells the two rule sets apart
+        assert r_econ_of(b1["records"]) is True
+        assert r_econ_of([{"record": r} for r in b1["records"]]) is True
+        assert r_econ_of(b0["records"]) is False and r_econ_of([]) is False
+        # (f) the quick set from the committed AUT-06 report
+        with open(COSTBOUND_JSON, encoding="utf-8") as fh:
+            ids = econ_quick_ids(json.load(fh))
+        assert ids == ["B-1-105", "E-1-058", "G-1-111", "B-1-036", "E-1-004", "G-1-081",
+                       "B-1-042", "E-1-007", "B-1-009", "E-1-028", "B-1-069",
+                       "E-1-010"], ids
+        # (g) the verdict: a drop with nothing lost passes; each loss fails it
+        idn = {"ok": True}
+
+        def arm(cells, fail=False, blc8=0.0, chk=0, pf=()):
+            return {"n_cells": cells, "failure": fail, "failure_class": None,
+                    "flags": {"F2": chk not in (0, None)}, "blc8": blc8,
+                    "check_exit": chk, "preflight_refused": list(pf)}
+        row = {"layer_cells": 100, "fluid": 10, "b0_cells": 50, "bound": 110}
+
+        def body(r, e):
+            b = {"arms": {"rules": r, "r-econ": e}}
+            b["compare"] = econ_body(b, row)
+            return b
+        good = [body(arm(1000, blc8=1.0), arm(400, blc8=1.0)), body(arm(800), arm(200))]
+        v = econ_verdict(good, idn, 0)
+        assert v["verdict"] == "PASS" and v["factor"] == 900 / 300 \
+            and v["ratio_b0"]["r-econ"] == 6.0 \
+            and v["ratio_bound"]["r-econ"] == 300 / 110, v
+        assert good[0]["compare"]["bounds_econ"] is True \
+            and good[0]["compare"]["bound_row_econ"] == 110.0
+        for bad_r, bad_e in ((arm(800), arm(200, fail=True)),
+                             (arm(800, blc8=1.0), arm(200, blc8=0.5)),
+                             (arm(800), arm(200, chk=1)),
+                             (arm(800), arm(200, pf=("PF-YPLUS",)))):
+            got = econ_verdict([good[0], body(bad_r, bad_e)], idn, 0)
+            assert got["verdict"] == "FAIL", bad_e
+        assert econ_verdict([body(arm(800), arm(900))], idn, 0)["verdict"] == "FAIL"
+        assert econ_verdict(good, {"ok": False}, 0)["verdict"] == "FAIL"
+        assert econ_verdict(good, idn, 1)["verdict"] == "FAIL"
+        return ("B-1-000's three bands become the wall band alone, 3 cells of level 6 "
+                "(0.02206875 m), every other block equal, predicted 989952 -> 104356; "
+                "A-1-000 keeps feature_level 6; the R-PLANE cube abstains byte-identical; "
+                "pass on a trimmed and a bandless config; r_econ_of; the 12 quick ids; "
+                "the verdict fails on a new failure, a lower BLC_8, -check, preflight and "
+                "no drop")
+
     failed = 0
     try:
         for name, fn in (("R-YP", g1), ("R-WIN", g2), ("window table", g3),
@@ -2440,7 +2757,8 @@ def selftest() -> int:
                          ("determinism", g13), ("cli", g14), ("FT-RADIUS rule", g15),
                          ("FT-RADIUS gate", g16), ("WIN-2TO1 rule", g17),
                          ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19),
-                         ("GLB-CONFIG rule", g20), ("R-SNAP rule", g21)):
+                         ("GLB-CONFIG rule", g20), ("R-SNAP rule", g21),
+                         ("R-TE rule", g22), ("R-ECON rule", g23)):
             failed += group(name, fn)
             if failed:
                 for l in lines:
@@ -2468,12 +2786,13 @@ FT_HEADER = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (I
 
 
 def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=False,
-                  r_snap=False) -> list:
+                  r_snap=False, r_econ=False) -> list:
     """Every tuning row, classed by setup on the fingerprint the committed rules
     campaign recorded: no_fingerprint, refused, plane (R-PLANE), smooth (no sharp edge)
     or sharp (the rows FT-RADIUS changes); the stl and case paths are campaign.py's.
-    The rules are FT-RADIUS's (win_2to1=False, r_snap=False), so G-FT-RADIUS still
-    reproduces; the WIN-2TO1 gate builds a second population with win_2to1=True."""
+    The rules are FT-RADIUS's (win_2to1=False, r_snap=False, r_econ=False), so
+    G-FT-RADIUS still reproduces; the WIN-2TO1 gate builds a second population with
+    win_2to1=True."""
     ends = {g["geometry_id"]: g for g in bundle["geometries"]}
     out = []
     for row in rows:
@@ -2484,7 +2803,7 @@ def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=Fals
         if fp is not None:
             res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
                         gates=gates, knobs=knobs, win_2to1=win_2to1, glb=glb,
-                        r_snap=r_snap)
+                        r_snap=r_snap, r_econ=r_econ)
             p["result"] = res
             if res["verdict"] != "apply":
                 p["class"] = "refused"
@@ -2549,7 +2868,7 @@ def ft_identity(pop, bundle, gates=None, knobs=None) -> dict:
         else:
             old = setup(p["row"], p["fingerprint"], "stl/%s.stl" % gid, "cases/%s" % gid,
                         gid, gates=gates, knobs=knobs, ft_radius=False, win_2to1=False,
-                        glb=False, r_snap=False)
+                        glb=False, r_snap=False, r_econ=False)
             ok = r1 is None or r1["config_sha"] == old["config_sha256"]
             if cls in ("plane", "smooth"):
                 ok = ok and new["config_sha256"] == old["config_sha256"]
@@ -3087,9 +3406,9 @@ def glb_gate(bundle_path: str = AML_BUNDLE, report_dir: str = REPORT_DIR) -> int
             continue
         counts["rows"] += 1
         res0 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                     gates=gates, knobs=knobs, glb=False, r_snap=False)
+                     gates=gates, knobs=knobs, glb=False, r_snap=False, r_econ=False)
         res1 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                     gates=gates, knobs=knobs, glb=True, r_snap=False)
+                     gates=gates, knobs=knobs, glb=True, r_snap=False, r_econ=False)
         cls = "refused" if res1["refused"] else \
             ("plane" if res1["summary"]["plane"] else "snapped")
         counts[cls] += 1
@@ -3234,7 +3553,8 @@ def snap_quick_ids(b0_bundle: dict, rules_bundle: dict, rows: list) -> list:
             fp = (ends.get(gid) or {}).get("fingerprint")
             if gid in got or fp is None:
                 continue
-            res = setup(by[gid], fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid)
+            res = setup(by[gid], fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                        r_econ=False)
             if res["verdict"] != "apply" or res["summary"]["plane"]:
                 continue
             got.append(gid)
@@ -3259,8 +3579,9 @@ def snap_plane_identity(rules_bundle: dict, rows: list) -> dict:
         if fp is None:
             continue
         n["rows"] += 1
-        new = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid)
-        old = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid, r_snap=False)
+        new = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid, r_econ=False)
+        old = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid, r_snap=False,
+                    r_econ=False)
         if new["refused"] != old["refused"]:
             refuse_bad.append(gid)
         if new["refused"]:
@@ -3380,9 +3701,9 @@ def snap_gate(out: str, *, streams: int = 6, binary: str = BINARY_DEFAULT,
             stl, case = campaign.stl_rel(gid), campaign.case_rel(gid)
             cfgs = {"b0-template": campaign.b0_template(mrow, fp),
                     "rules": setup(mrow, fp, stl, case, gid, gates=gates, knobs=knobs,
-                                   r_snap=False)["config"],
+                                   r_snap=False, r_econ=False)["config"],
                     "r-snap": setup(mrow, fp, stl, case, gid, gates=gates,
-                                    knobs=knobs)["config"]}
+                                    knobs=knobs, r_econ=False)["config"]}
             b = {"geometry_id": gid, "family": mrow["family"], "stratum": mrow["stratum"],
                  "arms": {}, "gctx": {"gid": gid, "areas": o["areas"], "fp": fp,
                                       "flow": mrow["flow"], "audit": []}}
@@ -3546,6 +3867,638 @@ def _cli_snap_gate(argv: list[str]) -> int:
 
 
 # --- the CLI (C9) ---------------------------------------------------------------
+
+# --- the R-TE gate (AUT-04): the quick set of 12 tuning wings at K = 4 ---------
+
+TE_SCHEMA = "autonomy-rte-gate/1"
+TE_FAMILY = "A"
+TE_N = 12
+TE_SALT = "r-te/1"
+TE_TARGET = 6          # fixed before the R-TE run from AUT-03's worst points and the probes
+TE_F3 = ("F3a", "F3b", "F3c", "F3d", "F3e")
+
+
+def te_quick_ids(rules_bundle: dict, rows: list) -> list:
+    """The quick set, pre-registered from the committed L5 bundle: the tuning A rows
+    setup classes sharp on their L5 fingerprint, strata round robin (easy, medium,
+    hard), each stratum in sha256(TE_SALT|id) order, TE_N of them."""
+    import hashlib
+    pop = ft_population(rules_bundle, rows, win_2to1=True, glb=True, r_snap=True)
+    by = {}
+    for p in pop:
+        if p["family"] == TE_FAMILY and p["class"] == "sharp":
+            by.setdefault(p["stratum"], []).append(p["geometry_id"])
+    for st in by:
+        by[st].sort(key=lambda g: hashlib.sha256(
+            ("%s|%s" % (TE_SALT, g)).encode("ascii")).hexdigest())
+    got, idx = [], {"easy": 0, "medium": 0, "hard": 0}
+    while len(got) < TE_N:
+        moved = False
+        for st in ("easy", "medium", "hard"):
+            if len(got) < TE_N and idx[st] < len(by.get(st, [])):
+                got.append(by[st][idx[st]])
+                idx[st] += 1
+                moved = True
+        if not moved:
+            raise RulesError("te_quick_ids: family %s holds %d sharp rows, not %d"
+                             % (TE_FAMILY, len(got), TE_N))
+    return got
+
+
+def te_identity(rules_bundle: dict, rows: list, gates=None, knobs=None) -> dict:
+    """Every tuning row with an L5 fingerprint: attempt 1 is setup's, which R-TE does
+    not touch; on the R-PLANE and smooth rows the remedy proposed for a synthetic F3c
+    outcome must be the same config, sha for sha, with RM-TE in the table and without."""
+    import remedies
+    gates = gates or schema.load_gates()
+    knobs = knobs or schema.load_knobs()
+    ends = {g["geometry_id"]: g for g in rules_bundle["geometries"]}
+    n = {"plane": 0, "smooth": 0, "sharp": 0, "sharp_rm_te": 0, "refused": 0}
+    bad = []
+    for row in rows:
+        gid = row["geometry_id"]
+        fp = (ends.get(gid) or {}).get("fingerprint")
+        if fp is None:
+            continue
+        res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                    gates=gates, knobs=knobs, r_econ=False)
+        if res["verdict"] != "apply":
+            n["refused"] += 1
+            continue
+        cls = "plane" if res["summary"]["plane"] else \
+            ("smooth" if fp["sharp_edge_length_m"] == 0 else "sharp")
+        n[cls] += 1
+        cfg = res["config"]
+        ctx = {"geometry_id": gid, "fingerprint": fp, "flow": row["flow"],
+               "win_level": res["summary"]["win_level"], "config": cfg,
+               "outcome": remedies.synthetic_outcome("F3c", cfg, fp, row["flow"])}
+        hist = [{"attempt": 1, "config_sha256": res["config_sha256"], "rule_id": None}]
+        a = remedies.propose(ctx, hist, gates=gates, knobs=knobs, r_te=True)
+        b = remedies.propose(ctx, hist, gates=gates, knobs=knobs, r_te=False)
+        if cls == "sharp":
+            n["sharp_rm_te"] += a["rule_id"] == "RM-TE"
+        elif a["rule_id"] != b["rule_id"] or a["config_sha256"] != b["config_sha256"]:
+            bad.append(gid)
+    return {"counts": n, "changed": bad,
+            "ok": not bad and n["plane"] > 0 and n["smooth"] > 0}
+
+
+def te_read(cdir: str, ids: list) -> tuple:
+    """A finished campaign's header and, per id, its rows by attempt and end record."""
+    with open(os.path.join(cdir, "campaign.json"), encoding="utf-8") as fh:
+        head = json.load(fh)
+    rows, ends = {g: [] for g in ids}, {}
+    with open(os.path.join(cdir, "attempts.jsonl"), encoding="utf-8") as fh:
+        for ln in fh:
+            if ln.strip():
+                r = json.loads(ln)
+                if r["geometry_id"] in rows:
+                    rows[r["geometry_id"]].append(r)
+    with open(os.path.join(cdir, "geometries.jsonl"), encoding="utf-8") as fh:
+        for ln in fh:
+            if ln.strip():
+                g = json.loads(ln)
+                if g["geometry_id"] in rows:
+                    ends[g["geometry_id"]] = g
+    for g in rows:
+        rows[g].sort(key=lambda r: r["attempt"])
+    return head, rows, ends
+
+
+def te_clean(outcome) -> bool:
+    """F3-clean: a written mesh (F1 false) with none of F3a-F3e true."""
+    fl = (outcome or {}).get("flags") or {}
+    return fl.get("F1") is False and not any(fl.get(k) is True for k in TE_F3)
+
+
+def te_side(rows: list, end) -> dict:
+    """One body under one arm: the final attempt (the mesh the campaign delivers)."""
+    last = rows[-1]["outcome"] if rows else None
+    fl = (last or {}).get("flags") or {}
+    return {"terminal": (end or {}).get("terminal"), "attempts": len(rows),
+            "chain": [r.get("rule_id") for r in rows],
+            "f3_clean": te_clean(last),
+            "f3_clean_any": any(te_clean(r["outcome"]) for r in rows),
+            "flags": [k for k in ("F1",) + TE_F3 if fl.get(k) is True],
+            "max_over_hf": (last or {}).get("max_over_hf"),
+            "p99_over_hf": (last or {}).get("p99_over_hf"),
+            "pinned_frac": (last or {}).get("pinned_frac"),
+            "feature_capture": (last or {}).get("feature_capture"),
+            "failure_class": (last or {}).get("failure_class"),
+            "n_cells": (last or {}).get("n_cells"),
+            "seconds": sum(r["outcome"].get("seconds") or 0.0 for r in rows)}
+
+
+def te_verdict(n_new: int, n_ref: int, identity: dict, n_errors: int) -> str:
+    """PASS: the R-TE arm reaches TE_TARGET F3-clean bodies, more than the rules
+    before it, with the identity held and no body missing or in a harness error."""
+    ok = n_new >= TE_TARGET and n_new > n_ref and identity["ok"] and n_errors == 0
+    return "PASS" if ok else "MISSED"
+
+
+def te_gate(cdir: str, ref_dir: str, report_dir: str = REPORT_DIR) -> int:
+    """The AUT-04 quick set over two finished K = 4 campaigns on te_quick_ids: `cdir`
+    with RM-TE, `ref_dir` the rules before it; writes R-TE.json and R-TE.md."""
+    import split
+    rb = _read_gz(AML_BUNDLE)
+    rows_t = split.load("tuning", "rules")
+    ids = te_quick_ids(rb, rows_t)
+    identity = te_identity(rb, rows_t)
+    head, got, end = te_read(cdir, ids)
+    rhead, rgot, rend = te_read(ref_dir, ids)
+    rec = {}
+    for r in rb["attempts"]:
+        if r["geometry_id"] in got:
+            rec.setdefault(r["geometry_id"], []).append(r)
+    rec_end = {g["geometry_id"]: g for g in rb["geometries"] if g["geometry_id"] in got}
+    bodies, errors = [], []
+    strata = {r["geometry_id"]: r["stratum"] for r in rows_t}
+    for gid in ids:
+        new, ref = te_side(got[gid], end.get(gid)), te_side(rgot[gid], rend.get(gid))
+        l5 = te_side(sorted(rec.get(gid, []), key=lambda r: r["attempt"]), rec_end.get(gid))
+        for arm, side in (("r-te", new), ("rules", ref)):
+            if side["terminal"] in (None, "HARNESS-ERROR"):
+                errors.append({"geometry_id": gid, "arm": arm, "terminal": side["terminal"]})
+        bodies.append({"geometry_id": gid, "stratum": strata[gid], "r-te": new,
+                       "rules": ref, "l5_recorded": l5})
+    arms = ("r-te", "rules", "l5_recorded")
+    count = {arm: sum(1 for b in bodies if b[arm]["f3_clean"]) for arm in arms}
+    count_any = {arm: sum(1 for b in bodies if b[arm]["f3_clean_any"]) for arm in arms}
+    verdict = te_verdict(count["r-te"], count["rules"], identity, len(errors))
+    keys = ("campaign_id", "git_sha", "streams", "t_start", "binary_sha256")
+    rep = {"$comment": FT_HEADER, "schema": TE_SCHEMA, "date": schema._now_iso()[:10],
+           "te_tau_h_f": TE_TAU_H_F, "target": TE_TARGET, "ids": ids,
+           "campaign": {k: head.get(k) for k in keys},
+           "ref_campaign": {k: rhead.get(k) for k in keys},
+           "identity": identity, "f3_clean": count, "f3_clean_any": count_any,
+           "verdict": verdict, "errors": errors, "bodies": bodies}
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "R-TE.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        json.dump(rep, fh, indent=1, sort_keys=True, ensure_ascii=False)
+        fh.write("\n")
+    with open(os.path.join(report_dir, "R-TE.md"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(te_md(rep))
+    ic = identity["counts"]
+    print("R-TE %s: F3-clean at K = 4 %d of %d (target >= %d; the rules before it %d, "
+          "L5 recorded %d); identity plane %d, smooth %d, changed %d (%s); sharp rows "
+          "moved to RM-TE %d of %d; harness errors %d"
+          % (verdict, count["r-te"], len(ids), TE_TARGET, count["rules"],
+             count["l5_recorded"], ic["plane"], ic["smooth"], len(identity["changed"]),
+             "ok" if identity["ok"] else "FAIL", ic["sharp_rm_te"], ic["sharp"],
+             len(errors)))
+    return 0 if verdict == "PASS" else 1
+
+
+def _te_cell(side: dict) -> str:
+    return "%s (%s)" % ("F3-clean" if side["f3_clean"] else " ".join(side["flags"]),
+                        side["terminal"])
+
+
+def te_md(rep: dict) -> str:
+    L = []
+    a = L.append
+    a("<!-- %s -->" % FT_HEADER)
+    a("# R-TE - the quick set of tuning wings (AUT-04)")
+    a("")
+    c, r = rep["campaign"], rep["ref_campaign"]
+    a("- date %s; R-TE campaign %s (git %s, binary %s, %s streams); the rules before it %s "
+      "(git %s, binary %s)" % (rep["date"], c["campaign_id"], (c["git_sha"] or "")[:12],
+                               (c["binary_sha256"] or "")[:12], c["streams"],
+                               r["campaign_id"], (r["git_sha"] or "")[:12],
+                               (r["binary_sha256"] or "")[:12]))
+    a("- the rule: after an F3a-F3c attempt on a sharp body off R-PLANE with a feature bump, "
+      "RM-TE sets feature_level = wall level, max_level = the largest level left, "
+      "tau = %g h_f and R-SNAP's band h_f/256 at the new h_f" % rep["te_tau_h_f"])
+    a("- bodies (pre-registered, te_quick_ids): %s" % " ".join(rep["ids"]))
+    ic = rep["identity"]["counts"]
+    a("- identity over the tuning rows with an L5 fingerprint: %d R-PLANE and %d smooth rows "
+      "propose the same config for a synthetic F3c with and without RM-TE, %d changed (%s); "
+      "%d of %d sharp rows take RM-TE; %d refused" % (
+          ic["plane"], ic["smooth"], len(rep["identity"]["changed"]),
+          "ok" if rep["identity"]["ok"] else "FAIL", ic["sharp_rm_te"], ic["sharp"],
+          ic["refused"]))
+    f, fa = rep["f3_clean"], rep["f3_clean_any"]
+    a("- **F3-clean at K = 4 (final attempt): R-TE %d of %d** against the target >= %d; "
+      "the rules before it %d; L5 recorded %d. Any attempt clean: %d / %d / %d. "
+      "Verdict: **%s**; harness errors %d" % (
+          f["r-te"], len(rep["ids"]), rep["target"], f["rules"], f["l5_recorded"],
+          fa["r-te"], fa["rules"], fa["l5_recorded"], rep["verdict"], len(rep["errors"])))
+    a("")
+    a("| body | stratum | L5 recorded | rules before R-TE | R-TE | R-TE chain | max/h_f | "
+      "p99/h_f | pinned | capture | cells | s |")
+    a("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for b in rep["bodies"]:
+        n = b["r-te"]
+        a("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %.0f |" % (
+            b["geometry_id"], b["stratum"], _te_cell(b["l5_recorded"]),
+            _te_cell(b["rules"]), _te_cell(n), " ".join(x or "-" for x in n["chain"]),
+            _ft4(n["max_over_hf"]), _ft4(n["p99_over_hf"]), _ft4(n["pinned_frac"]),
+            _ft4(n["feature_capture"]), n["n_cells"], n["seconds"]))
+    a("")
+    a("A quick set decides the rule; the full tuning effect is AUT-12's L-run.")
+    return "\n".join(L) + "\n"
+
+
+def _cli_te_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --te-gate")
+    ap.add_argument("--campaign", required=True)
+    ap.add_argument("--ref", required=True)
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    args = ap.parse_args(argv)
+    try:
+        return te_gate(args.campaign, args.ref, report_dir=args.report_dir)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
+
+# --- the R-ECON gate (AUT-07): 12 both-pass tuning bodies, two arms ------------
+
+ECON_SCHEMA = "autonomy-recon-gate/1"
+ECON_FAMILIES = ("B", "E", "G")
+ECON_N = 12
+ECON_SALT = "r-econ/1"
+ECON_ARMS = ("rules", "r-econ")   # the rules before AUT-07; with R-ECON
+COSTBOUND_JSON = os.path.join(HERE, "costbound", "COSTBOUND.json")
+
+
+def econ_quick_ids(costbound: dict) -> list:
+    """The quick set, pre-registered from the committed AUT-06 report: its tuning
+    both-pass rows (the L5 rules campaign and the tuning B0-template both pass, as
+    evaluate.g_cost filters them), per family in sha256(ECON_SALT|id) order, round
+    robin over ECON_FAMILIES, ECON_N of them."""
+    import hashlib
+    by = {}
+    for r in costbound["sets"]["tuning"]["rows"]:
+        by.setdefault(r["family"], []).append(r["geometry_id"])
+    for fam in by:
+        by[fam].sort(key=lambda g: hashlib.sha256(
+            ("%s|%s" % (ECON_SALT, g)).encode("ascii")).hexdigest())
+    got, idx = [], {f: 0 for f in ECON_FAMILIES}
+    while len(got) < ECON_N:
+        moved = False
+        for fam in ECON_FAMILIES:
+            if len(got) < ECON_N and idx[fam] < len(by.get(fam, [])):
+                got.append(by[fam][idx[fam]])
+                idx[fam] += 1
+                moved = True
+        if not moved:
+            raise RulesError("econ_quick_ids: the both-pass rows hold %d bodies, not %d"
+                             % (len(got), ECON_N))
+    return got
+
+
+def econ_identity(rules_bundle: dict, rows: list, gates=None, knobs=None) -> dict:
+    """Every tuning row with an L5 fingerprint through setup with and without R-ECON:
+    no refusal moves, an R-PLANE config is byte-identical, and a changed config
+    differs under /refinement/levels/*/bands alone, as the wall band of econ_bands,
+    with max_level, every feature_level and every other block unchanged."""
+    import re
+    gates = gates or schema.load_gates()
+    knobs = knobs or schema.load_knobs()
+    ends = {g["geometry_id"]: g for g in rules_bundle["geometries"]}
+    band_ptr = re.compile(r"^/refinement/levels/\d+/bands/")
+    n = {"rows": 0, "plane": 0, "snapped": 0, "changed": 0, "refused": 0}
+    bad, plane_bad, refuse_bad, ratios = [], [], [], []
+    for row in rows:
+        gid = row["geometry_id"]
+        fp = (ends.get(gid) or {}).get("fingerprint")
+        if fp is None:
+            continue
+        n["rows"] += 1
+        new = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                    gates=gates, knobs=knobs)
+        old = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                    gates=gates, knobs=knobs, r_econ=False)
+        if new["refused"] != old["refused"]:
+            refuse_bad.append(gid)
+        if new["refused"]:
+            n["refused"] += 1
+            continue
+        if new["summary"]["plane"]:
+            n["plane"] += 1
+            if new["config_sha256"] != old["config_sha256"]:
+                plane_bad.append(gid)
+            continue
+        n["snapped"] += 1
+        if new["config_sha256"] == old["config_sha256"]:
+            continue
+        n["changed"] += 1
+        oc, nc = old["config"], new["config"]
+        want = econ_bands(oc["domain"]["base_size"], old["summary"]["wall_level"])
+        ok = all(band_ptr.match(e["pointer"]) for e in diff_edits(oc, nc)) \
+            and nc["refinement"]["max_level"] == oc["refinement"]["max_level"] \
+            and [e.get("feature_level") for e in nc["refinement"]["levels"]] \
+            == [e.get("feature_level") for e in oc["refinement"]["levels"]] \
+            and all(e["bands"] == want for e in nc["refinement"]["levels"]
+                    if e.get("bands"))
+        if not ok:
+            bad.append(gid)
+        ratios.append(old["summary"]["predicted_total"] / new["summary"]["predicted_total"])
+    return {"counts": n, "plane_changed": plane_bad, "changed_wrong": bad,
+            "refusals_changed": refuse_bad, "predicted_factor_median": _median(ratios),
+            "ok": not bad and not plane_bad and not refuse_bad and n["plane"] > 0
+            and n["changed"] > 0}
+
+
+def _econ_arm(c, gctx, cfg, k, gates, knobs):
+    """One arm: the octree probe, preflight (recorded, never a veto here), the full
+    mesher run, -check on the mesh before it is deleted (G1-G7, SPEC-LIT §92.3) and
+    the score with that exit code, so F2 is the real one."""
+    import shutil
+    import campaign
+    import score
+    gid = gctx["gid"]
+    probe = campaign.octree_probe(c, gctx, cfg, k)
+    pf = preflight.preflight(cfg, fingerprint=gctx["fp"], flow=gctx["flow"],
+                             octree_probe=probe, gates=gates, knobs=knobs, cwd=c.dir)
+    campaign.write_config(c, gid, k, cfg)
+    rel, tag = campaign.config_rel(gid, k), "a%d" % k
+    case = os.path.join(c.dir, "cases", "%s_%s" % (gid, tag))
+    job = c.launch([c.binary, rel, "-tag", tag, "-runId", c.campaign_id], cwd=c.dir,
+                   timeout_s=c.timeout_s, kind="full", gid=gid, attempt=k, tag=tag)
+    summary = None
+    spath = os.path.join(case, "%s_%s_summary.json" % (gid, tag))
+    if job["exit_code"] == 0 and os.path.isfile(spath):
+        with open(spath, encoding="utf-8") as fh:
+            summary = json.load(fh)
+    check_exit = None
+    if job["exit_code"] == 0:
+        chk = c.launch([c.binary, rel, "-tag", tag, "-check"], cwd=c.dir,
+                       timeout_s=c.timeout_s, kind="check", gid=gid, attempt=k,
+                       tag=tag + "_check")
+        check_exit = 1 if chk["timed_out"] else chk["exit_code"]
+    try:
+        sc = score.score_run(exit_code=job["exit_code"], stdout=job["stdout"],
+                             stderr=job["stderr"], summary=summary, config=cfg,
+                             patch_areas_m2=gctx["areas"], flow=gctx["flow"],
+                             timed_out=job["timed_out"], wall_seconds=job["seconds"],
+                             check_exit=check_exit,
+                             case_dir=case if job["exit_code"] == 0 else None,
+                             gates=c.gates,
+                             sharp_edge_length_m=gctx["fp"]["sharp_edge_length_m"],
+                             plane_path=preflight.plane_path(cfg, gctx["fp"]))
+    finally:
+        shutil.rmtree(os.path.join(case, "constant", "polyMesh"), ignore_errors=True)
+        shutil.rmtree(os.path.join(case, "mesh"), ignore_errors=True)
+    oc = sc["outcome"]
+    return {"config_sha256": schema.canonical_sha256(cfg),
+            "n_bands": sum(len(e.get("bands") or []) for e in cfg["refinement"]["levels"]),
+            "max_level": cfg["refinement"]["max_level"],
+            "n_leaves_probe": probe.get("n_leaves"),
+            "preflight_refused": list(pf["refused"]), "check_exit": check_exit,
+            "failure": oc["failure"], "failure_class": oc["failure_class"],
+            "flags": oc["flags"], "blc8": oc["blc8_a_priori"],
+            "blc_full": oc["blc_full_a_priori"], "p99_over_hf": oc["p99_over_hf"],
+            "n_cells": oc["n_cells"], "seconds": oc["seconds"]}
+
+
+def econ_body(b: dict, cb_row: dict) -> dict:
+    """One body's comparison: a new failure, a lower BLC_8, a changed -check exit or
+    F2 flag, a changed preflight refusal list; cells against AUT-06's bound."""
+    r, e = b["arms"].get("rules"), b["arms"].get("r-econ")
+    if r is None or e is None:
+        return {"complete": False}
+    b8r, b8e = r["blc8"] or 0.0, e["blc8"] or 0.0
+    lay = cb_row["layer_cells"]
+    return {"complete": True,
+            "new_failure": (not r["failure"]) and bool(e["failure"]),
+            "blc8_lower": b8e < b8r,
+            "check_changed": r["check_exit"] != e["check_exit"]
+            or r["flags"]["F2"] != e["flags"]["F2"],
+            "preflight_changed": r["preflight_refused"] != e["preflight_refused"],
+            "factor": (r["n_cells"] / e["n_cells"]) if r["n_cells"] and e["n_cells"]
+            else None,
+            "b0_cells": cb_row["b0_cells"], "bound": cb_row["bound"],
+            "bound_row_econ": cb_row["fluid"] + b8e * lay,
+            "bounds_econ": e["n_cells"] is not None
+            and cb_row["fluid"] + b8e * lay <= e["n_cells"],
+            "econ_over_bound": (e["n_cells"] / cb_row["bound"]) if e["n_cells"] else None}
+
+
+def econ_verdict(bodies: list, identity: dict, n_errors: int) -> dict:
+    """PASS: the median cells drop (r-econ below rules), with 0 new failures, no body's
+    BLC_8 lower, -check and F2 unchanged and preflight unchanged on every body, the
+    identity holding, every body complete and no harness error."""
+    cmp_ = [b["compare"] for b in bodies]
+    med = {arm: _median([b["arms"][arm]["n_cells"] for b in bodies if arm in b["arms"]])
+           for arm in ECON_ARMS}
+    n = {"new_failures": sum(1 for x in cmp_ if x.get("new_failure")),
+         "blc8_lower": sum(1 for x in cmp_ if x.get("blc8_lower")),
+         "check_changed": sum(1 for x in cmp_ if x.get("check_changed")),
+         "preflight_changed": sum(1 for x in cmp_ if x.get("preflight_changed")),
+         "incomplete": sum(1 for x in cmp_ if not x.get("complete"))}
+    drop = med["rules"] is not None and med["r-econ"] is not None \
+        and med["r-econ"] < med["rules"]
+    ok = drop and all(v == 0 for v in n.values()) and identity["ok"] and n_errors == 0
+    b0 = _median([x["b0_cells"] for x in cmp_ if x.get("complete")])
+    bound = _median([x["bound"] for x in cmp_ if x.get("complete")])
+    ratio = (lambda a, z: (a / z) if a is not None and z else None)
+    return {"median_cells": med,
+            "factor": ratio(med["rules"], med["r-econ"]),
+            "median_b0_cells": b0, "median_bound": bound,
+            "ratio_b0": {arm: ratio(med[arm], b0) for arm in ECON_ARMS},
+            "ratio_bound": {arm: ratio(med[arm], bound) for arm in ECON_ARMS},
+            "n_bounds_econ": sum(1 for x in cmp_ if x.get("bounds_econ")),
+            "counts": n, "cells_drop": drop, "verdict": "PASS" if ok else "FAIL"}
+
+
+def econ_gate(out: str, *, streams: int = 6, binary: str = BINARY_DEFAULT,
+              ids=None, report_dir: str = REPORT_DIR) -> int:
+    """The AUT-07 quick set: every body meshed at attempt 1 by the rules before R-ECON
+    and by the rules with it, each checked by -check; writes R-ECON.json and .md."""
+    import threading
+    import campaign
+    import split
+    if os.path.isdir(out) and os.listdir(out):
+        raise RulesError("not empty: %s" % out)
+    os.makedirs(out, exist_ok=True)
+    with open(COSTBOUND_JSON, encoding="utf-8") as fh:
+        cb = json.load(fh)
+    cb_rows = {r["geometry_id"]: r for r in cb["sets"]["tuning"]["rows"]}
+    rb = _read_gz(AML_BUNDLE)
+    rows = split.load("tuning", "rules")
+    by = {r["geometry_id"]: r for r in rows}
+    ids = list(ids) if ids else econ_quick_ids(cb)
+    for gid in ids:
+        if gid not in cb_rows:
+            raise RulesError("%s is not a tuning both-pass row of COSTBOUND.json" % gid)
+    identity = econ_identity(rb, rows)
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    c = campaign.Campaign(out, campaign_id="r-econ", mode="rules", system="rules",
+                          ablate=(), split_mode="rules", binary=binary, streams=streams,
+                          timeout_s=campaign.TIMEOUT_S,
+                          probe_timeout_s=campaign.PROBE_TIMEOUT_S,
+                          audit_mod=SNAP_AUDIT_OFF, quiet=True, gates=gates, knobs=knobs)
+    c.start()
+    t0 = time.perf_counter()
+    bodies, errors, jobs = [], [], []
+    try:
+        with ThreadPoolExecutor(max_workers=streams) as ex:
+            obs = dict(zip(ids, ex.map(lambda g: campaign.observe(c, by[g]), ids)))
+        for gid in ids:
+            o = obs[gid]
+            if o.get("terminal") is not None:
+                errors.append({"geometry_id": gid, "error": "observe: %s: %s"
+                               % (o["terminal"], o.get("reason"))})
+                continue
+            mrow, fp = by[gid], o["fingerprint"]
+            stl, case = campaign.stl_rel(gid), campaign.case_rel(gid)
+            res = {"rules": setup(mrow, fp, stl, case, gid, gates=gates, knobs=knobs,
+                                  r_econ=False),
+                   "r-econ": setup(mrow, fp, stl, case, gid, gates=gates, knobs=knobs)}
+            b = {"geometry_id": gid, "family": mrow["family"], "stratum": mrow["stratum"],
+                 "arms": {}, "gctx": {"gid": gid, "areas": o["areas"], "fp": fp,
+                                      "flow": mrow["flow"], "audit": []}}
+            bodies.append(b)
+            for k, arm in enumerate(ECON_ARMS, 1):
+                if res[arm]["refused"] or res[arm]["summary"]["plane"]:
+                    errors.append({"geometry_id": gid, "arm": arm, "error":
+                                   "refused" if res[arm]["refused"] else "R-PLANE"})
+                    continue
+                jobs.append((b, arm, k, res[arm]["config"]))
+        done = [0]
+        lock = threading.Lock()
+
+        def one(job):
+            b, arm, k, cfg = job
+            try:
+                b["arms"][arm] = a = _econ_arm(c, b["gctx"], cfg, k, gates, knobs)
+                line = "cells %s, BLC_8 %s, -check %s, %s" % (
+                    a["n_cells"], _g(a["blc8"]), a["check_exit"],
+                    "FAIL " + str(a["failure_class"]) if a["failure"] else "pass")
+            except Exception as e:  # noqa: BLE001 - a harness error is reported by name
+                errors.append({"geometry_id": b["geometry_id"], "arm": arm,
+                               "error": "%s: %s" % (type(e).__name__, e)})
+                line = "harness error"
+            with lock:
+                done[0] += 1
+                print("[r-econ %d/%d %3.0f%%] %s %s: %s"
+                      % (done[0], len(jobs), 100.0 * done[0] / len(jobs),
+                         b["geometry_id"], arm, line), flush=True)
+        with ThreadPoolExecutor(max_workers=streams) as ex:
+            list(ex.map(one, jobs))
+    finally:
+        c.kill_all()
+        c.stop()
+    wall = time.perf_counter() - t0
+    for b in bodies:
+        del b["gctx"]
+        b["compare"] = econ_body(b, cb_rows[b["geometry_id"]])
+    v = econ_verdict(bodies, identity, len(errors))
+    rep = {"$comment": FT_HEADER, "schema": ECON_SCHEMA, "date": schema._now_iso()[:10],
+           "binary_sha256": c.binary_sha, "git_sha": c.git_sha,
+           "band_min_cells": BAND_MIN_CELLS, "ids": ids, "identity": identity,
+           "summary": v, "verdict": v["verdict"], "errors": errors, "bodies": bodies,
+           "streams": streams, "peak_rss_mib": c.peak_rss_mib,
+           "orphans": len(c.orphans()), "wall_seconds": wall}
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "R-ECON.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        json.dump(rep, fh, indent=1, sort_keys=True, ensure_ascii=False)
+        fh.write("\n")
+    with open(os.path.join(report_dir, "R-ECON.md"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(econ_md(rep))
+    m = v["median_cells"]
+    print("R-ECON %s: median cells %s -> %s (factor %s); new failures %d, BLC_8 lower %d, "
+          "-check/F2 changed %d, preflight changed %d; identity %s (%d changed); "
+          "harness errors %d, wall %.0f s"
+          % (v["verdict"], _g(m["rules"]), _g(m["r-econ"]), _g(v["factor"]),
+             v["counts"]["new_failures"], v["counts"]["blc8_lower"],
+             v["counts"]["check_changed"], v["counts"]["preflight_changed"],
+             "ok" if identity["ok"] else "FAIL", identity["counts"]["changed"],
+             len(errors), wall))
+    print("R-ECON ratio to B0 (median %s): rules %s, r-econ %s; to AUT-06's bound (median "
+          "%s): rules %s, r-econ %s"
+          % (_g(v["median_b0_cells"]), _g(v["ratio_b0"]["rules"]),
+             _g(v["ratio_b0"]["r-econ"]), _g(v["median_bound"]),
+             _g(v["ratio_bound"]["rules"]), _g(v["ratio_bound"]["r-econ"])))
+    return 0 if v["verdict"] == "PASS" else 1
+
+
+def econ_md(rep: dict) -> str:
+    v, idn = rep["summary"], rep["identity"]
+    L = []
+    a = L.append
+    a("<!-- %s -->" % rep["$comment"])
+    a("# R-ECON - the quick set of both-pass tuning bodies (AUT-07)")
+    a("")
+    a("- date %s; git %s, binary %s, %d streams, wall %.0f s; attempt 1, remedies off, "
+      "-check on every mesh" % (rep["date"], (rep["git_sha"] or "-")[:12],
+                                (rep["binary_sha256"] or "-")[:12], rep["streams"],
+                                rep["wall_seconds"]))
+    a("- the rule: off R-PLANE, after R-BUDGET, every refinement entry's bands become the "
+      "wall band alone, %d cells of the wall level; no level moves" % rep["band_min_cells"])
+    a("- bodies (pre-registered, econ_quick_ids from costbound/COSTBOUND.json): "
+      + " ".join(rep["ids"]))
+    c = idn["counts"]
+    a("- identity over the %d tuning rows with an L5 fingerprint: %d R-PLANE byte-identical "
+      "(%d wrong), %d snapped of which %d change under the bands alone (%d wrong), "
+      "%d refused (%d moved); median predicted factor %s: %s"
+      % (c["rows"], c["plane"], len(idn["plane_changed"]), c["snapped"],
+         c["changed"], len(idn["changed_wrong"]), c["refused"],
+         len(idn["refusals_changed"]), _g(idn["predicted_factor_median"]),
+         "ok" if idn["ok"] else "FAIL"))
+    m = v["median_cells"]
+    a("- **median cells: rules %s, R-ECON %s, factor %s**; new failures %d, BLC_8 lower %d, "
+      "-check/F2 changed %d, preflight changed %d, incomplete %d, harness errors %d. "
+      "Verdict: **%s**" % (_g(m["rules"]), _g(m["r-econ"]), _g(v["factor"]),
+                           v["counts"]["new_failures"], v["counts"]["blc8_lower"],
+                           v["counts"]["check_changed"], v["counts"]["preflight_changed"],
+                           v["counts"]["incomplete"], len(rep["errors"]), v["verdict"]))
+    a("- ratio to B0-template (median %s on the same bodies): rules %s, R-ECON %s; to "
+      "AUT-06's bound (median %s): rules %s, R-ECON %s"
+      % (_g(v["median_b0_cells"]), _g(v["ratio_b0"]["rules"]), _g(v["ratio_b0"]["r-econ"]),
+         _g(v["median_bound"]), _g(v["ratio_bound"]["rules"]),
+         _g(v["ratio_bound"]["r-econ"])))
+    a("- the bound counts 8 layers on the whole wall; a body that delivers no layer is held "
+      "to its fluid leaves alone (CB-8's row, fluid + BLC_8 x layer cells): it holds on %d "
+      "of %d R-ECON meshes" % (v["n_bounds_econ"], len(rep["bodies"])))
+    a("")
+    a("| body | stratum | rules cells | R-ECON cells | factor | rules | R-ECON | BLC_8 "
+      "rules / R-ECON | -check | B0 cells | bound | R-ECON / bound | CB-8 row |")
+    a("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for b in rep["bodies"]:
+        r, e, x = b["arms"].get("rules") or {}, b["arms"].get("r-econ") or {}, b["compare"]
+
+        def st(z):
+            if not z:
+                return "-"
+            return ("FAIL " + str(z["failure_class"])) if z["failure"] else \
+                ("pass" + (" (%s)" % z["failure_class"] if z["failure_class"] else ""))
+        a("| %s | %s | %s | %s | %s | %s | %s | %s / %s | %s / %s | %s | %s | %s | %s %s |"
+          % (b["geometry_id"], b["stratum"], r.get("n_cells", "-"), e.get("n_cells", "-"),
+             _g(x.get("factor")), st(r), st(e), _g(r.get("blc8")), _g(e.get("blc8")),
+             r.get("check_exit", "-"), e.get("check_exit", "-"), x.get("b0_cells", "-"),
+             x.get("bound", "-"), _g(x.get("econ_over_bound")),
+             _g(x.get("bound_row_econ")), "holds" if x.get("bounds_econ") else "FAILS"))
+    a("")
+    a("A quick set decides the rule; the full tuning effect is AUT-12's L-run.")
+    return "\n".join(L) + "\n"
+
+
+def _cli_econ_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --econ-gate")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--streams", type=int, default=6)
+    ap.add_argument("--binary", default=BINARY_DEFAULT)
+    ap.add_argument("--ids")
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    args = ap.parse_args(argv)
+    if not os.path.exists(args.binary):
+        sys.stderr.write("rules: the binary %s is missing\n" % args.binary)
+        return 2
+    try:
+        return econ_gate(args.out, streams=max(1, args.streams), binary=args.binary,
+                         ids=args.ids.split(",") if args.ids else None,
+                         report_dir=args.report_dir)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
 
 class _ArgParser(argparse.ArgumentParser):
     def error(self, message):
@@ -3715,6 +4668,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cli_glb_gate(argv[1:])
     if argv[0] == "--snap-gate":
         return _cli_snap_gate(argv[1:])
+    if argv[0] == "--te-gate":
+        return _cli_te_gate(argv[1:])
+    if argv[0] == "--econ-gate":
+        return _cli_econ_gate(argv[1:])
     ap = _ArgParser(prog="rules.py", description="the L1 setup rules (AM-9)")
     ap.add_argument("stl", nargs="?")
     ap.add_argument("--id")

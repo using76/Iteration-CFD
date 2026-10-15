@@ -970,3 +970,520 @@ extern "C" __global__ void cmpEnergySourceLocal
     const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
     source[i] += rcp*V[i]*(dpdt - drk + gw);
 }
+
+
+/*
+  ==========================================================================
+  The compressible inlets. SPEC-LIT 126.1, 126.3, 126.8 (CMP-16). Three
+  kernels, each over the faces [start, start + n) of one patch, each a
+  rewrite of the section-4 triple (fr, refValue, refGrad) and nothing else:
+  fldCorrectBcScalar / fldCorrectBcVector then evaluate the face value from
+  it, and the assemblies read the triple as they read any other.
+  No floor and no clip: |u_b|^2 >= 2 c_p T_0 has no isentropic state, and
+  the kernels write what (126.1) and (126.3) give there.
+  ==========================================================================
+*/
+
+//- (126.1) of SPEC-LIT 126.1 on one totalTemperature patch:
+//    inflow  (u_b . Sf < 0):  fr = 1, refValue = T_0 - |u_b|^2 / (2 c_p)
+//    outflow:                 fr = 0, refValue = 0, refGrad = 0
+//  cp2 = fl(2 c_p); the kinetic term is divided by it, not multiplied by a
+//  rounded reciprocal.
+extern "C" __global__ void cmpBcTotalTemperature
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ ub,
+    const ofvec3* __restrict__ bSf,
+    oflabel start,
+    oflabel n,
+    ofscalar t0,
+    ofscalar cp2
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = ub[f];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = u.x*s.x + u.y*s.y + u.z*s.z;
+    refGrad[f] = (ofscalar)0;
+    if (un < (ofscalar)0)
+    {
+        const ofscalar q = u.x*u.x + u.y*u.y + u.z*u.z;
+        fr[f] = (ofscalar)1;
+        refValue[f] = t0 - q/cp2;
+    }
+    else
+    {
+        fr[f] = (ofscalar)0;
+        refValue[f] = (ofscalar)0;
+    }
+}
+
+//- (126.3) of SPEC-LIT 126.1 on one totalPressure patch (with gamma):
+//    x     = |u_b|^2 / (2 c_p)
+//    T_0   = t0 when t0 > 0 (the patch's totalTemperature), else T_b + x,
+//            NACA 1135 (43) at the face (SPEC-LIT 126.8)
+//    p_b   = p_0 + (p_0 + p_op) expm1( ge log1p( -x / T_0 ) )
+//  on an inflow face (fr = 1); fr = 0, refValue = 0, refGrad = 0 on an
+//  outflow one. pt = fl(p_0 + p_op), ge = fl(gamma/(gamma-1)), both formed
+//  on the host in f64.
+extern "C" __global__ void cmpBcTotalPressure
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ ub,
+    const ofscalar* __restrict__ Tb,
+    const ofvec3* __restrict__ bSf,
+    oflabel start,
+    oflabel n,
+    ofscalar p0,
+    ofscalar pt,
+    ofscalar t0,
+    ofscalar cp2,
+    ofscalar ge
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = ub[f];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = u.x*s.x + u.y*s.y + u.z*s.z;
+    refGrad[f] = (ofscalar)0;
+    if (un < (ofscalar)0)
+    {
+        const ofscalar x = (u.x*u.x + u.y*u.y + u.z*u.z)/cp2;
+        const ofscalar T0 = (t0 > (ofscalar)0) ? t0 : Tb[f] + x;
+        fr[f] = (ofscalar)1;
+        refValue[f] = p0 + pt*expm1(ge*log1p(-x/T0));
+    }
+    else
+    {
+        fr[f] = (ofscalar)0;
+        refValue[f] = (ofscalar)0;
+    }
+}
+
+//- (126.4) of SPEC-LIT 126.3 on one mass-flow inlet, ONE block of
+//  OFGPU_CMP_BC_BLOCK threads for the whole patch:
+//    A   = sum_f rho_f |Sf|,  rho_f = psi_f (p_f + pop)   (ofacc, then the
+//          fixed-order tree in shared memory, so the sum is deterministic)
+//    u_b = -(mdot / A) Sf / |Sf|,   fr = 1, refGrad = 0
+//  rho_f is formed in the order cmpGasState forms rho, so it is the rho the
+//  boundary carries once the gas law has been evaluated on it.
+#define OFGPU_CMP_BC_BLOCK 256
+extern "C" __global__ void cmpBcMassFlowInlet
+(
+    ofscalar* __restrict__ fr,
+    ofvec3* __restrict__ refValue,
+    ofvec3* __restrict__ refGrad,
+    const ofscalar* __restrict__ psiB,
+    const ofscalar* __restrict__ pB,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar mdot,
+    ofscalar pop
+)
+{
+    __shared__ ofacc part[OFGPU_CMP_BC_BLOCK];
+    const oflabel t = threadIdx.x;
+    ofacc a = 0;
+    for (oflabel i = t; i < n; i += OFGPU_CMP_BC_BLOCK)
+    {
+        const oflabel f = start + i;
+        const ofscalar rho = psiB[f]*(pB[f] + pop);
+        a += (ofacc)rho*(ofacc)bMagSf[f];
+    }
+    part[t] = a;
+    __syncthreads();
+    for (oflabel h = OFGPU_CMP_BC_BLOCK/2; h > 0; h >>= 1)
+    {
+        if (t < h) part[t] += part[t + h];
+        __syncthreads();
+    }
+    const ofacc speed = (ofacc)mdot/part[0];
+    for (oflabel i = t; i < n; i += OFGPU_CMP_BC_BLOCK)
+    {
+        const oflabel f = start + i;
+        const ofvec3 s = bSf[f];
+        const ofacc k = -speed/(ofacc)bMagSf[f];
+        ofvec3 v;
+        v.x = (ofscalar)(k*(ofacc)s.x);
+        v.y = (ofscalar)(k*(ofacc)s.y);
+        v.z = (ofscalar)(k*(ofacc)s.z);
+        ofvec3 z;
+        z.x = (ofscalar)0;
+        z.y = (ofscalar)0;
+        z.z = (ofscalar)0;
+        fr[f] = (ofscalar)1;
+        refValue[f] = v;
+        refGrad[f] = z;
+    }
+}
+
+
+/*
+  ==========================================================================
+  The compressible outlets. SPEC-LIT 126.4, 126.5, 126.9 (CMP-17). Two
+  kernels, each over the faces [start, start + n) of one patch, from the
+  OWNER cell's state (u_n,P = u_P . n, c_P = sqrt(gamma R_s T_P)):
+  cmpBcSupersonicSwitch rewrites fr of a fixed-p outlet by (126.5);
+  cmpBcWaveSpeed fills (126.6)'s w and K for the Robin rewrite of BC-09's
+  fldAdvectiveRobinScalar in cuda/field.cu, which this file does not
+  restate. Both clip at zero only what 126.9 names: w (backflow holds the
+  face's time extrapolation, as (120.4b)) and K (no incoming characteristic
+  when M_n >= 1). No floor elsewhere: a NaN state stays a NaN.
+  ==========================================================================
+*/
+
+//- (126.5) of SPEC-LIT 126.4 on one fixed-p patch: fr = 1 while
+//  u_n,P / c_P < 1, fr = 0 (extrapolated) otherwise; refGrad = 0, and
+//  refValue - the stated p - is left as set up, so a subsonic face is the
+//  fixedValue face it was. grs = fl(gamma R_s).
+extern "C" __global__ void cmpBcSupersonicSwitch
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar grs
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = (u.x*s.x + u.y*s.y + u.z*s.z)/bMagSf[f];
+    const ofscalar c = sqrt(grs*T[P]);
+    fr[f] = (un/c < (ofscalar)1) ? (ofscalar)1 : (ofscalar)0;
+    refGrad[f] = (ofscalar)0;
+}
+
+//- (126.6) of SPEC-LIT 126.5 on one waveTransmissive patch:
+//    w = max(u_n,P + c_P, 0)  (acoustic = 1, on p)   or  max(u_n,P, 0)
+//    K = max(sigmaByL c_P (1 - M_n^2), 0),  M_n = u_n,P / c_P
+//  sigmaByL = fl(sigma / lInf), 0 when lInf is not stated. Under localEuler
+//  (local = 1) both are divided by the owner's r_P = 1/dt_P, so that BC-09's
+//  kernel, called with (a_n, a_0, a_00) = (1, -1, 0), forms (126.7) with
+//  the owner's dt_P (SPEC-LIT 126.9); otherwise rDeltaT is not read.
+extern "C" __global__ void cmpBcWaveSpeed
+(
+    ofscalar* __restrict__ w,
+    ofscalar* __restrict__ kRelax,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const ofscalar* __restrict__ rDeltaT,
+    oflabel local,
+    oflabel acoustic,
+    oflabel start,
+    oflabel n,
+    ofscalar grs,
+    ofscalar sigmaByL
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = (u.x*s.x + u.y*s.y + u.z*s.z)/bMagSf[f];
+    const ofscalar c = sqrt(grs*T[P]);
+    const ofscalar mn = un/c;
+    ofscalar ww = acoustic ? un + c : un;
+    ofscalar kk = sigmaByL*c*((ofscalar)1 - mn*mn);
+    if (ww < (ofscalar)0) ww = (ofscalar)0;
+    if (kk < (ofscalar)0) kk = (ofscalar)0;
+    if (local)
+    {
+        const ofscalar r = rDeltaT[P];
+        ww = ww/r;
+        kk = kk/r;
+    }
+    w[f] = ww;
+    kRelax[f] = kk;
+}
+
+
+/*
+  ==========================================================================
+  The characteristic far-field. SPEC-LIT 126.6, 126.10 (CMP-18). One kernel
+  over the faces [start, start + n) of one characteristicFarfield patch,
+  from the OWNER cell's state (i) and the stated free stream (o), writing
+  all three triples (U, p, T) at once with fr = 1 and refGrad = 0. Carlson
+  (2011) eqs. (8)-(17) as (126.8)-(126.12) restate them. No floor and no
+  clip: c_b <= 0 (an expansion the two invariants cannot carry) is written
+  as the formulas give it, and the bounds counter of SPEC-LIT 122.3 sees it.
+  ==========================================================================
+*/
+
+//- (126.8)-(126.12) of SPEC-LIT 126.6:
+//    n = Sf/|Sf|,  U_i = u_P . n,  c_i = sqrt(grs T_P),  U_o = u_o . n
+//    R+ = U_i + tg c_i,  R- = U_o - tg c_o,   tg = fl(2/(gamma-1))
+//    U_i > 0, |U_i|/c_i >= 1:  R- = U_i - tg c_i     (supersonic outflow)
+//    U_i < 0, |U_i|/c_i >= 1:  R+ = U_o + tg c_o     (supersonic inflow)
+//    U_b = (R+ + R-)/2,  c_b = (gamma-1)(R+ - R-)/4
+//    U_b > 0:  u_b = u_P + (U_b - U_i) n,  s_b = (p_P + pop)/rho_i^gamma,
+//              rho_i = (p_P + pop)/(rs T_P)
+//    else:     u_b = u_o + (U_b - U_o) n,  s_b = so
+//    rho_b = (c_b^2/(gamma s_b))^(1/(gamma-1)),  pa = rho_b c_b^2/gamma,
+//    T_b = pa/(rho_b rs),  p_b = pa - pop
+//  co = fl(sqrt(gamma R_s T_o)) and so = fl(p_abs,o / rho_o^gamma) are formed
+//  on the host in f64, as are gm1 = fl(gamma - 1), tg and ex = fl(1/(gamma-1)).
+extern "C" __global__ void cmpBcFarfield
+(
+    ofscalar* __restrict__ uFr,
+    ofvec3* __restrict__ uRef,
+    ofvec3* __restrict__ uGrad,
+    ofscalar* __restrict__ pFr,
+    ofscalar* __restrict__ pRef,
+    ofscalar* __restrict__ pGrad,
+    ofscalar* __restrict__ tFr,
+    ofscalar* __restrict__ tRef,
+    ofscalar* __restrict__ tGrad,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar uox,
+    ofscalar uoy,
+    ofscalar uoz,
+    ofscalar co,
+    ofscalar so,
+    ofscalar gamma,
+    ofscalar gm1,
+    ofscalar tg,
+    ofscalar ex,
+    ofscalar rs,
+    ofscalar grs,
+    ofscalar pop
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar mag = bMagSf[f];
+    ofvec3 nf;
+    nf.x = s.x/mag;
+    nf.y = s.y/mag;
+    nf.z = s.z/mag;
+    const ofscalar Ui = u.x*nf.x + u.y*nf.y + u.z*nf.z;
+    const ofscalar ci = sqrt(grs*T[P]);
+    const ofscalar Uo = uox*nf.x + uoy*nf.y + uoz*nf.z;
+    ofscalar rp = Ui + tg*ci;
+    ofscalar rm = Uo - tg*co;
+    const bool sup = fabs(Ui)/ci >= (ofscalar)1;
+    if (Ui > (ofscalar)0 && sup) rm = Ui - tg*ci;
+    if (Ui < (ofscalar)0 && sup) rp = Uo + tg*co;
+    const ofscalar Ub = (ofscalar)0.5*(rp + rm);
+    const ofscalar cb = gm1*(rp - rm)*(ofscalar)0.25;
+    ofvec3 ub;
+    ofscalar sb;
+    if (Ub > (ofscalar)0)
+    {
+        const ofscalar d = Ub - Ui;
+        ub.x = u.x + d*nf.x;
+        ub.y = u.y + d*nf.y;
+        ub.z = u.z + d*nf.z;
+        const ofscalar pa = p[P] + pop;
+        const ofscalar rhoi = pa/(rs*T[P]);
+        sb = pa/pow(rhoi, gamma);
+    }
+    else
+    {
+        const ofscalar d = Ub - Uo;
+        ub.x = uox + d*nf.x;
+        ub.y = uoy + d*nf.y;
+        ub.z = uoz + d*nf.z;
+        sb = so;
+    }
+    const ofscalar cb2 = cb*cb;
+    const ofscalar rhob = pow(cb2/(gamma*sb), ex);
+    const ofscalar pab = rhob*cb2/gamma;
+    ofvec3 z;
+    z.x = (ofscalar)0;
+    z.y = (ofscalar)0;
+    z.z = (ofscalar)0;
+    uFr[f] = (ofscalar)1;
+    uRef[f] = ub;
+    uGrad[f] = z;
+    pFr[f] = (ofscalar)1;
+    pRef[f] = pab - pop;
+    pGrad[f] = (ofscalar)0;
+    tFr[f] = (ofscalar)1;
+    tRef[f] = pab/(rhob*rs);
+    tGrad[f] = (ofscalar)0;
+}
+
+
+/*
+  ==========================================================================
+  The free-stream family. SPEC-LIT 126.11 (BC-20). Two kernels over the
+  faces [start, start + n) of one patch: supersonicFreestream on U turns
+  the stated supersonic stream by the Prandtl-Meyer angle of the face
+  pressure (NACA Report 1135 (43), (44), (171)) and vents an outflow face;
+  freestreamPressure on p blends its fixed value with zero gradient by the
+  face direction. inletOutletTotalTemperature is cmpBcTotalTemperature, and
+  fixedPressureCompressibleDensity is the gas law cmpGasState already
+  forms on every boundary face: neither has a kernel of its own.
+  ==========================================================================
+*/
+
+//- (126.14)-(126.16) of SPEC-LIT 126.11, from the OWNER cell's u_P and the
+//  face pressure p_b (p's face value, gauge):
+//    n = Sf/|Sf|;  u_P . n >= 0: vented, fr = 0, refValue = 0, refGrad = 0
+//    else  M^2   = tg expm1( gmg log(p0/(p_b + pop)) ), raised to 1 below 1
+//          nu    = a atan(sqrt(b (M^2 - 1))) - atan(sqrt(M^2 - 1))
+//          delta = nu - nuInf,  T_b = t0/(1 + hg M^2),  |u_b| = sqrt(M^2 grs T_b)
+//          t     = n - (n . e) e;  |t| > tmin: u_b = |u_b| (cos delta e - sin delta t/|t|)
+//                                  else       u_b = |u_b| e
+//          fr = 1, refValue = u_b, refGrad = 0
+//  e = fl(U_inf/|U_inf|), t0 = fl(T_0), p0 = fl(p_0) (absolute), nuInf =
+//  fl(nu(M_inf)), tg = fl(2/(gamma-1)), gmg = fl((gamma-1)/gamma), hg =
+//  fl((gamma-1)/2), grs = fl(gamma R_s), a = fl(sqrt((gamma+1)/(gamma-1))),
+//  b = fl((gamma-1)/(gamma+1)) and tmin = fl(1e-6) are formed on the host in
+//  f64. A NaN M^2 (p_b + pop <= 0) is not raised: it reaches the bounds
+//  counter of SPEC-LIT 122.3.
+extern "C" __global__ void cmpBcSupersonicFreestream
+(
+    ofscalar* __restrict__ uFr,
+    ofvec3* __restrict__ uRef,
+    ofvec3* __restrict__ uGrad,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ pb,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar ex,
+    ofscalar ey,
+    ofscalar ez,
+    ofscalar t0,
+    ofscalar p0,
+    ofscalar nuInf,
+    ofscalar tg,
+    ofscalar gmg,
+    ofscalar hg,
+    ofscalar grs,
+    ofscalar a,
+    ofscalar b,
+    ofscalar pop,
+    ofscalar tmin
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = U[bFaceCells[f]];
+    const ofvec3 s = bSf[f];
+    const ofscalar mag = bMagSf[f];
+    ofvec3 nf;
+    nf.x = s.x/mag;
+    nf.y = s.y/mag;
+    nf.z = s.z/mag;
+    ofvec3 z;
+    z.x = (ofscalar)0;
+    z.y = (ofscalar)0;
+    z.z = (ofscalar)0;
+    uGrad[f] = z;
+    if (u.x*nf.x + u.y*nf.y + u.z*nf.z >= (ofscalar)0)
+    {
+        uFr[f] = (ofscalar)0;
+        uRef[f] = z;
+        return;
+    }
+    const ofscalar pa = pb[f] + pop;
+    ofscalar m2 = tg*expm1(gmg*log(p0/pa));
+    if (m2 < (ofscalar)1) m2 = (ofscalar)1;
+    const ofscalar nu = a*atan(sqrt(b*(m2 - (ofscalar)1))) - atan(sqrt(m2 - (ofscalar)1));
+    const ofscalar d = nu - nuInf;
+    const ofscalar tb = t0/((ofscalar)1 + hg*m2);
+    const ofscalar speed = sqrt(m2*grs*tb);
+    const ofscalar en = ex*nf.x + ey*nf.y + ez*nf.z;
+    const ofscalar tx = nf.x - en*ex;
+    const ofscalar ty = nf.y - en*ey;
+    const ofscalar tz = nf.z - en*ez;
+    const ofscalar tm = sqrt(tx*tx + ty*ty + tz*tz);
+    ofvec3 dir;
+    if (tm > tmin)
+    {
+        const ofscalar cd = cos(d);
+        const ofscalar sd = sin(d);
+        dir.x = cd*ex - sd*(tx/tm);
+        dir.y = cd*ey - sd*(ty/tm);
+        dir.z = cd*ez - sd*(tz/tm);
+    }
+    else
+    {
+        dir.x = ex;
+        dir.y = ey;
+        dir.z = ez;
+    }
+    ofvec3 ub;
+    ub.x = speed*dir.x;
+    ub.y = speed*dir.y;
+    ub.z = speed*dir.z;
+    uFr[f] = (ofscalar)1;
+    uRef[f] = ub;
+}
+
+//- (126.13) of SPEC-LIT 126.11, from the face velocity u_b (U's face value):
+//    cos = (u_b . Sf)/(|u_b| |Sf|), clamped to [-1, 1]; 0 when |u_b| = 0
+//    fr  = 0.5 + 0.5 sgn cos,  refValue = value,  refGrad = 0
+//  sgn = +1 (subsonic: fixed on normal outflow, zero gradient on normal
+//  inflow) or -1 (supersonic: the reverse).
+extern "C" __global__ void cmpBcFreestreamPressure
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ ub,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar value,
+    ofscalar sgn
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = ub[f];
+    const ofvec3 s = bSf[f];
+    const ofscalar um = sqrt(u.x*u.x + u.y*u.y + u.z*u.z);
+    ofscalar c = (ofscalar)0;
+    if (um > (ofscalar)0)
+    {
+        c = (u.x*s.x + u.y*s.y + u.z*s.z)/(um*bMagSf[f]);
+        if (c > (ofscalar)1) c = (ofscalar)1;
+        if (c < (ofscalar)-1) c = (ofscalar)-1;
+    }
+    fr[f] = (ofscalar)0.5 + (ofscalar)0.5*sgn*c;
+    refValue[f] = value;
+    refGrad[f] = (ofscalar)0;
+}

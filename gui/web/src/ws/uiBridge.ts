@@ -22,6 +22,8 @@ import { selectionOfProbe, tabScreenLabel, tabStateLabel, type LogStream, type u
 // Pure series helpers (metric matching, surface keys); series.ts only type-imports
 // the store, so this value import stays node-test safe too.
 import { findMetric, metricNames, surfaceSeriesKeys } from '../chart/series'
+// The project tree's model is pure (no React, no store), so select_step stays node-test safe.
+import { buildProjectTree, findStep, parseCaseText, selectProjectNode, stepIds } from '../components/side/projectTreeModel'
 
 type SessionStore = ReturnType<typeof useSessionStore.getState>
 type UiStoreState = ReturnType<typeof useUiStore.getState>
@@ -45,6 +47,8 @@ export interface UiBridgeDeps {
     removeDiff(id: string): void
     /** save_case: validate the buffer on the server, refuse on errors unless force, then write it (editorStore.saveCase). */
     saveCase?(path: string, force: boolean): Promise<SaveCaseOutcome>
+    /** select_step: the case's text, its open buffer else the file on disk; null when neither can be read. */
+    caseText?(path: string): Promise<string | null>
   }
 }
 
@@ -202,7 +206,7 @@ const asScale = (v: unknown): [number, number, number] | null => {
   return null
 }
 
-const partResult = (err: string | null): { ok: true } | { ok: false; error: string } => (err == null ? { ok: true } : { ok: false, error: err })
+const partResult = (err: string | null): { ok: true } | { ok: false; error: string } => (err == null ? { ok: true } : { ok: false, error: `INVALID (geometry_part): ${err}` })
 
 function unsupported(type: string, why: string): { ok: false; error: string } {
   return { ok: false, error: `UNSUPPORTED (${type}): ${why}` }
@@ -267,7 +271,7 @@ export function createUiBridge(deps: UiBridgeDeps) {
     const vs = v.getState()
     return {
       activeTab: u.activeTabId,
-      activeStep: null,
+      activeStep: u.activeStep ?? null,
       rightTab: u.assistantVisible ? (u.rightTab ?? 'AI Assistant') : null,
       tool: TOOL_TO_UI[v.getTool()],
       frame: null,
@@ -336,35 +340,35 @@ export function createUiBridge(deps: UiBridgeDeps) {
    *  ok: false with err.message unchanged. */
   async function geometryCommand(cmd: GeometryUiCommand): Promise<{ ok: true } | { ok: false; error: string }> {
     const path = targetGeometryPath()
-    if (path == null) return { ok: false, error: 'no geometry tab is open; geometry_open or geometry_import_step first' }
+    if (path == null) return { ok: false, error: `NO_GEOMETRY (${cmd.type}): no geometry tab is open; geometry_open or geometry_import_step first` }
     const g = useGeometryStore.getState()
     const entry = g.byPath[path]
-    if (!entry || entry.status === 'loading') return { ok: false, error: `geometry "${path}" is still loading; try again` }
-    if (entry.status === 'error') return { ok: false, error: `geometry "${path}" failed to open: ${entry.error}` }
+    if (!entry || entry.status === 'loading') return { ok: false, error: `BUSY (${cmd.type}): geometry "${path}" is still loading; try again` }
+    if (entry.status === 'error') return { ok: false, error: `NO_GEOMETRY (${cmd.type}): geometry "${path}" failed to open: ${entry.error}` }
     switch (cmd.type) {
       case 'geometry_part':
         return partResult(g.setPart(path, cmd.name, cmd.action, cmd.newName ?? null))
       case 'geometry_transform': {
         const op = cmd.op
-        if (op === 'undo') return g.undo(path) ? { ok: true } : { ok: false, error: 'nothing to undo' }
-        if (op === 'redo') return g.redo(path) ? { ok: true } : { ok: false, error: 'nothing to redo' }
+        if (op === 'undo') return g.undo(path) ? { ok: true } : { ok: false, error: 'INVALID (geometry_transform): nothing to undo' }
+        if (op === 'redo') return g.redo(path) ? { ok: true } : { ok: false, error: 'INVALID (geometry_transform): nothing to redo' }
         if (op === 'reset') {
           g.reset(path)
           return { ok: true }
         }
         if (op === 'translate') {
-          if (!asVec3(cmd.value)) return { ok: false, error: 'translate needs value [x,y,z] in metres' }
+          if (!asVec3(cmd.value)) return { ok: false, error: 'INVALID (geometry_transform): translate needs value [x,y,z] in metres' }
           g.pushEdit(path, { kind: 'translate', t: cmd.value })
         } else if (op === 'rotate') {
-          if (!asVec3(cmd.value)) return { ok: false, error: 'rotate needs value [ax,ay,az] in degrees' }
+          if (!asVec3(cmd.value)) return { ok: false, error: 'INVALID (geometry_transform): rotate needs value [ax,ay,az] in degrees' }
           g.pushEdit(path, { kind: 'rotate', deg: cmd.value, pivot: cmd.pivot ?? 'centre' })
         } else if (op === 'scale') {
           const s = asScale(cmd.value)
-          if (!s) return { ok: false, error: 'scale needs one non-zero factor or [sx,sy,sz]' }
+          if (!s) return { ok: false, error: 'INVALID (geometry_transform): scale needs one non-zero factor or [sx,sy,sz]' }
           g.pushEdit(path, { kind: 'scale', s, pivot: cmd.pivot ?? 'centre' })
         } else {
           if (!asVec3(cmd.value) || (cmd.value[0] === 0 && cmd.value[1] === 0 && cmd.value[2] === 0)) {
-            return { ok: false, error: 'mirror needs a non-zero plane normal [nx,ny,nz]' }
+            return { ok: false, error: 'INVALID (geometry_transform): mirror needs a non-zero plane normal [nx,ny,nz]' }
           }
           g.pushEdit(path, { kind: 'mirror', normal: cmd.value, pivot: cmd.pivot ?? 'centre' })
         }
@@ -916,8 +920,16 @@ export function createUiBridge(deps: UiBridgeDeps) {
       }
       case 'run_custom_tool':
         return unsupported(cmd.type, 'gui_control runs this on the server as custom_tool_run; this window should not receive it')
-      case 'select_step':
-        return unsupported(cmd.type, 'this screen does not implement it')
+      case 'select_step': {
+        // The tree ProjectTree draws, built from the open case's text (STU-08b).
+        const path = activeCasePath()
+        const text = path !== null && deps.editor?.caseText ? await deps.editor.caseText(path) : null
+        const tree = buildProjectTree(text === null ? null : parseCaseText(text), u.locale === 'ko' ? 'ko' : 'en')
+        const node = findStep(tree, cmd.step)
+        if (node === null) return { ok: false, error: `NO_STEP (select_step): no project tree node is '${cmd.step}'; ids: ${stepIds(tree).join(', ')}` }
+        selectProjectNode(u, node, path)
+        return { ok: true }
+      }
       default:
         // Every type has a case now; a type a newer server sends still answers by name.
         return unsupported((cmd as { type: string }).type, 'this screen does not implement it')

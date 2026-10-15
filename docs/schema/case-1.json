@@ -524,6 +524,63 @@
         "T"
       ]
     },
+    "JsonGamg": {
+      "description": "A rule's `gamg` block (SPEC-LIT 141.7): the keys of an OpenFOAM GAMG\nentry this solver honours, each optional. OpenFOAM's `mergeLevels` and\n`agglomerator` are not keys here; `deny_unknown_fields` refuses them by\nname with the accepted keys as the menu.",
+      "type": "object",
+      "properties": {
+        "cacheAgglomeration": {
+          "description": "Keep the hierarchy while the matrix is unchanged (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "maxLevels": {
+          "description": "The most levels, the finest counted (default 50, at least 1).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nCellsInCoarsestLevel": {
+          "description": "Coarsening stops at or below this many cells (default 64, at least 1).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nPostSweeps": {
+          "description": "Post-smoothing sweeps (default 2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nPreSweeps": {
+          "description": "Pre-smoothing sweeps (default 2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "smoother": {
+          "description": "`Chebyshev` (default), `l1Jacobi` or `Jacobi` (weighted, 2/3).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "JsonGrading": {
       "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
       "type": "object",
@@ -1828,6 +1885,17 @@
       "description": "One `numerics.solvers` rule.",
       "type": "object",
       "properties": {
+        "gamg": {
+          "description": "The GAMG settings of SPEC-LIT 141.7, allowed only on a rule whose\n`solver` or `preconditioner` is `GAMG`. Absent: the cycle's\ndefaults (SPEC-LIT 141.5) and `cacheAgglomeration` true.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGamg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "match": {
           "type": "string"
         },

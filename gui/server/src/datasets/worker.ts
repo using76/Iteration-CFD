@@ -10,6 +10,8 @@ import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
 import { buildCellLocator, locatePoint, type CellLocator } from '../formats/pointLocate.js'
 import { cutPolyMesh } from '../formats/polycut.js'
+import { buildIsoMesh, isoSurface, type IsoMesh } from '../formats/polyiso.js'
+import { buildStreamMesh, polyStreamlines, type StreamDirection, type StreamEnd, type StreamMesh } from '../formats/polystream.js'
 import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
 import { readVtuCellData, readVtuPointData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
 
@@ -21,6 +23,8 @@ export type WorkerTask =
   | { op: 'vtuPointData'; path: string; name: string }
   | { op: 'polyCut'; dir: string; origin: [number, number, number]; normal: [number, number, number] }
   | { op: 'locate'; dir: string; point: [number, number, number] }
+  | { op: 'polyIso'; dir: string; cellValues: Float64Array; values: number[] }
+  | { op: 'polyStream'; dir: string; cellU: Float64Array; seeds: number[]; direction: StreamDirection; maxLength: number | null }
 
 export interface FoamFieldResult {
   op: 'foamField'
@@ -91,7 +95,37 @@ export interface LocateResult {
   center: [number, number, number] | null
 }
 
-export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult
+/** The iso-surfaces of a cell field on the polyMesh in `dir` (SPEC-LIT §148.2). */
+export interface PolyIsoResult {
+  op: 'polyIso'
+  /** Three corners per triangle, each polyiso coordinate rounded once to f32. */
+  positions: Float32Array
+  /** The unit normal at each corner, rounded once to f32. */
+  normals: Float32Array
+  /** Cell id per triangle. */
+  cells: Uint32Array
+  valueCounts: number[]
+  area: number
+  fallbackPoints: number
+  invertedTets: number
+}
+
+/** The streamlines of a cell velocity on the polyMesh in `dir` (SPEC-LIT §148.3). */
+export interface PolyStreamResult {
+  op: 'polyStream'
+  /** xyz per point, each polystream coordinate rounded once to f32. */
+  points: Float32Array
+  /** |U| per point, rounded once to f32. */
+  speeds: Float32Array
+  /** Line i spans points [offsets[i], offsets[i+1]). */
+  offsets: Uint32Array
+  refusedSeeds: number[]
+  ends: Record<StreamEnd, number>
+  fallbackPoints: number
+  invertedTets: number
+}
+
+export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult | PolyIsoResult | PolyStreamResult
 
 // The last polyMesh a cut read, per thread: a run of slices on one mesh parses it once.
 // Keyed by the directory and every file's size and mtime, so a re-meshed case is read again.
@@ -124,6 +158,27 @@ async function locatorFor(dir: string): Promise<CellLocator> {
   const loc = buildCellLocator(await meshForCut(dir))
   locator = { key, loc }
   return loc
+}
+// The iso topology of the last mesh contoured, per thread, under the same key as cutMesh.
+let isoTopology: { key: string; iso: IsoMesh } | null = null
+
+async function isoMeshFor(dir: string): Promise<IsoMesh> {
+  const key = await polyMeshStamp(dir)
+  if (isoTopology && isoTopology.key === key) return isoTopology.iso
+  const iso = buildIsoMesh(await meshForCut(dir))
+  isoTopology = { key, iso }
+  return iso
+}
+// The streamline topology of the last mesh traced, per thread, under the same key; it shares the iso topology and the locator.
+let streamTopology: { key: string; sm: StreamMesh } | null = null
+
+async function streamMeshFor(dir: string): Promise<StreamMesh> {
+  const key = await polyMeshStamp(dir)
+  if (streamTopology && streamTopology.key === key) return streamTopology.sm
+  const iso = await isoMeshFor(dir)
+  const sm = buildStreamMesh(iso.mesh, iso, await locatorFor(dir))
+  streamTopology = { key, sm }
+  return sm
 }
 export type ResultOf<T extends WorkerTask> = Extract<WorkerResult, { op: T['op'] }>
 
@@ -175,6 +230,36 @@ export async function runTask(task: WorkerTask): Promise<WorkerResult> {
       const hit = locatePoint(await locatorFor(task.dir), task.point)
       return hit ? { op: 'locate', cell: hit.cell, method: hit.method, center: hit.center } : { op: 'locate', cell: null, method: null, center: null }
     }
+    case 'polyIso': {
+      const iso = await isoMeshFor(task.dir)
+      if (task.cellValues.length !== iso.mesh.nCells) throw new Error(`polyIso: ${task.cellValues.length} cell values for ${iso.mesh.nCells} cells`)
+      const r = isoSurface(iso, task.cellValues, task.values)
+      return {
+        op: 'polyIso',
+        positions: Float32Array.from(r.triPositions),
+        normals: Float32Array.from(r.triNormals),
+        cells: Uint32Array.from(r.triCells),
+        valueCounts: r.valueCounts,
+        area: r.area,
+        fallbackPoints: r.fallbackPoints,
+        invertedTets: r.invertedTets,
+      }
+    }
+    case 'polyStream': {
+      const sm = await streamMeshFor(task.dir)
+      if (task.cellU.length !== 3 * sm.iso.mesh.nCells) throw new Error(`polyStream: ${task.cellU.length} velocity numbers for ${sm.iso.mesh.nCells} cells`)
+      const r = polyStreamlines(sm, task.cellU, task.seeds, { direction: task.direction, maxLength: task.maxLength ?? Number.POSITIVE_INFINITY })
+      return {
+        op: 'polyStream',
+        points: Float32Array.from(r.points),
+        speeds: Float32Array.from(r.speeds),
+        offsets: r.offsets,
+        refusedSeeds: r.refusedSeeds,
+        ends: r.ends,
+        fallbackPoints: r.fallbackPoints,
+        invertedTets: r.invertedTets,
+      }
+    }
   }
 }
 
@@ -193,6 +278,16 @@ function transferables(result: WorkerResult): ArrayBuffer[] {
     case 'polyCut':
       add(result.positions)
       add(result.cells)
+      break
+    case 'polyIso':
+      add(result.positions)
+      add(result.normals)
+      add(result.cells)
+      break
+    case 'polyStream':
+      add(result.points)
+      add(result.speeds)
+      add(result.offsets)
       break
     case 'polyMesh':
     case 'vtuGeometry':

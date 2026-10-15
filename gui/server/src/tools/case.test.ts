@@ -121,6 +121,21 @@ describe('case_validate', () => {
   })
 })
 
+describe('a case that states a gas (CMP-29)', () => {
+  it('suggests ofgpu-compressible alone, and the tube template passes', async () => {
+    const text = await fsp.readFile(path.join(REPO_ROOT, 'cases', 'compressibleTube.jsonc'), 'utf8')
+    const report = await validateCaseText(text, 'cases/compressibleTube.jsonc', ws.root)
+    expect(report.errors).toEqual([])
+    expect(report.suggestedDrivers).toEqual(['ofgpu-compressible'])
+    // the same file without its gas is an ordinary laminar case, and the gas driver is not offered
+    const plain = applyCaseEdits(text, [{ pointer: '/physics/compressible', op: 'remove', valueJson: null }])
+    expect(plain.errors).toEqual([])
+    const r2 = await validateCaseText(plain.text, 'cases/x.jsonc', ws.root)
+    expect(r2.suggestedDrivers).not.toContain('ofgpu-compressible')
+    expect(r2.suggestedDrivers).toContain('ofgpu-lowmach')
+  })
+})
+
 describe('case_read and case_create', () => {
   it('summarises a JSONC case', async () => {
     const r = await runTool('case_read', { path: 'cases/plume.jsonc' }, ctx())

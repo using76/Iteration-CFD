@@ -300,11 +300,11 @@ beforeEach(() => {
 describe('the four geometry edit commands', () => {
   it('an unlisted command is still refused by name', async () => {
     const h = harness([])
-    // select_step: still unimplemented on this screen (STU-08b); set_centerline
-    // stopped being the sample here when STU-09 implemented it.
-    const r = await h.run({ type: 'select_step', step: 'step-1' })
+    // Every schema type has a case now (select_step was the last, STU-08b), so
+    // the sample is a type a newer server could send.
+    const r = await h.run({ type: 'no_such_command' } as unknown as UiCommand)
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('UNSUPPORTED (select_step): this screen does not implement it')
+    expect(r.error).toBe('UNSUPPORTED (no_such_command): this screen does not implement it')
   })
 
   it('without a geometry tab the four commands refuse and the snapshot has no geometry', async () => {
@@ -318,7 +318,7 @@ describe('the four geometry edit commands', () => {
     for (const cmd of cmds) {
       const r = await h.run(cmd)
       expect(r.ok).toBe(false)
-      expect(r.error).toBe('no geometry tab is open; geometry_open or geometry_import_step first')
+      expect(r.error).toBe(`NO_GEOMETRY (${cmd.type}): no geometry tab is open; geometry_open or geometry_import_step first`)
       expect(r.state.geometry).toBeNull()
     }
   })
@@ -344,7 +344,7 @@ describe('the four geometry edit commands', () => {
     expect(r.state.geometry!.dirty).toBe(true)
     r = await h.run({ type: 'geometry_part', name: 'zz', action: 'hide' })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('no part "zz"; parts: a, body')
+    expect(r.error).toBe('INVALID (geometry_part): no part "zz"; parts: a, body')
   })
 
   it('geometry_transform pushes, undoes, redoes, resets and refuses a mis-shaped value by name', async () => {
@@ -359,20 +359,20 @@ describe('the four geometry edit commands', () => {
     expect(r.state.geometry!.dirty).toBe(false)
     r = await h.run({ type: 'geometry_transform', op: 'undo' })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('nothing to undo')
+    expect(r.error).toBe('INVALID (geometry_transform): nothing to undo')
     r = await h.run({ type: 'geometry_transform', op: 'redo' })
     expect(r.state.geometry!.edits).toBe(1)
     r = await h.run({ type: 'geometry_transform', op: 'reset' })
     expect(r.state.geometry!.edits).toBe(0)
     r = await h.run({ type: 'geometry_transform', op: 'translate', value: 3 })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('translate needs value [x,y,z] in metres')
+    expect(r.error).toBe('INVALID (geometry_transform): translate needs value [x,y,z] in metres')
     r = await h.run({ type: 'geometry_transform', op: 'scale', value: 0 })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('scale needs one non-zero factor or [sx,sy,sz]')
+    expect(r.error).toBe('INVALID (geometry_transform): scale needs one non-zero factor or [sx,sy,sz]')
     r = await h.run({ type: 'geometry_transform', op: 'mirror', value: [0, 0, 0] })
     expect(r.ok).toBe(false)
-    expect(r.error).toBe('mirror needs a non-zero plane normal [nx,ny,nz]')
+    expect(r.error).toBe('INVALID (geometry_transform): mirror needs a non-zero plane normal [nx,ny,nz]')
     r = await h.run({ type: 'geometry_transform', op: 'rotate', value: [0, 0, 90], pivot: 'origin' })
     expect(r.ok).toBe(true)
     expect(r.state.geometry!.edits).toBe(1)
@@ -452,7 +452,7 @@ describe('the four geometry edit commands', () => {
     st().begin('cases/x.stl')
     const r2 = await h.run({ type: 'geometry_part', name: 'a', action: 'hide' })
     expect(r2.ok).toBe(false)
-    expect(r2.error).toBe('geometry "cases/x.stl" is still loading; try again')
+    expect(r2.error).toBe('BUSY (geometry_part): geometry "cases/x.stl" is still loading; try again')
   })
 })
 

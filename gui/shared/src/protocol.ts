@@ -14,6 +14,19 @@ export const RunStatusSchema = z.enum(['queued', 'running', 'done', 'failed', 'k
 export type RunStatus = z.infer<typeof RunStatusSchema>
 export const RunEndWordSchema = z.enum(RUN_END_WORDS)
 
+/**
+ * The build a run uses (F32-19): `double` is the default f64 build in rust/target/release, `single`
+ * the `--features single` build in rust/target/single/release (SPEC-LIT §118, mixed precision). The
+ * default stays `double` (docs/17 §10.1 A18). Single is a PREVIEW until F32-18 measures the full
+ * single-build validate run; only then is it a supported configuration.
+ */
+export const RUN_PRECISIONS = ['double', 'single'] as const
+export const RunPrecisionSchema = z.enum(RUN_PRECISIONS)
+export type RunPrecision = z.infer<typeof RunPrecisionSchema>
+export const DEFAULT_RUN_PRECISION: RunPrecision = 'double'
+/** True until F32-18 lands: the run header says the single build is a preview. */
+export const SINGLE_PRECISION_PREVIEW = true
+
 /** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
 export const MachineRefSchema = z.object({
   hostname: z.string(),
@@ -70,6 +83,8 @@ export const RunInfoSchema = z.object({
   meshId: z.string().nullable().optional(),
   /** The Machine this run ran on: N1's struct, `hostname` its main field. Null only when unreadable. */
   machine: MachineRefSchema.nullable().optional(),
+  /** The build the run used (F32-19); absent on every run before it, which all ran `double`. */
+  precision: RunPrecisionSchema.optional(),
   /** The driver's own `run ended:` word; absent when it printed none (every run before it, every other driver). */
   endWord: RunEndWordSchema.optional(),
   /** The `<detail>` of that line; absent with endWord. */
@@ -411,6 +426,12 @@ export interface BoundaryPatchRow {
   /** The presets set_patch accepts as this patch's kind (empty when the patch cannot be edited). */
   presets: PatchPresetId[]
 }
+/** One condition type the Boundary editor's picker offers on a field (docs/17 BC-22). */
+export interface BoundaryConditionType {
+  type: string
+  /** The members the type requires (a .jsonc case: docs/schema/case-1.json's); null when the catalogue does not list them (a foam case directory). */
+  entries: string[] | null
+}
 /** The Boundary editor's table: a .jsonc case's patches (editable through set_patch) or a foam case directory's (read-only). */
 export interface BoundaryTable {
   path: string
@@ -421,6 +442,8 @@ export interface BoundaryTable {
   /** The field columns, in PATCH_FIELDS order then by name. */
   fields: string[]
   patches: BoundaryPatchRow[]
+  /** Field -> the condition types its picker offers: a .jsonc case's per-field schema types, or every type the solver implements (bcCatalogue.ts) for a foam case directory. Set by the server. */
+  conditionTypes?: Record<string, BoundaryConditionType[]>
 }
 /** The two halves of a split viewport. */
 export const ViewIdSchema = z.enum(['A', 'B'])
@@ -500,6 +523,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     // and the GUI's run-settings form coerces "4000" and "true" by that type. Turning
     // every numeric-looking string into a number here would decide it in the wrong place.
     value: z.union([z.string(), z.coerce.number(), Boolish]).nullish().describe('New value; a string is passed through as typed and the GUI coerces it by the flag\'s type'),
+    precision: RunPrecisionSchema.nullish().describe('The build to run: double (default, f64) or single (the f32 build, a preview until F32-18); null = leave it'),
   }),
   z.object({ type: z.literal('start_run') }),
   z.object({
@@ -1066,6 +1090,8 @@ export interface StartRunRequest {
   args: Array<{ flag: string; value: string | number | boolean | null }>
   positionals: string[]
   label: string | null
+  /** The build to run (F32-19); absent or null = `double`. */
+  precision?: RunPrecision | null
 }
 
 // ---------------------------------------------------------------------------

@@ -482,6 +482,7 @@ fn krylov_controls(
         check_interval: 1,
         fixed_iters: fixed.is_some(),
         report_residuals: !fixed.is_some(),
+        gamg: ofgpu::io::case::GamgControls::default(),
     }
 }
 

@@ -24,8 +24,8 @@
 //!   -outletPatch NAME patch it leaves through (default: outlet)
 //!
 //!   -nCorrectors N    PIMPLE outer correctors per unit of work (default 2)
-//!   -backend NAME     auto | pbicgstab | fft | amgx (default auto, which runs
-//!                     the selector and prints its table)
+//!   -backend NAME     auto | pbicgstab | fft | amgx | gamg (default auto,
+//!                     which runs the selector and prints its table)
 //!   -probe            print the mass-weighted mean T of the upper and the
 //!                     lower third of the domain at every write - the
 //!                     stratification a working buoyancy MUST produce
@@ -105,6 +105,13 @@
 //! and still refuses it if the probe says it cannot represent this system,
 //! because applicability is a hard constraint and not a preference.
 //!
+//! GAMG and AMGX re-use their set-up from one solve to the next and print
+//! what it cost at the end of the run. AMGX keeps its hierarchy structure
+//! and re-sets up only the coarse operators (SPEC-LIT 141.21); the
+//! environment variable `OFGPU_AMGX_REUSE=0` makes it rebuild the whole
+//! hierarchy every solve instead, which is what that saving is measured
+//! against.
+//!
 //! Provenance: ORIGINAL driver code over LITERATURE numerics. The equations it
 //! assembles live in the library modules it calls, each cited there and in
 //! SPEC-LIT.md; this file is argument parsing, case loading, the coupled
@@ -139,8 +146,8 @@ use ofgpu::potential_flow::{
     mean_inflow_speed, solve_potential_flow, PotentialFlowResult, PotentialFlowSpec,
 };
 use ofgpu::pressure::{
-    choose_pressure_backend, AmgxBackend, FftBackend, PbicgstabBackend, PressureBackend,
-    SystemProbe,
+    choose_pressure_backend, AmgxBackend, FftBackend, GamgBackend, PbicgstabBackend,
+    PressureBackend, SystemProbe,
 };
 use ofgpu::scalar_transport::{weighted_stats, ScalarTransport, ScalarTransportCoeffs};
 use ofgpu::simple::{nan_propagating_max, Simple, SimpleControls};
@@ -184,6 +191,8 @@ enum BackendPick {
     Pbicgstab,
     Fft,
     Amgx,
+    /// The native GAMG backend (SPEC-LIT 141.8).
+    Gamg,
 }
 
 impl BackendPick {
@@ -193,8 +202,9 @@ impl BackendPick {
             "pbicgstab" | "pbicg" => Ok(Self::Pbicgstab),
             "fft" | "cufft" => Ok(Self::Fft),
             "amgx" => Ok(Self::Amgx),
+            "gamg" => Ok(Self::Gamg),
             other => Err(Error::Config(format!(
-                "-backend takes auto|pbicgstab|fft|amgx, got \"{other}\""
+                "-backend takes auto|pbicgstab|fft|amgx|gamg, got \"{other}\""
             ))),
         }
     }
@@ -244,7 +254,7 @@ fn usage() {
          [-write NAME] [-noWrite] [-graph]\n       \
          [-endTime T] [-deltaT dt] [-writeInterval W] [-outerIters N] \
          [-nCorrectors N]\n       \
-         [-backend auto|pbicgstab|fft|amgx] [-probe]\n       \
+         [-backend auto|pbicgstab|fft|amgx|gamg] [-probe]\n       \
          [-noPotential] [-inletPatch NAME] [-outletPatch NAME]\n       \
          [-output LIST] [-restartWrite N] [-restartFrom FILE]
                 [-permissive]"
@@ -1775,6 +1785,7 @@ fn pick_backend(
     if pick == BackendPick::Auto {
         let candidates: Vec<Box<dyn PressureBackend>> = vec![
             Box::new(PbicgstabBackend::new(p_ctrl)),
+            Box::new(GamgBackend::new(p_ctrl)),
             Box::new(FftBackend::new()),
             Box::new(AmgxBackend::new()),
         ];
@@ -1788,6 +1799,7 @@ fn pick_backend(
         BackendPick::Pbicgstab | BackendPick::Auto => Box::new(PbicgstabBackend::new(p_ctrl)),
         BackendPick::Fft => Box::new(FftBackend::new()),
         BackendPick::Amgx => Box::new(AmgxBackend::new()),
+        BackendPick::Gamg => Box::new(GamgBackend::new(p_ctrl)),
     };
 
     // Applicability is a hard constraint even when the user asked by name. A
@@ -2638,6 +2650,9 @@ fn run(o: &Options) -> Result<()> {
         up,
         buoy.t_ref,
     )?;
+    if let Some(line) = backend.run_summary() {
+        println!("{line}");
+    }
 
     // ---- what the plume did -------------------------------------------------
     let temps = gpu.download(&heat.field().f)?;
@@ -2765,7 +2780,7 @@ mod buoyant_tests {
     }
 
     #[test]
-    fn the_backend_flag_takes_four_names_and_nothing_else() {
+    fn the_backend_flag_takes_five_names_and_nothing_else() {
         assert_eq!(BackendPick::from_name("auto").expect("auto"), BackendPick::Auto);
         assert_eq!(
             BackendPick::from_name("PBiCGStab").expect("case insensitive"),
@@ -2773,7 +2788,8 @@ mod buoyant_tests {
         );
         assert_eq!(BackendPick::from_name("fft").expect("fft"), BackendPick::Fft);
         assert_eq!(BackendPick::from_name("amgx").expect("amgx"), BackendPick::Amgx);
-        assert!(BackendPick::from_name("gamg").is_err());
+        assert_eq!(BackendPick::from_name("GAMG").expect("gamg"), BackendPick::Gamg);
+        assert!(BackendPick::from_name("gamgx").is_err());
         assert!(BackendPick::from_name("").is_err());
     }
 

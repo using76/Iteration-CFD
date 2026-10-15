@@ -95,6 +95,7 @@ fn controls(precon: Preconditioner) -> SolverControls {
         check_interval: 1,
         fixed_iters: false,
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     }
 }
 

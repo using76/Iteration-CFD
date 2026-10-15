@@ -26,8 +26,8 @@
 | A6 | DST-02 | 단열선 Ψ가 논문 closure 값의 약 57 % | 단열선을 잡는 방법에 따라 Ψ가 약 2배까지 달라진다. DST-06의 논문 비교에는 논문에 실린 식을 쓴다 | SPEC-LIT 153.8, `d337a4c` |
 | A7 | CHR-07b | device Rosenbrock 성능이 CPU 1코어의 약 4.5배에 그친다 | 정확도 게이트는 통과. 성능 목표는 미달 | `0758690` |
 | A8 | VAL-70 | Gate 78-D 측정 레그: 두 splash 기준 모두 Riboux & Gordillo 2014 임계 속도에 미달 (`MISSES`) | 띠 ±20 %, 액체 8개 중 6개 이상이 들어와야 통과. Mundo: 17행 중 0, 액체 8개 중 0 (e −0.734 ~ −0.214). Bai & Gosman: 17행 중 3, 액체 8개 중 1(에탄올) (e −0.396 ~ +0.690). 4.78 행은 OPEN으로 남는다 | SPEC-LIT 146.2, `1280c6f` |
-| A9 | AMG-04c | single에서 K-cycle FCG의 POI(32) 답이 Jacobi-PBiCGStab과 2.37e-8 차이 (기준 1e-8) | 11회 반복에 수렴은 한다. 이 테스트는 파일 관례(AMG-06a)에 따라 single에서 ignore 상태다. AMG-06a가 켜야 한다. f64는 1.61e-9~5.38e-9로 통과 | SPEC-LIT 141.6, `a887eb3` |
-| A10 | AMG-07b | single의 SPMD GAMG(정상 상태 cycle)는 반복 정밀화가 없어서 tol 1e-6이면 정체된다 | POI 32³, 500 cycle 뒤 참 잔차 4.3e-6. 게이트는 기존 SPMD 게이트와 같은 solver tol 1e-5로 돈다 (게이트 허용오차 tol32 1e-5는 그대로). F32-07의 IR이 `spmd_gamg`도 감싸야 한다 | SPEC-LIT 141.11, `3f110b3` |
+| A9 | AMG-04c | **해결됨 (AMG-06a `f13bebf`: single에서 7.68e-9로 통과, ignore 해제)** single에서 K-cycle FCG의 POI(32) 답이 Jacobi-PBiCGStab과 2.37e-8 차이 (기준 1e-8) | 11회 반복에 수렴은 한다. 이 테스트는 파일 관례(AMG-06a)에 따라 single에서 ignore 상태다. AMG-06a가 켜야 한다. f64는 1.61e-9~5.38e-9로 통과 | SPEC-LIT 141.6, `a887eb3` |
+| A10 | AMG-07b | **해결됨 (AMG-06a `f13bebf`: `spmd_gamg`도 IR로 감쌈, tol 1e-11·답 1e-8로 양쪽 빌드 통과)** single의 SPMD GAMG(정상 상태 cycle)는 반복 정밀화가 없어서 tol 1e-6이면 정체된다 | POI 32³, 500 cycle 뒤 참 잔차 4.3e-6. 게이트는 기존 SPMD 게이트와 같은 solver tol 1e-5로 돈다 (게이트 허용오차 tol32 1e-5는 그대로). F32-07의 IR이 `spmd_gamg`도 감싸야 한다 | SPEC-LIT 141.11, `3f110b3` |
 | A11 | CMP-13 | LTS 정상 해가 CFL에 따라 달라진다 (기준: CFL 2와 20의 해 차이 1e-8) | u 차이 2.85e-6, p는 max\|p\|의 7.0e-2 (2.2e-3 Pa), T 5.5e-9. Rhie-Chow 면 flux의 rAU = V/a_P가 시간항 대각 V r ρ를 지니기 때문이다. 기존 정상 SIMPLE도 alpha_U에 따라 같은 식으로 달라진다 (0.9와 0.7: 8.4e-7). 해결책(시간 간격에 무관한 rAU, 또는 면 flux의 ddt 보정)은 Rhie-Chow 수치 변경이다. 감독 권고는 미달 수용 | SPEC-LIT 125.7, `3c16286` |
 | A12 | DST-04 | single: 확산 지배 화염관에서 연소 쪽 plateau가 1 위로 떠오른다 | σ=1 평면 1000셀에서 최대 1.5e-4, 층류에서 5e-5. float 대각 ρV/dt가 eps(1+2D)까지만 유지되기 때문이다 (D = Γdt/dx² ≈ 40). solver tol과 IR로는 바뀌지 않는다. 해결책(delta form, ddt 재스케일)은 수치 변경이다. DST-06의 긴 계산에서 누적될 수 있다 | SPEC-LIT 155.9, `4875b9d` |
 | A13 | DST-04 | 양쪽 빌드: σ=5.06에서 δ_t 오차가 메시를 세분해도 줄지 않는다 | 250/500/1000셀에서 −2.2e-4, −6.2e-4, −4.5e-4 (모두 2 % 띠 안). 원인 미정: H20의 σ≠1 정확해 주장 또는 σ에 따른 이산화 하한. single에서는 x_f와 Linf도 1000셀에서 더 줄지 않는다 (float 하한 약 4e-4) | SPEC-LIT 155.9, `4875b9d` |
@@ -35,6 +35,16 @@
 | A15 | VAL-12 | Gate 95-A: 네 번째 메시(n_y=32)를 넣어도 5:1, 10:1이 미달 (21/25) | 5:1: n_y=4가 outer 673회에서 발산, p_u 1.423 (기준 1.9). 10:1: n_y=4 정체 (q_obs 0.992), p_u 1.896 (0.0037 부족). 2.5:1은 통과. n_y=4 수렴은 VAL-11(GMRES outer)의 몫이다. 5:1의 1.42는 아직 수렴한 차수가 아니며, 다섯 번째 메시가 있어야 더 알 수 있다 | SPEC-LIT 109.6-109.7, `f0a0df2` |
 | A16 | TET-09 | 리메시하지 않은 입력에서 feature가 아닌 segment 사이 각이 작으면 Delaunay refinement가 끝나지 않는다 | 면마다 삼각형 2개(대각선 45°)인 정육면체, h=0.4: 91 pass 뒤 67 289점 (예측 약 930 tet), 상한에서만 멈춘다. feature edge 각만 보호하므로 Shewchuk 1998의 90° 가정이 깨진다. 파이프라인은 항상 먼저 리메시하므로 기록만 했다 | SPEC-LIT 116.13, `0a2249d` |
 | A17 | TET-10b | 30° 쐐기 게이트(최소 이면각 ≥ 10°, 최대 ≤ 165°)를 측정할 수 없다 | TET-09 refinement가 쐐기에서 끝나지 않는다: h=0.1에서 187 pass 뒤 20 000점 상한. h=0.04~0.15와 상한 60 000에서도 상한, 240 s 제한 또는 refine/facet에 걸린다. 리메시한 정육면체−원기둥(24면)도 h=0.1에서 520 pass 뒤 60 000점 상한, h=0.0625에서는 끝난다 (71 074 tet, 346 pass). TET-10b는 h=0.0625를 쓴다 | SPEC-LIT 116.14, `7e57528` |
+| A18 | F32-07 | single: 반복 정밀화(IR)를 쓴 PBiCGStab 기준해가 section 6의 밀폐 all-Neumann 상자(216셀)에서 모든 셀 NaN | float로 반올림한 source가 O(n·u32)만큼 비일관적이어서, 정밀화 뒤 보정 방정식이 대부분 그 성분이 되고 float PBiCGStab가 붕괴하는 것으로 읽힌다 (추적은 아님). 기존 행 'cuFFT == iterative, sealed box'는 validate의 `max_abs_diff`(f64/f32::max)가 NaN을 버려서 0으로 통과해 왔다. 새 refined 행은 NaN을 FAIL로 낸다. single에서는 선택기도 밀폐 상자 계를 거부한다 (기준 잔차가 NaN). BC-07의 pure-Neumann NaN과 같은 계열로 보인다 | SPEC-LIT 118.12, `acbcfb0` |
+| A19 | BC-19 | cyclic 결합면을 가로지르는 device leastSquares 기울기 (선형장) | 3:2 imprint 계면에서 5.1e-2 오차. 커널(`cuda/fv.cu` boundarySeparation)이 d = Sf/(\|Sf\| Δ) = n(n·d)를 써서 d의 접선 성분 −k/Δ를 버린다. device = host twin(2.4e-16)으로 원인을 단언한다. 한 줄 해결책(bNonOrthCorr로 d = Sf·sc − k/Δ)은 비직교 cyclic의 기존 결과를 모두 바꾼다 | SPEC-LIT 120.13, `afa6ab1` |
+| A20 | BC-19 | 3:2 cyclicAMI 계면을 가로지르는 층류 채널이 단일 블록과 peak의 6.7 %, 7.5 % 차이 (기준 0.5 %) | bulk 0.959/0.963 대 1.014/1.031. 같은 reader·imprint·결합을 쓰는 conformal AMI 쌍은 단일 블록과 3e-16으로 같으므로, 기울어진 결합면의 이산화가 원인이다 (면 값에 skewness 보정이 없다). 0.5 % 띠는 단일 블록 자신의 Poiseuille 오차(0.69 %, 1.56 %)보다 작다 | SPEC-LIT 120.13, `afa6ab1` |
+| A21 | (기존, CMP-14/CHR-10a가 발견) | single 빌드가 `cases/channelThermalWF.jsonc`에서 11스텝째 발산 (Mach 거부, 셀 3199에서 M 1.8e9) | f64는 정상. f32 SIMPLE floor 계열(A4)로 보인다. CHR-10a의 해시 고정은 channelPeriodicFluxWF를 쓴다 | `5a79bf0` |
+| A22 | AUT-04 | quick set 날개 12개 중 4개가 RM-TE 뒤에도 F3를 통과하지 못한다 (게이트 목표 6/12는 8/12로 통과) | A-1-024: F3e, capture 0.357. A-1-049: bump 없음, F3e만, capture 0.284, NO-REMEDY. 둘 다 뭉툭한 뒷전 밑면이 0.46-0.66 h_f로, 한 셀보다 가까운 두 feature 사슬을 (92.62)가 예산 안의 어떤 level에서도 함께 잡지 못한다. A-1-098/099(6 % 날개): RM-TE로 max/h_f 0.21-0.23이지만 pin이 5.4-6.5 % (F3a, F3b). automesher snap 쪽 항목이며 수치 변경은 만들지 않았다 | `9a6862b` |
+| A23 | AUT-07 | R-ECON 뒤에도 G-COST 미달 | quick set 중앙값 B0-template의 6.18배 (기준 1.5배). layer 셀과 R-WIN/R-CURV 벽 level이 남는다. AUT-06이 이미 layer 8개로는 1.5배가 불가능함을 보였다. D-8은 사용자 결정으로 남는다 | `9e5d05e` |
+| A24 | F32-13 | single, section 1-25 미달 18행 (모두 SPEC-LIT 118.14 표에 기록, 허용오차 그대로) | section 6: 밀폐 상자 'cuFFT == iterative' (R)가 NaN으로 ok→FAIL (A18과 같은 원인, NaN을 버리던 `max_abs_diff`를 고쳐서 드러남). section 9 부력: 밀폐 상자 균일 T의 flux 2.03e-4, 정지 2.19e-4 (R, 기준 1e-5), 'T == T_ref면 체적력 0' 5.20e-9 (D, 기준 0): `buoyancy_flux`가 상수를 w T + (1−w) T로 보간하는데 f32에서는 T가 아니다. section 10: G_b 1.07e-5 (R). section 11 VOF: 정적 물방울 `vof.step`이 single에서 발산 (alpha Courant 1.7e18), P행 3개 NaN FAIL (이전에는 실행 전체가 여기서 중단). section 17: 벽 drag 1.46e-5 두 행 (R, Scalar로 200면 합산). section 23 Kays-Crawford: Pe_t→∞ 596 대 0.2 등 4행 (Scalar 계산의 상쇄). section 24: kEpsilon 균질 전단 고정점 9.7e-3, P/eps 1.93e-2 (P, 기준 5e-3; f64는 5.5e-4, 1.1e-3). 해결책은 모두 f64 누적·평가 같은 수치 변경이다 | SPEC-LIT 118.14, `1a8b9ba` |
+| A25 | F32-14 | single, section 26-65: 실행한 34개 section에서 473행 중 416행 통과 | 미실행(600 s 두 번 초과): 29 (공액 계면, 상한 시점에 33행 중 19행 실패, 루프 미수렴), 44 (95-G, 모든 외부 루프가 2000 pass), 52 (100-C, 4000회에도 미수렴), 57 (94-D), 61 (CMP-B). Gate 105-B MISSED (피스톤 균일 상태 1.58e-2~6.01e-2, 역방향 차수 0.737 부족), Gate 95-D MISSED (외부 루프 수렴 D행 3개; 응력은 0.01에서 통과), Gate 95-A single 3/21 (어떤 메시에서도 block-coupled 루프 미수렴). 100-A: 60 pass에 1e-13 상대 변화에 못 닿는다 (마지막 3.1e-7). 100-D: T가 5.2e5 K로 발산. Scalar로 계산하는 닫힌 식·장부 행 다수 (§31, 32, 33/34, 38, 39, 40, 26, 27, 30, 48, 49, 50; 표는 SPEC-LIT 118.14). 95-E, 105-A, 110-C(16/16)는 f64 띠에서 통과 | SPEC-LIT 118.14, `8d2ba83` |
+| A26 | STU-19 | gui_control 모든 type이 4 s 안에 답한다는 게이트 미달 2건 | open_result: 14 walk 중 4개가 3.55-4.83 s. headless Chromium SwiftShader에서 viewer의 첫 엔진 초기화(WebGPURenderer.init의 WebGL2 fallback, PMREM, 첫 shader compile)가 답에 포함되고 4 CPU를 3 레인이 나눠 쓴다. Cartesian open_result_in_view: 3 walk 4.05-4.87 s, 2 walk 5 s hub TIMEOUT: walk의 start_run이 fixture를 다시 써서 서버가 dataset을 다시 읽는다. 실행 중인 결과를 열면 gui_control이 time out될 수 있다는 실제 지연이다. viewer 동작을 바꾸는 해결책은 만들지 않았다 | `cf5aac6` |
+| A27 | AUT-12 | tuning 투영 NO-GO: G-FAIL 71/420 > 23 (180 test body에서 30.4개 예상, 한계 10), G-COST 셀 중앙값 52,632 대 9,008 = 5.84배 (기준 1.5배) | G-FAIL 실패: A 날개 39 (대부분 F3d/F3e의 EXHAUSTED, NO-REMEDY), F 15 (RM-TE가 13개에서 이득 없음), G 15, D 1, E 1. G-FAIL의 나머지 세 조건과 G-BLC-0/1, G-QUAL은 통과. G-COST는 L5의 82.5배에서 R-ECON으로 내려왔지만 layer 8개와 R-WIN 벽 level이 남는다. D-8(1.5배 유지 여부)이 사용자 결정으로 남는 한 GO가 나올 수 없다 | `tools/autonomy/projection/AUT12.md`, `10ad60a` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -51,6 +61,14 @@
 | B9 | PAR-06/16 MPI | MS-MPI 설치가 보류됐다. `-comm mpi`와 PMI 환경은 이름으로 거부한다 | MS-MPI를 설치하면 |
 | B10 | `ofgpu-validate` Gate 110-B 기록 계산 (VAL-52 준비) | VAL-50 가격 산정에서 backstep 레시피가 그대로는 돌지 않는다. 생성된 케이스의 inlet U가 10 m/s가 아닌 0.518 m/s다 (blockgen의 power-law 프로파일이 y=0, h=1 기준인데 `-extent`가 inlet을 y∈[1,9]에 놓는다). 1400×180은 24스텝(M 0.730), 2800×360은 152스텝(M 0.490)에서 Mach guard로 멈춘다 | VAL-52가 inflow를 입력으로 바로잡은 뒤 |
 | B11 | AUT-05 이후 autonomy selftest | AUT-02a/b/c의 stl_repair 변경 이후 campaign.py, prior.py, baseline.py selftest가 실패한다 (G-1-026이 non-manifold edge 12개로 SURFACE-OPEN이라고 가정). 그 뒤 그룹(replay, hooks, live)은 실행되지 않는다 | 오늘의 repair 결과로 기준을 다시 잡는 작은 fixture 단위 |
+| B12 | VIO-06 드론 레그 (VIO-11도 같은 해 필요) | t = 0.5 s 드론 해가 디스크에 없다. 지시대로 다시 풀지 않았다 | `tools/drone/solve.py`로 해를 다시 만든 뒤 `ofgpu-sample volume`으로 1회 |
+| B13 | single 빌드의 드라이버 비교 (AMG-05, AMX-02) | single에서는 라이브러리와 통합 테스트만 돌았다. `ofgpu-buoyant -backend gamg/amgx` 20회 비교는 f64에서만 했다 ('amgx single' bin 빌드 약 20분) | B1과 함께 |
+| B14 | STU-18 | GLM 주간 할당량이 2026-10-16까지 막혀 건너뛰었다 (live GLM-5.3-Flash studio 호출 필요) | 할당량이 돌아오면 G 레인에 다시 넣는다 |
+| B15 | AUT-04, AUT-07 효과의 family별 측정 | RM-TE는 bump가 있는 모든 sharp body에서 F3 remedy 중 먼저 걸린다 (가상 F3c에서 sharp 276행 중 169행). R-ECON quick set에는 sharp body가 없어 A, D, F family와 K = 4 remedy 캠페인 효과를 재지 않았다 | AUT-12의 L-run에서 family별 실패, BLC_8, F3를 L5 규칙과 비교 |
+| B16 | AUT-13, AUT-14, AUT-16 | AUT-12 NO-GO라서 seed 3을 쓰지 않았다 (D-9 권고). AUT-13의 `--write-fresh N`/`--check-fresh N`/`--manifest testN`은 임시 디렉터리에서만 시험했다. AUT-14(봉인 평가)와 AUT-16(G-YPLUS)은 실행하지 않았다 | GO가 나오거나 사용자가 명시적으로 쓰기로 할 때: `split.py --write-fresh 3 --go <GO 투영 JSON>` 또는 `--user-spend` |
+| B17 | AUT-12 | AUT-09의 refinement round (`optimise.py --refine`, 약 1.5 h, 26 body)를 돌리지 않았다. AUT-09의 사전 등록 hurdle CV가 실패했으므로(BLC_8 RMSE 0.152787 > 0.15) round를 돌려도 optimiser를 켤 수 없고, AUT-12 행으로 다시 CV하면 사전 등록되지 않은 실행이 된다 | 사용자가 R-ECON 행으로 새 사전 등록 surrogate 실행을 원하면 |
+| B18 | F32-14 | Gate 105-C를 양쪽 빌드에서 실행하지 않았다. `cases/turekHron/mesh*`가 이 트리에서 생성되지 않았다 | `python tools/mesh/examples/turek_hron.py --level 1..4` 뒤 실행 |
+| B19 | F32-13/14 | 나눠 돌리지 않은 `ofgpu-validate` 전체 실행 (section 1-65, 양쪽 빌드). 각 단위는 600 s 상한의 `-sections` 묶음으로 쟀다 | F32-18 |
 
 ## C. 모델·설계 선택 (권고대로 진행, 검토 대기)
 
@@ -66,6 +84,11 @@
 | C8 | DST-13 → DST-15 | DST-12의 수분·휘발 누적값은 구간 안의 dm을 더하므로, single에서는 저장된 m_w/m_v의 f32 반올림만큼 질량이 어긋난다. DST-15의 1e-10 질량 게이트를 single에서 맞추려면 char처럼 저장값 차이 규칙이 필요할 수 있다 (DST-12 산술이 바뀜) | SPEC-LIT 159.8 |
 | C9 | TET-09 | `refine.size_factor` 기본값을 sqrt(6)/4에서 0.8로 바꿨다 (sqrt(6)/4에서는 평균 edge/h 0.797, 개수 +134 %로 두 게이트 모두 미달) | SPEC-LIT 116.3, 116.13 |
 | C10 | D-VAL-5 | 1-D oracle에서 Wilcox 2006이 TG0 띠를 모두 닫지 못해 트리거가 발동하지 않았다 (log-law 1.134/1.179 대 1.0, Re_tau 2358 defect −11.8 %). 그래서 VAL-22a/b/c(Wilcox 2006 device·case)를 만들지 않는다. VAL-23은 SST만 기록한다 | SPEC-LIT 143.2 |
+| C11 | VIO-04 | 117.3의 기본 voxel (min V_c)^(1/3)이 얇거나 비등방 메시에서는 영역 깊이보다 거칠다. 등급 채널 8×6×4 (깊이 0.1 m): h = 0.0697 m, n_z = 2로 0.139 m를 덮어 유체 비율 0.491, volume_error −0.301. 가이드북은 이런 메시에서 voxel을 직접 지정하라고 쓴다. 기본값 변경은 사용자 결정 | SPEC-LIT 117.3, 117.12 |
+| C12 | BC-21 | 부력 압력 이름 4개(prghPressure 등)의 rho_f를 스텝마다 갱신하지 않았다. 갱신하면 face alpha가 움직이는 기존 prghPressure 계산이 바뀐다. 원하면 `Vof::refresh_vof_family`에 짧게 추가 | SPEC-LIT 120.7, 120.14 |
+| C13 | BC-16 | DFSEM 와류 모양 F(q) = (1−q)², 상수 G = 512π/45045, 강도 규칙 A = (tr R/2 I − R)/G는 자체 설계다 (Poletto et al. 2013은 유료라 식을 보지 못했다) | SPEC-LIT 120.12 |
+| C14 | AMG-05, AMX-02 | `-backend auto`가 이제 GAMG와 AMGX도 잰다. 큰 메시(gb_800000)에서는 auto가 GAMG나 AMGX를 골라 결과가 PBiCGStab와 solver 허용오차만큼 달라진다. AMGX 구조 재사용은 기본 켜짐 (`OFGPU_AMGX_REUSE=0`으로 끔) | SPEC-LIT 141.8, 141.21 |
+| C15 | AUT-10 | D-6 비공허 기준을 권고로 정했다: real − rules ≥ 1, real − shuffled 평균 ≥ 1.0 (기하 개수). 이 기준으로는 AM-L 2026-10-02 통과(241/241/240.667)가 FAIL, AM-13과 oracle은 통과(oracle은 margin 1.000으로 경계). 계획 §11 item 5에 따라 **사용자 승인이 필요**하다 | `c71a9e8` |
 
 ## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
@@ -91,6 +114,21 @@
 - AUT-05: gui 카드 템플릿(`templates.json`)에 R-SNAP 항목이 없어 AUT-05 이후 캠페인 기록에서 `explainGeometry`가 'no template for rule id R-SNAP'를 돌려준다 (G 레인 vitest).
 - VAL-12/VAL-14: README의 validate 집계(1021/1026, 2026-09-27 기준)가 낡았다. Gate 95-A는 행이 3개 늘었고 실패 행은 여전히 4개다. Gate 95-G의 ring 차수 행은 이제 통과한다 (nr 48→96에서 p = 0.926).
 - DST-04: dust_progress가 공유 GPU에서 빌드마다 5~6분 걸린다 (계획 예산 8분). harness의 host 전송을 공유하면 빨라진다.
+- F32-07: validate의 `max_abs_diff`가 NaN을 버리므로, single에서 다른 행들도 NaN으로 통과하고 있을 수 있다. CHT의 영역별 잔차(`residual_ranged`, `region_met`)는 아직 좁혀진 float 장을 재서 single에서 float 하한에 머문다 (F32-13/14 몫).
+- AMG-04b: PbicgstabBackend 밖의 방정식(ofgpu-vof p_rgh, 압축성 p, 에너지, 난류, U, dist_solve)에서 GAMG를 고르면 첫 solve에서야 내부 API(`set_gamg`) 이름으로 거부된다. reader 단계에서 방정식 이름으로 거부하는 편이 낫다.
+- AMX-02: 이 기계에는 AMGX_DLL/AMGX_DIR/PATH 설정이 없다. 모든 AMGX 실행은 다른 프로젝트(FDS_GPU_RUST_AmgX2)의 `amgxsh.dll`을 읽기 전용으로 썼다. 자체적으로 돌리려면 AMGX_DLL을 시스템에 설정하거나 DLL을 복사해야 한다.
+- BC-16: 어떤 드라이버도 `BcInputs::turbulent_inlet`을 넘기지 않아 turbulentInlet, turbulentDigitalFilterInlet, turbulentDFSEMInlet이 모두 이름으로 거부된다. transient 경로를 여는 드라이버 단위가 필요하다.
+- BC-16, BC-21: gui pick-list(registry)에 새 BC 이름 6개가 없다 (BC-22 몫).
+- CHR-25: 모든 드라이버가 parcel 케이스를 거부한다. CHR-26이 lowmach 경로에서 이 거부를 풀어야 한다.
+- AUT-07: optimise.py의 L4 상자가 R-ECON 이전 L1(`l1_of(r_econ=False)`)을 중심으로 한다. optimiser를 켜면 제안이 §B의 세 band 모양(×0.5..2)과 그 셀을 되살린다. R-ECON 캠페인(AUT-12 L-run, 그다음 AUT-09/10/11)으로 surrogate를 다시 맞춰야 한다. optimiser는 꺼진 채로 배포된다.
+- AUT-11: AM-14 기록 `optimise/`(PASS, AUC 0.986)는 AUT-11 이전에 gate돼 gate 파일 sha가 없어서 꺼져 있다. sha를 나중에 채우면 켜질 수 있으므로 커밋된 모델에는 절대 채우지 않는다. 새 gate 디렉터리로 옮기려면 `prior.REPORT_DIR`/`optimise.SHIP_DIR`을 바꿔야 한다 (AUT-12 L-run 다음 단계).
+- F32-19: studio의 single 빌드 실행은 F32-18 전까지 preview다 (`SINGLE_PRECISION_PREVIEW = true`, `gui/shared/src/protocol.ts`). F32-18이 들어오면 한 줄을 false로 바꾸고 dispatch.test의 header 기대값 두 개에서 접미사를 지운다. G 트리 `rust/target/single/release`의 single exe 21개는 오래됐을 수 있다 (단위 검증은 `--lib`만 빌드).
+- STU-15: tet 100 000개 넘게 지나거나 부피 0인 tet(중심에 대해 star-shaped가 아닌 셀)을 만나면 그 유선은 'lost'로 끝난다. 볼록하지 않은 영역에서 나갔다 들어오는 선은 첫 출구에서 끝난다.
+- gui registry: `MESH_KINDS`에 VAL-30의 `plate`가 없어 studio에서 평판 preset을 고를 수 없다 (플래그는 오케스트레이터가 `b17d194`에서 맞췄다).
+- F32-14: gate verdict 줄(SPEC-LIT 99 보고)은 single에서도 f64 조건을 그대로 쓴다. 98-B, 98-C, 100-A, 100-B는 R행이 tol32로 통과해도 MISSES를 찍을 수 있다. `precision::roundoff_tol(tol64)`을 쓰면 single 빌드만 바뀐다 (F32-18 몫).
+- F32-13/14: lane M의 W4 VAL 단위가 F32-13/14 이전 트리에서 새로 넣은 행은 plain `c.check`라서 'N rows carry no class yet'으로 나온다. 행마다 class를 붙이고 새 section 함수는 `c.ran`으로 감싸야 한다 (SPEC-LIT 118.14 규칙, F32-18 전에 0이어야 함). 함수 안의 `worst = worst.max(..)` 접기는 아직 NaN을 버린다.
+- AMG-06b: JSONC의 `JsonGamg`(deny_unknown_fields)에 `precision`이 없어서 JSONC `gamg.precision`이 unknown field로 거부된다 (S 레인 case_json.rs/schema 몫).
+- AMG-06b: f32 GAMG 사본은 V-cycle만 돈다 (`set_cycle(K)`는 이름으로 거부). `DistGamg`에는 f32 사본이 없다.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 

@@ -14,6 +14,9 @@
 //!     scalar needs
 //!   ofgpu `SPEC-LIT.md` §3.4 and §18, via [`crate::sources`] - the reaction
 //!     rates and production terms each species may carry
+//!   ofgpu `SPEC-LIT.md` §132.5 and §132.11 - the reaction source (132.10)
+//!     the split chemistry step of [`crate::chem::source`] hands each
+//!     solved species through `su`
 //! No GPL-licensed source was consulted.
 //!
 //! ```text
@@ -172,6 +175,9 @@ pub struct Species<'m> {
     /// The `N-1` solved species, in the order the case named them.
     solved: Vec<ScalarTransport<'m>>,
     names: Vec<String>,
+    /// The solved species' molecular diffusivities `D`, m2/s, as the case
+    /// gave them - what SPEC-LIT 133.9's enthalpy flux reads.
+    d: Vec<Scalar>,
 
     /// `Y_N = 1 - Σ_{i<N} Y_i`. A field like any other so it can be written
     /// out and read back, but it is never solved for.
@@ -198,6 +204,15 @@ pub struct Species<'m> {
     /// clip. Reused across the species within one `correct`, because it is
     /// written and read back before the next species is touched.
     pre_clip: DevBuf<Scalar>,
+
+    /// **SPEC-LIT §132.11.** Per solved species, `[n_cells]` of the
+    /// reaction source `su` (132.10) that [`crate::chem::source::ChemSource`]
+    /// writes before each correct and `correct_with_density` hands to the
+    /// species' equation as `fvm_su(su, +1)`: `(Y* - Y°)/dt` on the
+    /// constant-density equation, `rho (Y* - Y°)/dt` on the mass-weighted
+    /// one. Empty until [`Species::use_reaction_sources`] is called; while
+    /// it is empty each equation is handed `None`, exactly as before CHR-09.
+    reaction: Vec<DevBuf<Scalar>>,
 
     sk: SpeciesKernels,
     fldk: FieldKernels,
@@ -258,6 +273,7 @@ impl<'m> Species<'m> {
 
         let mut solved = Vec::new();
         let mut solved_names = Vec::new();
+        let mut d = Vec::new();
         for (name, c) in names.iter().zip(coeffs) {
             if name == inert {
                 continue;
@@ -266,6 +282,7 @@ impl<'m> Species<'m> {
             let st = ScalarTransport::new(gpu, hm, m, name, c.as_transport(nu, name)?, ctrl)?;
             solved.push(st);
             solved_names.push(name.clone());
+            d.push(c.d);
         }
 
         let nc = m.n_cells.max(1);
@@ -273,12 +290,14 @@ impl<'m> Species<'m> {
             m,
             solved,
             names: solved_names,
+            d,
             inert: GpuScalarField::zeros(gpu, m, inert)?,
             inert_name: inert.to_string(),
             sum: gpu.zeros(nc)?,
             err: gpu.zeros(nc)?,
             clip_ledger: Vec::new(),
             pre_clip: gpu.zeros(nc)?,
+            reaction: Vec::new(),
             sk: SpeciesKernels::new(gpu)?,
             fldk: FieldKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
@@ -337,6 +356,12 @@ impl<'m> Species<'m> {
 
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    /// The `i`-th solved species' molecular diffusivity `D`, m2/s (the
+    /// `SpeciesCoeffs::d` it was built with), or `None` past the set.
+    pub fn diffusivity(&self, i: usize) -> Option<Scalar> {
+        self.d.get(i).copied()
     }
 
     pub fn inert_name(&self) -> &str {
@@ -410,6 +435,38 @@ impl<'m> Species<'m> {
         self.clip_ledger.get(i)
     }
 
+    /// **SPEC-LIT §132.11.** Give every solved species a reaction source
+    /// `su`, zero until the split chemistry step of §132.5 fills it. The
+    /// buffers are allocated here, once, so the time loop still allocates
+    /// nothing (§81); a second call keeps the ones it has.
+    pub fn use_reaction_sources(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.reaction.is_empty() {
+            let nc = self.m.n_cells.max(1);
+            for _ in 0..self.solved.len() {
+                self.reaction.push(gpu.zeros(nc)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Does this set carry reaction sources (SPEC-LIT §132.11)?
+    pub fn has_reaction_sources(&self) -> bool {
+        !self.reaction.is_empty()
+    }
+
+    /// The reaction source `su` (132.10) this solved species was last
+    /// handed, per cell, per unit volume: `None` for the inert species, an
+    /// unknown name, or a set without reaction sources.
+    pub fn reaction_source(&self, name: &str) -> Option<&DevBuf<Scalar>> {
+        let i = self.names.iter().position(|n| n == name)?;
+        self.reaction.get(i)
+    }
+
+    /// Solved species `i`'s reaction source, for the split step to write.
+    pub(crate) fn reaction_source_mut(&mut self, i: usize) -> Option<&mut DevBuf<Scalar>> {
+        self.reaction.get_mut(i)
+    }
+
     /// Is this set integrated in `rho Y` (SPEC-LIT §86)?
     pub fn is_mass_weighted(&self) -> bool {
         self.solved.first().is_some_and(|st| st.is_mass_weighted())
@@ -479,6 +536,10 @@ impl<'m> Species<'m> {
     /// than quietly solving the equation it was not asked for.
     ///
     /// `None` is [`Species::correct`], and the two share this body.
+    ///
+    /// A set with reaction sources ([`Species::use_reaction_sources`],
+    /// SPEC-LIT §132.11) hands each solved species its own `su`, as the
+    /// split chemistry step left it; the inert remainder needs none.
     pub fn correct_with_density(
         &mut self,
         gpu: &Gpu,
@@ -493,7 +554,9 @@ impl<'m> Species<'m> {
 
         let mut perf = Vec::with_capacity(self.solved.len());
         for (i, st) in self.solved.iter_mut().enumerate() {
-            let p = st.correct_with_density(gpu, flow, nut, None, rho)?;
+            // SPEC-LIT §132.11: the reaction source, when the set has one;
+            // `None` otherwise, which is the call this line made before.
+            let p = st.correct_with_density(gpu, flow, nut, self.reaction.get(i), rho)?;
 
             // SPEC-LIT §86.9: what the clip is about to do, in kilograms.
             // Only reachable on the mass-weighted equation, because only

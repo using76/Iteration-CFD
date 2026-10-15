@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BINARIES, BINARY_NAMES, checkArgValue, getBinary, MODELS, PIPELINES, toolPolicy } from '@cfd/shared'
+import { BC_CATALOGUE, BINARIES, BINARY_NAMES, checkArgValue, getBinary, MODELS, PIPELINES, toolPolicy } from '@cfd/shared'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 
 const RUST = path.join(REPO_ROOT, 'rust')
@@ -248,5 +248,35 @@ describe('registry <-> rust sources', () => {
     }
     expect(p.flags.find((f) => f.name === '--arg')!.repeatable).toBe(true)
     expect(toolPolicy('run_start')).toBe('ask')
+  })
+})
+
+// docs/17 BC-22: the studio's boundary-condition catalogue is the one the solver generates. The JSON
+// and shared/bcCatalogue.data.ts come from rust/src/field/catalogue_json.rs; this block also reads the
+// two Rust sources directly, so a catalogue edit that was not regenerated fails here too.
+describe('bc catalogue <-> rust sources', () => {
+  const noComments = (text: string) => text.replace(/\/\/[^\n]*/g, '')
+
+  it('is the solver-generated docs/schema/bc-catalogue-1.json', () => {
+    const json = JSON.parse(read(path.join(REPO_ROOT, 'docs', 'schema', 'bc-catalogue-1.json')))
+    expect(BC_CATALOGUE).toEqual(json)
+  })
+
+  it('lists exactly IMPLEMENTED_BC_NAMES, in its order', () => {
+    const field = read(path.join(RUST, 'src', 'field.rs'))
+    const body = field.match(/pub const IMPLEMENTED_BC_NAMES: &\[&str\] = &\[([\s\S]*?)\];/)
+    expect(body, 'IMPLEMENTED_BC_NAMES in rust/src/field.rs').toBeTruthy()
+    const names = [...noComments(body![1]).matchAll(/"([^"]+)"/g)].map((m) => m[1])
+    expect(names.length).toBeGreaterThan(0)
+    expect(BC_CATALOGUE.implemented).toEqual(names)
+    expect(BC_CATALOGUE.counts.implemented).toBe(names.length)
+  })
+
+  it('has the rows of rust/src/field/catalogue.rs, in order, with their statuses', () => {
+    const src = noComments(read(path.join(RUST, 'src', 'field', 'catalogue.rs')))
+    const rows = [...src.matchAll(/Entry \{ family: "([^"]*)", name: "([^"]*)", status: Status::(\w+)/g)].map((m) => ({ family: m[1], name: m[2], status: m[3].toLowerCase() }))
+    expect(rows.length).toBeGreaterThan(0)
+    expect(BC_CATALOGUE.entries.map((e) => ({ family: e.family, name: e.name, status: e.status }))).toEqual(rows)
+    for (const st of ['implemented', 'alias', 'planned', 'owned', 'refused'] as const) expect(BC_CATALOGUE.counts[st], st).toBe(rows.filter((r) => r.status === st).length)
   })
 })

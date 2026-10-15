@@ -76,6 +76,15 @@ const KERNEL_UNITS: &[&str] = &["adapt.cu", "fv.cu", "solver.cu", "probe.cu", "l
 /// to assert an FMA had not happened when it had.
 const FMAD_OFF_UNITS: &[&str] = &["meshgeom.cu", "ale.cu", "amg.cu", "function1.cu", "dustparticle.cu"];
 
+/// Translation units the f64 build ALSO compiles with `-DOFGPU_SINGLE`, into
+/// `<STEM>_F32`, with the unit's own flags.
+///
+/// `amg.cu` is the one: the f32 preconditioner of an f64 solve (SPEC-LIT
+/// §141.12, AMG-06b) runs the V-cycle on float levels, and its kernels are
+/// this unit's kernels at `ofscalar = float`. Under the `single` feature the
+/// unit is already that build, and `<STEM>_F32` names `<STEM>`.
+const F32_TWIN_UNITS: &[&str] = &["amg.cu"];
+
 fn cuda_root() -> PathBuf {
     // CUDA_PATH is set by the Windows installer; CUDA_HOME and /usr/local/cuda
     // cover the Linux conventions.
@@ -355,6 +364,51 @@ fn main() {
                 "pub const {const_name}_FMAD: &[u8] = include_bytes!(r\"{}\");\n",
                 twin.display()
             ));
+        }
+
+        // The float twin. See F32_TWIN_UNITS: the same unit, the same
+        // flags, with -DOFGPU_SINGLE, emitted as `<STEM>_F32`. Under the
+        // single feature the unit itself is already that build, so the
+        // constant names it instead of compiling it twice.
+        if F32_TWIN_UNITS.contains(unit) {
+            if single {
+                generated.push_str(&format!("pub const {const_name}_F32: &[u8] = {const_name};\n"));
+            } else {
+                let twin = out_dir.join(format!("{stem}_f32.cubin"));
+                let mut cmd = Command::new(&nvcc);
+                cmd.arg("--cubin")
+                    .arg(format!("--gpu-architecture=sm_{arch}"))
+                    .arg("-std=c++17")
+                    .arg("-lineinfo")
+                    .args(if FMAD_OFF_UNITS.contains(unit) {
+                        &["-fmad=false"][..]
+                    } else {
+                        &[][..]
+                    })
+                    .arg("-Xcompiler=/wd4819")
+                    .arg("-I")
+                    .arg(&cuda_dir)
+                    .arg("-o")
+                    .arg(&twin)
+                    .arg(&src)
+                    .arg("-DOFGPU_SINGLE");
+                for (k, v) in &host_env {
+                    cmd.env(k, v);
+                }
+                let out = cmd
+                    .output()
+                    .unwrap_or_else(|e| panic!("failed to run {}: {e}", nvcc.display()));
+                if !out.status.success() {
+                    panic!(
+                        "nvcc failed on the float twin of {unit}\n--- stderr ---\n{}",
+                        String::from_utf8_lossy(&out.stderr),
+                    );
+                }
+                generated.push_str(&format!(
+                    "pub const {const_name}_F32: &[u8] = include_bytes!(r\"{}\");\n",
+                    twin.display()
+                ));
+            }
         }
     }
 

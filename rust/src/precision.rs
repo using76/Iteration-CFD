@@ -8,12 +8,14 @@
 //! The precision constants and stop rules of SPEC-LIT §118.4, the
 //! mixed-precision iterative refinement that carries a `single` build's
 //! Krylov solution and residual in double while the unchanged float method
-//! computes only a scaled correction.
+//! computes only a scaled correction; and the row classes of SPEC-LIT
+//! §118.14 with D-F32-1's round-off tolerance (118.14.1).
 //!
 //! ORIGINAL - the host-side arithmetic of the outer loop's targets and stop
-//! rules, exactly equations (118.4.4), (118.4.6) and (118.4.8) of §118.4.
-//! Pure host logic, no GPU, compiled in BOTH builds: in the f64 build
-//! nothing calls it, and the constants are unused there by design.
+//! rules, exactly equations (118.4.4), (118.4.6) and (118.4.8) of §118.4,
+//! and (118.14.1). Pure host logic, no GPU, compiled in BOTH builds: in the
+//! f64 build nothing calls the refinement rules, and `roundoff_tol` is the
+//! identity there by design.
 //!
 //! No GPL-licensed source was consulted.
 
@@ -105,6 +107,73 @@ pub fn ir_verdict(
     IrVerdict::Continue
 }
 
+/// `eps32 / eps64 = 2^-23 / 2^-52 = 2^29`: one f64 unit in the last place,
+/// counted in f32 units, is this many times smaller (SPEC-LIT §118.14).
+pub const ROUNDOFF_ULP_RATIO: f64 = 536_870_912.0;
+
+/// The cap of (118.14.1): `1e-5`, about 84 f32 units in the last place at 1
+/// (`1e-5 / 2^-23 = 83.9`).
+pub const ROUNDOFF_CAP: f64 = 1e-5;
+
+/// The f32 tolerance of a round-off-class (R) row, D-F32-1 (docs/17 section 11
+/// item 1, and section 5.1 rule 4), exactly (118.14.1):
+/// `tol32 = max(tol64, min(tol64 · 2^29, 1e-5))` - the same number of units
+/// in the last place as the f64 tolerance, capped at 84 f32 ulps, and never
+/// tighter than the f64 tolerance. It is computed in both builds so the rule
+/// itself is testable in either; [`roundoff_tol`] is what a row uses.
+pub fn tol32(tol64: f64) -> f64 {
+    tol64.max((tol64 * ROUNDOFF_ULP_RATIO).min(ROUNDOFF_CAP))
+}
+
+/// The tolerance an R row is judged at in THIS build: [`tol32`] under
+/// `single`, and `tol64` itself in the f64 build, so an f64 row is the same
+/// bits it was before it had a class.
+pub fn roundoff_tol(tol64: f64) -> f64 {
+    if cfg!(feature = "single") {
+        tol32(tol64)
+    } else {
+        tol64
+    }
+}
+
+/// The precision class of a gate row or test tolerance (docs/17 section 5.1 rule 4,
+/// SPEC-LIT §118.14). Only R moves between the builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowClass {
+    /// Physics: a discretisation, model or published band, the same in f32.
+    P,
+    /// An accumulated identity evaluated in f64, the same tolerance in f32.
+    A,
+    /// A round-off twin, held to [`roundoff_tol`] of its f64 tolerance.
+    R,
+    /// Discrete or bitwise: a count, an ordering, a yes/no, an exact zero.
+    D,
+}
+
+impl RowClass {
+    /// The four classes in the order a tally prints them.
+    pub const ALL: [RowClass; 4] = [RowClass::P, RowClass::A, RowClass::R, RowClass::D];
+
+    /// The class's letter.
+    pub fn letter(self) -> char {
+        match self {
+            RowClass::P => 'P',
+            RowClass::A => 'A',
+            RowClass::R => 'R',
+            RowClass::D => 'D',
+        }
+    }
+
+    /// The tolerance a row of this class with f64 tolerance `tol64` is
+    /// judged at in this build: [`roundoff_tol`] for R, `tol64` otherwise.
+    pub fn tol(self, tol64: f64) -> f64 {
+        match self {
+            RowClass::R => roundoff_tol(tol64),
+            RowClass::P | RowClass::A | RowClass::D => tol64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +204,22 @@ mod tests {
         assert_eq!(ir_verdict(0.6, Some(1.0), 0.1, 10, 0, 100, 1), Stagnated);
         assert_eq!(ir_verdict(0.5, Some(1.0), 0.1, 10, 0, 100, 1), Continue);
         assert_eq!(ir_verdict(1e-3, Some(1.0), 1e-9, 10, 0, 100, 12), OuterCapReached);
+    }
+
+    #[test]
+    fn tol32_is_the_same_ulps_capped_at_84_and_never_tighter() {
+        assert_eq!(ROUNDOFF_ULP_RATIO, 2f64.powi(29));
+        assert_eq!(tol32(1e-12), 1e-5);
+        assert_eq!(tol32(1e-14), 1e-14 * 536_870_912.0);
+        assert_eq!(tol32(0.0), 0.0);
+        assert_eq!(tol32(1e-5), 1e-5);
+        assert_eq!(tol32(1e-3), 1e-3);
+        // Only R moves; in the f64 build nothing does.
+        assert_eq!(RowClass::P.tol(1e-12), 1e-12);
+        assert_eq!(RowClass::D.tol(0.0), 0.0);
+        if !cfg!(feature = "single") {
+            assert_eq!(roundoff_tol(1e-12), 1e-12);
+            assert_eq!(RowClass::R.tol(1e-14), 1e-14);
+        }
     }
 }

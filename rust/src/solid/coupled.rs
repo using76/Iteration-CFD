@@ -1052,6 +1052,7 @@ mod tests {
             check_interval: 1,
             fixed_iters: false,
             report_residuals: true,
+            gamg: crate::io::case::GamgControls::default(),
         }
     }
 
@@ -1737,6 +1738,7 @@ mod tests {
             check_interval: 1,
             fixed_iters: false,
             report_residuals: true,
+            gamg: crate::io::case::GamgControls::default(),
         }
     }
 

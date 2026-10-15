@@ -1502,8 +1502,9 @@ that no reader asks for are listed as owed rather than hidden.
 
 | setting | honoured | aliases (same thing) | refused by name | `-permissive` runs | proof |
 |---|---|---|---|---|---|
-| `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2) | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` on every equation: `solver::solve` refuses it naming AMGX (§8.3); on the pressure equation `PbicgstabBackend::setup` refuses it under this rule — **was silent** there (one stderr line, then PBiCGStab); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_is_refused_with_the_reason`; `pressure::tests::gamg_on_the_pressure_equation_is_refused_by_name_and_names_amgx`; `pressure::tests::setup_refuses_gamg_on_the_pressure_equation_before_touching_the_device`; the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
-| `solvers/<var>/preconditioner` (`Preconditioner::from_name`) | `none`, `diagonal`, `DIC`, `DILU` | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG`, `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test |
+| `solvers/<var>/solver` (`src/io/case.rs`, `LinearSolverKind::from_name`) | `PBiCGStab`; `PCG` (symmetric matrices only, checked at solve time, §8.2); `GAMG` on a pressure equation solved by `PbicgstabBackend`, with the sub-entries of §141.7 | `BiCGStab`, `PBiCCCG`, empty → PBiCGStab; `CG`, `PPCG` → PCG | `GAMG` where no hierarchy is built: every equation outside `PbicgstabBackend` (§141.7), refused by `solver::solve` naming `set_gamg` (§141.5); `smoothSolver`, `PBiCG`, `PPCR`, anything else | PBiCGStab | `io::case::tests::an_unimplemented_solver_is_an_error_that_names_it`; `solver::tests::gamg_without_a_hierarchy_is_refused_by_name`; `pressure::tests::gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix`; `tests/gamg_case.rs` (§141.7); the `solvers/p/solver` knob of `ofgpu-buoyant`'s pair test |
+| `solvers/<var>/preconditioner` (`Preconditioner::from_name`), a bare word or OpenFOAM's `preconditioner { preconditioner <name>; ... }` sub-dictionary (§141.7; the sub-dictionary **was silent**: read by nobody, the default kept) | `none`, `diagonal`, `DIC`, `DILU`; `GAMG` on a pressure equation solved by `PbicgstabBackend` (§141.7) | `no`, empty → none; `diag`, `Jacobi` → diagonal; `FDIC` → DIC | `GAMG` where no hierarchy is built (§141.5's refusal naming `set_gamg`), `GaussSeidel`, anything else; `DIC` on an asymmetric matrix (names `DILU`); `DIC`/`DILU` on a mesh-free workspace | diagonal (Jacobi) | `io::case::tests::dic_and_dilu_are_honoured_rather_than_silently_downgraded`; `solver::tests::pcg_on_an_asymmetric_matrix_is_an_error`; `solver::tests::dic_on_an_asymmetric_matrix_is_an_error_that_names_dilu`; the `solvers/p/preconditioner` knob of `ofgpu-buoyant`'s pair test; `tests/gamg_case.rs` (§141.7) |
+| GAMG sub-entries `smoother`, `nPreSweeps`, `nPostSweeps`, `nCellsInCoarsestLevel`, `maxLevels`, `cacheAgglomeration`, `precision`, `mergeLevels`, `agglomerator` (`src/io/case.rs`, `read_gamg_controls`; JSONC `numerics.solvers[].gamg`, §141.7, §141.12) | `Chebyshev`, `l1Jacobi`, `Jacobi`; whole-number counts (sweeps `>= 0` with a non-zero sum, the other two `>= 1`); a Switch; `precision` `native` or `single` (dictionary route only); `mergeLevels 1` | — | `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DIC`, `DILU`, `FDIC` and anything else as `smoother`; `mergeLevels` other than 1; every `agglomerator`; a malformed count or switch, a `precision` other than `native`/`single` (not downgradable); in JSONC `mergeLevels`/`agglomerator`/`precision` as unknown keys and a `gamg` block on a rule naming no GAMG | Chebyshev; `mergeLevels 1`; the native aggregation | `tests/gamg_case.rs`: `every_gamg_key_reaches_the_solve` (one §13.4.1 pair per key), `unsupported_gamg_values_are_refused_by_name_with_the_alternative`; `tests/amg_single.rs`: `the_gamg_precision_key_reaches_the_solve` (§141.12.1); `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` |
 | CHT `numerics.solver`, `numerics.preconditioner` (`src/io/case_cht.rs`) | `PCG`, `PBiCGStab`; `DIC`, `DILU`, `diagonal`, `none` | none | `GAMG`, anything else | PCG; DIC | `io::case_cht::tests::a_preconditioner_of_none_lowers_to_none` — `none` lowered to Jacobi, **was silent**; `io::case_cht::tests::two_cases_differing_only_in_the_preconditioner_produce_different_output` |
 | `ddtSchemes/default` (`src/timescheme.rs`, `DdtScheme::parse`) | `steadyState`, `Euler`, `backward`, `CrankNicolson <θ>` with θ in (0, 1], `localEuler`; a `bounded` prefix is accepted and ignored (documented) | `euler`; `LocalEuler`; `CrankNicholson` | `CoEuler`, `SLTS`, bare `bounded` (recognised, not implemented); anything else; per equation: `CrankNicolson` under implicit relaxation, `localEuler`/`CrankNicolson` on `T`, a steady scheme under DES; in `ofgpu-vof` everything but `Euler` — an UNPARSEABLE name **was silent** there (folded into Euler) | Euler (OpenFOAM route, `read_fv_schemes`); the JSONC route's `numerics.ddt` refusal is NOT downgradable — a stated asymmetry | `timescheme::tests`; `io::case::tests::ddt_schemes_reaches_the_controls_in_full`; `vof::tests::a_ddt_scheme_that_is_not_euler_is_refused_by_name_even_when_unparseable` |
 | `divSchemes/<key>` (`src/io/schemes.rs`, `parse_div`) | the fifteen names of `DIV_AVAILABLE`, `Gauss` integration only, `bounded` prefix honoured (refused in `ofgpu-vof`, §20.3); coefficients `limitedLinear`/`Sweby <β>` in [1, 2] (§7), `Gamma <β_m>` in [0.1, 0.5] (§11.6), `blended`/`linearUpwindBlended <γ>` in [0, 1] (§11.5); `linearUpwind grad(U)`'s trailing word is accepted and ignored (DESIGN, the field's own `gradSchemes` entry is used) | case variants (`quick`, `vanleer`, `minmod`, `superbee`, `muscl`, `gamma`, `sweby`) | the nineteen names of `DIV_KNOWN_UNIMPLEMENTED` (recognised, not implemented) and anything else; a non-`Gauss` integration; a missing coefficient; a coefficient outside its range — **was silent** (clamped in `fv.rs` with no message) | `Gauss upwind`; for a coefficient, the clamped value | `io::schemes::tests` (`every_limiter_of_section_7_is_reachable_by_name`, `an_unimplemented_scheme_is_an_error_naming_it_and_the_menu`, `a_scheme_coefficient_outside_its_range_is_refused_by_name`, `permissive_takes_the_clamped_coefficient`); every driver's `divSchemes` knobs |
@@ -1519,8 +1520,10 @@ that no reader asks for are listed as owed rather than hidden.
 **Owed, and listed so nobody rediscovers them.** (i) `controlDict/writeFormat`, `writeControl`,
 `writeInterval`, `purgeWrite` are read by no driver; the writer is ASCII at `writePrecision`, and
 `cases/plumeB` writes `writeFormat ascii`, which is what it gets. (ii) `solvers/<var>Final` and the
-GAMG/smoothSolver sub-entries (`smoother`, `nSweeps`, `nPreSweeps`, `nPostSweeps`, `cacheAgglomeration`,
-`agglomerator`, `mergeLevels`, `nCellsInCoarsestLevel`) are read by nobody. (iii) `FoamDict::scalar`,
+smoothSolver sub-entries (`smoother`, `nSweeps`) are read by nobody, and so are OpenFOAM's GAMG entries
+outside §141.7's list (`nFinestSweeps`, `nVcycles`, `directSolveCoarsest`, `scaleCorrection`,
+`interpolateCorrection`, `processorAgglomerator`); the GAMG sub-entries §141.7 names are read, and
+refused where unsupported, since AMG-04b. (iii) `FoamDict::scalar`,
 `::label` and `::bool` return the caller's default on a token they cannot read (`tolerance banana;`,
 `turbulence maybe;`), which is the same defect class in a non-enumerated setting; the
 contract-conformant shape exists (`ofgpu-vof`'s `number_entry`) and applying it everywhere is a unit of
@@ -2414,8 +2417,11 @@ hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
 `p0` only:
 
 ```
-rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
+rho = p0 / (R_s T),   R_s = R / W        (one gas of constant W; a mixture: (133.20))
 ```
+
+A reacting gas carries `W_mix(Y)`: (133.3)'s equation of state, built as
+(133.20) in §133.10.
 
 **Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`). It is the binary
 that builds a `GasState` and calls `Energy::update_target_divergence`, and
@@ -2440,6 +2446,9 @@ Q   = ∇·(k_eff ∇T) + whatever §18's registry holds
 
 Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
 
+With a mixture this constraint is (133.4), with the molar-change term and the
+mixture's own `γ`; what is built is (133.21) of §133.10.
+
 **All three terms of `Q`, in BOTH places `Q` is used** (this field, and §25.2's
 `p0` ODE). The CONDUCTION term was implemented late — the crate ran for several
 rounds with `Q` = the §18 registry alone, an omission that was documented but
@@ -2456,6 +2465,9 @@ Integrate the constraint over the domain. Boundary volume flux `Φ_b`:
 dp0/dt = (γ / V_dom) [ ((γ−1)/γ) ∫ Q dV  −  p0 Φ_b ]      (sealed: Φ_b = 0)
 open domain:  p0 = const,  dp0/dt = 0
 ```
+
+With a mixture the sealed ODE is (133.22) of §133.10, which reduces to this
+one for a constant `W`.
 
 *Test (decisive)*: a sealed box with a known heater power P raises p0 at
 exactly `dp0/dt = (γ−1) P / V` — analytic, no tolerance excuses.
@@ -23028,7 +23040,8 @@ energy-balance gap. Here neither half is annihilated, because `Y` is not `T`
 and there is no ideal-gas identity to kill anything.
 
 `S` is `sum_c S_i,P V_P`, the §18 volumetric source term summed over the
-domain, and is zero unless a case names one. `sum_c Y_P R_P` is available to
+domain, and is zero unless a case names one or the split chemistry step of
+§132.11 fills the species' `su` (132.10). `sum_c Y_P R_P` is available to
 every mass-weighted run beside the budget it explains, with `R_P`'s L1 norm and
 worst cell. The record's first open candidate — *"the `d(rho)/dt` half of the
 difference above, which `bounded` does not touch"* — is that first term of
@@ -38675,6 +38688,7 @@ subsections, by unit:
 - 118.8 — moving geometry in f64 on the device (F32-11)
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
+- 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13 sections 1-25, F32-14 sections 26-65)
 
 and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -40288,6 +40302,199 @@ No GPL-licensed source was consulted.
 
 ---
 
+### 118.13 The opt-in f32 GAMG preconditioner of an f64 solve
+
+The f64 build has one place where it chooses float on purpose: the GAMG hierarchy's device copy under
+the case key `precision single` (§141.12, AMG-06b). It is off by default. What stays in double there
+is what the rest of this section keeps in double:
+- the Krylov iteration and its vectors, which are the solve's;
+- the residual of a stationary cycle, (141.46);
+- the coarsest factor, which is `Acc` in both builds (§141.4);
+- the aggregation and every level's Galerkin sum, which are made on the host in f64 and rounded once
+  to float on upload.
+
+What is float is the cycle: the levels' coefficients, the smoothers' diagonals and Chebyshev
+coefficients, the per-level vectors and level 0's operator `fl32(A)`, (141.45). That is the role
+§118.4 gives the float inner method, here inside a double solve that needs no outer refinement
+loop, because the outer solve already iterates in double. Under `--features single` the key is a
+no-op: the hierarchy is float there already, and §118.4 refines the solve around it (§141.9).
+
+### 118.14 Row classes in `ofgpu-validate` - every section, and the round-off tolerance
+
+Every row a gate or a test takes has a precision class (docs/17 §5.1 rule 4): **P**, a
+physics, discretisation or published band; **A**, an accumulated identity evaluated in f64;
+**R**, a round-off twin, a quantity that is zero or equal in exact arithmetic and is measured at
+the build's round-off; **D**, discrete or bitwise, a count, an ordering, a yes/no or an exact
+zero. P, A and D rows are held to their f64 tolerance in both builds. An R row is held to
+
+```
+tol32 = max(tol64, min(tol64 · 2^29, 1e-5))                                   (118.14.1)
+```
+
+under `single`, and to `tol64` in the f64 build. This is decision D-F32-1 of docs/17 §11 (item 1),
+the same-ulps rule. `2^29 = eps32/eps64 = 2^-23/2^-52` is the ratio of the unit round-offs of IEEE
+754 binary32 and binary64 (Goldberg 1991, "What every computer scientist should know about
+floating-point arithmetic", section "Relative Error and Ulps", open copy
+https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html), so `tol64 · 2^29` is the same
+count of units in the last place in f32. The cap `1e-5` is about 84 f32 ulps at 1
+(`1e-5/2^-23 = 83.9`), the `1e-5` that §112.4 read as "right to single precision". The outer `max`
+keeps an R row from ever being tighter than in f64. For `tol64 = 1e-12` it gives `1e-5`, for
+`1e-14` `5.37e-6`, for `1e-15` `5.37e-7`, and for `tol64 = 0` it gives `0`. `src/precision.rs`
+holds it as `tol32` (computed in both builds, so the rule is tested in either), `roundoff_tol`
+(`tol32` under `single`, the identity in f64) and `RowClass` (F32-13).
+
+**The mechanics.** `Checks` in `src/bin/validate.rs` takes a classed row through `check_p`,
+`check_a`, `check_d` or `check_roundoff(what, err, tol64)`; `require` is class D. Each is tallied
+once, and the summary prints `row classes (docs/17 5.1.4, SPEC-LIT 118.14): N P, N A, N R, N D;
+...; N rows carry no class yet`. A plain `check` is the "no class yet" count. After F32-14 no
+section row is taken through it (every run reports 0 there), and a row a later unit adds carries
+its class from birth (docs/17 §5.1 rule 4). Two more rules make "every row is reported" true
+under `single`:
+
+1. **A NaN is never dropped.** `f64::max` and `f32::max` return the other operand when one is NaN,
+   so the sup norms `max_abs`, `max_abs_diff`, `max_rel_diff`, `max_abs_diff_vec3` and
+   `max_abs_diff_tensor` folded a NaN away and a row could pass on one (F32-07's note). They fold
+   with `nan_max` now, which is `m.max(v)` bit for bit when neither operand is NaN, and `rel`
+   returns NaN on a NaN scale. `check` already failed a non-finite `err`. Local
+   `worst = worst.max(..)` loops inside individual check functions are not swept by this unit.
+2. **Under `single` a section function that stops is a row, not the end of the run.** Each
+   section function's `Result` goes through `Checks::ran` (sections 1-25 from F32-13, 26-65 from
+   F32-14). Under `single` an `Err` is one
+   failed class D row, "`<function>` ran to its end", with the error as a note, and the run goes
+   on; in the f64 build the `Err` aborts the run exactly as before. Inside §20's static drop
+   (section 11) a step that stops under `single` leaves that block's three rows failed on a NaN,
+   and the section's later blocks still run.
+
+**What was measured** (2026-10-15, RTX 5070 Ti, sm_120, `ofgpu-validate -sections 1-25 -json`).
+f64 build: 453/453. `tools/f64_identity.py rows` against the run before this unit gives
+**ROWS IDENTICAL 493** (453 checks and 40 skip rows). The f64 class line is 52 P, 13 A, 205 R,
+183 D (the 183 D include the four §69 audit rows), with 0 rows unclassified. `single` build, 41 s:
+**441/459**, class line 52 P, 19 A, 205 R, 183 D, 0 unclassified. Six A rows exist only under
+`single`: section 6's refinement rows of §118.4 and §118.12. Before this unit the `single` run
+stopped in section 11 (at the static drop's step, below) after 274 rows, 130 of them failing. 124 of
+those 130 were R rows at f64 tolerances of `1e-14 .. 1e-8` that pass at (118.14.1); the other six
+still fail and are in the table.
+
+| # | section | f64 | single | single misses (class, err against the tolerance) |
+|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 71/71 | |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 36/36 | |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 35/35 | |
+| 4 | the adapt | 34/34 | 34/34 | |
+| 5 | 2-D block with empty front and back | 37/37 | 37/37 | |
+| 6 | linear solvers | 6/6 | 10/12 | cuFFT == iterative, sealed box (R): NaN against 1e-5; cuFFT refined == iterative refined, sealed box (A): NaN against 1e-10 |
+| 7 | method of manufactured solutions | 6/6 | 6/6 | |
+| 8 | observed order (SPEC-LIT 94) | 10/10 | 10/10 | |
+| 9 | buoyancy | 12/12 | 8/12 | sealed box, uniform T: flux stays zero (R) 2.03e-4 and remains at rest (R) 2.19e-4 against 1e-5; T == T_ref gives no body force (D) 5.20e-9 against 0; the projected flux is solenoidal (R) 1.31e-5 against 1e-5 |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | 13/14 | G_b magnitude, stable stratification (R): 1.07e-5 against 1e-5 |
+| 11 | volume of fluid | 16/16 | 13/16 | the static drop's Laplace jump (P), spurious currents not accelerating (P) and small (P): NaN, the step stopped |
+| 12-16 | msh/cut-cell, low-Mach p0, wall treatment, Werner-Wengle, cyclic pair | 31/31 | 31/31 | |
+| 17 | the thermal wall-function gate | 27/27 | 25/27 | drag_kin balances g_x V, ny = 200 (R) 1.46e-5, and tau_w / force balance, ny = 200 (R) 1.46e-5, against 1e-5 |
+| 18-22 | Launder-Sharma, the replays and the thermostat | 43/43 | 43/43 | |
+| 23 | Kays-Crawford Pr_t | 10/10 | 6/10 | Pe_t -> inf to O(Pe_t^-2) (P) 596 against 0.2; the O(Pe_t^-2) coefficient (P) 0.154 against 1e-6; monotone in Pe_t (D); the rearrangement against the literature form (R) 2.14e-4 against 1e-5 |
+| 24 | realizable and RNG k-epsilon | 39/39 | 37/39 | kEpsilon's live homogeneous-shear fixed point (P) 9.7e-3 and P/eps (P) 1.93e-2 against 5e-3 |
+| 25 | the output block, fp16 voxels | 26/26 | 26/26 | |
+
+Each miss is a finding, recorded and not hidden; no tolerance moved. The causes, as far as this
+unit traced them:
+- Section 6: the sealed-box float answer is not finite under `single`. Before this unit the float
+  row read `0` because `max_abs_diff` dropped the NaN. It is the one row that turned from ok to
+  FAIL by rule 1.
+- Section 9: the sealed box keeps the f32 projection's hydrostatic cancellation at about `2e-4`
+  of the body-force scale. The exact-zero row interpolates a constant as `w T + (1 - w) T`,
+  which is not `T` in f32.
+- Sections 10 and 17 compute in `Scalar`: the gradient of a linear field, and the drag summed
+  over 200 wall faces.
+- Section 11: the static drop's step diverges under `single` (alpha Courant `1.7e18`).
+- Section 23 evaluates the closed form in `Scalar`. Its large-Pe_t cancellation, which §37.2's
+  rearrangement exists to avoid, is at f32 scale there.
+- Section 24: kEpsilon's live run settles about `1e-2` from its fixed point under `single`.
+
+A cure for each changes numerics (the library's arithmetic or the validation's own) and is not
+built here.
+
+**Sections 26-65 (F32-14).** docs/17's row for F32-14 names sections 26-51, the run order before
+tranche 17. The run has 65 sections now: tranche 17 added Gates 100-C and 100-D, 105-A..C, 94-D,
+110-A..C, CMP-B, 119-A, 145-A, 78-D's measured leg and 132-L after them. F32-14 classes every
+row of sections 26-65: 269 row sites in `src/bin/validate.rs` and 7 in
+`src/bin/validate_gates/` (`martin_moyce.rs`, `splash.rs`, `blasius_plate.rs`). Every section
+function of 26-65 goes through `Checks::ran`. The class of a row follows the four definitions
+above, with the precedents of sections 1-25:
+- A tolerance of `0` is D, except a one-sided physics shortfall such as `1.9 - p`, which is P.
+- An eps-scaled tolerance `k Scalar::EPSILON` becomes R at `k f64::EPSILON`. The two are the same
+  number in the f64 build, and under `single` (118.14.1) gives `k f32::EPSILON` exactly.
+- A hand-coded `if single { 1e-5 } else { tol64 }` is (118.14.1) itself, so it became R at
+  `tol64`: CMP-B's two symmetry rows (`1e-6`) and 145-A's volume row (`1e-12`).
+- A closed form against a printed constant is P when its tolerance is at least `1e-6` and R when
+  it is tighter. Below `1e-6` an f32 evaluation cannot resolve the digits, as in 49-C's view
+  factors (`1e-8`) and 100-B's piece jump at 1000 K (`1e-8`).
+- Gate 105-A's three space-conservation rows are A: the swept volumes are f64 on the device
+  (§118.8). Its uniform-flow row is R, as §118.8 says.
+- The parcel ledgers are R, as §118.9 says, and so are 100-A's two Kirchhoff rows. Those are f64
+  arithmetic on the f32 temperature field.
+
+A gate's own verdict line, the §99 report, keeps its f64 condition under `single`. Under `single`
+98-B, 98-C, 100-A and 100-B can print a MISSES verdict while their R rows pass at tol32. Making
+the verdicts read the class tolerance is a follow-up.
+
+**What was measured** (2026-10-15, RTX 5070 Ti, sm_120). The card was shared with lanes S and M,
+and one long run of theirs doubled the times for an hour. Each `-sections` command was capped at
+600 s, and a section over the cap was measured twice before it was called NOT RUN.
+- **f64 build:** 595 rows in sections 26-65, 591 ok. The four misses are Gate 95-A's, the same
+  as before. The class line for these sections is 137 P, 6 A, 153 R, 299 D, with 0 unclassified
+  (the four §69 audit rows of each run are not counted here).
+- **f64 identity:** each section's rows were compared with a run of the binary before this unit
+  (`f64-before`, a copy of HEAD 1a8b9ba's exe), every field but `seq`. Every row of 39 of the 40
+  sections is identical. For Gate 94-D the 600-s cap stopped the before run at 4 rows, and those
+  4 are identical in text.
+- **`single` build:** 416 of 473 rows pass in the 34 sections that ran, with 0 unclassified. 59
+  R rows pass at tol32 with an error above their tol64.
+- **Gates the row names:** 95-E and 105-A pass every row at their f64 bands, and so does 110-C
+  (16 of 16). 95-D's three stress rows pass at `0.01`, but its three "outer loop converged" rows
+  (D) fail, so 95-D is MISSED. 105-B is MISSED. 94-D is NOT RUN under `single` (Re = 100's four
+  rows pass at their f64 bands). 105-C is NOT RUN in either build, because the Turek-Hron meshes
+  of `cases/turekHron` are not generated in this tree.
+
+| # | section | f64 | single | single misses (class, err against the tolerance) |
+|---|---|---|---|---|
+| 26 | conjugate heat transfer | 16/16 | 15/16 | S47.12 Gate 2, k_solid -> inf (P): 3.66e-4 against 8.0e-5 |
+| 27 | Gate 93-B | 6/6 | 3/6 | leg B: no global tolerance in [1e-8, 1e-14] gives each region 1e-8 (D), so the series slab q (R) reads 1.0 and T_i (R) reads 4.75 against 1e-5 |
+| 28 | Gate 93-A | 8/8 | 8/8 | |
+| 29 | the conjugate fluid/solid interface | 48/48 | NOT RUN | over 600 s twice; at the cap 19 of the 33 rows taken failed: Gate 59-B's series and balance rows (R) 8.5e-4 .. 1.0e-1, 59-A, Gate 5 (P) |
+| 30 | surface-to-surface radiation | 47/47 | 45/47 | S50.4 fr in [0,1) (D); S50.2 the Neumann sweep count matches its table (D) |
+| 31 | fan curves, porous jumps, psychrometrics, metrics | 83/83 | 81/83 | S52.12 the lumped triple's flow rate (R) 2.74e-5; S52.5 Fritsch-Carlson monotone (R) 6.10e-5; both against 1e-5 |
+| 32 | Spalart-Allmaras, DES | 43/43 | 39/43 | S56.4 at chi = 1e14 (R) 9.0 against 1e-5; S57.3 tanh saturation derived == bisected (D); S57.3 f_d zero threshold (P) 7.38e-2 against 1e-5; S57.4 one ulp on the SA background (D) |
+| 33 | gamma-Re_theta | 20/20 | 19/20 | S88 the 596 breakpoint, not round-off (D) |
+| 34 | the 2015 gamma model | 24/24 | 21/24 | three S90.11 limiter and monotonicity rows (D) |
+| 35-37 | parcels, deposition, two-way coupling | 36/36 | 36/36 | |
+| 38 | droplet evaporation | 12/12 | 9/12 | 76-A d^2 line (P) 1.55e-2 against 5e-3; 76-A steady temperature (P) 5.62e-3 against 1e-3; 76-B the kernel's balance (R) 3.36e-4 against 1e-5 |
+| 39 | the vapour into the gas | 14/14 | 13/14 | 77-B the energy ledger (R) 1.85e-4 against 1e-5 |
+| 40 | droplet-wall impact, S38.9, S39.7 | 45/45 | 42/45 | 78-A the splash threshold (D); Buckingham-Reiner quadrature (P) 1.22e-4 against 1e-5; regularised HerschelBulkley plug (P) 0.465 against 0.05 |
+| 41 | Gate 95-D | 6/6 | 3/6 | outer loop converged at nr = 12, 24, 48 (D) |
+| 42 | Gate 95-E | 3/3 | 3/3 | |
+| 43 | Gate 95-A | 17/21 | 3/21 | the block-coupled loop converges on no mesh (D, 12 rows); the orders and tip rows (P) up to 1.4e16 |
+| 44 | Gate 95-G | 24/24 | NOT RUN | over 600 s twice: every outer loop runs its 2000 passes; the ring and LE1 bands that were reached pass (2.68e-3 against 0.01, 2.16e-3 against 0.03) |
+| 45-47 | imported region, region layout, 98-A | 9/9 | 9/9 | |
+| 48 | Gate 98-B | 4/4 | 3/4 | the Newton ratio over 2C (P) 6.33e6 against 1, measured at the f32 round-off floor |
+| 49 | Gate 98-C | 5/5 | 2/5 | (S98.10) re-radiating walls (R) 5.77e-2; black closure (R) 5.02e-4; the three relaxations converge in 4000 iterations (D) |
+| 50 | Gate 100-B | 5/5 | 4/5 | silicon, every knot to the bit (D) |
+| 51 | Gate 100-A | 4/4 | 0/1 | stopped: the outer loop's `1e-13` relative change is not reached in 60 passes (last 3.1e-7) |
+| 52 | Gate 100-C | 16/16 | NOT RUN | over 600 s twice: each channel runs its 4000 iterations unconverged (D); balance (R) 1.68e-4 and 1.86e-4 at ny = 16, 32 |
+| 53 | Gate 100-D | 11/11 | 0/1 | stopped: T reaches 5.2e5 K, outside water's mu(T) curve |
+| 54 | Gate 105-A | 10/10 | 10/10 | |
+| 55 | Gate 105-B | 14/14 | 8/14 | the piston's uniform state (R) 1.58e-2 .. 6.01e-2 against 1e-5; backward observed order (P) 0.737 against 0.1; the extrapolation moves toward the exact solution (D) |
+| 56 | Gate 105-C | skip | skip | NOT RUN in both builds: the meshes are not generated |
+| 57 | Gate 94-D | 8/8 | NOT RUN | over 600 s; Re = 100's four rows pass |
+| 58-60 | Gates 110-A..C | 17/17 | 17/17 | 110-A has no rows, because its fetched keys are absent |
+| 61 | Gate CMP-B | 13/13 | NOT RUN | over 600 s twice; Ra = 1e3 and 1e4: Nu passes, w (R) 5.07e-3 and 1.17e-3, s (R) 1.64e-3 and 8.61e-4 against 1e-5 |
+| 62-65 | 119-A, 145-A, 78-D leg, 132-L | 23/23 | 23/23 | |
+
+Each miss is a finding, recorded and not hidden; no tolerance moved. Most misses have one of two
+causes. Some are an iteration that stops short of its f64 criterion under `single`: 59-B, 95-A,
+95-D, 95-G, 98-C, 100-A, 100-C and CMP-B. The others evaluate a closed form or a ledger in
+`Scalar`: S52, S56.4, S57.3, 76, 77-B and Buckingham-Reiner. 100-D and 105-B diverge or drift
+under `single`. A cure changes numerics or a criterion and is not built here.
+
 ## 119. The true wedge: a rotational self-couple
 
 An axisymmetric case is solved on a wedge one cell thick in the
@@ -40922,6 +41129,18 @@ holds every refused entry's reason to the note its refusal prints, and
 `field::tests::the_spec_lit_120_table_is_the_catalogue` holds the table below
 to `src/field/catalogue.rs`, which is this table as data - one `Entry` per
 row, row for row.
+
+The studio reads the same table (docs/17 BC-22). `src/field/catalogue_json.rs`
+writes `IMPLEMENTED_BC_NAMES` and every `Entry` - family, name, status with its
+alias target, unit or refusal phrase, field, extending units and probes - as
+`docs/schema/bc-catalogue-1.json` and as `gui/shared/src/bcCatalogue.data.ts`;
+`field::catalogue_json::the_shipped_bc_catalogue_is_the_generated_one` rewrites
+both when the catalogue changes and fails once, so the regenerated pair is
+committed with the change, and the gui's `registry/sync.test.ts` holds its copy
+to the JSON and to the two Rust sources. The catalogue lists no per-name entry
+keys: the studio's picker offers a foam case directory every implemented name
+without entries, and a JSONC case the `ScalarBc`, `VectorBc` and `TurbBc`
+variants of `docs/schema/case-1.json` with their required members.
 
 | family | name | status | unit or target | extended by | note |
 |---|---|---|---|---|---|
@@ -44164,7 +44383,8 @@ error, inside CMP-08's 1 % bar (0.410 % at 288.15 K and 0.014 % at 273.15 K).
 
 `p_op` is stated by the case (`pOperating` / `physics.compressible.pOperating`,
 CMP-14), with no default: a compressible case that omits it is refused by name. A
-written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well.
+written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well;
+it is not (§125.8).
 
 ### 122.3 Floors, bounds and what is never clipped
 
@@ -44186,7 +44406,8 @@ written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as
 
 v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), laminar or
 Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
-radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
+radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15; the list
+is in §125.8).
 
 ### 122.5 The device twins of the gas state (CMP-08)
 
@@ -44283,7 +44504,7 @@ field (§122.2) and `T` is in kelvin.
 
 * `supersonicInlet` (§126.2) lowers `U`, `p` and `T` to `fixedValue` at that state.
 * `farfield` (§126.6) lowers all three to `characteristicFarfield`, with the free stream
-  as each field's `value`. CMP-18 registers and implements the kind.
+  as each field's `value`. CMP-18 implements the kind (§126.10).
 
 Both kinds are refused in a case without `physics.compressible`, without a
 `freestream`, or with a `U`, `p` or `T` entry of their own, because the preset decides
@@ -45147,12 +45368,102 @@ No driver or validate code changed. No existing kernel changed: the four kernels
 appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
 both builds.
 
+### 125.8 The driver as built (CMP-15)
+
+`No GPL-licensed source was consulted.` `rust/src/bin/compressible.rs` is `ofgpu-compressible`
+(a `[[bin]]` of its own). It reads a case in either format, refuses by name what §122.4
+leaves out, builds `Compressible` (§125.6) and calls `step` once per time step or SIMPLE
+iteration. It adds no numerics. The case's settings reach the controls through one
+function, `driver_controls`, which both `run` and the pair test call (§13.4.1).
+
+**The run mode is the case's.** `ddtSchemes default` (JSONC `numerics.ddt`) `steadyState`
+or `localEuler` makes a steady run, and `Euler` or `backward` a transient one at the
+case's `deltaT`. The number of steps is the case's `endTime/deltaT`
+(`TurbulenceControls::n_outer_iterations`, as both readers lower it), and `-iters N`
+overrides it. A steady run stops early when `residualControl` (`U`, `p`, `T`; OpenFOAM
+`SIMPLE/residualControl` only, because JSONC has no such key; the energy bar may be
+spelled `T`, `h` or `e`) is met on the initial residuals (§125.6). A bar the case does not
+name is 0 and is never met, and the banner says that the run will take every iteration.
+
+**What is read, and from where** (both formats through `common::CaseNumerics`):
+
+| control | setting |
+|---|---|
+| `momentum.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,U)`, `grad(U)`, `laplacianSchemes`/`snGradSchemes` `default` |
+| `energy.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,T)`, `grad(T)`, the same `default` |
+| `pressure.retarded` | `div(phid,p)`: `Gauss upwind` (and its absence) is `Retarded::Upwind`; a §7 limited scheme is `Retarded::Limited`, §124.1's `limitedRetarded`; any other scheme is refused by name |
+| `u_solver`, `p_solver`, `t_solver` | `solvers/U`, `solvers/p`, `solvers/T` (JSONC `numerics.solvers`) |
+| `u_relax`, `t_relax`, `p_relax` | `relaxationFactors` `U`, `T` (equations) and `p` (fields); JSONC `numerics.relaxation` |
+| `n_outer`, `n_corr`, `pressure.n_non_orth_corr` | `nOuterCorrectors`, `nCorrectors`, `nNonOrthogonalCorrectors` |
+| `lts.cfl` | `maxCo` (§125.7) |
+| `momentum.g`, `energy.g` | `constant/g` (JSONC `physics.gravity`) |
+| `gas` | `constant/thermophysicalProperties` or `physics.compressible` (§122.6) |
+
+`viscousWork` stays on, the §125.1 default when `mu > 0`; no case key exists for it yet. A
+`bounded` prefix on `div(phi,U)` or `div(phi,T)` is refused by name: both equations are
+conservative on the mass flux, and `div(mdot)` is `-ddt(rho)` there, not a convergence
+error. Under `-permissive` the scheme runs without the prefix and says so.
+
+**Refused by name** (§122.4): `-np` and `-parallel`, an mpiexec environment (`PMI_RANK`,
+`PMI_SIZE`) and a `processor*` directory (decomposition); the JSONC `motion` block and a
+`constant/dynamicMeshDict` other than `staticFvMesh` (motion); JSONC `sources` and the files
+`fvOptions`, `fvModels` and `fvConstraints` under `constant/` or `system/` (sources); every
+turbulence model but laminar; `physics.buoyancy` `boussinesq` (this solver carries the full
+density); a non-Newtonian rheology; a case with no gas. *DESIGN* (CMP-15): until CMP-25 builds
+(127.1), Spalart-Allmaras is refused too, with a message that names CMP-25, because the solver
+has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A boundary
+condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
+`mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
+as set up is the whole condition (§126.7). Every other type is refused with the field, the
+patch and the type. CMP-16's inlets (`totalPressure` with `gamma`, `totalTemperature`,
+`flowRateInletVelocity` with `massFlowRate`) are lowered before this check (§126.8), and so
+are CMP-17's `waveTransmissive` (§126.9) and CMP-18's `characteristicFarfield` (§126.10).
+Every other type is refused with a message saying that this driver rewrites no boundary
+between iterations but §126.8-§126.10's conditions.
+`output.restart` is refused through `OutputPlan::refuse_restart`, because no checkpoint of
+the compressible state exists.
+
+**What is written.** `p` (the gauge `p` of §122.2), `U`, `T`, `rho` and `Mach` go through
+the one pipeline of §44, from the case's `output` block or from `-output`, `-writeInterval`
+(transient) and `-writeEvery` (steady). The writers are `foam`, `vtu`, `nvdb`, `vdb` and
+`usda`. `rho` is the solver's cell and boundary density. `Mach` is (122.12) on the host,
+from the written `u` and `T`, per cell and per boundary face. Both carry `calculated` on
+every patch but a constraint patch. *DESIGN* (§122.2 left it to CMP-15): `p_abs` is not
+written. `pOperating` is a constant of the case, so `p_abs = p + p_op` is recovered exactly
+from the written `p`, and a second pressure field would be a second statement of one
+unknown.
+
+**The low-Mach refusal.** `ofgpu-lowmach`'s `M > 0.3` refusal and its `-permissive`
+warning (`energy::refuse_above_low_mach`, §93.6) and its banner line now name
+`ofgpu-compressible` (message only).
+
+**Tests** (`cargo test --release --bin ofgpu-compressible`, module `compressible`):
+
+| test | class | what it holds |
+|---|---|---|
+| `every_knob_changes_the_run` | D | The 50-cell tube below, three steps. Each of 20 settings changes the written bytes: `div(phi,U)`, `div(phi,T)`, `div(phid,p)`, `grad` (with a limited scheme that reads it), `relaxation` `U`, `T` and `p` (with two outer correctors, so a non-final iteration is relaxed), `correctors`, `outerCorrectors`, the `p`, `U` and `T` solver tolerances, `ddt` Euler to backward, `deltaT`, `gamma`, `W`, `Pr`, the Sutherland `As`, `pOperating` and `gravity`. `nonOrthogonalCorrectors` is §13.4.1's one admissible exception (the tube is orthogonal, so the correction it repeats is zero) and is asserted on the controls |
+| `the_orthogonal_settings_reach_the_controls` | D | `nonOrthogonalCorrectors 2` reaches `pressure.n_non_orth_corr`; `-iters 7` overrides the case's 3 steps. On the OpenFOAM cavity made steady with `localEuler`, `SIMPLE/residualControl { p 1e-3; U 1e-4; h 1e-5; }` reaches the three bars and `maxCo 5` reaches `lts.cfl` (a steady run's stop and its pseudo step are not shown by three transient steps) |
+| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming CMP-25, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
+| `a_fifty_cell_tube_runs_in_under_thirty_seconds` | P | The smoke run: 1 m tube, 50 x 1 x 1 cells, air at 300 K and 50 m/s, a 320 K inlet, a fixed `p = 0` outlet, symmetry sides, Euler at `1e-5` s for 30 steps. It runs in under 30 s with no bounds violation, `M_max` in (0.14, 0.15) (50/347.2 = 0.144), and the five fields written |
+| `an_openfoam_case_runs_and_writes_the_five_fields` | P | A blockgen 8 x 8 x 1 cavity with `thermophysicalProperties` (§122.6's air), laminar, Euler at `1e-3` s for 5 steps, writes the five fields |
+
+The driver is a binary, and the tests are bin tests of the f64 build (the single lib test
+crate does not compile, §112.3). The single build compiles the binary
+(`cargo build --release --features single --bin ofgpu-compressible`). Its rows are class D
+and P: they ask for a bit difference, a finite run and a refusal text, so no f32 tolerance
+is involved.
+
+*Landed* (f64): `every_knob_changes_the_run` found no inert setting (20 of 20).
+The smoke run took `0.22` s for its 30 steps (bar 30 s), and `M_max` was `0.1440`. The
+single-precision binary runs the same tube in `0.31` s with `M_max` `0.1440` (reported, not a
+test row).
+
 ---
 
 ## 126. The compressible boundary conditions — each a §4 triple rewrite
 
-`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3, CMP-17
-§126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3 (as built in
+§126.8), CMP-17 §126.4-§126.5 (as built in §126.9) and CMP-18 §126.6 (as built in §126.10), in `src/compressible/bc.rs` and `cuda/compressible.cu`; BC-20 adds the free-stream family there (§126.11).
 docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
 it lands. Every one is a kernel that rewrites the §4 triple
 `psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
@@ -45253,7 +45564,7 @@ when CMP-17 runs, CMP-17 writes the kernel to BC-09's contract.
 **`sigma` has no recalled default.** The plan quotes about 0.27 from Rudy & Strikwerda
 (1980); that paper is not read here. CMP-17 reads it and records the value with its
 page in this subsection, or, failing that, `sigma` is a required entry when `lInf` is
-stated. The reflection coefficient Selle et al. (2004) derive for this condition is not
+stated. CMP-17 did not read it, so `sigma` is required (§126.9). The reflection coefficient Selle et al. (2004) derive for this condition is not
 used by any gate: Gate CMP-NR measures the reflection directly (§127.6).
 
 ### 126.6 The characteristic far-field (`characteristicFarfield`; JSONC `farfield`)
@@ -45289,6 +45600,368 @@ stream to the last digit printed (15) on all four branches.
 Unchanged: `noSlip` (with adiabatic `zeroGradient` or isothermal `fixedValue` on `T`),
 `slip`/`symmetryPlane` (§120's aliases) and `empty` carry no compressible algebra. A
 slip wall makes the quasi-1-D duct and the Ringleb walls of §127.3.
+
+### 126.8 The inlets as built (CMP-16)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` and three
+kernels of `cuda/compressible.cu` (`cmpBcTotalTemperature`, `cmpBcTotalPressure`,
+`cmpBcMassFlowInlet`) implement §126.1 and §126.3 exactly as written there: (126.1) on
+`T`, (126.3) on `p`, (126.4) on `U`. §126.2's preset needs no kernel: CMP-14 already
+lowers a JSONC `supersonicInlet` rule to `fixedValue` on `U`, `p` and `T` (§122.6).
+
+**Names.** On the OpenFOAM route (`0/p`, `0/T`, `0/U`) the three conditions are
+`totalPressure` with `p0` and `gamma` on `p`, `totalTemperature` with `T0` (and an
+optional `gamma`) on `T`, and `flowRateInletVelocity` with `massFlowRate` on `U`. JSONC has
+no spelling for them yet, because a new JSONC kind needs the schema and the gui pick-lists
+too. `bc::lower` reads every value in f64 in both builds and refuses by name: a
+`totalPressure` without `gamma` (that is the kinematic `p0 - |U|^2/2` condition of
+`field_setup.rs`, which a gas does not obey), a stated `gamma` that differs from the gas's
+by more than `1e-12` relative (the gas law carries one ratio), a missing `p0`, `T0` or
+`massFlowRate`, `p0 + p_op <= 0`, `T0 <= 0`, `massFlowRate <= 0`, a
+`volumetricFlowRate`, a kind on the wrong field, and a mass-flow inlet whose `p` is not
+`zeroGradient` (§126.3).
+
+**Lowering, not a new setup arm.** `bc::lower` hands the shared setup of `field_setup.rs` the
+three fields with each of these entries replaced by a `fixedValue` placeholder (at `p_0`,
+`T_0` or zero velocity), and returns one `BcRule` per mesh patch (its face range and its
+value). `Compressible::set_boundary_rules` attaches them. `field.rs` and `field_setup.rs` are
+not touched, so the incompressible `totalPressure` of every other driver is bitwise what it
+was. §120's catalogue keeps `totalTemperature` as owned by CMP-16, because the catalogue
+describes `BcKind::from_name`, and the shared setup still refuses it (it has no gas law).
+The driver writes the fields with the types as read.
+
+**When.** `Compressible::initialise` applies the rules once after its first gas state and
+then re-forms `mu` and `kappa`. `Compressible::step` applies them at the top of every
+outer iteration (step 0 of §125.6's loop), from the latest state, in this order:
+
+1. The mass-flow inlets, from `psi_b` and `p_b`, then `U`'s face values.
+2. The total temperatures, from `u_b`, then `T`'s face values.
+3. The total pressures, from `u_b` (and `T_b`), then `p`'s face values.
+4. `psi` and `rho` on the boundary faces only, by (122.10). The cells are not touched.
+
+A run with no rule launches none of this, so it is bitwise the CMP-15 driver.
+
+**`T_0` of `totalPressure`.** It is the same patch's `totalTemperature` `T0` when `T` carries
+one. Otherwise each face takes `T_0 = T_b + |u_b|^2 / (2 c_p)`, which is (126.1) solved for
+`T_0` at the face (NACA 1135 (43), derived). Either way (126.3) holds with the face Mach
+number `M^2 = |u_b|^2 / (gamma R_s T_b)`.
+
+**Constants and order.** The host forms `cp2 = fl(2 c_p)`, `ge = fl(gamma/(gamma-1))` and
+`pt = fl(p_0 + p_op)` in f64 and rounds each once. The kinetic term is `q / cp2`, a division
+by the doubled `c_p`, not a product with a rounded reciprocal. (126.4)'s sum
+`A = sum_f rho_f |Sf|` is accumulated in `ofacc` by one block of 256 threads, with a
+fixed-order tree in shared memory, so it is deterministic. `rho_f = psi_f (p_f + p_op)` is
+formed in the order `cmpGasState` forms `rho`, so it is the `rho` the boundary carries.
+Then `u_b = -(mdot/A) Sf/|Sf|`. There is no floor and no clip: `|u_b|^2 >= 2 c_p T_0` has no
+isentropic state, and the kernels write what (126.1) and (126.3) give there (§122.3).
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, included by the lib tests of
+`compressible::bc` and by `tests/compressible_bc.rs`, so both builds run it):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `total_conditions_satisfy_isentropic_relation_to_round_off` | R, `tol_r(1e-13)` | inflow faces at M 0.1, 0.5, 0.9; `T_b` and `p_b + p_op` against NACA 1135 (43)-(44), once with `totalTemperature`, once with a fixed `T` | `e_T` 0, `e_p` <= 1.43e-16; `e_T` <= 8.0e-9, `e_p` <= 2.5e-8 |
+| `outflow_face_is_zero_gradient` | D | `u_b . Sf > 0`: `fr = 0` and `refGrad = 0` bitwise, and the face value is the owner cell's, bitwise, on `p` and `T` | bitwise in both |
+| `mass_flow_inlet_delivers_mdot_to_1e_10` | A, 1e-10 (f32: `tol_r(1e-10)`) | a graded 6-face patch with a non-uniform `T`: `sum_f rho_f u_b . Sf = -mdot`, and `u_b` is normal to the face | rel. err 0; 1.5e-8 |
+| `a_total_pressure_tube_runs` | P | 50-cell tube, `p0 = 2000` Pa and `T0 = 300` K against a fixed `p = 0` outlet, 10 Euler steps: no bounds violation, finite, and the inflow accelerates from 10 m/s | `u_b` 14.54 m/s, `M_max` 0.042 in both |
+| `inlet_refusals_name_the_setting` | D | the refusals above name the field, the patch and the entry | - |
+
+The plan names the third test `mass_flow_inlet_delivers_mdot_to_1e-10`, which is not a
+Rust identifier, so it is spelled `..._1e_10`. Its f32 row takes D-F32-1's `tol32`: the
+sum equals `-mdot` up to round-off by construction (§126.3), so it is an R-class row in
+f32. The driver adds `an_openfoam_case_with_the_compressible_inlets_runs` (the
+OpenFOAM route reads both kinds and runs) and a refusal row for `totalPressure` without
+`gamma`.
+
+### 126.9 The outlets as built (CMP-17)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`OutletRule`,
+`CompressibleOutlets`) and two kernels appended to `cuda/compressible.cu`
+(`cmpBcSupersonicSwitch`, `cmpBcWaveSpeed`) implement §126.4 and §126.5. The Robin rewrite
+of (126.7) is BC-09's own kernel (`fldAdvectiveRobinScalar`, (120.4d) of SPEC-LIT 120.4),
+called through `field_ops::advective_robin_scalar` with (126.6)'s `w` and `K` as its
+face-field inputs, as docs/17 §5.2.3 planned. `field.rs` is not edited and no `BcKind` is
+added: the outlets carry their own kind mask (`BcKind::Advective` on their faces, -1
+elsewhere), which is the buffer the kernel matches.
+
+**Names.** On the OpenFOAM route, `waveTransmissive` on `p` or `T` with the optional entries
+`lInf`, `fieldInf`, `sigma` and `gamma`. `sigma` is this solver's own entry: Rudy &
+Strikwerda (1980) is not read, so §126.5's fallback holds and `sigma` is REQUIRED when
+`lInf` is stated, with no default. `bc::lower` reads every value in f64 and refuses by
+name: `lInf <= 0`; `lInf` without `sigma` or without `fieldInf`; `sigma <= 0`; `sigma` or
+`fieldInf` without `lInf` (read by nothing, since `K = 0` then); a stated `gamma` that is
+not the gas's (§126.8's rule); a `phi`, `rho` or `psi` entry naming another field than
+`phi`, `rho` and `thermo:psi` (or `psi`), since (126.6) is formed from the solver's own
+state; and `waveTransmissive` on `U`, which is not built (a non-reflecting outlet takes
+`U` zero-gradient). `Compressible::set_outlet_rules` refuses it under `steadyState` (no
+time step) and `CrankNicolson` ((120.4c) is defined for Euler and backward only).
+`advective` stays refused in `ofgpu-compressible`, with a message naming
+`waveTransmissive`. §120's catalogue keeps `waveTransmissive` as owned by CMP-17, for the
+reason §126.8 gives for `totalTemperature`: the catalogue describes `BcKind::from_name`.
+
+**The supersonic switch** is attached to every `fixedValue` `p` patch as read (§126.4 does
+not name a type; the static-pressure outlet is the fixed `p`). `cmpBcSupersonicSwitch`
+writes `fr = 1` where `u_n,P / c_P < 1` and `fr = 0` otherwise, and `refGrad = 0`; it
+leaves `refValue` (the stated `p`) as set up. A subsonic face therefore carries the triple
+it had, and a supersonic inflow face (`u_n < 0`) stays fixed. `u_n,P = (u_P . Sf)/|Sf|`
+and `c_P = sqrt(fl(gamma R_s) T_P)` are the owner cell's.
+
+**`waveTransmissive`.** It is built as a `zeroGradient` placeholder, so `phi_b^o` starts
+at the owner's value. `cmpBcWaveSpeed` forms, per face,
+
+```
+w = max(u_n,P + c_P, 0)   on p ,     w = max(u_n,P, 0)   on T
+K = max(sigma_by_l c_P (1 - M_n^2), 0) ,   M_n = u_n,P / c_P ,   sigma_by_l = fl(sigma / lInf)
+```
+
+Both clips are *DESIGN*, ours, and the only ones. `w >= 0` is (120.4b)'s rule: a back-flow
+`T` face holds its time extrapolation (`fr = 1`). `K >= 0` holds because at `M_n >= 1`
+there is no incoming characteristic to relax. Without `lInf`, `sigma_by_l = 0` and
+`K = 0`. Time:
+
+* Under `Euler` or `backward`, `w` and `K` are used as formed, with the run's own
+  `(a_n, a_0, a_00)` (`Ddt::face_coeffs`). That is (120.4d), which is (126.7) under Euler.
+* Under `localEuler`, `cmpBcWaveSpeed` divides `w` and `K` by the owner's `r_P = 1/dt_P`,
+  and the Robin kernel takes `(1, -1, 0)`. Then `d = 1 + K dt_P` and
+  `fr = d/(d + w dt_P Delta_b)`, which is (126.7) with §126.5's "under LTS `dt` is the
+  owner's `dt_P`".
+
+`phi_b^o` and `phi_b^oo` are set to the face values in `Compressible::initialise`, and
+rotated (`oo <- o`, `o <- phi_b`) once at the top of every step. The rewrite runs at the
+top of every outer iteration, after the inlets and the switches. The order is `p`'s
+faces, then `T`'s, each followed by its §4 evaluation, and then `psi` and `rho` on the
+boundary faces (§126.8 step 4). The start of a run applies the switches only, because it
+has no step yet.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `robin_form_matches_advective_update_exactly` | R, `tol_r(1e-13)` | 4 faces at `M_n` 0.3, 0.8, 1.2 (`K` clipped) and -0.4 (`w` clipped on `T`), `p` and `T` with `lInf`, Euler and LTS, the cells moved off `phi_b^o`. The device `fr`, `refValue` against (126.7), and the face value against the face update `(phi_b - phi_b^o)/dt + w Delta_b (phi_b - phi_P) = K (phi_inf - phi_b)` solved directly | <= 3.8e-16; <= 8.6e-8 |
+| `supersonic_switch_by_owner_mach` | D | `M_n` 0.5, 0.999, 1.5 and -1.5. `fr` 1, 1, 0, 1 bitwise, `refValue` kept, and `p_b` the owner's on the supersonic face | bitwise in both |
+| `subsonic_fixed_p_outlet_is_bitwise_unchanged` | D | 40-cell tube, 10 Euler steps, with and without the switch attached: `p`, `p_b`, `T`, `rho`, `rho_b`, `u_x` | 0 differing values in both |
+| `gate_cmp_nr_acoustic_pulse` | P | Gate CMP-NR, below | below |
+| `outlet_refusals_name_the_setting` | D | the refusals above | - |
+
+The driver adds `an_openfoam_case_with_a_wave_transmissive_outlet_runs`: the OpenFOAM route
+reads `waveTransmissive` on `p` and runs.
+
+**Gate CMP-NR as measured.** The tube is 200 cells of 5 mm, closed on the left, with air at
+300 K and `p_op = 1e5` Pa. The pulse is `p' = A exp(-((x - x0)/W)^2)` with `A = 1e-3 p`,
+`W = 10` cells (an e-folding width of 20 cells) and `x0` 40 cells from the outlet. It is
+initialised as a simple wave (`u' = p'/(rho_0 c_0)`, isentropic `T'`). The run uses Euler,
+acoustic CFL 0.2, one outer iteration and 3 correctors. The outlet is
+`waveTransmissive` with `lInf 1`, `sigma 0.25` and `fieldInf 0`.
+
+**Reflection** is the largest `|p'_run - p'_ref|` at the probe (cell 190, 10 cells from the
+outlet) over 400 steps, divided by the largest `|p'_ref|`. Here `ref` is the same run in a
+400-cell tube, whose outlet nothing can come back from within the window. *DESIGN*, ours.
+The characteristic split `max|p-|/max|p+|` with `p+- = (p' +- rho_0 c_0 u')/2` is printed
+only: in the reference run, where nothing is reflected, it already reads 0.089, because
+the discrete wave's `u'/p'` is not `1/(rho_0 c_0)`.
+
+**The long-time mean** is the outlet face's `p` averaged over the last tenth of 16 000
+steps (46.1 ms = 4/K with `K = sigma c / lInf`), against `fieldInf`, relative to `A`.
+
+| row | bar | f64 | f32 |
+|---|---|---|---|
+| reflection, `waveTransmissive` | <= 0.05 | **0.1821, MISSED** | **0.1828, MISSED** |
+| reflection, fixed `p` (control) | >= 0.9 | 0.9776 | 0.9778 |
+| long-time outlet mean | <= 1e-3 of `A` | 2.57e-4 | **1.102e-3, MISSED** |
+
+**The miss.** It is asserted as MISSED (user rule of 2026-10-14) and recorded for review. The
+measurements give two parts:
+
+1. The pulse crosses the tube at 1.186 `c_0`, about `sqrt(gamma) c_0`, in both the
+   200-cell and the 400-cell tubes. The speed was measured from the peak's arrival at the
+   probe, and in a separate two-probe run at CFL 0.2 and 0.05 (1.1878 and 1.1862 `c_0`, so
+   it does not depend on `dt`). So the CMP-09..CMP-13 solver carries sound about
+   `sqrt(gamma)` too fast, and (126.6)'s `w = u_n + c_P` with the true `c` is slower than
+   the solver's own wave. The outlet then reflects an inverted copy of the pulse.
+   CMP-20's Gate CMP-AC ("speed within 1 % of (122.4)'s `c`") is the gate that owns this
+   speed.
+2. A diagnostic build that formed `w` with `fl(gamma^2 R_s)` brought the reflection down to
+   0.119 (0.122 with `lInf`), not to 0.05. The rest grows as `dt` falls: 0.117, 0.140,
+   0.179 and 0.261 at CFL 1.0, 0.5, 0.2 and 0.05 with `K = 0` and the true `c`. The
+   half-cell advective closure (126.7), coupled to the segregated pressure equation by
+   its Robin coefficient alone, is therefore not the scheme's own non-reflecting
+   relation.
+
+`K` is not the cause (0.1792 with `K = 0`), and more outer iterations or correctors do not
+help (0.2288 with 3 outer iterations, 0.1821 with 6 correctors). Each cure changes
+numerics, either the solver's acoustic speed (the energy-pressure coupling of §124/§125)
+or the outlet's closure (a characteristic condition on `U` as well), and is the user's
+decision.
+
+The f32 long-time row misses on its own (§112.3's rule: its own row, both values). The f64
+outlet mean decays like `exp(-t/tau)`, halving about every 2000 steps, down to 5.5e-3 Pa at
+step 20 000. Under single it stops decaying at step 14 000 and wanders between -0.07 and
++0.16 Pa (to 24 000 steps, sampled every 2000). That is a few f32 ulps of the absolute
+state about `p_op = 1e5` Pa: an f32 floor, for §112's owner, not a property of the outlet.
+
+### 126.10 The far-field as built (CMP-18)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`FarfieldRule`,
+`CompressibleFarfields`, the host twin `farfield_face`) and one kernel appended to
+`cuda/compressible.cu` (`cmpBcFarfield`) implement §126.6 exactly as written there:
+(126.8)-(126.12), Carlson (2011) §2.2 eqs. (8)-(17). `field.rs` is not edited and no
+`BcKind` is added. §120's catalogue keeps `characteristicFarfield` and `farfield` as owned
+by CMP-18, for the reason §126.8 gives for `totalTemperature`: the catalogue describes
+`BcKind::from_name`, and the shared setup still refuses both.
+
+**Names.** `characteristicFarfield` on `U`, `p` and `T` of the same patch, each with one
+uniform `value`: the free stream's `u_o`, gauge `p_o` (in the datum of `p`) and `T_o`. The
+JSONC kind `farfield` lowers to exactly that (§122.6), and `bc::lower` also accepts the
+spelling `farfield` in a field file. `bc::lower` refuses by name: the kind on one or two of
+the three fields only (one free stream decides all three), a missing or non-uniform
+`value`, `T_o <= 0`, `p_o + p_op <= 0` (§122.3), and a stated `gamma` that is not the gas's
+(§126.8's rule). Each entry is built as a `fixedValue` placeholder at its free-stream value,
+so the faces hold the free stream until the first rewrite. The supersonic switch of §126.9
+is not attached: it is attached to a `fixedValue` `p` as read, and this one is not.
+
+**The kernel.** One thread per face of one patch, from the OWNER cell `P`:
+
+```
+n = Sf/|Sf| ,  U_i = u_P . n ,  c_i = sqrt(fl(gamma R_s) T_P) ,  U_o = u_o . n
+rho_i = (p_P + p_op) / (fl(R_s) T_P)                                    (122.10)'s state
+```
+
+then (126.8)-(126.12) in that order, with `fl(2/(gamma-1))`, `fl(1/(gamma-1))`,
+`fl(gamma - 1)`, `fl(gamma)`, `fl(R_s)` and `fl(p_op)` formed on the host in f64 and
+rounded once, and `c_o = fl(sqrt(gamma R_s T_o))` and `s_o = fl(p_abs,o / rho_o^gamma)`
+formed there per patch. (126.9)'s test is `|U_i|/c_i >= 1`, written as a division, as
+§126.9's switch writes it. `c_b = (gamma - 1)(R+ - R-) * 0.25`, and the gauge `p` is
+`rho_b c_b^2/gamma - p_op`. It writes `fr = 1` and `refGrad = 0` on all three fields and
+`refValue = u_b`, `p_abs,b - p_op` and `T_b`, reading only cells, so every face sees the
+state of the same moment. There is no floor and no clip: `c_b <= 0` (an expansion the two
+invariants cannot carry) is written as the formulas give it, and §122.3's counter sees the
+state that follows. `farfield_face` is the f64 host twin in the kernel's operation order;
+it also names the face's branch.
+
+**When.** `Compressible::set_farfield_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, after the inlets of
+§126.8 and before the outlets of §126.9; then `U`'s, `p`'s and `T`'s face values, and `psi`
+and `rho` on the boundary faces (§126.8 step 4). It needs no time step, so steady runs
+take it. A run with no far-field launches none of this.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `freestream_preserved_m0_5_and_m1_5` | R, `tol_r(1e-10)` (1e-10; 1e-5) | interior equal to the free stream (`u = (M c, 0.2 c, 0)`, `p` 2000 Pa gauge, 300 K) on a far-field at both ends, `M` 0.5 and 1.5, so normal Mach +-0.5 and +-1.5, all four branches. `u_b` against `u_o` relative to `\|u_o\|`, `p_b` relative to `p_o + p_op`, `T_b` relative | `e_u` 2.2e-16, `e_p` 2.9e-16, `e_T` 1.9e-16; 1.6e-7, 1.5e-7, 1.0e-7 |
+| `branch_selection_by_un_and_c` | D | rows at `M_n` +-0.5 and +-1.5 against a free stream entering at 0.1 `c`. Changing the free stream's tangential `u` and `p` at fixed `T` leaves the two outflow branches bitwise unchanged; changing the interior's leaves the two inflow branches; the whole free stream leaves supersonic outflow only; the whole interior (in-branch) leaves supersonic inflow only. Every other face changes. `fr = 1` and `refGrad = 0` bitwise, and the face value is `refValue` bitwise | bitwise in both |
+| `invariants_exact_on_host_twin` | R, `tol_r(1e-13)` | varied interior (`M_n` 0.4, 1.3, -0.7, -1.2; 305 to 312.5 K; tangential `u`) against a free stream at 310 K entering at 0.2 `c_o`: the device state against `farfield_face` (velocity relative to `c_o`), and on the device face `R+`, `R-` against the sides (126.8)-(126.9) take them from, the entropy and the tangential velocity against the side (126.11) takes them from | twin 4.3e-16, invariants 3.4e-16; 6.2e-7, 1.7e-7 |
+| `a_farfield_tube_runs` | P | 50-cell tube, far-field at both ends (free stream M 0.3 along x, 300 K), 305 K interior, 10 Euler steps: finite and no bounds violation | `M_max` 0.3054 in both |
+| `farfield_refusals_name_the_setting` | D | the refusals above; `farfield` lowers to the same rule | - |
+
+The f32 rows of the first and third tests are R-class rows under D-F32-1: `tol_r(1e-10)`
+and `tol_r(1e-13)` are both `1e-5` in f32, the plan's figure for the first. The driver adds
+`a_jsonc_farfield_tube_runs`: the JSONC route lowers `farfield` with its `freestream`, runs
+the tube with no bounds violation, and writes `p` with the type `characteristicFarfield`.
+
+### 126.11 The free-stream family as built (BC-20)
+
+`No GPL-licensed source was consulted.` docs/17 BC-20, reduced by docs/17 §5.2.3 item 3:
+`inletOutletTotalTemperature`, `supersonicFreestream`, `freestreamPressure` with its
+supersonic switch, and `fixedPressureCompressibleDensity`, built on `src/compressible/bc.rs`
+(`FreestreamRule`, `CompressibleFreestreams`, `check_rho` and the host twins
+`supersonic_freestream_face`, `freestream_fraction`, `prandtl_meyer`) and two kernels appended
+to `cuda/compressible.cu` (`cmpBcSupersonicFreestream`, `cmpBcFreestreamPressure`). BC-20's
+acoustic-pulse row is dropped as a duplicate of Gate CMP-NR (§126.9); each remaining name has
+a closed-form gate. `field.rs` is not edited and no `BcKind` is added: §120's catalogue keeps
+the three new names as planned by BC-20 and `freestreamPressure` as implemented and extended
+by BC-20, for the reason §126.8 gives for `totalTemperature` (the catalogue describes
+`BcKind::from_name`, and the shared setup is unchanged). Only `ofgpu-compressible` lowers
+them. The names follow the public user guides by name only; the equations below are NACA
+Report 1135's and this tree's DESIGN.
+
+**`inletOutletTotalTemperature`** on `T`, with `T0` (and an optional `gamma`, held to the
+gas's): (126.1) on an inflow face, zero gradient on an outflow face. That is exactly what
+§126.8's `totalTemperature` rule already does, so `bc::lower` returns the same
+`RuleKind::TotalTemperature` rule and `cmpBcTotalTemperature` runs it; the two names give
+bitwise the same triples.
+
+**`freestreamPressure`** on `p`, with `freestreamValue` (gauge, in the datum of `p`) and an
+optional `supersonic` switch (`true`/`false`, `yes`/`no`, `on`/`off`; absent is `false`).
+The public description of the name (docs/01-model-catalog.md) is a blend "between zero
+gradient for normal inlet and fixed value for normal outlet flow" by the velocity
+orientation. *DESIGN* - the blend is linear in the direction cosine of the face velocity:
+
+```
+cos = (u_b . Sf) / (|u_b| |Sf|), clamped to [-1, 1];  cos = 0 when |u_b| = 0
+fr  = 1/2 + cos/2   (subsonic, the default)
+fr  = 1/2 - cos/2   (supersonic true)                                                      (126.13)
+refValue = freestreamValue,  refGrad = 0
+```
+
+with `u_b` the face value of `U` (its own condition). The subsonic form fixes `p` where the
+flow leaves and extrapolates it where the flow enters, the one outgoing characteristic of a
+subsonic inflow; the supersonic form is the reverse, Carlson (2011) Table 1's "all"
+specified at a supersonic inflow and none at a supersonic outflow. The generic
+`freestreamPressure` of the other drivers (an `inletOutlet`, §120's table) is unchanged.
+
+**`supersonicFreestream`** on `U`, with `UInf` (a uniform vector), `pInf` (gauge, in the
+datum of `p`), `TInf` and an optional `gamma` (held to the gas's). *DESIGN* on NACA Report
+1135's isentropic relations (43)-(44) and its Prandtl-Meyer function (171): the stated
+stream is turned through the simple wave that takes it from `pInf` to the face pressure.
+With `M_inf^2 = |u_inf|^2/(gamma R_s T_inf)`, `T_0 = T_inf (1 + (gamma-1)/2 M_inf^2)` (43)
+and `p_0 = (p_inf + p_op)(T_0/T_inf)^(gamma/(gamma-1))` (44), on a face whose OWNER velocity
+enters (`u_P . n < 0`):
+
+```
+M_b^2 = 2/(gamma-1) expm1( (gamma-1)/gamma log( p_0 / (p_b + p_op) ) ),  raised to 1 below 1   (126.14)
+nu(M) = sqrt((gamma+1)/(gamma-1)) atan sqrt( (gamma-1)/(gamma+1) (M^2-1) ) - atan sqrt(M^2-1)  (126.15)
+delta = nu(M_b) - nu(M_inf),  T_b = T_0/(1 + (gamma-1)/2 M_b^2),  |u_b| = M_b sqrt(gamma R_s T_b)
+e = u_inf/|u_inf|,  t = n - (n . e) e
+u_b = |u_b| (cos delta  e - sin delta  t/|t|)   if |t| > 1e-6,   u_b = |u_b| e   otherwise      (126.16)
+```
+
+`fr = 1`, `refValue = u_b`, `refGrad = 0`. (126.14) is (44) solved for `M` and written with
+`expm1` so that `p_b = p_inf` returns `M_inf` without cancellation; (126.15) is NACA (171).
+`p_b` is `p`'s face value (its own condition, normally zero gradient or `freestreamPressure`
+with `supersonic`). An expansion (`p_b < p_inf`, `delta > 0`) turns the entering stream
+toward `-n`, into the domain, and a compression away from it: the sense of a simple wave
+whose lower pressure lies inside. A face whose owner velocity leaves (`u_P . n >= 0`) is
+vented: zero gradient. The limits, recorded: `M_b` is raised to 1 when `p_b` is at or above
+the free stream's total pressure (no Prandtl-Meyer wave is subsonic); a stream within about
+1e-6 rad of the face normal has no turning plane and keeps its direction; `delta` is not
+limited, so a turn past the face plane is written as the formulas give it; a non-positive
+`p_b + p_op` gives a NaN that §122.3's counter sees. A free stream below Mach 1 is refused by
+name (it takes `characteristicFarfield`, §126.10).
+
+**`fixedPressureCompressibleDensity`** on `rho`: the density at the patch from the equation
+of state at the patch pressure, which is (122.10) at the face, `rho_b = (p_b + p_op)/(R_s
+T_b)`. `ofgpu-compressible` does not solve `rho`; it forms it on EVERY boundary face from
+`p`'s and `T`'s face values at each gas-state update, so the condition is what every face
+already does. The driver reads a `rho` file when the OpenFOAM case has one, and
+`bc::check_rho` accepts `fixedPressureCompressibleDensity`, `calculated` and the constraint
+types (`empty`, `symmetry`, `symmetryPlane`, `wedge`, `cyclic`, `cyclicAMI`); any other type
+would state a second density and is refused by name. The written `rho` keeps §44's
+`calculated` types.
+
+**When.** `Compressible::set_freestream_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, FIRST (before §126.8's
+inlets, so an inlet `T` on the same patch reads the new `u_b`): the `supersonicFreestream`
+faces, then `U`'s face values, then the `freestreamPressure` faces from those `u_b`, then
+`p`'s face values; `psi` and `rho` on the boundary faces follow with the other rules. A
+`supersonicFreestream` reads `p`'s face value of the previous evaluation. All host constants
+(`e`, `T_0`, `p_0`, `nu(M_inf)`, `2/(gamma-1)`, `(gamma-1)/gamma`, `(gamma-1)/2`,
+`gamma R_s`, `sqrt((gamma+1)/(gamma-1))`, `(gamma-1)/(gamma+1)`, `p_op`, `1e-6`) are formed
+in f64 and rounded once. No time step is needed, so steady runs take them.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `inlet_outlet_total_temperature_is_total_temperature` | D, R `tol_r(1e-12)` | rows entering at M 0.3, 0.8 and 0.5 (tangential part) and one leaving: `T`'s `fr`, `refValue`, `refGrad` and face values bitwise those of `totalTemperature`; an inflow face against NACA (43); the leaving face the cell's | bitwise; `e_T` 1.9e-16; 2.9e-8 |
+| `freestream_pressure_blends_by_direction` | D, R `tol_r(1e-14)` | face velocity out, in, at 60 degrees and zero, both switch positions: `fr` of (126.13) (bitwise on the aligned and zero rows), `refValue` = `freestreamValue` bitwise, the face value the blend, the host twin | 0; 2.9e-9 |
+| `supersonic_freestream_matches_prandtl_meyer` | R `tol_r(1e-12)`, twin `tol_r(1e-13)`, D | M 2 at 10 degrees, face pressure 1.0, 0.8 and 1.15 of `p_inf` and one leaving row: the free stream returned at `p_inf`; `M_b` from `\|u_b\|` and (126.1) gives the face pressure by NACA (44); the turn is `nu(M_b) - nu(M_inf)` by NACA (171) (3.861 and -2.514 degrees), toward `-n` on the expansion, in the stream's plane; the leaving face vented bitwise | worst 2.8e-15, twin 2.3e-16; 4.3e-7, 1.3e-7 |
+| `fixed_pressure_compressible_density_is_the_gas_law` | R `tol_r(1e-12)` | every boundary face after `initialise`, a fixed `p` (3000 Pa) and `T` (320 K) at one end: `rho_b` against (122.10); `check_rho` accepts the name, `calculated` and `empty` | 1.9e-16; 4.5e-8 |
+| `a_supersonic_freestream_tube_runs` | P | 50-cell tube carrying M 2: `supersonicFreestream`, `freestreamPressure` (supersonic) and `inletOutletTotalTemperature` on both ends, 10 Euler steps: finite, no bounds violation | `M_max` 2.0000 in both |
+| `bc20_refusals_name_the_setting` | D | a missing or malformed `UInf`, `pInf`, `TInf`, `freestreamValue`, `T0`; `TInf <= 0`; an absolute `pInf` or `freestreamValue <= 0`; a subsonic `UInf`; another `gamma`; a `supersonic` that is not a switch; each name on the wrong field; a `fixedValue` `rho` | - |
+
+The f32 rows are R-class rows under D-F32-1: `tol_r(1e-12)`, `tol_r(1e-13)` and
+`tol_r(1e-14)` are `1e-5`, `1e-5` and `5.4e-6` in f32.
 
 ---
 
@@ -45747,7 +46420,230 @@ acoustics, Ghia and the AR-138 experiment.
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| CMP-17 | CMP-NR reflection, `waveTransmissive` (bar <= 0.05) | f64 0.1821, f32 0.1828: **MISSED** (§126.9) | CMP-17 |
+| CMP-17 | CMP-NR reflection, fixed `p` (bar >= 0.9) | f64 0.9776, f32 0.9778 | CMP-17 |
+| CMP-17 | CMP-NR long-time outlet mean / `A` (bar <= 1e-3) | f64 2.57e-4; f32 1.102e-3 **MISSED** (f32 floor, §126.9) | CMP-17 |
+| CMP-17 | the pulse's speed in the solver (cause of the miss) | 1.186 `c_0`, about `sqrt(gamma) c_0`, both builds | CMP-17 |
+| CMP-19 | CMP-SOD PISO, 800 cells: worst plateau error (bar <= 1 %) | `rho*_L` f64 45.98 %, f32 45.95 % (`rho*_R` 16.08 / 16.09 %, `u*` 22.80 / 22.82 %, `p*` 19.94 / 19.94 %): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO, 800 cells: shock position (bar <= 0.5 % of the length) | not found inside the tube, both builds: the front has reached the right wall by `t = 0.2` (exact `x = 0.850431`): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO: observed L1(`rho`) order, 200/400/800 cells (bar >= 0.6) | f64 0.015, f32 0.015 (L1 5.17e-2 / 5.21e-2 / 5.28e-2): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO: total-energy drift at `t = 0.2` (exact 0; printed, the cause) | f64 +4.90e-2, f32 +4.90e-2 on 800 cells | CMP-19 |
+| CMP-19 | CMP-SOD PIMPLE (5 outer, `alpha_p` 1; printed only), 800 cells | worst plateau f64 0.31 %, f32 0.30 % (`rho*_R`); shock f64 0.132 %, f32 0.131 %; order f64 0.696, f32 0.700; energy drift f64 +1.7e-4, f32 +1.5e-4 | CMP-19 |
+| CMP-20 | CMP-AC pulse speed, 400 cells, the solver's default coupling (`nOuterCorrectors 1`, `nCorrectors 2`) (bar within 1 % of `c_0`) | f64 1.18949 `c_0`, f32 1.18934 `c_0`: **MISSED** (§127.6.2) | CMP-20 |
+| CMP-20 | CMP-AC pulse speed, PIMPLE (5 outer, `alpha_p` 1; printed only) | f64 0.99692 `c_0`, f32 0.99666 `c_0` | CMP-20 |
+| CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(u/U - Ghia)` over Table I (bar 0.02) | f64 2.716e-3, f32 2.718e-3 | CMP-20 |
+| CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(v/U - Ghia)` over Table II (bar 0.02) | f64 7.255e-3, f32 7.257e-3 | CMP-20 |
+| CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: adiabatic-wall `T_w - T_top`, error over `Pr U^2/(2 c_p)` (bar 0.5 %) | f64 1.103e-4, f32 5.842e-4 | CMP-22 |
+| CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: `T` profile L-infinity over the rise (bar 0.5 %) | f64 1.541e-4, f32 4.935e-4 | CMP-22 |
+
+#### 127.6.1 Gate CMP-SOD as built (CMP-19)
+
+`src/bin/validate_gates/sod.rs`, one `ofgpu-validate` section after Gate 132-Z, live in
+both builds. **The problem** (Sod 1978, doi:10.1016/0021-9991(78)90023-2):
+`(rho, u, p) = (1, 0, 1 | 0.125, 0, 0.1)`, `gamma = 1.4`, the diaphragm at `x_0 = 0.5` of a
+unit tube, `t = 0.2`. It is run dimensional in air (`PerfectGas::air`, inviscid:
+`Viscosity::Constant { mu: 0 }`) with `p_L = 1e5` Pa, `rho_L = 1` kg/m^3, `T = p/(rho R_s)`
+(122.1), the gauge datum `p_op = p_L`, the velocity unit `sqrt(p_L/rho_L)` and the time unit
+`L/sqrt(p_L/rho_L)`; the fields are compared non-dimensional, so the key is (127.5)-(127.7b)
+with the oracle values of §127.2, evaluated live by `compressible::exact::riemann`. The tube
+has one cell across, the four sides `symmetry`, the ends walls (`U` fixed 0, `p` and `T`
+zero-gradient): by `t = 0.2` the fan head is at `x = 0.263` and the shock at `0.850`, so no
+wave reaches an end. Schemes: `div(phi,U)`, `div(phi,T)` and the retarded density (124.3)
+limited with van Leer; transient Euler; PBiCGStab with DILU. **The step**: the largest
+`|u| + c` of the exact solution is `u* + c*_R = 2.191566`; `n` steps is the fewest with an
+acoustic CFL `<= 0.5`, and `dt = 0.2/n`, so every run ends at `t = 0.2` (702, 351 and 176
+steps). **The row's coupling is PISO**: `nOuterCorrectors 1`, `nCorrectors 2` (§125.3).
+
+**The measures** (derived; class P, the same bar in both builds). A plateau's error is the
+largest `|v_i - v*|/|v*|` over the cells whose centre is in the middle half of its star
+region: `rho*_L` on `[x_tail, x_contact]`, `rho*_R` on `[x_contact, x_shock]`, `u*` and `p*`
+on both. The shock is the right-most pair of cells across which `rho` rises through
+`(rho*_R + rho_R)/2`, located by linear interpolation; its error is `|x_s - 0.850431|` over
+the unit length. `L1(rho) = sum_i |rho_i - rho(x_i, 0.2)| dx`, and the observed order is the
+least-squares slope of `ln L1` on `ln h` over the three meshes (the two pair orders and
+§94's `grid_study` of the three `L1` values are printed). Printed with each leg: the total
+energy `sum_i (p_i/(gamma - 1) + rho_i u_i^2/2) dx` over its initial value, minus one, which
+is exactly 0 in the closed, adiabatic, inviscid tube.
+
+**Measured: the PISO row misses every bar, in both builds** (table above). The cause is
+the energy equation's place in the outer loop, not the mesh: in a one-outer step (125.1) is
+solved (§125.3 step 3) before the correctors (step 5), so its explicit `dp/dt = (p - p^o)/dt`
+reads the `p` that step 1 left, which is `p^o` (zero), and its `K` terms read the predicted,
+uncorrected `u`. The discrete total energy then grows by 4.9 % by `t = 0.2` on every mesh,
+the star state and the wave speeds are wrong, and `L1(rho)` does not fall with `h` (order
+0.015). **The cause leg** (printed only, never checked, run when the row misses): the same
+three meshes with PIMPLE, `nOuterCorrectors 5` and `alpha_p = 1` on the non-final outer
+iterations, so the last outer iteration's energy equation sees that step's `dp/dt` and `K`.
+That changes inputs only, and it meets every bar in both builds (worst plateau 0.31 %, shock
+0.13 % of the length, order 0.70, energy drift 1.7e-4). With the default `alpha_p = 0.3`
+the outer loop converges slowly: worst plateau 30 % at 5 outer iterations (`nCorrectors 3`),
+103 % at 10, 0.94 % at 20 (f64, 800 cells, measured once each). The row stays PISO, as
+docs/17 wrote it. Two cures are left for review, and neither is built: restating the row's
+coupling as PIMPLE (a gate definition, the user's), or an energy equation whose `dp/dt` and
+`K` are taken from the previous step's corrected fields when the step has one outer
+iteration (a numerics change). A full `-sections` run of the gate takes 34 s
+(f64) and 75 s (f32) on this machine, PIMPLE leg included.
+
+#### 127.6.2 Gate CMP-AC as built (CMP-20)
+
+`src/bin/validate_gates/acoustic.rs`, one `ofgpu-validate` section after Gate CMP-SOD, live
+in both builds. **The key** is linear acoustics. Linearise the inviscid equations about a gas
+at rest, `(rho_0, 0, p_0)`, with an isentropic disturbance, `p' = c_0^2 rho'`. The result is
+the wave equation for `p'` with speed `c_0 = sqrt(gamma R_s T_0)`, which is (122.4). A
+right-running simple wave has
+
+```
+u' = p' / (rho_0 c_0),        T' = T_0 [ (1 + p'/p_0)^((gamma - 1)/gamma) - 1 ]           (127.20)
+```
+
+(derived; the textbook form is Landau & Lifshitz, *Fluid Mechanics*, 2nd ed., §64, *not
+read*). Gate CMP-NR (§126.9) starts its pulse the same way.
+
+**The run.** A closed tube, 1 m long, of 400 cells with one cell across. The four sides are
+`symmetry`. Both ends are walls (`U` fixed at 0, `p` and `T` zero-gradient). The gas is
+`PerfectGas::air`, inviscid (`Viscosity::Constant { mu: 0 }`), at rest at `T_0 = 300` K and
+`p_op = 1e5` Pa. The pulse is `p' = A exp(-((x - 0.25)/W)^2)` with `A = 1e-3 p_op` and
+`W = 10` cells, plus (127.20). The scheme is transient Euler at an acoustic CFL of 0.2 on
+`c_0` (`dt = 1.44e-6` s), solved with PBiCGStab and DILU at an absolute tolerance of
+`1e-12`. **The row's coupling is the solver's default**, `nOuterCorrectors 1` and
+`nCorrectors 2` (`CompressibleControls::default`), because docs/17's row names none
+(decision TAKEN: the gate measures the solver as a case gets it).
+
+**The measure** is the peak of `p'`, located at step 200 and at step 1000 by a parabola
+through the largest cell and its two neighbours. The speed is the distance between the two
+peaks divided by `800 dt`, taken over `c_0`. The pulse travels 200 cells by step 1000.
+Eight half-widths either side of it (`exp(-64)`) stay inside the tube, at the start and at
+step 1000, so neither wall is reached.
+The bar is within 1 %, class P, the same bar in both builds. The arrival also carries a weak
+nonlinear bias: it is `(gamma + 1)/(2 gamma) A/p_op = 8.6e-4` of `c_0` at the peak (derived),
+which is inside the bar.
+
+**Measured: the row misses in both builds** (table above). The pulse travels at 1.1895
+`c_0` (f64) and 1.1893 `c_0` (f32), about `sqrt(gamma) c_0 = 1.1832 c_0`. That is the speed
+CMP-17 measured in its own tube (§126.9). **The cause leg** is printed only, never checked,
+and runs only when the row misses. It is the same tube with PIMPLE, five outer iterations
+and `alpha_p = 1`, so the last outer iteration's energy equation sees that step's `dp/dt`
+and `K` (§127.6.1). It carries the pulse at 0.99692 `c_0` (f64) and 0.99666 `c_0` (f32),
+which meets the bar. The speed error therefore lies in the one-outer step's coupling, the
+same place §127.6.1 names for Sod: (125.1) is solved before the correctors, so its
+`dp/dt` reads `p^o`. This gate does not derive how that ordering gives `sqrt(gamma)`
+rather than another factor. Two cures are left for review, and neither is built. One is to
+restate the solver's default coupling, or the row's, as PIMPLE (a gate or default
+decision, the user's). The other is the energy-ordering change of §127.6.1 (a numerics
+change). The gate's two runs take 22 s (f64) and 93 s (f32) on this machine's GPU, PIMPLE
+leg included, and about 2.5 and 3 min when two other lanes share that GPU.
+
+#### 127.6.3 Gate CMP-LM as built (CMP-20)
+
+`src/bin/validate_gates/cavity_lm.rs`, one `ofgpu-validate` section after Gate CMP-AC, live
+in both builds. **The key** is Ghia, Ghia & Shin (1982), doi:10.1016/0021-9991(82)90058-4,
+Tables I and II at Re 100. They are read from `reference/ghia1982/` through the answer-key
+reader, with the sha256 digests printed, which is the key Gate 94-D (§94.4) reads. **The
+bar is Gate 94-D's, row for row.** The worst `|u/U - Ghia|` over Table I along `x = 0.5` and
+the worst `|v/U - Ghia|` over Table II along `y = 0.5` must each be `<= 0.02`, on the 80 x 80
+mesh (94-D's finest). The rows use 94-D's own bilinear sampler and comparison
+(`published_benchmarks::compare`, made `pub(crate)` for this). Class P, the same bar in
+both builds. At `M = 0.05` the compressible solution differs from the incompressible one by
+`O(M^2) = 2.5e-3` (derived from the low-Mach expansion; §124.3 gives the limit itself),
+inside the bar.
+
+**The run.** The unit square has 80 x 80 cells and one cell of `1/80` m in z, with both z
+sides `symmetry`. The gas is `PerfectGas::air` at rest at `T_0 = 300` K and `p_op = 1e5` Pa.
+The lid (`yMax`) moves at `U = 0.05 c_0 = 17.3611` m/s in +x, and the other three walls are
+at rest. `T` is fixed at `T_0` on all four walls, `p` is zero-gradient, and the viscosity is
+constant, `mu = rho_0 U L / 100`. `div(phi,U)` and `div(phi,T)` use the limited van Leer
+scheme, as 94-D does. The momentum and energy equations are solved with PBiCGStab and DILU
+(tolerance `1e-9`, `relTol 0.01`), and `p` with tolerance `1e-10`, `relTol 0.001`. The
+relaxation is `alpha_U = alpha_T = 0.7` and `alpha_p = 0.3`.
+
+**The march is SIMPLE with the local time step (125.2) at `CFL = 20`** (acoustic, so about 1
+on the lid speed), not plain steady SIMPLE. Decision TAKEN, inputs only: the closed box's
+pressure level is fixed only by the mass inside it, and only the `ddt(rho)` term carries that
+mass. Plain steady SIMPLE has no such term (§125.1). It passed in f64 (worst `|du|` 3.7e-3 and
+`|dv|` 8.2e-3 at its stop, 1400 iterations), but in f32 every cell's `p_abs` became NaN at
+iteration 480. Transient Euler at a lid CFL of 2 (acoustic CFL 42) with the default
+coupling stopped at step 36 on a bound (`T <= 0`). **The stop** is the field's own. The run
+goes in chunks of 200 iterations until no cell's `u/U` or `v/U` moves by more than `1e-3`
+across a chunk (a twentieth of the bar), with a cap of 4000. `residualControl` cannot stop
+this run, because the one-cell z direction leaves `Uz`'s normalised initial residual at
+`O(0.1)`. A run that stops on a bound (§122.3) fails both rows with the solver's message and
+registers the verdict.
+
+**Measured: both rows pass in both builds** (table above). The field stop is met at 2200
+iterations in both builds, and the change falls by a factor of 0.4 to 0.7 per chunk
+(`8.9e-4` and `8.8e-4` in the last chunk). The mass imbalance is 7.1e-11 (f64) and 3.4e-8
+(f32), and `M_max` is 0.0481. The LTS fixed point keeps a weak `CFL` dependence through
+`rAU` (§125.7). The profiles differ from steady SIMPLE's f64 fixed point by 1e-3 in the worst
+rows (2.7e-3 against 3.7e-3, 7.3e-3 against 8.2e-3), inside the bar either way. The run takes
+29 s (f64) and 27 s (f32) on this machine's GPU, and about 4 min in each build when two
+other lanes share that GPU.
+
+#### 127.6.4 Gate CMP-COU as built (CMP-22)
+
+`src/bin/validate_gates/couette.rs`, one `ofgpu-validate` section after Gate CMP-LM, live
+in both builds. **The key** is (127.12), derived in §127.4 and evaluated live by
+`compressible::exact` (`Couette`, `couette_adiabatic_wall_rise`; CMP-07). Both rows are
+class P, the same bar in both builds: the adiabatic-wall rise `T_w - T_top` within 0.5 %
+of `Pr U^2/(2 c_p)`, and the `T` profile L-infinity within 0.5 % of the rise,
+
+```
+profile_error = max_i |T_i - T(y_i)| / (T_w - T_top) ,     T from (127.12)             (127.21)
+```
+
+(decision TAKEN: normalised by the exact rise; relative to `T` itself the bar would be
+about 20 times looser).
+
+**The run.** A channel `h = 1e-3` m tall on 40 cells (`NY`) and 4 cells (`NX`) of the same
+size along x, one cell of `h/NY` across in z with both z sides `symmetry`; `xMin`/`xMax`
+are a cyclic pair (`BlockSpec::set_cyclic_axis`), the two y sides `wall`. The gas is
+`PerfectGas::air` at `p_op = 1e5` Pa with `Viscosity::Constant { mu }`, so `Pr = 0.71` and
+`c_p = 1004.69` J/(kg K). The wall at `y = h` moves at `U = 200` m/s (`U/c_0 = 0.576`) and
+is held at `T_top = 300` K; the wall at `y = 0` is stationary, its `T` zero-gradient
+(adiabatic), and `p` is zero-gradient on both walls. `mu = rho_0 U h/10` with
+`rho_0 = p_op/(R_s T_top) = 1.16124` kg/m^3 and `mu = 2.3224e-2` Pa s, so the run is at
+`Re = 10`: a low Re keeps the diffusion time short, and the rise of (127.12) does not
+depend on `mu`. The run starts at rest — `u = 0`, `p = 0` (gauge), `T = T_top`
+everywhere — NOT from the key. The march is CMP-LM's: SIMPLE with the local time step
+(125.2) at `CFL = 20`, `localEuler` on momentum and energy, `alpha_U = alpha_T = 0.7`,
+`alpha_p = 0.3`, `nOuterCorrectors 1`, no `residualControl`, PBiCGStab with DILU (`U` and
+`T` at `1e-9`, `relTol 0.01`; `p` at `1e-10`, `relTol 0.001`); the div schemes are the
+controls' defaults, and `viscousWork` stays on — it IS the heating. **The stop** is the
+field's own, tested in chunks of 200 iterations: no cell's
+`(T - T_top)/(T_w - T_top)` or `u/U` moves by more than `2.5e-5` across a chunk (a
+two-hundredth of the bar), capped at 16000 iterations. The change contracts by a factor
+`r` of about 0.84 per chunk, so the march's remaining distance from its fixed point is
+about `2.5e-5 r/(1 - r) = 1.3e-4` of the rise at the stop, below the fixed point's own
+offset derived next. A run that stops on a bound (§122.3)
+fails both rows with NaN and registers the verdict.
+
+**The discrete fixed point** (derived). With `u` linear and the flow parallel, the
+convective terms of (125.1) vanish, and the face fluxes of `kappa grad T` and of the
+viscous work are exact for a quadratic `T` and a linear `u` on a uniform mesh. Write
+`theta = (T - T_top)/(T_w - T_top)`, `eta = y/h` and `Delta = 1/NY`. The interior rows and
+the adiabatic wall's row are then met by `theta_i = C - eta_i^2` for any `C`. The
+isothermal wall's half-cell closure, `(0 - theta_N)/(Delta/2)`, fixes `C = 1 + Delta^2/4`.
+So every cell sits `Delta^2/4 = 1/(4 NY^2) = 1.56e-4` of the rise above (127.12), and the
+zero-gradient face value on `yMin`, `theta_1 = C - Delta^2/4 = 1`, is the exact rise.
+
+**Measured: both rows pass in both builds** (table above). In f64 the field stop is met at
+10200 iterations. The measured rise is `14.132118` K against the oracle `14.133677` K, an
+error of `1.10e-4`, which is the march's remaining distance. The profile L-infinity (127.21)
+is `1.541e-4`, the fixed point's `1.56e-4` offset less that distance near the adiabatic
+wall. `u` matches (127.12)'s `u = U y/h` to `4.4e-9` of `U`, and `M_max` is `0.5685`.
+With the coder's first stop of `2.5e-4` per chunk (7600 iterations), the march's remaining
+distance (`1.3e-3`) dominated: the rise read `1.10e-3` low and the profile `9.40e-4`, in
+both builds. In f32 the stop is met at 8600 iterations, earlier than in f64. At the stop a
+chunk's change is `2.5e-5` of the rise, about `1.8e-6` K per iteration, below `T`'s f32
+spacing at 300 K (`3.1e-5` K). So the f32 march stalls on round-off rather than reaching
+f64's fixed point. The rise reads `14.125420` K (error `5.84e-4`), the profile L-infinity
+is `4.935e-4`, and `u` is `4.0e-6` of `U`. Both values are the f32 floor of this march, an
+order of magnitude inside the bar. (127.12) fixes no pressure level, and the channel is
+sealed and cyclic, so the mass in it cannot leave while its mean `T` rises by `2/3` of the
+rise. The pressure settles about `3.1e3` Pa above `p_op` (derived, first order), and `T`
+never reads it. The last outer line's mass imbalance is `6.5e-16` (f64). The cyclic x pair
+runs in `ofgpu::compressible` as `build_mesh` declares it, with no solver change. One
+`-sections` run of the gate took 346 s (f64) and 199 s (f32) while another program shared
+this machine's GPU. The coder's runs of the first stop took 47 s and 48 s on an idle GPU.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
@@ -47332,6 +48228,80 @@ paths are set (§129.6). JL4 is not in the tree (§129.6).
 
 No new equation labels.
 
+### 132.11 The split step as built (CHR-09, `src/chem/source.rs`, `src/species.rs`)
+
+`No GPL-licensed source was consulted.` The equations are §132.4's reactor and
+§132.5's split, (132.7)-(132.10); nothing is added to them.
+
+**The species set carries a source.** `Species::use_reaction_sources` gives
+each solved species one `[n_cells]` buffer `su`, allocated once (§81), and
+`Species::correct_with_density` hands species `i` its own buffer as the
+`su` of `ScalarTransport::correct_with_density`, which adds it as
+`fvm_su(su, +1)`: `source[P] += V_P su_P`, after the equation's own terms and
+before relaxation, where every other source of the solver goes (§18). A set
+without reaction sources hands every equation `None`, which is the call it
+made before CHR-09, so that path is the same arithmetic by construction and
+is held to a hash pinned before the change.
+
+**The split step fills it.** `chem::source::ChemSource::new` maps every
+mechanism species by name to a solved index or to the inert remainder of
+§19 and refuses, by name, a mechanism species that is not in the set and a
+member of the set that is not in the mechanism: the reactor needs the whole
+composition. `ChemSource::step(species, T, p, rho, dt)` then, for one flow
+step `dt`:
+
+1. packs `Y°` in mechanism order (the inert remainder included) and copies
+   `T°`, by device-to-device copies;
+2. runs CHR-07b's `integrate_fields` (§132.10) in place, every cell's reactor
+   at its `p` and in `double` in both builds (§132.6), with each cell's step
+   memory `h` seeded with `opts.h0` and carried from flow step to flow step
+   (`RosStats::h_next` out, the next step's first trial step in);
+3. writes, per solved species, (132.10) in the currency of the equation it
+   enters: `su_k = (Y*_k - Y°_k)/dt` on §19's constant-density equation
+   (`d(Y)/dt`), and `su_k = rho (Y*_k - Y°_k)/dt` on §86's mass-weighted one
+   (`d(rho Y)/dt`), with `rho` the density `correct_with_density` is handed.
+   `Y* - Y°` is formed from the two Scalar values, so it is exact
+   (Sterbenz) whenever the step changed `Y_k` by less than a factor of two.
+
+`T*` is kept (`ChemSource::temperature`) for (132.10)'s `Q_chem`, which is
+CHR-10b's; CHR-09 does not touch `T`. Refused by name: `dt` not finite or not
+above 0; a density on the constant-density set or none on the mass-weighted
+one (as §86.5 row 6); a set without reaction sources; `T` or `p` shorter than
+the cell count. A cell the reactor refuses carries NaN into its sources and
+its status into `ChemSource::refused_cells`, one read-back and so a
+diagnostic, not a loop step. The step allocates nothing and reads nothing
+back, and it captures (§81.7).
+
+**(133.5) is not built.** §133.5 lists `species_fluxes_sum_to_zero` under
+CHR-09, while the plan's CHR-09 row (docs/17 §12.2) names neither the
+correction nor its files or test. The correction is a new explicit face flux
+in every species equation. That is a numerics addition to species diffusion,
+and the diffusivity it corrects is not there yet: §133.4's route (b) is
+refused by name (§133.7), and on the Lewis route with one Lewis number for
+every species the correction is identically zero. This was decided by
+recommendation, and the row moves to the unit that brings species-specific
+mixture-averaged diffusivities into the species equation.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `species_box_matches_reactor` | a closed adiabatic box with no flow, 2^3 cells cyclic on all three axes and uniform (the plan's one-cell-wide periodic box is the same 0-D problem), stoichiometric H2-air with H, O, OH at 1e-4 moles each, `T0` 1400 K, 1 atm, on §132.8's 15-reaction fixture (placeholder rates); Lie split at `dt = 1e-6` s over 200 steps, `T` fed back from `T*`; every species of the set, solved and inert, against the host `ConstPressureReactor::advance` chained over the same 200 `dt` (each chunk's first trial step the last one's `h_next`), on both species equations | `max abs dY <= 1e-6`; the host must move `max abs dY > 1e-3` | P | host: `T` 1400 -> 1456.270 K, `max abs dY` `2.33e-2`. f64 build: `3.12e-13` (constant density) and `4.59e-13` (mass-weighted), `T*` within `1.7e-9` K. f32 build: solved species `7.04e-7` on both equations; **the inert N2 MISSED**, `1.086e-6` (constant density) and `1.026e-6` (mass-weighted), at step 196 |
+| `species_budget_closes_with_chemistry` | (86.5) with the source metered: a closed 4^3 box (walls, a non-solenoidal internal flux, conservative upwind, `rho` varying in space and held in time, non-uniform `T` and `Y`), the mass-weighted set with the split step's sources; per step and per solved species `abs(Δ Σ rho Y V - dt Σ su V - Δ clip) / Σ rho V`, three steps | `1e-12`, tol32 `1e-5` (D-F32-1); the chemistry term above `1e-6` of the mass | R | f64 build `1.23e-16`; f32 build `3.27e-9`; the chemistry term `2.52e-4` of the mass |
+| `species_without_chemistry_is_bitwise` | three steps of each species equation with no reaction sources, FNV-1a over every solved field and the inert remainder, against the hash pinned at afd0f30 before `src/species.rs` changed | bitwise | D | f64 `0x1bc5208b67b6041e`, f32 `0x018e7024cfdec719`: both unchanged |
+| `chem_source_replays_under_capture` | `ChemSource::step`, `T*` copied back into `T`, then `Species::correct` on a 3^3 box with a flux, captured and replayed | bitwise | D | 1027 nodes (896 kernel, 100 memset, 31 memcpy), 3 replays bitwise over 6 buffers / 162 values (f64 lib test) |
+
+**The f32 miss.** The inert remainder is `1 - Σ` over nine f32 fields, and
+each of them is rounded once per step, so the remainder carries their
+summed round-off. The test measures that cause: N2's error minus the
+negated sum of the solved species' errors is `8.1e-8` on both equations,
+while every solved species stays within `7.0e-7`. The miss is the f32
+storage of the mass fractions, which §19's construction sends to the inert
+species. A cure (f64 mass fractions, or a renormalised set) changes the
+species numerics and is the user's decision (docs/17 §5.3.4). Under the
+user's rule of 2026-10-14 the test asserts the miss as MISSED, prints its
+value and cause, and the unit lands.
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint
@@ -47429,12 +48399,13 @@ with a factor `f < 1`, that pulls a fractional-step solution back onto (133.3).
 Its exact coefficient is not restated here, because the open copy's text layer
 is garbled at that line. It is **named and not
 adopted in v1**. §25's loop holds the equation of state by recomputing `rho`
-from (133.3), and CHR-11 measures the drift that remains. If that drift needs
+from (133.3), and CHR-11 measures the drift that remains: first order in
+`Δt` (§133.10), so the term is not needed for it. If that drift needs
 the term, it is a numerics change and goes to the user (docs/17 §5.3.4).
 
-**§25 is amended in place by CHR-11**, not here. §25.1's "v1: constant W = air,
-stated" becomes a pointer to (133.4). This section is the derivation that
-amendment cites.
+**§25 is amended in place by CHR-11** (§133.10), not here. §25's
+"constant W" line points to (133.20), and §25.1 and §25.2 point to (133.21)
+and (133.22). This section is the derivation those pointers cite.
 
 ### 133.3 The species fluxes must sum to zero
 
@@ -47456,7 +48427,8 @@ form already does.
 
 **On the mesh**, (133.5) is evaluated per face with face-interpolated `Y_m`,
 and its sum over `m` is zero per face up to round-off. §86's species budget
-then closes with the correction metered, not hidden. CHR-09 proves it.
+then closes with the correction metered, not hidden. CHR-09 was to prove it;
+it did not build (133.5), and §132.11 says why.
 
 ### 133.4 Mixture-averaged coefficients
 
@@ -47526,7 +48498,7 @@ constant.
 | `transport_air_viscosity_vs_kadoya` | (133.8) on N2/O2 0.79/0.21 with route (a), 300-1500 K, against `reference/kadoya1985` | 2 % | P |
 | `transport_air_conductivity_vs_kadoya` | (133.9) and (133.11), same | 5 % | P |
 | `transport_route_b_named` | `D_kj` refused by name until Neufeld is read | — | D |
-| `species_fluxes_sum_to_zero` (CHR-09) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
+| `species_fluxes_sum_to_zero` (CHR-09; not built, §132.11) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
 | `gas_wmix_sealed_box_p0_closed_form` (CHR-11) | `dp0/dt` from (133.4) against the analytic sealed box | 1e-12 relative | A |
 | `gas_constant_w_default_bitwise` (CHR-11) | one species, constant W: (133.4) reduces to §25.1 bitwise | bitwise | D |
 
@@ -47665,9 +48637,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's and CHR-12a's; this
-unit builds the slot and the two rows that read it. Without a field nothing
-changes.
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
+and CHR-12a wires it from the case; this unit builds the slot and the two rows
+that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
 field enters both:
@@ -47688,7 +48660,7 @@ shorter than the mesh, is refused by name, naming the cell or boundary face.
 
 **What still reads the constant `cp`, stated.** `k_eff`'s turbulent part
 `rho cp nu_t/Pr_t` (S26, both `Pr_t` models), §25.1's target divergence
-(which (133.4) replaces in CHR-11), and the S29.3 thermal wall function.
+on a gas without a mixture (with one, (133.21) of §133.10 reads the field), and the S29.3 thermal wall function.
 The §120.8 Danckwerts inlet reads `phi_m` itself, so it follows (133.14).
 `assembly_budget` divides by (133.14)'s own `cp_f` and weighs by the cell's
 `cp_c`; its mass diagnostics come from the same pass on `rho_f phi_f`, exact,
@@ -47707,6 +48679,199 @@ The two exact zeros are not a promise: the uniform mesh's `w_f = 1/2` makes
 differ from `c` in its last bit, which the R tolerance allows.
 
 Labels: (133.13)-(133.14).
+
+### 133.9 Heat release and species-enthalpy diffusion in the temperature equation (CHR-10b, `src/energy.rs`, `src/chem/source.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (1)-(6) as (133.1)-(133.2) of §133.1 write them, and the split of
+(132.10) of §132.5; nothing is added to them.
+
+**The temperature form.** Subtract `Σ_m h_m` times (133.1) from (133.2), use
+continuity, and write `h = Σ_m Y_m h_m(T)` with `grad h_m = cp_m grad T`:
+
+```
+rho cp DT/Dt = div(λ grad T) - Σ_m Γ_m . grad h_m - Σ_m h_m W_m omega_m + dp0/dt              (133.15)
+```
+
+The first line of (133.4) is this equation divided by `rho cp T`, term for
+term. §26 already carries `rho cp DT/Dt` (with CHR-10a's `cp` field,
+§133.8), `div(λ grad T)` and `dp0/dt`. CHR-10b adds the other two terms, both
+as explicit sources on §18's `EnergySources`, so they also enter §25.1's `Q`
+and with it the target divergence and the sealed-box `p0`, as §26.1 requires
+of every heat source.
+
+**The heat release.** `-Σ_m h_m W_m omega_m` is the split step's: the reactor
+(132.7)-(132.8) has already integrated it over `Δt` into `T* - T°`, and
+(132.10) hands it to the transport step as `Q_chem = rho cp (T* - T°)/Δt`.
+The `rho cp` is the energy equation's own:
+
+```
+Q_chem,c = w_c (T*_c - T°_c) / Δt,    w_c = the ddt row's current-level weight                 (133.16)
+```
+
+`w` is `rho_c cp_c` (or `rho_c cp` on the constant path), and (133.13)'s
+`rho* cp` under backward, refreshed from the gas state exactly as
+`Energy::correct` refreshes it (`Energy::heat_release_weight`). *DESIGN.*
+With this weight a cell with no flux under Euler, at the first outer
+iteration of a step (`rho^n = rho^(n-1)`, `ofgpu-lowmach`'s order: open the
+step, then `update_density`), solves `w (T^(n+1) - T°)/Δt = Q_chem` and lands
+on `T*` to round-off: the 0-D box is the reactor. Under backward the row is
+`w (3/2 T - 2 T° + 1/2 T^(n-1))/Δt` and lands near, not on, `T*`; Lie
+splitting is first order in `Δt` either way (§132.5). `T* - T°` is formed
+from the two Scalar values (`ChemSource::start_temperature` keeps `T°`),
+exact whenever the step changed `T` by less than a factor of two.
+
+**The species-enthalpy diffusion.** §19's inert remainder `N` closes the
+fluxes as it closes the mass fractions, `Γ_N = -Σ_k Γ_k` over the solved
+species (§133.3's (133.5) is not built, §132.11), so with
+`Γ_k = -rho D_k grad Y_k`
+
+```
+- Σ_m Γ_m . grad h_m = Σ_{k solved} rho_c D_k (cp_k(T_c) - cp_N(T_c)) (grad Y_k)_c . (grad T)_c   (133.17)
+```
+
+per cell, from Gauss gradients of `T` and of each solved `Y_k`. `D_k` is
+the species' molecular diffusivity (`SpeciesCoeffs::d`), the laminar flux
+of Day & Bell's equations. *DESIGN, decided by recommendation:* the
+turbulent part `nu_t/Sc_t` of the species flux is not added, because §26's
+turbulent heat flux `rho cp nu_t/Pr_t grad T` is the model of the turbulent
+enthalpy transport and adding a second turbulent enthalpy flux would count
+it twice. `rho` is the cell density of §25. (133.17) is not a divergence, so
+its domain integral is not zero: it moves sensible heat between species of
+different `cp`, which the temperature equation sees as a source.
+
+**The mixture `cp`**, the producer §133.8 left open:
+
+```
+cp_c = Σ_m Y_m,c cp_m(T_c),   cp_m = (R/W_m)(a1 + a2 T + a3 T^2 + a4 T^3 + a5 T^4)            (133.18)
+```
+
+(128.7) with (128.1), the lower set at or below `t_mid` (128.5), on every
+cell and every boundary face from that face's `T` and `Y`, into the two
+buffers `Energy::set_cp_field` takes. A member with `Y_m = 0` adds exactly
+nothing, as `ThermoSet::cp_mass` skips it. The polynomial ranges are not
+checked here; a cell outside them is the reactor's refusal (§132.4).
+
+**As built.** `cuda/energy.cu` gains `energyMixtureCpAdd` (one member per
+launch), `energyEnthalpyDiffusionAdd` (one solved species per launch) and
+`energyRoundAcc`: every sum is formed in `ofacc` (double in both builds,
+§118.1) and rounded once to the build's scalar. `chem::source::SpeciesEnthalpy`
+holds one 12-value row per member (`R/W`, `t_mid`, the two sets'
+`a1..a5`), built by name from the `ThermoSet` and refused by name for a member
+it does not carry; `mixture_cp` and `diffusion_source` allocate nothing and
+read nothing back. `ChemSource::heat_release(weight, out)` forms (133.16)
+and is refused by name before the first step. `EnergySources::use_meters`
+gives the registry two opt-in meters, and `register_heat_release` and
+`register_enthalpy_diffusion` add into `q` and into their meter;
+`EnergyBudget` gains `heat_release_w` and `enthalpy_diffusion_w`, each
+`-Σ_c q_meter,c V_c`, two sub-entries of `sources_w` in the same sign. A
+registry without meters runs the launches it ran before, and the six
+existing kernels of `energy.cubin` keep their SASS (the cubin's three new
+functions are its only change).
+
+**Gates, measured 2026-10-15 (both builds, `tests/energy_chem.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `energy_box_matches_reactor` | §132.11's 0-D box (2^3 cyclic, uniform, no flow, open, `p0` 1 atm, H2-air 1400 K, CHR-06's fixture), Lie split at `dt = 1e-6` s over 200 steps, `T` from the energy equation (Euler) with (133.16) and (133.17) registered and the (133.18) field set every step, both species equations, against CHR-06's host `ConstPressureReactor::advance` chained over the same steps | `max abs dT <= 0.5 K`; the host must heat by more than 10 K | P | host 1400 -> 1456.270 K. f64 `1.43e-9` K (constant density), `7.71e-10` K (mass-weighted); f32 `3.33e-2` K and `3.51e-2` K |
+| `energy_budget_meters_heat_release` | a closed 4^3 box (adiabatic walls, no flow), `T` 1700 ± 60 K and `Y_H2`, `Y_OH` varying per cell, nine distinct `D_k`, three steps at `dt = 1e-5` s: (a) `abs(residual_w)`, (c) `abs(sources_w - heat_release_w - enthalpy_diffusion_w)`, both over the gross `Σ w T° V/dt`; (b) `heat_release_w` against the host's `-Σ w (T* - T°)/dt V` from the downloaded `w`, `T°`, `T*`, relative; the heat release above `1e-4` of the gross and the enthalpy diffusion nonzero | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 (a) `1.39e-16`, (b) `1.29e-16`, (c) `3.69e-18`; f32 (a) `1.41e-8`, (b) `8.28e-9`, (c) `9.65e-10`; heat release `2.28e-4` of the gross (0.863 W), enthalpy diffusion `1.09e-4` W |
+| `energy_species_enthalpy_matches_host` | 4^3 walled box, `T` 900-1845 K, every `Y` varying: (133.18) on every cell and boundary face against `ThermoSet::cp_mass`, relative; (133.17) against an f64 host evaluation from the device's own Gauss gradients, over the largest value; refusals named (a member without thermo, a heat release before any step, a metered registration without meters) | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 `2.92e-16` and `5.60e-16` of `1.04e5` W/m3; f32 `3.98e-8` and `3.70e-8` |
+
+Labels: (133.15)-(133.18).
+
+### 133.10 The mixture molar mass in the equation of state and the molar-change term of the constraint (CHR-11, `src/energy.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (3) and (7) as (133.3) and (133.4) of §133.1-§133.2 state and derive
+them; nothing is added to them. What this section adds is how they are
+evaluated.
+
+**The mixture.** `GasMixture` names the solved members `k`, in the order
+their mass-fraction fields are handed over, and §19's inert remainder `N`,
+each with its molar mass. (133.3)'s `Σ_m Y_m/W_m`, with `Y_N = 1 - Σ_k Y_k`
+written out, is
+
+```
+1/W = 1/W_N + Σ_k Y_k (1/W_k - 1/W_N)                                                          (133.19)
+rho^(l) = p0^(l) / ( R T^(l) (1/W)^(l) ),    l = n, n-1, n-2 on the cells, and l = n on the boundary faces   (133.20)
+```
+
+`GasState::update_density_mixture` forms both on every level §25's
+`update_density` refreshes, each level from its own `T`, `Y` and `p0`.
+*DESIGN.* (133.19) equals (133.3)'s sum while `Σ_k Y_k <= 1`, where §19's
+clip of `Y_N` at zero is idle (`Species::max_sum_error` measures when it is
+not), and it reads the solved members' own old levels, which the inert field
+does not keep.
+
+**The constraint.** In (133.4), the first line and the `- h_m/(cp T)` part of
+the third are `Q/(rho cp T)`, with `Q` §26.1's registry and conduction (CHR-10b
+registers the heat release (133.16) and the enthalpy diffusion (133.17) there).
+What is new is `(1/rho) Σ_m (W/W_m) S_m` with `S_m = W_m omega_m - div Γ_m`,
+the member's net mass source, and `S_N = -Σ_k S_k` by the closure. By (133.3),
+`W/rho = R T/p0` and `1/(rho cp T) = R_s/(cp p0)` exactly, so per cell
+
+```
+D_c = Q_c R_s,c / (cp_c p0) + (R T_c / p0) Σ_k (1/W_k - 1/W_N) S_k,c,    R_s,c = R (1/W)_c
+(div u)_target,c = D_c - (1/γ_c) (dp0/dt) / p0,    1/γ_c = 1 - R_s,c / cp_c                    (133.21)
+```
+
+with `cp_c` CHR-10a's field when one is set and the constant `cp` otherwise,
+`dp0/dt` at §25's one-iteration lag. Integrating (133.21) over a sealed domain,
+where `∫ div u dV = 0`:
+
+```
+dp0/dt = p0 ∫ D dV / ∫ (1/γ) dV     (sealed),     dp0/dt = 0     (open)                         (133.22)
+```
+
+With one constant `W` and `γ = cp/(cp - R/W)` this is (25.2)'s
+`(γ - 1)/V_dom ∫ Q dV`. On the gate's box (uniform, `Q = 0`, one solved `A`
+against the inert `N`, `Σ_m omega_m = S_A/W_A + S_N/W_N`) it is the closed form
+
+```
+dp0/dt = γ R T S_A (1/W_A - 1/W_N) = γ R T Σ_m omega_m,     γ = cp / (cp - R (1/W))             (133.23)
+```
+
+**As built.** `cuda/energy.cu` gains `energyFillAcc` and `energyAxpyAcc`
+((133.19), and the molar sum `Σ_k (1/W_k - 1/W_N) S_k` that
+`GasState::set_molar_change` forms from the members' sources in kg/(m3 s)),
+`energyMixtureDensity` ((133.20)) and `energyMixtureConstraint` ((133.21) on
+every cell, grid-stride, with the per-block sums of `D V` and `V/γ`). Every sum
+and quotient is in `ofacc` (double in both builds, §118.1), rounded once to the
+build's scalar; `Energy::constraint_integrals` totals the block sums on the
+host in block order, and `GasState::advance_p0_mixture` takes one explicit
+Euler step of (133.22) in f64 and rounds `p0` once. Because the rate never
+passes through a rounded `rho`, class A holds in f32. A gas without a mixture
+runs every launch it ran before (the old `energyTargetDivergence`, `update_density`,
+`advance_p0`), and on a gas with one `update_density` and `advance_p0` are refused
+by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
+with the current level's `1/W`, as it takes the `cp` field as last set.
+
+**What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
+`set_molar_change` takes the net source, and CHR-12b forms it from the species
+equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
+still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
+measured drift below is first order in `Δt`.
+
+**Gates, measured 2026-10-15 (both builds, `tests/gas_wmix.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `gas_constant_w_default_bitwise` | a sealed 4^3 walled box without a mixture, `T` 300-330 K, a uniform 1e3 W/m3 heater, three Euler steps of `update_density`, `update_target_divergence`, `correct` and `advance_p0`: SHA-256 of every `rho`, target divergence, `T`, `p0` and `dp0/dt`, against pins captured at the parent commit 41d449a, one per build | bitwise | D | equal in both builds |
+| `gas_wmix_sealed_box_p0_closed_form` | a sealed 2^3 walled box, `T` held at 300 K (isothermal: the energy equation not solved), no flow, no heat source, `A` with NO2's `W` and the inert `N = 2 A` (the shape of 2 NO2 -> N2O4, heat-neutral by construction), `S_A = -2 kg/(m3 s)`, `Y_A` in {0.9, 0.6, 0.3}: `dp0/dt` against (133.23) evaluated in f64 from the stored inputs; `p0` one Euler step of it (D); `rho` against (133.20) and, at the new `p0`, the target divergence against its own `D` (R, D-F32-1); seven refusals by name | `1e-12` relative (A); `1e-12`, `1e-5` in f32 (R) | A, D, R | `dp0/dt` `1.15e-16` (f64) and `1.19e-16` (f32); `rho` `2.29e-16` and `4.35e-8`; target divergence `2.05e-16` and `1.76e-8` |
+| (diagnostic, same test) | the same box adiabatic, `T` solved (Euler, one outer iteration per step, `ofgpu-lowmach`'s order), `Y_A(t) = 0.9 + S_A t/rho`, to `t = 0.05` s: `p0` against the exact `rho R Z (T_0 - p0_0/(rho cp))/(1 - R Z/cp)`, `Z = 1/W(t)`, and the mass drift `Σ rho V` | printed | — | 10 steps: `p0` error `1.05e-3` of its change, mass drift `5.8e-4`; 20 steps: `5.4e-4`, `2.9e-4`; order `0.96` in both builds |
+
+**The order of a step matters, measured.** The adiabatic leg first ran with
+`Y` at the step's new value on its current level and the old value on the
+previous one when `T` was solved. Then §26's conservative ddt row
+`(rho^n T - rho^(n-1) T°) cp/Δt` saw `rho^n ≠ rho^(n-1)` from `W` alone. `T`
+fell 9 K where the exact fall is 1.66 K, and the error did not shrink with
+`Δt`. In `ofgpu-lowmach`'s order the species are solved after `T`, so `Y`
+holds the step's opening value on both levels and `rho^n = rho^(n-1)` at the
+energy solve, as on the constant-`W` path. The numbers above are for that
+order. CHR-12b keeps it.
+
+Labels: (133.19)-(133.23).
 
 ---
 
@@ -50467,8 +51632,10 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a, the K-cycle of §141.6, AMG-04c, and the decomposed levels of §141.10, AMG-07a). Since AMG-04a `solver::solve` runs the cycle (§141.5); no case can ask for it
-before AMG-04b.
+AMG-04a, the K-cycle of §141.6, AMG-04c, and the decomposed levels of §141.10, AMG-07a). Since AMG-04a `solver::solve` runs the cycle (§141.5), since AMG-04b a case asks
+for it and its settings (§141.7), and since AMG-05 it is a pressure backend the selector measures
+(§141.8). AMX-01 opens AMGX at run time (§141.20), and since AMX-02 AMGX keeps its hierarchy structure
+in the time loop and is compared with PBiCGStab and GAMG (§141.21).
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -51124,8 +52291,8 @@ asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda
 two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
 integration test (both builds; since AMG-06a the iteration and agreement gates hold their
 f64 numbers under `single` too, §141.9), and one library test, the capture gate of §81. No existing solve, case or SASS
-outside `amg.cubin` moves: a case cannot ask for GAMG yet (AMG-04b), the pressure backend
-still refuses it (AMG-04b, AMG-05), and every other preconditioner and solver path is unchanged.
+outside `amg.cubin` moves: a case could not ask for GAMG before AMG-04b, which also lifted
+the pressure backend's refusal (§141.7), and every other preconditioner and solver path is unchanged.
 
 Sources: **Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed. (2003)** (the author's
 open copy, read again on 2026-10-13), §13.4.3, Algorithm 13.3 `uh = V-cycle(Ah, uh0, fh)`:
@@ -51423,6 +52590,178 @@ The iteration growth 32^3 -> 128^3 is 14/13 = 1.08x for the K-cycle, inside the 
 `POI(32)` both take 39 iterations and agree to 3.5e-16. The host twin agrees to 9.4e-16
 (K(2,2), `t = 0.25`: 4 one-step and 0 two-step inner solves), 1.0e-15 (`t = 0`: 15 two-step)
 and 2.9e-16 (K(1,1) l1-Jacobi: 8 one-step, 5 two-step).
+
+### 141.7 GAMG from a case: the settings, and the pressure backend that serves them (AMG-04b)
+
+`No GPL-licensed source was consulted.` A case names GAMG in `solvers/<var>/solver` or
+`solvers/<var>/preconditioner` and states its settings beside it; `io::case::read_solver_controls`
+reads them into `SolverControls::gamg` (`GamgControls`: the `GamgConfig` of §141.5 and
+`cache_agglomeration`), the JSONC route reads the same keys from a `numerics.solvers[]` rule's
+`gamg` block, and `pressure::PbicgstabBackend` builds the hierarchy and attaches it
+(`set_gamg`) before it calls `solver::solve`. The backend's refusal of GAMG, which named AMGX, is
+removed. Every other solve keeps §141.5's refusal naming `set_gamg`: a hierarchy is built only where
+the pressure equation is solved by a `PbicgstabBackend` (the SIMPLE/PISO core of `src/simple.rs` with
+the backend a driver hands it, as `ofgpu-buoyant`, `ofgpu-lowmach` and `ofgpu-datacentre` do, the CHT
+flow of `src/cht/flow.rs`, and the ALE and Turek-Hron flows). `ofgpu-vof`'s `p_rgh`, the compressible pressure, the energy and turbulence equations and
+`dist_solve` do not build one. AMG-05 adds GAMG as a backend of its own.
+
+Sources: no new literature. The key names are the case format's, as `fvSolution` files write them;
+what each key does here is the setting of §141.3 or §141.5 it is mapped onto, stated below. OpenFOAM's
+GAMG and its sources were not opened.
+
+**The keys** (read where the GAMG they belong to is named: `solver GAMG` reads them from
+`solvers/<var>/`; `preconditioner GAMG` from `solvers/<var>/` when it is a bare word, and from inside
+OpenFOAM's sub-dictionary form `preconditioner { preconditioner GAMG; ... }`, whose own `preconditioner`
+entry names the preconditioner; any preconditioner name may use that form; a key beside a solve that
+names no GAMG is not read):
+
+| key | maps onto | values | default |
+|---|---|---|---|
+| `smoother` | `HierarchyConfig::smoother` (§141.3) | `Chebyshev` (degree 2, fraction 0.3), `l1Jacobi`, `Jacobi` (weighted, `ω = 2/3`) | `Chebyshev` (§141.5) |
+| `nPreSweeps` | `GamgConfig::n_pre`, `ν1` of (141.5.1) | whole number `>= 0` | 2 |
+| `nPostSweeps` | `GamgConfig::n_post`, `ν2` of (141.5.1) | whole number `>= 0`; `ν1 + ν2 >= 1` | 2 |
+| `nCellsInCoarsestLevel` | `HierarchyConfig::n_cells_coarsest` (§141.3) | whole number `>= 1` | 64 |
+| `maxLevels` | `HierarchyConfig::max_levels`, the finest level counted (§141.3) | whole number `>= 1` | 50 |
+| `cacheAgglomeration` | `GamgControls::cache_agglomeration` | an OpenFOAM Switch | `true` |
+| `precision` | `GamgControls::precision`, the device copy's precision (§141.12, AMG-06b) | `native`, `single`; anything else is refused naming the key, and `-permissive` does not downgrade it | `native` |
+| `mergeLevels` | — | `1` only: no merging, which is what the hierarchy does | — |
+| `agglomerator` | — | none: refused | — |
+
+**Refused by name** (§13.4, with the alternative in the message): a `smoother` of the Gauss-Seidel
+family (`GaussSeidel`, `symGaussSeidel`, `nonBlockingGaussSeidel`, `DICGaussSeidel`), `DIC`, `DILU`,
+`FDIC` or anything else, with the menu `Chebyshev, l1Jacobi, Jacobi` and the note that the native
+smoothers run one thread per cell; `-permissive` substitutes Chebyshev. `mergeLevels` other than 1, with
+the menu `1` and the note to set `nCellsInCoarsestLevel` or `maxLevels`; `-permissive` substitutes 1.
+Every `agglomerator`, with the note that the aggregation is algebraic (§141.1) and the entry should be
+removed; `-permissive` keeps the native aggregation. A count that is not a whole number in range, a
+`cacheAgglomeration` that is not a Switch, and `nPreSweeps = nPostSweeps = 0` are refused naming the
+key, and `-permissive` does not downgrade them. In JSONC the block denies unknown fields, so
+`mergeLevels` and `agglomerator` are refused by name with the accepted keys as the menu, and a `gamg`
+block on a rule whose solver and preconditioner are both other than GAMG is refused: nothing would read
+it (§13.4.1).
+
+**The backend** (*DESIGN*). `setup` keeps a copy of the host mesh when the controls name GAMG. Each
+`solve` downloads the matrix it is given and builds a `Gamg` of it with `GamgControls::cycle`, the
+`permissive` flag of §13.4 passed on to the coarsest solve's pivot fallback (§141.5), unless
+`cacheAgglomeration` is on and the matrix is bit for bit (diag, upper, lower, boundary_coeffs: every
+array the hierarchy reads) the one the attached hierarchy was built from, in which case the attached one
+is used again. The cache therefore never changes an answer: a hierarchy built twice from one matrix is
+the same hierarchy, and the gate holds the two answers bitwise equal. AMG-05 left this cache as it
+stands, so a GAMG case solved through `PbicgstabBackend` keeps its numbers, and put the re-gather into
+the backend of its own, `GamgBackend` (§141.8): there `cacheAgglomeration true` keeps the aggregation
+and re-gathers the Galerkin values per solve; here every changed matrix still costs one host build. No
+default moves: a case that names no GAMG keeps its controls, its backend and its numbers.
+
+#### 141.7.1 The gates
+
+`POI(16)` of (141.5.5) (4096 cells), `b = 1`, tolerance `1e-8`, `relTol 0`, from zero. Each row
+reads an `fvSolution` text through `read_solver_controls` and solves through `PbicgstabBackend`; a
+pair is two texts that differ in one line. All rows run in both builds.
+
+| test (`tests/gamg_case.rs` unless marked) | what | class |
+|---|---|---|
+| `the_solver_a_case_asks_for_is_the_solver_it_gets` | `PBiCGStab`/`diagonal`, `PCG`/`DIC`, `GAMG`, `PCG`/`GAMG`, `PBiCGStab`/`GAMG` and `PCG` with the `preconditioner { preconditioner GAMG; smoother l1Jacobi; }` sub-dictionary read as named; each converges; one hierarchy is built and attached exactly when GAMG is named; the GAMG rows take other counts than the Krylov rows they replace | P, D |
+| `every_gamg_key_reaches_the_solve` | `smoother` Chebyshev / l1Jacobi under PCG/GAMG; `nPreSweeps` 2 / 1 and `nPostSweeps` 2 / 1 under the GAMG solver: other iteration counts. `nCellsInCoarsestLevel` 64 / 512 and `maxLevels` 50 / 2: other hierarchies (`maxLevels 2` has two levels). `cacheAgglomeration` yes / no over two solves of one matrix: 1 / 2 builds and the answers bitwise equal; with it on, a changed matrix (the diagonal times 1.5) is rebuilt and answers bitwise as a fresh build | P, D |
+| `unsupported_gamg_values_are_refused_by_name_with_the_alternative` | `smoother` `GaussSeidel`, `DICGaussSeidel`, `symGaussSeidel`, `DIC` (naming `solvers/p/smoother`, the value, `Chebyshev`, `l1Jacobi`, `-permissive`); `mergeLevels 2`; `agglomerator faceAreaPair`; the sub-dictionary's `smoother DICGaussSeidel` under `solvers/p/preconditioner/smoother`; both sweeps 0; `maxLevels 0`; `nCellsInCoarsestLevel 2.5`; `cacheAgglomeration maybe`. `mergeLevels 1` is the default controls; under `-permissive` `GaussSeidel` becomes Chebyshev | D |
+| `io::case_json::tests::a_jsonc_gamg_block_reaches_the_controls_and_its_refusals_name_the_key` (library) | every key of a `gamg` block lowers under `solver GAMG` and under `preconditioner GAMG`; no block is the defaults; `mergeLevels`, `agglomerator` refused by name; a block under `PBiCGStab`/`DILU` refused; `GaussSeidel`, both sweeps 0, `maxLevels 0` refused naming `numerics.solvers` | D |
+| `pressure::tests::gamg_on_the_pressure_equation_is_served_with_a_hierarchy_of_its_matrix` (library) | the backend's own: `setup` keeps the mesh, the first solve builds one hierarchy of the fine size, GAMG, PCG/GAMG and PBiCGStab/GAMG converge to `1e-6` | D |
+| `pressure::tests::a_pbicgstab_or_pcg_entry_builds_no_hierarchy` (library) | PBiCGStab and PCG with DIC keep no mesh and build nothing | D |
+
+**Measured** (supervisor's runs, 2026-10-15; iterations of the first solve; under `single` the count
+is that of the §118.4-refined solve):
+
+| row | f64 | `single` |
+|---|---|---|
+| PBiCGStab/diagonal, PCG/DIC | 27, 19 | 35, 25 |
+| GAMG, PCG/GAMG, PBiCGStab/GAMG | 31, 10, 6 | 28, 9, 6 |
+| PCG with the sub-dictionary (`l1Jacobi`) | 17 | 15 |
+| `smoother` Chebyshev / l1Jacobi (PCG/GAMG) | 10 / 17 | 9 / 15 |
+| GAMG V(2,2) / V(1,2) / V(2,1) | 31 / 36 / 37 | 28 / 32 / 33 |
+| level sizes, `nCellsInCoarsestLevel` 64 | 4096, 1024, 256, 65, 17 | 4096, 1024, 256, 64 |
+| level sizes, `nCellsInCoarsestLevel` 512 | 4096, 1024, 256 | 4096, 1024, 256 |
+| level sizes, `maxLevels` 2 | 4096, 1024 | 4096, 1024 |
+| builds, `cacheAgglomeration` yes / no | 1 / 2 | 1 / 2 |
+
+The two builds coarsen `POI(16)` differently below 256 cells for the reason §141.3 gives for
+`POI(64)`: the f64 face coefficients differ in the last bits and move the tie-breaks.
+
+### 141.8 GAMG as a pressure backend: the kept aggregation, the re-gather, and the measurement (AMG-05)
+
+`No GPL-licensed source was consulted.` `pressure::GamgBackend` (`src/pressure/gamg.rs`) is the
+native GAMG of §141.5 as a backend of the measuring selector of `src/pressure/mod.rs`
+(`choose_pressure_backend`), beside PBiCGStab, cuFFT and AMGX:
+`default_candidates` lists it second, `ofgpu-buoyant`'s `-backend auto` measures it, and
+`-backend gamg` names it. Sources: no new literature; the numerics are those of §141.1-§141.5,
+cited there. OpenFOAM's GAMG was not opened.
+
+**The re-gather.** The first solve builds the hierarchy of §141.3 from the matrix it receives
+(aggregation §141.1, plans and coarse levels §141.2, smoothers §141.3, coarsest factor §141.4). A
+later solve whose matrix is bit for bit the held one (diag, upper, lower, boundary_coeffs) reuses it.
+Any other matrix, with `cacheAgglomeration true`, is RE-GATHERED: `agg(c)` and each level's
+`GalerkinPlan` and row map are kept, and level `l + 1`'s coefficients are the coarse operator
+(141.14)-(141.16) of the new level `l` through the kept plan, level by level from the fine matrix in
+the order of (141.3.1); no stop test is evaluated again, because the level sizes are those of the kept
+aggregation. Every smoother setup ((141.3.3), (141.3.4), (141.3.7)) and the coarsest factorisation
+of §141.4 are redone from the re-gathered levels (`HostHierarchy::regather`, `Gamg::regather`). The
+strength of §141.1 reads the couplings, so a matrix that differs only in its diagonal aggregates as
+the held one did, and its re-gather is the fresh build bit for bit. With `cacheAgglomeration false`
+every solve builds from scratch, as §141.7's key says. A failed re-gather drops the hierarchy, so the next solve
+builds a fresh one.
+
+**The controls** (*DESIGN*). A `p` entry that names GAMG (solver or preconditioner, §141.7) is used as
+it stands. Any other keeps its `tolerance`, `relTol`, `maxIter`, `minIter` and check interval and
+runs PCG with the GAMG cycle as its preconditioner when the probe finds the system symmetric and
+`nPreSweeps == nPostSweeps` (§141.5's condition for a symmetric cycle), and PBiCGStab with it
+otherwise, under the default settings of §141.7.
+
+**The measurement** (*DESIGN*). Two defaulted methods join the backend trait; the other backends keep
+their defaults, so their behaviour is unchanged. `set_agreement_trial`: the selector turns it on for a
+candidate's agreement solve and off before the timed solve. An iterative backend solves the trial to
+`reference_controls()`'s tolerance (`1e-14`, `relTol 0`), so the selector's 1e-8 agreement certifies the
+method rather than the case's stopping rule; the timed solve keeps the run's controls. GAMG's trial
+builds the hierarchy, and its timed solve re-gathers once more on the same matrix, so the time it
+reports is what a solve in a time loop costs: the matrix download, the re-gather and the Krylov solve.
+`setup_secs`: the time the backend's last set-up inside a solve took. The decision table prints a
+`set-up` column (the `setup` call plus that time) beside the `solve` column. A third defaulted method,
+`run_summary`, gives `ofgpu-buoyant` the line it prints at the end of a run: aggregations built,
+re-gathers and the mean of each. `auto` still picks the fastest survivor by measurement only. No
+default moves: `-backend` is `auto` as before, and no backend is preferred by a rule.
+
+#### 141.8.1 The gates
+
+| test (`tests/gamg_backend.rs` unless marked) | what | class |
+|---|---|---|
+| `a_regather_on_the_same_aggregation_is_the_fresh_build` | `POI(16)` of (141.5.5), `b = 1`, then the same matrix with its diagonal times 1.5, through one backend (`1e-8`, `relTol 0`): 1 build and 1 re-gather; the answer and the level sizes bit for bit a fresh backend's on the scaled matrix; the controls resolve to PCG with GAMG | P, D |
+| `a_changed_coupling_is_regathered_onto_the_kept_aggregation` | `POI(16)`, then its face coefficients times `1 + x_f/16`: 1 build, 1 re-gather, the level sizes kept, both solves converged to `1e-8`; `cacheAgglomeration no` builds 2; the same matrix twice is 1 build and no re-gather | P, D |
+| `the_selector_measures_gamg_with_its_set_up` | `default_candidates` lists PBiCGStab, GAMG, cuFFT, AMGX; under a loose entry (`1e-3`, `relTol 0.1`) the GAMG row is applicable, timed, agrees to `1e-8` and carries a set-up time | D |
+| `the_backend_flag_takes_five_names_and_nothing_else` (`ofgpu-buoyant`) | `-backend GAMG` (any case) is the GAMG backend; `gamgx` is refused | D |
+
+All three integration tests run in both builds. **Measured** (supervisor's runs, 2026-10-15; one card
+shared with two other lanes, so the times move by up to 2x between runs; the gate is the
+agreement, the times are reported). `POI(16)`, f64 / `single`: the changed coupling takes 10, 10 /
+9, 11 iterations, the diagonal times 1.5 takes 3 / 3, and the selector's GAMG row agrees to 2.6e-15 /
+3.4e-15. The `ofgpu-buoyant -iters 1` decision tables (f64, the case's own `p` entry, PBiCGStab with
+DIC, `relTol 0.01`), two runs each:
+
+| case | cells | PBiCGStab set-up / solve, ms | GAMG set-up / solve, ms | GAMG agrees to | `auto` picks |
+|---|---|---|---|---|---|
+| `plume` (`cases/plumeB`, 98 × 42 × 20) | 82,320 | 10.45 / 25.66; 9.38 / 27.22 | 236.83 / 90.23; 278.31 / 88.20 | 8.0e-15 | PBiCGStab |
+| `gb_800000` (`ofgpu-generate-mesh big` 500 × 400 × 4) | 800,000 | 33.04 / 931.73; 32.78 / 965.11 | 1821.29 / 596.75; 1736.38 / 491.85 | 2.8e-14 | GAMG, 1.6x and 2.0x |
+
+In the time loop (`-backend gamg`): on `plume` one aggregation build of 208-253 ms and 39 re-gathers
+of 42 ms each over 20 iterations; on `gb_800000` (5 iterations) one build of 1698 ms and 9 re-gathers
+of 320 ms each, the time loop taking 6.15 s against PBiCGStab's 9.00 s, with 20 and 19 p iterations
+against 233 and 482.
+
+**The 20-iteration comparison.** `plume`, `-iters 20`, `-backend pbicgstab` against `-backend gamg`,
+both with the `p` entry tightened to `tolerance 1e-12; relTol 0; maxIter 5000` (an input, the same in
+both runs), the states compared through `-restartWrite 20`: the largest `max|diff| / max|field|` over
+`U`, `p`, `k`, `epsilon`, `nut`, `T` and `phi` is **8.4e-12** (`U`; `p` 1.1e-12, `T` 1.0e-12), inside
+the 1e-8 gate. With the case's own `relTol 0.01` the two runs differ by 1.4e-1 after 20 iterations:
+the two solvers stop at different points of an unconverged SIMPLE iteration, which is the stopping
+rule's difference and not the backend's. The comparison ran in the f64 build; the single build's
+drivers were not run (`--features single` builds the library, and the three integration tests run
+there).
 
 ### 141.9 GAMG in f32 (AMG-06a)
 
@@ -51775,6 +53114,118 @@ Measured as AMG-07b landed (f64; `single`, then at tol `1e-5` without refinement
 The worst iteration ratio is 47/44 = 1.07 in f64 and 6/5 = 1.2 under `single`, against the
 gate's 1.3.
 
+### 141.12 The f32 GAMG preconditioner of an f64 solve (AMG-06b)
+
+`No GPL-licensed source was consulted.` An f64 solve can take its GAMG preconditioner in single
+precision: `Gamg::new_with_precision(.., GamgPrecision::Single, ..)` builds the solve's own host
+hierarchy (§141.3) and coarsest setup (§141.4) exactly as `Gamg::new` does, and then holds them on the
+device in `f32` instead of `Scalar`. A case asks for it with the GAMG key `precision single` (§141.7;
+the default is `native`), read by the dictionary route; the pressure backends of §141.7 and §141.8
+pass it to the build. The JSONC `gamg` block does not carry the key yet, so it refuses `precision` by
+name as an unknown field (`io/case_json.rs` was another lane's file in this wave). It is opt-in: no default moves, and a case that does not write the key keeps
+its hierarchy, its counts and its answers bit for bit. Under `--features single` the hierarchy is
+already float, both values build the native one, and the key changes nothing (the gates hold this
+bitwise). The unit is AMG-06b.
+
+Sources: **Kronbichler & Ljungkvist, "Multigrid for Matrix-Free High-Order Finite Element Computations
+on Graphics Processors", *ACM Trans. Parallel Comput.* 6(1) (2019)**, DOI `10.1145/3322813`, the
+reference docs/17 names: the design idea only, a multigrid V-cycle run in single precision as the
+preconditioner of a conjugate gradient iterated in double. No equation of this section is taken from
+it, and its code was not read. The cycle is §141.5's (Saad 2003 §13.4.3, the author's open copy). The
+roundings are IEEE-754 round-to-nearest conversions.
+
+**What the f32 copy holds** (*DESIGN*, `src/amg/single.rs`). The aggregation and every level are the
+solve's own, built in f64 in the f64 build, so the f32 copy coarsens level for level as the f64
+hierarchy does. That is unlike the `single` build, where the aggregation itself reads float strengths
+(§141.9).
+- Each coarse level's `diag`, `upper` and `lower`, each smoother's diagonal `m` and its Chebyshev
+  coefficients `c1`, `c2` are rounded once to `f32` from their f64 setups.
+- The per-level cycle vectors are `f32`.
+- The coarsest factor and its work vector stay in `Acc` (f64), as under `single` (§141.4); only the
+  solve's `x` and `b` are float.
+- The transfers keep the aggregate lists of (141.11)-(141.13). The Galerkin slot lists of (141.17) are
+  not uploaded, because the levels come from the host and no device Galerkin product runs.
+- Level 0's operator is `A32 = fl32(A)` taken entrywise inside the product (`amgFineAmulFloat`), from
+  the solve's own matrix and the mesh's row map, so no copy of the fine matrix is stored.
+
+The V-cycle on the copy is `cuda/amg.cu` compiled a second time with `-DOFGPU_SINGLE`
+(`kernels::AMG_F32`, build.rs's `F32_TWIN_UNITS`); under `single` that constant names `AMG` itself.
+Four kernels cross the precisions, from the native module: `amgToFloat`, `amgAddFloat`,
+`amgFineAmulFloat` and `amgFineResidualFloat`. Each is one thread per cell and only launches, so the
+copy captures into a CUDA graph (§81; `single_cycle_replays_under_capture`).
+
+**The equations.** `M32` is the V-cycle (141.5.1) from zero on the float levels, its level-0 operator
+`A32`. The preconditioner application is
+
+```
+z = fl64( M32( fl32(r) ) )                                              (141.45)
+```
+
+where `fl32` rounds each entry to nearest and `fl64` widens it exactly. One stationary cycle from the
+caller's `x` (`Gamg::vcycle`, `Gamg::cycle`, and so `LinearSolverKind::Gamg`) is
+
+```
+x <- x + fl64( M32( fl32(b - A x) ) )                                  (141.46)
+```
+
+with `b - A x` formed in the solve's precision in `lduAmul`'s order (`amgFineResidualFloat`). For a
+linear cycle, (141.46) is one step of the same stationary method as (141.5.1), written in correction
+form. Its residual is the solve's, so the f32 levels do not floor the stationary solve. In exact
+arithmetic `M32` would be `M`; the copy changes the preconditioner by its float rounding only, and PCG
+and PBiCGStab iterate in the solve's precision around it. The memory measure is
+
+```
+rho = B(single) / B(native),  B = sum over every DevBuf a Gamg holds of len * sizeof(element)   (141.47)
+```
+
+`Gamg::device_bytes` sums the levels, transfers, row maps, smoothers, the coarsest factor and its work
+vector, the per-level cycle vectors and any K-cycle buffers. It reports them split into the
+precision-chosen arrays (`float`), the `Acc` ones and the `Label` ones. Level 0's matrix is the solve's
+and is counted in neither.
+
+**What is refused.** The K-cycle (§141.6) on the f32 copy: `set_cycle(K)` is refused naming `K-cycle`,
+`precision single` and this section, and the Gamg keeps its V-cycle. The distributed GAMG of §141.11
+has no f32 copy; `DistGamg` is unchanged.
+
+**Measured gate interpretation** (TAKEN by recommendation). The row's "the hierarchy's memory" is read
+as (141.47) over every byte, integers included. That is the strictest reading. The float-only ratio is
+reported beside it.
+
+#### 141.12.1 The gates
+
+`POI(n)` of (141.5.5), default `GamgConfig`, from zero, `relTol 0`. "Iterations" is
+`SolverPerformance::n_iterations`. All rows run in both builds.
+
+| test (`tests/amg_single.rs` unless marked) | what | class |
+|---|---|---|
+| `an_f32_gamg_preconditions_an_f64_pcg_on_poisson_128` | **the AMG-06b gate.** PCG/GAMG at tol `1e-10` on `POI(128)`, native and `precision single`. f64 build: both converge; the copy has the native level sizes; it takes `<= 1.15x` the all-f64 iterations; its answer's §8.4 residual, on the host in f64, is `<= 1e-10`; and `rho <= 0.55` by (141.47). Under `single` the two are one: equal counts, equal bytes, bitwise answers | P, R, count |
+| `the_gamg_precision_key_reaches_the_solve` | the §13.4.1 pair: fvSolution texts that differ in the one line `precision single;`, read by `read_solver_controls` and solved through `PbicgstabBackend` on `POI(16)` at `1e-8` under `PCG`/`GAMG` and the `GAMG` solver. The key lands bare, in the `preconditioner { }` sub-dictionary and under `solver GAMG`; `precision native` is the default text's controls. f64: the answers differ in their bits and all converge. `single`: bitwise one. `precision half` is refused naming `solvers/p/precision`, `half`, `native`, `single` and this section | P, D |
+| `the_single_cycle_refusals_are_named` | the K-cycle on the copy is refused by name, and the cycle stays V (f64); under `single` it is set | D |
+| `the_stationary_single_gamg_converges` | `solver GAMG` on `POI(32)` at tol `1e-10`: (141.46) converges with its §8.4 residual on the host `<= 1e-10`, in `<= 1.15x` the native cycles | P, R |
+| `amg::single::tests::single_cycle_replays_under_capture` (library) | (141.45) and two cycles of (141.46) on `POI(8)`, with one coarse level and with more, captured and replayed bitwise (§81, the registry row of `src/amg/single.rs`) | D |
+
+**Measured** (supervisor's runs, 2026-10-15; f64 build, then `single` in brackets).
+
+- `POI(128)` PCG/GAMG at `1e-10`:
+  - The levels are 2097152, 524306, 131244, 32879, 8227, 2059, 516, 129, 33 in both precisions
+    [2097152, 524288, ..., 32].
+  - Native: 45 iterations, single: 45, a ratio of 1.000 against a gate of 1.15 [39 and 39].
+  - The §8.4 residuals of the answers are 1.502986e-12 native and 1.502995e-12 single. The two
+    answers differ by 9.13e-14 relative [9.521613e-13 for both, bitwise equal].
+  - Device bytes: native 449.65 MiB (206.52 float, 0.0045 acc, 243.13 label); single 207.68 MiB
+    (103.26 float, 0.0045 acc, 104.42 label).
+  - `rho = 0.4619` by (141.47), against a gate of 0.55. The float-and-acc-only ratio is 0.5000
+    [275.15 MiB both, `rho = 1`].
+- `POI(16)` pair: PCG/GAMG 10 iterations native and 10 single, 4096 of 4096 entries differing in
+  their bits; the GAMG solver 31 and 31, 3681 of 4096 differing [9 and 9, 28 and 28, 0 differing].
+- `POI(32)` `solver GAMG` at `1e-10`: 85 cycles in both precisions, §8.4 residual 4.689e-12 [70
+  and 70, 5.619e-12].
+
+The f32 copy holds under half the bytes because it drops the Galerkin slot lists and the duplicated
+coarse addressing as well as halving every float array. Its iteration count equals the native one
+here: the preconditioner's float rounding, about `2^-24` relative, is far below the V-cycle's own
+contraction, as the cited design expects.
+
 ### 141.20 AMGX by dynamic load (AMX-01)
 
 `No GPL-licensed source was consulted.` §141.2 to §141.19 are left for the GAMG units
@@ -51863,6 +53314,125 @@ Measured on 2026-10-11 (RTX 5070 Ti, the DLL above, deterministic over five runs
 `rel = 1.643e-14` with dDDI (22 iterations, converged) and `rel = 8.640e-6` with dFFI (13 iterations, AMGX reports
 converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
 
+### 141.21 AMGX in the time loop: the kept structure, and the three-way comparison (AMX-02)
+
+`No GPL-licensed source was consulted.` This is the subsection after §141.20, and AMX-02 is the second AMGX unit.
+§141.20 left the backend calling `AMGX_solver_setup` on every solve. That call rebuilds the whole classical-AMG
+hierarchy from the new matrix. Before this unit it was most of AMGX's time on the plume matrix, and nobody had
+measured it inside a time loop. Now the backend keeps the hierarchy's structure from one solve to the next and
+re-sets up only what depends on the coefficients. `ofgpu-buoyant` runs AMGX in the time loop and prints what the
+set-ups cost. The comparison below puts AMGX beside PBiCGStab and the native GAMG of §141.8.
+
+Sources: **Naumov, M. et al. (2015), "AmgX: a library for GPU accelerated algebraic multigrid and preconditioned
+iterative methods", *SIAM J. Sci. Comput.* 37(5) S602-S626, doi:10.1137/140980260** (title, journal, volume, issue
+and pages checked against Crossref on 2026-10-15). It gives the split of AMGX into a set-up phase and a solve
+phase. **NVIDIA AMGX 2.5.0** (BSD-3-Clause, <https://github.com/NVIDIA/AMGX>). Its reference manual
+(`doc/AMGX_Reference.pdf`, `AMGX_solver_setup`) says "anytime the matrix changes AMGX solver setup must be called
+again". The manual does not document the two things this unit uses, so the following files were read to learn what
+they mean: `include/amgx_c.h` declares `AMGX_solver_resetup(AMGX_solver_handle, AMGX_matrix_handle)`, in its
+"C-API deprecated" block; `src/core.cu` registers `structure_reuse_levels` as "controls reuse of AMG hierarchy,
+0 - everything rebuilds, 1 - reuse coloring on the finest level, 2 - reuse coloring on the next level, etc.",
+default 0; `src/amg_solver.cu` (`setup`, `resetup`) and `src/amg.cu` (the level loop) say what the parameter does in
+each call. These files were read for meaning only. No AMGX code is reproduced here.
+
+**The hierarchy, solve by solve.** The matrix `A_0` of one session (one `setup` of the backend) changes from solve
+to solve. Its pattern is the CSR of §48.2, and it does not change:
+
+```
+first solve of a session:      full set-up; the levels {A_l}, prolongations P_l and restrictions R_l      (141.21a)
+                               are built from A_0, as AMGX_solver_setup does
+later solve, reuse on:         P_l and R_l kept;  A_{l+1} = R_l A_l P_l,  l = 0 .. L-2, from the new A_0;  (141.21b)
+                               the smoothers and the coarsest solve redone from the new A_l
+later solve, reuse off:        full set-up again, as (141.21a)                                          (141.21c)
+```
+
+(141.21b) is a Galerkin coarse operator on a kept coarsening, which is what §141.8's re-gather does for the native
+GAMG. Each level's operator is the Galerkin product of the new matrix, so the cycle preconditions the new `A_0` and
+not the old one, and PCG is still run to AMGX's own tolerance (`1e-12` relative to the initial residual, §141.20's
+configuration). What can change is the iteration count, because the kept coarsening was built for the first
+matrix's strength of connection. Measured here, it did not change: 20 iterations with and without reuse (below).
+
+**The calls** (*DESIGN*). With reuse on, the session's configuration is `DEFAULT_CONFIG` plus
+`amg:structure_reuse_levels=-1` (`REUSE_KEY`, in the AMG preconditioner's scope `amg`). Every solve after the
+session's first then calls `AMGX_solver_resetup`, and in that call `-1` keeps every level's structure. With reuse
+off, the key is absent (AMGX's default 0) and every solve calls `AMGX_solver_setup`, which is §141.20's
+behaviour. The key is never paired with `AMGX_solver_setup`. With `-1`, that call returns at once on a matrix it
+has set up before (`amg_solver.cu`), so the hierarchy, values included, would stay the first matrix's for the
+whole run. That would be a frozen preconditioner, not a re-set-up. `AMGX_solver_resetup` is the 23rd bound entry
+point. A library that lacks it is refused by §141.20's rule, and the 2.5.0 DLL exports it.
+
+**The switch** (*DESIGN*). Reuse is on by default. `OFGPU_AMGX_REUSE=0`, and only the value `0`, turns it off
+(`reuse_from`, the rule of §141.20's `OFGPU_REQUIRE_AMGX` turned around). `AmgxBackend::with_reuse` sets it in
+code. It exists so that the saving can be measured against the full set-up. It is not a tuning knob.
+
+**The timing.** A solve's set-up time runs from the matrix upload (`AMGX_matrix_upload_all` on the first solve,
+`AMGX_matrix_replace_coefficients` after it) to the end of the set-up call. The CUDA context is synchronised on
+each side, because AMGX works on the legacy default stream (§141.20). `setup_secs` reports it for the decision
+table's set-up column (§141.8), and `run_summary` gives `ofgpu-buoyant`'s end-of-run line: the full set-ups and
+the re-set-ups, with the mean of each. The vector uploads, the solve and the copy back come after the set-up, so
+the order of the calls changed, but AMGX's answer does not depend on it.
+
+#### 141.21.1 The gates
+
+| test or run | gate | class (docs/17 §5.1.4) |
+|---|---|---|
+| `pressure::amgx::tests::reuse_is_on_unless_the_value_is_0` | `reuse_from`: unset, `1`, the empty string and `no` give reuse; `0` turns it off; `with_reuse` overrides; `setup_counts` is `(0, 0)` before a solve | D |
+| `pressure::amgx::tests::the_reuse_key_is_appended_only_when_reuse_is_on` | `config_for("a=1", true) == "a=1,amg:structure_reuse_levels=-1"`, `config_for("a=1", false) == "a=1"`, and `DEFAULT_CONFIG` has no `structure_reuse_levels` | D |
+| `tests/amgx.rs` `a_resetup_on_the_kept_structure_agrees_with_pbicgstab` (both builds, feature on, `OFGPU_REQUIRE_AMGX=1`) | the plume matrix `A1` of §141.20.1, then `A2` with internal face `i`'s `Γ` times `1 + 0.5 ((7919 i) mod 1000) / 1000`, through one backend: reuse on is `(1, 1)` (full set-ups, re-set-ups) and reuse off is `(2, 0)`; both converge (f64), and `A2`'s answer agrees with the PBiCGStab reference to `1e-8` (dDDI) / `1e-5` (dFFI) | D (counts), R (agreement), `tol32` per D-F32-1 |
+| `ofgpu-buoyant` plume, 20 iterations, `-backend amgx` against `-backend pbicgstab` | every field within `1e-8` relative | R |
+| the same run, reuse on against `OFGPU_AMGX_REUSE=0` | the mean re-set-up `<=` half the mean full set-up (measured, reported) | measured |
+
+**Measured** (supervisor's runs, 2026-10-15, RTX 5070 Ti, the 2.5.0 DLL of §141.20, f64 build with
+`--features amgx`; one card is shared with two other lanes, so the times move between runs).
+
+*The re-set-up test.* f64: 22 iterations on `A1` and 20 on `A2`, with reuse on and with it off. With reuse on, the
+set-up on `A2` took 7.28 ms against 20.18 ms for the full set-up. `A2`'s answer agrees to 2.8e-14 (reuse on) and
+2.3e-14 (reuse off). `single` (dFFI): 13 iterations on `A1` and 10 on `A2`, with reuse on and with it off;
+the set-up on `A2` took 5.51 ms against 14.96 ms for the full set-up; `A2`'s answer agrees to 1.7e-6 (reuse on) and
+2.2e-6 (reuse off), inside the `1e-5` band, and §141.20.1's plume row still gives 8.640e-6.
+
+*The 20-iteration comparison.* The case is `plume` (`cases/plumeB`, 98 × 42 × 20, 82,320 cells), `-iters 20`, with
+the `p` entry tightened to `tolerance 1e-12; relTol 0; maxIter 5000` (an input, the same in every run, as in
+§141.8). The states are compared through `-restartWrite 20`, and the measure is the largest
+`max|diff| / max|field|` over `U`, `p`, `k`, `epsilon`, `nut`, `T` and `phi`:
+
+| run | worst field difference from PBiCGStab | p iterations per solve | set-ups, ms each | time loop |
+|---|---|---|---|---|
+| PBiCGStab + DIC | (reference) | 202-217 | - | 2.445 s |
+| GAMG (§141.8) | 8.4e-12 (`U`) | 46-48 | 1 build 266.12, 39 re-gathers 44.32 | 4.728 s |
+| AMGX, reuse on | **8.5e-12** (`U`; `p` 1.1e-12, `T` 8.9e-13) | 20 | 1 full 84.27 / 90.41, 39 re-set-ups **7.70 / 7.40** | 1.303 / 1.237 s |
+| AMGX, `OFGPU_AMGX_REUSE=0` | 8.6e-12 | 20 | 40 full **20.62 / 21.46** | 1.695 / 1.790 s |
+
+The `1e-8` gate passes for AMGX with reuse on. Where a cell shows two values, they are two runs. The re-set-up
+takes 0.37 and 0.34 of the full set-up, inside the "half" gate. The first full set-up of a run also pays for
+AMGX's warm-up, so the ratio uses the 40 full set-ups of the reuse-off run.
+
+*The decision tables* (`-iters 1 -backend auto`, the case's own `p` entry: PBiCGStab with DIC, `relTol 0.01`; two
+runs each). In the selector, AMGX's set-up column is the backend's `setup` call plus the timed solve's re-set-up.
+The `setup` call creates the AMGX session (initialisation, configuration, resources and the CSR pattern), so most
+of the figure is that call. AMGX solves to its own `1e-12` relative, while PBiCGStab stops at the case's
+`relTol 0.01`.
+
+| case | cells | PBiCGStab set-up / solve, ms | GAMG set-up / solve, ms | AMGX set-up / solve, ms | GAMG, AMGX agree to | `auto` picks |
+|---|---|---|---|---|---|---|
+| `plume` | 82,320 | 5.23 / 12.16; 6.53 / 12.35 | 323.41 / 60.16; 324.38 / 60.14 | 169.71 / 21.53; 169.31 / 20.27 | 8.0e-15, 1.2e-14 | PBiCGStab |
+| `gb_800000` (`ofgpu-generate-mesh big` 500 × 400 × 4) | 800,000 | 38.30 / 492.48; 47.95 / 485.26 | 2362.14 / 504.20; 2432.22 / 531.77 | 267.37 / 52.54; 238.54 / 49.72 | 2.8e-14, 2.1e-14 | AMGX, 9.4x and 9.8x |
+
+*The time loop on `gb_800000`* (reduced to `-iters 5` under the 10-minute rule, as in §141.8, with the case's own
+`p` entry):
+
+| backend | p iterations per solve | set-ups, ms each | time loop |
+|---|---|---|---|
+| PBiCGStab + DIC | 233-482 | - | 5.584 s |
+| GAMG | 19-20 | 1 build 2216.80, 9 re-gathers 433.95 | 7.181 s |
+| AMGX, reuse on | 20 | 1 full 113.01, 9 re-set-ups **12.35** | 0.872 s |
+| AMGX, `OFGPU_AMGX_REUSE=0` | 20 | 10 full **51.86** | 1.186 s |
+
+On `gb_800000` the re-set-up takes 0.24 of the full set-up. AMGX's p residuals are reported in AMGX's own `L2`
+norm (`main:norm=L2`). That is not OpenFOAM's normalised residual that the other two rows print, so the p residual
+columns of the logs cannot be compared across backends, and they are not tabulated. The drivers ran in the f64
+build only. Under `single` the library builds with `--features "amgx single"`, and the two integration tests run
+there (dFFI).
 
 ---
 
@@ -53720,7 +55290,7 @@ millimetric drops on glass, which is a different experiment from the one either 
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §148 to the studio's
 post-processing on a polyMesh that is not a lattice: STU-12a (§148.1, the exact plane cut),
-STU-14 (the iso-surface, not yet written) and STU-15 (not yet written). The code lives in the
+STU-14 (§148.2, the iso-surface) and STU-15 (§148.3, streamlines). The code lives in the
 studio's server, `gui/server/src/formats/`. No solver, gate or test that existed before this
 section changes.
 
@@ -53826,6 +55396,196 @@ cube.
 
 The independent oracle intersects the plane with the cube's 12 edges, sorts the points by
 angle about their mean, and takes the shoelace area. It shares no code with `polycut.ts`.
+
+### 148.2 The iso-surface of a cell field on a polyhedral polyMesh
+
+`gui/server/src/formats/polyiso.ts`: `buildIsoMesh(mesh)` (the topology, built once per mesh),
+`reconstructPointValues(iso, cellValues)` and `isoSurface(iso, cellValues, isoValues)`. It
+contours a cell-centred field at one or more values on any polyMesh. The output is a triangle
+soup with a cell id and a unit normal per triangle, plus the area of each value's surface. The
+dataset service runs it in its worker pool for a polyMesh with no lattice (`manifest.planeCut`)
+at `POST /api/datasets/<id>/iso`. A vector is contoured by its magnitude, as the lattice's
+marching cubes is; a tensor or a point field is refused (`INVALID`). A lattice keeps its
+marching cubes, and a cut-cell lattice keeps its `ISO_CUTCELL` refusal.
+
+**Sources.** D. J. Mavriplis, "Revisiting the least-squares procedure for gradient
+reconstruction on unstructured meshes", AIAA 2003-3986, NASA/CR-2003-212683 (NTRS 20040010717,
+open). It is cited for the weighted least-squares fit and for inverse-distance weighting. Both
+are used in their standard form, and no equation is quoted from the paper. The paper fits a
+gradient at a cell centre. Here the same fit is made at a mesh point, with the point value as a
+fourth unknown. That adaptation, the ring rule and the column scaling are house-original. G. M.
+Treece, R. W. Prager and A. H. Gee, "Regularised marching tetrahedra: improved iso-surface
+extraction", *Computers & Graphics* 23(4) (1999) 583–598, doi:10.1016/S0097-8493(99)00076-X.
+The paper is paywalled and was not read. It is cited for marching tetrahedra in its textbook
+form: per tetrahedron, one triangle when one or three corners are above the value, and a quad
+when two are. Its regularisation (vertex clustering) is not used. The tetrahedra about the
+centroid and the face centres are house-original.
+
+**Face centres and centroids.** Each face's centre `F` is the mean of its vertices. The cell is
+the polyhedron bounded by its faces' fans `(F, a, b)` over each face edge `a → b`. Its volume
+centroid is taken about the mean `r` of its face centres:
+
+    V_t = s ((a − F) × (b − F)) · (F − r) / 6,   C = Σ_t V_t (r + F + a + b) / (4 Σ_t V_t)     (148.4)
+
+where `s = +1` when the cell owns the face (its stored order points out of the owner) and `−1`
+when it is the neighbour. `C` does not depend on `r`. For a linear field, the cell average
+equals the field's value at `C`, so `C` is where the cell value lives.
+
+**Point values.** At a mesh point `p`, the fit is made over the stencil's cells `c` with finite
+values:
+
+    minimise Σ_c w_c² (φ_c − φ_p − g · (x_c − x_p))²,   w_c = L / |x_c − x_p|                  (148.5)
+
+Here `x_c` is the centroid `C` of 148.4, and `L` is the largest `|x_c − x_p|`. The unknowns are
+`φ_p` and `g`. The rows `[L/d, Δx/d, Δy/d, Δz/d] = φ_c L/d` (`d = |x_c − x_p|`) have their four
+columns scaled to unit length, and the system is solved by Householder QR. The column scaling
+keeps a stretched stencil from reading as a flat one. **The fit has full rank when
+min |R_kk| > 0.1 · max |R_kk|.** The stencil starts with the cells that have `p` as a vertex.
+Until the fit has full rank, it grows by one point ring at a time: every cell that shares a
+point with the last ring is added. It stops after 6 rings or at 256 cells. A point that never
+reaches full rank takes the `1/d`-weighted mean of its stencil and is counted as a
+`fallbackPoint`. A point of no cell gets NaN. Wherever the fit has full rank, a linear field
+fits with zero residual, so `φ_p` is exact to round-off.
+
+The floor 0.1 was chosen by measurement, and it is a conditioning floor, not a gate. On the
+warped sphere-in-box (STU-12b's fixture) the boundary-face points have four nearly coplanar
+centroids. A floor of 1e-6 accepts that stencil, and the linear field comes back with errors up
+to 1.7e-11 (8.4e-12 without the column scaling). A floor of 1e-2 gives 1.6e-12, 3e-2 gives
+1.6e-13, and 0.1 gives 4.0e-15 with no fallback. Hex blocks with cells at 1000:1, and graded
+1.5 from 1e-5, give 4.0e-15 and 2.9e-15 with no fallback at 1e-2, 3e-2 and 0.1 (the floors measured on them).
+
+**Tetrahedra.** Each cell is split into the tetrahedra `(C, F, a, b)`, one per face edge, with
+the values
+
+    (φ_cell, φ_F = mean of the face's φ_p, φ_a, φ_b)                                           (148.6)
+
+For a linear field all four values are exact, so linear interpolation in every tetrahedron
+reproduces the field, and the iso-surface is the exact plane section of the union of the
+tetrahedra. The tetrahedra tile the face-fan polyhedron of 148.4. A tetrahedron with
+non-positive volume (`invertedTets`) is counted, and means a cell that is not star-shaped about
+its centroid; such a cell's surface can overlap itself. Two cells sharing a face use the same
+`F`, the same `φ_F` and the same edges, so the surface is watertight across faces.
+
+**Marching tetrahedra and the sign rule.** As in 148.1, **a corner with `φ ≥ φ_iso` is on the
++ side.** A tetrahedron with 0 or 4 corners on the + side gives nothing. With one or three it
+gives one triangle, and with two it gives the quad `a₀b₀, a₀b₁, a₁b₁, a₁b₀` as two triangles.
+Consecutive corners of that quad share an end. Each crossing is computed from its + end `u`
+toward its − end `v`:
+
+    t = (φ_u − φ_iso) / (φ_u − φ_v),   x = x_u + t (x_v − x_u)                                 (148.7)
+
+so an edge shared by tetrahedra gives the same bits in each. A triangle whose cross product is
+exactly zero is dropped. Each triangle is oriented so that its normal has a positive dot
+product with `x_max − x_min`, the corners with the largest + value and the smallest − value.
+The normal therefore points toward increasing `φ`. As in 148.1, a face lying exactly at the
+value is reported once, by the tetrahedron on its − side.
+
+**Gates (STU-14, `gui/server/src/formats/polyiso.test.ts`, 5 tests).** These run on the mixed
+unit cube of 148.1 (`formats/fixtures/mixedCube.ts`), with `f = 2x − y + 0.5z` and each cell
+value set to `f(C)`.
+
+| case | gate | measured |
+|---|---|---|
+| centroids | Σ V_c = 1 and Σ V_c C_c = (½, ½, ½) to 1e-14, no inverted tetrahedron | pass, 0 inverted |
+| point values | `|φ_p − f(x_p)| ≤ 1e-12` at every point, no fallback | worst 1.4e-15 over 22 points |
+| iso `f = 0.3` | every vertex within 1e-12 of the plane; the area equals the independent plane ∩ cube polygon area to 1e-9 relative; every normal · ∇f > 0 | worst distance 5.1e-16; 95 triangles in 6 cells; area 1.0998181667894014, relative error 0 |
+| values `[5, 0.3, −0.3, −2]` | in order; 0 triangles outside the field's range; `−0.3` has the independent area to 1e-9 | pass |
+| hex blocks, cells 1000:1 and graded 1.5 from 1e-5, `h = 2x − y + 500z` | exact points to 1e-12, no fallback | pass |
+
+The independent oracle is the one 148.1 describes, rewritten in the test for this plane. It
+shares no code with `polyiso.ts`. The wiring tests are
+`gui/server/src/datasets/__tests__/unstructuredIso.test.ts`, which checks that the warped
+sphere-in-box's stored triangles, f32 corners and normals are polyiso's bit for bit (p = 227.5
+gives 1004 triangles, 0 fallback points, 0 inverted tetrahedra), and that a lattice is refused
+`NO_POLY_ISO`. `gui/web/src/viewer/controller/unstructuredIso.test.ts` checks that add_layer iso
+through the bridge draws the served triangles and that the lattice, cut-cell and streamline
+paths are unchanged. Measured, not gated (Node 22, the shared 4-CPU host): on a 100³ hex cube
+(1 M cells), building the topology took 951 ms, the point values 984 ms and the contour 252 ms,
+giving 214 501 triangles. The area agreed with the oracle to 2.9e-13.
+
+### 148.3 Streamlines of a cell velocity on a polyhedral polyMesh
+
+`gui/server/src/formats/polystream.ts`: `buildStreamMesh(mesh)` (the topology, built once per
+mesh: the iso topology of 148.2, the cell locator's buckets of STU-13 and a length per cell) and
+`polyStreamlines(sm, cellU, seeds, options)`. It traces streamlines of a cell-centred velocity
+from seed points on any polyMesh. The output is one polyline per seed, upstream → seed →
+downstream, with the speed at every point. The dataset service runs it in its worker pool for a
+polyMesh with no lattice (`manifest.planeCut`) at `POST /api/datasets/<id>/streamlines`. A
+scalar, tensor or point field is refused (`INVALID`), and a request whose seeds are all outside
+the domain is refused (`OUTSIDE`). A lattice keeps its own trilinear tracer
+(`gui/web/src/viewer/worker/streamlines.ts`).
+
+**Sources.** C. Runge, "Über die numerische Auflösung von Differentialgleichungen",
+*Mathematische Annalen* 46 (1895) 167–178, doi:10.1007/BF01446807, and W. Kutta, "Beitrag zur
+näherungsweisen Integration totaler Differentialgleichungen", *Zeitschrift für Mathematik und
+Physik* 46 (1901) 435–453. Both are in the public domain (the Göttinger Digitalisierungszentrum
+holds a scan of the *Annalen*). They are cited for the classical fourth-order Runge–Kutta step,
+used in its textbook form. Neither paper was re-read for this section. The walk, the boundary
+rule and the Euler fallback are house-original.
+
+**Velocity.** Each component of the cell velocity is reconstructed at the mesh points by the fit
+of 148.5. Each cell is split into the tetrahedra of 148.6, with the corner values `U_C` (the cell
+value), `U_F` (the mean of the face's point values), `U_a` and `U_b`. At a point `x` in the
+tetrahedron `(P₀, P₁, P₂, P₃) = (C, F, a, b)`:
+
+    λ_i = V(P with P_i replaced by x) / V(P),   U(x) = Σ_i λ_i U_i                              (148.8)
+
+where `V` is the signed volume. For a linear velocity, every corner value is exact (148.5), so
+`U(x)` is exact. **A point is in a tetrahedron when every `λ_i ≥ −10⁻¹²`.** A tetrahedron with
+zero volume holds no point.
+
+**Integration.** The line is parameterised by arc length, as the lattice tracer is. With the
+direction `d(x) = s U(x) / |U(x)|` (`s = +1` downstream, `−1` upstream) and a step `h`:
+
+    k₁ = d(p),  k₂ = d(p + h k₁ / 2),  k₃ = d(p + h k₂ / 2),  k₄ = d(p + h k₃),
+    p' = p + (h / 6)(k₁ + 2 k₂ + 2 k₃ + k₄)                                                      (148.9)
+
+`h` is the option `step` when given. Otherwise it is `stepFactor` (0.5) times `V_c^{1/3}`, where
+`V_c` is the current cell's face-fan volume (148.4). A step that would pass `maxLength` is
+shortened to end on it. The line stops at a point whose speed is not above `minSpeedFraction`
+(10⁻⁶) times the largest cell speed (`stall`), after `maxSteps` (4000) steps (`steps`), and at
+`maxLength` (`length`).
+
+**The walk.** Every stage point and every new point is reached by walking the straight segment
+from `p` to it, starting in the tetrahedron that holds `p`. In a tetrahedron, with `λ(p)` and
+`λ(x)` the coordinates of the segment's start and end,
+
+    t_i = λ_i(p) / (λ_i(p) − λ_i(x))   for each i with λ_i(x) < −10⁻¹²,   exit through argmin t_i   (148.10)
+
+and when there is no such `i`, `x` is in the tetrahedron. `λ_i(p)` is clamped at 0, and the face
+the walk came in through is not a candidate. The face opposite `C` is part of a polyMesh face.
+At an internal face, the walk goes on in the neighbour cell's tetrahedron on the same face edge.
+At a boundary face, the segment leaves the domain at `p + t_i (x − p)`. The other three faces
+lead to tetrahedra of the same cell: the next or previous edge of the same face, or the cell's
+other face with the same edge. A walk that crosses more than 100 000 tetrahedra, or meets one
+with no volume, ends the line as `lost`.
+
+**The boundary rule.** When a stage point of (148.9) is outside the domain, the step falls back
+to forward Euler, `p' = p + h k₁`. When the segment to `p'` leaves the domain, the line ends at
+the exit point (`boundary`), with the speed interpolated there. A seed that no tetrahedron holds
+is refused: its line is empty and its index is reported. Seeds are found from the candidate
+cells of the locator's bucket and box (STU-13), each tested on its tetrahedra.
+
+**Gates (STU-15, `gui/server/src/formats/polystream.test.ts`, 3 tests).**
+
+| case | gate | measured |
+|---|---|---|
+| uniform `U = (0.8, 0.5, 0.3)` on the mixed unit cube of 148.1, seed `(0.3, 0.4, 0.5)`, both directions, step 0.02 | every point within 1e-12 of the line; both ends on the box, at the exact ray–cube exits, to 1e-12; both ends `boundary` | 64 points; worst distance 1.75e-15; end errors 1.81e-15 and 4.16e-16 |
+| `U = (−y, x, 0)` at the centroids of 20 × 20 × 20 hexes on `[−1, 1]³`, each split into six Kuhn tetrahedra (48 000 cells, `h = 0.1`), seed `(0.5, 0, 0.05)`, downstream, step `h/10`, `maxLength = 2π · 0.5` | radius drift ≤ 1e-3 relative; `|z − 0.05|` ≤ 1e-12; ends `length` | 316 points; drift 8.72e-11; `|Δz|` 0; the end is 5.2e-5 from the seed |
+| seeds `(1.5, 0.5, 0.5)` and `(0.5, −10⁻⁶, 0.5)` on the mixed cube, `(2, 0, 0)` on a 4³ Kuhn cube | refused, empty lines; the seed inside is traced | pass |
+
+The 5.2e-5 gap at the end is not a radius error. A line's length is the sum of its chords, which
+is shorter than the arc by about `h³ / (24 r²)` per step. Over 315 steps that is 5.2e-5 of arc
+past the seed. The row's "20³-cell tet mesh" is read as 20 hexes per axis, each split into six
+tetrahedra, so `h` is the hex spacing 0.1. The wiring tests are
+`gui/server/src/datasets/__tests__/unstructuredStream.test.ts` and
+`gui/web/src/viewer/controller/unstructuredStream.test.ts`. The server test checks that the warped
+sphere-in-box's stored lines are polystream's bit for bit: the offsets, and the points and speeds
+rounded once to f32. Three seeds give 29 points, the outside seed is refused, and all four traced
+directions end `boundary`. It also checks the `OUTSIDE`, `NO_POLY_STREAM` and `INVALID` refusals.
+The web test checks that add_layer streamlines through the bridge sends the layer's seeds and
+draws the served lines, that `OUTSIDE` answers `INVALID`, and that a lattice keeps its own
+tracer.
 
 ---
 

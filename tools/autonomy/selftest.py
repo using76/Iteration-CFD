@@ -27,7 +27,7 @@ campaign through the CLI), then baseline.py --selftest (the baselines: the refus
 L3 prior: the null policy and the features, the scaler and the abstention distance, the
 vote, the bank, the remedy path, the G-PRIOR gate on an oracle campaign and its disabled
 branch, the 2026-09-26 rule in the bank, the edge class and the whole-path rule, the hook
-seam, a live rules+prior campaign, the shipped prior disabled by the user's decision, the check and the CLI), then optimise.py --selftest
+seam, a live rules+prior campaign, the shipped prior disabled by its gate file, the check and the CLI, the gate-driven ship rule of AUT-11), then optimise.py --selftest
 (the L4 optimiser: the config rebuild, the knob features, the cross-fitted ensemble, the Sobol pool and the pick,
 the hook seam, the refinement rounds on two oracle campaigns and the disabled branch, the refit on
 new rows and its gate, a live rules+opt campaign, the
@@ -43,6 +43,9 @@ ledger and CLI), then costbound.py --selftest (the AUT-06 lower bound: the
 hand-counted boxes F0-F5, the ancestor-only balance control, the
 192-triangle box, the 4096-centre ray test, the refusals, the recorded
 E-1-004 inputs and the byte-identical two-row report), then
+projection.py --selftest (the AUT-12 go / no-go: k* and the bar, the
+scaled McNemar, a GO and a NO-GO hand case, the L5 NO-GO 177/420 > 23,
+determinism and the CLI), then
 sensitivity.py --selftest
 (the G-PILOT builder: the 12 geometries, the 288+3 jobs and their whitelist
 edits, R-WIN, the verdict function, a live small-cube run, resume and the
@@ -92,7 +95,8 @@ def main():
               ("remedies.py", 13), ("explain.py", 15),
               ("campaign.py", 13), ("baseline.py", 9), ("prior.py", 12),
               ("optimise.py", 11), ("evaluate.py", 8), ("rescore.py", 6),
-              ("lreplay.py", 6), ("aml.py", 7), ("costbound.py", 7))
+              ("lreplay.py", 6), ("aml.py", 7), ("costbound.py", 7),
+              ("projection.py", 5))
     total = n_ok + s_ok
     outs = [p.stdout, q.stdout]
     for rel, min_ok in corpus:

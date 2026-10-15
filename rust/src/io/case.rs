@@ -83,6 +83,9 @@ impl Preconditioner {
             // multi-colour factorisation does anyway - it stores 1/Dt.
             "DIC" | "FDIC" => Ok(Preconditioner::Dic),
             "DILU" => Ok(Preconditioner::Dilu),
+            // The native V-cycle (SPEC-LIT 141.5), served on the pressure
+            // equation with the settings of SPEC-LIT 141.7.
+            "GAMG" => Ok(Preconditioner::Gamg),
 
             // Recognised, not implemented, and anything unrecognised: both
             // are errors naming the setting (SPEC-LIT 13.4), and both are
@@ -90,7 +93,7 @@ impl Preconditioner {
             other => unsupported(
                 "solvers/<var>/preconditioner",
                 other,
-                &["none", "diagonal", "DIC", "DILU"],
+                &["none", "diagonal", "DIC", "DILU", "GAMG (pressure equation only)"],
                 "diagonal (Jacobi)",
                 Preconditioner::Diagonal,
             ),
@@ -163,6 +166,201 @@ impl LinearSolverKind {
 }
 
 // ==========================================================================
+//  GAMG settings (SPEC-LIT 141.7)
+// ==========================================================================
+
+/// The GAMG sub-entries a case can write, as the backend that builds the
+/// hierarchy needs them (SPEC-LIT 141.7): the cycle's own knobs of
+/// SPEC-LIT 141.5 (`smoother`, `nPreSweeps`, `nPostSweeps`,
+/// `nCellsInCoarsestLevel`, `maxLevels`) and `cacheAgglomeration`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GamgControls {
+    /// The V-cycle's config, [`crate::amg::GamgConfig::default`] when the
+    /// case says nothing.
+    pub cycle: crate::amg::GamgConfig,
+    /// *DESIGN* (SPEC-LIT 141.7): `true` keeps the hierarchy while the
+    /// matrix is bit for bit the one it was built from, `false` rebuilds
+    /// it on every solve. Default `true`.
+    pub cache_agglomeration: bool,
+    /// `precision` (SPEC-LIT 141.12): the device copy of the hierarchy in
+    /// the solve's own precision (`native`, the default) or in `f32`
+    /// under an f64 solve (`single`; under `--features single` the two
+    /// are one).
+    pub precision: crate::amg::GamgPrecision,
+}
+
+impl Default for GamgControls {
+    fn default() -> Self {
+        Self {
+            cycle: crate::amg::GamgConfig::default(),
+            cache_agglomeration: true,
+            precision: crate::amg::GamgPrecision::Native,
+        }
+    }
+}
+
+/// `solvers/<var>/precision` of a GAMG block (SPEC-LIT 141.12): `native`
+/// or `single`. Anything else is refused naming `setting`, with both as
+/// the menu; `-permissive` does not downgrade it, because a precision
+/// silently defaulted is a hierarchy the case did not ask for.
+pub fn gamg_precision_from_name(setting: &str, s: &str) -> Result<crate::amg::GamgPrecision> {
+    use crate::amg::GamgPrecision;
+    match s {
+        "native" => Ok(GamgPrecision::Native),
+        "single" => Ok(GamgPrecision::Single),
+        other => Err(Error::Config(format!(
+            "{setting} is `{other}`: the GAMG hierarchy is held in `native` \
+             (the solve's own precision) or `single` (f32 levels under an f64 \
+             solve) (SPEC-LIT 141.12)"
+        ))),
+    }
+}
+
+/// The smoother names of SPEC-LIT 141.7, in the order the refusal lists them.
+pub const GAMG_SMOOTHERS: [&str; 3] = ["Chebyshev", "l1Jacobi", "Jacobi"];
+
+/// `solvers/<var>/smoother` under the SPEC-LIT 13.4 rule (SPEC-LIT 141.7):
+/// `Chebyshev` (the cycle's default degree and fraction), `l1Jacobi`, and
+/// `Jacobi` (weighted, `omega = 2/3`). OpenFOAM's Gauss-Seidel family and
+/// its DIC/DILU smoothers are refused by name with these three as the
+/// menu; `-permissive` substitutes Chebyshev.
+pub fn gamg_smoother_from_name(setting: &str, s: &str) -> Result<crate::amg::SmootherKind> {
+    use crate::amg::smooth::{DEFAULT_CHEBYSHEV_DEGREE, DEFAULT_CHEBYSHEV_FRACTION, DEFAULT_OMEGA};
+    use crate::amg::SmootherKind;
+    let chebyshev = SmootherKind::Chebyshev {
+        degree: DEFAULT_CHEBYSHEV_DEGREE,
+        fraction: DEFAULT_CHEBYSHEV_FRACTION,
+    };
+    match s {
+        "Chebyshev" => Ok(chebyshev),
+        "l1Jacobi" => Ok(SmootherKind::L1Jacobi),
+        "Jacobi" => Ok(SmootherKind::WeightedJacobi { omega: DEFAULT_OMEGA }),
+        other => unsupported_note(
+            setting,
+            other,
+            &GAMG_SMOOTHERS,
+            "a Gauss-Seidel or incomplete-factorisation sweep is sequential from \
+             cell to cell; the native GAMG smooths with one thread per cell \
+             (SPEC-LIT 141.3), and Chebyshev is its default",
+            "Chebyshev",
+            chebyshev,
+        ),
+    }
+}
+
+/// The name [`gamg_smoother_from_name`] reads for `k`.
+pub fn gamg_smoother_name(k: crate::amg::SmootherKind) -> &'static str {
+    match k {
+        crate::amg::SmootherKind::Chebyshev { .. } => "Chebyshev",
+        crate::amg::SmootherKind::L1Jacobi => "l1Jacobi",
+        crate::amg::SmootherKind::WeightedJacobi { .. } => "Jacobi",
+    }
+}
+
+/// A whole-number GAMG entry, at least `min`, or `None` when absent
+/// (SPEC-LIT 141.7). Read strictly: a count silently defaulted is a
+/// hierarchy the case did not ask for.
+fn gamg_count(d: &FoamDict, key: &str, min: usize) -> Result<Option<usize>> {
+    let Some(raw) = d.get(key) else {
+        return Ok(None);
+    };
+    let tok = raw.split_whitespace().next().unwrap_or("");
+    match tok.parse::<usize>() {
+        Ok(v) if v >= min => Ok(Some(v)),
+        _ => Err(Error::Config(format!(
+            "{key} is `{}`: it must be a whole number of at least {min} \
+             (SPEC-LIT 141.7)",
+            raw.trim()
+        ))),
+    }
+}
+
+/// Check the sweep counts of `g` (SPEC-LIT 141.5, 141.7): `nPreSweeps +
+/// nPostSweeps = 0` is a cycle that does nothing, refused naming both keys
+/// under the prefix `p` (`solvers/<var>/`, or a JSONC rule's `gamg.`).
+pub fn check_gamg_sweeps(g: &GamgControls, p: &str) -> Result<()> {
+    if g.cycle.n_pre + g.cycle.n_post == 0 {
+        return Err(Error::Config(format!(
+            "{p}nPreSweeps and {p}nPostSweeps are both 0: a cycle without any \
+             smoothing sweeps does nothing at all (SPEC-LIT 141.5, 141.7)"
+        )));
+    }
+    Ok(())
+}
+
+/// Read the GAMG sub-entries of the dictionary at `p` (`solvers/<key>/`, or
+/// its `preconditioner/` sub-dictionary) into `g` (SPEC-LIT 141.7).
+pub fn read_gamg_controls(g: &mut GamgControls, d: &FoamDict, p: &str) -> Result<()> {
+    if let Some(raw) = d.get(&format!("{p}smoother")) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        g.cycle.hierarchy.smoother = gamg_smoother_from_name(&format!("{p}smoother"), tok)?;
+    }
+    if let Some(v) = gamg_count(d, &format!("{p}nPreSweeps"), 0)? {
+        g.cycle.n_pre = v;
+    }
+    if let Some(v) = gamg_count(d, &format!("{p}nPostSweeps"), 0)? {
+        g.cycle.n_post = v;
+    }
+    check_gamg_sweeps(g, p)?;
+    if let Some(v) = gamg_count(d, &format!("{p}nCellsInCoarsestLevel"), 1)? {
+        g.cycle.hierarchy.n_cells_coarsest = v;
+    }
+    if let Some(v) = gamg_count(d, &format!("{p}maxLevels"), 1)? {
+        g.cycle.hierarchy.max_levels = v;
+    }
+    let precision_key = format!("{p}precision");
+    if let Some(raw) = d.get(&precision_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        g.precision = gamg_precision_from_name(&precision_key, tok)?;
+    }
+    let cache_key = format!("{p}cacheAgglomeration");
+    if let Some(raw) = d.get(&cache_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        g.cache_agglomeration = crate::io::dict::parse_switch(tok).ok_or_else(|| {
+            Error::Config(format!(
+                "{cache_key} is `{}`: it is a switch (yes/no, true/false, on/off) \
+                 (SPEC-LIT 141.7)",
+                raw.trim()
+            ))
+        })?;
+    }
+    // Recognised, not implemented: refused by name with the alternative
+    // (SPEC-LIT 13.4). `mergeLevels 1` is no merging, which is what the
+    // hierarchy does, so it is honoured.
+    let merge_key = format!("{p}mergeLevels");
+    if let Some(raw) = d.get(&merge_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        if tok != "1" {
+            unsupported_note(
+                &merge_key,
+                tok,
+                &["1"],
+                "the native GAMG coarsens one level per aggregation pass and \
+                 cannot merge levels (SPEC-LIT 141.3); set nCellsInCoarsestLevel \
+                 or maxLevels to change the hierarchy",
+                "mergeLevels 1",
+                (),
+            )?;
+        }
+    }
+    let agg_key = format!("{p}agglomerator");
+    if let Some(raw) = d.get(&agg_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        unsupported_note(
+            &agg_key,
+            tok,
+            &[],
+            "the native GAMG aggregates algebraically, by Notay's double pairwise \
+             aggregation of the matrix (SPEC-LIT 141.1), and has no agglomerator \
+             to choose; remove the entry",
+            "the native pairwise aggregation",
+            (),
+        )?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
 //  Controls
 // ==========================================================================
 
@@ -196,6 +394,11 @@ pub struct SolverControls {
     /// Read the residuals back at the end of the solve, for the log. Must be
     /// off for a genuinely transfer-free run.
     pub report_residuals: bool,
+
+    /// The GAMG sub-entries (SPEC-LIT 141.7), read when `solver` or
+    /// `precon` is GAMG and used by the pressure backend that builds the
+    /// hierarchy. Default everywhere else.
+    pub gamg: GamgControls,
 }
 
 impl Default for SolverControls {
@@ -210,6 +413,7 @@ impl Default for SolverControls {
             check_interval: DEFAULT_CHECK_INTERVAL,
             fixed_iters: false,
             report_residuals: true,
+            gamg: GamgControls::default(),
         }
     }
 }
@@ -1295,10 +1499,30 @@ pub fn read_solver_controls(
         }
     }
 
-    if let Some(raw) = fv_solution.get(&format!("{p}preconditioner")) {
+    // A bare word, or OpenFOAM's sub-dictionary form `preconditioner {
+    // preconditioner GAMG; smoother ...; }`, whose own `preconditioner`
+    // entry names it and whose other entries are its settings (SPEC-LIT
+    // 141.7). Before AMG-04b the sub-dictionary was read by nobody and the
+    // equation kept the default preconditioner.
+    let pc_dict = format!("{p}preconditioner/");
+    let pc_sub = fv_solution.dict_exists(&format!("{p}preconditioner"));
+    let pc_key = if pc_sub {
+        format!("{pc_dict}preconditioner")
+    } else {
+        format!("{p}preconditioner")
+    };
+    if let Some(raw) = fv_solution.get(&pc_key) {
         if let Some(tok) = raw.split_whitespace().next() {
             sc.precon = Preconditioner::from_name(tok)?;
         }
+    }
+
+    // SPEC-LIT 141.7: the GAMG sub-entries, where the GAMG they belong to
+    // is named.
+    if sc.solver == LinearSolverKind::Gamg {
+        read_gamg_controls(&mut sc.gamg, fv_solution, &p)?;
+    } else if sc.precon == Preconditioner::Gamg {
+        read_gamg_controls(&mut sc.gamg, fv_solution, if pc_sub { &pc_dict } else { &p })?;
     }
     Ok(())
 }

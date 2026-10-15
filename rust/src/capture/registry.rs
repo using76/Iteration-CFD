@@ -123,6 +123,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("galerkin_replays_under_capture"),
     ),
     (
+        "src/amg/single.rs",
+        Stance::Gate("single_cycle_replays_under_capture"),
+    ),
+    (
         "src/amg/smooth.rs",
         Stance::Gate("smoothers_replay_under_capture"),
     ),
@@ -137,6 +141,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              132.8; it launches nothing, and its device counterpart is \
              src/chem/device.rs",
         ),
+    ),
+    (
+        "src/chem/source.rs",
+        Stance::Gate("chem_source_replays_under_capture"),
     ),
     (
         "src/compressible/energy.rs",
@@ -201,6 +209,9 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     // step of `Compressible::step`, and its three time-term kernels run only
     // in the equations `Compressible::new` attached it to.
     ("src/compressible/lts.rs", Stance::Via("src/compressible/mod.rs")),
+    // SPEC-LIT 126.8: the inlets are rewritten at the top of each outer
+    // iteration of `Compressible::step`, so they live inside its loop.
+    ("src/compressible/bc.rs", Stance::Via("src/compressible/mod.rs")),
     (
         "src/compressible/exact/riemann.rs",
         Stance::Outside(

@@ -24,15 +24,25 @@ beats rules-only's and a shuffled-fingerprint control; if either condition
 fails the model ships DISABLED and records PR-DISABLED on every geometry.
 The current gate's report and the shipped model live in prior/aml/ (the AM-L
 tuning campaign's re-gate); prior/ keeps the AM-13 / PRIOR-FIX gate as the
-record of that run, and its bundles are optimise.py's SOURCES.
+record of that run, and its bundles are optimise.py's SOURCES.  Since AUT-10
+(2026-10-15) --surrogate gates the prior by AUT-09's hurdle surrogate: it acts
+only where the out-of-fold p_fail of the rules' attempt 1 is at least 0.5
+(PR-RULES below it), only same-edge-class neighbours with a non-empty path vote,
+and every gate also needs D-6's non-vacuity (a net gain over rules-only and a
+margin over the shuffled mean, whole geometries); that gate writes prior/aml2/.
+Since AUT-11 USER_SHIP is the recorded rule "gate-driven since 2026-10-06 (the
+user's tranche-17 order)": attempt1 enables the model only from the G-PRIOR.json
+beside it - PASS, non-vacuous, its sha the one the model recorded, its model sha
+the model's (gate_status) - and otherwise records PR-DISABLED with the reasons.
 
     python tools/autonomy/prior.py --selftest
-    python tools/autonomy/prior.py --plan --rules DIR
-    python tools/autonomy/prior.py --gate --rules DIR --work DIR
+    python tools/autonomy/prior.py --plan --rules DIR [--surrogate [DIR]]
+    python tools/autonomy/prior.py --gate --rules DIR --work DIR [--surrogate [DIR]]
     python tools/autonomy/prior.py --check [--report-dir prior/aml|prior]
 """
 import argparse
 import copy
+import gzip
 import hashlib
 import importlib
 import json
@@ -88,7 +98,15 @@ STD_MIN = 1e-12                            # a feature whose pool std is not abo
 TRANSFER_STAGES = ("octree", "castellate", "snap")
 TRANSFER = tuple(r["id"] for r in remedies.REMEDIES if r["stage"] in TRANSFER_STAGES)
 PR_IDS = ("PR-KNN", "PR-KEEP", "PR-FAR", "PR-NOEDIT", "PR-PARTIAL",
-          "PR-DISABLED")
+          "PR-DISABLED", "PR-RULES")
+# AUT-10: the prior acts only where the surrogate (optimise/aml2, AUT-09's hurdle)
+# predicts p_fail(rules attempt 1) >= P_FAIL_ACT; the gated gate writes prior/aml2/
+P_FAIL_ACT = 0.5
+GATED_DIR = os.path.join(HERE, "prior", "aml2")
+# D-6, G-PRIOR's non-vacuity (a tightening, docs/17 §11 item 5): a PASS also needs
+# a net gain over rules-only and a margin over the shuffled mean of whole geometries
+NV_GAIN_MIN = 1
+NV_MARGIN_MIN = 1.0
 VARIANTS = ("real", "shuffle-0", "shuffle-1", "shuffle-2")
 EDGE_CLASSES = ("sharp", "smooth")         # the 2026-09-26 feature-edge rule
 FOCUS_FAMILY = "B"  # the family the held-out G-OPT miss named; the report states it
@@ -105,11 +123,19 @@ GATE_SCHEMA = "autonomy-prior-gate/1"
 CHECK_SCHEMA = "autonomy-prior-check/1"
 DECISION_SCHEMA = "autonomy-prior-decision/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
-_MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None}
-# the user's ship decision over the gate's: None leaves the gate's enabled flag in force
-USER_SHIP = {"enabled": False, "date": "2026-10-03",
-             "why": "its G-PRIOR pass was vacuous: real equals rules on every "
-                    "tuning geometry"}
+_MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None,
+          "st": None, "st_key": None}
+# the ship rule (AUT-11): since the user's tranche-17 order the shipped prior is
+# enabled only by its gate file (gate_status); the 2026-10-03 decision it replaced
+# is kept as the record
+USER_SHIP = {"rule": "gate-driven since 2026-10-06 (the user's tranche-17 order)",
+             "since": "2026-10-06",
+             "requires": "a gate file whose verdict is PASS and non-vacuous (D-6), "
+                         "whose sha matches the model's record of it, and whose "
+                         "model sha matches the model",
+             "superseded": {"enabled": False, "date": "2026-10-03",
+                            "why": "its G-PRIOR pass was vacuous: real equals "
+                                   "rules on every tuning geometry"}}
 _REMEDY_BY_ID = {r["id"]: r for r in remedies.REMEDIES}
 
 
@@ -374,12 +400,13 @@ def bank_from(bundle, transfer=TRANSFER):
     return out
 
 
-def build(bundle, transfer=None):
+def build(bundle, transfer=None, surrogate=None):
     """The model: the pool's scaler and abstention distance, the bank with z.
 
     transfer None means the module's TRANSFER; a list rebuilds the bank under a
     recorded transfer list (check's model rebuild) - an id that is not a
-    remedy-table id is a PriorError naming it."""
+    remedy-table id is a PriorError naming it.  surrogate (a meta dict) marks
+    the AUT-10 gated prior; None leaves the ungated model byte-identical."""
     if transfer is None:
         transfer = TRANSFER
     else:
@@ -416,6 +443,7 @@ def build(bundle, transfer=None):
                        "manifest_sha256": head["manifest"]["sha256"],
                        "n_geometries": len(head["geometry_ids"]),
                        "content_sha256": bundle_sha(bundle)},
+            **({} if surrogate is None else {"surrogate": copy.deepcopy(surrogate)}),
             "enabled": False, "gate": None}
 
 
@@ -480,6 +508,10 @@ FORMULA = ("k-NN (k = 3) on the RMS distance of standardised fingerprint feature
            "the largest summed weight wins, ties to the nearest; its refinement and "
            "snap remedies are re-applied through remedies.py, and only whole: a path "
            "that applies in part abstains")
+FORMULA_GATED = ("the surrogate's p_fail of the rules' attempt 1 (optimise/aml2, the "
+                 "fold model that leaves the geometry's fold out) gates the prior: "
+                 "below 0.5 it abstains; at or above it, " + FORMULA +
+                 ", where only neighbours with a non-empty remedy path vote")
 CITE = ("docs/15 §C L3 prior, §F G-PRIOR; tools/autonomy/remedies.py "
         "(the transferred refinement and snap remedies)")
 
@@ -518,14 +550,22 @@ def _nb_text(v):
                      for gid, d in zip(v["neighbours"], v["distances"]))
 
 
-def decide(zq, bank, model, ctx, gates, knobs):
-    """One prior decision on one geometry: the vote, the config, the record."""
+def decide(zq, bank, model, ctx, gates, knobs, p_fail=None):
+    """One prior decision on one geometry: the vote, the config, the record.
+
+    p_fail None is the ungated prior.  A number is the surrogate's p_fail of the
+    rules' attempt 1 (AUT-10): below P_FAIL_ACT the prior abstains PR-RULES, at or
+    above it only neighbours of the query's edge class with a non-empty path vote."""
     for e in bank:
         if "edge_class" not in e:
             raise PriorError("the model's bank carries no edge class (built before "
                              "2026-09-26): run prior.py --gate")
     cls = edge_class(ctx["fingerprint"])
     same = [e for e in bank if e["edge_class"] == cls]
+    if p_fail is not None:
+        same = [e for e in same if e["path"]]
+        if not p_fail >= P_FAIL_ACT:      # a NaN p_fail never lets the prior act
+            return _rules_decision(ctx, model, p_fail, len(bank), cls, len(same))
     v = vote(zq, same, model["d_abstain"], model["k"])
     skipped = []
     after = None
@@ -574,18 +614,51 @@ def decide(zq, bank, model, ctx, gates, knobs):
                % (" + ".join(v["winner"]),
                   "; ".join("%s: %s" % (s["rule_id"] or "R-PLANE", s["why"])
                             for s in skipped)))
-    rec = _record(rid, verdict, _trigger(v, model),
-                  _inputs(v, skipped, model, len(bank), cls, len(same)),
-                  FORMULA, edits, CITE, msg, v["nearest"] or 0.0)
+    inputs = _inputs(v, skipped, model, len(bank), cls, len(same))
+    formula = FORMULA
+    if p_fail is not None:
+        inputs.append({"name": "p_fail", "value": float(p_fail), "unit": "1"})
+        formula = FORMULA_GATED
+        msg += ("; the surrogate predicts the rules' attempt 1 fails with p_fail "
+                "%s >= %s, and only neighbours with a non-empty path vote"
+                % (explain.fmt(float(p_fail)), explain.fmt(P_FAIL_ACT)))
+    rec = _record(rid, verdict, _trigger(v, model), inputs, formula, edits, CITE,
+                  msg, v["nearest"] or 0.0)
     return {"schema": DECISION_SCHEMA, "geometry_id": ctx["geometry_id"],
             "verdict": verdict, "rule_id": rid, "config": after, "edits": edits,
             "record": rec, "vote": v, "skipped": skipped}
 
 
-def disabled_decision(model, user=None):
+def _rules_decision(ctx, model, p_fail, bank_n, cls, class_n):
+    """PR-RULES: the surrogate predicts the rules' attempt 1 passes (AUT-10)."""
+    sur = model.get("surrogate") or {}
+    inputs = [{"name": "p_fail", "value": float(p_fail), "unit": "1"},
+              {"name": "p_fail_act", "value": float(P_FAIL_ACT), "unit": "1"},
+              {"name": "bank_n", "value": int(bank_n), "unit": "1"},
+              {"name": "edge_class", "value": cls, "unit": ""},
+              {"name": "class_n", "value": int(class_n), "unit": "1"},
+              {"name": "surrogate_sha256", "value": sur.get("model_sha256"),
+               "unit": ""},
+              {"name": "model_sha256", "value": model_sha(model), "unit": ""}]
+    msg = ("PR-RULES: the surrogate predicts the rules' attempt 1 fails with p_fail "
+           "%s < %s, so the prior does not act; attempt 1 stays the rules' config"
+           % (explain.fmt(float(p_fail)), explain.fmt(P_FAIL_ACT)))
+    rec = _record("PR-RULES", "abstain",
+                  {"observable": "surrogate.p_fail", "value": float(p_fail),
+                   "threshold": P_FAIL_ACT, "op": "<",
+                   "source": "optimise/aml2 hurdle surrogate (AUT-09); the prior "
+                             "acts at p_fail >= %s (AUT-10)"
+                             % explain.fmt(P_FAIL_ACT)},
+                  inputs, FORMULA_GATED, [], CITE, msg, float(p_fail))
+    return {"schema": DECISION_SCHEMA, "geometry_id": ctx["geometry_id"],
+            "verdict": "abstain", "rule_id": "PR-RULES", "config": None,
+            "edits": [], "record": rec, "vote": None, "skipped": []}
+
+
+def disabled_decision(model, status=None):
     """The abstain decision recorded on every geometry when the prior ships
-    disabled; `user` (USER_SHIP) records the user's ship decision over the
-    gate's enabled flag."""
+    disabled; `status` (gate_status, AUT-11) records why USER_SHIP's gate-driven
+    rule keeps the shipped prior off."""
     g = model["gate"]
     inputs = [{"name": "verdict", "value": g["verdict"], "unit": ""},
               {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
@@ -598,13 +671,15 @@ def disabled_decision(model, user=None):
     formula = ("the gate did not earn the prior its place, so the setup rules "
                "decide attempt one")
     tail = ""
-    if user is not None:
-        head += " by the user's decision"
-        inputs.append({"name": "user_disabled", "value": user["date"],
+    if status is not None:
+        head += " by its gate file"
+        why = "; ".join(status["reasons"])
+        inputs.append({"name": "ship_rule", "value": USER_SHIP["rule"],
                        "unit": ""})
-        formula = ("the user disabled the prior, so the setup rules decide "
-                   "attempt one")
-        tail = "; %s" % user["why"]
+        inputs.append({"name": "gate_reasons", "value": why, "unit": ""})
+        formula = ("the ship rule is gate-driven: the gate file does not enable "
+                   "the prior, so the setup rules decide attempt one")
+        tail = "; %s: %s" % (USER_SHIP["rule"], why)
     msg = ("%s (G-PRIOR %s: attempt-1 passes rules %s, real %s, shuffled mean "
            "%s of %s%s); attempt 1 stays the rules' config"
            % (head, g["verdict"], explain.fmt(g["rules_pass"]),
@@ -639,17 +714,87 @@ def load_model(path=None):
     return m
 
 
+def _surrogate_dir(meta):
+    d = meta["dir"]
+    return d if os.path.isabs(d) else os.path.join(HERE, d)
+
+
+def surrogate_from(sdir=None):
+    """The AUT-10 gate's surrogate: {"meta", "p_fail"} out of AUT-09's hurdle
+    model (optimise/aml2).  p_fail(gid, config, fp) is the fold model that leaves
+    gid's fold out (optimise.fold_of, fit_hurdle on the train part's other
+    folds): AUT-09's out-of-fold prediction, so no geometry's own rows train the
+    number that gates it.  The model's train-file sha and refit drift are checked
+    by optimise.load_model first."""
+    import optimise   # optimise imports this module at its top: no top-level import
+    sdir = os.path.abspath(sdir or optimise.HURDLE_DIR)
+    try:
+        v = optimise.load_model(os.path.join(sdir, optimise.MODEL_NAME))
+    except (optimise.OptError, OSError, ValueError) as e:
+        raise PriorError("surrogate: %s" % e)
+    if v["model"].get("kind") != "hurdle":
+        raise PriorError("surrogate: %s is not a hurdle model (AUT-09)" % sdir)
+    with open(os.path.join(sdir, v["model"]["train"]["file"]), "rb") as f:
+        train = json.loads(gzip.decompress(f.read()).decode("utf-8"))
+    X, yf, yb, ylc, gr = optimise._train_rows_of(train)
+    keep = numpy.array([not r["holdout"] for r in train["rows"]], dtype=bool)
+    folds = numpy.array([optimise.fold_of(g) for g in gr])
+    ens_of = {}
+
+    def p_fail(gid, config, fp):
+        f = optimise.fold_of(gid)
+        if f not in ens_of:
+            tr = keep & (folds != f)
+            ens_of[f] = optimise.fit_hurdle(X[tr], yf[tr], yb[tr], ylc[tr],
+                                            [gr[i] for i in numpy.where(tr)[0]])
+        xq = numpy.array([[float("nan") if x is None else x
+                           for x in optimise.x_h_of(config, fp)]], dtype=float)
+        return float(optimise.predict(ens_of[f], xq)["p_fail"][0])
+    rel = os.path.relpath(sdir, HERE).replace(os.sep, "/")
+    meta = {"dir": rel, "model_sha256": v["sha"], "kind": "hurdle",
+            "p_fail_act": P_FAIL_ACT,
+            "fold": "the fold model that leaves the geometry's fold out "
+                    "(optimise.fold_of, AUT-09's cross-fit); the hook deploys the "
+                    "train-part model"}
+    return {"meta": meta, "p_fail": p_fail}
+
+
+def _live_p_fail(model):
+    """The deployed hook's p_fail: the surrogate's train-part model."""
+    import optimise
+    meta = model["surrogate"]
+    v = optimise.load_model(os.path.join(_surrogate_dir(meta), optimise.MODEL_NAME))
+    if v["sha"] != meta["model_sha256"]:
+        raise PriorError("surrogate drift: %s is model %s, the prior was gated on %s"
+                         % (meta["dir"], v["sha"][:12], meta["model_sha256"][:12]))
+
+    def p_fail(ctx):
+        xq = numpy.array([[float("nan") if x is None else x
+                           for x in optimise.x_h_of(ctx["config"],
+                                                    ctx["fingerprint"])]],
+                         dtype=float)
+        return float(optimise.predict(v["ensemble"], xq)["p_fail"][0])
+    return p_fail
+
+
 def make_hook(model):
-    """The campaign hook: PR-DISABLED when disabled, decide() otherwise."""
+    """The campaign hook: PR-DISABLED when disabled, decide() otherwise (gated
+    by the surrogate when the model carries one, AUT-10)."""
     gates = schema.load_gates()
     knobs = schema.load_knobs()
+    live = {}
 
     def hook(ctx):
         if not model.get("enabled"):
             d = disabled_decision(model)
             return {"verdict": d["verdict"], "record": d["record"]}
+        pf = None
+        if model.get("surrogate"):
+            if "fn" not in live:
+                live["fn"] = _live_p_fail(model)
+            pf = live["fn"](ctx)
         d = decide(standardise(features(ctx["fingerprint"]), model["scaler"]),
-                   model["bank"], model, ctx, gates, knobs)
+                   model["bank"], model, ctx, gates, knobs, pf)
         out = {"verdict": d["verdict"], "record": d["record"]}
         if d["verdict"] == "apply":
             out["config"] = d["config"]
@@ -658,22 +803,99 @@ def make_hook(model):
     return hook
 
 
+def gate_status(model, gate_path):
+    """USER_SHIP's gate-driven rule (AUT-11): {"enabled", "reasons", "path",
+    "gate_sha256"} of a model from the gate file beside it.  Enabled only when
+    the file's verdict is PASS, D-6 recomputed from its pass counts is
+    non-vacuous and the file records so, its canonical sha256 is the one the
+    model's gate record holds, its model_sha256 is this model's, and the model's
+    own enabled flag is set; every check that fails is a reason."""
+    rel = _rel_here(gate_path)
+    rep = _read_json_or_none(gate_path)
+    if not isinstance(rep, dict):
+        return {"enabled": False, "path": rel, "gate_sha256": None,
+                "reasons": ["no readable gate file at %s" % rel]}
+    reasons = []
+    g = model.get("gate") if isinstance(model.get("gate"), dict) else {}
+    gsha = schema.canonical_sha256(rep)
+    want = g.get("report_sha256")
+    if want is None:
+        reasons.append("the model records no sha of its gate file (gated "
+                       "before AUT-11)")
+    elif want != gsha:
+        reasons.append("the gate file is sha %s but the model recorded %s (it "
+                       "was edited or replaced after the gate)"
+                       % (gsha[:12], str(want)[:12]))
+    if rep.get("verdict") != "PASS":
+        reasons.append("the gate's verdict is %s" % rep.get("verdict"))
+    try:
+        sy = rep["systems"]
+        _c, d6 = conditions_of(sy["rules"]["pass"], sy["real"]["pass"],
+                               [sy[v]["pass"] for v in VARIANTS
+                                if v.startswith("shuffle-")])
+    except (KeyError, TypeError, ZeroDivisionError):
+        d6 = None
+    if d6 is None:
+        reasons.append("the gate file holds no pass counts for D-6")
+    elif not d6["non_vacuous"]:
+        reasons.append("the pass is vacuous (D-6: real - rules %s, needs %s; "
+                       "real - shuffled mean %s, needs %s)"
+                       % (explain.fmt(d6["gain"]), explain.fmt(NV_GAIN_MIN),
+                          explain.fmt(d6["margin"]), explain.fmt(NV_MARGIN_MIN)))
+    elif rep.get("non_vacuous") is not True:
+        reasons.append("the gate file does not record D-6's non-vacuity")
+    msha = model_sha(model)
+    if rep.get("model_sha256") != msha:
+        reasons.append("the gate file is for model %s, this model is %s"
+                       % (str(rep.get("model_sha256"))[:12], msha[:12]))
+    if not model.get("enabled"):
+        reasons.append("the model's enabled flag is false")
+    return {"enabled": not reasons, "path": rel, "gate_sha256": gsha,
+            "reasons": reasons}
+
+
+def _rel_here(path):
+    """path relative to tools/autonomy with forward slashes (absolute when it is
+    on another drive)."""
+    try:
+        return os.path.relpath(os.path.abspath(path), HERE).replace(os.sep, "/")
+    except ValueError:
+        return os.path.abspath(path).replace(os.sep, "/")
+
+
+def ship_status(path=None):
+    """(model, gate_status) of the shipped model (or `path`) and the
+    G-PRIOR.json beside it, cached by both files' mtimes."""
+    path = path or _MODEL["path"]
+    model = load_model(path)
+    gp = os.path.join(os.path.dirname(os.path.abspath(path)), REPORT_NAME)
+    key = (path, os.stat(path).st_mtime_ns,
+           os.stat(gp).st_mtime_ns if os.path.isfile(gp) else None)
+    if _MODEL.get("st_key") != key or _MODEL.get("st") is None:
+        _MODEL["st"], _MODEL["st_key"] = gate_status(model, gp), key
+    return model, _MODEL["st"]
+
+
 def attempt1(ctx):
     """The hook campaign.py's HOOKS names; the model comes from prior_model.json.
 
-    While USER_SHIP disables the shipped prior, an ENABLED model still records
-    PR-DISABLED here - "by the user's decision"; make_hook itself is unchanged
-    (the gate's own seam and the live group use it)."""
-    model = load_model()
-    if model.get("enabled") and USER_SHIP is not None \
-            and not USER_SHIP["enabled"]:
-        d = disabled_decision(model, USER_SHIP)
+    USER_SHIP's rule is gate-driven (AUT-11): unless gate_status enables the
+    model from its gate file, attempt 1 records PR-DISABLED with the reasons;
+    make_hook itself is unchanged (the gate's own seam and the live group use
+    it)."""
+    model, st = ship_status()
+    if not st["enabled"]:
+        d = disabled_decision(model, st)
         return {"verdict": d["verdict"], "record": d["record"]}
     return make_hook(model)(ctx)
 
 
-def decide_all(bundle, model, gates, knobs):
-    """Every geometry's decision under the real variant and the three shuffles."""
+def decide_all(bundle, model, gates, knobs, surrogate=None):
+    """Every geometry's decision under the real variant and the three shuffles.
+
+    surrogate (AUT-10) is {"meta", "p_fail"}: p_fail(gid, config, fp) is the
+    surrogate's leave-the-fold-out p_fail of the rules' attempt 1, the same
+    number for the real prior and its three shuffles."""
     head = bundle["campaign"]
     mrows = {r["geometry_id"]: r for r in campaign.load_manifest(
         "tuning", "rules", ids=head["geometry_ids"])}
@@ -695,7 +917,8 @@ def decide_all(bundle, model, gates, knobs):
                         ft_radius=rules.ft_radius_of(bundle.get("records") or []),
                         win_2to1=rules.win_2to1_of(bundle.get("records") or []),
                         glb=rules.glb_of(bundle.get("records") or []),
-                        r_snap=rules.r_snap_of(bundle.get("records") or []))
+                        r_snap=rules.r_snap_of(bundle.get("records") or []),
+                        r_econ=rules.r_econ_of(bundle.get("records") or []))
         if s["refused"]:
             raise PriorError("rules.setup refuses %s: %s"
                              % (gid, ", ".join(s["refused"])))
@@ -707,18 +930,22 @@ def decide_all(bundle, model, gates, knobs):
                "rules": s}
         zq = standardise(features(fp), model["scaler"])
         fold = [e for e in model["bank"] if e["geometry_id"] != gid]
-        variants = {"real": decide(zq, fold, model, ctx, gates, knobs)}
+        pf = (None if surrogate is None
+              else float(surrogate["p_fail"](gid, s["config"], fp)))
+        variants = {"real": decide(zq, fold, model, ctx, gates, knobs, pf)}
         for r in range(SHUFFLES):
             rng = numpy.random.default_rng(
                 [SHUFFLE_SEED, r, zlib.crc32(gid.encode("ascii"))])
             perm = rng.permutation(len(fold))
             sbank = [dict(fold[i], z=fold[int(perm[i])]["z"])
                      for i in range(len(fold))]
-            variants["shuffle-%d" % r] = decide(zq, sbank, model, ctx, gates, knobs)
+            variants["shuffle-%d" % r] = decide(zq, sbank, model, ctx, gates, knobs,
+                                                pf)
         out.append(dict(base, eligible=True,
                         l1_sha256=schema.canonical_sha256(s["config"]),
                         fingerprint_sha256=schema.canonical_sha256(fp),
-                        variants=variants))
+                        variants=variants,
+                        **({} if pf is None else {"p_fail": pf})))
     return out
 
 
@@ -877,7 +1104,7 @@ def _bundle_info(fname, bundle, report_dir, write):
             "bytes": info["bytes"]}
 
 
-def _prepare(rules_dir):
+def _prepare(rules_dir, surrogate=None):
     """gate's steps 1-4: the seal, the bundle checks, the model, the decisions."""
     cpath = os.path.join(rules_dir, campaign.FILES["campaign"])
     if not os.path.isfile(cpath):
@@ -903,10 +1130,10 @@ def _prepare(rules_dir):
     if bad:
         raise PriorError("%d harness error(s) in the rules campaign: %s"
                          % (len(bad), ", ".join(sorted(bad))))
-    model = build(bundle)
+    model = build(bundle, surrogate=None if surrogate is None else surrogate["meta"])
     gates = schema.load_gates()
     knobs = schema.load_knobs()
-    decisions = decide_all(bundle, model, gates, knobs)
+    decisions = decide_all(bundle, model, gates, knobs, surrogate)
     measured = {}
     for r in bundle["attempts"]:
         measured.setdefault(r["geometry_id"], {})[r["config_sha"]] = r["attempt"]
@@ -914,9 +1141,12 @@ def _prepare(rules_dir):
 
 
 def gate(rules_dir, work, *, streams=6, report_dir=REPORT_DIR, binary=None,
-         attempt_fn=None, probe_fn=None, snap_fn=None, write=True, quiet=False):
-    """G-PRIOR: the gate on a finished rules campaign of the tuning split."""
-    head, bundle, model, gates, knobs, decisions, measured = _prepare(rules_dir)
+         attempt_fn=None, probe_fn=None, snap_fn=None, write=True, quiet=False,
+         surrogate=None):
+    """G-PRIOR: the gate on a finished rules campaign of the tuning split;
+    surrogate (surrogate_from's {"meta", "p_fail"}) gates the prior (AUT-10)."""
+    head, bundle, model, gates, knobs, decisions, measured = _prepare(rules_dir,
+                                                                      surrogate)
     rounds = plan_rounds(decisions, measured)
     round_rows, rounds_of = {}, {}
     round_infos = []
@@ -963,6 +1193,8 @@ def _finish(head, bundle, model, decisions, measured, rounds, round_rows,
         fams.setdefault(d["family"], []).append(gid)
         grow = {"geometry_id": gid, "family": d["family"],
                 "eligible": d["eligible"], "terminal": d["terminal"]}
+        if "p_fail" in d:
+            grow["p_fail"] = d["p_fail"]
         for name in ("rules",) + VARIANTS:
             entry, vote_d = {}, None
             if name == "rules":
@@ -1001,6 +1233,25 @@ def _finish(head, bundle, model, decisions, measured, rounds, round_rows,
                                rounds, round_infos, report_dir, write)
 
 
+def conditions_of(rules_pass, real_pass, shuffled_passes):
+    """G-PRIOR's conditions (docs/15 §F) and D-6's non-vacuity (AUT-10): the
+    conditions dict (every one must hold for PASS) and the D-6 record."""
+    sm = sum(shuffled_passes) / float(len(shuffled_passes))
+    gain, margin = real_pass - rules_pass, real_pass - sm
+    d6 = {"gain": gain, "gain_min": NV_GAIN_MIN, "margin": margin,
+          "margin_min": NV_MARGIN_MIN,
+          "rule": "real - rules >= %d and real - shuffled mean >= %s (D-6, "
+                  "AUT-10: a pass is a net gain of whole geometries over rules-only "
+                  "and over the shuffled control)" % (NV_GAIN_MIN,
+                                                      explain.fmt(NV_MARGIN_MIN))}
+    conditions = {"real_ge_rules": real_pass >= rules_pass,
+                  "shuffled_worse": sm < real_pass,
+                  "nv_gain": gain >= NV_GAIN_MIN,
+                  "nv_margin": margin >= NV_MARGIN_MIN}
+    d6["non_vacuous"] = conditions["nv_gain"] and conditions["nv_margin"]
+    return conditions, d6
+
+
 def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
                         round_infos, report_dir, write):
     """The conditions and verdict, the per-family table, the report, the bundles."""
@@ -1012,8 +1263,8 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
         s["loss"] = len(systems["rules"]["pass_gids"] - s["pass_gids"])
     sh = [systems[v]["pass"] for v in VARIANTS if v.startswith("shuffle-")]
     shuffled_mean_pass = sum(sh) / float(len(sh))
-    conditions = {"real_ge_rules": systems["real"]["pass"] >= systems["rules"]["pass"],
-                  "shuffled_worse": shuffled_mean_pass < systems["real"]["pass"]}
+    conditions, d6 = conditions_of(systems["rules"]["pass"], systems["real"]["pass"],
+                                   sh)
     verdict = "PASS" if all(conditions.values()) else "FAIL"
     enabled = verdict == "PASS"
     rep_fams = {}
@@ -1059,10 +1310,14 @@ def _systems_and_report(head, bundle, model, systems, geom_out, fams, n, rounds,
     shipped["gate"] = {"verdict": verdict, "rules_pass": systems["rules"]["pass"],
                        "real_pass": systems["real"]["pass"],
                        "shuffled_mean_pass": shuffled_mean_pass, "n": n,
-                       "report": REPORT_NAME}
+                       "non_vacuous": d6["non_vacuous"], "report": REPORT_NAME}
     rep = {"$comment": HEADER, "schema": GATE_SCHEMA,
            "date": time.strftime("%Y-%m-%d"), "verdict": verdict,
-           "enabled": enabled, "conditions": conditions, "n_tuning": n,
+           "enabled": enabled, "conditions": conditions,
+           "non_vacuous": d6["non_vacuous"], "d6": d6,
+           "surrogate": model.get("surrogate"),
+           "p_fail_act": P_FAIL_ACT if model.get("surrogate") else None,
+           "n_tuning": n,
            "n_eligible": sum(1 for g in geom_out if g["eligible"]),
            "pool_n": model["pool_n"], "bank_n": model["bank_n"], "k": model["k"],
            "d_abstain": model["d_abstain"], "model_sha256": model_sha(model),
@@ -1097,8 +1352,11 @@ def _report_and_bundles(head, bundle, shipped, rep, round_infos, report_dir,
                               "geometry_ids": info["geometry_ids"],
                               "bundle": bi})
     if write:
-        _dump(os.path.join(report_dir, MODEL_NAME), shipped)
+        # AUT-11: the model records its gate file's canonical sha as written
         _dump(os.path.join(report_dir, REPORT_NAME), rep)
+        shipped["gate"]["report_sha256"] = schema.canonical_sha256(
+            _read_json_or_none(os.path.join(report_dir, REPORT_NAME)))
+        _dump(os.path.join(report_dir, MODEL_NAME), shipped)
         _write_text(os.path.join(report_dir, REPORT_MD), report_md(rep))
     return rep
 
@@ -1127,6 +1385,18 @@ def report_md(rep):
         a.append("- The prior ships enabled.")
     else:
         a.append("- The prior ships DISABLED: %s." % ", ".join(false))
+    d6 = rep["d6"]
+    a.append("- D-6 non-vacuous: %s (gain over rules %s >= %s, margin over the "
+             "shuffled mean %s >= %s)"
+             % ("yes" if rep["non_vacuous"] else "NO", explain.fmt(d6["gain"]),
+                explain.fmt(d6["gain_min"]), _f3(d6["margin"]),
+                explain.fmt(d6["margin_min"])))
+    if rep.get("surrogate"):
+        sur = rep["surrogate"]
+        a.append("- gated by the surrogate %s (model sha256 %s): the prior acts only "
+                 "at p_fail >= %s, %s" % (sur["dir"], sur["model_sha256"],
+                                          explain.fmt(rep["p_fail_act"]),
+                                          sur["fold"]))
     a.append("- model sha256: %s" % rep["model_sha256"])
     rc = rep["rules_campaign"]
     a.append("- rules campaign: %s (binary sha256 %s, %d geometries, %d rows)"
@@ -1149,15 +1419,15 @@ def report_md(rep):
     a.append("## Decisions")
     a.append("")
     a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL | "
-             "reused | ran | refused |")
-    a.append("|---|---|---|---|---|---|---|---|---|")
+             "PR-RULES | reused | ran | refused |")
+    a.append("|---|---|---|---|---|---|---|---|---|---|")
     for name in VARIANTS:
         s = rep["systems"][name]
         dec, st = s["decisions"], s["statuses"]
-        a.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |"
+        a.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |"
                  % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
                     dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
-                    dec.get("PR-PARTIAL", 0),
+                    dec.get("PR-PARTIAL", 0), dec.get("PR-RULES", 0),
                     st.get("reused", 0), st.get("ran", 0), st.get("refused", 0)))
     a.append("")
     a.append("## Per family")
@@ -1183,14 +1453,15 @@ def report_md(rep):
                     focus["real"], focus["shuffle-0"], focus["shuffle-1"],
                     focus["shuffle-2"], _f3(focus["shuffled_mean"])))
         a.append("")
-        a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL |")
-        a.append("|---|---|---|---|---|---|")
+        a.append("| variant | PR-KNN | PR-KEEP | PR-FAR | PR-NOEDIT | PR-PARTIAL | "
+                 "PR-RULES |")
+        a.append("|---|---|---|---|---|---|---|")
         for name in VARIANTS:
             dec = focus["decisions"][name]
-            a.append("| %s | %d | %d | %d | %d | %d |"
+            a.append("| %s | %d | %d | %d | %d | %d | %d |"
                      % (name, dec.get("PR-KNN", 0), dec.get("PR-KEEP", 0),
                         dec.get("PR-FAR", 0), dec.get("PR-NOEDIT", 0),
-                        dec.get("PR-PARTIAL", 0)))
+                        dec.get("PR-PARTIAL", 0), dec.get("PR-RULES", 0)))
     a.append("")
     a.append("## Null policy")
     a.append("")
@@ -1294,7 +1565,8 @@ def _check_models(rep, pm, bpath, mp, items, report_dir, rp_path):
             # the recorded transfer list: a gate written under an older table
             # rebuilds under its own ids (a non-table id fails by name)
             rebuilt = model_sha(build(baseline.read_bundle(bpath),
-                                      transfer=(pm.get("transfer") or [])))
+                                      transfer=(pm.get("transfer") or []),
+                                      surrogate=pm.get("surrogate")))
         except (PriorError, baseline.BaselineError, ValueError, KeyError,
                 zlib.error, EOFError) as e:
             rebuilt, why_r = None, "%s: %s" % (bpath, e)
@@ -1322,7 +1594,7 @@ class _ArgParser(argparse.ArgumentParser):
 
 def _counts_line(variant, decisions, measured):
     dec = {"PR-KNN": 0, "PR-KEEP": 0, "PR-FAR": 0, "PR-NOEDIT": 0,
-           "PR-PARTIAL": 0}
+           "PR-PARTIAL": 0, "PR-RULES": 0}
     m = w = 0
     for d in decisions:
         if not d["eligible"]:
@@ -1336,9 +1608,9 @@ def _counts_line(variant, decisions, measured):
             else:
                 w += 1
     return ("[prior] %s: PR-KNN %d, PR-KEEP %d, PR-FAR %d, PR-NOEDIT %d, "
-            "PR-PARTIAL %d, measured %d, new %d"
+            "PR-PARTIAL %d, PR-RULES %d, measured %d, new %d"
             % (variant, dec["PR-KNN"], dec["PR-KEEP"], dec["PR-FAR"],
-               dec["PR-NOEDIT"], dec["PR-PARTIAL"], m, w))
+               dec["PR-NOEDIT"], dec["PR-PARTIAL"], dec["PR-RULES"], m, w))
 
 
 def _plan_lines(model, decisions, measured, rounds):
@@ -1371,14 +1643,27 @@ def _cli_run(a):
         sys.stderr.write("prior: --streams %r outside 1..%d\n"
                          % (a.streams, campaign.MAX_STREAMS))
         return 2
-    head, bundle, model, gates, knobs, decisions, measured = _prepare(a.rules)
+    sur = None
+    report_dir = a.report_dir
+    if a.surrogate is not None:
+        if report_dir is None:
+            report_dir = GATED_DIR
+        elif os.path.abspath(report_dir) in (os.path.abspath(REPORT_DIR),
+                                             os.path.abspath(AM13_DIR)):
+            raise PriorError("the gated gate (AUT-10) never writes into %s (the "
+                             "AM-L or AM-13 record); use %s"
+                             % (report_dir, GATED_DIR))
+        sur = surrogate_from(a.surrogate or None)
+    elif report_dir is None:
+        report_dir = REPORT_DIR
+    head, bundle, model, gates, knobs, decisions, measured = _prepare(a.rules, sur)
     rounds = plan_rounds(decisions, measured)
     for line in _plan_lines(model, decisions, measured, rounds):
         print(line)
     if a.plan:
         return 0
-    rep = gate(a.rules, a.work, streams=a.streams, report_dir=a.report_dir,
-               binary=a.binary, quiet=False)
+    rep = gate(a.rules, a.work, streams=a.streams, report_dir=report_dir,
+               binary=a.binary, quiet=False, surrogate=sur)
     s = rep["systems"]
     line = ("G-PRIOR %s: attempt-1 passes rules %d/%d, real %d/%d, shuffled %d, "
             "%d, %d (mean %.3f); the prior ships %s"
@@ -1410,14 +1695,19 @@ def main(argv=None):
     ap.add_argument("--work", help="the evaluation rounds' work directory")
     ap.add_argument("--streams", type=int, default=6)
     ap.add_argument("--binary", default=None)
-    ap.add_argument("--report-dir", dest="report_dir", default=REPORT_DIR,
-                    help="the report directory (default prior/aml; the AM-13 "
-                         "record is prior)")
+    ap.add_argument("--report-dir", dest="report_dir", default=None,
+                    help="the report directory (default prior/aml, or prior/aml2 "
+                         "with --surrogate; the AM-13 record is prior)")
+    ap.add_argument("--surrogate", nargs="?", const="", default=None,
+                    help="gate the prior by AUT-09's hurdle surrogate (default "
+                         "optimise/aml2): it acts only at p_fail >= 0.5 (AUT-10)")
     a = ap.parse_args(argv)
     if a.selftest:
         return selftest()
     try:
         if a.check:
+            if a.report_dir is None:
+                a.report_dir = REPORT_DIR
             return _cli_check(a)
         if a.plan or a.gate:
             return _cli_run(a)
@@ -1494,9 +1784,11 @@ _pass_oracle = _oracle_attempt(lambda config, gctx: "pass")
 
 
 def _run_oracle(out, attempt_fn, ids=IDS8):
+    # r_te False: the oracles model G-PILOT's cure (one wall level coarser), the remedy
+    # table before AUT-04's RM-TE that the bank and gate counts were written against
     return campaign.run_campaign(
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": "rules",
-         "streams": 2, "quiet": True},
+         "streams": 2, "quiet": True, "r_te": False},
         attempt_fn=attempt_fn, probe_fn=campaign._fake_probe(1000),
         snap_fn=campaign._fake_snap)
 
@@ -1516,11 +1808,14 @@ def _setup_of(H, gid):
 
 def _g1_constants(H):
     assert len(FEATURES) == 17 and K == 3 and SHUFFLES == 3 and EPS == 1e-6
-    assert USER_SHIP == {"enabled": False, "date": "2026-10-03",
-                         "why": "its G-PRIOR pass was vacuous: real equals rules "
-                                "on every tuning geometry"}, USER_SHIP
+    assert USER_SHIP["rule"] == ("gate-driven since 2026-10-06 (the user's "
+                                 "tranche-17 order)") and \
+        USER_SHIP["superseded"] == {"enabled": False, "date": "2026-10-03",
+                                    "why": "its G-PRIOR pass was vacuous: real "
+                                           "equals rules on every tuning "
+                                           "geometry"}, USER_SHIP
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
-                        "RM-TOPO-REFINE", "RM-SNAP-WALL", "RM-SNAP-FT",
+                        "RM-TOPO-REFINE", "RM-TE", "RM-SNAP-WALL", "RM-SNAP-FT",
                         "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
     for rid in PR_IDS:
         assert rid in explain.TEMPLATES and \
@@ -1555,7 +1850,7 @@ def _g1_constants(H):
     else:
         raise AssertionError("a missing model was not refused")
     print("[ok] constants: 17 features, k 3, 3 shuffles, 8 transferable remedies, "
-          "6 PR ids templated; an evaluate campaign is refused before any other "
+          "7 PR ids templated; an evaluate campaign is refused before any other "
           "file, a b0-template campaign and a missing model are refused by name")
 
 
@@ -1768,7 +2063,11 @@ def _g7_gate(H):
                                      "PR-FAR": 3}, s["real"]["statuses"]
     assert s["real"]["gain"] == 3 and s["real"]["loss"] == 0
     assert rep["rounds"] == [], rep["rounds"]
-    assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True}
+    assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True,
+                                 "nv_gain": True, "nv_margin": True}
+    assert (rep["non_vacuous"] is True and rep["d6"]["gain"] == 3
+            and abs(rep["d6"]["margin"] - 1.0) <= 1e-12), rep["d6"]   # D-6 at its bar
+    assert rep["surrogate"] is None and "surrogate" not in H["model"]
     assert rep["verdict"] == "PASS" and rep["enabled"] is True
     for name in (REPORT_NAME, REPORT_MD, MODEL_NAME, RULES_BUNDLE):
         assert os.path.isfile(os.path.join(rdir, name)), name
@@ -1806,7 +2105,8 @@ def _g7_gate(H):
     assert ms["shuffle-0"]["pass"] == 3 and ms["shuffle-1"]["pass"] == 2 \
         and ms["shuffle-2"]["pass"] == 2
     assert abs(mrep["shuffled_mean_pass"] - 7.0 / 3.0) <= 1e-9
-    assert mrep["conditions"] == {"real_ge_rules": True, "shuffled_worse": False}
+    assert mrep["conditions"] == {"real_ge_rules": True, "shuffled_worse": False,
+                                  "nv_gain": False, "nv_margin": False}
     assert mrep["verdict"] == "FAIL" and mrep["enabled"] is False
     assert os.path.isfile(os.path.join(mrdir, ROUND_BUNDLE % 1)), "round bundle"
     cj = os.path.join(mwork, "round_1", campaign.FILES["campaign"])
@@ -1820,16 +2120,38 @@ def _g7_gate(H):
     m1.pop("date")
     m2.pop("date")
     assert m1 == m2, "the mixed re-run's report differs beyond the date"
-    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 2 3 4 (mean "
-          "3.000), no round (every prior config already meshed), PASS and enabled; "
+    print("[ok] gate on the oracle campaign: rules 2, real 5, shuffled 5 3 4 (mean "
+          "4.000), no round (every prior config already meshed), D-6 non-vacuous at "
+          "its bar (gain 3, margin 1.000), PASS and enabled; "
           "on the mixed oracle one round of two geometries (D-1-077, F-1-011) runs, "
           "the shuffled control is not worse so it FAILs disabled, and a re-run "
           "reuses the round and gives an equal report")
 
 
+def _surface_open_observe(gid):
+    """campaign.observe with gid's surface left open: since AUT-02a stl_repair
+    closes G-1-026 (a duplicate), and no tuning row stays open, so the selftest
+    stands it in as the SURFACE-OPEN geometry it was."""
+    real = campaign.observe
+
+    def observe(c, mrow):
+        obs = real(c, mrow)
+        if mrow["geometry_id"] != gid:
+            return obs
+        surf = dict(obs["surface"] or {}, closed_after=False, repaired=False)
+        return {"terminal": "SURFACE-OPEN",
+                "reason": "stl_repair leaves the surface open (selftest stand-in)",
+                "surface": surf}
+    return real, observe
+
+
 def _g8_disabled(H):
     r2 = os.path.join(H["tmp"], "rules_pass")
-    _run_oracle(r2, _pass_oracle, ids=IDS8 + ("G-1-026",))   # + one SURFACE-OPEN
+    real, campaign.observe = _surface_open_observe("G-1-026")
+    try:
+        _run_oracle(r2, _pass_oracle, ids=IDS8 + ("G-1-026",))   # + one SURFACE-OPEN
+    finally:
+        campaign.observe = real
     rep = gate(r2, os.path.join(H["tmp"], "work_pass"), streams=2,
                report_dir=os.path.join(H["tmp"], "rep_fail"),
                attempt_fn=_pass_oracle, probe_fn=campaign._fake_probe(1000),
@@ -1898,12 +2220,10 @@ def _g9_hook(H):
     campaign._check_hook(res, "prior", H["cfg"]["F-1-009"], H["knobs"])
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
-    old_ship = pm_mod.USER_SHIP
     try:
         # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010;
-        # the gate's own seam, so the user's ship decision stands aside here
+        # the oracle gate's file enables its model (PASS, non-vacuous, AUT-11)
         ids2 = ["F-1-011", "D-1-010"]
-        pm_mod.USER_SHIP = None
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out2 = os.path.join(H["tmp"], "hook-import")
@@ -1930,11 +2250,11 @@ def _g9_hook(H):
         recs3 = campaign.load_records(out3)
         assert sum(1 for gid in recs3 for t in recs3[gid]
                    if t["record"]["rule_id"] == "PR-DISABLED") == 2
-        # the shipped prior is disabled by the user's decision (USER_SHIP) even
-        # though this model's gate enabled it: attempt 1 stays the rules'
-        # config and PR-DISABLED says so, grounded on both geometries
-        pm_mod.USER_SHIP = old_ship
-        pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
+        # the shipped prior/aml model is enabled with a PASS gate, but the gate
+        # file does not enable it under USER_SHIP's rule (vacuous, gated before
+        # AUT-11): attempt 1 stays the rules' config and PR-DISABLED says why,
+        # grounded on both geometries
+        pm_mod._MODEL["path"] = os.path.join(REPORT_DIR, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out5 = os.path.join(H["tmp"], "hook-user")
         _fake_prior_campaign(out5, ids2)
@@ -1946,10 +2266,13 @@ def _g9_hook(H):
                 if t["record"]["rule_id"] == "PR-DISABLED"]
         assert len(dis5) == 2, dis5
         for t in dis5:
-            assert "by the user's decision" in t["record"]["message"], \
+            assert "by its gate file" in t["record"]["message"] and \
+                "the pass is vacuous" in t["record"]["message"], \
                 t["record"]["message"]
-            assert t["record"]["inputs"][-1] == \
-                {"name": "user_disabled", "value": "2026-10-03", "unit": ""}, \
+            assert t["record"]["inputs"][-2] == \
+                {"name": "ship_rule", "value": USER_SHIP["rule"], "unit": ""}, \
+                t["record"]["inputs"][-2]
+            assert t["record"]["inputs"][-1]["name"] == "gate_reasons", \
                 t["record"]["inputs"][-1]
             card5 = explain.card(t["record"])
             assert explain.ungrounded(card5["line"], [t["record"]]) == [], \
@@ -1964,12 +2287,11 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
-        pm_mod.USER_SHIP = old_ship
     print("[ok] hook seam: make_hook in a fake rules+prior campaign (3 prior rows, "
           "5 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
           "PR card grounded, audit and replay ok; the shipped prior disabled by "
-          "the user's decision (PR-DISABLED on both)")
+          "its gate file (vacuous; PR-DISABLED on both)")
 
 
 def _g10_live(H):
@@ -2004,6 +2326,110 @@ def _g10_live(H):
           "the rules (PR-NOEDIT on the plane); 0 harness errors, 0 orphans, at "
           "most 2 meshers"
           % (f["outcome"]["exit_code"], f["outcome"]["failure_class"]))
+
+
+def _g14_ship(H):
+    """AUT-11: only a PASS, non-vacuous gate file whose sha and model sha match
+    enables the model; every other case records PR-DISABLED with its reason."""
+    import prior as pm_mod
+    src = os.path.join(H["tmp"], "rep")          # the oracle gate (group 7)
+
+    def case(name, edit_rep=None, edit_model=None, rerecord=True, drop=False):
+        d = _copy_dir(src, os.path.join(H["tmp"], "ship-" + name))
+        rp, mp = os.path.join(d, REPORT_NAME), os.path.join(d, MODEL_NAME)
+        r, m = _read_json_or_none(rp), _read_json_or_none(mp)
+        if edit_rep:
+            edit_rep(r)
+            _dump(rp, r)
+        if edit_model:
+            edit_model(m)
+        if rerecord and not drop:
+            m["gate"]["report_sha256"] = schema.canonical_sha256(
+                _read_json_or_none(rp))
+        _dump(mp, m)
+        if drop:
+            os.remove(rp)
+        return mp
+
+    def fail(r):
+        r["verdict"], r["enabled"] = "FAIL", False
+
+    def vacuous(r):        # a PASS whose real equals rules (D-6 gain 0)
+        r["systems"]["rules"]["pass"] = r["systems"]["real"]["pass"]
+        for v in ("shuffle-0", "shuffle-1", "shuffle-2"):
+            r["systems"][v]["pass"] = r["systems"]["real"]["pass"] - 1
+        r["non_vacuous"] = False
+
+    def tamper(r):
+        r["systems"]["real"]["pass"] += 1
+
+    def other_model(m):
+        m["d_abstain"] = m["d_abstain"] * 2.0
+
+    m0 = _read_json_or_none(os.path.join(src, MODEL_NAME))
+    msha0 = model_sha(m0)
+    want = {
+        "genuine": (case("genuine"), []),
+        "fail": (case("fail", fail), ["the gate's verdict is FAIL"]),
+        "vacuous": (case("vacuous", vacuous),
+                    ["the pass is vacuous (D-6: real - rules 0, needs 1; real - "
+                     "shuffled mean 1, needs 1)"]),
+        "tampered": (case("tampered", tamper, rerecord=False), None),
+        "missing": (case("missing", drop=True),
+                    ["no readable gate file at %s" % _rel_here(
+                        os.path.join(H["tmp"], "ship-missing", REPORT_NAME))]),
+        "model": (case("model", edit_model=other_model), None),
+    }
+    gsha0 = schema.canonical_sha256(_read_json_or_none(
+        os.path.join(src, REPORT_NAME)))
+    assert m0["gate"]["report_sha256"] == gsha0, m0["gate"]
+    old = dict(pm_mod._MODEL)
+    try:
+        for name, (mp, reasons) in want.items():
+            pm_mod._MODEL["path"] = mp
+            pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+            model, st = pm_mod.ship_status()
+            got = st["reasons"]
+            if name == "tampered":
+                assert len(got) == 1 and got[0].startswith(
+                    "the gate file is sha ") and "edited or replaced" in got[0], got
+            elif name == "model":
+                assert got == ["the gate file is for model %s, this model is %s"
+                               % (msha0[:12], model_sha(model)[:12])], got
+            else:
+                assert got == reasons, (name, got)
+            assert st["enabled"] is (name == "genuine"), (name, st)
+            res = pm_mod.attempt1(H["ctx"]["F-1-009"])
+            rid = res["record"]["rule_id"]
+            if name == "genuine":
+                # decide() ran: the live bank holds F-1-009 itself (the gate's
+                # leave-one-out read it PR-FAR in group 7)
+                assert rid == "PR-KNN", rid
+                continue
+            assert rid == "PR-DISABLED" and res["verdict"] == "abstain", rid
+            rec = res["record"]
+            assert rec["inputs"][-1] == {"name": "gate_reasons",
+                                         "value": "; ".join(got), "unit": ""}
+            assert "; ".join(got) in rec["message"], rec["message"]
+            assert explain.ungrounded(explain.card(rec)["line"], [rec]) == []
+        # the committed gates: prior/aml (a vacuous PASS) and prior/ (a FAIL)
+        for d, first in ((REPORT_DIR, "the model records no sha"),
+                         (AM13_DIR, "the model records no sha")):
+            pm_mod._MODEL["path"] = os.path.join(d, MODEL_NAME)
+            pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+            _m, st = pm_mod.ship_status()
+            assert st["enabled"] is False and st["reasons"][0].startswith(first) \
+                and any(x.startswith("the pass is vacuous") for x in st["reasons"]), \
+                (d, st["reasons"])
+    finally:
+        pm_mod._MODEL.clear()
+        pm_mod._MODEL.update(old)
+    print("[ok] the gate-driven ship rule (AUT-11): only the genuine oracle gate "
+          "(PASS, non-vacuous, sha and model sha matching) enables the model; a "
+          "FAIL, a vacuous PASS, a tampered gate file, a missing one and a model "
+          "sha mismatch each keep it off and attempt1 records PR-DISABLED with "
+          "the reason (grounded); the committed prior/aml and prior/ stay off "
+          "(vacuous, gated before AUT-11)")
 
 
 def _copy_dir(src, dst):
@@ -2173,8 +2599,104 @@ def _g12_rule(H):
           "PR-PARTIAL; an old bank is refused")
 
 
+def _fixture_surrogate(H, p_of):
+    meta = {"dir": "selftest", "model_sha256": "0" * 64, "kind": "fixture",
+            "p_fail_act": P_FAIL_ACT, "fold": "a selftest table"}
+    return {"meta": meta, "p_fail": lambda gid, cfg, fp: p_of(gid)}
+
+
+def _g13_gated(H):
+    # (a) D-6 on the recorded numbers: the AM-L pass was vacuous, the AM-13 one not
+    c, d = conditions_of(241, 241, [240, 241, 241])
+    assert c == {"real_ge_rules": True, "shuffled_worse": True, "nv_gain": False,
+                 "nv_margin": False} and d["non_vacuous"] is False, (c, d)
+    assert d["gain"] == 0 and abs(d["margin"] - 1.0 / 3.0) <= 1e-12, d
+    c, d = conditions_of(80, 214, [169, 170, 170])
+    assert all(c.values()) and d["non_vacuous"] is True, (c, d)
+    c, d = conditions_of(2, 5, [5, 3, 4])
+    assert all(c.values()) and d["margin"] == 1.0, (c, d)
+    c, d = conditions_of(2, 3, [2, 2, 3])
+    assert c == {"real_ge_rules": True, "shuffled_worse": True, "nv_gain": True,
+                 "nv_margin": False}, c
+    # (b) the gated gate on the oracle: p_fail 1 where the rules' attempt 1 fails
+    rows1 = {r["geometry_id"]: r for r in H["B1"]["attempts"] if r["attempt"] == 1}
+    fails = {g: r["outcome"]["failure"] is not False for g, r in rows1.items()}
+    sur = _fixture_surrogate(H, lambda g: 1.0 if fails[g] else 0.0)
+    rdir = os.path.join(H["tmp"], "rep_gated")
+    rep = gate(H["R1"], os.path.join(H["tmp"], "work_gated"), streams=2,
+               report_dir=rdir, attempt_fn=_wall_oracle,
+               probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap,
+               quiet=True, surrogate=sur)
+    s = rep["systems"]
+    got = [s[v]["pass"] for v in ("rules",) + VARIANTS]
+    assert got == [2, 5, 5, 2, 4], got
+    assert s["real"]["decisions"] == {"PR-KNN": 3, "PR-RULES": 2, "PR-FAR": 3}, \
+        s["real"]["decisions"]
+    assert rep["conditions"] == {"real_ge_rules": True, "shuffled_worse": True,
+                                 "nv_gain": True, "nv_margin": True}
+    assert rep["d6"]["gain"] == 3 and abs(rep["d6"]["margin"] - 4.0 / 3.0) <= 1e-12
+    assert rep["verdict"] == "PASS" and rep["rounds"] == []
+    assert rep["surrogate"]["kind"] == "fixture" and rep["p_fail_act"] == 0.5
+    banks = {e["geometry_id"]: e["path"] for e in H["model"]["bank"]}
+    for g in rep["geometries"]:
+        assert g["p_fail"] == (1.0 if fails[g["geometry_id"]] else 0.0), g
+        if g["p_fail"] < P_FAIL_ACT:
+            for v in VARIANTS:          # the rules' attempt 1 and its outcome stand
+                assert g[v]["rule_id"] == "PR-RULES", g
+                assert g[v]["pass"] == g["rules"]["pass"], g
+        for nb in g["real"]["neighbours"] or []:
+            assert banks[nb], (g["geometry_id"], nb)   # every voter needed a remedy
+    ck = check(rdir)
+    assert ck["verdict"] == "PASS", ck
+    with open(os.path.join(rdir, MODEL_NAME), encoding="utf-8") as f:
+        pm = json.load(f)
+    assert pm["surrogate"] == sur["meta"] and pm["gate"]["non_vacuous"] is True
+    assert model_sha(pm) != model_sha(H["model"])
+    # (c) p_fail 0 everywhere: the prior never acts, and D-6 FAILs the gate
+    rep0 = gate(H["R1"], os.path.join(H["tmp"], "work_gated0"), streams=2,
+                report_dir=os.path.join(H["tmp"], "rep_gated0"),
+                attempt_fn=_wall_oracle, probe_fn=campaign._fake_probe(1000),
+                snap_fn=campaign._fake_snap, quiet=True,
+                surrogate=_fixture_surrogate(H, lambda g: 0.0))
+    s0 = rep0["systems"]
+    assert [s0[v]["pass"] for v in ("rules",) + VARIANTS] == [2, 2, 2, 2, 2]
+    assert s0["real"]["decisions"] == {"PR-RULES": 8}, s0["real"]["decisions"]
+    assert rep0["conditions"] == {"real_ge_rules": True, "shuffled_worse": False,
+                                  "nv_gain": False, "nv_margin": False}
+    assert rep0["verdict"] == "FAIL" and rep0["non_vacuous"] is False
+    with open(os.path.join(H["tmp"], "rep_gated0", REPORT_MD), encoding="utf-8") as f:
+        md0 = f.read()
+    assert "D-6 non-vacuous: NO" in md0 and "nv_gain" in md0, md0
+    # (d) a NaN p_fail never lets the prior act
+    gid = "F-1-011"
+    d = decide(standardise(features(H["ctx"][gid]["fingerprint"]),
+                           H["model"]["scaler"]),
+               [e for e in H["model"]["bank"] if e["geometry_id"] != gid],
+               H["model"], H["ctx"][gid], H["gates"], H["knobs"], float("nan"))
+    assert d["rule_id"] == "PR-RULES" and d["verdict"] == "abstain", d["rule_id"]
+    # (e) the real surrogate (AUT-09's optimise/aml2): its sha, a leave-the-fold-out
+    # p_fail in [0, 1], deterministic
+    import optimise
+    real = surrogate_from()
+    v = optimise.load_model(os.path.join(optimise.HURDLE_DIR, optimise.MODEL_NAME))
+    assert real["meta"]["model_sha256"] == v["sha"] and \
+        real["meta"]["dir"] == "optimise/aml2", real["meta"]
+    p1 = real["p_fail"](gid, H["cfg"][gid], H["ctx"][gid]["fingerprint"])
+    p2 = real["p_fail"](gid, H["cfg"][gid], H["ctx"][gid]["fingerprint"])
+    assert 0.0 <= p1 <= 1.0 and p1 == p2, (p1, p2)
+    # (f) the gated gate never writes into the AM-L or AM-13 record
+    assert main(["--plan", "--rules", H["R1"], "--surrogate",
+                 "--report-dir", REPORT_DIR]) == 2
+    print("[ok] gated by the surrogate (AUT-10): D-6 FAILs the AM-L numbers 241/241/"
+          "240.667 and passes AM-13's; on the oracle with p_fail 1 where rules fail, "
+          "rules 2, real 5, shuffled 5 2 4, PR-RULES 2, every voter needed a remedy, "
+          "PASS and --check PASS; p_fail 0 everywhere acts nowhere and D-6 FAILs it; "
+          "a NaN p_fail abstains; the aml2 surrogate gives F-1-011 p_fail %.6f"
+          % p1)
+
+
 def selftest():
-    """(C14): twelve [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
+    """(C14): thirteen [ok] groups, then SELFTEST PASS; the mesher runs in group 10."""
     t0 = time.perf_counter()
     tmp = tempfile.mkdtemp()
     H = {"tmp": tmp}
@@ -2183,7 +2705,9 @@ def selftest():
               (_g6_apply, "apply"), (_g7_gate, "gate"), (_g8_disabled, "disabled"),
               (_g9_hook, "hook seam"), (_g10_live, "live"),
               (_g11_check_cli, "check and CLI"),
-              (_g12_rule, "the rule, the edge class, the whole path"))
+              (_g12_rule, "the rule, the edge class, the whole path"),
+              (_g13_gated, "gated by the surrogate, D-6"),
+              (_g14_ship, "the gate-driven ship rule"))
     try:
         try:
             H["gates"] = schema.load_gates()

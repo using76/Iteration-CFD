@@ -71,6 +71,14 @@ export interface BinarySpec {
    * ofgpu-par's ranks / transport pair, -np and -comm (PAR-17).
    */
   runOptions?: RunOptionGroup[]
+  /**
+   * Set on a driver that reads only a case stating a gas: a JSONC case with
+   * `physics.compressible`, an OpenFOAM case with
+   * `constant/thermophysicalProperties` (SPEC-LIT §122.6). `driversFor` keeps
+   * it out of every other case's suggestions and keeps the others out of a
+   * gas case's.
+   */
+  compressible?: true
 }
 
 export interface RunOptionGroup {
@@ -158,6 +166,12 @@ export const BINARIES: BinarySpec[] = [
       { name: '-Ks', type: 'float', description: 'Sand-grain roughness height in m.', requires: '-wallModel' },
       { name: '-Cs', type: 'float', default: 0.5, description: 'Roughness constant.', requires: '-wallModel' },
       { name: '-cyclic', type: 'enum', values: ['x', 'y', 'z'], repeatable: true, description: 'Make the two faces of this axis a cyclic pair.' },
+      { name: '-upstream', type: 'float', description: '`plate` only: length in m of the symmetry floor ahead of the leading edge (SPEC-LIT §144.1).' },
+      { name: '-length', type: 'float', description: '`plate` only: plate length in m.' },
+      { name: '-height', type: 'float', description: '`plate` only: domain height in m above the plate.' },
+      { name: '-ratios', type: 'string', description: '`plate` only: three numbers `rUp rPlate rY` - the expansion ratios upstream, along the plate and normal to it.' },
+      { name: '-uInf', type: 'float', description: '`plate` only: free-stream speed in m/s.' },
+      { name: '-nu', type: 'float', description: '`plate` only: kinematic viscosity in m^2/s.' },
       PERMISSIVE,
     ],
     accepts: [],
@@ -195,14 +209,14 @@ export const BINARIES: BinarySpec[] = [
   {
     name: 'ofgpu-automesher',
     source: 'src/bin/automesher.rs',
-    purpose: 'Our own mesher (SPEC-LIT §92, hex-dominant path). Reads an AutomeshConfig JSONC, loads and merges the input STLs, requires a closed surface, runs the §92.2 stage-0 domain check, then the §92.14 pipeline - octree refinement, castellation, snapping, layers - printing a banner before each stage. When every §92.3 gate (G1-G7) holds it writes <case_dir>/constant/polyMesh and <name>_summary.json; a failed gate names the cells and writes neither. -check runs the gate on a polyMesh that already exists; -dryRun stops after the surface summary. The tetrahedral (§92.4) and polyhedral (§92.5) paths are specified but not implemented.',
-    summary: 'Automesher: config + STLs to a gate-checked hex-dominant polyMesh; -check judges an existing mesh; -dryRun checks a config.',
+    purpose: 'Our own mesher. Reads an AutomeshConfig JSONC whose "kind" picks the path, loads and merges the input STLs, requires a closed surface and runs the §92.2 stage-0 domain check. kind "hexDominant" (the default when absent, SPEC-LIT §92) runs the §92.14 pipeline - octree refinement, castellation, snapping, layers. kind "tet" (SPEC-LIT §116, no gmsh) runs the native tetrahedral mesher - surfprep, sizefield, remesh, recover, refine, optimise, emit - and its summary carries a "tet" block (tetrahedron and prism counts, the dihedral bounds, the Steiner points, the time of each stage); -stopAfter is refused on a tet config. A banner is printed before each stage. When every §92.3 gate (G1-G7) holds it writes <case_dir>/constant/polyMesh and <name>_summary.json; a failed gate names the cells and writes neither. -check runs the gate on a polyMesh that already exists; -dryRun stops after the surface summary. The polyhedral (§92.5) path is specified but not implemented.',
+    summary: 'Automesher: config + STLs to a gate-checked polyMesh, hex-dominant or (kind "tet") tetrahedral; -check judges an existing mesh; -dryRun checks a config.',
     kind: 'mesh',
     positionals: [
-      { name: 'config', type: 'path', description: 'AutomeshConfig JSONC file (worked example: tools/automesher/examples/nh3_site.json).' },
+      { name: 'config', type: 'path', description: 'AutomeshConfig JSONC file; its "kind" is "hexDominant" (default; worked example: tools/automesher/examples/nh3_site.json) or "tet" (worked example: tools/automesher/examples/box_sphere_tet.json).' },
     ],
     flags: [
-      { name: '-stopAfter', type: 'enum', values: ['octree', 'castellate', 'snap', 'features', 'layers'], description: 'The stop rule of SPEC-LIT §92.14: the stages up to and including STAGE run and the mesh that stage returned is written. "features" is a spelling of "snap".' },
+      { name: '-stopAfter', type: 'enum', values: ['octree', 'castellate', 'snap', 'features', 'split', 'layers'], description: 'The stop rule of SPEC-LIT §92.14: the stages up to and including STAGE run and the mesh that stage returned is written. "features" is a spelling of "snap". Hex-dominant only: refused on a kind "tet" config, whose stages run as one (§116.16).' },
       { name: '-tag', type: 'string', description: "This run's output is its own: the case directory and the mesh name each gain _NAME, so two runs of one config do not overwrite each other. NAME is a suffix, not a path." },
       { name: '-runId', type: 'string', description: "The run this mesh belongs to, recorded in the summary's identity block. 1 to 64 characters from [A-Za-z0-9._-]; without it OFGPU_RUN_ID is used, and without that the summary records run_id: null." },
       { name: '-schema', type: 'flag', description: 'Print the JSON Schema of the config to stdout and exit 0 (no config read; other arguments ignored).' },
@@ -319,6 +333,7 @@ export const BINARIES: BinarySpec[] = [
       { name: '-a', type: 'float', description: 'Initial column width (m).' },
       OUTPUT_LIST, RESTART_WRITE, RESTART_FROM,
       { name: '-reportEvery', type: 'int', description: 'Print a step line every N steps.' },
+      { name: '-forceSplitDouble', type: 'flag', description: 'Single build only: evaluate the VOF face pressure/gravity force split in double precision, which cuts the ~1e-5 m/s spurious velocity f32 round-off leaves at a water/air density jump. A little slower; off by default; no effect in the f64 build (SPEC-LIT §120.7).' },
       PERMISSIVE,
     ],
     accepts: ['foamDir'],
@@ -366,6 +381,31 @@ export const BINARIES: BinarySpec[] = [
     longRunning: true,
     gpu: true,
     usageKind: 'constUsage',
+  },
+  {
+    name: 'ofgpu-compressible',
+    source: 'src/bin/compressible.rs',
+    purpose: 'Pressure-based all-speed compressible solver (SPEC-LIT §122 to §127), driven by nothing but the case: the gas is the JSONC `physics.compressible` block or an OpenFOAM case\'s constant/thermophysicalProperties. `ddt` steadyState or localEuler is a steady SIMPLE run, Euler or backward a transient PIMPLE run at the case\'s deltaT. v1 is laminar on one GPU and refuses by name what it does not have (turbulence, decomposition, mesh motion, sources, a Boussinesq body force, non-Newtonian rheology; §122.4). Writes p (gauge, about pOperating), U, T, rho and Mach through the one output pipeline (§44).',
+    summary: 'All-speed compressible solver, laminar (JSONC case with physics.compressible, or OpenFOAM directory).',
+    kind: 'solver',
+    positionals: [{ name: 'case', type: 'path', description: 'A .jsonc case file with physics.compressible, or an OpenFOAM case directory with constant/thermophysicalProperties.' }],
+    flags: [
+      { name: '-iters', type: 'int', description: 'Steps (transient) or SIMPLE iterations (steady); default endTime/deltaT of the case.' },
+      { name: '-reportEvery', type: 'int', default: 10, description: 'Print the last outer iteration\'s line every N steps (always on the first and the last step).' },
+      OUTPUT_LIST,
+      { name: '-writeInterval', type: 'time', description: 'Transient runs only: write every W seconds of physical time (SPEC-LIT §44.4).' },
+      { name: '-writeEvery', type: 'int', description: 'Steady runs only: write every N iterations.' },
+      { name: '-noWrite', type: 'flag', description: 'Write nothing, not even the final state.' },
+      PERMISSIVE,
+    ],
+    accepts: ['jsonc', 'foamDir'],
+    builds: ['laminar'],
+    residualStyle: 'generic',
+    writes: { formats: ['foam', 'vtu', 'nvdb', 'vdb', 'usda'], restart: false, csv: false },
+    longRunning: true,
+    gpu: true,
+    usageKind: 'usageFn',
+    compressible: true,
   },
   {
     name: 'ofgpu-datacentre',
@@ -542,11 +582,11 @@ export const BINARIES: BinarySpec[] = [
   {
     name: 'ofgpu-sample',
     source: 'src/bin/sample.rs',
-    purpose: 'The post-processing sampler the published fluid gates of SPEC-LIT §110 record their measurements with; it reads a written time and never solves. `column <case> <time> <axis> <c1> <c2> [-at v1,v2,...] [-mean]` prints the cells whose centres lie on the line along <axis> through (c1, c2) - coordinate, Ux Uy Uz, T when present, cell volume - sorted along <axis>; `wall <case> <time> <patch> <axis>` prints every face of <patch> sorted along <axis> with its owner-cell velocity and distance, then every sign change of the owner-cell <axis> velocity as a crossing (the reattachment search of Gate 110-B). <case> is a .jsonc case file or an OpenFOAM case directory, passed as a positional after the subcommand (not as casePath); fields come from its output root /<time>/U and /T.',
-    summary: 'Sample a cell column or a wall patch from a written time (SPEC-LIT §110 gates).',
+    purpose: 'The post-processing sampler the published fluid gates of SPEC-LIT §110 record their measurements with; it reads a written time and never solves. `column <case> <time> <axis> <c1> <c2> [-at v1,v2,...] [-mean]` prints the cells whose centres lie on the line along <axis> through (c1, c2) - coordinate, Ux Uy Uz, T when present, cell volume - sorted along <axis>; `wall <case> <time> <patch> <axis>` prints every face of <patch> sorted along <axis> with its owner-cell velocity and distance, then every sign change of the owner-cell <axis> velocity as a crossing (the reattachment search of Gate 110-B). <case> is a .jsonc case file or an OpenFOAM case directory, passed as a positional after the subcommand (not as casePath); fields come from its output root /<time>/U and /T. `volume <case> <time|latest>` writes the volume files a run would have written at that time, without solving (SPEC-LIT §117.11): every volScalarField and volVectorField of the time directory through the writers of the run itself, on the Cartesian cells of a uniform box or on the §117.3-117.4 lattice of any other polyMesh, whose report (fluid fraction included) is printed.',
+    summary: 'Sample a cell column or a wall patch from a written time (SPEC-LIT §110 gates), or write its volume files (SPEC-LIT §117.11).',
     kind: 'analysis',
     positionals: [
-      { name: 'command', type: 'enum', values: ['column', 'wall'], description: 'column | wall' },
+      { name: 'command', type: 'enum', values: ['column', 'wall', 'volume'], description: 'column | wall | volume' },
       { name: 'case', type: 'path', description: 'A .jsonc case file or an OpenFOAM case directory' },
       { name: 'time', type: 'string', description: 'The written time directory to read, e.g. 2000' },
       { name: 'axisOrPatch', type: 'string', description: 'column: the axis x|y|z; wall: the patch name' },
@@ -556,6 +596,16 @@ export const BINARIES: BinarySpec[] = [
     flags: [
       { name: '-at', type: 'list', description: "column: stations along <axis>, comma separated, each linearly interpolated between the two nearest cell centres; a station outside the column's range is refused." },
       { name: '-mean', type: 'flag', description: 'column: also print the cell-volume-weighted mean of each column.' },
+      { name: '-vdb', type: 'flag', description: 'volume: write OpenVDB (.vdb); replaces the format of the case output.visualisation block.' },
+      { name: '-nvdb', type: 'flag', description: 'volume: write NanoVDB (.nvdb).' },
+      { name: '-usda', type: 'flag', description: 'volume: write the USD stage (.usda) that references the volume files.' },
+      { name: '-lattice', type: 'string', description: 'volume: the whole output.visualisation.lattice block as JSON, e.g. {"voxel": 0.01, "box": [...]} (SPEC-LIT §117.3-117.4).' },
+      { name: '-fields', type: 'list', description: 'volume: the fields to write, comma separated (default: the selection of the case, else every field of the time directory).' },
+      { name: '-precision', type: 'enum', values: ['fp32', 'fp16'], description: 'volume: the voxel precision.' },
+      { name: '-freestream', type: 'float', description: 'volume: print the median U.x over the fluid voxels of the xMax plane of the lattice and |median - Ux| / |Ux| against this Ux.' },
+      { name: '-out', type: 'path', description: 'volume: output directory (default <output root>/volume_<time>).' },
+      { name: '-stem', type: 'string', default: 'volume', description: 'volume: file stem, VDB/<stem>_000000.vdb|.nvdb and <stem>.usda.' },
+      { name: '-isaac', type: 'flag', description: 'volume: the Isaac profile of SPEC-LIT §117.9; refused by name in this build, which has no Isaac profile.' },
     ],
     accepts: [],
     builds: [],
@@ -789,7 +839,7 @@ export const MODELS: ModelSpec[] = [
   { name: 'Smagorinsky', family: 'LES', title: 'Smagorinsky LES', equations: [], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: {}, specRef: '§30', notes: 'Werner-Wengle wall model by default.' },
   { name: 'WALE', family: 'LES', title: 'WALE LES', equations: [], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: {}, specRef: '§30', notes: '' },
   { name: 'kEqn', family: 'LES', title: 'Deardorff one-equation LES', equations: ['k'], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: { initial: ['k'] }, specRef: '§30', notes: '' },
-  { name: 'laminar', family: 'laminar', title: 'Laminar (no closure)', equations: [], drivers: ['ofgpu-k-epsilon', 'ofgpu-buoyant', 'ofgpu-lowmach', 'ofgpu-vof', 'ofgpu-cht'], kind: 'RAS', requires: {}, specRef: '§5', notes: 'nu_t frozen at zero.' },
+  { name: 'laminar', family: 'laminar', title: 'Laminar (no closure)', equations: [], drivers: ['ofgpu-k-epsilon', 'ofgpu-buoyant', 'ofgpu-lowmach', 'ofgpu-vof', 'ofgpu-cht', 'ofgpu-compressible'], kind: 'RAS', requires: {}, specRef: '§5', notes: 'nu_t frozen at zero.' },
 ]
 
 export function getModel(name: string): ModelSpec | undefined {
@@ -802,7 +852,8 @@ export const PICK_LISTS = {
   wallTreatments: ['standard', 'spalding', 'rough', 'lowRe'],
   algorithms: ['SIMPLE', 'PISO', 'PIMPLE'],
   meshKinds: ['cartesian'],
-  patchKinds: ['wall', 'inlet', 'open', 'empty', 'symmetry'],
+  // PatchPresetKind of docs/schema/case-1.json; farfield and supersonicInlet need physics.compressible
+  patchKinds: ['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'],
   buoyancy: ['densityRatio', 'boussinesq'],
   ddt: ['steadyState', 'Euler', 'backward', 'CrankNicolson', 'localEuler'],
   exactFormats: ['foam', 'vtu'],
@@ -827,16 +878,30 @@ export function isJsonCase(path: string): boolean {
   return /\.jsonc?$/i.test(path)
 }
 
-/** Drivers that can run a given model on a given case format, in preference order. */
-export function driversFor(model: string | null, format: CaseFormat): string[] {
+/**
+ * Drivers that can run a given model on a given case format, in preference order.
+ * `compressible` says whether the case states a gas (`statesCompressible`): true keeps
+ * only the drivers marked `compressible`, false drops them, absent does not filter.
+ */
+export function driversFor(model: string | null, format: CaseFormat, compressible?: boolean): string[] {
   const out: string[] = []
   for (const b of BINARIES) {
     if (b.kind !== 'solver') continue
     if (!b.accepts.includes(format)) continue
     if (model && !b.builds.includes(model)) continue
+    if (compressible !== undefined && compressible !== (b.compressible === true)) continue
     out.push(b.name)
   }
   return out
+}
+
+/** Whether a parsed JSONC case states a gas: `physics.compressible` is an object (SPEC-LIT §122.6). */
+export function statesCompressible(json: unknown): boolean {
+  if (!json || typeof json !== 'object') return false
+  const physics = (json as { physics?: unknown }).physics
+  if (!physics || typeof physics !== 'object') return false
+  const gas = (physics as { compressible?: unknown }).compressible
+  return !!gas && typeof gas === 'object' && !Array.isArray(gas)
 }
 
 /** A number, or a string that is entirely a number. Anything else is NaN. */

@@ -7,7 +7,7 @@
 // later STU unit deletes its rows when its types are implemented, and the last
 // test flips from an expected failure to a plain pass when the list is empty.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { UI_COMMAND_TYPES, UiCommandSchema, type ClientMsg, type UiCommand, type UiCommandType } from '@cfd/shared'
+import { isNamedRefusal, UI_COMMAND_TYPES, UiCommandSchema, type ClientMsg, type UiCommand, type UiCommandType } from '@cfd/shared'
 import type { ViewerTool } from '../viewer'
 import { createUiBridge } from './uiBridge'
 import { useGeometryStore } from '../state/geometryStore'
@@ -169,9 +169,7 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
 /** type -> the later STU unit that implements it. Each later STU unit deletes
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
-const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  select_step: 'STU-08b',
-}
+const OPEN_UNIMPLEMENTED: Record<string, string> = {}
 
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 
@@ -287,6 +285,19 @@ describe('uiBridge.census', () => {
     expect(r?.error ?? null).toBeNull()
     expect(r?.ok).toBe(true)
     expect(ui.openGeometryTab).toHaveBeenCalledWith('cases/two-fuse.stl')
+  })
+
+  // STU-19: the allow-list the Playwright walk holds its refusals to (shared/src/uiRefusals.ts).
+  it('every sample is applied or refused by a name from the allow-list', async () => {
+    const unnamed: string[] = []
+    for (const t of UI_COMMAND_TYPES) {
+      const { sent, bridge } = freshBridge()
+      await bridge.handleCommand(`census-named-${t}`, SAMPLES[t])
+      const r = resultFor(sent, `census-named-${t}`)
+      expect(r, t).toBeTruthy()
+      if (!r!.ok && !isNamedRefusal('UI_ERROR', r!.error ?? '')) unnamed.push(`${t}: ${r!.error}`)
+    }
+    expect(unnamed).toEqual([])
   })
 
   it('the unimplemented set is exactly the open list', async () => {

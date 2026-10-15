@@ -18,7 +18,9 @@
 //! Rosenbrock integrator (SPEC-LIT §132) lives in [`rosenbrock`]. The
 //! constant-pressure reactor (SPEC-LIT §132.4) lives in [`reactor`]. The
 //! device kernels (SPEC-LIT §132.9) live in [`device`]. Mixture-averaged
-//! transport (SPEC-LIT §133.4) lives in [`transport`].
+//! transport (SPEC-LIT §133.4) lives in [`transport`]. The split chemistry
+//! step that hands a species set its reaction sources (SPEC-LIT §132.11)
+//! lives in [`source`].
 
 mod ck_lexer;
 pub mod device;
@@ -27,6 +29,7 @@ pub mod kinetics;
 pub mod mechanism;
 pub mod reactor;
 pub mod rosenbrock;
+pub mod source;
 pub mod thermo;
 pub mod transport;
 #[cfg(test)]

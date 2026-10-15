@@ -120,7 +120,8 @@ export async function approvalPreview(name: string, input: unknown, workspaceRoo
     case 'case_create':
       return `${String(i.path)} ← ${String(i.template)}${Array.isArray(i.overrides) && i.overrides.length ? `\n${(i.overrides as Array<{ pointer: string; valueJson: string }>).map((o) => `${o.pointer} = ${o.valueJson}`).join('\n')}` : ''}`
     case 'run_start':
-      return [String(i.binary), i.casePath ? String(i.casePath) : '', ...(Array.isArray(i.positionals) ? (i.positionals as string[]) : []), formatArgs((i.args as Array<{ flag: string; value: unknown }>) ?? [])].filter(Boolean).join(' ')
+      // F32-19: a single-precision run says so on the approval card; double is the default and says nothing.
+      return [String(i.binary), i.casePath ? String(i.casePath) : '', ...(Array.isArray(i.positionals) ? (i.positionals as string[]) : []), formatArgs((i.args as Array<{ flag: string; value: unknown }>) ?? []), i.precision === 'single' ? '(precision single)' : ''].filter(Boolean).join(' ')
     case 'mesh_generate': {
       const m = meshArgs(input as Parameters<typeof meshArgs>[0])
       return [m.binary, ...m.positionals, formatArgs(m.args)].filter(Boolean).join(' ')

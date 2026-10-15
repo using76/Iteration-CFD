@@ -506,6 +506,25 @@ The fresh test seed — a second claim (docs/15 §F) needs a fresh test seed and
   lock, the in-memory regen and the lock history. The seed-1 split and its
   lock are never rewritten.
 
+Any fresh seed N (AUT-13) — `split.py --write-fresh N` and `--check-fresh N`
+  take any corpus seed N >= 2 the same way: `manifests/seedN/`, split name
+  `testN` (`split.fresh_seed_of`), sealed outside mode evaluate, and the guard
+  seals the ids of every `seedN/split.lock` present (`split.fresh_seeds`).
+  `--check-fresh N`'s disjoint line also counts the ids shared with every other
+  fresh lock. A write INTO THE TREE is refused before anything is written
+  unless `--go PROJECTION.json` names a `projection.py` report whose verdict
+  is GO, or `--user-spend` records the user's explicit spend (D-9); a write
+  under `--out DIR` elsewhere needs neither. `evaluate.py --manifest testN
+  --scope reduced|full` runs fresh seed N under `fresh_plan(N)` (seed 2's plan
+  with its seed: the G-BLC-1 targets stay D-L9's 0.09 / 0.05) and reports in
+  `evaluate/seedN/<scope>`; `--plan --manifest testN` exits 2 naming the
+  missing lock while seed N is unwritten. Seed 2's plan, departures and files
+  are byte-unchanged. **Seed 3 is not written:** AUT-12 projected NO-GO
+  (`projection/AUT12.json`: G-FAIL 71/420 > 23, G-COST 5.84x), so AUT-13
+  built and tested the generalisation in temporary directories only; its
+  full-size `--write-fresh 3` / `--check-fresh 3` there matched an
+  independent re-derivation of the section E draw byte for byte (180 rows).
+
 ## sensitivity.py — G-PILOT
 
 - `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a
@@ -639,7 +658,7 @@ on every candidate; `surface_facts` caches per (path, size, mtime); pass
 
 ## rules.py — L1 setup rules
 
-AM-9's attempt 1: nine pure rules run in a fixed order, each editing the config and returning one DecisionRecord
+AM-9's attempt 1: ten pure rules run in a fixed order, each editing the config and returning one DecisionRecord
 (formula, inputs with units, edits, cite). Verdicts: `apply` edited, `pass` — holds already or trigger absent,
 `abstain` — cannot act, `refuse` — no config under the rule; it sets `stop`, the config comes back None and every
 later rule abstains. Every edit goes through the locked knob table (no `/quality`, no `cell_frac`, `medial_frac`,
@@ -647,7 +666,10 @@ later rule abstains. Every edit goes through the locked knob table (no `/quality
 (2026-09-27) R-FEAT writes `/snap/feature_tolerance = 0.5 · 2^−max_level`, so the attraction radius
 tau = feature_tolerance · base_size is h_f/2 (R-BUDGET re-derives it when it changes max_level); 0 still switches
 the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D). Since AUT-05
-(2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE.
+(2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE. R-TE (AUT-04, 2026-10-15) is
+not an attempt-1 rule: its edit `te_config` is applied by remedies.py's RM-TE after an F3 failure, so setup and
+every attempt-1 config are unchanged. Since AUT-07 (2026-10-15) R-ECON, between R-BUDGET and R-SNAP, trims the
+bands of every config off R-PLANE to the wall band alone.
 
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
@@ -657,6 +679,7 @@ the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0,
 - R-GAP reads the outer gap and raises the wall level to h ≤ gap/3.
 - R-FEAT reads the sharp-edge length and sets feature_level = wall level + 1, then asks for the attraction radius tau = h_f/2 (SPEC-LIT §92.12's erratum: the default 0.5 is half a BASE cell, 2^(L−1) wall cells at wall level L, and pins a refined sharp body).
 - R-BUDGET predicts cells (never probes: one costs up to 150 s) and coarsens far-field bands, then the wall band, then the feature bump, then the wall level, until 0.7·cell_budget fits.
+- R-ECON reads the wall level R-BUDGET left and, off R-PLANE, writes `/refinement/levels/*/bands` = one band, 3 cells of the wall level (`BAND_MIN_CELLS · base / 2^L_w`): no level, feature level, max_level or growth moves, and the coarser shells are (92.21)'s 2:1 balance (it passes when the bands are already that or there is none; it abstains on R-PLANE).
 - R-SNAP reads the final max_level and, off R-PLANE, writes `/snap/tolerance = 2^−max_level / 256` and `/snap/iterations = 60`: the (92.28) dead band eps = tolerance·base_size becomes h_f/256 (it passes when the default band is already inside, max_level ≤ 1; it abstains on R-PLANE).
 
 Where the plan and the tree disagree (the tree wins): on a box the delivered stack needs h/t1 ≤ about 42.9 — 42.9 delivers on cubep, 43.0 drops, and part 1's runs D and F pass the §D.3 early check and still lose their layers — so R-PLANE targets 0.70 of the G5 edge, while R-WIN keeps §D.3's 60 as the floor on every snapped wall and, since GLB-CONFIG (2026-10-03), prefers 60/1.10 there when the margin holds after the (92.45) depth (below). R-WIN picks the COARSEST landing level, as the pilot's r_win did; the plan's worked example (κ = 1) still gives wall level 4 at base 0.5.
@@ -795,10 +818,96 @@ to the cap: 30 iterations at 45.1 s and p99/h_f 0.0686 before, 60 iterations at 
 R-PLANE identity: 37 of 37 plane configs byte-identical over the 372 tuning rows with an L5 fingerprint, no refusal
 moved. A quick set decides the rule, not G-FID: the full tuning effect is AUT-12's L-run.
 
+**R-TE (AUT-04, 2026-10-15): the trailing-edge feature level on the A-family wings.** AUT-03's `worst_points`
+((92.75)-(92.76)) located the wings' F3 failure before any R-TE code. On the 12 bodies below, at today's binary and
+rules, attempt 1 fails F3c (max/h_f 0.56-0.97) on the 11 with a feature bump. All 16 worst points of every body
+are classed "smooth". On the nine thick wings (tt 13-24) they sit at x/c 0.97-0.99, 1.7-3.8 h_f upstream of the
+trailing edge, where the section is 1.3-2.2 h_f thick. That is the wall-level cells (2 h_f) just outside the
+one-cell feature band of (92.37): the 2:1 transition of the bump lands in a wedge thinner than one wall cell, and
+the blunt TE base is itself only 0.46-0.66 h_f tall. On the two 6 % wings (A-1-098, A-1-099) they sit at
+x/c 0.04, the leading edge. Probes on attempt-1 configs: without the bump, A-1-012's max/h_f falls from 0.743 to
+0.0039 with nothing pinned, but the capture (92.62) is 0.283 at tau h_f/2 and 0.289 at h_f (F3e). At 1.5 h_f it
+is 0.503 with p99 0.068 and max 0.255 (F3-clean); at 2 h_f p99 rises to 0.239 (F3b). A-1-047 and A-1-118 are
+F3-clean at 1.5 h_f too (capture 0.846 and 0.856). The fingerprint carries no trailing-edge observable, so the
+rule acts on the attempt's own failure. RM-TE comes first among the F3 remedies (keys F3a-F3c, ahead of
+RM-SNAP-WALL), on a sharp body off R-PLANE whose `feature_level` exceeds its wall level. It sets
+`feature_level` to the wall level, `max_level` to the largest level left, `snap.feature_tolerance` to
+1.5·2^−max_level (tau = `TE_TAU_H_F` = 1.5 h_f, above RM-SNAP-TAU's floor h_f/8), and, where the config carries
+one, `snap.tolerance` to 2^−max_level/256 (R-SNAP's dead band at the new h_f). No band distance or band level
+moves. These are the plan row's whitelisted knobs: the trailing-edge feature level, the band and the attraction
+radius. `propose(..., r_te=False)` is the table before AUT-04, and `rules.r_te_of(records)` tells which table a
+campaign used (an RM-TE record, or RM-TE among a record's skipped remedies). `campaign.replay` and
+optimise.py's refine rounds pass it. The selftest oracles (prior.py `_run_oracle`, optimise.py `_oracle_run`)
+model G-PILOT's wall cure and run with r_te False. remedies.py's labelled fixtures still run the old table,
+and group 14 holds RM-TE's departures from them: 4 of 66 (S03, S04, S25, S34) move to RM-TE.
+
+G-R-TE 2026-10-15 (`rules.py --te-gate --campaign DIR --ref DIR`, `rules/R-TE.json` and `.md`; binary
+a6e15835…, git db2542c plus this unit's diff, two K = 4 campaigns at 3 streams with the audit off: the rules
+before R-TE 2394 s, R-TE 3307 s): PASS. The quick set was pre-registered from the committed L5 bundle
+(`te_quick_ids`): the tuning A rows that setup classes sharp, strata round robin, each in
+sha256("r-te/1|id") order: A-1-012, A-1-024, A-1-047, A-1-037, A-1-013, A-1-017, A-1-049, A-1-118, A-1-098,
+A-1-034, A-1-099, A-1-109. The target was fixed before the R-TE run: **F3-clean at the final attempt, K = 4:
+8 of 12 against the target ≥ 6**; the rules before it 0, and the L5 bundle as recorded 0. The eight are the
+thick bump wings, each F3-clean at attempt 2 (RM-TE): max/h_f 0.158-0.331, p99/h_f 0.0038-0.0677, pinned
+0.004-0.024, capture 0.50-0.91. The four that stay out are: A-1-024 (F3e, capture 0.357 after RM-TE, NO-REMEDY);
+A-1-049 (no bump, so RM-TE does not fire; F3e only, capture 0.284); and A-1-098 and A-1-099 (the 6 % wings).
+On the thin wings RM-TE brings max/h_f to 0.21-0.23 but pins 5.4-6.5 % (F3a, F3b). Attempt 3 (RM-SNAP-WALL,
+RM-SNAP-TAU) clears F3a-c, but F3d and F3e remain: the leading edge loses area and the capture is 0.03-0.13. All eight
+end CAPABILITY-LIMITED on `layer:retreat_snapped`: F3-clean is not a layer pass, and strict failure is
+unchanged. Identity: over the tuning rows with an L5 fingerprint, the 37 R-PLANE and the 44 smooth rows propose
+the same config for a synthetic F3c with and without RM-TE. 169 of 276 sharp rows would take RM-TE on an F3
+failure. That is measured on the wings only, so the other families' effect is AUT-12's L-run.
+
+**R-ECON (AUT-07, 2026-10-15): the bands at the minimum the gates and R-WIN allow.** The full system's cells are
+G-COST's miss (docs/15: 469,898 against B0-template's 10,808 on the seed-1 both-pass bodies), and AUT-06's bound
+put the octree alone at 1.2-1.5x B0. On the 36 tuning both-pass rows the L5 rules mesh a median 717,000 cells
+against a bound of 61,055.5: the cells are the bands. §B's shape asks for the wall level within 0.1 L_ref, one level
+coarser within 0.5 L_ref and two coarser within 1.5 L_ref; at the B wall level 6 that last shell alone is about
+(1 + 3)^3 L_ref^3 of level-4 cells. No gate reads those cells. The wall level is R-WIN's (raised by R-CURV and
+R-GAP, lowered only by R-BUDGET), (92.22) puts every leaf whose bounding sphere touches the patch at the band's
+deepest level, and (92.21) builds the coarser shells out to the base grid. So R-ECON keeps one band per patch, the
+wall level, `BAND_MIN_CELLS` = 3 cells deep: the floor `bands_for` and RM-BUDGET-FAR already keep, which holds the
+wall cells' outer faces off the 2:1 transition (the (92.33) note of §92.11). It moves no level. It runs after
+R-BUDGET, so the budget's choices stand, and it recomputes the predicted cells. It abstains on R-PLANE, whose
+configs stay byte-identical. The exploration before the rule (scratch, the 12 bodies below at attempt 1) meshed three
+variants: today's bands, every band at its 3-cell floor and the wall band alone. Failure, F flags, p99/h_f, BLC_8 and
+`-check` were identical in all three on all 12, and the floor-at-every-level variant was 3-9 % above the wall band
+alone, which is the one chosen. `setup(..., r_econ=False)` is the rule set every campaign before AUT-07 was recorded
+under, and `r_econ_of(records)` tells which one a campaign used (an R-ECON record). `optimise.rows_from`,
+optimise.py's selftest and prior.py's G-PRIOR rows pass it beside `r_snap`. The FT-RADIUS, WIN-2TO1, GLB-CONFIG,
+R-SNAP and R-TE identities and quick ids rebuild with r_econ False, so their committed reports still reproduce,
+and so do remedies.py's labelled fixtures (`rules_ctx`: AM-10's attempt-1 configs, whose `config_edits` point at
+§B's three bands) and optimise.py's selftest oracle campaigns (`_before_econ`: their counts and predictions were
+written against §B's bands, which the surrogate reads, and campaign.py takes no rule-set flag). The remedy
+table is unchanged: RM-BUDGET-FAR finds nothing to halve under R-ECON, and a remedy that rebuilds the band shape (`_shift` from no band, the R-PLANE re-lattice) still writes §B's shape; that is L2's,
+measured in AUT-12. optimise.py's `l1_of` centres the L4 box on the L1 before R-ECON: the box scales the band
+distances and every row the surrogate was fitted on was meshed under §B's bands, so a box around R-ECON's
+3-cell bands would leave the training rows (on D-1-073 it finds no feasible point); a refit on R-ECON campaigns is
+AUT-12's. The optimiser ships disabled (AUT-09).
+
+G-R-ECON 2026-10-15 (`rules.py --econ-gate`, `rules/R-ECON.json` and `.md`; binary a6e15835…, git 9a6862b plus
+this unit's diff, 3 streams, 289 s): PASS. The quick set is pre-registered from the committed AUT-06 report
+(`econ_quick_ids`): its 36 tuning both-pass rows, per family in sha256("r-econ/1|id") order, round robin B, E, G:
+B-1-105, E-1-058, G-1-111, B-1-036, E-1-004, G-1-081, B-1-042, E-1-007, B-1-009, E-1-028, B-1-069, E-1-010.
+Each body is meshed at attempt 1 (remedies off) by the rules before R-ECON and by the rules with it, and each mesh
+is checked by `-check` (G1-G7, §92.3) before it is deleted, so F2 is the real one. PASS needs the median cells to
+drop, 0 new failures, no body's BLC_8 lower, `-check`, F2 and the preflight refusals equal on every body, the
+identity and zero harness errors. **Median cells 516,471.5 → 66,254.5, a factor of 7.80** (per body 2.08-38.5;
+the two bodies that deliver their layers, E-1-058 and G-1-111, by 2.08 and 2.14, where the layer cells stay).
+New failures 0, BLC_8 lower 0 (E-1-058 and G-1-111 at 1.0 in both arms, the other ten 0), `-check` exit 0 on all
+24 meshes, preflight unchanged; p99/h_f and the F flags are unchanged on every body. Against B0-template's cells on
+the same bodies (median 10,720): the rules 48.2x, R-ECON 6.18x, so G-COST's 1.5x is still out of reach (D-8, the
+user's). Against AUT-06's bound (median 63,030.5): the rules 8.19x, R-ECON 1.05x. The bound counts 8 layers on
+the whole wall; CB-8's row (fluid + BLC_8 × layer cells) holds on all 12 R-ECON meshes. Identity: over the 372
+tuning rows with an L5 fingerprint, the 37 R-PLANE configs are byte-identical, the 15 refusals do not move, and
+all 320 snapped configs change under `/refinement/levels/*/bands` alone, as `econ_bands` of their wall level, with
+max_level and every feature_level equal (median predicted factor 1.81). The quick set holds no sharp body: families
+A, D and F, and the K = 4 effect, are AUT-12's L-run.
+
 ## remedies.py — L2 remedies
 
 AM-10's L2: after a failed attempt, `diagnose` names the key and the earliest failing stage from score.py's
-closed failure enum; `propose` walks a thirteen-row table in priority order. Keys and their stage: F1's
+closed failure enum; `propose` walks a fourteen-row table in priority order. Keys and their stage: F1's
 `surface_closed`/`config`/`io`/`crash`, `gate@octree|castellate|split|layers` and F2 end NO-REMEDY (stage
 None; the gate keys keep their stage); `timeout` and F5 → octree; F4 → castellate; F3a/F3b/F3c, F3d and
 `gate@snap` → snap; `layer_t1_G5`, `layer:min_thickness`, `layer:retreat_snapped`, `layer:no_full_stack` →
@@ -809,6 +918,9 @@ Since 2026-09-26 RM-SNAP-FT never applies on a body with sharp edges (skipped by
 - RM-BUDGET-FEAT (F5, timeout; octree) — drops the feature bump to the wall level.
 - RM-BUDGET-WALL (F5, timeout; octree) — the whole ladder one level coarser, never below the y⁺ floor.
 - RM-TOPO-REFINE (F4; castellate) — the ladder one level finer, predicted cells ≤ 0.7·cell_budget.
+- RM-TE (F3; snap, since 2026-10-15, AUT-04) — R-TE's `rules.te_config`: the feature bump dropped to the wall
+  level, tau = 1.5 h_f at the new finest level, R-SNAP's band re-derived; skipped with no sharp edge, on the
+  R-PLANE path, with no bump or with the attraction off. `propose(r_te=False)` leaves it out (the table before).
 - RM-SNAP-WALL (F3, gate@snap; snap) — the ladder one level coarser, never on the R-PLANE path (G-PILOT's only F3-clean knob with the attraction on).
 - RM-SNAP-FT (F3, gate@snap; snap) — `snap.feature_tolerance = 0`; caution 1 applies and G-FID guards it.
 - RM-SNAP-TAU (F3, gate@snap; snap, since 2026-10-02) — `snap.feature_tolerance = feature_tolerance / 2`
@@ -1048,8 +1160,9 @@ supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 (`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/aml/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
-(the ablation "-prior" is then equal to it by construction); while `USER_SHIP` disables the shipped
-prior, attempt1 records PR-DISABLED "by the user's decision" even though the gate's model is enabled.
+(the ablation "-prior" is then equal to it by construction); since AUT-11 attempt1 enables the model
+only from its gate file (`USER_SHIP`'s gate-driven rule, below) and otherwise records PR-DISABLED "by its
+gate file" with the reasons.
 
 **The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
 came through family B, where the prior's paths regressed the lathes against rules-only
@@ -1093,7 +1206,68 @@ record of that run; optimise.py's SOURCES still read its bundles.
 was vacuous — real equals rules on every one of the 420 tuning geometries (0 gains, 0 losses) — so the
 user's decision of 2026-10-03 ships the prior DISABLED: while `USER_SHIP` disables it, `prior.attempt1`
 records PR-DISABLED "by the user's decision" on every attempt 1 of the gate's enabled model, and attempt 1
-stays the rules' config.
+stays the rules' config. AUT-11 replaced that decision with the gate-driven rule below; it is kept as
+`USER_SHIP["superseded"]`.
+
+**Gated by the surrogate, under D-6 (AUT-10, 2026-10-15).** `prior.py --gate --rules DIR --work DIR
+--surrogate [DIR]` gates the prior by AUT-09's hurdle surrogate (default `optimise/aml2`, model sha256
+`c32b43e0…3b79a`) and writes `prior/aml2/` (it refuses `prior/aml` and `prior/`). The prior acts only where
+the surrogate predicts p_fail(rules attempt 1) ≥ 0.5 (`P_FAIL_ACT`); below that it abstains **PR-RULES**
+and attempt 1 stays the rules' config. Where it acts, only neighbours of the query's edge class whose
+remedy path is non-empty vote (a neighbour that passed on the rules' own config says nothing about a
+geometry the surrogate expects to fail); the rest of the decision is unchanged (PR-FAR, PR-NOEDIT,
+PR-PARTIAL, PR-KNN). The gate stays leave-one-geometry-out with the three-seed shuffled control, and the
+surrogate is too: the p_fail that gates geometry g comes from the fold model that leaves g's fold out
+(`optimise.fold_of`, `fit_hurdle` on the train part's other folds), i.e. the out-of-fold prediction AUT-09's
+CV AUC was measured on; the real prior and its shuffles see the same p_fail. A deployed gated model
+(`attempt1`) uses the train-part model and refuses a surrogate whose sha drifted. Without `--surrogate`
+the prior, its model and its sha are byte-identical to before.
+
+**D-6, G-PRIOR's non-vacuity (every gate since AUT-10).** A PASS needs, beside `real_ge_rules` and
+`shuffled_worse`, `nv_gain`: real − rules ≥ 1 (`NV_GAIN_MIN`) and `nv_margin`: real − shuffled mean ≥ 1.0
+(`NV_MARGIN_MIN`), both in whole geometries. The report carries `conditions`, `non_vacuous` and `d6`
+(gain, margin, the two bars), and the shipped model's `gate` record carries `non_vacuous` (AUT-11 enables
+only from a PASS that is non-vacuous). On the recorded numbers: the AM-L pass (rules 241, real 241,
+shuffled 240, 241, 241) has gain 0 and margin 0.333, so it FAILs D-6; AM-13's (80, 214, mean 169.667)
+passes; the oracle (2, 5, shuffled 5 3 4) sits at the margin bar exactly (1.000) and passes. The
+thresholds are the plan's D-6 taken by recommendation (docs/17 §11 item 5, a tightening); the
+committed `prior/aml` and `prior/` records are unchanged and still `--check` PASS.
+
+**Measured here, gate rounds deferred.** The gated gate's meshing rounds run in AUT-12's L-run, on the
+tuning re-measure after AUT-02…AUT-11 (the L5 campaign measured the rules before them, and only its
+bundle is in the tree). A pre-measure on the L5 bundle's 356 attempt-1 rows (their recorded configs,
+out-of-fold p_fail): the prior would act on 112 and abstain PR-RULES on 244; of the 112, 97 failed (and
+15 passed), and 18 failures had p_fail < 0.5. The selftest (thirteen groups) adds the gated oracle: with
+p_fail 1 exactly where the rules' attempt 1 fails, rules 2, real 5, shuffled 5, 2, 4, PR-KNN 3,
+PR-RULES 2, PR-FAR 3, every voter with a non-empty path, PASS; with p_fail 0 everywhere the prior acts
+nowhere and D-6 FAILs it. The prior still ships disabled (`USER_SHIP`).
+
+**The gate rounds, run (AUT-12, 2026-10-15).** On the `aut12-rules` re-measure (2 rounds, 38 + 2 bodies):
+G-PRIOR **PASS, non-vacuous** — rules 281/420, real 337/420, shuffled 326, 328, 329 (mean 327.667); gain 56,
+margin 9.333; no losses; real PR-KNN 95 (69 reused from the rules campaign's own attempts, 26 meshed), PR-FAR
+46, PR-NOEDIT 7, PR-RULES 253. `prior/aml2/` holds the report, the model and the bundles, and `--check
+--report-dir prior/aml2` passes. The hook still reads `prior/aml` (AUT-11), so the shipped prior is unchanged;
+moving `REPORT_DIR` / `_MODEL` to `prior/aml2` is the next step and waits for the user's D-6 ratification.
+
+**Gate-driven since 2026-10-06 (AUT-11, the user's tranche-17 order).** `USER_SHIP` is no longer a ship
+decision but the recorded rule "gate-driven since 2026-10-06 (the user's tranche-17 order)": the prior
+and the optimiser are enabled only from the gate file beside their model (`G-PRIOR.json`, `G-OPT.json`).
+`prior.gate_status` and `optimise.gate_status` enable a model only when all of these hold, and list every
+one that fails as a reason: the file is there and readable; its canonical sha256 is the
+`gate.report_sha256` the gate writer recorded in the model after it wrote the file (canonical, so a CRLF
+checkout does not matter; the gate record is outside `model_sha`, so no model sha moved); its verdict is
+PASS; it is non-vacuous — for G-PRIOR, D-6 recomputed from the file's pass counts and the file's own
+`non_vacuous`; for G-OPT, `conditions.beats_rules` is true, so a CV-only PASS (a refit or the hurdle,
+`beats_rules` none) is vacuous; its `model_sha256` is the model's (for G-OPT, also the gate record's); and
+the model's own `enabled` flag is set. `prior.attempt1` records PR-DISABLED and `optimise.propose`
+records OPT-DISABLED "by its gate file" with the rule and the reasons as inputs (`ship_rule`,
+`gate_reasons`), so every card stays grounded; `make_hook` (the gates' own in-memory seam) is unchanged.
+Under the rule every committed gate keeps its layer off: `prior/aml` (a PASS that is vacuous, gain 0 and
+margin 0.333) and `prior/` (FAIL), `optimise/aml` and `optimise/aml2` (FAIL, ablation not measured), and
+the AM-14 record `optimise/` (PASS, beats the rules) because it was gated before AUT-11 and records no
+gate-file sha. The committed files are not rewritten. The selftests' property cases (prior group 14,
+optimise group 8): a genuine oracle gate enables; a FAIL, a vacuous PASS, a tampered gate file, a missing
+one and a model sha mismatch each keep the layer off with exactly that reason.
 
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
@@ -1193,7 +1367,7 @@ hurdle group reproduces the committed `optimise/aml2` beyond the date.
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
 `optimise/aml/opt_model.json` and `optimise/aml/train.json.gz` and refits in seconds; when it is disabled
-it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
+it records OPT-DISABLED at every EXHAUSTED (since AUT-11 the gate file decides, section "Gate-driven since 2026-10-06"); no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
 
 ## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
 
@@ -1374,6 +1548,48 @@ layers, already misses 1.5x on tuning, while seed-1's 1.185 is below. With the 8
 5.4-7.0 x B0, so G-COST as written cannot be met by any mesh of these geometries that holds the R-WIN wall
 level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D-8's, the user's.
 
+## projection.py — the go / no-go for a fresh seed (AUT-12, pre-registered 2026-10-15)
+
+A held-out split is spent once (docs/15 §E), so a fresh seed is opened only when a tuning re-measure projects
+that the test bar would pass. `projection.py` reads a tuning `rules` or `full` bundle and the B0-template bundle
+on the same ids and projects every headline and guard of §F as the test bar would read them. Every threshold
+is `evaluate.py`'s; no rule, gate or constant changes here. D-9 (docs/17 §11 item 5, taken by recommendation):
+seed 3 is not spent on a NO-GO; AUT-13 writes and locks it only on a GO (or on the user's explicit spend).
+
+The rule, fixed before the AUT-12 L-run was scored (N = `evaluate.TEST_N` = 180):
+
+- PJ-1 `k*(N)` = the largest k in [0, N] with `clopper_pearson(k, N)[1] <= MFR_UPPER_MAX` (0.10): k*(180) = 10.
+- PJ-2 the tuning bar `bar(n) = floor(n k*(N) / N)` in integers: bar(420) = 23. G-FAIL's "95 % upper bound
+  <= 10 %" projects as held iff the tuning failures are at most bar(n).
+- PJ-3 `4 F_fail <= B_fail` (scale-free). PJ-4 McNemar: b = #(B0 fails, system passes), c = #(B0 passes, system
+  fails) on the tuning ids, each scaled to N by round-half-up of `x N / n`, then `mcnemar(b', c') < 0.01`.
+  PJ-5 no family with more system failures than B0 failures.
+- PJ-6 G-BLC-0 (tier 0 = D and F with the manifest's commensurate flag), G-BLC-1 (`baseline.TIER1`, targets 0.09 /
+  0.05), G-FID and G-COST are `evaluate.py`'s own functions on the tuning ends. G-FID reads `p99_over_hf`,
+  `pinned_frac` and `feature_capture` from the rows; `feature_share` needs the cases' summaries, which a bundle
+  does not carry, so it is not projected. G-COST's campaign wall time is scaled to N (`wall x N / n`).
+- PJ-7 G-QUAL projects the rows' edits against the knob whitelist (the configs' quality block is not in a
+  bundle); G-EXPL is the bundle's summary audit. G-DET (two runs) and G-OPT (the test ablation) are NOT-PROJECTED.
+- PJ-8 **GO** iff G-FAIL, G-BLC-0, G-BLC-1, G-QUAL, G-FID, G-COST and G-EXPL all project PASS; otherwise NO-GO,
+  with every failed gate named, G-FAIL's numbers first. A guard that fails on the tuning split would fail the
+  evaluation too, so it blocks a spend just as a headline does.
+
+The selftest reproduces the L5 verdict from the committed bundles (`aml/tuning_rules_L5.json.gz` against
+`baseline/tuning_b0-template.json.gz`): NO-GO, `G-FAIL FAIL: 177/420 > 23`; also 4 x 177 > 384, and G-FID (p99
+in B, E and G) and G-COST (cells 717000 vs 8688) fail. The reports are `projection/<name>.json` and `.md`, and
+`--check` rebuilds each byte for byte from its recorded inputs (sha256-pinned).
+
+Measured (AUT-12 L-run, 2026-10-15; docs/15 ledger): the tuning `rules` re-measure after AUT-02..AUT-11
+(`aut12-rules`, 4,993 s at 6 streams, bundle `prior/aml2/tuning_rules.json.gz`) against B0-template re-meshed on
+the same binary (`projection/tuning_b0-template_AUT12.json.gz`, 380 failures of 420) projects **NO-GO**:
+
+    G-FAIL FAIL: 71/420 > 23 (the 95 % upper bound on 180 test bodies holds at <= 10 failures)
+    G-COST FAIL: cells FAIL; cells median 52632 vs B0 9008 (ratio 5.84281 > 1.5)
+
+G-FAIL's other three conditions hold (4 x 71 <= 380, McNemar p 1.8e-40, no family worse); G-BLC-0, G-BLC-1,
+G-QUAL, G-FID and G-EXPL project PASS. Seed 3 is not spent (D-9). A GO needs at most 23 tuning failures (the 71
+are A 39, F 15, G 15, D 1, E 1) and G-COST's 1.5x, which AUT-06 showed unattainable with 8 layers (D-8, the user's).
+
 ## Running
 
     python tools/autonomy/schema.py --selftest            # the 8 schema/lock/knob checks
@@ -1389,6 +1605,9 @@ level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D
     python tools/autonomy/costbound.py --selftest                         # the AUT-06 lower bound: the 7 groups
     python tools/autonomy/costbound.py --report --jobs 6                  # costbound/COSTBOUND.json and .md
     python tools/autonomy/costbound.py --id GID --set tuning              # one geometry's row JSON
+    python tools/autonomy/projection.py --selftest                        # the AUT-12 go / no-go: the 5 groups
+    python tools/autonomy/projection.py --project --full B.json.gz --b0 B0.json.gz --name NAME   # projection/NAME.json, .md
+    python tools/autonomy/projection.py --check                           # every projection report rebuilds
     python tools/autonomy/schema.py --print-lock          # the lock lines, no comments
     python tools/autonomy/schema.py --validate KIND FILE  # valid / one error per line
     python tools/deps_licences.py --python                # the Python-side licences above
@@ -1408,6 +1627,7 @@ level on the whole wall with 2:1 shells and 8 layers, and the gate decision is D
     python tools/autonomy/preflight.py --gate --stl box_sphere=P --stl wing_b=P --out DIR          # G-PREFLIGHT
 
     python tools/autonomy/rules.py --id GEOMETRY_ID --out-dir DIR [--records OUT.jsonl]   # attempt 1 for a tuning row
+    python tools/autonomy/rules.py --econ-gate --out DIR [--streams 3]                    # G-R-ECON (AUT-07): the 12-body quick set
     python tools/autonomy/rules.py --gate --out DIR [--parts 1,2,3]                       # G-RULES (AM-9's gate)
     python tools/autonomy/remedies.py --probe PROBE_ID [--json]                  # the tabled remedy for one probe
     python tools/autonomy/remedies.py --gate --out DIR [--parts 1,2,3,4]         # G-REMEDIES (AM-10's gate)

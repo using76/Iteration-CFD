@@ -131,7 +131,8 @@ describe('write guards on run_start, file_write and case_edit', () => {
     // STU-07a's gui_control carries set_patch's (NO_PATCH, PATCH_FIELD, ...) and case_edit's own.
     expect(TOOLS.filter((t) => t.refuse).map((t) => t.name).sort()).toEqual(['autonomy_propose_edit', 'cad_propose_edit', 'cad_requirements_propose', 'cad_template_freeze', 'cad_template_propose', 'case_edit', 'custom_tool_create', 'custom_tool_run', 'file_write', 'gui_control', 'run_start', 'shell_exec'])
     const props = (name: string): string[] => Object.keys((toolDefinitions().find((d) => d.name === name) as any).input_schema.properties)
-    expect(props('run_start')).toEqual(['binary', 'casePath', 'args', 'positionals', 'label'])
+    // F32-19 added precision: an enum (double | single), so it carries no flag or path for the guard to read.
+    expect(props('run_start')).toEqual(['binary', 'casePath', 'args', 'positionals', 'label', 'precision'])
     expect(props('file_write')).toEqual(['path', 'content', 'createOnly'])
     expect(props('case_edit')).toEqual(['path', 'edits', 'dryRun'])
     expect(isMesherRun('ofgpu-automesher')).toBe(true)
@@ -156,6 +157,8 @@ describe('write guards on run_start, file_write and case_edit', () => {
     }
     expect(isMeshConfig(CONFIG)).toBe(true)
     expect(isMeshConfig({ title: 'x', mesh_quality: { a: 1 } })).toBe(false)
+    expect(isMeshConfig({ kind: 'tet', title: 'x' })).toBe(false)
+    expect(isMeshConfig({ tet: {} })).toBe(true)
     expect(isMeshConfig([CONFIG])).toBe(false)
     expect(jsonDoc('{"a": 1, // c\n "b": [1, 2,],}')).toEqual({ a: 1, b: [1, 2] })
     expect(jsonDoc(JSON.stringify(JSON.stringify({ a: 1 })))).toEqual({ a: 1 })

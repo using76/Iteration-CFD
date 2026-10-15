@@ -30,6 +30,11 @@
 //! variable preconditioner, so the outer solve is
 //! `solver::solve_fcg`; PCG and PBiCGStab refuse it.
 //!
+//! AMG-06b adds [`Gamg::new_with_precision`] (SPEC-LIT §141.12): with
+//! [`GamgPrecision::Single`] in the f64 build the same host hierarchy is
+//! held on the device in `f32` (`amg::single::SingleCycle`) instead of in
+//! `Scalar`, and the V-cycle runs there behind the same entry points.
+//!
 //! Provenance: LITERATURE - written from Saad, Iterative Methods for
 //! Sparse Linear Systems, 2nd ed. (2003), §13.4.3 Algorithm 13.3, and
 //! Notay, ETNA 37 (2010), eq. (2.1) (the restriction is the transpose
@@ -42,6 +47,7 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 use crate::amg::coarse::{CoarseMethod, CoarseOperator, CoarseSetup, GpuCoarse};
 use crate::amg::galerkin::{GpuGalerkin, GpuLevel};
 use crate::amg::hierarchy::{GpuHierarchy, HostHierarchy, HierarchyConfig};
+use crate::amg::single::{DeviceBytes, GamgPrecision, SingleCycle};
 use crate::amg::smooth::{
     GpuLevelRows, GpuSmoother, HostRows, SmootherKind, DEFAULT_CHEBYSHEV_DEGREE,
     DEFAULT_CHEBYSHEV_FRACTION,
@@ -131,7 +137,8 @@ pub struct Gamg {
     host: HostHierarchy,
     coarse: CoarseSetup,
     gpu_h: GpuHierarchy,
-    gpu_c: GpuCoarse,
+    /// The coarsest solve in `Scalar`; `None` when the float copy runs.
+    gpu_c: Option<GpuCoarse>,
     ldu: LduKernels,
     residual: CudaFunction,
     /// Per-level scratch, levels `0 ..= L`, level `l` sized `n_l`.
@@ -143,6 +150,11 @@ pub struct Gamg {
     kind: CycleKind,
     /// The K-cycle's buffers, `None` until a K-cycle is set (§141.6).
     ks: Option<KScratch>,
+    /// The precision asked for (§141.12).
+    precision: GamgPrecision,
+    /// The float copy of the hierarchy, when it runs instead of the
+    /// `Scalar` one: [`GamgPrecision::Single`] in the f64 build (§141.12).
+    single: Option<SingleCycle>,
 }
 
 impl Gamg {
@@ -156,6 +168,22 @@ impl Gamg {
         m: &HostMesh,
         a: &crate::ldu::HostLduMatrix,
         cfg: &GamgConfig,
+        permissive: bool,
+    ) -> Result<Self> {
+        Self::new_with_precision(gpu, m, a, cfg, GamgPrecision::Native, permissive)
+    }
+
+    /// [`Gamg::new`] with the device copy's precision (SPEC-LIT §141.12).
+    /// `Native` is [`Gamg::new`]. `Single` in the f64 build builds the
+    /// same host hierarchy and coarsest setup, then uploads them rounded
+    /// once to `f32` (the factor stays `Acc`), and no `Scalar` device
+    /// hierarchy; under the `single` feature it is `Native`.
+    pub fn new_with_precision(
+        gpu: &Gpu,
+        m: &HostMesh,
+        a: &crate::ldu::HostLduMatrix,
+        cfg: &GamgConfig,
+        precision: GamgPrecision,
         permissive: bool,
     ) -> Result<Self> {
         if cfg.n_pre + cfg.n_post == 0 {
@@ -175,6 +203,33 @@ impl Gamg {
                 CoarseSetup::general(&HostRows::of_matrix(m, a)?, permissive)?
             }
         };
+        let ldu = LduKernels::new(gpu)?;
+        let residual = KernelSet::new(gpu, crate::kernels::AMG)?.func("amgResidual")?;
+        if precision.runs_float_copy() {
+            let single = SingleCycle::new(gpu, &host, &coarse, cfg)?;
+            return Ok(Self {
+                cfg: *cfg,
+                host,
+                coarse,
+                gpu_h: GpuHierarchy {
+                    gals: Vec::new(),
+                    levels: Vec::new(),
+                    rows: Vec::new(),
+                    smoothers: Vec::new(),
+                },
+                gpu_c: None,
+                ldu,
+                residual,
+                b_l: Vec::new(),
+                x_l: Vec::new(),
+                r_l: Vec::new(),
+                y_l: Vec::new(),
+                kind: CycleKind::V,
+                ks: None,
+                precision,
+                single: Some(single),
+            });
+        }
         let mut gpu_h = GpuHierarchy::new(gpu, &host)?;
         for (hl, gl) in host.levels.iter().zip(gpu_h.levels.iter_mut()) {
             // Bitwise what GpuHierarchy::galerkin would give: the device
@@ -190,8 +245,6 @@ impl Gamg {
             }
         }
         let gpu_c = GpuCoarse::new(gpu, &coarse)?;
-        let ldu = LduKernels::new(gpu)?;
-        let residual = KernelSet::new(gpu, crate::kernels::AMG)?.func("amgResidual")?;
         let mut sizes = Vec::with_capacity(host.levels.len() + 1);
         sizes.push(host.n_fine);
         for l in &host.levels {
@@ -205,7 +258,7 @@ impl Gamg {
             host,
             coarse,
             gpu_h,
-            gpu_c,
+            gpu_c: Some(gpu_c),
             ldu,
             residual,
             b_l: scratch(gpu)?,
@@ -214,7 +267,56 @@ impl Gamg {
             y_l: scratch(gpu)?,
             kind: CycleKind::V,
             ks: None,
+            precision,
+            single: None,
         })
+    }
+
+    /// SPEC-LIT §141.8 (AMG-05): the same hierarchy on new values. The
+    /// aggregation, the plans, the row maps and every device buffer stay;
+    /// [`HostHierarchy::regather`] gives the levels and smoother setups of
+    /// `a`, they are written into the device levels and smoothers as
+    /// [`Gamg::new`] writes them, and the coarsest level is factored again
+    /// (§141.4). `m` must be the mesh of the build. Allocates (the
+    /// smoothers and the coarsest solve are set up again), so it runs
+    /// outside a capture.
+    pub fn regather(
+        &mut self,
+        gpu: &Gpu,
+        m: &HostMesh,
+        a: &crate::ldu::HostLduMatrix,
+        permissive: bool,
+    ) -> Result<()> {
+        self.host.regather(m, a)?;
+        let coarse = match self.host.levels.last() {
+            Some(l) => CoarseSetup::general(&HostRows::of_level(l)?, permissive)?,
+            None => CoarseSetup::general(&HostRows::of_matrix(m, a)?, permissive)?,
+        };
+        if let Some(s) = self.single.as_mut() {
+            s.regather(gpu, &self.host, &coarse)?;
+            self.coarse = coarse;
+            return Ok(());
+        }
+        for (hl, gl) in self.host.levels.iter().zip(self.gpu_h.levels.iter_mut()) {
+            if !hl.diag.is_empty() {
+                gpu.write(&mut gl.diag, &hl.diag)?;
+            }
+            if !hl.upper.is_empty() {
+                gpu.write(&mut gl.upper, &hl.upper)?;
+            }
+            if !hl.lower.is_empty() {
+                gpu.write(&mut gl.lower, &hl.lower)?;
+            }
+        }
+        self.gpu_h.smoothers = self
+            .host
+            .smoothers
+            .iter()
+            .map(|s| crate::amg::smooth::GpuSmoother::new(gpu, s))
+            .collect::<Result<Vec<_>>>()?;
+        self.gpu_c = Some(GpuCoarse::new(gpu, &coarse)?);
+        self.coarse = coarse;
+        Ok(())
     }
 
     /// Select the cycle [`Gamg::cycle`] runs (SPEC-LIT §141.6). Setup:
@@ -222,6 +324,15 @@ impl Gamg {
     /// outside a capture. A threshold that is not finite in `[0, 1)` is
     /// refused by name.
     pub fn set_cycle(&mut self, gpu: &Gpu, kind: CycleKind) -> Result<()> {
+        if matches!(kind, CycleKind::K { .. }) && self.single.is_some() {
+            return Err(Error::Config(
+                "amg::cycle: a K-cycle was asked of a GAMG whose levels are \
+                 held in single precision (precision single); the f32 copy \
+                 runs the V-cycle only (SPEC-LIT 141.12); use the V-cycle, \
+                 or precision native for the K-cycle"
+                    .to_string(),
+            ));
+        }
         if let CycleKind::K { threshold } = kind {
             if !(threshold.is_finite() && (0.0..1.0).contains(&threshold)) {
                 return Err(Error::Config(format!(
@@ -275,6 +386,51 @@ impl Gamg {
     /// The config the cycle was built with.
     pub fn config(&self) -> &GamgConfig {
         &self.cfg
+    }
+
+    /// The precision the hierarchy was asked for (§141.12).
+    pub fn precision(&self) -> GamgPrecision {
+        self.precision
+    }
+
+    /// Whether the cycle runs on the `f32` copy (§141.12): `Single` in the
+    /// f64 build.
+    pub fn runs_in_f32(&self) -> bool {
+        self.single.is_some()
+    }
+
+    /// Every device byte this GAMG holds, (141.47): the levels, transfers,
+    /// row maps, smoothers, coarsest factor and its work vector, the
+    /// per-level cycle vectors and the K-cycle's buffers. Level 0's
+    /// operator is the solve's matrix and is not counted.
+    pub fn device_bytes(&self) -> DeviceBytes {
+        if let Some(s) = &self.single {
+            return s.device_bytes();
+        }
+        let h = &self.gpu_h;
+        let gals: DeviceBytes = h.gals.iter().map(GpuGalerkin::device_bytes).sum();
+        let levels: DeviceBytes = h.levels.iter().map(GpuLevel::device_bytes).sum();
+        let rows: DeviceBytes = h.rows.iter().map(GpuLevelRows::device_bytes).sum();
+        let sm: DeviceBytes = h.smoothers.iter().map(GpuSmoother::device_bytes).sum();
+        let co = self.gpu_c.as_ref().map(GpuCoarse::device_bytes).unwrap_or_default();
+        let vecs: DeviceBytes = [&self.b_l, &self.x_l, &self.r_l, &self.y_l]
+            .iter()
+            .flat_map(|v| v.iter())
+            .map(DeviceBytes::of_float)
+            .sum();
+        let ks = self
+            .ks
+            .as_ref()
+            .map(|k| {
+                k.c.iter()
+                    .chain(k.v.iter())
+                    .chain(k.s.iter())
+                    .map(DeviceBytes::of_float)
+                    .sum::<DeviceBytes>()
+                    + DeviceBytes::of_acc(&k.partials)
+            })
+            .unwrap_or_default();
+        gals + levels + rows + sm + co + vecs + ks
     }
 
     /// The host hierarchy the device levels were uploaded from.
@@ -375,6 +531,10 @@ impl Gamg {
         x: &mut DevBuf<Scalar>,
         b: &DevBuf<Scalar>,
     ) -> Result<()> {
+        if let Some(s) = self.single.as_mut() {
+            // (141.46); set_cycle refuses the K-cycle here.
+            return s.cycle(gpu, mesh, a, x, b);
+        }
         let n = self.host.n_fine;
         if a.n_cells != n {
             return Err(Error::Config(format!(
@@ -425,6 +585,9 @@ impl Gamg {
             rows,
             smoothers,
         } = gpu_h;
+        let gpu_c = gpu_c.as_mut().ok_or_else(|| {
+            Error::Config("amg::cycle: the coarsest solve was not set up".to_string())
+        })?;
         let mut p = Parts {
             gpu,
             n_pre: cfg.n_pre,
@@ -458,6 +621,10 @@ impl Gamg {
         z: &mut DevBuf<Scalar>,
         r: &DevBuf<Scalar>,
     ) -> Result<()> {
+        if let Some(s) = self.single.as_mut() {
+            // (141.45).
+            return s.precondition(gpu, mesh, a, z, r);
+        }
         gpu.fill_zero(z)?;
         self.cycle(gpu, mesh, a, z, r)
     }

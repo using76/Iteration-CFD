@@ -1,0 +1,50 @@
+// SPEC-LIT 125.8 - the 50-cell tube ofgpu-compressible's own driver tests run
+// (src/bin/compressible.rs, CMP-15), shipped as the studio's compressible
+// template (docs/17 CMP-29). A 1 m tube one cell across: air (gamma 1.4,
+// W 0.0289647 kg/mol, Sutherland viscosity, pOperating 1e5 Pa) at 300 K moving
+// at 50 m/s, a 320 K fixed-U inlet, a fixed-p outlet (p is gauge, about
+// pOperating) and symmetry sides; transient Euler, three steps of 1e-5 s.
+// Run: ofgpu-compressible cases/compressibleTube.jsonc
+//
+// NOT A SHOCK TUBE. The JSONC `initial` block is uniform, so Sod's jump
+// cannot be stated here; the Sod gate is ofgpu-validate's (docs/17 CMP-19).
+// NOT VALIDATED: a smoke case, no gate reads its numbers.
+{
+  "name": "compressibleTube",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [1, 0.02, 0.02] },
+    "cells": [50, 1, 1],
+    "boundaries": { "xmin": "inlet", "xmax": "outlet", "ymin": "ya", "ymax": "yb", "zmin": "za", "zmax": "zb" }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 },
+    "buoyancy": "densityRatio",
+    "compressible": {
+      "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+      "viscosity": { "model": "sutherland", "As": 1.458e-6, "Ts": 110.4 },
+      "pOperating": 1e5
+    }
+  },
+  "patches": [
+    { "match": "inlet", "kind": "inlet", "U": { "type": "fixedValue", "value": [50, 0, 0] }, "T": { "type": "fixedValue", "value": 320 } },
+    { "match": "outlet", "kind": "open", "U": { "type": "zeroGradient" }, "p": { "type": "fixedValue", "value": 0 }, "T": { "type": "zeroGradient" } },
+    { "match": "(ya|yb|za|zb)", "kind": "symmetry" }
+  ],
+  "initial": { "U": [50, 0, 0], "p": 0.0, "T": 300.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 1 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "T": 0.9, "p": 0.3 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12 }
+    ]
+  },
+  "run": { "endTime": 0.00003, "deltaT": 0.00001 }
+}

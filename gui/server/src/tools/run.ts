@@ -1,6 +1,6 @@
 // Solver / analysis runs: start (validated by the run manager against the
 // registry), wait, status, log window and stop.
-import { BINARY_NAMES, driversFor, getBinary, isJsonCase, PIPELINES, RunStatusSchema, type RunInfo } from '@cfd/shared'
+import { BINARY_NAMES, driversFor, getBinary, isJsonCase, PIPELINES, RunPrecisionSchema, RunStatusSchema, type RunInfo } from '@cfd/shared'
 import { z } from 'zod'
 import { compileUserRegex } from '../regex.js'
 import type { RunManager } from '../runs/types.js'
@@ -58,12 +58,13 @@ const StartSchema = z.object({
   args: z.array(ArgSchema).describe('Flags from the registry for this binary'),
   positionals: z.array(z.string()).nullable().describe('Extra positional arguments (bench nx ny nz); the case is added automatically'),
   label: z.string().nullable().describe('Short label shown in the run list'),
+  precision: RunPrecisionSchema.nullish().describe('Build to run: double (default, f64) or single (the f32 build in rust/target/single/release, a preview until F32-18; not for pipelines)'),
 })
 
 export const runStart: ToolDef<typeof StartSchema> = {
   name: 'run_start',
   description:
-    'Start an ofgpu binary on a case and return immediately with a runId. Flags are validated against the registry (unknown flags are refused). JSONC cases run only with ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose; the others need an OpenFOAM case directory. Follow with run_wait. Do not start a second GPU solver while one is running.',
+    'Start an ofgpu binary on a case and return immediately with a runId. Flags are validated against the registry (unknown flags are refused). JSONC cases run only with ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-compressible (only a case that states physics.compressible, and only it reads one), ofgpu-cht, ofgpu-datacentre and ofgpu-decompose; the others need an OpenFOAM case directory. Follow with run_wait. Do not start a second GPU solver while one is running.',
   schema: StartSchema,
   refuse: refuseRunStart,
   async run(input, ctx) {
@@ -78,8 +79,8 @@ export const runStart: ToolDef<typeof StartSchema> = {
     }
     const busy = spec.gpu ? ctx.runs.list().filter((r) => r.status === 'running' && getBinary(r.binary)?.gpu) : []
     try {
-      const run = await ctx.runs.start({ binary: input.binary, casePath: input.casePath, args: input.args, positionals: input.positionals ?? [], label: input.label, sessionId: ctx.sessionId })
-      return okResult({ runId: run.id, argv: run.argv, outputRoot: run.outputRoot, status: run.status, mode: run.mode, queuedBehind: busy.map((r) => r.id) }, { runId: run.id })
+      const run = await ctx.runs.start({ binary: input.binary, casePath: input.casePath, args: input.args, positionals: input.positionals ?? [], label: input.label, ...(input.precision ? { precision: input.precision } : {}), sessionId: ctx.sessionId })
+      return okResult({ runId: run.id, argv: run.argv, outputRoot: run.outputRoot, status: run.status, mode: run.mode, precision: run.precision ?? 'double', queuedBehind: busy.map((r) => r.id) }, { runId: run.id })
     } catch (err) {
       return fail('START_FAILED', errorMessage(err))
     }

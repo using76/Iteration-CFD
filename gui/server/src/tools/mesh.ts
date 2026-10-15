@@ -31,7 +31,7 @@ export function parseMeshCells(lines: string[]): number | null {
   return cells
 }
 
-const STOP_STAGES = ['octree', 'castellate', 'snap', 'features', 'layers'] as const
+const STOP_STAGES = ['octree', 'castellate', 'snap', 'features', 'split', 'layers'] as const
 
 const MeshSchema = z.object({
   kind: z.enum(MESH_KINDS).optional().describe(`Preset (kind or config is required): ${MESH_PRESETS.map((p) => `${p.kind} (${p.title}, ${p.defaultCells.join('x')})`).join('; ')}`),
@@ -52,11 +52,11 @@ const MeshSchema = z.object({
   Cs: z.number().nullable().describe('Roughness constant'),
   cyclic: z.array(z.enum(['x', 'y', 'z'])).nullable().describe('Axes whose two faces become a cyclic pair'),
   permissive: z.boolean().nullable(),
-  config: z.string().nullable().optional().describe('Automesher form: AutomeshConfig JSONC (workspace-relative), e.g. tools/automesher/examples/box_sphere.json - runs ofgpu-automesher through octree, castellate, snap and layers instead of the preset generator'),
+  config: z.string().nullable().optional().describe('Automesher form: AutomeshConfig JSONC (workspace-relative), e.g. tools/automesher/examples/box_sphere.json - runs ofgpu-automesher instead of the preset generator. The "kind" of the config picks the path: "hexDominant" (default) runs octree, castellate, snap and layers; "tet" (e.g. tools/automesher/examples/box_sphere_tet.json, SPEC-LIT §116) meshes tetrahedra with no gmsh, and the automesher.tet block of its record carries the tetrahedron count and the dihedral bounds'),
   check: z.boolean().nullable().optional().describe('With config: run the quality gate on an existing mesh instead of meshing (ofgpu-automesher -check)'),
   checkDir: z.string().nullable().optional().describe('With check: the case directory to check (default: the config output.case_dir, _tag suffixed)'),
   dryRun: z.boolean().nullable().optional().describe('With config: stop after the surface summary and exit 0 (ofgpu-automesher -dryRun)'),
-  stopAfter: z.enum(STOP_STAGES).nullable().optional().describe('With config: stop after this stage and write what it returned (ofgpu-automesher -stopAfter)'),
+  stopAfter: z.enum(STOP_STAGES).nullable().optional().describe('With config: stop after this stage and write what it returned (ofgpu-automesher -stopAfter); refused on a kind "tet" config'),
   tag: z.string().nullable().optional().describe("With config: suffix this run's case directory and mesh name so two runs of one config do not overwrite each other (ofgpu-automesher -tag)"),
   waitSeconds: z.number().int().min(1).max(MESH_WAIT_MAX_SECONDS).nullable().optional().describe('Block until the run ends or this many seconds pass; omit it to return the run id immediately and follow with run_wait'),
 })

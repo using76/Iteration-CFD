@@ -163,6 +163,43 @@ impl HostHierarchy {
         }
         s
     }
+
+    /// SPEC-LIT §141.8 (AMG-05): new values on the KEPT aggregation. The
+    /// aggregations, the plans and the row maps stay; every level's
+    /// coefficients are the Galerkin product (141.14)-(141.16) of the new
+    /// `a` through the stored plans, in the order [`Self::build`] takes,
+    /// and every smoother setup is redone from them. When the new `a`
+    /// would aggregate as the cached one did, the result is bit for bit
+    /// the [`Self::build`] of `a`. `m` must be the mesh of the build.
+    pub fn regather(&mut self, m: &HostMesh, a: &HostLduMatrix) -> Result<()> {
+        if m.n_cells != self.n_fine || a.diag.len() != self.n_fine {
+            return Err(Error::Config(format!(
+                "amg::hierarchy: regather: the hierarchy was built for {} \
+                 cells but the mesh has {} and the matrix {}; a re-gather \
+                 keeps the aggregation, so the cells must be the same",
+                self.n_fine,
+                m.n_cells,
+                a.diag.len()
+            )));
+        }
+        let smoother = self.config.smoother;
+        let mut smoothers = Vec::with_capacity(self.smoothers.len());
+        smoothers.push(SmootherSetup::new(&HostRows::of_matrix(m, a)?, smoother)?);
+        let mut levels: Vec<HostLevel> = Vec::with_capacity(self.levels.len());
+        for (l, plan) in self.plans.iter().enumerate() {
+            let level = if l == 0 {
+                plan.coarse_host(&a.diag, &a.upper, &a.lower, &a.boundary_coeffs)?
+            } else {
+                let fine = &levels[l - 1];
+                plan.coarse_host(&fine.diag, &fine.upper, &fine.lower, &[])?
+            };
+            smoothers.push(SmootherSetup::new(&HostRows::of_level(&level)?, smoother)?);
+            levels.push(level);
+        }
+        self.levels = levels;
+        self.smoothers = smoothers;
+        Ok(())
+    }
 }
 
 /// The hierarchy on the device (SPEC-LIT §141.3): one [`GpuGalerkin`] per

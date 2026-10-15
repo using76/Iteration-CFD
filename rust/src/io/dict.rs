@@ -157,11 +157,7 @@ impl FoamDict {
         let Some(tok) = raw.split_whitespace().next() else {
             return d;
         };
-        match tok.to_ascii_lowercase().as_str() {
-            "yes" | "true" | "on" | "y" | "t" | "1" => true,
-            "no" | "false" | "off" | "n" | "f" | "0" => false,
-            _ => d,
-        }
+        parse_switch(tok).unwrap_or(d)
     }
 
     // ----------------------------------------------------------------
@@ -572,6 +568,19 @@ pub(crate) fn last_number(raw: &str) -> Option<f64> {
         }
     }
     found
+}
+
+/// OpenFOAM's `Switch` read strictly: `yes/true/on/y/t/1` is `Some(true)`,
+/// `no/false/off/n/f/0` is `Some(false)`, any other token `None`. The one
+/// spelling table [`FoamDict::bool`] and the strict readers share, so a
+/// reader that must refuse an unreadable switch by name (SPEC-LIT 141.7's
+/// `cacheAgglomeration`) accepts exactly the words `bool` does.
+pub fn parse_switch(tok: &str) -> Option<bool> {
+    match tok.to_ascii_lowercase().as_str() {
+        "yes" | "true" | "on" | "y" | "t" | "1" => Some(true),
+        "no" | "false" | "off" | "n" | "f" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 // ==========================================================================

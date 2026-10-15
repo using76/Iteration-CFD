@@ -112,6 +112,8 @@ export interface ViewerDataset {
   /**
    * True when the server cuts this mesh by a plane exactly (`POST /api/datasets/<id>/cut`,
    * SPEC-LIT §148.1): a polyMesh with no lattice, whose slices and planes are drawn from the cut.
+   * The same server also contours it (`POST /api/datasets/<id>/iso`, SPEC-LIT §148.2) and traces
+   * its streamlines (`POST /api/datasets/<id>/streamlines`, SPEC-LIT §148.3).
    */
   planeCut?: boolean
   /**
@@ -168,7 +170,79 @@ export interface PlaneCutInfo {
   openCells: number
 }
 
-export type DatasetStage = 'queued' | 'scanning' | 'geometry' | 'fields' | 'ready' | 'error'
+/** An iso-surface request on a non-lattice polyMesh: a field (vectors by magnitude) at one stored time. */
+export interface IsoSurfaceSpec {
+  field: string
+  timeIndex: number
+  /** One or more iso values; finite. */
+  values: number[]
+}
+
+/**
+ * The iso-surfaces of a cell field on a non-lattice polyMesh (`POST /api/datasets/<id>/iso`,
+ * SPEC-LIT §148.2, served where `planeCut` is true), their triangles stored as blobs.
+ */
+export interface IsoSurfaceInfo {
+  /** Blob key prefix: `<key>.positions`, `<key>.normals` and `<key>.cells`. */
+  key: string
+  field: string
+  timeIndex: number
+  values: number[]
+  triangleCount: number
+  /** f32, components 3: three corners per triangle (vertices not shared). */
+  positions: BlobRef
+  /** f32, components 3: the triangle's unit normal at each corner, pointing to increasing values. */
+  normals: BlobRef
+  /** u32, components 1: the cell of each triangle. */
+  cells: BlobRef
+  /** Triangles of each value, in the order of `values`. */
+  valueCounts: number[]
+  /** Total area (f64). */
+  area: number
+  /** Mesh points whose least-squares stencil never had full rank (their value is a weighted mean). */
+  fallbackPoints: number
+  /** Tetrahedra (centroid, face centre, edge) with non-positive volume: cells not star-shaped about their centroid. */
+  invertedTets: number
+}
+
+/** A streamline request on a non-lattice polyMesh: a cell vector field at one stored time, from seed points. */
+export interface StreamlineSpec {
+  field: string
+  timeIndex: number
+  /** xyz per seed, finite; a seed outside the domain is refused (its line is empty). */
+  seeds: number[]
+  direction: 'forward' | 'backward' | 'both'
+  /** Maximum arc length per direction; null: unbounded. */
+  maxLength: number | null
+}
+
+/**
+ * The streamlines of a cell vector field on a non-lattice polyMesh (`POST /api/datasets/<id>/streamlines`,
+ * SPEC-LIT §148.3, served where `planeCut` is true), their points stored as blobs.
+ */
+export interface StreamlineInfo {
+  /** Blob key prefix: `<key>.points`, `<key>.speeds` and `<key>.offsets`. */
+  key: string
+  field: string
+  timeIndex: number
+  /** One line per seed, in seed order (an empty line for a refused seed). */
+  lineCount: number
+  pointCount: number
+  /** f32, components 3: the points of every line, concatenated. */
+  points: BlobRef
+  /** f32, components 1: |U| at every point. */
+  speeds: BlobRef
+  /** u32, components 1: line i spans points [offsets[i], offsets[i+1]); lineCount + 1 entries. */
+  offsets: BlobRef
+  /** Seeds no cell holds, by index: refused. */
+  refusedSeeds: number[]
+  /** How each traced direction ended: through a boundary face, at maxLength, at the step cap, at a stagnation point, or lost by the walk. */
+  ends: { boundary: number; length: number; steps: number; stall: number; lost: number }
+  fallbackPoints: number
+  invertedTets: number
+}
+
+export type DatasetStage ='queued' | 'scanning' | 'geometry' | 'fields' | 'ready' | 'error'
 
 export interface DatasetProgress {
   datasetId: string

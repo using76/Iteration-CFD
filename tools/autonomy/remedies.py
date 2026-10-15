@@ -6,7 +6,7 @@
 remedies.py - the L2 remedies (docs/15 §C's L2 row, AM-10).
 
 After a failed attempt, `diagnose` names the key and the earliest failing
-stage from score.py's closed failure enum; `propose` walks a table of thirteen
+stage from score.py's closed failure enum; `propose` walks a table of fourteen
 remedies in priority order, each firing at most MAX_FIRES times per geometry
 and never revisiting a config sha, and ends the geometry in one of four
 terminals: PASS, CAPABILITY-LIMITED, EXHAUSTED or NO-REMEDY. `loop` runs the
@@ -91,6 +91,12 @@ REMEDIES = (
      "formula": "every band level + 1 (none past max_level 6), feature_level + 1 capped at 6; "
                 "predicted cells <= 0.7*cell_budget",
      "cite": "docs/15 §C L2, §D.1 F4 (a wall patch absent or n_regions != 1); rules.predict_cells"},
+    {"id": "RM-TE", "keys": ("F3",), "stage": "snap",
+     "fn": "_rm_te",
+     "what": "drop the feature bump to the wall level and set the attraction radius to "
+             "1.5 h_f at the new finest level (R-TE)",
+     "formula": rules.TE_FORMULA,
+     "cite": rules.TE_CITE},
     {"id": "RM-SNAP-WALL", "keys": ("F3", "gate@snap"), "stage": "snap",
      "fn": "_rm_snap_wall",
      "what": "coarsen the whole refinement ladder one level, not below the y+ floor",
@@ -362,7 +368,7 @@ def _qualifies(ctx, gates, knobs):
 _QUAL_CACHE = {}
 
 
-# --- the thirteen remedies (C5): (after | None, why | None, extra inputs) -----
+# --- the fourteen remedies (C5): (after | None, why | None, extra inputs) -----
 
 def _coarsen(ctx, gates, knobs, plane_guard):
     """The shared coarsen guards; the pack (levels, max_level) goes back for _set."""
@@ -466,6 +472,25 @@ def _rm_snap_refine(ctx, gates, knobs):
     _set(after, "/refinement/max_level", pack[1])
     if not _cells_ok(after, ctx, gates):
         return None, _cells_why(after, ctx, gates), extra
+    return after, None, extra
+
+
+def _rm_te(ctx, gates, knobs):
+    before = ctx["config"]
+    if ctx["fingerprint"].get("sharp_edge_length_m", 0) <= 0:
+        return None, "no sharp edge (features.py)", []
+    if on_plane(before, ctx["fingerprint"]):
+        return None, "on the R-PLANE path (the plane owns the snap knobs)", []
+    got = rules.te_config(before)
+    if got is None:
+        return None, "no feature level above the wall level, or the attraction is off", []
+    edited, extra = got
+    after = copy.deepcopy(before)
+    _set(after, "/refinement/levels", edited["refinement"]["levels"])
+    _set(after, "/refinement/max_level", edited["refinement"]["max_level"])
+    _set(after, "/snap/feature_tolerance", edited["snap"]["feature_tolerance"])
+    if "tolerance" in edited["snap"]:
+        _set(after, "/snap/tolerance", edited["snap"]["tolerance"])
     return after, None, extra
 
 
@@ -746,8 +771,11 @@ def _no_remedy_why(key):
     return "the written mesh fails -check: no remedy touches the quality block"
 
 
-def propose(ctx: dict, history: list, *, k=None, gates=None, knobs=None, veto=None) -> dict:
-    """The tabled remedy for one failed attempt, or the geometry's terminal."""
+def propose(ctx: dict, history: list, *, k=None, gates=None, knobs=None, veto=None,
+            r_te=True) -> dict:
+    """The tabled remedy for one failed attempt, or the geometry's terminal.
+    r_te=False is the table before AUT-04: RM-TE neither fires nor is listed as
+    skipped (rules.r_te_of tells a recorded campaign's table)."""
     gates = gates if gates is not None else schema.load_gates()
     knobs = knobs if knobs is not None else schema.load_knobs()
     fp = ctx["fingerprint"]
@@ -846,7 +874,8 @@ def propose(ctx: dict, history: list, *, k=None, gates=None, knobs=None, veto=No
             rows = [r for r in REMEDIES if r["id"] == "RM-PLANE"]
             cap_route = True
     else:
-        rows = [r for r in REMEDIES if key in r["keys"]]
+        rows = [r for r in REMEDIES if key in r["keys"]
+                and (r_te or r["id"] != "RM-TE")]
     if len(history) >= k:
         return terminal("EXHAUSTED", "K = %d attempts spent" % k)
     for row in rows:
@@ -1216,8 +1245,10 @@ def rules_ctx(stl, flow_name, plabels, rl, fps):
     if key not in _RULES_CTX["v"]:
         flow = plabels["flow"] if flow_name == "probe" else rl["flows"][flow_name]
         stem = stl[:-4]
+        # the labelled fixtures are AM-10's attempt-1 configs: the rules before R-ECON
+        # (AUT-07), whose bands their config_edits and labels point at
         res = rules.setup({"geometry_id": stem, "flow": flow}, fps[stl], stl,
-                          "case_" + stem, stem, flow=flow)
+                          "case_" + stem, stem, flow=flow, r_econ=False)
         if res["verdict"] != "apply":
             raise RemedyError("rules.setup refuses %s (%s)" % (stl, res["refused"]))
         _RULES_CTX["v"][key] = (flow, res["config"])
@@ -1529,24 +1560,31 @@ def _loops(rng, pool, n, gates, knobs, records):
 
 # --- the selftest (C11) -----------------------------------------------------------
 
+def r_te_flags(results) -> bool:
+    """rules.r_te_of over a list of (id, propose result) pairs."""
+    return rules.r_te_of([res["record"] for _, res in results])
+
+
 def _fix_probe_rows(plabels, rl, fps, gates, knobs):
-    """Group 2/3/4 runners: the per-probe and per-sequence results with their checks."""
-    def run_probes():
+    """Group 2/3/4 runners: the per-probe and per-sequence results with their checks.
+    The labels are G-REMEDIES' (the table before AUT-04), so g34 runs r_te=False and
+    gte holds RM-TE's departures from them."""
+    def run_probes(r_te=False):
         out = []
         for row in rl["probes"]:
             ctx = probe_ctx(row["id"], plabels, fps)
             res = propose(ctx, [{"attempt": 1,
                                  "config_sha256": schema.canonical_sha256(ctx["config"]),
-                                 "rule_id": None}], gates=gates, knobs=knobs)
+                                 "rule_id": None}], gates=gates, knobs=knobs, r_te=r_te)
             out.append((row, res))
         return out
 
-    def run_seqs():
+    def run_seqs(r_te=False):
         out = []
         for case in rl["sequences"]:
             ctx = seq_ctx(case, plabels, rl, fps)
             hist = seq_history(ctx, case, gates, knobs)
-            res = propose(ctx, hist, k=case.get("k"), gates=gates, knobs=knobs)
+            res = propose(ctx, hist, k=case.get("k"), gates=gates, knobs=knobs, r_te=r_te)
             out.append((case, res))
         return out
 
@@ -1581,7 +1619,7 @@ def selftest() -> int:
 
     def g1():
         ids = [r["id"] for r in REMEDIES]
-        assert len(ids) == len(set(ids)) == 13, "the table needs 13 unique rows"
+        assert len(ids) == len(set(ids)) == 14, "the table needs 14 unique rows"
         pat = __import__("re").compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
         for r in REMEDIES:
             assert pat.match(r["id"]), "%s is not a DecisionRecord rule id" % r["id"]
@@ -1596,7 +1634,7 @@ def selftest() -> int:
         assert len(routed) == 21, "21 keys routed, have %d: %s" % (len(routed), sorted(routed))
         for k in ("surface_closed", "gate@snap", "pass", "layer:min_thickness"):
             assert k in routed, "%s unrouted" % k
-        return ("[ok] table: 13 remedies, 4 terminals, 21 keys routed "
+        return ("[ok] table: 14 remedies, 4 terminals, 21 keys routed "
                 "(RM-BUDGET-FAR ... RM-LAYER-FIT)")
 
     def g2():
@@ -1638,6 +1676,32 @@ def selftest() -> int:
         return p_results, s_results, ("[ok] fixtures: 31/31 probes get the tabled remedy (%s)"
                                       % ptxt), "[ok] sequences: 35/35 as labelled"
 
+    def gte(p_old, s_old):
+        """RM-TE (AUT-04) against the labelled table: every probe and sequence keeps its
+        result, except an F3 one on a sharp body off R-PLANE with a feature bump, which
+        gets RM-TE and edits only R-TE's four pointers."""
+        te_ptr = ("/snap/feature_tolerance", "/snap/tolerance", "/refinement/max_level")
+        old = ([(row["id"], res) for row, res in p_old]
+               + [(case["id"], res) for case, res in s_old])
+        new = ([(row["id"], res) for row, res in run_probes(True)]
+               + [(case["id"], res) for case, res in run_seqs(True)])
+        changed, kept = [], 0
+        for (i, a), (j, b) in zip(old, new):
+            assert i == j
+            if a["rule_id"] == b["rule_id"] and a["config_sha256"] == b["config_sha256"]:
+                kept += 1
+                continue
+            assert a["key"] == "F3" and b["rule_id"] == "RM-TE", (
+                "%s: %s -> %s on key %s" % (i, a["rule_id"], b["rule_id"], a["key"]))
+            assert all(e["pointer"] in te_ptr or e["pointer"].endswith("/feature_level")
+                       for e in b["edits"]), (i, b["edits"])
+            assert not any(s["rule_id"] == "RM-TE" for s in a["skipped"])
+            changed.append(i)
+        assert kept + len(changed) == 66 and changed, (kept, changed)
+        assert r_te_flags(new) and not r_te_flags(old)
+        return "[ok] RM-TE: %d of 66 fixtures move to RM-TE (%s), %d keep their result" % (
+            len(changed), " ".join(changed), kept)
+
     def g5():
         ctx = probe_ctx("box_sphere", plabels, fps)
         oc = ctx["outcome"]
@@ -1656,7 +1720,7 @@ def selftest() -> int:
         sc = static_scan(knobs=knobs)
         assert sc["ok"], "static scan: %s" % sc["violations"]
         n_fn = len(sc["writes"])
-        assert n_fn == 12, "12 _rm_* functions with writes, have %d" % n_fn
+        assert n_fn == 13, "13 _rm_* functions with writes, have %d" % n_fn
         wr = "; ".join("%s[%s]" % (k[3:], ",".join(
             "levels" if p in CONTAINERS else p.rsplit("/", 1)[-1] for p in v))
             for k, v in sorted(sc["writes"].items()))
@@ -1683,8 +1747,8 @@ def selftest() -> int:
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
-        return ("[ok] static scan: %d _set calls in 12 _rm_* functions, 0 violations; "
-                "writes %s" % (sc["n_set_calls"], wr))
+        return ("[ok] static scan: %d _set calls in %d _rm_* functions, 0 violations; "
+                "writes %s" % (sc["n_set_calls"], n_fn, wr))
 
     def g7():
         pool = _pool(plabels, rl, fps)
@@ -1816,7 +1880,8 @@ def selftest() -> int:
                         (5, "box_sphere", g5), (6, "static scan", g6),
                         (7, "property", g7), (8, "loops", g8), (9, "synthetic", g9),
                         (10, "records", g10), (11, "determinism", g11),
-                        (12, "veto", g12), (13, "cli", g13)):
+                        (12, "veto", g12), (13, "cli", g13),
+                        (14, "RM-TE", lambda: gte(*g34()[0:2]))):
         if step(g, name, fn):
             return 1
         print(lines[-1])

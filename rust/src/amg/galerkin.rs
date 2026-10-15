@@ -445,6 +445,16 @@ pub struct GpuLevel {
 }
 
 impl GpuLevel {
+    /// The device bytes of the level (SPEC-LIT (141.47)).
+    pub fn device_bytes(&self) -> crate::amg::single::DeviceBytes {
+        use crate::amg::single::DeviceBytes as B;
+        B::of_label(&self.owner)
+            + B::of_label(&self.neighbour)
+            + B::of_float(&self.diag)
+            + B::of_float(&self.upper)
+            + B::of_float(&self.lower)
+    }
+
     /// The level back on the host, exactly `n` entries even when a buffer
     /// is the padded one.
     pub fn download(&self, gpu: &Gpu) -> Result<HostLevel> {
@@ -547,6 +557,18 @@ impl GpuGalerkin {
             n_slots: plan.n_slots(),
             has_boundary_sources: plan.has_boundary_sources(),
         })
+    }
+
+    /// The device bytes of the lists (SPEC-LIT (141.47)).
+    pub fn device_bytes(&self) -> crate::amg::single::DeviceBytes {
+        use crate::amg::single::DeviceBytes as B;
+        B::of_label(&self.slot_offset)
+            + B::of_label(&self.slot_src)
+            + B::of_label(&self.agg_offset)
+            + B::of_label(&self.agg_cells)
+            + B::of_label(&self.cell_agg)
+            + B::of_label(&self.owner)
+            + B::of_label(&self.neighbour)
     }
 
     /// A device buffer is at least the level's length (a field may be
