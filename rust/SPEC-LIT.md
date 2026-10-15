@@ -41262,8 +41262,8 @@ variants of `docs/schema/case-1.json` with their required members.
 | radiation | `MarshakRadiationFixedTemperature` | owned | CHR-23 | — | — |
 | radiation | `greyDiffusiveRadiation` | owned | CHR-23 | — | — |
 | radiation | `wideBandDiffusiveRadiation` | owned | CHR-23 | — | — |
-| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | — |
-| species | `specieTransfer` | owned | CHR-29 | — | — |
+| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
+| species | `specieTransfer` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
 | refused | `coded*` | refused | — | — | compiles C++ written into the case, at run time |
 | refused | `#codeStream` | refused | — | — | runs code at parse time; the directive form is skipped by the reader |
 | refused | `cyclicACMI` | refused | — | — | couples partly overlapping patches through AMI weights |
@@ -43670,6 +43670,123 @@ run writes.
   at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
   the modified pressure `p - rho (g . x)` the hydrostatic level is written
   in, as in §120.7.
+
+No GPL-licensed source was consulted.
+
+### 120.15 The species family - a film mass-transfer coefficient through a baffle and to a reservoir (CHR-29)
+
+*DESIGN, with the film law from the literature.* `semiPermeableBaffleMassFraction`
+and `specieTransfer` are two §4 triple rewrites on the solved members of a
+species set (§19, §86). Their names are taken by name only (§120's rule); the
+law they apply is the defining relation of a mass-transfer coefficient (Bird,
+Stewart & Lightfoot, §22.1): a flux proportional to a concentration
+difference, the coefficient carrying everything between the two values. The
+entries are ours: `c`, the film coefficient in m/s (required, finite, `>= 0`;
+`c = 0` holds the species back), `neighbourPatch` on a baffle, and `Yinf` on
+`specieTransfer` (default 0).
+
+The outward flux of the transported quantity through a face `f` of the patch
+is taken between the two cell values adjacent to the baffle, or between the
+cell and the reservoir:
+
+```
+semiPermeableBaffleMassFraction:  n_f = c (Y_P - Y_N)                      (120.15a)
+specieTransfer:                   n_f = c (Y_P - Y_inf)                    (120.15b)
+```
+
+per unit area on the constant-density equation of §19. On the mass-weighted
+equation of §86 they are `rho_m c (...)`: at a `specieTransfer` face `rho_m =
+rho_b`, the face density the assembly already multiplies the diffusivity by;
+at a baffle face `rho_m = (rho_b + rho_b,partner)/2`, the same number on the
+two sides, so the two sides' film laws are one law. `Y_N` is the value of the
+cell behind face `j` of the partner patch: a baffle's two patches pair face
+`j` with face `j`, as a cyclic's do, and must have the same size, coincident
+face centres (within `1e-6 sqrt(|S_f|)`), the same condition naming each
+other, and the same `c` bit for bit, or the flux leaving one side is not the
+flux entering the other. Because the driving difference is taken between the
+two CELL values, `1/c` is the whole resistance between the two cell centres:
+the two half-cells beside the baffle are inside it, not in series with it. A
+case that knows a membrane's own coefficient `k_m` and wants the half-cells
+in series gives `c = 1/(1/k_m + d_P/D + d_N/D)` itself, `d_P` and `d_N` the two
+cell-centre-to-face distances.
+
+The triple that makes the laplacian apply exactly that flux follows from
+§4's `snGrad_b = fr Delta_b (psi_ref - psi_P) + (1 - fr) g_ref`:
+
+```
+fr = c (rho_m/rho_b) / (Gamma_b Delta_b),   psi_ref = Y_N (or Y_inf),   g_ref = 0   (120.15c)
+Gamma_b = nu/Pr + nu_t,b/Pr_t
+```
+
+with `rho_m/rho_b = 1` on the constant-density equation and at a
+`specieTransfer` face (the factor is then not formed),
+
+and `Gamma_b` formed as `turbGammaBoundary` forms it from the species'
+`Pr = nu/D` and `Pr_t = Sc_t`, so `rho_b Gamma_b |S_f| snGrad_b = rho_m c
+|S_f| (Y_N - Y_P)` (and without the densities on the constant-density
+equation) to round-off. `fr` may exceed 1 when `c > Gamma_b Delta_b`; the matrix
+coefficient stays `c |S_f| > 0` and the face value is then the linear
+extrapolation that carries that gradient. `c = 0` gives `fr = 0` and `g_ref =
+0` exactly: a zero-gradient face whose matrix contribution is exactly zero.
+A species with `D = 0` is refused a positive `c` (its half-cell has no
+laminar conductance to carry it). Only a plain patch or a wall carries one;
+an empty, symmetry or coupled patch is refused by name.
+
+`Species::setup_member` lowers a member's raw field: a field without either
+name goes to `setup_scalar_field` unchanged, so a member set up that way is
+set up exactly as before; each carrying patch is set up as `zeroGradient`,
+its faces are marked `Mixed`, and a rule (patch, face range, partner range,
+`c`, `Y_inf`) is kept. `Species::correct_with_density` rewrites every rule's
+triple by (120.15c) in one `spcTransferTriple` launch per patch, from the
+fields as they stand and the call's `nu_t`, before that species' own solve:
+`Y_P` is implicit, `Y_N` is the partner cell's value at the rewrite, the
+explicit half of §4's rewrite. The two sides of a baffle therefore carry
+equal and opposite fluxes at a steady state and differ by `c |S_f|` (`rho_m c
+|S_f|`) times the sum of the two cells' changes over the step in a transient - exact transient
+conservation across the baffle would need the baffle as an implicit coupled
+entry (§47.3's interface), which this unit does not build. A set without a
+rule launches nothing, and the arithmetic of every other species path is the
+one it was. `ofgpu-lowmach`'s reacting set (§133.11) sets its members up
+through `setup_member`, and writes a baffle's `neighbourPatch` back out.
+
+**The generic reader refuses both names by name.** `BcKind::from_name` has
+one arm for the pair, whose note says the condition is lowered only on a
+solved member of a species set: on a case without species, or on a field
+outside the set (`T`, `U`, the inert remainder), the case is refused naming
+the condition, the field and the patch, and `-permissive` substitutes
+`zeroGradient`, an impermeable wall. That is why the two rows stay **owned**
+by CHR-29 in the table, as CMP-16/17/18's and BC-20's kinds stay owned or
+planned while their own lowering path accepts them: `from_name` refuses them
+and the species set lowers them.
+
+For the 1-D slab of the gate - `N = 16` cells of `h = 1/16` m, the baffle
+between cells 7 and 8, `Y = 1` and `Y = 0` held at the two ends - the profile
+is linear in each half, which the finite-volume discretisation reproduces
+exactly, and the series resistances from the two end faces to the cell
+centres beside the baffle give
+
+```
+J = (Y_left - Y_right) / (15 h / D + 1/c)                                  (120.15d)
+```
+
+**Gates** (`tests/species_bc.rs`, both builds; class R tolerances are
+D-F32-1's `max(t, min(t 2^29, 1e-5))` under `single`):
+
+| test | class | what it holds | measured |
+|---|---|---|---|
+| `species_semipermeable_baffle_flux` | R | species A (`c = 1e-4`, `D = 2e-5`) marched to steady state at `dt = 1e7` s: `c (Y_7 - Y_8)`, every interior face's `D (Y_i - Y_i+1)/h` and both end faces' fluxes equal (120.15d)'s `J = 1.758242e-5` to 1e-12 relative; species B (`c = 0`) has `fr = +0` and `g_ref = +0` bit for bit on both baffle faces and relaxes to uniform on each side | 1.657e-14 (f64), 7.653e-6 (f32, tol 1e-5) |
+| `species_transfer_budget_closes` | R | mass-weighted, `rho` varying in space, the baffle plus a `specieTransfer` sink (`c = 5e-5`, `Y_inf = 0`): per step and species `abs(Δ Σ rho Y V - dt Σ_b rho_m c S_b (Y_ref - Y_P) - Δclip) <= 1e-12` of the mass (86.5), the transfer above 1e-6 of it; species C (`c = 0` on both) keeps its mass on each side to 1e-12 of it | 1.472e-16 with the transfer at 8.280e-6, side masses 3.163e-16 (f64); 7.252e-9 and 4.489e-8 (f32, tol 1e-5) |
+| `species_bc_refused_without_species` | D | `from_name` refuses both names on `T` naming them and this section; `setup_scalar_field` refuses `specieTransfer` on `T`; `setup_member` refuses a missing `c`, `c < 0`, a missing or unknown `neighbourPatch`, a partner with another `c` or another condition, `Yinf = 1.5`, an empty patch, and a positive `c` with `D = 0`; a raw field without either name gets no rule | all refused by name |
+
+The species set's existing pins (`tests/chem_species.rs`
+`species_without_chemistry_is_bitwise`, §132.11) hold unchanged: a set
+without a rule runs the arithmetic it ran before.
+
+* **Bird, R. B., Stewart, W. E. & Lightfoot, E. N.** *Transport Phenomena*,
+  2nd ed., Wiley (2002), §22.1 (the definition of mass-transfer coefficients
+  in one phase) - the film law (120.15a)-(120.15b): a flux proportional to a
+  concentration difference through a coefficient that carries everything
+  between the two values.
 
 No GPL-licensed source was consulted.
 
@@ -48637,8 +48754,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
-and CHR-12a wires it from the case; this unit builds the slot and the two rows
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18)).
+CHR-12a lowers its inputs from the case (§137.7) and CHR-12b wires it in the
+driver; this unit builds the slot and the two rows
 that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
@@ -48847,8 +48965,8 @@ by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
 with the current level's `1/W`, as it takes the `cp` field as last set.
 
 **What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
-`set_molar_change` takes the net source, and CHR-12b forms it from the species
-equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+`set_molar_change` takes the net source, and CHR-12b forms it, (133.24) of
+§133.11, from the species equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
 on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
 still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
 measured drift below is first order in `Δt`.
@@ -48872,6 +48990,110 @@ energy solve, as on the constant-`W` path. The numbers above are for that
 order. CHR-12b keeps it.
 
 Labels: (133.19)-(133.23).
+
+### 133.11 The reacting driver as built (CHR-12b, `src/bin/lowmach.rs`, `src/bin/lowmach_chem/`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's as
+§133.1-§133.10 write them and §132's split step; this section adds the
+discrete diffusion half of (133.21)'s net source, (133.24), and the order in
+which `ofgpu-lowmach` runs them. It is this project's own contract (ORIGINAL).
+
+**What runs.** A JSONC case whose `species`, `chemistry` and `combustion`
+blocks lower (§137.7) with `combustion.model laminar` runs as laminar
+finite-rate chemistry, Lie split (§132.5): chemistry first, then transport.
+`common::load_case_with(path, true)` lets the blocks past §137.7's seam for
+this driver only; every other driver keeps the refusal through
+`common::load_case`.
+
+**The species set.** Every solved member gets §86's mass-weighted equation,
+`d(rho Y)/dt`, with the density of the step. Its diffusivity is the Lewis
+route of §133.4, `D_k = lambda/(rho cp Le_k) = nu/(Pr Le_k)`, with this
+driver's constant `nu` and `Pr` and `Le_k` from the case (1 by default), and
+`Sc_t` the case's. The controls are read by the species' own entry names
+(§13.4.1): `solvers` and `relaxation` under `Yi` (relaxation 1 when the case
+names none), `grad(Yi)`, and the convection `div(phi,Yi_h)` or `div(phi,Yi)`
+when the case names one (two different entries are refused), otherwise §19's
+bounded Gauss upwind. The case's `div` `default` is never taken.
+
+**One step, in this order.** `o` marks the step's opening state.
+
+1. Open the step (from the second on): `Simple::begin_time_step`, `T`'s
+   levels, `p0`'s levels, and then every solved `Y_k`'s levels
+   (`Y^(n-2) <- Y^(n-1) <- Y`). The last rotation is what makes (133.20)'s
+   `rho^(n-1)` the opening state's, so `rho^n = rho^(n-1)` at the energy
+   solve, as §133.10 requires of the order.
+2. `T`'s and every `Y_k`'s `inletOutlet` faces switch on the last flux.
+3. `rho` by (133.19)-(133.20) from `T`, `Y_k` and `p0`.
+4. `EnergySources::clear`; the mixture `cp` (133.18) into the energy
+   equation's `cp` field; the split step (132.10) with every cell's reactor
+   at `p0`; the heat release (133.16) and the enthalpy diffusion (133.17)
+   registered, ahead of `-heaterPower`, the thermostat and the case's sources.
+5. The molar change of (133.21), with each solved member's net source
+
+```
+S_k,P = rho_P (Y*_k,P - Y°_k,P)/dt + (1/V_P) Σ_f rho_f D_k |S_f| snGrad(Y°_k)_f          (133.24)
+```
+
+   The first term is the split step's own source on the mass-weighted
+   equation (§132.11). The second is `-div Gamma_k` with
+   `Gamma_k = -rho D_k grad Y_k`: `rho_f` interpolated linearly, the
+   uncorrected `snGrad` and `fvc::div` of the face flux (`fv::sn_grad_flux`,
+   `fv::fvc_div_surface`). *DESIGN, decided by recommendation:* it carries
+   the laminar `D_k` only, as (133.17) does and for the same reason (§133.9).
+6. `Energy::update_target_divergence` ((133.21)), `Simple::correct_outer_low_mach`
+   and `Energy::correct`.
+7. The species equations, on the flux the pressure solve made.
+8. Transient: `GasState::advance_p0_mixture` from
+   `Energy::constraint_integrals`, (133.22); an open gas keeps `p0`.
+
+A case without the blocks makes the calls it made before CHR-12b, in the same
+order: `outer_iteration`'s `None` arm is the old sequence.
+
+**Written.** Every solved `Y_k` with its own boundary types, the inert member
+and `HRR` (133.16)'s `Q_chem` in W/m3, both with `calculated` in place of the
+value rules and the constraint patches kept. The final cell values of `T`,
+`rho`, `HRR` and every member are also held at full precision in the driver's
+`RunEnd`, because the written fields carry six digits.
+
+**Refused by name, before a field is set up** (`lowmach_chem::refuse_settings`):
+a steady run (the split step integrates over a physical `dt`); EDM, EDC and
+PaSR, which lower (§137.7) and are CHR-14's and CHR-15's; Strang splitting;
+a `ddt` other than Euler (the box lands on the reactor under Euler, §133.9,
+and the species keep one old level); a checkpoint, `-restartFrom`,
+`-restartWrite` or an output restart series (the `.mcr` format carries no
+mass fractions); a motion block; and a species named like another field the
+run writes. The dictionary route keeps §137.7's refusal: a case directory
+with chemistry is refused by every driver.
+
+**What is not built, stated.** The dictionary route, Strang, `backward`, a
+restart of the mass fractions, the closures of §134, the turbulent part of
+(133.24), and §93.5's Mach number with the mixture's own `R_s` (it still
+reads the constant one, §133.10).
+
+**Tree against plan.** The plan's row names "a reduced 1-D JL flame".
+`cases/mech/jl4.ck` does not exist: its paper is unread and no rate is
+written from memory (`cases/mech/README.md`). The tube below runs CHR-06's
+fifteen-reaction fixture with its placeholder rates instead. The plan's 0-D
+box is CHR-09's 2^3 box, cyclic on all three axes. Through the driver that box
+does not stay at rest. Its domain is open, so the target divergence (133.21)
+is uniform and nonzero, and with no open boundary the pressure equation has
+no solution. The mean is removed, the round-off left over is solved, and the
+flow it makes grows to about 2 m/s in 200 steps (measured). The pair below
+therefore runs the box as two cells with adiabatic walls. There the pressure
+source cancels to an exact zero, the written `U` is exactly zero, and the box
+is the same 0-D problem.
+
+**Gates, measured 2026-10-16 (both builds, `lowmach_chem::tests`, bin tests
+of `ofgpu-lowmach`).** The chemistry is CHR-06's fixture over TM-4513's ten
+records, with the reactor at `rtol` 1e-6.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `lowmach_reacting_case_equals_library` | the 0-D box (2 cells, 1 cm, adiabatic walls, open, `p0` 1 atm, stoichiometric H2-air with H, O and OH at 1e-4 moles, 1400 K) through a case for 200 Lie steps at dt = 1e-6 s, against steps 1-8 made by hand from the library on the same lowered case without the flow solve: `T`, `rho`, `HRR` and every member, cell by cell; the written `U` exactly zero; the box heats by more than 10 K | bitwise | D | every member, `T`, `rho` and `HRR` equal in both cells in both builds (0 of 2 differ); `T` 1400 -> 1456.270 K (f64) and 1456.269 K (f32). Diagnostic: the box's H and O content moved by `1.4e-12` and `6.1e-13` (f64), `3.7e-6` and `2.7e-6` (f32) |
+| `lowmach_reacting_elements_conserved` | a 1-D tube (40 x 1 x 1 cells over 1 cm; premixed H2-air entering at 1 m/s and 1400 K into gas at 1000 K, an open outlet, symmetric sides), 200 steps at dt = 1e-5 s without a NaN; every cell's element content `n_e = Σ_k a_ek Y_k/W_k` of H, O and N against the premixed value, relative, and C (absent) staying absent. Equal diffusivities, the reactor's element balance and the bounded convection keep a uniform composition uniform | `1e-10` (D-F32-1: `1e-5` in f32) | R | f64: H `6.43e-13`, O `5.01e-13`, N `1.71e-13`, C `2.1e-20` mol/kg; f32: `6.10e-6`, `5.68e-6`, `1.90e-6`, `3.0e-20`; no NaN, `T` 2152-2738 K, max `HRR` `1.39e9` W/m3 |
+| `lowmach_reacting_refusals_name_the_setting` | a steady run, Strang, `-restartWrite` and `backward`, each refused naming its key and §133.11 | refused | D | all four, both builds |
+
+Labels: (133.24).
 
 ---
 
@@ -50834,10 +51056,9 @@ An injector requires `position` and `massFlow`. Its other fields default to
   or `cpGas` with `physics inert`; `evaporation` unless `physics
   evaporating`; `impact` unless `wall weber`; and `coupling.vapour` with
   `mass none`.
-* `coupling.mass evaporation` without a `species` block. The JSONC route has
-  none until CHR-12a, so `JsonCase::lower` passes no species and the mass
-  coupling is refused there. The lowering already takes `species.names` for
-  CHR-12a to pass in.
+* `coupling.mass evaporation` without a `species` block. Since CHR-12a,
+  `JsonCase::lower` passes the lowered `species.names` (§137.7), so a JSONC
+  case with a `species` block may name its vapour.
 * `coupling.mass evaporation` without a `vapour`, or with a `vapour` that is
   not in `species.names`.
 * An unknown liquid `preset`.
@@ -50861,6 +51082,135 @@ CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
 | `case_parcels_lowers_every_field` | one case sets every `ParcelControls`, `EvaporationControls`, `LiquidProperties`, `WallImpactControls`, `CouplingControls` and `Injector` field to a non-default value; each is read back; the dictionary route equals the JSONC route; serde round trip | exact | D |
 | `case_parcels_refusals` | every refusal above, the driver seam included | refused, naming the key | D |
 | `tests/case_parcels.rs` | both routes equal, and `film` refused, in both builds | exact | D |
+
+No labels.
+
+### 137.7 The `species`, `chemistry` and `combustion` blocks as built (CHR-12a)
+
+`src/io/case_chem.rs` builds §137.2's three tables. This subsection records
+the rules the tables leave open, as the code applies them. It is this
+project's own contract (ORIGINAL), with no external source.
+
+**One lowering for both routes.** The JSONC route reads the three blocks of
+`JsonCase`. The dictionary route turns each dictionary into the JSON object
+the JSONC route reads and hands it to the same `deny_unknown_fields`
+deserialiser, so an unknown key is refused by name on both routes.
+`case_chem::lower_blocks` is the only lowering. It produces one
+`LoweredChem`, which holds the species set, the chemistry and the closure, and
+`JsonCase::lower` stores it in `LoweredCase::chem`. In the dictionaries:
+
+* `constant/thermophysicalProperties` gives `species` (a list) as `names`
+  and `inertSpecie` as `inert`, and the sub-dictionary `speciesTransport`
+  gives `transport`. The file's other entries belong to other readers
+  (§122.6, §37.4) and are not looked at. `inertSpecie` or `speciesTransport`
+  without a `species` list is refused, because it would be read and ignored.
+* `constant/chemistryProperties` holds the `chemistry` keys, with the same
+  spellings (`mechanism`, `thermo`, `integrator`, `rtol`, `atol`,
+  `splitting`).
+* `constant/combustionProperties` holds the `combustion` keys. `model` may
+  also be spelled `combustionModel`, on both routes.
+* `constant/reactions` (a foam-format reaction list) is refused, naming the
+  CHEMKIN route. The mechanism is always a CHEMKIN file (§129).
+
+**Two stages.** `lower_blocks` applies every refusal that the keys alone
+decide. `LoweredChem::load(base)` reads the two files, with their paths
+taken relative to `base`, the case's directory. It applies the refusals that
+need the files, and it returns the `Mechanism`. The thermo file is read at
+CHEMKIN's `P_ATM` (§128.4) with the standard element table.
+
+**The species set.** `names` holds every species, the inert one included.
+`inert` has no default. The Lewis route of §133.4 is the one model, with
+`Le` 1 for every species the case does not name and `Sct` §19's 0.7.
+`LoweredSpecies::le` is in `names` order. On the JSONC route each SOLVED
+species gets one field (`LoweredScalarField`, dimensionless):
+
+* `initial` maps a name to a uniform mass fraction, and every solved
+  species needs one. The inert's value is `1 - sum`, so stating it is
+  refused. A value outside `[0, 1]` is refused, and so is a sum of the solved
+  values above 1, because the inert's value would then be negative. The test
+  is exact, in f64.
+* `patches` is an ordered array of `{ "match": <ERE>, "Y": { name: bc } }`.
+  The first rule whose `match` matches a boundary patch governs it, in file
+  order. A species that rule does not list gets its patch kind's default:
+  `zeroGradient` on a wall, `inletOutlet` at the species' initial value on an
+  open patch, and the constraint on an empty, symmetry or wedge patch. On an
+  inlet a species has no default, so it is refused, naming the patch and the
+  species. That is the same rule as `T`'s.
+* A condition is `fixedValue`, `inletOutlet` or `zeroGradient`. The two
+  temperature types are refused, and so is a value outside `[0, 1]`. A
+  condition on the inert species is refused, because the inert species is
+  closed by `1 - sum` on every face.
+
+On the dictionary route the fields are the case's `0/` files. A solved
+species with no `0/<name>` is refused there, because it has no initial
+value.
+
+**The chemistry.** `mechanism` and `thermo` are required with a `species`
+block. A `species` block without `chemistry` is refused, and so are
+`chemistry` or `combustion` without `species`. `integrator` goes through
+`rosenbrock::Method::from_name`, so `ros4` keeps §132.7's reason. `rtol`
+and `atol` replace `ReactorOptions::default()`'s `rtol` and `atol_y` (the
+mass-fraction tolerance, §132.8), and the rest of the reactor's controls
+keep their defaults. A `transport` (TRAN) path is always refused while the
+Lewis route is the one model, because it would be read and ignored.
+`species` together with `physics.compressible` is refused, because
+compressible reacting flow is out of scope (docs/17 §2).
+
+**The closure.** The keys of a closure that the case did not select are
+refused, for example `A` under `laminar` or `Cmix` under `EDC` (§13.4.1).
+The combination with the turbulence model is checked through
+`case_chem::MixingKind`, which names `MixingRate`'s four arms.
+`MixingKind::of_model` reads the arm from the case's `turbulence.kind` and
+`model` through `RasModel::dissipation_field`. `MixingKind::of` reads it
+from a running model's `mixing_rate()`, for the driver. Then:
+
+* EDM, EDC or PaSR with `None` (laminar, Spalart-Allmaras) is refused.
+* Any of the three with a model name this crate does not build is refused,
+  because its mixing rate is unknown.
+* EDM or EDC with `Strain` (LES) is refused.
+* PaSR's `tauMix strain` needs `Strain`. Under `Strain`, the three
+  `epsilon` mixing times are refused.
+* `Cmix` is required with `tauMix integral` and refused with the others.
+* EDC's `variant` may be written as a number or a string. `batch` keeps
+  §134.3's reason.
+* Every number is refused unless it is finite and above zero, and
+  `gammaMax` must lie in `(0, 1)`.
+
+**The file-dependent refusals** of `load` are these:
+
+* §129's own refusals. A mechanism species with no thermo record is one of
+  them, and it names the mechanism file and its line.
+* A name that is in neither the thermo file nor the mechanism's thermo
+  block (§128).
+* A mechanism species that is not in `species.names`, and a name that is not
+  a mechanism species. `ChemSource::new` (§132.11) refuses both too, so the
+  case is refused before a device is touched.
+* EDM with more than two reactions, or with a reaction that is reversible,
+  has explicit reverse parameters, or has a third body or a fall-off
+  (§134.1). The reaction is named by its line.
+
+**The driver seam.** No driver runs a reacting case before CHR-12b:
+
+* `common::load_case` refuses a JSONC case through
+  `LoweredCase::refuse_chemistry`.
+* `read_case_controls` refuses a case directory that holds
+  `constant/chemistryProperties`, `constant/combustionProperties` or
+  `constant/reactions`, or whose `thermophysicalProperties` names `species`.
+  A `thermophysicalProperties` that does not parse is left to the readers
+  that use it, so a driver that never read the file does not start failing
+  on it.
+
+CHR-12b replaces the refusal on `ofgpu-lowmach`'s path for a JSONC case
+(§133.11); the dictionary route stays refused. A case without the
+three blocks lowers, serialises and runs exactly as before.
+`docs/schema/case-1.json` is regenerated (§137.2).
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_chem_lowers` | one case sets every key of the three blocks to a non-default value and each is read back; the open and wall defaults; the closures' keys and defaults; `MixingKind` by model name; the dictionary route equals the JSONC route; serde round trip; absent blocks lower to no chemistry and serialise nothing; `load` reads a mechanism | exact | D |
+| `case_chem_refusals` | every refusal above, on both routes and in `load`, the driver seam included | refused, naming the key | D |
+| `the_shipped_schema_is_the_generated_one` | `docs/schema/case-1.json` equals `emit_schema()` (the plan's `schema_matches_emit`) | exact | D |
+| `tests/case_chem.rs` | both routes equal, `load`, `ros4` and EDM under `MixingRate::None` refused, in both builds | exact | D |
 
 No labels.
 

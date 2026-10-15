@@ -12,6 +12,9 @@
   Written from:
     ofgpu SPEC-LIT.md section 19 - the N-1 formulation, the boundedness
       requirement and the sum-to-one constraint
+    ofgpu SPEC-LIT.md section 120.15 - the two species boundary conditions
+      as triple rewrites (spcTransferTriple; Bird, Stewart & Lightfoot,
+      "Transport Phenomena", 2nd ed., section 22.1, for the film coefficient)
     Patankar, "Numerical Heat Transfer and Fluid Flow" (1980) section 4.2 -
       the source linearisation the reaction rates use, via sources.cu
   No GPL-licensed source was consulted.
@@ -178,4 +181,67 @@ extern "C" __global__ void spcSumError
     const ofscalar total = sum[c] + yInert[c];
     const ofscalar d = total - (ofscalar)1;
     err[c] = d < (ofscalar)0 ? -d : d;
+}
+
+
+// ==========================================================================
+//  The species boundary conditions as a triple rewrite - SPEC-LIT 120.15
+//
+//  One rule (one patch) per launch, one thread per face of it. The face's
+//  outward flux of the transported quantity is the film law (120.15a/b),
+//
+//      n_f = c (Y_P - Y_N)        Y_N the paired baffle face's cell value
+//      n_f = c (Y_P - Y_inf)      specieTransfer (nbrStart < 0)
+//
+//  and the section 4 triple that makes the laplacian apply exactly that is
+//  (120.15c): fr = c / (Gamma_b Delta_b) on the constant-density equation,
+//  refValue = Y_N (or Y_inf),
+//  refGrad = 0, with Gamma_b = nu + rSigma nut_b written as turbGammaBoundary
+//  writes it, so Gamma_b |Sf| snGrad_b = c |Sf| (Y_N - Y_P). On the
+//  mass-weighted equation (weighted != 0) the assembly multiplies Gamma_b by
+//  the face density rho_b, and the flux is rho_b c (Y_P - Y_N) at a
+//  specieTransfer face; at a baffle face fr carries rho_m/rho_b as well,
+//  rho_m = (rho_b + rho_b,partner)/2 the same number on both sides, so the
+//  two sides' fluxes are rho_m c (Y_P - Y_N) and its negative. c = 0 gives
+//  fr = 0 and refGrad = 0: zero gradient, and a flux of exactly zero.
+//
+//  The neighbour value is the one the paired cell holds when the rewrite
+//  runs (before this species' solve), the explicit half of section 4's
+//  rewrite; the cell's own value stays implicit.
+// ==========================================================================
+
+extern "C" __global__ void spcTransferTriple
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofscalar* __restrict__ psi,
+    const oflabel* __restrict__ bFaceCells,
+    const ofscalar* __restrict__ nutB,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofscalar* __restrict__ rhoB,
+    oflabel weighted,
+    oflabel start,
+    oflabel nbrStart,
+    oflabel n,
+    ofscalar c,
+    ofscalar yInf,
+    ofscalar nu,
+    ofscalar rSigma
+)
+{
+    const oflabel j = OFGPU_TID;
+    if (j >= n) return;
+
+    const oflabel i = start + j;
+    const ofscalar gamma = nu + rSigma*nutB[i];
+    ofscalar ratio = (ofscalar)1;
+    if (weighted != 0 && nbrStart >= 0)
+    {
+        const ofscalar rhoP = rhoB[i];
+        ratio = (ofscalar)0.5*(rhoP + rhoB[nbrStart + j])/rhoP;
+    }
+    fr[i] = c*ratio/(gamma*bDeltaCoeffs[i]);
+    refValue[i] = nbrStart >= 0 ? psi[bFaceCells[nbrStart + j]] : yInf;
+    refGrad[i] = (ofscalar)0;
 }

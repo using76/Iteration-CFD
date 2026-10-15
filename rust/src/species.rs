@@ -17,6 +17,10 @@
 //!   ofgpu `SPEC-LIT.md` §132.5 and §132.11 - the reaction source (132.10)
 //!     the split chemistry step of [`crate::chem::source`] hands each
 //!     solved species through `su`
+//!   ofgpu `SPEC-LIT.md` §120.15 - the species boundary conditions
+//!     `semiPermeableBaffleMassFraction` and `specieTransfer` as §4 triple
+//!     rewrites ([`Species::setup_member`]); the film coefficient of Bird,
+//!     Stewart & Lightfoot, *Transport Phenomena*, 2nd ed., section 22.1
 //! No GPL-licensed source was consulted.
 //!
 //! ```text
@@ -64,10 +68,11 @@ use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
-use crate::field::GpuScalarField;
+use crate::field::{BcKind, GpuScalarField};
 use crate::field_ops::{self, FieldKernels};
+use crate::io::fields::{PatchFieldSpec, RawScalarField};
 use crate::io::schemes::DivEntry;
-use crate::mesh::{GpuMesh, HostMesh};
+use crate::mesh::{GpuMesh, HostMesh, PatchKind};
 use crate::scalar_transport::{ScalarTransport, ScalarTransportCoeffs};
 use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::turbulence::{FlowState, TurbulenceControls};
@@ -149,6 +154,7 @@ struct SpeciesKernels {
     accumulate: CudaFunction,
     close_inert: CudaFunction,
     sum_error: CudaFunction,
+    transfer: CudaFunction,
 }
 
 impl SpeciesKernels {
@@ -160,8 +166,154 @@ impl SpeciesKernels {
             accumulate: k.func("spcAccumulate")?,
             close_inert: k.func("spcCloseInert")?,
             sum_error: k.func("spcSumError")?,
+            transfer: k.func("spcTransferTriple")?,
         })
     }
+}
+
+// ==========================================================================
+//  The species boundary conditions - SPEC-LIT 120.15
+// ==========================================================================
+
+/// The two species boundary-condition names of SPEC-LIT §120.15.
+pub const SPECIES_BC_NAMES: [&str; 2] = ["semiPermeableBaffleMassFraction", "specieTransfer"];
+
+/// Which film law a [`SpeciesBcRule`] applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeciesBcKind {
+    /// `semiPermeableBaffleMassFraction`: `n_f = c (Y_P - Y_N)` with `Y_N`
+    /// the paired face's cell on the other side of the baffle (120.15a).
+    SemiPermeableBaffle,
+    /// `specieTransfer`: `n_f = c (Y_P - Y_inf)` to a reservoir (120.15b).
+    Transfer,
+}
+
+/// One patch of one solved species carrying a SPEC-LIT §120.15 condition:
+/// what `spcTransferTriple` rewrites the patch's §4 triple from, once per
+/// [`Species::correct_with_density`], before the species' own solve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeciesBcRule {
+    pub kind: SpeciesBcKind,
+    /// The patch's name, for messages.
+    pub patch: String,
+    /// The patch's first face in the flattened boundary, and its size.
+    pub start: usize,
+    pub size: usize,
+    /// The paired baffle patch's first face (face `j` pairs with face `j`);
+    /// `None` for [`SpeciesBcKind::Transfer`].
+    pub nbr_start: Option<usize>,
+    /// The film mass-transfer coefficient `c`, m/s (120.15a); 0 holds the
+    /// species back - a flux of exactly zero.
+    pub c: Scalar,
+    /// The reservoir value of (120.15b); 0 on a baffle, where it is unused.
+    pub y_inf: Scalar,
+}
+
+/// The message prefix of every §120.15 refusal.
+fn bc_where(species: &str, patch: &str, ty: &str) -> String {
+    format!("species \"{species}\": boundaryField/{patch}: {ty} (SPEC-LIT 120.15)")
+}
+
+/// `c` of one entry: required, finite and non-negative.
+fn transfer_coefficient(spec: &PatchFieldSpec, species: &str, patch: &str) -> Result<Scalar> {
+    let ty = spec.type_name.as_str();
+    let c = spec.number("c", patch)?.ok_or_else(|| {
+        Error::Config(format!(
+            "{}: needs a `c` entry, the film mass-transfer coefficient in m/s (0 holds the \
+             species back)",
+            bc_where(species, patch, ty)
+        ))
+    })?;
+    if !(c.is_finite() && c >= 0.0) {
+        return Err(Error::Config(format!(
+            "{}: c = {c} is not a mass-transfer coefficient (finite, >= 0, m/s)",
+            bc_where(species, patch, ty)
+        )));
+    }
+    Ok(c)
+}
+
+/// The paired side of a `semiPermeableBaffleMassFraction` patch: its first
+/// face, after the checks [`Species::setup_member`] lists.
+#[allow(clippy::useless_conversion)]
+fn baffle_partner(
+    raw: &RawScalarField,
+    hm: &HostMesh,
+    pi: usize,
+    spec: &PatchFieldSpec,
+    c: Scalar,
+    species: &str,
+) -> Result<usize> {
+    let p = &hm.patches[pi];
+    let ty = spec.type_name.as_str();
+    let here = || bc_where(species, &p.name, ty);
+    let Some(nbr) = spec.neighbour_patch.as_deref() else {
+        return Err(Error::Config(format!(
+            "{}: needs a `neighbourPatch` entry naming the baffle's other side",
+            here()
+        )));
+    };
+    let Some(qi) = hm.patches.iter().position(|q| q.name == nbr) else {
+        return Err(Error::Config(format!(
+            "{}: neighbourPatch \"{nbr}\" - the mesh has no such patch",
+            here()
+        )));
+    };
+    if qi == pi {
+        return Err(Error::Config(format!(
+            "{}: neighbourPatch names the patch itself",
+            here()
+        )));
+    }
+    let q = &hm.patches[qi];
+    match raw.spec(&q.name)? {
+        Some(o) if o.type_name == ty && o.neighbour_patch.as_deref() == Some(p.name.as_str()) => {
+            let oc = transfer_coefficient(o, species, &q.name)?;
+            if oc.to_bits() != c.to_bits() {
+                return Err(Error::Config(format!(
+                    "{}: the two sides of a baffle must carry the same `c` - {c} here, {oc} on \
+                     \"{}\" - or the baffle is not conservative",
+                    here(),
+                    q.name
+                )));
+            }
+        }
+        _ => {
+            return Err(Error::Config(format!(
+                "{}: its partner \"{}\" must carry {ty} with neighbourPatch \"{}\"",
+                here(),
+                q.name,
+                p.name
+            )));
+        }
+    }
+    if q.size != p.size {
+        return Err(Error::Config(format!(
+            "{}: {} faces against {} on \"{}\" - the faces pair one to one",
+            here(),
+            p.size,
+            q.size,
+            q.name
+        )));
+    }
+    for j in 0..p.size {
+        let (a, b) = (hm.b_cf[p.start + j], hm.b_cf[q.start + j]);
+        let d2 = [a.x - b.x, a.y - b.y, a.z - b.z]
+            .iter()
+            .map(|d| f64::from(*d) * f64::from(*d))
+            .sum::<f64>();
+        let scale = 1e-6 * f64::from(hm.b_mag_sf[p.start + j]).sqrt();
+        if !(d2.sqrt() <= scale) {
+            return Err(Error::Config(format!(
+                "{}: face {j} does not sit on face {j} of \"{}\" ({:.3e} m apart) - the faces \
+                 pair in order, as a cyclic's do",
+                here(),
+                q.name,
+                d2.sqrt()
+            )));
+        }
+    }
+    Ok(q.start)
 }
 
 // ==========================================================================
@@ -213,6 +365,11 @@ pub struct Species<'m> {
     /// one. Empty until [`Species::use_reaction_sources`] is called; while
     /// it is empty each equation is handed `None`, exactly as before CHR-09.
     reaction: Vec<DevBuf<Scalar>>,
+
+    /// **SPEC-LIT §120.15.** Per solved species, the patches carrying a
+    /// species boundary condition, set by [`Species::setup_member`]. Empty
+    /// for a species set up any other way, which then launches nothing.
+    bc: Vec<Vec<SpeciesBcRule>>,
 
     sk: SpeciesKernels,
     fldk: FieldKernels,
@@ -286,6 +443,7 @@ impl<'m> Species<'m> {
         }
 
         let nc = m.n_cells.max(1);
+        let n_solved = solved.len();
         Ok(Self {
             m,
             solved,
@@ -298,6 +456,7 @@ impl<'m> Species<'m> {
             clip_ledger: Vec::new(),
             pre_clip: gpu.zeros(nc)?,
             reaction: Vec::new(),
+            bc: vec![Vec::new(); n_solved],
             sk: SpeciesKernels::new(gpu)?,
             fldk: FieldKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
@@ -467,6 +626,135 @@ impl<'m> Species<'m> {
         self.reaction.get_mut(i)
     }
 
+    /// **SPEC-LIT §120.15.** Set solved species `i` up from its raw field,
+    /// lowering the two species boundary conditions the generic reader
+    /// refuses (`semiPermeableBaffleMassFraction`, `specieTransfer`).
+    ///
+    /// A raw field without either is handed to
+    /// [`crate::field_setup::setup_scalar_field`] unchanged, so a member set
+    /// up here is set up exactly as that function sets it up. With one, each
+    /// carrying patch is set up as `zeroGradient`, its faces are marked
+    /// `Mixed`, and a [`SpeciesBcRule`] is kept; the triple is rewritten
+    /// from the rule before every solve of this species (120.15c).
+    ///
+    /// Refused by name, naming the condition and the patch: a missing,
+    /// negative or non-finite `c`; a `Yinf` outside `[0, 1]`; a patch that
+    /// is not a plain patch or wall (an empty, symmetry or coupled patch
+    /// has no triple of its own); a baffle without a `neighbourPatch`, or
+    /// whose partner is not the same condition naming it back with the same
+    /// `c` and the same number of faces at the same centres; and a
+    /// positive `c` on a species with `D = 0`, whose half-cell has no
+    /// laminar conductance to carry it.
+    pub fn setup_member(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        i: usize,
+        raw: &RawScalarField,
+    ) -> Result<()> {
+        let Some(name) = self.names.get(i).cloned() else {
+            return Err(Error::Config(format!(
+                "species: member {i} of {} solved (SPEC-LIT 120.15)",
+                self.names.len()
+            )));
+        };
+
+        let mut carrying: Vec<(usize, PatchFieldSpec)> = Vec::new();
+        for (pi, p) in hm.patches.iter().enumerate() {
+            if let Some(spec) = raw.spec(&p.name)? {
+                if SPECIES_BC_NAMES.contains(&spec.type_name.as_str()) {
+                    carrying.push((pi, spec.clone()));
+                }
+            }
+        }
+        if carrying.is_empty() {
+            self.bc[i].clear();
+            return crate::field_setup::setup_scalar_field(gpu, self.solved[i].field_mut(), raw, hm);
+        }
+
+        let mut rules = Vec::with_capacity(carrying.len());
+        for (pi, spec) in &carrying {
+            let p = &hm.patches[*pi];
+            let ty = spec.type_name.as_str();
+            if !matches!(p.kind, PatchKind::Generic | PatchKind::Wall) {
+                return Err(Error::Config(format!(
+                    "{}: the patch is {:?}, and only a plain patch or a wall carries its own \
+                     boundary triple",
+                    bc_where(&name, &p.name, ty),
+                    p.kind
+                )));
+            }
+            let c = transfer_coefficient(spec, &name, &p.name)?;
+            if c > 0.0 && !(self.d[i] > 0.0) {
+                return Err(Error::Config(format!(
+                    "{}: c = {c} on a species with D = 0 - the transfer is carried through \
+                     the half-cell's laminar conductance, and there is none",
+                    bc_where(&name, &p.name, ty)
+                )));
+            }
+            let rule = if ty == "specieTransfer" {
+                let y_inf = spec.number("Yinf", &p.name)?.unwrap_or(0.0);
+                if !(0.0..=1.0).contains(&y_inf) {
+                    return Err(Error::Config(format!(
+                        "{}: Yinf = {y_inf} is not a mass fraction in [0, 1]",
+                        bc_where(&name, &p.name, ty)
+                    )));
+                }
+                SpeciesBcRule {
+                    kind: SpeciesBcKind::Transfer,
+                    patch: p.name.clone(),
+                    start: p.start,
+                    size: p.size,
+                    nbr_start: None,
+                    c,
+                    y_inf,
+                }
+            } else {
+                let nbr_start = baffle_partner(raw, hm, *pi, spec, c, &name)?;
+                SpeciesBcRule {
+                    kind: SpeciesBcKind::SemiPermeableBaffle,
+                    patch: p.name.clone(),
+                    start: p.start,
+                    size: p.size,
+                    nbr_start: Some(nbr_start),
+                    c,
+                    y_inf: 0.0,
+                }
+            };
+            rules.push(rule);
+        }
+
+        // Every carrying patch set up as the zero-gradient wall it is until
+        // the first rewrite, then its faces marked Mixed so §4's general
+        // form evaluates them.
+        let mut lowered = raw.clone();
+        for (pi, _) in &carrying {
+            lowered
+                .boundary
+                .insert(hm.patches[*pi].name.clone(), PatchFieldSpec {
+                    type_name: "zeroGradient".to_string(),
+                    ..PatchFieldSpec::default()
+                });
+        }
+        let field = self.solved[i].field_mut();
+        crate::field_setup::setup_scalar_field(gpu, field, &lowered, hm)?;
+        let mut kinds = gpu.download(&field.bc_kind)?;
+        for r in &rules {
+            for k in &mut kinds[r.start..r.start + r.size] {
+                *k = BcKind::Mixed as Label;
+            }
+        }
+        gpu.write(&mut field.bc_kind, &kinds)?;
+        self.bc[i] = rules;
+        Ok(())
+    }
+
+    /// Solved species `i`'s SPEC-LIT §120.15 rules (empty for an unknown
+    /// index or a member without one).
+    pub fn boundary_rules(&self, i: usize) -> &[SpeciesBcRule] {
+        self.bc.get(i).map_or(&[], Vec::as_slice)
+    }
+
     /// Is this set integrated in `rho Y` (SPEC-LIT §86)?
     pub fn is_mass_weighted(&self) -> bool {
         self.solved.first().is_some_and(|st| st.is_mass_weighted())
@@ -554,6 +842,17 @@ impl<'m> Species<'m> {
 
         let mut perf = Vec::with_capacity(self.solved.len());
         for (i, st) in self.solved.iter_mut().enumerate() {
+            // SPEC-LIT §120.15: the species boundary conditions' triples,
+            // from the fields as they stand and this call's nut. Nothing
+            // is launched for a species without a rule.
+            if let Some(rules) = self.bc.get(i).filter(|r| !r.is_empty()) {
+                let nu_lam = st.coeffs().alpha_laminar(flow.nu);
+                let r_sigma = st.coeffs().r_prt();
+                for r in rules {
+                    launch_transfer(gpu, &self.sk.transfer, st.field_mut(), self.m, nut, rho, r, nu_lam, r_sigma)?;
+                }
+            }
+
             // SPEC-LIT §132.11: the reaction source, when the set has one;
             // `None` otherwise, which is the call this line made before.
             let p = st.correct_with_density(gpu, flow, nut, self.reaction.get(i), rho)?;
@@ -682,6 +981,56 @@ fn launch_bound(gpu: &Gpu, k: &CudaFunction, y: &mut DevBuf<Scalar>, n: usize) -
             .arg(y)
             .arg(&nl)
             .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// SPEC-LIT §120.15: rewrite one rule's faces of `y`'s triple by (120.15c).
+/// `rho` is the mass-weighted equation's density (`None` on the
+/// constant-density one, where the kernel reads no density).
+#[allow(clippy::too_many_arguments)]
+fn launch_transfer(
+    gpu: &Gpu,
+    k: &CudaFunction,
+    y: &mut GpuScalarField,
+    m: &GpuMesh,
+    nut: &GpuScalarField,
+    rho: Option<&GpuScalarField>,
+    r: &SpeciesBcRule,
+    nu_lam: Scalar,
+    r_sigma: Scalar,
+) -> Result<()> {
+    if r.size == 0 {
+        return Ok(());
+    }
+    let start = r.start as Label;
+    let nbr_start: Label = r.nbr_start.map_or(-1, |s| s as Label);
+    let n = r.size as Label;
+    let weighted: Label = Label::from(rho.is_some());
+    // Unread when `weighted` is 0; any boundary-sized buffer will do.
+    let rho_b = rho.map_or(&nut.bf, |r| &r.bf);
+    let GpuScalarField { fr, ref_value, ref_grad, f, .. } = y;
+    let func = k.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&func)
+            .arg(fr)
+            .arg(ref_value)
+            .arg(ref_grad)
+            .arg(&*f)
+            .arg(&m.b_face_cells)
+            .arg(&nut.bf)
+            .arg(&m.b_delta_coeffs)
+            .arg(rho_b)
+            .arg(&weighted)
+            .arg(&start)
+            .arg(&nbr_start)
+            .arg(&n)
+            .arg(&r.c)
+            .arg(&r.y_inf)
+            .arg(&nu_lam)
+            .arg(&r_sigma)
+            .launch(cfg_for(r.size))?;
     }
     Ok(())
 }
