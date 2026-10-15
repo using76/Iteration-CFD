@@ -101,6 +101,7 @@ use ofgpu::ldu_ops::{
 };
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::DVec3;
+use ofgpu::precision::RowClass;
 use ofgpu::pressure::fft::cufft_available;
 use ofgpu::pressure::{FftBackend, PbicgstabBackend, PressureBackend, SystemProbe};
 use ofgpu::rheology::{herschel_bulkley_channel_u, KinematicCoeffs};
@@ -349,6 +350,11 @@ struct Checks {
     section_count: usize,
     /// How many of them were selected. The rest are one skip row each.
     sections_run: usize,
+    /// The rows taken through a classed method, per precision class in
+    /// `RowClass::ALL` order (P, A, R, D; docs/17 section 5.1 rule 4, SPEC-LIT §118.14).
+    /// A plain [`Self::check`] is not counted here: `total` minus their sum
+    /// is the rows that do not carry a class yet.
+    classes: [usize; 4],
 }
 
 impl Checks {
@@ -369,6 +375,7 @@ impl Checks {
             sections: None,
             section_count: 0,
             sections_run: 0,
+            classes: [0; 4],
         }
     }
 
@@ -477,9 +484,78 @@ impl Checks {
         self.rows.push(json::check_row(self.seq, what, f64::from(err), f64::from(tol), ok, self.in_replay, self.gate));
     }
 
-    /// A yes/no check with no meaningful error magnitude.
+    /// A yes/no check with no meaningful error magnitude. A yes/no is
+    /// discrete, so every `require` is a class D row (SPEC-LIT §118.14).
     fn require(&mut self, what: &str, ok: bool) {
-        self.check(what, if ok { 0.0 } else { 1.0 }, 0.0);
+        self.check_class(RowClass::D, what, if ok { 0.0 } else { 1.0 }, 0.0);
+    }
+
+    /// A row of precision class `class` (docs/17 section 5.1 rule 4, SPEC-LIT §118.14):
+    /// counted in [`Self::classes`], then judged by [`Self::check`] at
+    /// `class.tol(tol64)` - `tol64` itself unless the class is R. A NaN or
+    /// an infinite `err` fails the row whatever its class.
+    fn check_class(&mut self, class: RowClass, what: &str, err: Scalar, tol64: f64) {
+        self.classes[class as usize] += 1;
+        self.check(what, err, class.tol(tol64) as Scalar);
+    }
+
+    /// Class P: a physics, discretisation or published band, the same
+    /// tolerance in both builds.
+    fn check_p(&mut self, what: &str, err: Scalar, tol: Scalar) {
+        self.check_class(RowClass::P, what, err, f64::from(tol));
+    }
+
+    /// Class A: an accumulated identity evaluated in f64, the same
+    /// tolerance in both builds.
+    fn check_a(&mut self, what: &str, err: Scalar, tol: Scalar) {
+        self.check_class(RowClass::A, what, err, f64::from(tol));
+    }
+
+    /// Class D: discrete or bitwise - a count, an ordering, an exact zero.
+    fn check_d(&mut self, what: &str, err: Scalar, tol: Scalar) {
+        self.check_class(RowClass::D, what, err, f64::from(tol));
+    }
+
+    /// Class R: a round-off twin, judged at D-F32-1's `tol32` of its f64
+    /// tolerance under `single` (118.14.1) and at `tol64` in the f64 build.
+    fn check_roundoff(&mut self, what: &str, err: Scalar, tol64: f64) {
+        self.check_class(RowClass::R, what, err, tol64);
+    }
+
+    /// The end of one section function under `single`: an `Err` becomes one
+    /// failed class D row naming the function and the error, and the run
+    /// goes on, so every later row of sections 1-25 is still reported
+    /// (SPEC-LIT §118.14). In the f64 build the `Err` is returned and aborts
+    /// the run exactly as it did before.
+    fn ran(&mut self, what: &str, r: Result<()>) -> Result<()> {
+        match r {
+            Ok(()) => Ok(()),
+            Err(e) if cfg!(feature = "single") => {
+                self.note(&format!("{what} stopped under single: {e}"));
+                self.check_d(&format!("{what} ran to its end"), 1.0, 0.0);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The class tally line the summary prints (SPEC-LIT §118.14).
+    fn class_line(&self) -> String {
+        let classed: usize = self.classes.iter().sum();
+        let parts: Vec<String> = RowClass::ALL
+            .iter()
+            .map(|k| format!("{} {}", self.classes[*k as usize], k.letter()))
+            .collect();
+        format!(
+            "row classes (docs/17 5.1.4, SPEC-LIT 118.14): {}; R rows at {}; {} rows carry no class yet",
+            parts.join(", "),
+            if cfg!(feature = "single") {
+                "tol32 = max(tol64, min(tol64 2^29, 1e-5))"
+            } else {
+                "their f64 tolerance"
+            },
+            self.total - classed
+        )
     }
 
     /// Something that could not be attempted on this machine. Not a pass and
@@ -708,14 +784,26 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 //  Comparison helpers
 // ==========================================================================
 
+/// `m.max(v)`, except that a NaN on either side is the answer. `f64::max`
+/// and `f32::max` return the other operand when one is NaN, so a sup norm
+/// folded with them DROPS a NaN and a row could pass on one (SPEC-LIT
+/// §118.14; F32-07's note). With no NaN this is `m.max(v)`, bit for bit.
+fn nan_max(m: Scalar, v: Scalar) -> Scalar {
+    if m.is_nan() || v.is_nan() {
+        Scalar::NAN
+    } else {
+        m.max(v)
+    }
+}
+
 fn max_abs(a: &[Scalar]) -> Scalar {
-    a.iter().fold(0.0 as Scalar, |m, v| m.max(v.abs()))
+    a.iter().fold(0.0 as Scalar, |m, v| nan_max(m, v.abs()))
 }
 
 fn max_abs_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
     a.iter()
         .zip(b.iter())
-        .fold(0.0 as Scalar, |m, (x, y)| m.max((x - y).abs()))
+        .fold(0.0 as Scalar, |m, (x, y)| nan_max(m, (x - y).abs()))
 }
 
 /// The sup norm of the RELATIVE difference. The adapt gates measure a field
@@ -732,13 +820,13 @@ fn max_rel_diff(a: &[Scalar], b: &[Scalar]) -> Scalar {
                 d
             }
         })
-        .fold(0.0 as Scalar, Scalar::max)
+        .fold(0.0 as Scalar, nan_max)
 }
 
 fn max_abs_diff_vec3(a: &[Vec3], b: &[Vec3]) -> Scalar {
     a.iter()
         .zip(b.iter())
-        .fold(0.0 as Scalar, |m, (x, y)| m.max((*x - *y).mag()))
+        .fold(0.0 as Scalar, |m, (x, y)| nan_max(m, (*x - *y).mag()))
 }
 
 fn max_abs_diff_tensor(a: &[Tensor], b: &[Tensor]) -> Scalar {
@@ -748,14 +836,18 @@ fn max_abs_diff_tensor(a: &[Tensor], b: &[Tensor]) -> Scalar {
             x.yx - y.yx, x.yy - y.yy, x.yz - y.yz,
             x.zx - y.zx, x.zy - y.zy, x.zz - y.zz,
         ];
-        m.max(d.iter().fold(0.0 as Scalar, |w, v| w.max(v.abs())))
+        nan_max(m, d.iter().fold(0.0 as Scalar, |w, v| nan_max(w, v.abs())))
     })
 }
 
 /// Relative to the reference's own magnitude, so a coefficient of `1e6`
 /// and one of `1e-6` are held to the same number of significant digits.
+/// A NaN reference magnitude makes the answer NaN, never `e` unscaled.
 fn rel(e: Scalar, r: &[Scalar]) -> Scalar {
     let s = max_abs(r);
+    if s.is_nan() {
+        return Scalar::NAN;
+    }
     if s > 0.0 {
         e / s
     } else {
@@ -1026,7 +1118,7 @@ fn boundary_gamma(m: &HostMesh, gamma: Scalar) -> Vec<Scalar> {
 fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: f64) {
     let g = m.geom64();
     let sum_v: f64 = g.v.iter().copied().sum();
-    c.check(
+    c.check_a(
         "sum(V) == analytic block volume",
         ((sum_v - analytic_volume).abs() / analytic_volume) as Scalar,
         1e-12,
@@ -1051,7 +1143,7 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: f64) {
         let scale = g.v[cell].powf(2.0 / 3.0);
         w.max(closure[cell].mag() / scale)
     });
-    c.check("cell closure |sum Sf| / V^(2/3)", worst as Scalar, 1e-12);
+    c.check_a("cell closure |sum Sf| / V^(2/3)", worst as Scalar, 1e-12);
 
     // Cell centroids must lie inside their own cells; the pyramid
     // decomposition of SPEC-LIT section 2.2 guarantees it for a convex cell,
@@ -1065,7 +1157,7 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: f64) {
             inverted += 1;
         }
     }
-    c.check("every face separates its two cell centres", inverted as Scalar, 0.0);
+    c.check_d("every face separates its two cell centres", inverted as Scalar, 0.0);
 
     // owner < neighbour, ascending by (owner, neighbour): the
     // upper-triangular order SPEC-LIT section 1 and every gather kernel
@@ -1083,14 +1175,14 @@ fn check_mesh(c: &mut Checks, m: &HostMesh, analytic_volume: f64) {
             }
         }
     }
-    c.check("lduAddressing is upper-triangular", bad as Scalar, 0.0);
+    c.check_d("lduAddressing is upper-triangular", bad as Scalar, 0.0);
 
     // The interpolation weight of SPEC-LIT section 2.3 must land in [0,1] on
     // a convex mesh; outside it the "interpolated" value is an extrapolation.
     let bad_w = (0..m.n_internal_faces)
         .filter(|&f| !(0.0..=1.0).contains(&g.weights[f]))
         .count();
-    c.check("interpolation weights in [0,1]", bad_w as Scalar, 0.0);
+    c.check_d("interpolation weights in [0,1]", bad_w as Scalar, 0.0);
 }
 
 // ==========================================================================
@@ -1195,7 +1287,7 @@ fn check_skew_correction(
             "linear interpolation does NOT land on the face centroid there",
             ei > 1e-3,
         );
-        c.check(
+        c.check_roundoff(
             "the iterated skewness correction restores Green-Gauss exactness",
             ek,
             1e-11,
@@ -1211,7 +1303,7 @@ fn check_skew_correction(
     let mut g2_ref = grad_h.clone();
     cpu::fvc_grad_scalar_skew_correction(&mut g2_ref, &grad_h, m);
 
-    c.check(
+    c.check_roundoff(
         "gradient skewness correction device vs host reference",
         max_abs_diff_vec3(&g2, &g2_ref) / max_abs_diff_vec3(&grad_h, &vec![Vec3::ZERO; m.n_cells]),
         1e-12,
@@ -1234,7 +1326,7 @@ fn check_skew_correction(
     let mut r = cpu::CpuLdu::new(m);
     cpu::fvm_laplacian_skew_correction(&mut r, m, &gamma, &grad_h, -1.0);
 
-    c.check(
+    c.check_roundoff(
         "laplacian skewness correction device vs host reference",
         rel(max_abs_diff(&src, &r.source), &r.source),
         1e-12,
@@ -1321,7 +1413,7 @@ fn check_explicit_operators(
         // the gradient comparison isolates the gradient.
         let bf_dev = gpu.download(&psi.bf)?;
         let bf_ref = bc.evaluate(m, &f);
-        c.check(
+        c.check_roundoff(
             "correctBoundaryConditions == the mixed form of section 4",
             rel(max_abs_diff(&bf_dev, &bf_ref), &bf_ref),
             1e-14,
@@ -1333,7 +1425,7 @@ fn check_explicit_operators(
         let gh = gpu.download(&g)?;
 
         let worst = gh.iter().take(m.n_cells).fold(0.0 as Scalar, |w, v| w.max((*v - a).mag()));
-        c.check("fvc::grad(linear field) == analytic", worst / a.mag(), 1e-11);
+        c.check_roundoff("fvc::grad(linear field) == analytic", worst / a.mag(), 1e-11);
 
         if planar {
             // Every face that survives an empty patch has zero area component
@@ -1343,12 +1435,12 @@ fn check_explicit_operators(
             // cell are integrated separately and their centroids agree only to
             // the last bit.
             let worst_z = gh.iter().fold(0.0 as Scalar, |w, v| w.max(v.z.abs()));
-            c.check("2-D: out-of-plane gradient vanishes", worst_z / a.mag(), 1e-13);
+            c.check_roundoff("2-D: out-of-plane gradient vanishes", worst_z / a.mag(), 1e-13);
         }
 
         let mut g_ref = Vec::new();
         cpu::fvc_grad_scalar(&mut g_ref, &f, &bf_ref, m);
-        c.check(
+        c.check_roundoff(
             "fvc::grad scalar   device vs host reference",
             max_abs_diff_vec3(&gh, &g_ref) / a.mag(),
             1e-12,
@@ -1362,7 +1454,7 @@ fn check_explicit_operators(
         gpu.sync()?;
         let fh = gpu.download(&face.f)?;
         let want: Vec<Scalar> = (0..m.n_internal_faces).map(|i| a.dot(m.cf[i]) + b0).collect();
-        c.check(
+        c.check_roundoff(
             "interpolate(linear field) == value at the face centre",
             rel(max_abs_diff(&fh, &want), &want),
             1e-12,
@@ -1370,7 +1462,7 @@ fn check_explicit_operators(
 
         let mut f_ref = Vec::new();
         cpu::interpolate_linear(&mut f_ref, &f, m);
-        c.check(
+        c.check_roundoff(
             "interpolate        device vs host reference",
             rel(max_abs_diff(&fh, &f_ref), &f_ref),
             1e-14,
@@ -1395,7 +1487,7 @@ fn check_explicit_operators(
         cpu::sn_grad_flux(
             &mut phi_ref, &mut bphi_ref, &f, &gamma, &b_gamma, &bc, m,
         );
-        c.check(
+        c.check_roundoff(
             "snGrad flux        device vs host reference",
             rel(max_abs_diff(&phi_h, &phi_ref), &phi_ref),
             1e-12,
@@ -1436,7 +1528,7 @@ fn check_explicit_operators(
         let scale = g_ref
             .iter()
             .fold(1.0 as Scalar, |w, t| w.max(t.xx.abs()).max(t.yy.abs()).max(t.zz.abs()));
-        c.check(
+        c.check_roundoff(
             "fvc::grad vector   device vs host reference",
             max_abs_diff_tensor(&gh, &g_ref) / scale,
             1e-12,
@@ -1451,7 +1543,7 @@ fn check_explicit_operators(
         let ph = gpu.download(&prod)?;
         let mut p_ref = Vec::new();
         cpu::turbulence_production(&mut p_ref, &nut_h, &g_ref, m.n_cells);
-        c.check(
+        c.check_roundoff(
             "G = nut dev(2 symm(gradU)) : gradU",
             rel(max_abs_diff(&ph, &p_ref), &p_ref),
             1e-12,
@@ -1474,11 +1566,11 @@ fn check_explicit_operators(
         fvc_div_surface(gpu, &k.fv, &mut d, &sphi, gm)?;
         gpu.sync()?;
         let dh = gpu.download(&d)?;
-        c.check("fvc::div(uniform flux) == 0", max_abs(&dh) / u_const.mag(), 1e-10);
+        c.check_roundoff("fvc::div(uniform flux) == 0", max_abs(&dh) / u_const.mag(), 1e-10);
 
         let mut d_ref = Vec::new();
         cpu::fvc_div_surface(&mut d_ref, &phi, &bphi, m);
-        c.check(
+        c.check_roundoff(
             "fvc::div           device vs host reference",
             max_abs_diff(&dh, &d_ref) / u_const.mag(),
             1e-12,
@@ -1508,7 +1600,7 @@ fn check_explicit_operators(
             fvc_div_surface(gpu, &k.fv, &mut d2, &sphi, gm)?;
             gpu.sync()?;
             let d2h = gpu.download(&d2)?;
-            c.check("2-D: an empty patch carries no flux", max_abs_diff(&d2h, &dh), 0.0);
+            c.check_d("2-D: an empty patch carries no flux", max_abs_diff(&d2h, &dh), 0.0);
         }
     }
 
@@ -1532,7 +1624,7 @@ fn check_explicit_operators(
         let uh = gpu.download(&u)?;
 
         let worst = uh.iter().fold(0.0 as Scalar, |w, v| w.max((*v - u_const).mag()));
-        c.check("fvc::reconstruct(U . Sf) == U", worst / u_const.mag(), 1e-11);
+        c.check_roundoff("fvc::reconstruct(U . Sf) == U", worst / u_const.mag(), 1e-11);
     }
 
     Ok(())
@@ -1631,7 +1723,7 @@ fn check_assembly(
     cpu::div_scheme_weights(
         &mut w_ref, &mut bw_ref, scheme, &phi, &bphi, &psi_h, Some(&grad_h), m,
     );
-    c.check(
+    c.check_roundoff(
         &format!("{scheme:?} weights   device vs host reference"),
         max_abs_diff(&w, &w_ref).max(max_abs_diff(&bw, &bw_ref)),
         1e-14,
@@ -1693,7 +1785,7 @@ fn check_assembly(
         ("internalCoeffs", gpu.download(&a.internal_coeffs)?, &r.internal_coeffs),
         ("boundaryCoeffs", gpu.download(&a.boundary_coeffs)?, &r.boundary_coeffs),
     ] {
-        c.check(
+        c.check_roundoff(
             &format!("assembly {what:<16}device vs host reference"),
             rel(max_abs_diff(&got, want), want),
             1e-12,
@@ -1705,12 +1797,12 @@ fn check_assembly(
     cpu::relax(&mut r, m, &psi_h, 0.7);
     gpu.sync()?;
 
-    c.check(
+    c.check_roundoff(
         "relax(0.7) diag    device vs host reference",
         rel(max_abs_diff(&gpu.download(&a.diag)?, &r.diag), &r.diag),
         1e-12,
     );
-    c.check(
+    c.check_roundoff(
         "relax(0.7) source  device vs host reference",
         rel(max_abs_diff(&gpu.download(&a.source)?, &r.source), &r.source),
         1e-12,
@@ -1720,12 +1812,12 @@ fn check_assembly(
     cpu::add_boundary_contributions(&mut r, m);
     gpu.sync()?;
 
-    c.check(
+    c.check_roundoff(
         "boundary folding, diag",
         rel(max_abs_diff(&gpu.download(&a.diag)?, &r.diag), &r.diag),
         1e-12,
     );
-    c.check(
+    c.check_roundoff(
         "boundary folding, source",
         rel(max_abs_diff(&gpu.download(&a.source)?, &r.source), &r.source),
         1e-12,
@@ -1738,7 +1830,7 @@ fn check_assembly(
     let mut ap_ref = Vec::new();
     cpu::amul(&mut ap_ref, &psi_h, &r, m);
     let ap_h = gpu.download(&ap)?;
-    c.check("Amul", rel(max_abs_diff(&ap_h, &ap_ref), &ap_ref), 1e-12);
+    c.check_roundoff("Amul", rel(max_abs_diff(&ap_h, &ap_ref), &ap_ref), 1e-12);
 
     // ---- CSR export -------------------------------------------------------
     // The export is only worth anything if the LDU -> CSR permutation is
@@ -1761,7 +1853,7 @@ fn check_assembly(
             }
             csr_ax[row] = s;
         }
-        c.check(
+        c.check_roundoff(
             "CSR export reproduces Amul",
             rel(max_abs_diff(&csr_ax, &ap_ref), &ap_ref),
             1e-12,
@@ -1771,10 +1863,10 @@ fn check_assembly(
             .flat_map(|row| row_ptr[row] as usize + 1..row_ptr[row + 1] as usize)
             .filter(|&j| col_ind[j] <= col_ind[j - 1])
             .count();
-        c.check("CSR columns ascending within each row", unsorted as Scalar, 0.0);
+        c.check_d("CSR columns ascending within each row", unsorted as Scalar, 0.0);
 
         let expected = n_c + 2 * n_if;
-        c.check(
+        c.check_d(
             "CSR nnz == nCells + 2 nInternalFaces",
             (csr.nnz as i64 - expected as i64).abs() as Scalar,
             0.0,
@@ -1812,7 +1904,7 @@ fn check_assembly(
             ("upper", gpu.download(&ac.upper)?, &rc.upper),
             ("source", gpu.download(&ac.source)?, &rc.source),
         ] {
-            c.check(
+            c.check_roundoff(
                 &format!("setValues {what:<15}device vs host reference"),
                 rel(max_abs_diff(&got, want), want),
                 1e-12,
@@ -1894,12 +1986,12 @@ fn check_solver_against_dense(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<
             sci(f64::from(perf.initial_residual), 3),
             sci(f64::from(perf.final_residual), 3)
         ));
-        c.check(
+        c.check_roundoff(
             "PCG == dense direct solve (symmetric)",
             max_abs_diff(&got, &exact) / max_abs(&exact).max(1e-30),
             1e-8,
         );
-        c.check("dense solve leaves no residual", cpu::residual(&exact, &r, &m), 1e-13);
+        c.check_roundoff("dense solve leaves no residual", cpu::residual(&exact, &r, &m), 1e-13);
         #[cfg(feature = "single")]
         check_refined(c, gpu, "PCG", &a, &gm, &m, &ws)?;
     }
@@ -1975,12 +2067,12 @@ fn check_solver_against_dense(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<
             sci(f64::from(perf.initial_residual), 3),
             sci(f64::from(perf.final_residual), 3)
         ));
-        c.check(
+        c.check_roundoff(
             "PBiCGStab == dense direct solve (asymmetric)",
             max_abs_diff(&got, &exact) / max_abs(&exact).max(1e-30),
             1e-8,
         );
-        c.check("device residual reaches the tolerance", perf.final_residual, 1e-10);
+        c.check_a("device residual reaches the tolerance", perf.final_residual, 1e-10);
         #[cfg(feature = "single")]
         check_refined(c, gpu, "PBiCGStab", &a, &gm, &m, &ws)?;
     }
@@ -2037,12 +2129,12 @@ fn check_refined(
         .iter()
         .zip(exact.iter())
         .fold(0.0f64, |s, (v, e)| s.max((v - e).abs()));
-    c.check(
+    c.check_a(
         &format!("{label} refined == dense f64 solve of the device's own matrix (SPEC-LIT 118.4)"),
         (worst / scale) as Scalar,
         1e-8,
     );
-    c.check(
+    c.check_a(
         &format!("{label} refined residual in f64 on the device's own matrix (SPEC-LIT 118.4)"),
         cpu::residual64(&x, &dev, m) as Scalar,
         1e-13,
@@ -2159,7 +2251,7 @@ fn check_fft_poisson(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         // round-off comparison. With the continuous -k^2 it would miss by
         // orders, which is the classic silent failure of an FFT Poisson
         // solver and the whole reason this check exists.
-        c.check(
+        c.check_roundoff(
             &format!("cuFFT == iterative, {what}"),
             max_abs_diff(&got, &want) / max_abs(&want).max(1e-30),
             1e-10,
@@ -2212,7 +2304,7 @@ fn check_fft_refined(
         fft.ir_outer_steps(),
         if finite { "" } else { "; an answer is not finite" }
     ));
-    c.check(
+    c.check_a(
         &format!("cuFFT refined == iterative refined, {what} (SPEC-LIT 118.12)"),
         if finite { (worst / scale) as Scalar } else { Scalar::NAN },
         1e-10,
@@ -2417,7 +2509,7 @@ fn check_mms(
     // order lands near 1.0 and cannot reach it, while ordinary round-off and
     // the finite refinement ratio move the measured value by a few hundredths.
     let shortfall = if order >= 1.8 { 0.0 } else { 1.8 - order };
-    c.check(&format!("{what}: observed order >= 1.8"), shortfall as Scalar, 0.0);
+    c.check_p(&format!("{what}: observed order >= 1.8"), shortfall as Scalar, 0.0);
     c.require(&format!("{what}: the error actually fell"), e2 < e1);
 
     Ok(())
@@ -2495,12 +2587,12 @@ fn check_observed_order_anisotropic(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> R
         errs[0].value < errs[1].value && errs[1].value < errs[2].value,
     );
     let shortfall = 0.0f64.max(1.9 - p).max(p - 2.1);
-    c.check(
+    c.check_p(
         "Gate 94-A (Gate 46-B): observed order p in [1.9, 2.1] on k = 1:10:100",
         shortfall as Scalar,
         0.0,
     );
-    c.check(
+    c.check_a(
         "Gate 94-A: the SPEC-LIT 46.4 anisotropy residual is zero on the axis-aligned block",
         worst_res,
         1e-14,
@@ -2718,7 +2810,7 @@ fn check_observed_order_interface(c: &mut Checks, gpu: &Gpu) -> Result<()> {
              ONLY - the 3.8e-3 default would refuse a mesh leaning 1 - cos(20 deg) = \
              0.0603 off the normal, and widening it IS the gate's point",
         );
-        c.check(
+        c.check_p(
             "Gate 94-B: the pairing report's interface angle is 20.0 deg off-normal",
             (tm.report.non_orth_deg() - 20.0).abs(),
             0.01,
@@ -2758,20 +2850,20 @@ fn check_observed_order_interface(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             lv[0].value < lv[1].value && lv[1].value < lv[2].value,
         );
         if leg == 0 {
-            c.check(
+            c.check_p(
                 "Gate 94-B leg 1 (R_c = 0, interface 20 deg off-normal, SPEC-LIT 47.3's \
                  suppressed correction): observed order p >= 0.9",
                 (0.9 - p).max(0.0) as Scalar,
                 0.0,
             );
         } else {
-            c.check(
+            c.check_p(
                 "Gate 94-B leg 2 (R_c = 5e-3, the contact jump across the tilted plane): \
                  observed order p >= 0.9",
                 (0.9 - p).max(0.0) as Scalar,
                 0.0,
             );
-            c.check(
+            c.check_p(
                 "Gate 94-B leg 2: the interface jump is -R_c sin(ky y) - (S47.3) with q_G = \
                  -k dT/dn - within 5 % of R_c on the finest mesh",
                 worst_jump,
@@ -2931,9 +3023,9 @@ fn check_buoyancy(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     ));
     // SPEC-LIT section 9 states the value: g = (0,0,-9.81), TRef = 293.15,
     // T = 1173.15 gives b = (0,0,+7.36), upward.
-    c.check("b_z(1173.15 K) == +7.36 m/s^2", (b_hot.z - 7.36).abs(), 5e-3);
+    c.check_p("b_z(1173.15 K) == +7.36 m/s^2", (b_hot.z - 7.36).abs(), 5e-3);
     c.require("b is upward for hot gas", b_hot.z > 0.0);
-    c.check("b(T_ref) == 0 exactly", body_force(T_REF).mag(), 0.0);
+    c.check_d("b(T_ref) == 0 exactly", body_force(T_REF).mag(), 0.0);
 
     let spec = MeshSpec {
         n: [9, 9, 12],
@@ -2990,7 +3082,7 @@ fn check_buoyancy(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
                 .fold(0.0 as Scalar, |w, f| w.max((phi_b[f] - sn_f[f]).abs()));
             let worst_b = (0..m.n_boundary_faces)
                 .fold(0.0 as Scalar, |w, f| w.max((b_phi_b[f] - sn_b[f]).abs()));
-            c.check(
+            c.check_roundoff(
                 "hydrostatic balance is exact for p = b.x",
                 worst_i.max(worst_b) / scale,
                 1e-13,
@@ -2999,11 +3091,11 @@ fn check_buoyancy(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
 
         let (phi, u) = project_body_force(gpu, k, &m, &gm, &phi_b, &b_phi_b)?;
 
-        c.check("sealed box, uniform T: flux stays zero", max_abs(&phi) / scale, 1e-8);
+        c.check_roundoff("sealed box, uniform T: flux stays zero", max_abs(&phi) / scale, 1e-8);
 
         let u_scale = b_uniform.mag() * spec.l[2];
         let worst_u = u.iter().fold(0.0 as Scalar, |w, v| w.max(v.mag()));
-        c.check("sealed box, uniform T: remains at rest", worst_u / u_scale, 1e-8);
+        c.check_roundoff("sealed box, uniform T: remains at rest", worst_u / u_scale, 1e-8);
         c.note(&format!(
             "|b| = {} m/s^2, worst |u| = {} m/s",
             sci(f64::from(b_uniform.mag()), 3),
@@ -3016,7 +3108,7 @@ fn check_buoyancy(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let t = vec![T_REF; m.n_cells];
         let bt = vec![T_REF; m.n_boundary_faces];
         let (phi_b, b_phi_b) = buoyancy_flux(&m, &t, &bt);
-        c.check("T == T_ref gives no body force at all", max_abs(&phi_b), 0.0);
+        c.check_d("T == T_ref gives no body force at all", max_abs(&phi_b), 0.0);
         let _ = b_phi_b;
     }
 
@@ -3066,7 +3158,7 @@ fn check_buoyancy(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let mut divergence = Vec::new();
         cpu::fvc_div_surface(&mut divergence, &phi, &bphi_zero, &m);
         let div_scale = max_abs(&phi_b).max(1e-30) / m.v[0];
-        c.check(
+        c.check_roundoff(
             "the projected flux is solenoidal",
             max_abs(&divergence) / div_scale,
             1e-8,
@@ -3146,10 +3238,14 @@ fn run(c: &mut Checks) -> Result<()> {
     let gm3 = GpuMesh::upload(&gpu, &m3)?;
 
     check_mesh(c, &m3, spec3.volume_f64());
-    check_explicit_operators(c, &gpu, &k, &m3, &gm3)?;
-    check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Upwind)?;
-    check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Central)?;
-    check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Limited(Limiter::VanLeer))?;
+    let r = check_explicit_operators(c, &gpu, &k, &m3, &gm3);
+    c.ran("check_explicit_operators", r)?;
+    let r = check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Upwind);
+    c.ran("check_assembly", r)?;
+    let r = check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Central);
+    c.ran("check_assembly", r)?;
+    let r = check_assembly(c, &gpu, &k, &m3, &gm3, DivScheme::Limited(Limiter::VanLeer));
+    c.ran("check_assembly", r)?;
     drop(gm3);
     }
 
@@ -3173,8 +3269,10 @@ fn run(c: &mut Checks) -> Result<()> {
     let gmsh = GpuMesh::upload(&gpu, &msh)?;
 
     check_mesh(c, &msh, spec_sh.volume_f64());
-    check_explicit_operators(c, &gpu, &k, &msh, &gmsh)?;
-    check_assembly(c, &gpu, &k, &msh, &gmsh, DivScheme::Limited(Limiter::MinMod))?;
+    let r = check_explicit_operators(c, &gpu, &k, &msh, &gmsh);
+    c.ran("check_explicit_operators", r)?;
+    let r = check_assembly(c, &gpu, &k, &msh, &gmsh, DivScheme::Limited(Limiter::MinMod));
+    c.ran("check_assembly", r)?;
     drop(gmsh);
     }
 
@@ -3210,8 +3308,10 @@ fn run(c: &mut Checks) -> Result<()> {
     // report a failure for a known and quantified property. The same two
     // facts are asserted below, with their sign the right way round and their
     // size printed.
-    check_assembly(c, &gpu, &k, &mref, &gmref, DivScheme::Upwind)?;
-    check_skew_correction(c, &gpu, &k, &mref, &gmref)?;
+    let r = check_assembly(c, &gpu, &k, &mref, &gmref, DivScheme::Upwind);
+    c.ran("check_assembly", r)?;
+    let r = check_skew_correction(c, &gpu, &k, &mref, &gmref);
+    c.ran("check_skew_correction", r)?;
     drop(gmref);
     }
 
@@ -3220,7 +3320,8 @@ fn run(c: &mut Checks) -> Result<()> {
     //      SPEC-LIT S75. Everything above this line is measured on a mesh
     //      that was BORN with 2:1 interfaces. Below it the mesh changes.
     if c.section("the adapt: refine, coarsen, and what a rebuild costs") {
-    check_adapt(c, &gpu, &k)?;
+    let r = check_adapt(c, &gpu, &k);
+    c.ran("check_adapt", r)?;
     }
 
     // ---- a 2-D block with empty front and back ---------------------------
@@ -3236,20 +3337,24 @@ fn run(c: &mut Checks) -> Result<()> {
     let gm2 = GpuMesh::upload(&gpu, &m2)?;
 
     check_mesh(c, &m2, spec2.volume_f64());
-    check_explicit_operators(c, &gpu, &k, &m2, &gm2)?;
-    check_assembly(c, &gpu, &k, &m2, &gm2, DivScheme::Upwind)?;
+    let r = check_explicit_operators(c, &gpu, &k, &m2, &gm2);
+    c.ran("check_explicit_operators", r)?;
+    let r = check_assembly(c, &gpu, &k, &m2, &gm2, DivScheme::Upwind);
+    c.ran("check_assembly", r)?;
     drop(gm2);
     }
 
     // ---- linear algebra --------------------------------------------------
     if c.section("linear solvers") {
-    check_solver_against_dense(c, &gpu, &k)?;
-    check_fft_poisson(c, &gpu, &k)?;
+    let r = check_solver_against_dense(c, &gpu, &k);
+    c.ran("check_solver_against_dense", r)?;
+    let r = check_fft_poisson(c, &gpu, &k);
+    c.ran("check_fft_poisson", r)?;
     }
 
     // ---- manufactured solutions ------------------------------------------
     if c.section("method of manufactured solutions, -lap(psi) = f") {
-    check_mms(
+    let r = check_mms(
         c,
         &gpu,
         &k,
@@ -3261,8 +3366,9 @@ fn run(c: &mut Checks) -> Result<()> {
             ..Default::default()
         },
         0,
-    )?;
-    check_mms(
+    );
+    c.ran("check_mms", r)?;
+    let r = check_mms(
         c,
         &gpu,
         &k,
@@ -3274,8 +3380,9 @@ fn run(c: &mut Checks) -> Result<()> {
             ..Default::default()
         },
         3,
-    )?;
-    check_mms(
+    );
+    c.ran("check_mms", r)?;
+    let r = check_mms(
         c,
         &gpu,
         &k,
@@ -3288,42 +3395,54 @@ fn run(c: &mut Checks) -> Result<()> {
             ..Default::default()
         },
         0,
-    )?;
+    );
+    c.ran("check_mms", r)?;
     }
 
     // ---- observed order and reported uncertainty -------------------------
     if c.section("observed order and reported uncertainty (SPEC-LIT 94)") {
-    check_observed_order_anisotropic(c, &gpu, &k)?;
-    check_observed_order_interface(c, &gpu)?;
+    let r = check_observed_order_anisotropic(c, &gpu, &k);
+    c.ran("check_observed_order_anisotropic", r)?;
+    let r = check_observed_order_interface(c, &gpu);
+    c.ran("check_observed_order_interface", r)?;
     }
 
     // ---- buoyancy --------------------------------------------------------
     if c.section("buoyancy") {
-    check_buoyancy(c, &gpu, &k)?;
+    let r = check_buoyancy(c, &gpu, &k);
+    c.ran("check_buoyancy", r)?;
     }
 
     // ---- SPEC-LIT 17, 18, 19 and the flux round trip ---------------------
     if c.section("buoyancy production, sources, species, phi I/O") {
-    check_buoyancy_production(c, &gpu)?;
-    check_volumetric_source(c, &gpu)?;
-    check_species(c, &gpu)?;
-    check_phi_round_trip(c, &gpu)?;
+    let r = check_buoyancy_production(c, &gpu);
+    c.ran("check_buoyancy_production", r)?;
+    let r = check_volumetric_source(c, &gpu);
+    c.ran("check_volumetric_source", r)?;
+    let r = check_species(c, &gpu);
+    c.ran("check_species", r)?;
+    let r = check_phi_round_trip(c, &gpu);
+    c.ran("check_phi_round_trip", r)?;
     }
 
     // ---- volume of fluid -------------------------------------------------
     if c.section("volume of fluid (SPEC-LIT 20, the 22 rows)") {
-    check_vof(c, &gpu)?;
+    let r = check_vof(c, &gpu);
+    c.ran("check_vof", r)?;
     }
 
     // ---- surface intake and embedded boundaries (SPEC-LIT 23, 24) --------
     if c.section("msh hex closure, cut-cell closure (SPEC-LIT 23, 24)") {
-    check_msh_hex_closure(c)?;
-    check_cutcell_closure(c)?;
+    let r = check_msh_hex_closure(c);
+    c.ran("check_msh_hex_closure", r)?;
+    let r = check_cutcell_closure(c);
+    c.ran("check_cutcell_closure", r)?;
     }
 
     // ---- the low-Mach reference pressure (SPEC-LIT 25) -------------------
     if c.section("the low-Mach reference pressure (SPEC-LIT 25)") {
-    check_low_mach_p0(c, &gpu)?;
+    let r = check_low_mach_p0(c, &gpu);
+    c.ran("check_low_mach_p0", r)?;
     }
 
     // ---- wall treatment: rough-wall Ks -> 0, the thermal wall function
@@ -3338,19 +3457,22 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30)") {
     check_werner_wengle(c);
     check_werner_wengle_inversion(c);
-    check_coupled_selection(c, &gpu, &k)?;
+    let r = check_coupled_selection(c, &gpu, &k);
+    c.ran("check_coupled_selection", r)?;
     }
 
     // ---- periodic domains: the cyclic-pair invariants (SPEC-LIT 31.1) ----
     if c.section("periodic domains: cyclic-pair invariants (SPEC-LIT 31.1)") {
-    check_cyclic_pair(c)?;
+    let r = check_cyclic_pair(c);
+    c.ran("check_cyclic_pair", r)?;
     }
 
     // ---- the thermal wall-function gate, redesigned (SPEC-LIT 32) --------
     if c.section("the thermal wall-function gate, redesigned (SPEC-LIT 32)") {
     check_fixed_flux_identity(c);
     check_nu_correlations(c);
-    check_realised_friction_factor(c)?;
+    let r = check_realised_friction_factor(c);
+    c.ran("check_realised_friction_factor", r)?;
     c.enter_gate("SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg");
     c.replaying(check_thermal_wall_function_gate_verdict_replay);
     c.leave_gate();
@@ -3395,7 +3517,8 @@ fn run(c: &mut Checks) -> Result<()> {
     // true in the first place), and the resolved leg's own Nu verdict now
     // that it has an actual steady state to measure.
     if c.section("the bulk-temperature thermostat (SPEC-LIT 35)") {
-    check_thermostat_sign_and_steady_offset(c, &gpu)?;
+    let r = check_thermostat_sign_and_steady_offset(c, &gpu);
+    c.ran("check_thermostat_sign_and_steady_offset", r)?;
     c.enter_gate("SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg");
     c.replaying(check_resolved_leg_gate_verdict_replay);
     c.leave_gate();
@@ -3425,14 +3548,18 @@ fn run(c: &mut Checks) -> Result<()> {
     // SPEC-LIT S40 and S41 - the two k-epsilon variants.
     if c.section("realizable and RNG k-epsilon (SPEC-LIT 40, 41)") {
     check_ke_variant_closed_forms(c);
-    check_realizability(c, &gpu)?;
-    check_homogeneous_shear_live(c, &gpu)?;
-    check_strained_realizability_live(c, &gpu)?;
+    let r = check_realizability(c, &gpu);
+    c.ran("check_realizability", r)?;
+    let r = check_homogeneous_shear_live(c, &gpu);
+    c.ran("check_homogeneous_shear_live", r)?;
+    let r = check_strained_realizability_live(c, &gpu);
+    c.ran("check_strained_realizability_live", r)?;
     }
 
     // SPEC-LIT S44 and S45 - the case file driving the output pipeline.
     if c.section("the output block, and fp16 voxels (SPEC-LIT 44, 45)") {
-    check_output_pipeline(c)?;
+    let r = check_output_pipeline(c);
+    c.ran("check_output_pipeline", r)?;
     }
 
     // SPEC-LIT S46/S47/S48 - conjugate heat transfer.
@@ -8161,7 +8288,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
     // `U` becomes four grids and `p`/`T` one each, so "every field" is six
     // grids and `fields: ["T"]` is one - the file must be about a sixth.
     let ratio = vdb_bytes(&f_one) as f64 / vdb_bytes(&f_all) as f64;
-    c.check(
+    c.check_p(
         "S44.2 fields [T] writes one grid of six (ratio to 1/6)",
         (ratio - 1.0 / 6.0).abs() as Scalar,
         0.01,
@@ -8440,7 +8567,7 @@ fn check_rough_wall_ks_zero(c: &mut Checks) {
             }
         }
     }
-    c.check("Ks -> 0 reproduces the smooth nutk wall (S29.2 gate)", worst_k, 1e-12);
+    c.check_roundoff("Ks -> 0 reproduces the smooth nutk wall (S29.2 gate)", worst_k, 1e-12);
 
     let nu_u: Scalar = 1.5e-5;
     let y: Scalar = 2e-3;
@@ -8455,7 +8582,7 @@ fn check_rough_wall_ks_zero(c: &mut Checks) {
         let got_nut = nut_wall_rough_u(u_mag, y, nu_u, wc.kappa, wc.e, 0.0, 0.5);
         worst_u = worst_u.max((got_nut - want_nut).abs() / want_nut.max(1e-30));
     }
-    c.check("Ks -> 0 reproduces the smooth nutU wall (S29.2 gate)", worst_u, 1e-9);
+    c.check_roundoff("Ks -> 0 reproduces the smooth nutU wall (S29.2 gate)", worst_u, 1e-9);
 }
 
 /// Jayatilleke's `P(Pr/Pr_t = 1) = 0` identity, and the one-cell conductance
@@ -8472,7 +8599,7 @@ fn check_thermal_wall_function(c: &mut Checks) {
     for prt in [0.7 as Scalar, 0.85, 1.0, 1.3] {
         worst_p = worst_p.max(jayatilleke_p(prt, prt).abs());
     }
-    c.check("P(Pr/Pr_t = 1) = 0 exactly (S29.3 gate)", worst_p, 0.0);
+    c.check_d("P(Pr/Pr_t = 1) = 0 exactly (S29.3 gate)", worst_p, 0.0);
 
     let prt: Scalar = 0.85;
     let p_at_prt = jayatilleke_p(prt, prt);
@@ -8482,7 +8609,7 @@ fn check_thermal_wall_function(c: &mut Checks) {
         let want = prt * u_plus(y_plus, wc.kappa, wc.e);
         worst_tplus = worst_tplus.max((tp - want).abs() / want.abs().max(1.0));
     }
-    c.check("Pr = Pr_t: T+ == Pr_t * u+ everywhere", worst_tplus, 1e-9);
+    c.check_roundoff("Pr = Pr_t: T+ == Pr_t * u+ everywhere", worst_tplus, 1e-9);
 
     // The one-cell conductance identity.
     let nu: Scalar = 1.5e-5;
@@ -8512,13 +8639,13 @@ fn check_thermal_wall_function(c: &mut Checks) {
                 f64::from(q_w),
                 f64::from(flux_from_triple)
             ));
-            c.check(
+            c.check_roundoff(
                 "wall-function triple encodes exactly q_w (S29.3 one-cell conductance)",
                 (flux_from_triple - q_w).abs() / q_w.abs(),
                 1e-9,
             );
         }
-        None => c.check(
+        None => c.check_d(
             "wall-function triple encodes exactly q_w (S29.3 one-cell conductance)",
             1.0,
             0.0,
@@ -8565,17 +8692,17 @@ fn check_werner_wengle(c: &mut Checks) {
         worst_below = worst_below.max((below - at).abs() / scale);
         worst_above = worst_above.max((above - at).abs() / scale);
     }
-    c.check(
+    c.check_roundoff(
         "WW: tau_w(u_c) == 2 nu u_c/h, the viscous closed form (S30.3 gate)",
         worst_at,
         1e-9,
     );
-    c.check(
+    c.check_p(
         "WW: viscous side does not step crossing the branch point",
         worst_below,
         1e-6,
     );
-    c.check(
+    c.check_p(
         "WW: power side does not step crossing the branch point",
         worst_above,
         1e-6,
@@ -8608,7 +8735,7 @@ fn check_werner_wengle_inversion(c: &mut Checks) {
         let got = tau_w_werner_wengle(u_p, h, nu);
         worst_power = worst_power.max((got - tau_w_target).abs() / tau_w_target);
     }
-    c.check(
+    c.check_roundoff(
         "WW power branch: invert then reapply reproduces tau_w (S30.3 gate)",
         worst_power,
         1e-9,
@@ -8624,7 +8751,7 @@ fn check_werner_wengle_inversion(c: &mut Checks) {
         let got = tau_w_werner_wengle(u_p, h, nu);
         worst_viscous = worst_viscous.max((got - tau_w_target).abs() / tau_w_target.max(SCALAR_FLOOR));
     }
-    c.check(
+    c.check_roundoff(
         "WW viscous branch: invert then reapply reproduces tau_w (S30.3 gate)",
         worst_viscous,
         1e-9,
@@ -8866,7 +8993,7 @@ fn check_buoyancy_production(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             let want = (nut_value / prt) * (gz * lapse) / tc;
             w.max((g_host[i] - want).abs() / want.abs())
         });
-        c.check(&format!("G_b magnitude: {label}"), worst_mag, 1e-11);
+        c.check_roundoff(&format!("G_b magnitude: {label}"), worst_mag, 1e-11);
     }
 
     Ok(())
@@ -8928,7 +9055,7 @@ fn check_volumetric_source(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     // times rho c_p it is watts.
     let src = gpu.download(&a.source)?;
     let injected = rho_cp * src.iter().fold(0.0 as Scalar, |t, v| t + v);
-    c.check(
+    c.check_roundoff(
         "a heat source injects exactly its power",
         (injected - q_dot).abs() / q_dot,
         1e-12,
@@ -8979,8 +9106,8 @@ fn check_volumetric_source(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         let want = vh[i] * 350.0;
         w.max((diag[i] - want).abs() / want)
     });
-    c.check("Darcy-Forchheimer coefficient on the diagonal", worst, 1e-13);
-    c.check("Darcy-Forchheimer never touches the source", max_abs(&src), 0.0);
+    c.check_roundoff("Darcy-Forchheimer coefficient on the diagonal", worst, 1e-13);
+    c.check_d("Darcy-Forchheimer never touches the source", max_abs(&src), 0.0);
 
     Ok(())
 }
@@ -9044,7 +9171,8 @@ fn check_species(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let yi = gpu.download(&sp.inert().f)?;
 
     let worst_sum = (0..n).fold(0.0 as Scalar, |w, i| w.max((y0[i] + y1[i] + yi[i] - 1.0).abs()));
-    c.check("species mass fractions sum to 1", worst_sum, 4.0 * Scalar::EPSILON);
+    // Class R: 4 f64 ulps, whose tol32 (118.14.1) is exactly 4 f32 ulps.
+    c.check_roundoff("species mass fractions sum to 1", worst_sum, 4.0 * f64::EPSILON);
 
     let out_of_range = (0..n).fold(0.0 as Scalar, |w, i| {
         let bad = [y0[i], y1[i], yi[i]]
@@ -9055,7 +9183,7 @@ fn check_species(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     c.require("every mass fraction stays in [0, 1]", out_of_range == 0.0);
 
     let e = sp.max_sum_error(gpu)?;
-    c.check("device-side max |1 - sum Y|", e, 4.0 * Scalar::EPSILON);
+    c.check_roundoff("device-side max |1 - sum Y|", e, 4.0 * f64::EPSILON);
 
     Ok(())
 }
@@ -9091,7 +9219,7 @@ fn check_phi_round_trip(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     gpu.write(&mut phi.bf, &fb)?;
 
     let before = max_div_phi_host(&fi, &fb, &m);
-    c.check("the reference flux is conservative to begin with", before, 1e-14);
+    c.check_roundoff("the reference flux is conservative to begin with", before, 1e-14);
 
     let dir = scratch_dir("phiio_out");
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -9116,10 +9244,10 @@ fn check_phi_round_trip(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 
     let worst_i = (0..m.n_internal_faces).fold(0.0 as Scalar, |w, f| w.max((internal[f] - fi[f]).abs()));
     let worst_b = (0..m.n_boundary_faces).fold(0.0 as Scalar, |w, f| w.max((boundary[f] - fb[f]).abs()));
-    c.check("phi survives write/read bit for bit", worst_i.max(worst_b), 0.0);
+    c.check_d("phi survives write/read bit for bit", worst_i.max(worst_b), 0.0);
 
     let after = max_div_phi_host(&internal, &boundary, &m);
-    c.check("the reread flux is still conservative", after, before.max(1e-14));
+    c.check_d("the reread flux is still conservative", after, before.max(1e-14));
 
     // And what the fallback would have cost: interpolate(U).Sf on the same
     // mesh with a velocity that is NOT uniform, which is the case a restart
@@ -9327,7 +9455,7 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         })?;
         vof.initialise(gpu)?;
 
-        c.check("solid-body rotation flux is solenoidal", div, 1e-15);
+        c.check_roundoff("solid-body rotation flux is solenoidal", div, 1e-15);
 
         let v0 = vof.phase_volume(gpu)?;
         let steps = 500;
@@ -9346,9 +9474,9 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         // SPEC-LIT 20.2: "alpha must stay in [0, 1] EXACTLY". Both bounds are
         // held to round-off, not to a tolerance, because the whole point of
         // the FCT machinery is that -1e-3 gives a negative density.
-        c.check("Zalesak: min(alpha) >= 0", (-lo).max(0.0), 1e-12);
-        c.check("Zalesak: max(alpha) <= 1", (hi - 1.0).max(0.0), 1e-12);
-        c.check("Zalesak: phase volume conserved", ((v1 - v0) / v0).abs(), 1e-9);
+        c.check_roundoff("Zalesak: min(alpha) >= 0", (-lo).max(0.0), 1e-12);
+        c.check_roundoff("Zalesak: max(alpha) <= 1", (hi - 1.0).max(0.0), 1e-12);
+        c.check_roundoff("Zalesak: phase volume conserved", ((v1 - v0) / v0).abs(), 1e-9);
     }
 
     // ---------------------------------------------------------------- 20.1
@@ -9497,7 +9625,7 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         // came out at 0.8 here. What pins the ORDER is
         // `the_curvature_of_a_circular_interface_converges_to_one_over_r` in
         // src/vof.rs, which holds `w` fixed in metres and refines.
-        c.check("kappa of a circular interface == 1/r", rms, 0.15);
+        c.check_p("kappa of a circular interface == 1/r", rms, 0.15);
 
         // The Laplace jump. At equilibrium the face balance is
         //   |Sf| snGrad(p_rgh) = sigma kappa_f |Sf| snGrad(alpha),
@@ -9508,8 +9636,19 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         // check below.
         let dt = 1e-4 as Scalar;
         let mut u = [0.0 as Scalar; 3];
+        // Under `single` a step that stops leaves this block's three rows to
+        // be reported as failed on a NaN, and the section goes on (SPEC-LIT
+        // §118.14); in the f64 build the error aborts the run as before.
+        let mut stopped: Option<String> = None;
         for step in 1..=120 {
-            vof.step(gpu, dt)?;
+            if let Err(e) = vof.step(gpu, dt) {
+                if !cfg!(feature = "single") {
+                    return Err(e);
+                }
+                stopped = Some(e.to_string());
+                u = [Scalar::NAN; 3];
+                break;
+            }
             match step {
                 30 => u[0] = vof_max_speed(&gpu.download(&vof.u().f)?),
                 60 => u[1] = vof_max_speed(&gpu.download(&vof.u().f)?),
@@ -9533,6 +9672,12 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             }
         }
         let jump = inside.0 / inside.1.max(1) as Scalar - outside.0 / outside.1.max(1) as Scalar;
+        let jump = if let Some(e) = &stopped {
+            c.note(&format!("static drop: the step stopped under single: {e}"));
+            Scalar::NAN
+        } else {
+            jump
+        };
         let exact = sigma / radius;
 
         c.note(&format!(
@@ -9544,7 +9689,7 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(u[1]),
             f64::from(u[2])
         ));
-        c.check(
+        c.check_p(
             "Laplace pressure jump == sigma/R (2-D)",
             ((jump - exact) / exact).abs(),
             0.10,
@@ -9569,12 +9714,12 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(r1),
             f64::from(r2)
         ));
-        c.check(
+        c.check_p(
             "spurious interface currents do not accelerate",
-            (r2 - r1).max(0.0) / r1.max(SCALAR_FLOOR),
+            nan_max(r2 - r1, 0.0) / r1.max(SCALAR_FLOOR),
             0.05,
         );
-        c.check(
+        c.check_p(
             "spurious interface currents are small (Ca)",
             props.mu1 * u_end / sigma,
             1e-2,
@@ -9648,11 +9793,11 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(last),
             f64::from(scale)
         ));
-        c.check("a sealed stratified tank stays at rest", last / scale, 1e-8);
+        c.check_roundoff("a sealed stratified tank stays at rest", last / scale, 1e-8);
         c.require("and does not drift", last <= worst);
 
         let (lo, hi) = vof.alpha_bounds(gpu)?;
-        c.check("its interface does not move", (-lo).max(hi - 1.0).max(0.0), 1e-9);
+        c.check_roundoff("its interface does not move", (-lo).max(hi - 1.0).max(0.0), 1e-9);
     }
 
     // ---------------------------------------------------------------- 20.3
@@ -9739,7 +9884,7 @@ fn check_vof(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(scale)
         ));
         c.require("something actually moved", scale > 0.0);
-        c.check(
+        c.check_roundoff(
             "d(rho)/dt + div(rho phi) == 0",
             worst / scale.max(1e-30),
             1e-12,
@@ -9860,7 +10005,7 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let mut d_e: DevBuf<Scalar> = gpu.zeros(m0.n_cells)?;
         gpu_loehner_indicator(gpu, &ak, &mut d_e, &d_phi, &d_bphi, &d_grad, &gm0, LOEHNER_EPS)?;
         gpu.sync()?;
-        c.check(
+        c.check_roundoff(
             "device Loehner indicator == host reference",
             max_abs_diff(&gpu.download(&d_e)?, &e),
             1e-12,
@@ -9875,7 +10020,7 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         let lg = vec![lin; m0.n_cells];
         let mut le = Vec::new();
         loehner_indicator(&mut le, &lf, &lb, &lg, m0, LOEHNER_EPS);
-        c.check(
+        c.check_roundoff(
             "the indicator is blind to a linear field",
             le.iter().cloned().fold(0.0 as Scalar, Scalar::max),
             1e-12,
@@ -9943,7 +10088,7 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
 
     // ---- 4. the transfer, and the conservation gate -----------------------
     let tgt = transfer::parent_targets(&p.map, &m1.c)?;
-    c.check(
+    c.check_roundoff(
         "the conservative weights sum to one on every old cell",
         tgt.wsum.iter().map(|w| (w - 1.0).abs()).fold(0.0 as Scalar, Scalar::max),
         1e-15,
@@ -9970,9 +10115,9 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
     let i0 = Integrals::of(&rho, &phi, &m0.v);
     let i1 = Integrals::of(&rho1, &phi1, &m1.v);
     let (dv, dm, de) = i1.drift(&i0);
-    c.check("volume survives a refine", dv, 1e-14);
-    c.check("mass survives a refine", dm, 1e-14);
-    c.check("energy survives a refine", de, 1e-14);
+    c.check_roundoff("volume survives a refine", dv, 1e-14);
+    c.check_roundoff("mass survives a refine", dm, 1e-14);
+    c.check_roundoff("energy survives a refine", de, 1e-14);
     c.require(
         "a refine invents no new extremum",
         i1.max <= i0.max + 1e-14 && i1.min >= i0.min - 1e-14,
@@ -10015,17 +10160,17 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
             Prolongation::LimitedLinear,
         )?;
         gpu.sync()?;
-        c.check(
+        c.check_roundoff(
             "device Barth-Jespersen limiter == host reference",
             max_abs_diff(&gpu.download(&d_psi)?, &psi),
             1e-13,
         );
-        c.check(
+        c.check_roundoff(
             "device density transfer == host reference",
             max_abs_diff(&gpu.download(&d_rho1)?, &rho1),
             1e-14,
         );
-        c.check(
+        c.check_roundoff(
             "device scalar transfer == host reference",
             max_abs_diff(&gpu.download(&d_phi1)?, &phi1),
             1e-13,
@@ -10083,9 +10228,9 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
 
     let i2 = Integrals::of(&rho2, &phi2, &m2.v);
     let (dv, dm, de) = i2.drift(&i1);
-    c.check("volume survives a coarsen", dv, 1e-14);
-    c.check("mass survives a coarsen", dm, 1e-14);
-    c.check("energy survives a coarsen", de, 1e-14);
+    c.check_roundoff("volume survives a coarsen", dv, 1e-14);
+    c.check_roundoff("mass survives a coarsen", dm, 1e-14);
+    c.check_roundoff("energy survives a coarsen", de, 1e-14);
     c.require(
         "a coarsen invents no new extremum",
         i2.max <= i1.max + 1e-14 && i2.min >= i1.min - 1e-14,
@@ -10098,8 +10243,8 @@ fn check_adapt(c: &mut Checks, gpu: &Gpu, k: &Kernels) -> Result<()> {
         sci(f64::from(rt_phi), 2),
         sci(f64::from(rt_rho), 2)
     ));
-    c.check("the refine-then-coarsen round trip returns phi to round-off", rt_phi, 1e-13);
-    c.check("the refine-then-coarsen round trip returns rho to round-off", rt_rho, 1e-13);
+    c.check_roundoff("the refine-then-coarsen round trip returns phi to round-off", rt_phi, 1e-13);
+    c.check_roundoff("the refine-then-coarsen round trip returns rho to round-off", rt_rho, 1e-13);
 
     // The other direction, where the loss is real and is the prolongation's
     // own. Coarsen the whole mesh and refine it back; what does not come back
@@ -10944,6 +11089,7 @@ fn main() -> ExitCode {
         if c.skipped > 0 {
             println!("{} checks skipped", c.skipped);
         }
+        println!("{}", c.class_line());
         if let Some(f) = &c.sections {
             println!(
                 "-sections {}: {} of {} sections run; the other {} are skip rows, \
@@ -11122,7 +11268,7 @@ fn check_cutcell_closure(c: &mut Checks) -> Result<()> {
         max_err = max_err.max(sum.mag());
     }
     c.note(&format!("cut-cell closure: {} cut cells out of {}", field.n_cut, field.cells.len()));
-    c.check("cut-cell closure (S24.3/24.6 row 1): sum Sf = 0", max_err / (h * h), 1e-8);
+    c.check_roundoff("cut-cell closure (S24.3/24.6 row 1): sum Sf = 0", max_err / (h * h), 1e-8);
     Ok(())
 }
 
@@ -11144,7 +11290,7 @@ fn check_low_mach_p0(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let q_field = gpu.upload(&vec![q_per_vol; hm.n_cells])?;
     sources.register_explicit(gpu, &q_field)?;
     let total_q = sources.total_q(gpu, &m)?;
-    c.check(
+    c.check_roundoff(
         "low-Mach S25.1: integral(Q)dV matches the heater power",
         (total_q - p_watts).abs() / p_watts,
         1e-6,
@@ -11156,7 +11302,7 @@ fn check_low_mach_p0(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let want_dp0dt = (props.gamma - 1.0) * p_watts / m.total_volume;
     let got = sealed.dp0dt();
     c.note(&format!("sealed dp0/dt = {got}, analytic (gamma-1)P/V = {want_dp0dt}"));
-    c.check(
+    c.check_p(
         "low-Mach S25.2 (decisive): sealed dp0/dt = (gamma-1) P / V",
         (got - want_dp0dt).abs() / want_dp0dt.abs(),
         1e-3,
@@ -11219,7 +11365,7 @@ fn check_cyclic_pair(c: &mut Checks) -> Result<()> {
         return Ok(());
     }
     let (pa, pb) = (&hm.patches[cyclic_patches[0]], &hm.patches[cyclic_patches[1]]);
-    c.check(
+    c.check_d(
         "the two cyclic patches carry equal face counts",
         (pa.size as Scalar - pb.size as Scalar).abs(),
         0.0,
@@ -11275,7 +11421,7 @@ fn check_cyclic_pair(c: &mut Checks) -> Result<()> {
         "cyclic pair: face matching is a bijection (SPEC-LIT S31.1 invariant 1)",
         bijection_ok,
     );
-    c.check(
+    c.check_a(
         "cyclic pair: Sf_a == -Sf_b after translation (SPEC-LIT S31.1 invariant 2)",
         worst_sf_mismatch,
         1e-12,
@@ -11313,7 +11459,7 @@ fn check_fixed_flux_identity(c: &mut Checks) {
             worst = worst.max((flux - q_w).abs() / q_w.abs());
         }
     }
-    c.check(
+    c.check_roundoff(
         "flux_to_grad: k_eff * flux_to_grad(q, k_eff) == q for any k_eff (S32.2)",
         worst,
         1e-12,
@@ -11340,17 +11486,17 @@ fn check_nu_correlations(c: &mut Checks) {
     let nu_gn = gnielinski_nu(re, pr);
     let f = gnielinski_f(re);
 
-    c.check(
+    c.check_roundoff(
         "Dittus-Boelter Nu at Re=1.6e4, Pr=0.71 matches the hand-derived value",
         (nu_db - 46.294_261_62).abs(),
         1e-4,
     );
-    c.check(
+    c.check_roundoff(
         "Gnielinski f at Re=1.6e4 matches the hand-derived value",
         (f - 0.027_708_723_8).abs(),
         1e-9,
     );
-    c.check(
+    c.check_roundoff(
         "Gnielinski Nu at Re=1.6e4, Pr=0.71 matches the hand-derived value",
         (nu_gn - 43.528_672_6).abs(),
         1e-3,
@@ -11362,7 +11508,7 @@ fn check_nu_correlations(c: &mut Checks) {
         sci(f64::from(nu_gn), 4),
         sci(f64::from(nu_db / nu_gn), 4)
     ));
-    c.check(
+    c.check_p(
         "Dittus-Boelter and Gnielinski agree within Dittus-Boelter's own +-25% band",
         (nu_db - nu_gn).abs() / nu_gn,
         0.25,
@@ -11442,12 +11588,12 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
         let tau_force = g_x * rho * volume / ws.area;
 
         if ny == 20 {
-            c.check(
+            c.check_d(
                 "wall_shear finds every wall face of the gate cases' own block",
                 if ws.n_faces == 2 * 4 { 0.0 } else { 1.0 },
                 0.0,
             );
-            c.check(
+            c.check_roundoff(
                 "D_h = 4V/A_wall reduces to 2H on a plane channel (SPEC-LIT 32.2/32.5)",
                 ((4.0 * volume / ws.area) - 2.0 * h).abs() / (2.0 * h),
                 1e-12,
@@ -11469,7 +11615,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
                 sci(f64::from(f), 4),
                 sci(f64::from(f * re), 6),
             ));
-            c.check(
+            c.check_roundoff(
                 "darcy_friction_factor gives Shah & London's f*Re = 96 for parallel plates",
                 (f * re - 96.0).abs() / 96.0,
                 1e-12,
@@ -11486,14 +11632,14 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
         // body force `g_x V` up to the same one-cell error - with no density
         // anywhere in either statement. This is the identity that closed to
         // `+0.001 %` on the real wall-function channel run (§32.5.3).
-        c.check(
+        c.check_roundoff(
             &format!(
                 "drag_kin = drag/rho exactly at uniform density, ny = {ny} (SPEC-LIT 32.5.2)"
             ),
             (ws.drag_kin - ws.drag / rho).abs() / (ws.drag / rho).abs(),
             1e-14,
         );
-        c.check(
+        c.check_roundoff(
             &format!(
                 "drag_kin balances the KINEMATIC body force g_x V, ny = {ny} (SPEC-LIT 32.5.2)"
             ),
@@ -11508,7 +11654,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
     // (g_x/(2 nu)) H.
     for (ny, ratio) in &ratios {
         let want = 1.0 - 1.0 / (2.0 * *ny as Scalar);
-        c.check(
+        c.check_roundoff(
             &format!(
                 "measured tau_w / force balance = 1 - 1/(2 ny) exactly, ny = {ny} (SPEC-LIT 32.5.2)"
             ),
@@ -11554,7 +11700,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
             "a wall-function face takes the wall-function tau_w form (SPEC-LIT 32.5.1)",
             ws.forms() == vec![WallShearForm::WallFunctionK],
         );
-        c.check(
+        c.check_roundoff(
             "wall-function tau_w is rho (Cmu^1/4 sqrt(k_P))^2 (SPEC-LIT 29.3/32.5.1)",
             (ws.tau_w_mag - rho * u_tau * u_tau).abs() / (rho * u_tau * u_tau),
             1e-12,
@@ -11586,7 +11732,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
             "a velocity-based wall function falls to the viscous form (SPEC-LIT 32.5.1)",
             ws_u.forms() == vec![WallShearForm::Viscous],
         );
-        c.check(
+        c.check_roundoff(
             "and the k-based value is then the CROSS-CHECK, not the reported one",
             (ws_u.by_patch[0].tau_w_other.expect("k is available") - rho * u_tau * u_tau).abs()
                 / (rho * u_tau * u_tau),
@@ -11600,7 +11746,7 @@ fn check_realised_friction_factor(c: &mut Checks) -> Result<()> {
     {
         let (re, pr): (Scalar, Scalar) = (25_834.0, 0.71);
         let f_pipe = gnielinski_f(re);
-        c.check(
+        c.check_d(
             "gnielinski_nu_at_f at the Petukhov f reproduces gnielinski_nu exactly",
             (gnielinski_nu_at_f(f_pipe, re, pr) - gnielinski_nu(re, pr)).abs(),
             0.0,
@@ -12000,7 +12146,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // superseded; the `uniform` leg was rerun for `WEIGHTING_EXPERIMENT` but
     // its thermostat power was not re-recorded, so no current figure is
     // claimed for it here.
-    c.check(
+    c.check_p(
         "WF leg: thermostat power = q_w A_wall to better than 0.2% (S35.2)",
         v.energy_gap.abs(),
         2e-3,
@@ -12015,7 +12161,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // `-0.113 %` this comment used to record was §3.1's `bounded` correction,
     // applied to momentum by a driver that ignored the case (SPEC-LIT
     // §32.5.5); it is reproduced exactly by restoring that entry by hand.
-    c.check(
+    c.check_p(
         "WF leg: kinematic wall sink = (g.e_hat) V to better than 0.2% (S32.5.2)",
         (v.kin_sink - CHANNEL_KIN_FORCE).abs() / CHANNEL_KIN_FORCE,
         2e-3,
@@ -12024,7 +12170,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // SPEC-LIT §32.4, verdict 1: the ABSOLUTE-PREDICTION question, Gnielinski
     // at the Petukhov smooth-PIPE `f`. Quoted at +-10%; this leg sits at
     // about -5.9%.
-    c.check(
+    c.check_p(
         "WF Nu in Gnielinski's +-10% band at the PIPE f (absolute prediction, S32.4)",
         (v.nu_measured - v.nu_gn_pipe).abs() / v.nu_gn_pipe,
         0.10,
@@ -12058,7 +12204,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // Dittus-Boelter takes no `f` argument, so it has ONE verdict only, and
     // it is an absolute-prediction one. Quoted at +-20-25%; this leg sits at
     // about -12.9%.
-    c.check(
+    c.check_p(
         "wall-function Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
         (v.nu_measured - v.nu_db).abs() / v.nu_db,
         0.25,
@@ -12067,7 +12213,7 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     // The y+ this measurement was taken at - SPEC-LIT §32.4's own "both
     // meshes land in their regime" row, for the wall-function leg.
     let y_plus_mean: Scalar = 57.7661;
-    c.check(
+    c.check_d(
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
         0.0,
@@ -12095,12 +12241,12 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
     // model with f_mu, f_2, D and E, not with new constants").
     let std_coeffs = KEpsilonCoeffs::default();
     let ls_coeffs = KEpsilonCoeffs::default();
-    c.check(
+    c.check_d(
         "LaunderSharmaKE reuses KEpsilonCoeffs unchanged (Cmu)",
         (ls_coeffs.cmu - std_coeffs.cmu).abs() as Scalar,
         0.0,
     );
-    c.check(
+    c.check_d(
         "LaunderSharmaKE reuses KEpsilonCoeffs unchanged (C2)",
         (ls_coeffs.c2 - std_coeffs.c2).abs() as Scalar,
         0.0,
@@ -12112,18 +12258,18 @@ fn check_launder_sharma_damping_functions(c: &mut Checks) {
         worst_fmu_inf = worst_fmu_inf.max((f_mu(re_t) - 1.0).abs());
         worst_f2_inf = worst_f2_inf.max((f2(re_t) - 1.0).abs());
     }
-    c.check("f_mu(Re_t -> infinity) -> 1 (SPEC-LIT 33.3)", worst_fmu_inf, 1e-6);
-    c.check("f_2(Re_t -> infinity) -> 1 (SPEC-LIT 33.3)", worst_f2_inf, 1e-9);
+    c.check_p("f_mu(Re_t -> infinity) -> 1 (SPEC-LIT 33.3)", worst_fmu_inf, 1e-6);
+    c.check_p("f_2(Re_t -> infinity) -> 1 (SPEC-LIT 33.3)", worst_f2_inf, 1e-9);
 
     // Re_t = 0: f_mu = exp(-3.4) ~ 0.0334 (nu_t suppressed ~30x at the
     // wall - the number SPEC-LIT §33.1 itself quotes), f_2 = 0.7.
     let fmu0 = f_mu(0.0);
     let want_fmu0 = (-3.4 as Scalar).exp();
-    c.check("f_mu(Re_t = 0) = exp(-3.4) (SPEC-LIT 33.3)", (fmu0 - want_fmu0).abs(), 1e-12);
+    c.check_roundoff("f_mu(Re_t = 0) = exp(-3.4) (SPEC-LIT 33.3)", (fmu0 - want_fmu0).abs(), 1e-12);
     c.note(&format!("f_mu(0) = {} (~1/30th of its Re_t -> infinity value)", sci(f64::from(fmu0), 4)));
 
     let f2_0 = f2(0.0);
-    c.check("f_2(Re_t = 0) = 0.7 (SPEC-LIT 33.3)", (f2_0 - 0.7).abs(), 1e-12);
+    c.check_roundoff("f_2(Re_t = 0) = 0.7 (SPEC-LIT 33.3)", (f2_0 - 0.7).abs(), 1e-12);
 
     // Monotone increasing in between, and bounded - the shape SPEC-LIT
     // §33.3's table asks for ("monotone in between"), swept at fine
@@ -12194,12 +12340,12 @@ fn check_resolved_leg_mesh_resolution_replay(c: &mut Checks) {
         report.n_wall_faces,
     ));
 
-    c.check(
+    c.check_d(
         "resolved leg's own y+ < 1 (SPEC-LIT 33.2, replayed measurement)",
         if report.max_first_cell_y_plus < 1.0 { 0.0 } else { 1.0 },
         0.0,
     );
-    c.check(
+    c.check_d(
         "resolved leg has at least 10 cells at y+ < 20 (SPEC-LIT 33.2, replayed measurement)",
         if report.cells_below_y_plus_20 >= 10 { 0.0 } else { 1.0 },
         0.0,
@@ -12238,7 +12384,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
     // SPEC-LIT §35.1's default `tau`: V^(1/3) / U_ref. `spec.volume()` is
     // this mesh's own `0.2^3 = 0.008 m3`, so V^(1/3) = 0.2 m exactly.
     let tau_default = flow_through_time(spec.volume(), 4.0)?;
-    c.check(
+    c.check_roundoff(
         "flow_through_time defaults to V^(1/3)/U_ref (SPEC-LIT 35.1)",
         (tau_default - 0.05).abs(),
         1e-9,
@@ -12263,7 +12409,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
     // full channel regression converges to regardless of initial T.
     let at_target = gpu.upload(&vec![target; m.n_cells])?;
     let q_zero = th.correct(gpu, &gm, &at_target)?;
-    c.check("thermostat asks for 0 at its own T_mean == target", q_zero.abs(), 1e-6);
+    c.check_p("thermostat asks for 0 at its own T_mean == target", q_zero.abs(), 1e-6);
 
     // A persistent net forcing (here, a manufactured "wall heat" analog Q)
     // settles the volume-mean at target + Q*tau/(rho_cp*V), NOT at target
@@ -12282,7 +12428,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
         t_mean += dt * (q_forcing + q) / rho_cp;
     }
     let closed_form = target + q_forcing * tau / rho_cp;
-    c.check(
+    c.check_roundoff(
         "the P-controller's steady-state offset matches target + Q*tau/rho_cp (SPEC-LIT 35.1)",
         (t_mean - closed_form).abs() / closed_form,
         1e-6,
@@ -12332,13 +12478,13 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // S13.4.1's numerics, 293.574 K before that). Since S26.1 the two legs
     // settle at the SAME `T_mean`, because both thermostats now settle at the
     // same -3.2 W - which is the balance closing, seen from the controller.
-    c.check(
+    c.check_p(
         "T_mean from the thermostat law matches the recorded 293.563 K (S35.1/S35.2)",
         (v.t_mean - 293.563).abs(),
         5e-3,
     );
 
-    c.check(
+    c.check_p(
         "resolved leg Nu within Dittus-Boelter's own +-25% band (replayed measurement, S32.4)",
         (v.nu_measured - v.nu_db).abs() / v.nu_db,
         0.25,
@@ -12404,7 +12550,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         v.energy_gap * 100.0,
         v.energy_gap.abs() * 100.0,
     ));
-    c.check(
+    c.check_p(
         "resolved leg: thermostat power = q_w A_wall to better than 0.05% (S35.2/S26.1)",
         v.energy_gap.abs(),
         5e-4,
@@ -12422,7 +12568,7 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     // The balance closes now, so it is ASSERTED rather than only noted - which
     // is what makes a future reintroduction of the same defect fail on the
     // commit that makes it, instead of being read off a note nobody diffs.
-    c.check(
+    c.check_p(
         "resolved leg: kinematic wall sink = (g.e_hat) V to better than 0.2% (S32.5.2/S32.5.5)",
         (v.kin_sink - CHANNEL_KIN_FORCE).abs() / CHANNEL_KIN_FORCE,
         2e-3,
@@ -12550,7 +12696,7 @@ fn check_kays_crawford_prt(c: &mut Checks) {
     let sublayer_row = "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-300 (S37.2)";
     #[cfg(feature = "single")]
     let sublayer_row = "Pe_t -> 0 gives Pr_t = 2*Pr_t_inf exactly, at Pe_t = 0 and 1e-30 (§37.2)";
-    c.check(
+    c.check_d(
         sublayer_row,
         worst_sublayer,
         0.0,
@@ -12575,18 +12721,18 @@ fn check_kays_crawford_prt(c: &mut Checks) {
         worst_first_order = worst_first_order.max((got - first_order(pe)).abs() * pe * pe);
     }
     c.require("Pr_t approaches Pr_t_inf FROM ABOVE, never below it (S37.2)", from_above);
-    c.check(
+    c.check_p(
         "Pe_t -> inf matches Pr_t_inf(1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) to O(Pe_t^-2)",
         worst_first_order,
         0.2,
     );
     let c2_measured = (kays_crawford_prt(1e6, C, p_inf) - first_order(1e6)) * 1e12;
-    c.check(
+    c.check_p(
         "...and the O(Pe_t^-2) coefficient IS the derived -1/(72 C^2) (S37.2)",
         (c2_measured + 1.0 / (72.0 * C * C)).abs(),
         1e-6,
     );
-    c.check(
+    c.check_p(
         "Pr_t(1e9) is the free-stream constant to 1e-9 (S37.2)",
         (kays_crawford_prt(1e9, C, p_inf) - p_inf).abs(),
         1e-9,
@@ -12612,7 +12758,7 @@ fn check_kays_crawford_prt(c: &mut Checks) {
         "Pr_t never leaves [Pr_t_inf, 2 Pr_t_inf] over Pe_t = 1e-8 .. 1e3 (S37.5)",
         lo >= p_inf - 1e-12 && hi <= 2.0 * p_inf + 1e-12,
     );
-    c.check(
+    c.check_roundoff(
         "S37.2's rearrangement reproduces S37.1's literature form (relative, Pe_t <= 1e3)",
         worst_rel as Scalar,
         1e-10,
@@ -12988,7 +13134,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
         .filter(|r| r.leg == "resolved" && r.bounded)
         .map(|r| r.drag_gap.abs())
         .fold(0.0 as Scalar, Scalar::max);
-    c.check(
+    c.check_d(
         "resolved leg: the `bounded` correction is worth 3.7-3.9% of the streamwise body force",
         if (0.037..=0.039).contains(&resolved_bounded) { 0.0 } else { 1.0 },
         0.0,
@@ -13019,7 +13165,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
             ));
         }
     }
-    c.check(
+    c.check_p(
         "the convection scheme's ORDER is worth less than 0.3% of Nu on either leg (S32.5.5)",
         worst_order_shift,
         3e-3,
@@ -13056,7 +13202,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
         gaps.iter().copied().fold(Scalar::NEG_INFINITY, Scalar::max)
             - gaps.iter().copied().fold(Scalar::INFINITY, Scalar::min)
     };
-    c.check(
+    c.check_p(
         "resolved leg: the energy imbalance moves under 0.2 points on a change worth 3.8 points \
          of momentum imbalance - the two are NOT one defect (S32.5.5)",
         resolved_energy_span,
@@ -13096,7 +13242,7 @@ fn check_bounded_convection_experiment_replay(c: &mut Checks) {
          above was the fictitious dilatation an incomplete Q was prescribing (S26.1)",
         after_resolved.drag_gap.abs() < 5e-4,
     );
-    c.check(
+    c.check_p(
         "resolved leg AFTER S26.1: `bounded` reproduces the shipped case's own Nu to 0.01%",
         (after_resolved.nu_measured / 71.6830 - 1.0).abs(),
         1e-4,
@@ -16386,12 +16532,12 @@ fn check_realizability(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(want_sup),
             f64::from(REALIZABILITY_BOUND),
         ));
-        c.check(
+        c.check_d(
             &format!("realizable C_mu keeps the normal stress positive, {name}"),
             (sup - REALIZABILITY_BOUND).max(0.0),
             0.0,
         );
-        c.check(
+        c.check_p(
             &format!(
                 "...with the asymptote EXACTLY (1/3)(Stil/Ustar), which pins every \
                  invariant in (40.4), {name}"
@@ -16408,7 +16554,7 @@ fn check_realizability(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         f64::from(worst_constant),
         f64::from(worst_constant / REALIZABILITY_BOUND),
     ));
-    c.check(
+    c.check_d(
         "SPEC-LIT 40.7: a constant C_mu = 0.09 DOES violate realizability \
          (or the model has nothing to fix)",
         if worst_constant > REALIZABILITY_BOUND { 0.0 } else { 1.0 },
@@ -16425,7 +16571,7 @@ fn check_realizability(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         f64::from(lam * ts_crit),
         1.0 / (3.0 * 0.09),
     ));
-    c.check(
+    c.check_roundoff(
         "the published threshold 1/(3 Cmu) = 3.7037 is where the stress crosses zero",
         ((lam * ts_crit) - 1.0 / (3.0 * 0.09)).abs() / (1.0 / (3.0 * 0.09)),
         1e-12,
@@ -16456,12 +16602,12 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(log_layer_cmu(4.04)),
         f64::from(log_layer_cmu(4.0)),
     ));
-    c.check(
+    c.check_p(
         "SPEC-LIT 40.3: A0 = 4.04 reproduces the log-layer Cmu = 0.09",
         (log_layer_cmu(4.04) - 0.09).abs() / 0.09,
         1e-4,
     );
-    c.check(
+    c.check_d(
         "SPEC-LIT 40.3: the derivation DISCRIMINATES - A0 = 4.0 does not",
         if (log_layer_cmu(4.0) - 0.09).abs() / 0.09 > 1e-3 { 0.0 } else { 1.0 },
         0.0,
@@ -16481,18 +16627,18 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(k_std), 100.0 * f64::from(k_std / 0.41 - 1.0),
         f64::from(k_rng), 100.0 * f64::from(k_rng / 0.41 - 1.0),
     ));
-    c.check("SPEC-LIT 40.4: realizableKE implies kappa = 0.409880", (k_re - 0.409_880).abs(), 1e-5);
-    c.check("SPEC-LIT 40.4: kEpsilon implies kappa = 0.432666", (k_std - 0.432_666).abs(), 1e-5);
-    c.check("SPEC-LIT 41.3: RNGkEpsilon implies kappa = 0.397600", (k_rng - 0.397_600).abs(), 1e-5);
+    c.check_p("SPEC-LIT 40.4: realizableKE implies kappa = 0.409880", (k_re - 0.409_880).abs(), 1e-5);
+    c.check_p("SPEC-LIT 40.4: kEpsilon implies kappa = 0.432666", (k_std - 0.432_666).abs(), 1e-5);
+    c.check_p("SPEC-LIT 41.3: RNGkEpsilon implies kappa = 0.397600", (k_rng - 0.397_600).abs(), 1e-5);
 
     // ---- SPEC-LIT §41.6: what C_e2* does --------------------------------
     let f = |eta: Scalar| rng_c2_star(eta, rng.cmu, rng.c2, rng.eta0, rng.beta);
-    c.check(
+    c.check_d(
         "SPEC-LIT 41.6: C_e2*(eta_0) is EXACTLY C_e2 - the R term vanishes there",
         (f(rng.eta0) - rng.c2).abs(),
         0.0,
     );
-    c.check(
+    c.check_d(
         "SPEC-LIT 41.6: C_e2*(0) is exactly C_e2 (the divided-through form's +inf)",
         (f(0.0) - rng.c2).abs(),
         0.0,
@@ -16511,12 +16657,12 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(f(3.0)), f64::from(f(rng.eta0)), f64::from(rng.eta0),
         f64::from(cross), f64::from(f(100.0)),
     ));
-    c.check("SPEC-LIT 41.1: C_e2* crosses zero at eta = 5.8581", (cross - 5.858_139).abs(), 1e-4);
+    c.check_p("SPEC-LIT 41.1: C_e2* crosses zero at eta = 5.8581", (cross - 5.858_139).abs(), 1e-4);
     #[cfg(not(feature = "single"))]
     let (eta_huge, huge_row): (Scalar, &str) = (1e120, "SPEC-LIT 41.1: and stays finite at eta = 1e120 (the overflow the divided-through form removes)");
     #[cfg(feature = "single")]
     let (eta_huge, huge_row): (Scalar, &str) = (1e30, "SPEC-LIT 41.1: and stays finite at eta = 1e30 (the overflow the divided-through form removes)");
-    c.check(huge_row, if f(eta_huge).is_finite() { 0.0 } else { 1.0 }, 0.0);
+    c.check_d(huge_row, if f(eta_huge).is_finite() { 0.0 } else { 1.0 }, 0.0);
 
     // ---- the homogeneous-shear fixed points ------------------------------
     let (eta_std, p_std) = standard_homogeneous_shear(ke.c1, ke.c2, ke.cmu);
@@ -16529,12 +16675,12 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(eta_re), f64::from(p_re), f64::from(cmu_re),
         f64::from(eta_rng), f64::from(p_rng),
     ));
-    c.check(
+    c.check_roundoff(
         "the realizable root satisfies its own balance C_mu eta^2 = C_1 eta - (C_2-1)",
         (realizable_c1(eta_re) * eta_re - (re.c2 - 1.0) - p_re).abs(),
         1e-10,
     );
-    c.check(
+    c.check_roundoff(
         "SPEC-LIT 41.6: the RNG root satisfies (41.6)",
         (rng.cmu * (rng.c1 - 1.0) * eta_rng * eta_rng - (f(eta_rng) - 1.0)).abs(),
         1e-10,
@@ -16546,7 +16692,7 @@ fn check_ke_variant_closed_forms(c: &mut Checks) {
         f64::from(resid),
         f64::from(eta_rng),
     ));
-    c.check("SPEC-LIT 41.3: the published eta_0 solves (41.6) to 1e-3", resid.abs(), 1e-3);
+    c.check_p("SPEC-LIT 41.3: the published eta_0 solves (41.6) to 1e-3", resid.abs(), 1e-3);
 }
 
 /// **SPEC-LIT §40.7 Gate 3 - homogeneous shear, LIVE on the GPU.**
@@ -16595,7 +16741,7 @@ fn check_homogeneous_shear_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
                     + t.yy.abs() + t.yz.abs() + t.zx.abs() + t.zy.abs() + t.zz.abs()
             })
             .fold(0.0 as Scalar, Scalar::max);
-        c.check(
+        c.check_roundoff(
             "the linear velocity field gives an exactly uniform grad U (the \
              premise of a homogeneous experiment)",
             worst,
@@ -16694,17 +16840,17 @@ fn check_homogeneous_shear_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             f64::from(*p_eps), f64::from(*wp),
             f64::from(*spr),
         ));
-        c.check(
+        c.check_p(
             &format!("{name} reaches its own homogeneous-shear fixed point, live"),
             (eta - weta).abs() / weta,
             5e-3,
         );
-        c.check(
+        c.check_p(
             &format!("{name}: the live P/eps matches the same fixed point"),
             (p_eps - wp).abs() / wp,
             5e-3,
         );
-        c.check(
+        c.check_roundoff(
             &format!("{name}: the experiment stayed homogeneous (k uniform to 1e-9)"),
             *spr,
             1e-9,
@@ -16720,12 +16866,12 @@ fn check_homogeneous_shear_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
          asserted is that realizableKE predicts a LARGER S k/eps and a SMALLER \
          P/eps than kEpsilon, which is the direction the experiment lies in",
     );
-    c.check(
+    c.check_d(
         "realizableKE predicts a larger S k/eps than kEpsilon in homogeneous shear",
         if measured[1].1 > measured[0].1 { 0.0 } else { 1.0 },
         0.0,
     );
-    c.check(
+    c.check_d(
         "...and a smaller P/eps",
         if measured[1].2 < measured[0].2 { 0.0 } else { 1.0 },
         0.0,
@@ -16853,17 +16999,17 @@ fn check_strained_realizability_live(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     let std_min = rows.iter().map(|r| r.1).fold(Scalar::INFINITY, Scalar::min);
     let rng_min = rows.iter().map(|r| r.3).fold(Scalar::INFINITY, Scalar::min);
 
-    c.check(
+    c.check_d(
         "SPEC-LIT 40.7: realizableKE's normal stress stays POSITIVE at every strain",
         (-re_min).max(0.0),
         0.0,
     );
-    c.check(
+    c.check_d(
         "SPEC-LIT 40.7: kEpsilon's goes NEGATIVE (the defect the model exists to fix)",
         if std_min < 0.0 { 0.0 } else { 1.0 },
         0.0,
     );
-    c.check(
+    c.check_d(
         "SPEC-LIT 41: RNGkEpsilon's goes negative too - its C_mu is a constant, so it \
          is NOT a realizable model and this check refuses to imply it is",
         if rng_min < 0.0 { 0.0 } else { 1.0 },
@@ -22903,6 +23049,44 @@ mod gate_parent {
         c.note("a note is not a check");
         assert_eq!(c.rows.len(), 4);
         assert_eq!(c.rows.len(), c.total + c.skipped);
+    }
+
+    /// SPEC-LIT §118.14: each classed row is tallied once under its class, a
+    /// require is class D, a plain check carries no class, and the line the
+    /// summary prints says so. An R row at `2e-12` against `tol64 = 1e-12`
+    /// fails in the f64 build and passes at tol32 = 1e-5 under single.
+    #[test]
+    fn classed_rows_are_tallied_once_and_require_is_class_d() {
+        let mut c = Checks::new();
+        c.check_p("p", 0.0, 1.0);
+        c.check_a("a", 0.0, 1.0);
+        c.check_roundoff("r", 2e-12, 1e-12);
+        c.check_d("d", 0.0, 0.0);
+        c.require("yes/no", true);
+        c.check("unclassed", 0.0, 1.0);
+        assert_eq!(c.classes, [1, 1, 1, 2]);
+        assert_eq!(c.total, 6);
+        assert_eq!(c.failures, usize::from(!cfg!(feature = "single")));
+        assert!(c.class_line().contains("1 P, 1 A, 1 R, 2 D;"));
+        assert!(c.class_line().ends_with("; 1 rows carry no class yet"));
+    }
+
+    /// F32-07's note, SPEC-LIT §118.14: `f64::max` drops a NaN, so the sup
+    /// norms must not, and a row fed one fails whatever its class.
+    #[test]
+    fn a_nan_survives_the_sup_norms_and_fails_its_row() {
+        let nan = Scalar::NAN;
+        assert!(max_abs(&[1.0, nan, 2.0]).is_nan());
+        assert!(max_abs_diff(&[1.0, 1.0], &[nan, 1.0]).is_nan());
+        assert!(max_rel_diff(&[1.0, 1.0], &[1.0, nan]).is_nan());
+        assert!(max_abs_diff_vec3(&[Vec3::new(nan, 0.0, 0.0)], &[Vec3::ZERO]).is_nan());
+        assert!(rel(1.0, &[nan]).is_nan());
+        assert_eq!(max_abs_diff(&[1.0, -3.0], &[0.5, 1.0]), 4.0);
+        assert_eq!(nan_max(0.0, -0.0), (0.0 as Scalar).max(-0.0));
+        let mut c = Checks::new();
+        c.check_roundoff("r", max_abs_diff(&[nan], &[0.0]), 1e-5);
+        c.check_p("p", nan, 1.0);
+        assert_eq!(c.failures, 2);
     }
 
     /// The scope is a field, not an argument: opened, replaced, closed.

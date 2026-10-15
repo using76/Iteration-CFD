@@ -38150,6 +38150,7 @@ subsections, by unit:
 - 118.8 — moving geometry in f64 on the device (F32-11)
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
+- 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13)
 
 and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -39779,6 +39780,98 @@ coefficients, the per-level vectors and level 0's operator `fl32(A)`, (141.45). 
 §118.4 gives the float inner method, here inside a double solve that needs no outer refinement
 loop, because the outer solve already iterates in double. Under `--features single` the key is a
 no-op: the hierarchy is float there already, and §118.4 refines the solve around it (§141.9).
+
+### 118.14 Row classes in `ofgpu-validate` - sections 1-25, and the round-off tolerance
+
+Every row a gate or a test takes has a precision class (docs/17 §5.1 rule 4): **P**, a
+physics, discretisation or published band; **A**, an accumulated identity evaluated in f64;
+**R**, a round-off twin, a quantity that is zero or equal in exact arithmetic and is measured at
+the build's round-off; **D**, discrete or bitwise, a count, an ordering, a yes/no or an exact
+zero. P, A and D rows are held to their f64 tolerance in both builds. An R row is held to
+
+```
+tol32 = max(tol64, min(tol64 · 2^29, 1e-5))                                   (118.14.1)
+```
+
+under `single`, and to `tol64` in the f64 build. This is decision D-F32-1 of docs/17 §11 (item 1),
+the same-ulps rule. `2^29 = eps32/eps64 = 2^-23/2^-52` is the ratio of the unit round-offs of IEEE
+754 binary32 and binary64 (Goldberg 1991, "What every computer scientist should know about
+floating-point arithmetic", section "Relative Error and Ulps", open copy
+https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html), so `tol64 · 2^29` is the same
+count of units in the last place in f32. The cap `1e-5` is about 84 f32 ulps at 1
+(`1e-5/2^-23 = 83.9`), the `1e-5` that §112.4 read as "right to single precision". The outer `max`
+keeps an R row from ever being tighter than in f64. For `tol64 = 1e-12` it gives `1e-5`, for
+`1e-14` `5.37e-6`, for `1e-15` `5.37e-7`, and for `tol64 = 0` it gives `0`. `src/precision.rs`
+holds it as `tol32` (computed in both builds, so the rule is tested in either), `roundoff_tol`
+(`tol32` under `single`, the identity in f64) and `RowClass` (F32-13).
+
+**The mechanics.** `Checks` in `src/bin/validate.rs` takes a classed row through `check_p`,
+`check_a`, `check_d` or `check_roundoff(what, err, tol64)`; `require` is class D. Each is tallied
+once, and the summary prints `row classes (docs/17 5.1.4, SPEC-LIT 118.14): N P, N A, N R, N D;
+...; N rows carry no class yet`. A plain `check` remains for the sections F32-14 has not yet
+classified (26 onward); those rows are the "no class yet" count. Two more rules make "every row of
+sections 1-25 is reported" true under `single`:
+
+1. **A NaN is never dropped.** `f64::max` and `f32::max` return the other operand when one is NaN,
+   so the sup norms `max_abs`, `max_abs_diff`, `max_rel_diff`, `max_abs_diff_vec3` and
+   `max_abs_diff_tensor` folded a NaN away and a row could pass on one (F32-07's note). They fold
+   with `nan_max` now, which is `m.max(v)` bit for bit when neither operand is NaN, and `rel`
+   returns NaN on a NaN scale. `check` already failed a non-finite `err`. Local
+   `worst = worst.max(..)` loops inside individual check functions are not swept by this unit.
+2. **Under `single` a section function that stops is a row, not the end of the run.** Each
+   section 1-25 function's `Result` goes through `Checks::ran`. Under `single` an `Err` is one
+   failed class D row, "`<function>` ran to its end", with the error as a note, and the run goes
+   on; in the f64 build the `Err` aborts the run exactly as before. Inside §20's static drop
+   (section 11) a step that stops under `single` leaves that block's three rows failed on a NaN,
+   and the section's later blocks still run.
+
+**What was measured** (2026-10-15, RTX 5070 Ti, sm_120, `ofgpu-validate -sections 1-25 -json`).
+f64 build: 453/453. `tools/f64_identity.py rows` against the run before this unit gives
+**ROWS IDENTICAL 493** (453 checks and 40 skip rows). The f64 class line is 52 P, 13 A, 205 R,
+183 D (the 183 D include the four §69 audit rows), with 0 rows unclassified. `single` build, 41 s:
+**441/459**, class line 52 P, 19 A, 205 R, 183 D, 0 unclassified. Six A rows exist only under
+`single`: section 6's refinement rows of §118.4 and §118.12. Before this unit the `single` run
+stopped in section 11 (at the static drop's step, below) after 274 rows, 130 of them failing. 124 of
+those 130 were R rows at f64 tolerances of `1e-14 .. 1e-8` that pass at (118.14.1); the other six
+still fail and are in the table.
+
+| # | section | f64 | single | single misses (class, err against the tolerance) |
+|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 71/71 | |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 36/36 | |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 35/35 | |
+| 4 | the adapt | 34/34 | 34/34 | |
+| 5 | 2-D block with empty front and back | 37/37 | 37/37 | |
+| 6 | linear solvers | 6/6 | 10/12 | cuFFT == iterative, sealed box (R): NaN against 1e-5; cuFFT refined == iterative refined, sealed box (A): NaN against 1e-10 |
+| 7 | method of manufactured solutions | 6/6 | 6/6 | |
+| 8 | observed order (SPEC-LIT 94) | 10/10 | 10/10 | |
+| 9 | buoyancy | 12/12 | 8/12 | sealed box, uniform T: flux stays zero (R) 2.03e-4 and remains at rest (R) 2.19e-4 against 1e-5; T == T_ref gives no body force (D) 5.20e-9 against 0; the projected flux is solenoidal (R) 1.31e-5 against 1e-5 |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | 13/14 | G_b magnitude, stable stratification (R): 1.07e-5 against 1e-5 |
+| 11 | volume of fluid | 16/16 | 13/16 | the static drop's Laplace jump (P), spurious currents not accelerating (P) and small (P): NaN, the step stopped |
+| 12-16 | msh/cut-cell, low-Mach p0, wall treatment, Werner-Wengle, cyclic pair | 31/31 | 31/31 | |
+| 17 | the thermal wall-function gate | 27/27 | 25/27 | drag_kin balances g_x V, ny = 200 (R) 1.46e-5, and tau_w / force balance, ny = 200 (R) 1.46e-5, against 1e-5 |
+| 18-22 | Launder-Sharma, the replays and the thermostat | 43/43 | 43/43 | |
+| 23 | Kays-Crawford Pr_t | 10/10 | 6/10 | Pe_t -> inf to O(Pe_t^-2) (P) 596 against 0.2; the O(Pe_t^-2) coefficient (P) 0.154 against 1e-6; monotone in Pe_t (D); the rearrangement against the literature form (R) 2.14e-4 against 1e-5 |
+| 24 | realizable and RNG k-epsilon | 39/39 | 37/39 | kEpsilon's live homogeneous-shear fixed point (P) 9.7e-3 and P/eps (P) 1.93e-2 against 5e-3 |
+| 25 | the output block, fp16 voxels | 26/26 | 26/26 | |
+
+Each miss is a finding, recorded and not hidden; no tolerance moved. The causes, as far as this
+unit traced them:
+- Section 6: the sealed-box float answer is not finite under `single`. Before this unit the float
+  row read `0` because `max_abs_diff` dropped the NaN. It is the one row that turned from ok to
+  FAIL by rule 1.
+- Section 9: the sealed box keeps the f32 projection's hydrostatic cancellation at about `2e-4`
+  of the body-force scale. The exact-zero row interpolates a constant as `w T + (1 - w) T`,
+  which is not `T` in f32.
+- Sections 10 and 17 compute in `Scalar`: the gradient of a linear field, and the drag summed
+  over 200 wall faces.
+- Section 11: the static drop's step diverges under `single` (alpha Courant `1.7e18`).
+- Section 23 evaluates the closed form in `Scalar`. Its large-Pe_t cancellation, which §37.2's
+  rearrangement exists to avoid, is at f32 scale there.
+- Section 24: kEpsilon's live run settles about `1e-2` from its fixed point under `single`.
+
+A cure for each changes numerics (the library's arithmetic or the validation's own) and is not
+built here.
 
 ## 119. The true wedge: a rotational self-couple
 
