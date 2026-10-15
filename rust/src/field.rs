@@ -1939,6 +1939,11 @@ pub mod synthetic;
 #[cfg(test)]
 mod catalogue;
 
+/// That catalogue as the JSON the studio reads (docs/17 BC-22), test-only;
+/// see [`catalogue_json::emit_bc_catalogue`].
+#[cfg(test)]
+mod catalogue_json;
+
 #[cfg(test)]
 mod tests {
     use super::*;

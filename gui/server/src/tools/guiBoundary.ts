@@ -20,7 +20,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { isJsonCase, PATCH_FIELDS, PATCH_PRESET_IDS, UiCommandSchema, type BoundaryCondition, type BoundaryPatchRow, type BoundaryTable, type PatchBc, type PatchField, type PatchPresetId, type UiCommand } from '@cfd/shared'
+import { describeBcType, IMPLEMENTED_BC_TYPES, isJsonCase, PATCH_FIELDS, PATCH_PRESET_IDS, UiCommandSchema, type BoundaryCondition, type BoundaryConditionType, type BoundaryPatchRow, type BoundaryTable, type PatchBc, type PatchField, type PatchPresetId, type UiCommand } from '@cfd/shared'
 import { parseJsonc } from '../formats/casejsonc.js'
 import { parseBoundaryText } from '../formats/polymesh.js'
 import { caseEdit, isToolResult, previewCaseEdit, type CaseEdit, type CaseEditInput } from './case.js'
@@ -70,6 +70,20 @@ const TURB_BC: Record<string, string | null> = {
 const BC_TABLE: Record<PatchField, Record<string, string | null>> = { U: VECTOR_BC, p: SCALAR_BC, T: SCALAR_BC, k: TURB_BC, epsilon: TURB_BC, omega: TURB_BC, nut: TURB_BC }
 
 const NO_SLIP = { type: 'fixedValue', value: [0, 0, 0] }
+
+/** Field -> the condition types a .jsonc case's picker offers, each with the member it requires (docs/17 BC-22). Held to docs/schema/case-1.json by guiBoundary.test.ts. */
+export function jsoncConditionTypes(): Record<PatchField, BoundaryConditionType[]> {
+  const out = {} as Record<PatchField, BoundaryConditionType[]>
+  for (const f of PATCH_FIELDS) out[f] = Object.entries(BC_TABLE[f]).map(([type, member]) => ({ type, entries: member === null ? [] : [member] }))
+  return out
+}
+
+/** Field -> every type the solver implements, for a foam case directory's columns; the catalogue lists no entries (bcCatalogue.ts). */
+function foamConditionTypes(fields: string[]): Record<string, BoundaryConditionType[]> {
+  const out: Record<string, BoundaryConditionType[]> = {}
+  for (const f of fields) out[f] = IMPLEMENTED_BC_TYPES.map((type) => ({ type, entries: null }))
+  return out
+}
 
 function isObj(v: unknown): v is Json {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -147,7 +161,7 @@ function kindRefusal(mesh: Json, name: string, kind: string, relPath: string): s
 /** One field's condition checked against the types that field takes, reduced to the members the schema allows. */
 function checkCondition(field: PatchField, bc: PatchBc): { bc: Json } | { error: string } {
   const table = BC_TABLE[field]
-  if (!Object.hasOwn(table, bc.type)) return { error: `${field} takes ${Object.keys(table).join(', ')}; not ${bc.type}` }
+  if (!Object.hasOwn(table, bc.type)) return { error: `${field} takes ${Object.keys(table).join(', ')}; not ${bc.type} (${describeBcType(bc.type)}; a .jsonc case's ${field} condition does not carry it)` }
   const member = table[bc.type]
   if (member === null) return { bc: { type: bc.type } }
   const raw = (bc as Record<string, unknown>)[member]
@@ -421,7 +435,7 @@ export function boundaryTable(json: unknown, relPath: string, meshed: { dir: str
   const used = new Set<string>(['U', 'p'])
   if (isObj(obj.initial) && obj.initial.T != null) used.add('T')
   for (const r of patches) for (const f of Object.keys(r.fields)) used.add(f)
-  return { path: relPath, format: 'jsonc', editable: true, meshDir: meshed?.dir ?? null, fields: orderFields(used), patches }
+  return { path: relPath, format: 'jsonc', editable: true, meshDir: meshed?.dir ?? null, fields: orderFields(used), patches, conditionTypes: jsoncConditionTypes() }
 }
 
 type FoamEntry = { key: string; quoted: boolean; body: string }
@@ -523,7 +537,7 @@ export function foamBoundaryTable(relPath: string, boundaryText: string, fieldTe
     }
     return { name: p.name, faces: [], nFaces: p.nFaces, kind: p.type, preset: null, rule: null, ownRule: null, match: null, fields: conds, presets: [] }
   })
-  return { path: relPath, format: 'foamDir', editable: false, meshDir: relPath, fields, patches }
+  return { path: relPath, format: 'foamDir', editable: false, meshDir: relPath, fields, patches, conditionTypes: foamConditionTypes(fields) }
 }
 
 /** A 0/ field file larger than this is not read for the table. */

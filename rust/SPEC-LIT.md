@@ -40937,6 +40937,18 @@ holds every refused entry's reason to the note its refusal prints, and
 to `src/field/catalogue.rs`, which is this table as data - one `Entry` per
 row, row for row.
 
+The studio reads the same table (docs/17 BC-22). `src/field/catalogue_json.rs`
+writes `IMPLEMENTED_BC_NAMES` and every `Entry` - family, name, status with its
+alias target, unit or refusal phrase, field, extending units and probes - as
+`docs/schema/bc-catalogue-1.json` and as `gui/shared/src/bcCatalogue.data.ts`;
+`field::catalogue_json::the_shipped_bc_catalogue_is_the_generated_one` rewrites
+both when the catalogue changes and fails once, so the regenerated pair is
+committed with the change, and the gui's `registry/sync.test.ts` holds its copy
+to the JSON and to the two Rust sources. The catalogue lists no per-name entry
+keys: the studio's picker offers a foam case directory every implemented name
+without entries, and a JSONC case the `ScalarBc`, `VectorBc` and `TurbBc`
+variants of `docs/schema/case-1.json` with their required members.
+
 | family | name | status | unit or target | extended by | note |
 |---|---|---|---|---|---|
 | basic | `fixedValue` | implemented | — | — | — |

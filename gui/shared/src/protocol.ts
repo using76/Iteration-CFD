@@ -426,6 +426,12 @@ export interface BoundaryPatchRow {
   /** The presets set_patch accepts as this patch's kind (empty when the patch cannot be edited). */
   presets: PatchPresetId[]
 }
+/** One condition type the Boundary editor's picker offers on a field (docs/17 BC-22). */
+export interface BoundaryConditionType {
+  type: string
+  /** The members the type requires (a .jsonc case: docs/schema/case-1.json's); null when the catalogue does not list them (a foam case directory). */
+  entries: string[] | null
+}
 /** The Boundary editor's table: a .jsonc case's patches (editable through set_patch) or a foam case directory's (read-only). */
 export interface BoundaryTable {
   path: string
@@ -436,6 +442,8 @@ export interface BoundaryTable {
   /** The field columns, in PATCH_FIELDS order then by name. */
   fields: string[]
   patches: BoundaryPatchRow[]
+  /** Field -> the condition types its picker offers: a .jsonc case's per-field schema types, or every type the solver implements (bcCatalogue.ts) for a foam case directory. Set by the server. */
+  conditionTypes?: Record<string, BoundaryConditionType[]>
 }
 /** The two halves of a split viewport. */
 export const ViewIdSchema = z.enum(['A', 'B'])
