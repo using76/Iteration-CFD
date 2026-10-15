@@ -3889,6 +3889,13 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)") {
     validate_gates::zpg::check_zpg(c)?;
     }
+    // SPEC-LIT 143.5 - Gate 131-P: TG0's fully developed turbulent pipe with
+    // kOmegaSST on the true wedge, its four bands against Nikuradse's pipes
+    // via Schlichting, replayed from the recorded ofgpu-lowmach runs of
+    // src/bin/validate_gates/pipe.rs (each Re_tau opens its own gate scopes).
+    if c.section("Gate 131-P: TG0's turbulent pipe, kOmegaSST on the true wedge against Prandtl, Blasius, the log law and the core defect, three radial levels, replayed (SPEC-LIT 143.5)") {
+    validate_gates::pipe::check_pipe(c)?;
+    }
     // SPEC-LIT 127.6 - Gate CMP-SOD: Sod's shock tube on 200, 400 and 800
     // cells against the exact Riemann solution of (127.5)-(127.7b), live, in
     // src/bin/validate_gates/sod.rs (CMP-19).
@@ -13593,9 +13600,14 @@ struct PlumeRecord {
     stations_m: [Scalar; 6], dt_c: [[Scalar; 6]; 3], w_c: [[Scalar; 6]; 3], iterations: usize, residual_u: Scalar,
 }
 
-const CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [None, None, None]; // 178.12, 392.24, 587.19
-const STEP_RECORD: Option<&StepRecord> = None;
-const PLUME_RECORD: Option<&PlumeRecord> = None;
+// 178.12, 392.24, 587.19: the recorded runs of docs/17 VAL-51 (validate_gates/channel_dns.rs)
+static CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [
+    Some(&validate_gates::channel_dns::RECORDS[0]),
+    Some(&validate_gates::channel_dns::RECORDS[1]),
+    Some(&validate_gates::channel_dns::RECORDS[2]),
+];
+// the recorded runs of docs/17 VAL-53 (validate_gates/plume.rs)
+static PLUME_RECORD: Option<&PlumeRecord> = Some(&validate_gates::plume::RECORD);
 
 /// The three MKM answer keys the channel gate reads, id and expected file
 /// under `reference/` (SPEC-LIT 110.2). They are `fetched` rows: their host
@@ -13646,10 +13658,16 @@ enum Band {
     Outside,
 }
 
+/// SPEC-LIT 110.1's rule as its text states it: "a result that lands within
+/// the uncertainty of a band edge is reported UNDECIDED, not as inside it",
+/// on either side of the edge - inside is `|E| + u_val <= band`, outside
+/// `|E| - u_val > band` (the rule `validate_gates::t3a::band_110` states; this
+/// one made only the outside half undecided until docs/17 VAL-51). A NaN is
+/// outside.
 fn band_of(e_abs: Scalar, band: Scalar, u_val: Scalar) -> Band {
-    if e_abs <= band {
+    if e_abs + u_val <= band {
         Band::Inside
-    } else if e_abs <= band + u_val {
+    } else if e_abs - u_val <= band {
         Band::Undecided
     } else {
         Band::Outside
@@ -14031,7 +14049,13 @@ fn check_channel_dns(c: &mut Checks) -> Result<()> {
             Err(why) => c.note(&answer_key_missing_line(id, file, &why)),
         }
     }
-    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS)
+    // The single build's finest runs of the same three legs (class R,
+    // docs/17 section 5.1 rule 4): a record, or the reason the run left none.
+    let single = std::array::from_fn(|i| {
+        let s = &validate_gates::channel_dns::SINGLE[i];
+        Some(s.as_ref().ok_or(validate_gates::channel_dns::SINGLE_NOT_RECORDED[i]))
+    });
+    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS, single)
 }
 
 /// The worker behind [`check_channel_dns`]: parsed keys and record slots are
@@ -14042,6 +14066,7 @@ fn check_channel_dns_on(
     c: &mut Checks,
     keys: [Option<MkmProfile>; 3],
     records: [Option<&ChannelDnsRecord>; 3],
+    single: [Option<std::result::Result<&validate_gates::channel_dns::ChannelDnsSingle, &'static str>>; 3],
 ) -> Result<()> {
     // The key's own consistency rows (C-KEYCHK), per loaded file.
     for (i, k) in keys.iter().enumerate() {
@@ -14114,11 +14139,14 @@ fn check_channel_dns_on(
         }
         return Ok(());
     }
-    // C-VERDICT, per leg: the key and the record both exist.
+    // C-VERDICT, per leg: the key and the record both exist. Every row and
+    // verdict below is judged on a RECORDED run (docs/17 VAL-51), so it is
+    // counted as replayed and its verdict says so (SPEC-LIT 110.1).
     for i in 0..3 {
         let (Some(key), Some(rec)) = (&keys[i], records[i]) else {
             continue;
         };
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
         let u_tau = (rec.body_force * H_CHANNEL).sqrt();
         let (_ub_sim, ub_dns, b2, b3) =
             channel_functionals(rec.profile_fine, u_tau, NU_CHANNEL, key)?;
@@ -14130,31 +14158,54 @@ fn check_channel_dns_on(
             })
             .collect();
         let study = vv::grid_study(&levels)?;
-        let u_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs() * ub_dns;
+        let rel_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs();
+        let u_input = rel_input * ub_dns;
         let val = vv::validation(rec.u_b_plus[2], ub_dns, study.u_fine, u_input, 0.0);
+        c.note(&format!(
+            "110.5 {leg}: {} iterations per level, finest |U| res {}; U_b+ = {} / {} / {} at N_y = \
+             {} / {} / {}; DNS U_b+ = {} (trapezoid over the key's rows); binaries built at {}",
+            rec.iterations,
+            sci(f64::from(rec.residual_u), 3),
+            sci(f64::from(rec.u_b_plus[0]), 5),
+            sci(f64::from(rec.u_b_plus[1]), 5),
+            sci(f64::from(rec.u_b_plus[2]), 5),
+            rec.n_y[0],
+            rec.n_y[1],
+            rec.n_y[2],
+            sci(f64::from(ub_dns), 5),
+            validate_gates::channel_dns::BUILT_AT,
+        ));
         c.note(&study.one_line());
         c.note(&val.one_line("U_b+ on the finest mesh"));
         c.note(&format!(
             "u_input (S32.4): the driver's measured wall shear misses g_x h by \
-             {} relative - quoted, never folded into the band",
+             {} relative ({} in U_b+) - quoted, never folded into the band",
+            sci(f64::from(rel_input), 3),
             sci(f64::from(u_input), 3)
         ));
-        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
-        match band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns) {
-            Band::Inside => c.check_p(
-                &format!(
-                    "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau \
-                     (absolute prediction, SPEC-LIT S110.2)"
-                ),
-                val.e.abs() / ub_dns,
-                0.05,
-            ),
+        c.note(&format!(
+            "110.2 {leg}: B2 sup-norm {} wall units, B3 worst sublayer deviation {}",
+            sci(f64::from(b2), 4),
+            sci(f64::from(b3), 4)
+        ));
+        let b1 = band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns);
+        match b1 {
+            Band::Inside => c.replaying(|c| {
+                c.check_p(
+                    &format!(
+                        "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau, \
+                         |E|/D + u_val/D (absolute prediction, SPEC-LIT S110.2)"
+                    ),
+                    (val.e.abs() + val.u_val) / ub_dns,
+                    0.05,
+                )
+            }),
             Band::Undecided => report_110a(
                 c,
                 Verdict::Open,
-                How::Live,
+                How::Replayed,
                 format!(
-                    "undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
+                    "{leg} B1 undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
                     sci(f64::from(val.e.abs() / ub_dns), 3),
                     sci(f64::from(val.u_val / ub_dns), 3)
                 ),
@@ -14164,9 +14215,9 @@ fn check_channel_dns_on(
             Band::Outside => report_110a(
                 c,
                 Verdict::Misses,
-                How::Live,
+                How::Replayed,
                 format!(
-                    "U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
+                    "{leg} B1: U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
                      study's order p = {}",
                     sci(f64::from(rec.u_b_plus[2]), 5),
                     sci(f64::from(ub_dns), 5),
@@ -14180,28 +14231,91 @@ fn check_channel_dns_on(
                 Some(Uncertainty::Study(study)),
             ),
         }
-        c.check_p(
-            &format!(
-                "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
-                 within 1.0 wall unit (SPEC-LIT S110.2)"
-            ),
-            b2,
-            1.0,
+        // B2 is a comparison with published data: outside its bar it is a
+        // MISS, asserted and printed by name (the user's 2026-10-14 rule),
+        // never a quietly failed row.
+        let b2_label = format!(
+            "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
+             within 1.0 wall unit (SPEC-LIT S110.2)"
         );
-        c.check_p(
-            &format!(
-                "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
-                 to 2% (not a verdict, SPEC-LIT S110.2)"
-            ),
-            b3,
-            0.02,
-        );
+        if b2 <= 1.0 {
+            c.replaying(|c| c.check_p(&b2_label, b2, 1.0));
+        } else {
+            report_110a(
+                c,
+                Verdict::Misses,
+                How::Replayed,
+                format!(
+                    "{leg} B2: the finest column's u+ departs from the DNS by {} wall units over \
+                     30 <= y+ <= Re_tau, against the 1.0 bar",
+                    sci(f64::from(b2), 4)
+                ),
+                vec![],
+                Some(Uncertainty::SingleMesh("B2 is read on the finest mesh alone (SPEC-LIT 110.2)")),
+            );
+        }
+        c.replaying(|c| {
+            c.check_p(
+                &format!(
+                    "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
+                     to 2% (not a verdict, SPEC-LIT S110.2)"
+                ),
+                b3,
+                0.02,
+            )
+        });
+        // Class R (docs/17 section 5.1 rule 4): the single build's finest run lands in
+        // each band the f64 build's finest run landed in, B1 at the f64
+        // study's u_val.
+        let s = match single[i] {
+            None => {
+                c.note(&format!("110.5 {leg}: no single-build run is recorded on the finest level"));
+                continue;
+            }
+            // A run that diverged or stopped is recorded as exactly that
+            // (SPEC-LIT 110.1): the class-R row cannot be taken, and the miss
+            // is registered by name (the user's 2026-10-14 rule; SPEC-LIT §69.2 keeps
+            // the verdict word in the registry).
+            Some(Err(why)) => {
+                report_110a(
+                    c,
+                    Verdict::Misses,
+                    How::Replayed,
+                    format!("{leg} class R: the single build's finest run left no record - {why}"),
+                    vec![],
+                    Some(Uncertainty::SingleMesh("the single build's finest level alone (docs/17 section 5.1 rule 4)")),
+                );
+                continue;
+            }
+            Some(Ok(s)) => s,
+        };
+        let (_, _, b2s, b3s) = channel_functionals(s.profile_fine, u_tau, NU_CHANNEL, key)?;
+        let e_s = (s.u_b_plus - ub_dns).abs() / ub_dns;
+        let b1s = band_of(e_s, 0.05, val.u_val / ub_dns);
+        c.note(&format!(
+            "110.5 {leg} single build, N_y {}: U_b+ = {} (|E|/D {}), B2 {}, B3 {}, {} iterations, |U| res {}",
+            s.n_y,
+            sci(f64::from(s.u_b_plus), 5),
+            sci(f64::from(e_s), 3),
+            sci(f64::from(b2s), 4),
+            sci(f64::from(b3s), 4),
+            s.iterations,
+            sci(f64::from(s.residual_u), 3),
+        ));
+        let same = b1s == b1 && (b2s <= 1.0) == (b2 <= 1.0) && (b3s <= 0.02) == (b3 <= 0.02);
+        c.replaying(|c| {
+            c.require(
+                &format!("Gate 110-A {leg} single build: B1, B2 and B3 land where the f64 build's do (class R)"),
+                same,
+            )
+        });
     }
     Ok(())
 }
 
-/// Gate 110-B: load the Driver & Seegmiller key and the record slot, then
-/// hand the verdict to [`check_backstep_reattachment_on`] (S7's split).
+/// Gate 110-B: load the Driver & Seegmiller key, then hand it with the
+/// recorded runs (docs/17 VAL-52, `validate_gates/backstep.rs`) to
+/// [`check_backstep_runs_on`] (S7's split).
 fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
     // answer-key: driver-seegmiller1985
     let key = match key::load_text(DS_KEY.0) {
@@ -14220,20 +14334,13 @@ fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
             None
         }
     };
-    check_backstep_reattachment_on(c, key, STEP_RECORD)
+    check_backstep_runs_on(c, key, &validate_gates::backstep::RUNS, &validate_gates::backstep::SINGLE)
 }
 
-/// The worker behind [`check_backstep_reattachment`]: the parsed key
-/// `(D, u_D)` and the record slot are parameters (S7). With the key present
-/// and a record recorded, the datum's own +-0.10 IS the band - `u_num` from
-/// the three-mesh study decides undecided at its edge (SPEC-LIT 110.3) - and
-/// the inflow boundary layer and reference velocity are INPUT DIFFERENCES,
-/// printed beside the verdict, never folded in (S32.4).
-fn check_backstep_reattachment_on(
-    c: &mut Checks,
-    key: Option<(Scalar, Scalar)>,
-    rec: Option<&StepRecord>,
-) -> Result<()> {
+/// The key's own row, spelled once and run by both step workers (SPEC-LIT
+/// 69.3): the transcription is 6.26 with u_D 0.10, the TMR page's numbers,
+/// held to the digit before anything is compared against it.
+fn ds_key_row(c: &mut Checks, key: Option<(Scalar, Scalar)>) {
     if let Some((d, u_d)) = key {
         c.check_d(
             "D&S 1985 key: x_r/H = 6.26 with u_D = 0.10, as the TMR page states it",
@@ -14241,6 +14348,22 @@ fn check_backstep_reattachment_on(
             0.0,
         );
     }
+}
+
+/// The worker behind [`check_backstep_runs_on`]'s formed-study path: the
+/// parsed key `(D, u_D)` and the record slot are parameters (S7). With the
+/// key present and a record recorded, the datum's own +-0.10 IS the band -
+/// `u_num` from the three-mesh study decides undecided at its edge (SPEC-LIT
+/// 110.3) - and the inflow boundary layer and reference velocity are INPUT
+/// DIFFERENCES, printed beside the verdict, never folded in (S32.4). Every
+/// row and verdict here is REPLAYED: the record is a measurement this binary
+/// did not take on this run (SPEC-LIT 110.1).
+fn check_backstep_reattachment_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    rec: Option<&StepRecord>,
+) -> Result<()> {
+    ds_key_row(c, key);
     let (Some((d, u_d)), Some(r)) = (key, rec) else {
         if key.is_none() {
             report_110b(
@@ -14286,17 +14409,20 @@ fn check_backstep_reattachment_on(
     ));
     c.note(&study.one_line());
     c.note(&val.one_line("x_r/H on the finest mesh"));
+    c.note(&format!("110.5 step: binaries built at {}", validate_gates::backstep::BUILT_AT));
     match band_of(val.e.abs(), 0.10, study.u_fine) {
-        Band::Inside => c.check_p(
-            "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
-             SPEC-LIT S110.3)",
-            val.e.abs(),
-            0.10,
-        ),
+        Band::Inside => c.replaying(|c| {
+            c.check_p(
+                "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
+                 SPEC-LIT S110.3)",
+                val.e.abs(),
+                0.10,
+            )
+        }),
         Band::Undecided => report_110b(
             c,
             Verdict::Open,
-            How::Live,
+            How::Replayed,
             format!(
                 "undecided: |E| = {} is within u_num = {} of the 0.10 edge (S32.4)",
                 sci(f64::from(val.e.abs()), 3),
@@ -14307,7 +14433,7 @@ fn check_backstep_reattachment_on(
         Band::Outside => report_110b(
             c,
             Verdict::Misses,
-            How::Live,
+            How::Replayed,
             format!(
                 "x_r/H = {:.3} against 6.26 - {:+.1}% of D, outside the datum's own \
                  +-0.10; the study's order p = {}",
@@ -14322,6 +14448,161 @@ fn check_backstep_reattachment_on(
         ),
     }
     Ok(())
+}
+
+/// Gate 110-B's replay worker behind [`check_backstep_reattachment`]: the
+/// key and the two recorded run arrays are parameters (S7) - the three f64
+/// levels, coarse to fine, and the same three meshes on the single build
+/// (docs/17 VAL-52, `validate_gates/backstep.rs`). Every level's record is
+/// named; a level that stopped is recorded as exactly that, and the gate
+/// MISSES, because a run that diverged is a finding (SPEC-LIT 110.1). With
+/// all three f64 levels converged the three-mesh study forms and the verdict
+/// is [`check_backstep_reattachment_on`]'s; while it does not, there is no
+/// u_num and the miss names the finest level that converged.
+fn check_backstep_runs_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    runs: &[validate_gates::backstep::StepRun; 3],
+    single: &[validate_gates::backstep::StepRun; 3],
+) -> Result<()> {
+    let Some((d, u_d)) = key else {
+        return check_backstep_reattachment_on(c, None, None);
+    };
+    let note = |c: &mut Checks, tag: &str, r: &validate_gates::backstep::StepRun| match &r.outcome {
+        Ok(f) => c.note(&format!(
+            "110.5 {tag} dx = {}H, {} cells: x_r/H = {:.4}, delta_99/H at x = -4H = {:.4} \
+             (U_e {:.4} m/s; the datum says approximately 1.5H), {} iterations, |U| res {}",
+            r.dx_over_h,
+            r.n_cells,
+            f.x_r_over_h,
+            f.delta99_over_h,
+            f.u_e,
+            f.iterations,
+            sci(f64::from(f.residual_u), 3),
+        )),
+        Err(why) => c.note(&format!(
+            "110.5 {tag} dx = {}H, {} cells: did not converge - {why}",
+            r.dx_over_h, r.n_cells
+        )),
+    };
+    for r in runs {
+        note(c, "step", r);
+    }
+    for r in single {
+        note(c, "single build", r);
+    }
+    if runs.iter().all(|r| r.outcome.is_ok()) {
+        backstep_class_r(c, d, u_d, runs, single);
+        let f: Vec<&validate_gates::backstep::StepConverged> =
+            runs.iter().map(|r| r.outcome.as_ref().expect("all three f64 levels converged")).collect();
+        let rec = StepRecord {
+            n_cells: [runs[0].n_cells, runs[1].n_cells, runs[2].n_cells],
+            dx_over_h: [runs[0].dx_over_h, runs[1].dx_over_h, runs[2].dx_over_h],
+            x_r_over_h: [f[0].x_r_over_h, f[1].x_r_over_h, f[2].x_r_over_h],
+            delta99_over_h_at_minus_4h: [
+                f[0].delta99_over_h,
+                f[1].delta99_over_h,
+                f[2].delta99_over_h,
+            ],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: f[2].iterations,
+            residual_u: f[2].residual_u,
+        };
+        return check_backstep_reattachment_on(c, key, Some(&rec));
+    }
+    // The three-mesh study of S110.3 is not formed: one miss, by name.
+    ds_key_row(c, key);
+    let stopped: Vec<String> = runs
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            Err(why) => Some(format!("the dx = {}H level stopped - {why}", r.dx_over_h)),
+            Ok(_) => None,
+        })
+        .collect();
+    let mut headline = format!("study not formed: {}", stopped.join("; "));
+    let mut finest: Option<(
+        &validate_gates::backstep::StepRun,
+        &validate_gates::backstep::StepConverged,
+    )> = None;
+    for r in runs {
+        let Ok(f) = &r.outcome else { continue };
+        let finer = match finest {
+            Some((cur, _)) => f64::from(r.dx_over_h) < f64::from(cur.dx_over_h),
+            None => true,
+        };
+        if finer {
+            finest = Some((r, f));
+        }
+    }
+    match finest {
+        Some((r, f)) => {
+            let e = f.x_r_over_h - d;
+            let word = if e.abs() <= u_d { "inside" } else { "outside" };
+            headline.push_str(&format!(
+                "; on the finest level that converged, dx = {}H, x_r/H = {:.3} against 6.26, \
+                 E = {:+.3} ({:+.1}% of D), {} the datum's own +-0.10 at that level, with no u_num",
+                r.dx_over_h,
+                f.x_r_over_h,
+                e,
+                100.0 * e / d,
+                word
+            ));
+        }
+        None => headline.push_str("; no level converged"),
+    }
+    report_110b(
+        c,
+        Verdict::Misses,
+        How::Replayed,
+        headline,
+        Some(Uncertainty::SingleMesh(
+            "the three-mesh study of S110.3 is not formed: a level did not converge",
+        )),
+    );
+    backstep_class_r(c, d, u_d, runs, single);
+    Ok(())
+}
+
+/// Class R (docs/17 section 5.1 rule 4), one row per level: where the f64
+/// build converged, the single build's run lands on the same side of the
+/// datum's +-0.10 as the f64 build's, or its missing record is a miss; a
+/// level whose f64 run already stopped says no more than its note. At most
+/// one class-R verdict per level.
+fn backstep_class_r(
+    c: &mut Checks,
+    d: Scalar,
+    u_d: Scalar,
+    runs: &[validate_gates::backstep::StepRun; 3],
+    single: &[validate_gates::backstep::StepRun; 3],
+) {
+    for i in 0..3 {
+        match (&runs[i].outcome, &single[i].outcome) {
+            (Ok(f), Ok(s)) => c.replaying(|c| {
+                c.require(
+                    &format!(
+                        "Gate 110-B single build at dx = {}H: x_r/H lands on the same side \
+                         of the datum's +-0.10 as the f64 build's (class R)",
+                        single[i].dx_over_h
+                    ),
+                    ((f.x_r_over_h - d).abs() <= u_d) == ((s.x_r_over_h - d).abs() <= u_d),
+                )
+            }),
+            (Ok(_), Err(why)) => report_110b(
+                c,
+                Verdict::Misses,
+                How::Replayed,
+                format!(
+                    "class R: the single build's dx = {}H run left no record - {why}",
+                    single[i].dx_over_h
+                ),
+                Some(Uncertainty::SingleMesh(
+                    "the single build's run of a level the f64 build converged on \
+                     (docs/17 section 5.1 rule 4)",
+                )),
+            ),
+            (Err(_), _) => {}
+        }
+    }
 }
 
 /// Gate 110-C: load the McCaffrey key and the record slot, then hand the
@@ -14344,7 +14625,14 @@ fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
             None
         }
     };
-    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD)
+    // The single build's finest run of the same case (class R, docs/17
+    // section 5.1 rule 4): a record, or the reason the run left none.
+    let single = Some(
+        validate_gates::plume::SINGLE
+            .as_ref()
+            .ok_or(validate_gates::plume::SINGLE_NOT_RECORDED),
+    );
+    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD, single)
 }
 
 /// The worker behind [`check_mccaffrey_plume`]: the parsed key and record
@@ -14358,6 +14646,7 @@ fn check_mccaffrey_plume_on(
     c: &mut Checks,
     key: Option<&McCaffreyKey>,
     rec: Option<&PlumeRecord>,
+    single: Option<std::result::Result<&validate_gates::plume::PlumeSingle, &'static str>>,
 ) -> Result<()> {
     if let Some(k) = key {
         c.check_p(
@@ -14413,19 +14702,28 @@ fn check_mccaffrey_plume_on(
     let w_mcc = |z: Scalar| k.plume_v * r.q_kw.powf(1.0 / 3.0) * z.powf(-1.0 / 3.0);
     // The worst station of each, kept SIGNED: the band reads its magnitude,
     // the headline its sign (high is the side S110.4 predicts; low is not).
-    let (mut s_t, mut s_w) = (0.0 as Scalar, 0.0 as Scalar);
-    for i in 0..6 {
-        let e_t = r.dt_c[2][i] / dt_mcc(r.stations_m[i]) - 1.0;
-        let e_w = r.w_c[2][i] / w_mcc(r.stations_m[i]) - 1.0;
-        if e_t.abs() > s_t.abs() {
-            s_t = e_t;
+    let worst = |dt: &[Scalar; 6], w: &[Scalar; 6]| -> (Scalar, Scalar) {
+        let (mut s_t, mut s_w) = (0.0 as Scalar, 0.0 as Scalar);
+        for i in 0..6 {
+            let e_t = dt[i] / dt_mcc(r.stations_m[i]) - 1.0;
+            let e_w = w[i] / w_mcc(r.stations_m[i]) - 1.0;
+            if e_t.abs() > s_t.abs() {
+                s_t = e_t;
+            }
+            if e_w.abs() > s_w.abs() {
+                s_w = e_w;
+            }
         }
-        if e_w.abs() > s_w.abs() {
-            s_w = e_w;
-        }
-    }
+        (s_t, s_w)
+    };
+    let (s_t, s_w) = worst(&r.dt_c[2], &r.w_c[2]);
     let (r_t, r_w) = (s_t.abs(), s_w.abs());
     let p3 = plume_exponent(&r.stations_m, &r.dt_c[2]);
+    // What 20-40 % radiative loss accounts for (S110.4): dT high by
+    // (1/(1-chi_r))^(2/3), w by (1/(1-chi_r))^(1/3), over that range.
+    let rad = |chi_r: Scalar, e: Scalar| (1.0 / (1.0 - chi_r)).powf(e) - 1.0;
+    let (t_lo, t_hi) = (rad(0.20, 2.0 / 3.0), rad(0.40, 2.0 / 3.0));
+    let (w_lo, w_hi) = (rad(0.20, 1.0 / 3.0), rad(0.40, 1.0 / 3.0));
     // P4, printed and asserted as nothing: the convective fraction the run
     // implies, BEFORE the numbers (S110.4).
     let chi: Scalar = (0..6)
@@ -14438,8 +14736,39 @@ fn check_mccaffrey_plume_on(
     );
     c.note(&format!(
         "P4 (a number, not a verdict): the implied convective fraction chi_c = {:.3} - \
-         what a participating medium would have to carry if one were ever built",
+         what a participating medium would have to carry if one were ever built; \
+         McCaffrey's 20-40 % radiative loss is chi_c = 0.60-0.80",
         chi
+    ));
+    let six = |v: &[Scalar; 6], f: &dyn Fn(Scalar) -> Scalar| -> String {
+        (0..6)
+            .map(|i| format!("{:+.1}%", 100.0 * (v[i] / f(r.stations_m[i]) - 1.0)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    c.note(&format!(
+        "110.5 plume: {} iterations per level, finest |U| res {}; dT_c(2.00 m) = {} / {} / {} K \
+         and w_c(2.00 m) = {} / {} / {} m/s at h = 0.10 / 0.05 / 0.025 m, against McCaffrey's {} K \
+         and {} m/s at the declared Q = {} kW; binaries built at {}",
+        r.iterations,
+        sci(f64::from(r.residual_u), 3),
+        sci(f64::from(r.dt_c[0][3]), 5),
+        sci(f64::from(r.dt_c[1][3]), 5),
+        sci(f64::from(r.dt_c[2][3]), 5),
+        sci(f64::from(r.w_c[0][3]), 5),
+        sci(f64::from(r.w_c[1][3]), 5),
+        sci(f64::from(r.w_c[2][3]), 5),
+        sci(f64::from(dt_mcc(2.0)), 5),
+        sci(f64::from(w_mcc(2.0)), 5),
+        r.q_kw,
+        validate_gates::plume::BUILT_AT,
+    ));
+    c.note(&format!(
+        "110.4 finest, z = 1.25 ... 2.50 m (the column dx/2 off the axis): dT_c {}; w_c {}; \
+         P3 slope {:.4}",
+        six(&r.dt_c[2], &dt_mcc),
+        six(&r.w_c[2], &w_mcc),
+        p3
     ));
     let levels: Vec<ofgpu::vv::Level> = (0..3)
         .rev()
@@ -14452,70 +14781,164 @@ fn check_mccaffrey_plume_on(
     let val = vv::validation(r.dt_c[2][3], dt_mcc(2.0), study.u_fine, 0.0, 0.0);
     c.note(&study.one_line());
     c.note(&val.one_line("dT_c at z = 2.00 m"));
-    c.check_p(
-        "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
-         (SPEC-LIT S110.4)",
-        (p3 + 5.0 / 3.0).abs(),
-        0.25,
-    );
+    // P3, the exponent a non-radiating solver CAN close. Its -5/3 is the
+    // correlation's, so outside its band the gate is left open (S110.1).
+    let p3_in = (p3 + 5.0 / 3.0).abs() <= 0.25;
+    if p3_in {
+        c.replaying(|c| {
+            c.check_p(
+                "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
+                 (SPEC-LIT S110.4)",
+                (p3 + 5.0 / 3.0).abs(),
+                0.25,
+            )
+        });
+    } else {
+        report_110c(
+            c,
+            Verdict::Open,
+            How::Replayed,
+            format!(
+                "P3: the finest centreline dT decays as z^({:.3}) over the six stations, outside \
+                 -5/3 +- 0.25 - the correlation's exponent, so the gate is left open (S110.1)",
+                p3
+            ),
+            Some(Uncertainty::SingleMesh("P3 is read on the finest mesh alone (SPEC-LIT 110.4)")),
+        );
+    }
     // P1 and P2 each: inside, undecided, or outside a correlation - and an
     // outside band is Verdict::Open, never the measurement word, because the
-    // datum is a correlation and the section expects this very miss.
-    let band1 = band_of(r_t, 0.15, val.u_val / dt_mcc(2.0));
-    let band2 = band_of(r_w, 0.15, val.u_val / dt_mcc(2.0));
-    let worst = if band1 == Band::Outside || band2 == Band::Outside {
+    // datum is a correlation and the section expects this very miss. Both
+    // are judged at the one study S110.4 names, dT_c at z = 2.00 m, as a
+    // relative u_val.
+    let rel_u = val.u_val / dt_mcc(2.0);
+    let band1 = band_of(r_t, 0.15, rel_u);
+    let band2 = band_of(r_w, 0.15, rel_u);
+    let worst_band = if band1 == Band::Outside || band2 == Band::Outside {
         Band::Outside
     } else if band1 == Band::Undecided || band2 == Band::Undecided {
         Band::Undecided
     } else {
         Band::Inside
     };
-    match worst {
-        Band::Inside => {
+    match worst_band {
+        Band::Inside => c.replaying(|c| {
             c.check_p(
                 "Gate 110-C: P1, centreline dT within 15% of the correlation at every \
-                 station (SPEC-LIT S110.4)",
-                r_t,
+                 station, |E| + u_val (SPEC-LIT S110.4)",
+                r_t + rel_u,
                 0.15,
             );
             c.check_p(
                 "Gate 110-C: P2, centreline w within 15% of the correlation at every \
-                 station (SPEC-LIT S110.4)",
-                r_w,
+                 station, |E| + u_val (SPEC-LIT S110.4)",
+                r_w + rel_u,
                 0.15,
             );
-        }
+        }),
         Band::Undecided => report_110c(
             c,
             Verdict::Open,
-            How::Live,
+            How::Replayed,
             format!(
                 "undecided: P1/P2 worst {:.3} is within u_val/D = {:.3} of the 15% edge \
                  (S32.4)",
                 r_t.max(r_w),
-                val.u_val / dt_mcc(2.0)
+                rel_u
             ),
             Some(Uncertainty::Study(study)),
         ),
-        Band::Outside => report_110c(
+        Band::Outside => {
+            // Each leg's own band word: one leg outside makes the gate's,
+            // but the other is never reported as outside when it is not.
+            let word = |b: Band| match b {
+                Band::Inside => "inside",
+                Band::Undecided => "undecided",
+                Band::Outside => "outside",
+            };
+            let high = s_t > 0.0 && s_w > 0.0;
+            let within_rad = high && s_t <= t_hi && s_w <= w_hi;
+            let why = if within_rad {
+                "on the high side a non-radiating solver was predicted to sit on and inside \
+                 what 20-40 % radiative loss accounts for: the correlation does not close \
+                 without radiative loss, which is the measurement this gate exists to take"
+                    .to_string()
+            } else if high {
+                format!(
+                    "on the predicted high side but BEYOND what 20-40 % radiative loss accounts \
+                     for (dT {:+.0}% to {:+.0}%, w {:+.0}% to {:+.0}%): radiation alone does not \
+                     explain this miss",
+                    100.0 * t_lo,
+                    100.0 * t_hi,
+                    100.0 * w_lo,
+                    100.0 * w_hi
+                )
+            } else {
+                "NOT the high side the section predicted for a non-radiating solver - a deficit \
+                 radiation cannot explain"
+                    .to_string()
+            };
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Replayed,
+                format!(
+                    "P1 worst {:+.1}% {}, P2 worst {:+.1}% {} against the +-15% band at u_val/D \
+                     = {:.3} - {} (S110.4)",
+                    100.0 * s_t,
+                    word(band1),
+                    100.0 * s_w,
+                    word(band2),
+                    rel_u,
+                    why
+                ),
+                Some(Uncertainty::Study(study)),
+            )
+        }
+    }
+    // Class R (docs/17 section 5.1 rule 4): the single build's finest run
+    // lands in each band the f64 build's finest run landed in, P1 and P2 at
+    // the f64 study's u_val.
+    match single {
+        None => c.note("110.5 plume: no single-build run is recorded on the finest level"),
+        // A run that diverged or stopped is recorded as exactly that
+        // (SPEC-LIT 110.1), and the miss is registered by name.
+        Some(Err(why)) => report_110c(
             c,
-            Verdict::Open,
-            How::Live,
-            format!(
-                "P1 worst {:+.1}%, P2 worst {:+.1}% - outside the +-15% band, {} (S110.4)",
-                100.0 * s_t,
-                100.0 * s_w,
-                if s_t > 0.0 && s_w > 0.0 {
-                    "on the high side a non-radiating solver was predicted to sit on: the \
-                     correlation does not close without radiative loss, which is the \
-                     measurement this gate exists to take"
-                } else {
-                    "NOT the high side the section predicted for a non-radiating solver - \
-                     a deficit radiation cannot explain"
-                },
-            ),
-            Some(Uncertainty::Study(study)),
+            Verdict::Misses,
+            How::Replayed,
+            format!("class R: the single build's finest run left no record - {why}"),
+            Some(Uncertainty::SingleMesh(
+                "the single build's finest level alone (docs/17 section 5.1 rule 4)",
+            )),
         ),
+        Some(Ok(s)) => {
+            let (st_s, sw_s) = worst(&s.dt_c, &s.w_c);
+            let p3_s = plume_exponent(&r.stations_m, &s.dt_c);
+            let b1_s = band_of(st_s.abs(), 0.15, rel_u);
+            let b2_s = band_of(sw_s.abs(), 0.15, rel_u);
+            c.note(&format!(
+                "110.5 plume single build, {} cells: P1 worst {:+.2}%, P2 worst {:+.2}%, P3 \
+                 slope {:.4}, dT_c(2.00 m) {} K, {} iterations, |U| res {}",
+                s.n_cells,
+                100.0 * st_s,
+                100.0 * sw_s,
+                p3_s,
+                sci(f64::from(s.dt_c[3]), 5),
+                s.iterations,
+                sci(f64::from(s.residual_u), 3),
+            ));
+            let same = b1_s == band1
+                && b2_s == band2
+                && ((p3_s + 5.0 / 3.0).abs() <= 0.25) == p3_in;
+            c.replaying(|c| {
+                c.require(
+                    "Gate 110-C single build: P1, P2 and P3 land where the f64 build's do \
+                     (class R)",
+                    same,
+                )
+            });
+        }
     }
     Ok(())
 }
@@ -23876,7 +24299,7 @@ buoyancy_constant 0.935
             rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
         };
         let mut c = Checks::new();
-        check_channel_dns_on(&mut c, [Some(half), None, None], [None, None, None])
+        check_channel_dns_on(&mut c, [Some(half), None, None], [None, None, None], [None, None, None])
             .expect("the gate runs");
         assert_eq!(c.failures, 0, "3 rows is (5 + 1)/2, what ny = 5 asks for");
         let whole = MkmProfile {
@@ -23885,7 +24308,7 @@ buoyancy_constant 0.935
             rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
         };
         let mut c = Checks::new();
-        check_channel_dns_on(&mut c, [Some(whole), None, None], [None, None, None])
+        check_channel_dns_on(&mut c, [Some(whole), None, None], [None, None, None], [None, None, None])
             .expect("the gate runs");
         assert_eq!(c.failures, 1, "3 rows against ny = 3's (3 + 1)/2 = 2 fails");
     }
@@ -23938,6 +24361,11 @@ buoyancy_constant 0.935
         assert_eq!(band_of(0.04, 0.05, 0.01), Band::Inside);
         assert_eq!(band_of(0.055, 0.05, 0.01), Band::Undecided);
         assert_eq!(band_of(0.07, 0.05, 0.01), Band::Outside);
+        // SPEC-LIT 110.1: "a result that lands within the uncertainty of a
+        // band edge is reported UNDECIDED, not as inside it" - on the inside
+        // of the edge too (docs/17 VAL-51 found the one-sided rule).
+        assert_eq!(band_of(0.045, 0.05, 0.01), Band::Undecided);
+        assert_eq!(band_of(0.05, 0.05, 0.0), Band::Inside);
     }
 
     /// The synthetic DNS profile: `u+ = y+` to y+ 11, the log law above it.
@@ -23998,33 +24426,89 @@ buoyancy_constant 0.935
         assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
     }
 
-    /// (g) THIS TREE's own truth: the two tracked transcriptions load and
-    /// their key rows run, the three `fetched` DNS keys are absent on a
-    /// clean clone, and no record exists - so the three top-level checks
-    /// each register exactly one open, live verdict, BY NAME, in C-GATES
-    /// order, and nothing a key alone could close has closed.
+    /// (g) Gate 110-B on this tree (docs/17 VAL-52): its three f64 levels
+    /// and the three single builds are recorded - the coarse f64 run
+    /// converged, and the other five left exactly the records the driver
+    /// printed (§110.1: a run that diverged is a finding). So the study is
+    /// not formed and the gate MISSES, twice, both REPLAYED, BY NAME: the
+    /// not-formed study, with the one converged level's x_r against the
+    /// datum in the headline, and the single build's missing coarse run.
+    /// (110-A has its records since docs/17 VAL-51: test (g2); 110-C since
+    /// docs/17 VAL-53: test (g3).)
     #[test]
-    fn the_three_sections_report_not_closed_by_name_on_this_tree() {
+    fn gate_110b_replays_its_recorded_runs() {
+        let placed = key::load_text(DS_KEY.0).is_ok();
+        let mut c = Checks::new();
+        check_backstep_reattachment(&mut c).expect("110-B runs");
+        if !placed {
+            assert_eq!(c.gates.len(), 1, "one report");
+            assert_eq!(c.gates[0].verdict, Verdict::Open);
+            assert_eq!(c.gates[0].how, How::Live);
+            assert!(c.gates[0].headline.starts_with("answer key missing"), "{}", c.gates[0].headline);
+            return;
+        }
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        assert_eq!(c.gates.len(), 2, "study not formed, then class R");
+        for g in &c.gates {
+            assert_eq!(
+                g.gate,
+                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+            );
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let got: Vec<(Verdict, &str)> =
+            c.gates.iter().map(|g| (g.verdict, g.headline.split(':').next().unwrap_or(""))).collect();
+        assert_eq!(
+            got,
+            [(Verdict::Misses, "study not formed"), (Verdict::Misses, "class R")],
+            "SPEC-LIT 110.5's results rows"
+        );
+        let h = &c.gates[0].headline;
+        assert!(h.contains("x_r/H = 5.637"), "{h}");
+        assert!(h.contains("-9.9% of D"), "{h}");
+        assert!(h.contains("outside"), "{h}");
+        assert_eq!(c.replayed, 0, "no require row ran: the only converged level's single build left no record");
+    }
+
+    /// (g2) Gate 110-A on this tree (docs/17 VAL-51): its three legs are
+    /// recorded. Without the fetched keys (a clean clone) the gate reports
+    /// one open, live `answer key missing` verdict and compares nothing; with
+    /// them placed, every verdict is REPLAYED and they are the ones SPEC-LIT
+    /// 110.5's results rows state.
+    #[test]
+    fn gate_110a_replays_its_three_recorded_legs() {
+        let placed = MKM_KEYS.iter().all(|(id, _)| key::load_text(id).is_ok());
         let mut c = Checks::new();
         check_channel_dns(&mut c).expect("110-A runs");
-        check_backstep_reattachment(&mut c).expect("110-B runs");
-        check_mccaffrey_plume(&mut c).expect("110-C runs");
-        assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
-        assert_eq!(c.gates.len(), 3, "one report per gate");
-        let gates: Vec<&str> = c.gates.iter().map(|g| g.gate).collect();
-        assert_eq!(
-            gates,
-            [
-                "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
-                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
-                "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
-            ],
-            "the three gate names, in order"
-        );
-        for g in &c.gates {
-            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
-            assert_eq!(g.how, How::Live, "{}", g.headline);
+        if !placed {
+            assert_eq!(c.gates.len(), 1, "one report");
+            assert_eq!(c.gates[0].verdict, Verdict::Open);
+            assert_eq!(c.gates[0].how, How::Live);
+            assert!(c.gates[0].headline.starts_with("answer key missing"), "{}", c.gates[0].headline);
+            return;
         }
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        for g in &c.gates {
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let got: Vec<(Verdict, &str)> =
+            c.gates.iter().map(|g| (g.verdict, g.headline.split(':').next().unwrap_or(""))).collect();
+        assert_eq!(
+            got,
+            [
+                (Verdict::Open, "chan180 B1 undecided"),
+                (Verdict::Misses, "chan180 B2"),
+                (Verdict::Misses, "chan180 class R"),
+                (Verdict::Open, "chan395 B1 undecided"),
+                (Verdict::Misses, "chan395 B2"),
+                (Verdict::Open, "chan590 B1 undecided"),
+                (Verdict::Misses, "chan590 B2"),
+            ],
+            "SPEC-LIT 110.5's results rows"
+        );
+        // Replayed rows: B3 on each leg, and the class-R row on the two legs
+        // whose single-build run finished (chan180's diverged, 110.5).
+        assert_eq!(c.replayed, 5, "three B3 rows and two class-R rows");
     }
 
     /// A recorded step run whose finest-mesh reattachment lands inside the
@@ -24070,6 +24554,81 @@ buoyancy_constant 0.935
         assert!(matches!(c.gates[0].uncertainty, Some(Uncertainty::Study(_))));
     }
 
+    /// A converged step level with the recipe's mesh and the given
+    /// reattachment, for the synthetic replays below.
+    const fn ok_level(
+        nx: usize,
+        ny: usize,
+        n_cells: usize,
+        dx: Scalar,
+        x_r: Scalar,
+    ) -> validate_gates::backstep::StepRun {
+        validate_gates::backstep::StepRun {
+            nx,
+            ny,
+            n_cells,
+            dx_over_h: dx,
+            outcome: Ok(validate_gates::backstep::StepConverged {
+                x_r_over_h: x_r,
+                delta99_over_h: 1.5,
+                u_e: 10.5,
+                iterations: 6000,
+                residual_u: 1e-8,
+            }),
+        }
+    }
+
+    /// The replay's study path (docs/17 VAL-52): three converged f64 levels
+    /// whose reattachments approach 6.26 from above, and the same three
+    /// records on the single build. The three class-R rows pass in replay,
+    /// the study forms, the finest level's x_r/H lands inside the datum's
+    /// own +-0.10 - and the gate reports nothing: a pass is not a report
+    /// (SPEC-LIT 69).
+    #[test]
+    fn three_converged_step_levels_take_the_study_path() {
+        static RUNS_OK: [validate_gates::backstep::StepRun; 3] = [
+            ok_level(700, 90, 57500, 0.2, 6.40),
+            ok_level(1400, 180, 230000, 0.1, 6.30),
+            ok_level(2800, 360, 920000, 0.05, 6.27),
+        ];
+        static SINGLE_OK: [validate_gates::backstep::StepRun; 3] = [
+            ok_level(700, 90, 57500, 0.2, 6.40),
+            ok_level(1400, 180, 230000, 0.1, 6.30),
+            ok_level(2800, 360, 920000, 0.05, 6.27),
+        ];
+        let mut c = Checks::new();
+        check_backstep_runs_on(&mut c, Some((6.26, 0.10)), &RUNS_OK, &SINGLE_OK)
+            .expect("the replay runs");
+        assert_eq!(c.failures, 0, "the key row, the class-R rows and the inside row all pass");
+        assert!(c.gates.is_empty(), "inside the band, nothing to report");
+        assert!(c.replayed >= 3, "the three class-R rows: {}", c.replayed);
+    }
+
+    /// (g3) Gate 110-C on this tree (docs/17 VAL-53): its three levels and
+    /// the single build's finest are recorded, every row and verdict is
+    /// REPLAYED, nothing fails, and the verdicts are the ones SPEC-LIT
+    /// 110.5's results row states: P3 open (the finest slope lies outside
+    /// -5/3 +- 0.25), P1/P2 open on the high side and BEYOND what 20-40 %
+    /// radiative loss accounts for, and class R holds (a require row).
+    #[test]
+    fn gate_110c_replays_its_recorded_runs() {
+        let mut c = Checks::new();
+        check_mccaffrey_plume(&mut c).expect("110-C runs");
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        assert_eq!(c.gates.len(), 2, "P3 and P1/P2, one report each");
+        for g in &c.gates {
+            assert_eq!(g.gate, "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)");
+            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let p3 = &c.gates[0].headline;
+        assert!(p3.starts_with("P3: the finest centreline dT decays as z^(-2.130)"), "{p3}");
+        let p12 = &c.gates[1].headline;
+        assert!(p12.starts_with("P1 worst +212.6% outside, P2 worst +76.1% undecided"), "{p12}");
+        assert!(p12.contains("BEYOND what 20-40 % radiative loss accounts for"), "{p12}");
+        assert!(matches!(c.gates[1].uncertainty, Some(Uncertainty::Study(_))));
+    }
+
     /// A recorded plume run that sits LOW, 30 % under the correlation at
     /// every station on the finest mesh: the exponent closes (P3 is a check
     /// row), P1/P2 fall outside the +-15 % band, the verdict is the
@@ -24093,7 +24652,7 @@ buoyancy_constant 0.935
             residual_u: 1.0e-5,
         };
         let mut c = Checks::new();
-        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec)).expect("the verdict runs");
+        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec), None).expect("the verdict runs");
         assert_eq!(c.failures, 0, "the key rows and P3 hold");
         assert_eq!(c.gates.len(), 1, "exactly one report");
         assert_eq!(c.gates[0].verdict, Verdict::Open, "a correlation leaves the gate open");

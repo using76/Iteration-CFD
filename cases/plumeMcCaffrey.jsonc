@@ -25,16 +25,16 @@
 // meshes no cell centre sits on x = y = 0: the column is the NEAREST one,
 // dx/2 off the axis, and that offset stands quoted on every number.
 //
-// The key `mccaffrey1979-table1` is expected at
+// The key `mccaffrey1979-table1` is the tracked file
 // reference/mccaffrey_1979/centreline_table1.txt - the report is a US
-// Government work, public domain, but this tree carries NO transcription of
-// it; the key's bytes live in 110.4's fenced block and nowhere else. The
-// gate itself is validate.rs's check_mccaffrey_plume; the recipe is 110.5.
+// Government work, public domain, and the file is 110.4's fenced block byte
+// for byte (docs/17 D-VAL-1). The gate itself is validate.rs's
+// check_mccaffrey_plume; the recipe is 110.5.
 //
-// UNVERIFIED: no run of this file has filled a cell of 110.5's table, and no
-// number anywhere below is a claim. P1/P2 are EXPECTED outside their bands
-// (radiation is 20-40 % of Q and this solver does not model it - 110.4); that
-// miss is the measurement, not a failure.
+// RECORDED (docs/17 VAL-53): this file's three level copies filled 110.5's
+// Gate 110-C row; the numbers below are the case's inputs, not results. P1/P2
+// were EXPECTED outside their bands (radiation is 20-40 % of Q and this
+// solver does not model it - 110.4); 110.5 says where they landed.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

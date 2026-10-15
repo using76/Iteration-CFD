@@ -1814,6 +1814,11 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
             crate::io::case_parcels::FILE,
         ));
     }
+    // SPEC-LIT §137.7: likewise a case that states species, chemistry or
+    // combustion: no driver runs one from a case directory yet (§133.11).
+    if let Some(f) = crate::io::case_chem::dict_route_states_chemistry(case_dir)? {
+        return Err(crate::io::case_chem::refuse_chemistry_case(f));
+    }
 
     // ---- physicalProperties: nu ------------------------------------------
     // transportProperties is the pre-OpenFOAM-11 name for the same file.

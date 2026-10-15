@@ -117,6 +117,18 @@ pub struct JsonCase {
     /// until CHR-26 wires `ofgpu-lowmach` (§137.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parcels: Option<crate::io::case_parcels::JsonParcels>,
+    /// SPEC-LIT §137.2: the species set (`crate::io::case_chem`). Absent
+    /// (the default) is every case this reader has ever built; present, the
+    /// three blocks lower to [`LoweredCase::chem`] and every driver refuses
+    /// the case until CHR-12b wires `ofgpu-lowmach` (§137.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub species: Option<crate::io::case_chem::JsonSpecies>,
+    /// SPEC-LIT §137.2: the mechanism, the thermo set and the integrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chemistry: Option<crate::io::case_chem::JsonChemistry>,
+    /// SPEC-LIT §137.2: the combustion closure (§134).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combustion: Option<crate::io::case_chem::JsonCombustion>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -1661,9 +1673,22 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `parcels` block, lowered onto the library's
     /// settings. `None` for every case without the block.
     pub parcels: Option<crate::io::case_parcels::LoweredParcels>,
+    /// SPEC-LIT §137.2: the `species`, `chemistry` and `combustion` blocks,
+    /// lowered onto one config (§137.7). `None` for every case without them.
+    pub chem: Option<crate::io::case_chem::LoweredChem>,
 }
 
 impl LoweredCase {
+    /// SPEC-LIT §137.7: a driver's refusal of a case that states species,
+    /// chemistry or combustion. Every driver but `ofgpu-lowmach` (§133.11)
+    /// would ignore them; `Ok` for every case without them.
+    pub fn refuse_chemistry(&self) -> Result<()> {
+        match self.chem {
+            Some(_) => Err(crate::io::case_chem::refuse_chemistry_case("species")),
+            None => Ok(()),
+        }
+    }
+
     /// SPEC-LIT §137.6: a driver's refusal of a case that states parcels.
     /// No driver carries a case's parcels before CHR-26, so a run would
     /// ignore them; `Ok` for every case without the block.
@@ -1891,7 +1916,7 @@ fn cell_range_from_bounds(nodes: &[Scalar], lo: Scalar, hi: Scalar) -> (usize, u
 /// OpenFOAM's own boundary-patch class (`wall`/`patch`) for one of this
 /// format's `patches[].kind` presets - `crate::mesh::PatchKind::from_type`
 /// is what reads it back.
-fn patch_class(kind: PatchPresetKind) -> &'static str {
+pub(crate) fn patch_class(kind: PatchPresetKind) -> &'static str {
     match kind {
         PatchPresetKind::Wall => "wall",
         PatchPresetKind::Inlet | PatchPresetKind::Open => "patch",
@@ -3321,13 +3346,28 @@ impl JsonCase {
         }
 
         let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
-        // SPEC-LIT §137.2: JSONC has no `species` block before CHR-12a, so a
-        // mass coupling is refused here by name; the parcels' gravity, when
-        // the block states none, is the case's.
+        // SPEC-LIT §137.2 and §137.7: the three chemistry blocks, one
+        // lowering; each solved species' field is built on the same patch
+        // names and rules as `T`'s.
+        let chem = crate::io::case_chem::lower_blocks(
+            crate::io::case_chem::ChemBlocks {
+                species: self.species.as_ref(),
+                chemistry: self.chemistry.as_ref(),
+                combustion: self.combustion.as_ref(),
+            },
+            crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
+            compressible.is_some(),
+            Some((&names, &self.patches)),
+        )?;
+        // SPEC-LIT §137.2: a mass coupling's vapour is checked against
+        // `species.names` (refused without a species block); the parcels'
+        // gravity, when the block states none, is the case's.
         let parcels = self
             .parcels
             .as_ref()
-            .map(|p| p.lower(None, Some(self.physics.gravity)))
+            .map(|p| {
+                p.lower(chem.as_ref().map(|c| c.species.names.as_slice()), Some(self.physics.gravity))
+            })
             .transpose()?;
         Ok(LoweredCase {
             name: self.name.clone(),
@@ -3370,6 +3410,7 @@ impl JsonCase {
             wedge,
             compressible,
             parcels,
+            chem,
         })
     }
 }

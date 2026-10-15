@@ -33665,7 +33665,7 @@ Government data, and their files are the fenced blocks of §110.3 and §110.4 by
 byte, written by the same script's `write` and checked by its `--check`. So a clean
 clone reports Gate 110-A not closed with three `answer key <id> missing` lines, and
 Gates 110-B and 110-C load their keys, print the digest lines and run the keys' own
-rows before they report that no driver run is recorded. With no key file present at
+rows; then each replays its record (docs/17 VAL-52 and VAL-53, §110.5). With no key file present at
 all, the three gates print five `answer key <id> missing` lines between them. That is
 the designed behaviour, not a failure; §110.5's *Placing a key* says what a user who
 wants the channel gate closed runs.
@@ -33812,6 +33812,18 @@ Re_H = U_ref H / nu = 36 000 ; M = 0.128 in the experiment, incompressible here
 study level = the streamwise spacing dx: 0.2H, 0.1H, 0.05H, with dy = dx/2,
           value = x_r/H
 ```
+
+**The inflow, and how delta_99 is read (docs/17 VAL-52).** The run's inflow is the free
+stream: `ofgpu-generate-mesh step ... -inflow uniform` sets `U = (U_ref, 0, 0)`,
+`U_ref = 10`, on the inlet and through the initial interior, so `Re_H = 36 000` holds at the
+inlet as stated. Without the flag the step preset keeps its own profile byte for byte, which
+on this recipe's inlet (`y` in [1H, 9H]) is the clamped power law of §110.5's pricing note,
+not the free stream; the flag is refused for every other preset. `delta_99` is read from the
+column through `(x, z) = (-4H, 0.5H)`: `U_e` is the column's largest `u_x`, and `delta_99` is
+the height above the upstream floor `y = 1H` at which `u_x` first reaches `0.99 U_e`,
+linearly interpolated between the two cell centres that bracket it. In this 8H channel both
+walls grow a layer and the core between them is nearly flat, so the column's largest `u_x`
+is the core speed.
 
 **Prediction, stated in advance.** The TMR's SSTm reattaches near `x/H = 6.50`; this
 crate's `kOmegaSST` is expected near there too, which is OUTSIDE the datum's ±0.10 on
@@ -33978,12 +33990,16 @@ lower index deterministically, the recipe never asks it to.
 
 **The step.** From `cases/`: `backstep.cmd backstep_c 700 90`, `backstep_m 1400 180`,
 `backstep_f 2800 360` — dx = 0.2H / 0.1H / 0.05H, dy = dx/2, the study's three levels.
-The recipe generates the castellated mesh from `backstep.stl`, swaps `kEpsilon` for
+The recipe generates the castellated mesh from `backstep.stl` with the free-stream inflow
+(`-inflow uniform`, §110.3), swaps `kEpsilon` for
 `kOmegaSST` and the `Re_H = 36 000` viscosity (the recipe, not the code, is where that
 is decided), runs `ofgpu-lowmach` 6 000 iterations, and prints the two measurements the
 record needs: the reattachment search (`ofgpu-sample wall <case> 6000 lowerWall x`) and
-the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5 -at 0.5,1,1.5,2,2.5,3,4,5`),
-whose delta_99 is the input difference §110.3 reports beside the band.
+the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5`, every cell of it),
+whose delta_99 is the input difference §110.3 reports beside the band. Until docs/17 VAL-52
+the column line also carried `-at 0.5,1,1.5,2,2.5,3,4,5`; the sampler refuses it, because
+at `x = -4H` the column starts at the first cell centre above the floor `y = 1H` ("station
+0.5 is outside the column's range [1.05, 8.95]" on the coarse mesh).
 
 **The plume.** `cases/plumeMcCaffrey.jsonc` at `ofgpu-lowmach`, 4 000 iterations,
 `-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
@@ -34061,17 +34077,194 @@ which is 10 × (1e-9)^(1/7), and not 10 m/s. With the recipe's ν = 2.7778e-4 th
 Re_H ≈ 1.86e3, not 36 000. Both are recorded here as found and are not changed: this
 pricing edits no recipe. The step's prices above are for the recipe as it stands, and
 docs/17 VAL-52 settles its inflow and its divergence before any run of it is recorded.
+VAL-52 settled the inflow as an input (§110.3, `-inflow uniform`) and re-priced the step on it;
+the divergence remains, and its record is below.
 
 **Results.** Every cell below is filled by the run that produced it; until then none
 has been made, and no verdict in this table is a claim.
 
 | gate | datum | finest-mesh value | study | verdict |
 |---|---|---|---|---|
-| Gate 110-A Re_tau 178.12 | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-A Re_tau 392.24 | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-A Re_tau 587.19 | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 178.12 | MKM99 `chan180`: U_b+ = 15.6787 (trapezoid over the key's 65 rows) | U_b+ = 16.7138 at N_y 128, E = +6.60 % of D; B2 = 1.3555 wall units (at y+ 130.6); B3 = 1.171e-2 | 15.2919 / 16.2777 / 16.7138, monotone, p = 1.177, u_num = 0.4325 (2.76 % of D), u_input = 2.8e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; class R MISSES (the single-build run diverged) |
+| Gate 110-A Re_tau 392.24 | MKM99 `chan395`: U_b+ = 17.5448 (129 rows) | U_b+ = 18.5775 at N_y 128, E = +5.89 % of D; B2 = 1.2729 (at y+ 162.5); B3 = 6.34e-3 | 16.9912 / 18.0618 / 18.5775, monotone, p = 1.054, u_num = 0.5989 (3.41 % of D), u_input = 9.4e-7 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
+| Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
+| Gate 110-B reattachment | Driver & Seegmiller (1985) through the TMR: x_r/H = 6.26 +- 0.10 | x_r/H = 5.637 at dx 0.2H, the one level that converged, E = -0.623 (-9.9 % of D); delta_99/H at x = -4H = 1.674 (U_e 10.554 m/s) against approximately 1.5 | not formed: dx 0.1H stopped at step 1232 (M 3.615, cell 56) and dx 0.05H at step 30 (M 1.920, cell 917604), both on the Mach guard of §93.6 | MISSES (the study is not formed; the one converged level lies outside the band); class R MISSES (the single build stops at step 0 on all three levels) |
+| Gate 110-C plume centreline | McCaffrey Table 1, plume region, at the declared Q = 57.5 kW: dT_c(2.00 m) = 101.356 K, w_c(2.00 m) = 3.4311 m/s | dT_c(2.00 m) = 265.214 K, w_c = 5.9370 m/s at 0.025 m; P1 worst +212.6 % (z = 1.25 m), P2 worst +76.1 % (z = 1.75 m); P3 slope -2.130; P4 chi_c = 0.224 | 231.556 / 224.483 / 265.214 K, oscillatory diverging, p n/a, u_num = 144.1 K (142 % of D), u_input = 0 (Q declared) | P1 OPEN (outside); P2 OPEN (undecided at u_val/D = 1.422); P3 OPEN (outside -5/3 +- 0.25); class R holds |
+
+**The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
+stands, with nothing edited but `cells`: `cases/channelDns{180,395,590}.jsonc` (LaunderSharmaKE,
+`wallTreatment` lowRe, two-sided expansion 200) on scratch copies at `N_y = 32 / 64 / 128`, each
+`ofgpu-lowmach -iters 40000 -check 5000` in the f64 release build at `67af46d`, and each column
+from `ofgpu-sample column <copy> 40000 y 0.045 0.02 -mean`. The single build ran the three finest
+copies the same way. The records are constants in `src/bin/validate_gates/channel_dns.rs`, printed
+from the runs' own outputs by its ignored test `record_channel_dns`, and the gate replays them;
+`U_b+` is the sampler's column mean over the case's `u_tau = sqrt(g_x h)`, the profile is the
+finest column's 64 cells below `y = h`, and the measured shear is the driver's printed kinematic
+wall sink over its printed wall area (§32.5.2). Every run reached its 40 000 iterations with the
+§32.5.2 balance closed to 0.000 %, and the measured shear meets `g_x h` to 2.8e-6, 9.4e-7 and
+1.5e-6 relative, so `u_input` is negligible beside `u_num`. The iterations are converged in the
+quantity the gate reads: the finest `Re_tau = 178.12` copy run to 20 000 iterations gives a column
+mean `U_x` of 2.23283 m/s against 2.23279 at 40 000, 1.8e-5 relative. The last printed `|U| res` is
+3.0e-2 to 1.6e-1 and does not fall further; it is the normalised SIMPLE residual of a periodic case
+and is recorded, not read as convergence. The runs took 291-1 366 s each, about 1.8 h of card time
+in all, because other lanes' and another project's jobs held the card at up to 94 % (the uncontended
+price above is 4-5 min per run).
+
+What the record says. **B1 is OPEN (undecided) at all three `Re_tau`**: the finest `U_b+` lies
++6.60 %, +5.89 % and +4.51 % above the DNS, and `u_val/D` = 2.76 %, 3.41 % and 4.02 %, so each
+`|E|/D` is within `u_val/D` of the 5 % edge, one of them on the inside. **B2 MISSES at all three**,
+1.3555, 1.2729 and 1.0541 wall units against the 1.0 bar, against a published measurement-grade
+datum (§110.2's datum kind). B3 holds (1.17e-2, 6.3e-3, 4.9e-3 against 0.02). The disagreement is
+the model's, not the mesh's: on every leg `|E| > u_val`, and the three-mesh study runs AWAY from the
+DNS with refinement (the extrapolated `U_b+` is 17.060, 19.057 and 20.094, +8.8 %, +8.6 % and
++7.7 %), at an observed order near 1. The finest profile sits above the DNS over the whole of
+`30 <= y+ <= Re_tau`, by 0.25-0.45 at `y+ = 30` and most in the outer layer (the worst rows at
+`y+` = 130.6, 162.5 and 203.7), which is a raised log-layer intercept and wake: the low-Re
+Launder-Sharma model of this case under-predicts the friction at a given bulk speed. §110.2's
+expectation, stated in advance, was B1 inside at all three and B2 near its limit at the lowest
+`Re_tau`; B1 is not inside at any, and B2 misses at every one. That is recorded as found.
+
+The single build. At `Re_tau = 392.24` and `587.19` the single build's finest run lands in every band
+the f64 run lands in (class R holds): `U_b+` 18.5775 and 19.4942 against 18.5775 and 19.4944. At
+`Re_tau = 178.12` the single-build run DIVERGES: at outer iteration 32 503 the temperature goes
+non-finite (`T [inf, -inf]`) in a case whose walls are adiabatic and which has no heat source, after
+`T` had drifted to [293.147, 293.152] K from its uniform 293.15 under f32 round-off. A re-run
+diverges at the same iteration with the same residuals, so it is deterministic. The class-R row of
+that leg is not taken, and the gate registers a MISSES verdict for it ("chan180 class R") that
+quotes the driver's own `run ended:` line. No input or numerics was
+changed to make it run.
+
+The band rule. `band_of`, which Gates 110-A, 110-B and 110-C share, made only the OUTSIDE side of a
+band edge undecided, so a result inside the band by less than its `u_val` passed. §110.1 says
+otherwise: "a result that lands within the uncertainty of a band edge is reported UNDECIDED, not as
+inside it". Since VAL-51 `band_of` is inside when `|E| + u_val <= band` and outside when
+`|E| - u_val > band`, as §144.3's `band_110` already was. Under the old rule `Re_tau = 587.19`'s B1
+would have passed at 4.51 %; under the rule as written it is undecided. Gates 110-B and 110-C have
+no record yet, so nothing they print changed.
+
+**The record of Gate 110-B (docs/17 VAL-52).** The runs are §110.5's step recipe with the
+free-stream inflow of §110.3 and nothing else changed: `ofgpu-generate-mesh step <copy> <nx>
+<ny> 1 -stl step=backstep.stl -extent -110 30 0 9 0 1 -grading x=1 -grading y=1 -wallModel
+spalding -inflow uniform` at 700 × 90, 1400 × 180 and 2800 × 360, the recipe's two edits
+(`nu` 2.7778e-4, `kOmegaSST`), `ofgpu-lowmach -iters 6000 -check 500` in the f64 release build
+at `77f8626` with this unit's flag, and the two samplers of §110.5. The single build ran the
+three levels the same way. The records are constants in `src/bin/validate_gates/backstep.rs`,
+printed from the runs' own outputs by its ignored test `record_backstep`, and the gate replays
+them.
+
+The price on the fixed inflow. Before recording, each level ran 200 iterations by VAL-50's
+method (time-stamped lines, the rate between `iter 0` and the last `iter` line, the larger of
+the mean and the last window of about 50 iterations). The probes ran on a `0/U` set to
+`uniform (10 0 0)`, the same file the flag writes (equal up to line endings). The coarse level
+costs 110 ms per iteration mean and 125 ms in the last window, the medium level 184 and 105 ms,
+and the fine level 2,393 ms over iterations 0-20 before it stopped at step 30. The projection
+is 12.5 min, 18.4 min and 3.99 h, 4.5 h for the step set, within VAL-50's 4.8 h. The recorded
+runs cost far less, because the coarse level converged early and the two finer ones stopped.
+
+| level | cells | outcome | x_r/H | delta_99/H at x = -4H |
+|---|---|---|---|---|
+| dx 0.2H | 57,500 | 6 000 iterations; `|U| res` 2.6e-8 by iteration 1 000 and 1.7e-8 at the end; M max 0.030902 from iteration 500 on | 5.637 | 1.674 (U_e 10.554 m/s) |
+| dx 0.1H | 230,000 | stopped at step 1232 on the Mach guard of §93.6: M = 3.615 at cell 56 | - | - |
+| dx 0.05H | 920,000 | stopped at step 30 on the Mach guard: M = 1.920 at cell 917604 | - | - |
+| dx 0.2H, single | 57,500 | stopped at step 0 on the Mach guard: M = 1.03e7 at cell 57149 | - | - |
+| dx 0.1H, single | 230,000 | stopped at outer iteration 0: a field went non-finite | - | - |
+| dx 0.05H, single | 920,000 | stopped at step 0 on the Mach guard: M = 2.89e8 at cell 919549 | - | - |
+
+The coarse level's lower wall changes sign twice: the corner eddy's `pos->neg` at
+`x = 0.744H` and the reattachment's `neg->pos` at `x = 5.637H`, which is the one the gate
+takes. Its inflow column has `delta_99 = 1.674H` against the datum's approximately 1.5H, an
+input difference of +0.17H (+11.6 %), reported beside the band and never folded into it.
+The core of the 8H channel runs at `U_e` = 10.554 m/s, above the 10 m/s inflow, because
+both walls' layers displace it.
+
+How the finer levels stop. Both stop from a quiet state in one step. Neither grows
+gradually. The fluid cells keep the block's order, so cell 56 of the medium mesh is on the
+bottom row of the downstream channel at `x` ≈ 5.65H, `y` = 0.025H, where the coarse level
+reattaches. A `-check 1` re-run shows `|U| res` between 2.6e-3 and 7.8e-3 and M max 0.0308 over
+steps 1150-1231, and then M = 3.615 at step 1232. Cell 917604 of the fine mesh is in the top
+row under the upper wall at `x` ≈ -89.8H, and step 29's M max is 0.0443. Each re-run stops at
+the same step with the same numbers, so both are deterministic. On VAL-50's old inflow the two
+levels stopped at steps 24 and 152. The inflow changed where they stop, not whether.
+
+What the record says. **Gate 110-B MISSES**, because the three-mesh study of §110.3 is not
+formed (§110.1: a run that diverged is a finding). On the one level that converged, dx = 0.2H,
+`x_r/H` = 5.637 against 6.26: E = -0.623 (-9.9 % of D), outside the datum's ±0.10 at that level,
+with no `u_num` from a single level. It lies on the LOW side, while §110.3 predicted the high
+side near the SSTm's 6.50. One coarse level does not establish where this model reattaches, and
+the record says only what it measured. **Class R MISSES**: the single build stops at step 0 on
+all three levels. That is not this recipe's alone. Under the single build the plain `step`
+preset at 700 × 90 with no flag at all also stops at step 0 (M non-finite), and the `channel`
+preset stops at step 19, while the `step` preset at 70 × 20 and the `cavity` preset run their
+20 iterations. This record notes that and does not diagnose it.
+
+No input other than the inflow, and no numerics, was changed to make a run converge. The
+candidate cures change the numerics or the model: under-relaxation, the wall treatment, or
+starting a level from the coarser level's solution, for which the tree has no field mapper.
+None was tried (docs/17 review-later). The card time was about 15 minutes in all: the probes,
+the six recorded runs, the medium re-run and the `-check 1` trace, beside another project's job
+that held the card at about 90 %.
+
+**The record of Gate 110-C (docs/17 VAL-53).** The three runs are §110.5's plume recipe as it
+stands, with nothing edited but `cells`: `cases/plumeMcCaffrey.jsonc` (kEpsilon, the hot-gas inlet
+of §110.4 at 2.3985 m/s, so `Q = 57.5 kW` declared) on scratch copies at `[33,33,40] / [66,66,80] /
+[132,132,160]`, each `ofgpu-lowmach -iters 4000 -check 500` in the f64 release build at `f49a16c`,
+and each set of stations from `ofgpu-sample column <copy> 4000 z 0 0 -at 1.25,1.5,1.75,2.0,2.25,2.5`.
+The single build ran the finest copy the same way. The records are constants in
+`src/bin/validate_gates/plume.rs`, printed from the runs' own outputs by its ignored test
+`record_plume`, and the gate replays them; `dT_c` is the sampler's station `T` less the case's
+293.15 K, and `w_c` its station `U_z`. Every run reached its 4 000 iterations. The iterations are
+converged in the quantities the gate reads: run to 2 000 iterations, the medium copy gives
+`dT_c(2.00 m)` = 224.482 K against 224.483 at 4 000 (4e-6 relative), and the finest gives 265.135
+against 265.214 K (3.0e-4), its worst station 691.37 against 693.55 K (3.1e-3) and its P3 slope
+-2.1249 against -2.1297. The last printed `|U| res` is 1.2e-2, 6.6e-3 and 3.8e-3 on the three levels
+and does not fall further; it is recorded, not read as convergence. The runs took 121 s, 189 s and
+1 485 s, the single build's 1 269 s, and the two 2 000-iteration checks 83 s and 1 011 s, about
+69 min of card time in all, beside another project's job on the same card.
+
+| level | dT_c at z = 1.25 / 1.50 / 1.75 / 2.00 / 2.25 / 2.50 m (K) | w_c at the same stations (m/s) | P3 slope |
+|---|---|---|---|
+| 0.10 m | 410.91 / 340.26 / 280.42 / 231.56 / 191.66 / 159.97 | 4.8935 / 5.1333 / 5.2658 / 5.2800 / 5.1960 / 5.0312 | -1.3638 |
+| 0.05 m | 473.23 / 367.89 / 285.40 / 224.48 / 180.29 / 148.02 | 5.2137 / 5.4700 / 5.4820 / 5.3082 / 5.0468 / 4.7718 | -1.6911 |
+| 0.025 m | 693.55 / 511.25 / 361.31 / 265.21 / 204.15 / 163.25 | 5.4024 / 6.2163 / 6.3188 / 5.9370 / 5.4886 / 5.0914 | -2.1297 |
+| 0.025 m, single | 691.86 / 509.38 / 359.89 / 264.17 / 203.34 / 162.58 | 5.4058 / 6.2155 / 6.3127 / 5.9277 / 5.4781 / 5.0800 | -2.1317 |
+| McCaffrey at Q = 57.5 kW | 221.84 / 163.71 / 126.62 / 101.36 / 83.29 / 69.88 | 4.0130 / 3.7764 / 3.5872 / 3.4311 / 3.2990 / 3.1851 | -5/3 |
+
+What the record says. **P1, P2 and P3 are all OPEN**; the datum is a correlation, so none is a
+miss (§110.1). On the finest mesh `dT_c` lies +133.6 % to +212.6 % above the correlation (worst at
+`z = 1.25 m`) and `w_c` +34.6 % to +76.1 % (worst at 1.75 m). Both are on the high side §110.4
+predicted, but far beyond what it predicted: 20-40 % radiative loss accounts for +16 % to +41 % in
+`dT` and +8 % to +19 % in `w`, and P4's implied convective fraction is `chi_c` = 0.224 against the
+0.60-0.80 that McCaffrey's radiant fractions give. **Radiation alone does not explain this miss**,
+and the headline says so. P1 is outside its band. P2 is UNDECIDED, not outside: it is judged at
+the one study §110.4 names, `dT_c` at `z = 2.00 m`, as a relative `u_val`, and that study's
+`u_val/D` = 1.422 reaches past the 15 % edge from P2's 0.761. P3, the leg §110.4 called closable,
+does not close on the finest mesh: the slope is -2.130 against -5/3 ± 0.25. It is inside the band
+on the medium mesh (-1.691) and outside on the coarse one (-1.364).
+
+The study does not converge. `dT_c(2.00 m)` is 231.556, 224.483 and 265.214 K on the three levels,
+oscillatory and diverging, so `p` is not available and the fixed-exponent fit gives `u_num` =
+144.1 K (142 % of D); `E` = +163.9 K and `|E| > u_val`, so the disagreement is not the mesh's. The
+finest mesh is the hottest. Its centreline is still 693.6 K above ambient at `z = 1.25 m`, while
+McCaffrey's continuous flame holds 797 K only up to `z/Q^(2/5) = 0.0796`, that is `z = 0.40 m` here.
+The source's hot core survives far up the column. The reading, not measured further here, is
+that the near field mixes too little, so the stations sit in a core that has not reached plume
+similarity; that would also explain why the decay steepens past -5/3 as the mesh refines.
+This record does not establish the cause. The candidates, none measured here, are standard k-ε's
+known under-prediction of the spreading rate of round jets and plumes, the source's low inflow
+turbulence (`k = 0.015 m2/s2`), and the walled box, whose only open boundary is the top. Each
+cure changes the model or the case, so none was tried (docs/17 review-later).
+
+The single build lands in every band the f64 run lands in (class R holds): P1 +211.87 % and P2
++75.98 % against +212.6 % and +76.1 %, slope -2.1317 against -2.1297, and `dT_c(2.00 m)` = 264.172
+against 265.214 K (-0.39 %). That gap is the size of the finest run's own 2 000-to-4 000-iteration
+drift.
+
+What changed in the verdict code. Every row and verdict of Gate 110-C is now counted as replayed.
+A P3 outside its band used to be a failed check row; it is now an OPEN verdict, the §110.1 word for
+an outside-band result against a correlation. The P1/P2 headline names each leg's own band word,
+so a leg that is undecided is never reported as outside because the other one is. It also says
+whether a high miss lies inside what 20-40 % radiative loss accounts for. The class-R row follows
+Gate 110-A's (VAL-51). No band, tolerance or functional changed.
 
 ---
 
@@ -41069,8 +41262,8 @@ variants of `docs/schema/case-1.json` with their required members.
 | radiation | `MarshakRadiationFixedTemperature` | owned | CHR-23 | — | — |
 | radiation | `greyDiffusiveRadiation` | owned | CHR-23 | — | — |
 | radiation | `wideBandDiffusiveRadiation` | owned | CHR-23 | — | — |
-| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | — |
-| species | `specieTransfer` | owned | CHR-29 | — | — |
+| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
+| species | `specieTransfer` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
 | refused | `coded*` | refused | — | — | compiles C++ written into the case, at run time |
 | refused | `#codeStream` | refused | — | — | runs code at parse time; the directive form is skipped by the reader |
 | refused | `cyclicACMI` | refused | — | — | couples partly overlapping patches through AMI weights |
@@ -43477,6 +43670,123 @@ run writes.
   at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
   the modified pressure `p - rho (g . x)` the hydrostatic level is written
   in, as in §120.7.
+
+No GPL-licensed source was consulted.
+
+### 120.15 The species family - a film mass-transfer coefficient through a baffle and to a reservoir (CHR-29)
+
+*DESIGN, with the film law from the literature.* `semiPermeableBaffleMassFraction`
+and `specieTransfer` are two §4 triple rewrites on the solved members of a
+species set (§19, §86). Their names are taken by name only (§120's rule); the
+law they apply is the defining relation of a mass-transfer coefficient (Bird,
+Stewart & Lightfoot, §22.1): a flux proportional to a concentration
+difference, the coefficient carrying everything between the two values. The
+entries are ours: `c`, the film coefficient in m/s (required, finite, `>= 0`;
+`c = 0` holds the species back), `neighbourPatch` on a baffle, and `Yinf` on
+`specieTransfer` (default 0).
+
+The outward flux of the transported quantity through a face `f` of the patch
+is taken between the two cell values adjacent to the baffle, or between the
+cell and the reservoir:
+
+```
+semiPermeableBaffleMassFraction:  n_f = c (Y_P - Y_N)                      (120.15a)
+specieTransfer:                   n_f = c (Y_P - Y_inf)                    (120.15b)
+```
+
+per unit area on the constant-density equation of §19. On the mass-weighted
+equation of §86 they are `rho_m c (...)`: at a `specieTransfer` face `rho_m =
+rho_b`, the face density the assembly already multiplies the diffusivity by;
+at a baffle face `rho_m = (rho_b + rho_b,partner)/2`, the same number on the
+two sides, so the two sides' film laws are one law. `Y_N` is the value of the
+cell behind face `j` of the partner patch: a baffle's two patches pair face
+`j` with face `j`, as a cyclic's do, and must have the same size, coincident
+face centres (within `1e-6 sqrt(|S_f|)`), the same condition naming each
+other, and the same `c` bit for bit, or the flux leaving one side is not the
+flux entering the other. Because the driving difference is taken between the
+two CELL values, `1/c` is the whole resistance between the two cell centres:
+the two half-cells beside the baffle are inside it, not in series with it. A
+case that knows a membrane's own coefficient `k_m` and wants the half-cells
+in series gives `c = 1/(1/k_m + d_P/D + d_N/D)` itself, `d_P` and `d_N` the two
+cell-centre-to-face distances.
+
+The triple that makes the laplacian apply exactly that flux follows from
+§4's `snGrad_b = fr Delta_b (psi_ref - psi_P) + (1 - fr) g_ref`:
+
+```
+fr = c (rho_m/rho_b) / (Gamma_b Delta_b),   psi_ref = Y_N (or Y_inf),   g_ref = 0   (120.15c)
+Gamma_b = nu/Pr + nu_t,b/Pr_t
+```
+
+with `rho_m/rho_b = 1` on the constant-density equation and at a
+`specieTransfer` face (the factor is then not formed),
+
+and `Gamma_b` formed as `turbGammaBoundary` forms it from the species'
+`Pr = nu/D` and `Pr_t = Sc_t`, so `rho_b Gamma_b |S_f| snGrad_b = rho_m c
+|S_f| (Y_N - Y_P)` (and without the densities on the constant-density
+equation) to round-off. `fr` may exceed 1 when `c > Gamma_b Delta_b`; the matrix
+coefficient stays `c |S_f| > 0` and the face value is then the linear
+extrapolation that carries that gradient. `c = 0` gives `fr = 0` and `g_ref =
+0` exactly: a zero-gradient face whose matrix contribution is exactly zero.
+A species with `D = 0` is refused a positive `c` (its half-cell has no
+laminar conductance to carry it). Only a plain patch or a wall carries one;
+an empty, symmetry or coupled patch is refused by name.
+
+`Species::setup_member` lowers a member's raw field: a field without either
+name goes to `setup_scalar_field` unchanged, so a member set up that way is
+set up exactly as before; each carrying patch is set up as `zeroGradient`,
+its faces are marked `Mixed`, and a rule (patch, face range, partner range,
+`c`, `Y_inf`) is kept. `Species::correct_with_density` rewrites every rule's
+triple by (120.15c) in one `spcTransferTriple` launch per patch, from the
+fields as they stand and the call's `nu_t`, before that species' own solve:
+`Y_P` is implicit, `Y_N` is the partner cell's value at the rewrite, the
+explicit half of §4's rewrite. The two sides of a baffle therefore carry
+equal and opposite fluxes at a steady state and differ by `c |S_f|` (`rho_m c
+|S_f|`) times the sum of the two cells' changes over the step in a transient - exact transient
+conservation across the baffle would need the baffle as an implicit coupled
+entry (§47.3's interface), which this unit does not build. A set without a
+rule launches nothing, and the arithmetic of every other species path is the
+one it was. `ofgpu-lowmach`'s reacting set (§133.11) sets its members up
+through `setup_member`, and writes a baffle's `neighbourPatch` back out.
+
+**The generic reader refuses both names by name.** `BcKind::from_name` has
+one arm for the pair, whose note says the condition is lowered only on a
+solved member of a species set: on a case without species, or on a field
+outside the set (`T`, `U`, the inert remainder), the case is refused naming
+the condition, the field and the patch, and `-permissive` substitutes
+`zeroGradient`, an impermeable wall. That is why the two rows stay **owned**
+by CHR-29 in the table, as CMP-16/17/18's and BC-20's kinds stay owned or
+planned while their own lowering path accepts them: `from_name` refuses them
+and the species set lowers them.
+
+For the 1-D slab of the gate - `N = 16` cells of `h = 1/16` m, the baffle
+between cells 7 and 8, `Y = 1` and `Y = 0` held at the two ends - the profile
+is linear in each half, which the finite-volume discretisation reproduces
+exactly, and the series resistances from the two end faces to the cell
+centres beside the baffle give
+
+```
+J = (Y_left - Y_right) / (15 h / D + 1/c)                                  (120.15d)
+```
+
+**Gates** (`tests/species_bc.rs`, both builds; class R tolerances are
+D-F32-1's `max(t, min(t 2^29, 1e-5))` under `single`):
+
+| test | class | what it holds | measured |
+|---|---|---|---|
+| `species_semipermeable_baffle_flux` | R | species A (`c = 1e-4`, `D = 2e-5`) marched to steady state at `dt = 1e7` s: `c (Y_7 - Y_8)`, every interior face's `D (Y_i - Y_i+1)/h` and both end faces' fluxes equal (120.15d)'s `J = 1.758242e-5` to 1e-12 relative; species B (`c = 0`) has `fr = +0` and `g_ref = +0` bit for bit on both baffle faces and relaxes to uniform on each side | 1.657e-14 (f64), 7.653e-6 (f32, tol 1e-5) |
+| `species_transfer_budget_closes` | R | mass-weighted, `rho` varying in space, the baffle plus a `specieTransfer` sink (`c = 5e-5`, `Y_inf = 0`): per step and species `abs(Δ Σ rho Y V - dt Σ_b rho_m c S_b (Y_ref - Y_P) - Δclip) <= 1e-12` of the mass (86.5), the transfer above 1e-6 of it; species C (`c = 0` on both) keeps its mass on each side to 1e-12 of it | 1.472e-16 with the transfer at 8.280e-6, side masses 3.163e-16 (f64); 7.252e-9 and 4.489e-8 (f32, tol 1e-5) |
+| `species_bc_refused_without_species` | D | `from_name` refuses both names on `T` naming them and this section; `setup_scalar_field` refuses `specieTransfer` on `T`; `setup_member` refuses a missing `c`, `c < 0`, a missing or unknown `neighbourPatch`, a partner with another `c` or another condition, `Yinf = 1.5`, an empty patch, and a positive `c` with `D = 0`; a raw field without either name gets no rule | all refused by name |
+
+The species set's existing pins (`tests/chem_species.rs`
+`species_without_chemistry_is_bitwise`, §132.11) hold unchanged: a set
+without a rule runs the arithmetic it ran before.
+
+* **Bird, R. B., Stewart, W. E. & Lightfoot, E. N.** *Transport Phenomena*,
+  2nd ed., Wiley (2002), §22.1 (the definition of mass-transfer coefficients
+  in one phase) - the film law (120.15a)-(120.15b): a flux proportional to a
+  concentration difference through a coefficient that carries everything
+  between the two values.
 
 No GPL-licensed source was consulted.
 
@@ -48444,8 +48754,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
-and CHR-12a wires it from the case; this unit builds the slot and the two rows
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18)).
+CHR-12a lowers its inputs from the case (§137.7) and CHR-12b wires it in the
+driver; this unit builds the slot and the two rows
 that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
@@ -48654,8 +48965,8 @@ by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
 with the current level's `1/W`, as it takes the `cp` field as last set.
 
 **What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
-`set_molar_change` takes the net source, and CHR-12b forms it from the species
-equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+`set_molar_change` takes the net source, and CHR-12b forms it, (133.24) of
+§133.11, from the species equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
 on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
 still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
 measured drift below is first order in `Δt`.
@@ -48679,6 +48990,110 @@ energy solve, as on the constant-`W` path. The numbers above are for that
 order. CHR-12b keeps it.
 
 Labels: (133.19)-(133.23).
+
+### 133.11 The reacting driver as built (CHR-12b, `src/bin/lowmach.rs`, `src/bin/lowmach_chem/`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's as
+§133.1-§133.10 write them and §132's split step; this section adds the
+discrete diffusion half of (133.21)'s net source, (133.24), and the order in
+which `ofgpu-lowmach` runs them. It is this project's own contract (ORIGINAL).
+
+**What runs.** A JSONC case whose `species`, `chemistry` and `combustion`
+blocks lower (§137.7) with `combustion.model laminar` runs as laminar
+finite-rate chemistry, Lie split (§132.5): chemistry first, then transport.
+`common::load_case_with(path, true)` lets the blocks past §137.7's seam for
+this driver only; every other driver keeps the refusal through
+`common::load_case`.
+
+**The species set.** Every solved member gets §86's mass-weighted equation,
+`d(rho Y)/dt`, with the density of the step. Its diffusivity is the Lewis
+route of §133.4, `D_k = lambda/(rho cp Le_k) = nu/(Pr Le_k)`, with this
+driver's constant `nu` and `Pr` and `Le_k` from the case (1 by default), and
+`Sc_t` the case's. The controls are read by the species' own entry names
+(§13.4.1): `solvers` and `relaxation` under `Yi` (relaxation 1 when the case
+names none), `grad(Yi)`, and the convection `div(phi,Yi_h)` or `div(phi,Yi)`
+when the case names one (two different entries are refused), otherwise §19's
+bounded Gauss upwind. The case's `div` `default` is never taken.
+
+**One step, in this order.** `o` marks the step's opening state.
+
+1. Open the step (from the second on): `Simple::begin_time_step`, `T`'s
+   levels, `p0`'s levels, and then every solved `Y_k`'s levels
+   (`Y^(n-2) <- Y^(n-1) <- Y`). The last rotation is what makes (133.20)'s
+   `rho^(n-1)` the opening state's, so `rho^n = rho^(n-1)` at the energy
+   solve, as §133.10 requires of the order.
+2. `T`'s and every `Y_k`'s `inletOutlet` faces switch on the last flux.
+3. `rho` by (133.19)-(133.20) from `T`, `Y_k` and `p0`.
+4. `EnergySources::clear`; the mixture `cp` (133.18) into the energy
+   equation's `cp` field; the split step (132.10) with every cell's reactor
+   at `p0`; the heat release (133.16) and the enthalpy diffusion (133.17)
+   registered, ahead of `-heaterPower`, the thermostat and the case's sources.
+5. The molar change of (133.21), with each solved member's net source
+
+```
+S_k,P = rho_P (Y*_k,P - Y°_k,P)/dt + (1/V_P) Σ_f rho_f D_k |S_f| snGrad(Y°_k)_f          (133.24)
+```
+
+   The first term is the split step's own source on the mass-weighted
+   equation (§132.11). The second is `-div Gamma_k` with
+   `Gamma_k = -rho D_k grad Y_k`: `rho_f` interpolated linearly, the
+   uncorrected `snGrad` and `fvc::div` of the face flux (`fv::sn_grad_flux`,
+   `fv::fvc_div_surface`). *DESIGN, decided by recommendation:* it carries
+   the laminar `D_k` only, as (133.17) does and for the same reason (§133.9).
+6. `Energy::update_target_divergence` ((133.21)), `Simple::correct_outer_low_mach`
+   and `Energy::correct`.
+7. The species equations, on the flux the pressure solve made.
+8. Transient: `GasState::advance_p0_mixture` from
+   `Energy::constraint_integrals`, (133.22); an open gas keeps `p0`.
+
+A case without the blocks makes the calls it made before CHR-12b, in the same
+order: `outer_iteration`'s `None` arm is the old sequence.
+
+**Written.** Every solved `Y_k` with its own boundary types, the inert member
+and `HRR` (133.16)'s `Q_chem` in W/m3, both with `calculated` in place of the
+value rules and the constraint patches kept. The final cell values of `T`,
+`rho`, `HRR` and every member are also held at full precision in the driver's
+`RunEnd`, because the written fields carry six digits.
+
+**Refused by name, before a field is set up** (`lowmach_chem::refuse_settings`):
+a steady run (the split step integrates over a physical `dt`); EDM, EDC and
+PaSR, which lower (§137.7) and are CHR-14's and CHR-15's; Strang splitting;
+a `ddt` other than Euler (the box lands on the reactor under Euler, §133.9,
+and the species keep one old level); a checkpoint, `-restartFrom`,
+`-restartWrite` or an output restart series (the `.mcr` format carries no
+mass fractions); a motion block; and a species named like another field the
+run writes. The dictionary route keeps §137.7's refusal: a case directory
+with chemistry is refused by every driver.
+
+**What is not built, stated.** The dictionary route, Strang, `backward`, a
+restart of the mass fractions, the closures of §134, the turbulent part of
+(133.24), and §93.5's Mach number with the mixture's own `R_s` (it still
+reads the constant one, §133.10).
+
+**Tree against plan.** The plan's row names "a reduced 1-D JL flame".
+`cases/mech/jl4.ck` does not exist: its paper is unread and no rate is
+written from memory (`cases/mech/README.md`). The tube below runs CHR-06's
+fifteen-reaction fixture with its placeholder rates instead. The plan's 0-D
+box is CHR-09's 2^3 box, cyclic on all three axes. Through the driver that box
+does not stay at rest. Its domain is open, so the target divergence (133.21)
+is uniform and nonzero, and with no open boundary the pressure equation has
+no solution. The mean is removed, the round-off left over is solved, and the
+flow it makes grows to about 2 m/s in 200 steps (measured). The pair below
+therefore runs the box as two cells with adiabatic walls. There the pressure
+source cancels to an exact zero, the written `U` is exactly zero, and the box
+is the same 0-D problem.
+
+**Gates, measured 2026-10-16 (both builds, `lowmach_chem::tests`, bin tests
+of `ofgpu-lowmach`).** The chemistry is CHR-06's fixture over TM-4513's ten
+records, with the reactor at `rtol` 1e-6.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `lowmach_reacting_case_equals_library` | the 0-D box (2 cells, 1 cm, adiabatic walls, open, `p0` 1 atm, stoichiometric H2-air with H, O and OH at 1e-4 moles, 1400 K) through a case for 200 Lie steps at dt = 1e-6 s, against steps 1-8 made by hand from the library on the same lowered case without the flow solve: `T`, `rho`, `HRR` and every member, cell by cell; the written `U` exactly zero; the box heats by more than 10 K | bitwise | D | every member, `T`, `rho` and `HRR` equal in both cells in both builds (0 of 2 differ); `T` 1400 -> 1456.270 K (f64) and 1456.269 K (f32). Diagnostic: the box's H and O content moved by `1.4e-12` and `6.1e-13` (f64), `3.7e-6` and `2.7e-6` (f32) |
+| `lowmach_reacting_elements_conserved` | a 1-D tube (40 x 1 x 1 cells over 1 cm; premixed H2-air entering at 1 m/s and 1400 K into gas at 1000 K, an open outlet, symmetric sides), 200 steps at dt = 1e-5 s without a NaN; every cell's element content `n_e = Σ_k a_ek Y_k/W_k` of H, O and N against the premixed value, relative, and C (absent) staying absent. Equal diffusivities, the reactor's element balance and the bounded convection keep a uniform composition uniform | `1e-10` (D-F32-1: `1e-5` in f32) | R | f64: H `6.43e-13`, O `5.01e-13`, N `1.71e-13`, C `2.1e-20` mol/kg; f32: `6.10e-6`, `5.68e-6`, `1.90e-6`, `3.0e-20`; no NaN, `T` 2152-2738 K, max `HRR` `1.39e9` W/m3 |
+| `lowmach_reacting_refusals_name_the_setting` | a steady run, Strang, `-restartWrite` and `backward`, each refused naming its key and §133.11 | refused | D | all four, both builds |
+
+Labels: (133.24).
 
 ---
 
@@ -50641,10 +51056,9 @@ An injector requires `position` and `massFlow`. Its other fields default to
   or `cpGas` with `physics inert`; `evaporation` unless `physics
   evaporating`; `impact` unless `wall weber`; and `coupling.vapour` with
   `mass none`.
-* `coupling.mass evaporation` without a `species` block. The JSONC route has
-  none until CHR-12a, so `JsonCase::lower` passes no species and the mass
-  coupling is refused there. The lowering already takes `species.names` for
-  CHR-12a to pass in.
+* `coupling.mass evaporation` without a `species` block. Since CHR-12a,
+  `JsonCase::lower` passes the lowered `species.names` (§137.7), so a JSONC
+  case with a `species` block may name its vapour.
 * `coupling.mass evaporation` without a `vapour`, or with a `vapour` that is
   not in `species.names`.
 * An unknown liquid `preset`.
@@ -50668,6 +51082,135 @@ CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
 | `case_parcels_lowers_every_field` | one case sets every `ParcelControls`, `EvaporationControls`, `LiquidProperties`, `WallImpactControls`, `CouplingControls` and `Injector` field to a non-default value; each is read back; the dictionary route equals the JSONC route; serde round trip | exact | D |
 | `case_parcels_refusals` | every refusal above, the driver seam included | refused, naming the key | D |
 | `tests/case_parcels.rs` | both routes equal, and `film` refused, in both builds | exact | D |
+
+No labels.
+
+### 137.7 The `species`, `chemistry` and `combustion` blocks as built (CHR-12a)
+
+`src/io/case_chem.rs` builds §137.2's three tables. This subsection records
+the rules the tables leave open, as the code applies them. It is this
+project's own contract (ORIGINAL), with no external source.
+
+**One lowering for both routes.** The JSONC route reads the three blocks of
+`JsonCase`. The dictionary route turns each dictionary into the JSON object
+the JSONC route reads and hands it to the same `deny_unknown_fields`
+deserialiser, so an unknown key is refused by name on both routes.
+`case_chem::lower_blocks` is the only lowering. It produces one
+`LoweredChem`, which holds the species set, the chemistry and the closure, and
+`JsonCase::lower` stores it in `LoweredCase::chem`. In the dictionaries:
+
+* `constant/thermophysicalProperties` gives `species` (a list) as `names`
+  and `inertSpecie` as `inert`, and the sub-dictionary `speciesTransport`
+  gives `transport`. The file's other entries belong to other readers
+  (§122.6, §37.4) and are not looked at. `inertSpecie` or `speciesTransport`
+  without a `species` list is refused, because it would be read and ignored.
+* `constant/chemistryProperties` holds the `chemistry` keys, with the same
+  spellings (`mechanism`, `thermo`, `integrator`, `rtol`, `atol`,
+  `splitting`).
+* `constant/combustionProperties` holds the `combustion` keys. `model` may
+  also be spelled `combustionModel`, on both routes.
+* `constant/reactions` (a foam-format reaction list) is refused, naming the
+  CHEMKIN route. The mechanism is always a CHEMKIN file (§129).
+
+**Two stages.** `lower_blocks` applies every refusal that the keys alone
+decide. `LoweredChem::load(base)` reads the two files, with their paths
+taken relative to `base`, the case's directory. It applies the refusals that
+need the files, and it returns the `Mechanism`. The thermo file is read at
+CHEMKIN's `P_ATM` (§128.4) with the standard element table.
+
+**The species set.** `names` holds every species, the inert one included.
+`inert` has no default. The Lewis route of §133.4 is the one model, with
+`Le` 1 for every species the case does not name and `Sct` §19's 0.7.
+`LoweredSpecies::le` is in `names` order. On the JSONC route each SOLVED
+species gets one field (`LoweredScalarField`, dimensionless):
+
+* `initial` maps a name to a uniform mass fraction, and every solved
+  species needs one. The inert's value is `1 - sum`, so stating it is
+  refused. A value outside `[0, 1]` is refused, and so is a sum of the solved
+  values above 1, because the inert's value would then be negative. The test
+  is exact, in f64.
+* `patches` is an ordered array of `{ "match": <ERE>, "Y": { name: bc } }`.
+  The first rule whose `match` matches a boundary patch governs it, in file
+  order. A species that rule does not list gets its patch kind's default:
+  `zeroGradient` on a wall, `inletOutlet` at the species' initial value on an
+  open patch, and the constraint on an empty, symmetry or wedge patch. On an
+  inlet a species has no default, so it is refused, naming the patch and the
+  species. That is the same rule as `T`'s.
+* A condition is `fixedValue`, `inletOutlet` or `zeroGradient`. The two
+  temperature types are refused, and so is a value outside `[0, 1]`. A
+  condition on the inert species is refused, because the inert species is
+  closed by `1 - sum` on every face.
+
+On the dictionary route the fields are the case's `0/` files. A solved
+species with no `0/<name>` is refused there, because it has no initial
+value.
+
+**The chemistry.** `mechanism` and `thermo` are required with a `species`
+block. A `species` block without `chemistry` is refused, and so are
+`chemistry` or `combustion` without `species`. `integrator` goes through
+`rosenbrock::Method::from_name`, so `ros4` keeps §132.7's reason. `rtol`
+and `atol` replace `ReactorOptions::default()`'s `rtol` and `atol_y` (the
+mass-fraction tolerance, §132.8), and the rest of the reactor's controls
+keep their defaults. A `transport` (TRAN) path is always refused while the
+Lewis route is the one model, because it would be read and ignored.
+`species` together with `physics.compressible` is refused, because
+compressible reacting flow is out of scope (docs/17 §2).
+
+**The closure.** The keys of a closure that the case did not select are
+refused, for example `A` under `laminar` or `Cmix` under `EDC` (§13.4.1).
+The combination with the turbulence model is checked through
+`case_chem::MixingKind`, which names `MixingRate`'s four arms.
+`MixingKind::of_model` reads the arm from the case's `turbulence.kind` and
+`model` through `RasModel::dissipation_field`. `MixingKind::of` reads it
+from a running model's `mixing_rate()`, for the driver. Then:
+
+* EDM, EDC or PaSR with `None` (laminar, Spalart-Allmaras) is refused.
+* Any of the three with a model name this crate does not build is refused,
+  because its mixing rate is unknown.
+* EDM or EDC with `Strain` (LES) is refused.
+* PaSR's `tauMix strain` needs `Strain`. Under `Strain`, the three
+  `epsilon` mixing times are refused.
+* `Cmix` is required with `tauMix integral` and refused with the others.
+* EDC's `variant` may be written as a number or a string. `batch` keeps
+  §134.3's reason.
+* Every number is refused unless it is finite and above zero, and
+  `gammaMax` must lie in `(0, 1)`.
+
+**The file-dependent refusals** of `load` are these:
+
+* §129's own refusals. A mechanism species with no thermo record is one of
+  them, and it names the mechanism file and its line.
+* A name that is in neither the thermo file nor the mechanism's thermo
+  block (§128).
+* A mechanism species that is not in `species.names`, and a name that is not
+  a mechanism species. `ChemSource::new` (§132.11) refuses both too, so the
+  case is refused before a device is touched.
+* EDM with more than two reactions, or with a reaction that is reversible,
+  has explicit reverse parameters, or has a third body or a fall-off
+  (§134.1). The reaction is named by its line.
+
+**The driver seam.** No driver runs a reacting case before CHR-12b:
+
+* `common::load_case` refuses a JSONC case through
+  `LoweredCase::refuse_chemistry`.
+* `read_case_controls` refuses a case directory that holds
+  `constant/chemistryProperties`, `constant/combustionProperties` or
+  `constant/reactions`, or whose `thermophysicalProperties` names `species`.
+  A `thermophysicalProperties` that does not parse is left to the readers
+  that use it, so a driver that never read the file does not start failing
+  on it.
+
+CHR-12b replaces the refusal on `ofgpu-lowmach`'s path for a JSONC case
+(§133.11); the dictionary route stays refused. A case without the
+three blocks lowers, serialises and runs exactly as before.
+`docs/schema/case-1.json` is regenerated (§137.2).
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_chem_lowers` | one case sets every key of the three blocks to a non-default value and each is read back; the open and wall defaults; the closures' keys and defaults; `MixingKind` by model name; the dictionary route equals the JSONC route; serde round trip; absent blocks lower to no chemistry and serialise nothing; `load` reads a mechanism | exact | D |
+| `case_chem_refusals` | every refusal above, on both routes and in `load`, the driver seam included | refused, naming the key | D |
+| `the_shipped_schema_is_the_generated_one` | `docs/schema/case-1.json` equals `emit_schema()` (the plan's `schema_matches_emit`) | exact | D |
+| `tests/case_chem.rs` | both routes equal, `load`, `ros4` and EDM under `MixingRate::None` refused, in both builds | exact | D |
 
 No labels.
 
@@ -53752,6 +54295,137 @@ a measurement of the intercept.
 **Not claimed.** The oracle discretises each model's equations on TG0's cells; its table is the models' answer on
 that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
 only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
+
+### 143.5 Gate 131-P: TG0's turbulent pipe on the true wedge, kOmegaSST, replayed (VAL-23)
+
+`No GPL-licensed source was consulted.` Docs/17 VAL-23. 짠143.3 and 짠143.4 were allocated to VAL-22a and VAL-22c,
+which are not built because D-VAL-5 did not fire (짠143.2), so this unit records kOmegaSST only and there is no
+`kOmega2006` case keyword. No new equation: the metrics are (143.13) and the bands (143.17), evaluated by
+`vv::rans1d` itself.
+
+**The rig.** TG0's pipe (짠114.1) on 짠119.0's wedge: `R = 0.025 m`, `theta = 5 deg`, periodic length `L = 0.1 m`
+in 4 axial cells, `nu = 1.516e-5 m^2/s`, `x` the radius, `z` the axis, `zmin`/`zmax` a cyclic pair. The wedge is
+the tangent one, so its radial faces are the planes `x = r_i` and its wall is at `x = R`: (143.1) with
+`theta_deg = 0` (`rho = r`) is the same cell set, and `rans1d::PipeMesh` is built from the device's own graded
+nodes. The drive is (143.5)'s `g_z = 2 u_tau,in^2 / R`, `u_tau,in = Re_tau nu / R`: 9.78347667 m/s^2 at
+`Re_tau = 576.69`, 163.567108 at 2358. TG0's wall (`U = 0`, `k` and `nu_t` fixedValue 0, `omega`
+`omegaWallFunction`, `T` fixedValue), TG0's numerics (SIMPLE, relaxation 0.7 on `U`, `k`, `omega`, `T` and 0.3
+on `p`, `bounded Gauss linearUpwind grad(U)`, `bounded Gauss upwind` for `k` and `omega`), and 짠114.5's O1: the
+`k`/`omega` PBiCGStab `tolerance 1e-12`, `relTol 0.01`. The start state is `U_z = U_b` of Prandtl's law and TG0's
+own `k`, `omega` (`case_writer.py` `turb_refs`, `I = 1 %`, `l = 3 mm`). Levels `l = 0, 1, 2`: `n = 40 2^l`
+radial cells, the wall cell `(R/2358) 2^-l` (143.2), `mesh.grading.x.expansion = q^-(n-1)` = 0.00306719135840698,
+0.00297925479726894, 0.00293619304606138. `cases/pipeTurb576.jsonc` and `cases/pipeTurb2358.jsonc` are level 1;
+levels 0 and 2 are copies with only `cells` and `expansion` edited.
+
+**Found on the way: a cyclic patch inherits a wall function from the catch-all rule.** A JSONC case needs a
+catch-all patch rule for its cyclic pair (`cases/README.md`), and every catch-all rule in the shipped cases is
+`"kind": "wall"`. With `turbulence.wallTreatment` at its default, that rule's `k`, `omega` (or `epsilon`) and
+`nut` are completed to `kqRWallFunction`, `omegaWallFunction` and `nutkWallFunction` on the cyclic patches as well
+(짠29.1, route b). The solver's boundary kind there is still `Cyclic` (`field_setup::topology_override`), but its
+wall-cell set is read from the field's patch TYPE names (`field_setup::faces_where`, through
+`WallFaces::from_case`), which does not consult the patch kind, so every cell next to a cyclic face is pinned as a
+wall cell. Measured at `Re_tau = 576.69` with the catch-all naming only `U`, `p` and `T`: on level 0, after one
+iteration, `omega` in the cells next to the cyclic faces is 27.97 (the log-branch pin at
+half an axial cell from the "wall") where the two interior stations carry 34 to 46 across the core; on level 1 from rest, after 8000
+iterations, the four axial stations differ by up to 0.4425 m/s in `U_z` (6.7 % of `U_axis`), `|U_x|` reaches 5.08e-3 m/s, and
+`U_b = 5.55938`, `f = 0.0315835`, +22.5 % against Prandtl, against 6.02305 and +4.44 % with the workaround below.
+`cases/channelPeriodicWF.jsonc` (k-epsilon, standard wall functions, the same catch-all) shows it too: after one
+iteration its wall-row `epsilon` is 0.508872 in the two end cells and 0.545202 in the six interior ones. The
+pipe cases name `k` zeroGradient, `omega` zeroGradient and `nut` calculated in their catch-all, which gives the
+cyclic faces no wall-function type; then the stations agree to the written digit (spread 0) and `|U_x|` falls to
+3.4e-9 m/s. The cure, `faces_where` skipping a patch whose `topology_override` is not `None`, moves the results of
+every shipped JSONC case with a cyclic pair and a turbulence model, so it is not made here; it is a REVIEW-LATER
+item.
+
+**Measured: the plan's 8000 iterations do not reach the fixed point.** On level 1 at 576.69 from rest (TG0's
+start) `U_b` at 8000 is 6.023051, 6.8e-4 below the oracle's 6.027151 on the same cells, with `U_axis` still moving
+8.1e-4 of itself per 1000 iterations; from `U_b` it is 6.030511, 5.6e-4 above. From `U_b` the excess falls by a
+factor of about 5.5 per 2000 iterations on level 1 and about 0.80 per 1000 on level 2: the SIMPLE pseudo-time step of
+a core cell scales with its size squared, so each level takes about four times the iterations of the last. The
+records therefore run 12 000 (level 0), 24 000 (level 1) and 80 000 (level 2, two 40 000-iteration legs through
+`-restartWrite`/`-restartFrom`, which continues the count) iterations at 576.69, and 16 000, 32 000 and 80 000
+at 2358. Nothing else changed: the case, its numerics and the solver are as above.
+
+**The recorder.** Each run writes every 1000 iterations. The ignored test `record_pipe` of `ofgpu-validate`
+(`OFGPU_PIPE_CASE`, `OFGPU_PIPE_META`) lowers the run's case, checks that cell `i + n k` has the oracle's centre
+`i` to `1e-12 R`, reads `U` and `nut` of the last two writes (ASCII at six digits), averages the four axial
+stations, and puts the profile into a `rans1d::Solution` for `rans1d::metrics` and `rans1d::tg0_bands`. It records
+`change` (the largest change of a cell's `U_z` between the last two writes, over `U_axis`) and `spread` (the largest
+difference of a cell's `U_z` from its station mean, over `U_axis`). The records are constants of
+`src/bin/validate_gates/pipe.rs`, replayed by `ofgpu-validate`'s section 69.
+
+**The rows.** Per `Re_tau`, on the finest level (`n = 160`), the four band errors of (143.17): `E_P = f/f_P - 1`
+at the input `Re_tau`, `E_B = f/f_B(Re_D) - 1`, the log-law deviation in `u+`, and `E_D = defect/4.07 - 1`; `u_val`
+is `|U_fine|` of 짠94's study of the same error over the three levels at `h = R/n`; 짠110.1's rule (`band_110`)
+reads Inside as a passing row, Undecided as OPEN and Outside as MISSES (Nikuradse's measured pipes, via
+Schlichting). Each f64 record is held to the 짠143.1 oracle on the same cells: `U_b` and `f` within `1e-4`
+relative (class P; 짠114.2 measured 1e-5 once omega converges, and six written digits give 5e-7). Class R: the
+single build's finest record lands in the f64 band of each of the four rows.
+
+**The price** (2026-10-15, the one RTX 5070 Ti shared with two other lanes' work): level 1, 8000 iterations,
+100.7 s with the card to itself and 265.8 s beside another run; an iteration costs 11.8 to 28 ms on levels 1 and 2, as
+much by what else the card runs as by the level.
+The six f64 records took 4273 s of card time and the two single ones 2863 s; with the pricing and the
+diagnosis runs above (about 1160 s) the unit used about 2.3 h of the 3 h it was given.
+
+**The records** (2026-10-15, `ofgpu-lowmach` built at f9bcb4a, unchanged by this unit), with the oracle (143.1) on the
+same cells beside them:
+
+| Re_tau | level (n) | iterations | U_b | oracle U_b | f | defect | Re_D | E_P | E_B | log law (cells) | E_D | device vs oracle | change | s |
+|--------|-----------|-----------|-----|------------|---|--------|------|-----|-----|-----------------|-----|------------------|--------|---|
+| 576.69 | 2 (160) | 80 000 | 6.005781 | 6.005666 | 0.0271240 | 3.6136 | 19 808 | +5.18 % | +1.70 % | 1.177 (35) | -11.21 % | 3.96e-5 | 1.4e-6 | 1717 |
+| 576.69 | 1 (80) | 24 000 | 6.027165 | 6.027151 | 0.0269318 | 3.6140 | 19 879 | +4.43 % | +1.07 % | 1.072 (17) | -11.20 % | 6.7e-6 | 0 | 358 |
+| 576.69 | 0 (40) | 12 000 | 6.079581 | 6.079579 | 0.0264695 | 3.6158 | 20 051 | +2.64 % | -0.45 % | 0.993 (9) | -11.16 % | 2.7e-7 | 0 | 114 |
+| 2358 | 2 (160) | 80 000 | 30.005245 | 30.005124 | 0.0181678 | 3.3215 | 98 962 | +0.84 % | +1.84 % | 1.230 (70) | -18.39 % | 4.0e-6 | 2.9e-6 | 1558 |
+| 2358 | 1 (80) | 32 000 | 30.287038 | 30.287032 | 0.0178313 | 3.3223 | 99 891 | -1.03 % | +0.19 % | 1.049 (35) | -18.37 % | 8.6e-7 | 2.9e-7 | 394 |
+| 2358 | 0 (40) | 16 000 | 30.818480 | 30.818478 | 0.0172216 | 3.3234 | 101 644 | -4.41 % | -2.81 % | 0.630 (17) | -18.34 % | 2.1e-7 | 0 | 132 |
+| 576.69 | 2 (160), single | 80 000 | 6.005792 | - | 0.0271076 | 3.6146 | 19 808 | +5.11 % | +1.64 % | 1.172 (35) | -11.19 % | - | 1.4e-6 | 1241 |
+| 2358 | 2 (160), single | 80 000 | 30.004043 | - | 0.0181560 | 3.3227 | 98 958 | +0.78 % | +1.78 % | 1.225 (70) | -18.36 % | - | 3.0e-6 | 1622 |
+
+Every record is x-invariant to the written digit (spread 0, 1.4e-7 on 2358 level 0), and its measured `u_tau` is the
+input one within 2.1e-6 ((143.6) at the steady state). "device vs oracle" is the larger of the `U_b` and `f`
+relative differences; the device's band errors are the oracle's within 0.01 percentage point (0.001 in `u+`) on every
+level, so the verdicts below are the model's on these cells, as 짠114.3 and 짠143.2 found on TG0's own mesh. `nu_t` on the axis is
+0.124 `u_tau R` at 576.69 and 0.131 at 2358 (짠114.3: 0.124 to 0.131).
+
+**The verdicts** on the finest level, with 짠94's studies:
+
+| Re_tau | row | E | u_val | bar | verdict |
+|--------|-----|---|-------|-----|---------|
+| 576.69 | f against Prandtl | +5.18 % | 0.66 % (p 1.27) | 5 % | OPEN, undecided within u_val |
+| 576.69 | f against Blasius | +1.70 % | 0.56 % (p 1.27) | 5 % | holds |
+| 576.69 | log law | 1.177 | 0.237 (diverging, first order) | 1.0 | OPEN, undecided within u_val |
+| 576.69 | core defect | -11.21 % | 0.01 % (p 2.21) | 10 % | **MISSES** |
+| 2358 | f against Prandtl | +0.84 % | 2.88 % (p 0.86) | 5 % | holds |
+| 2358 | f against Blasius | +1.84 % | 2.53 % (p 0.86) | 5 % | holds |
+| 2358 | log law | 1.230 | 0.173 (p 1.21) | 1.0 | **MISSES** |
+| 2358 | core defect | -18.39 % | 0.04 % (p 0.63) | 10 % | **MISSES** |
+
+Class R holds at both `Re_tau`: each single-build band error lands in the f64 band of its row. The single runs'
+measured `u_tau` is 3.0e-4 (576.69) and 3.6e-4 (2358) below the input one, where the f64 runs hold it to 2.1e-6: the
+wall cell's `U_P / delta_w` with `delta_w` 1.3e-6 m is where f32 is shortest, so their `f` is 6e-4 and 7e-4 below
+the f64 record's. Their stations agree to 1.3e-5 and 7.2e-6 of `U_axis` (the written f32 digits).
+
+These are 짠143.2's oracle conclusions on the device: no mesh closes the defect (the model's centreline eddy
+viscosity, 짠114.3), the log law at 2358 is outside by more than its `u_val`, and at 576.69 `f` against Prandtl
+and the log law sit on their bars, where the finer oracle meshes of 짠143.2 (+5.81 % extrapolated, 1.240 at 640
+cells) fall outside. The case-side O1 does what 짠114.5 measured: with the 1e-12 tolerance the device and the
+oracle agree on every level.
+
+**Tests** (`pipe::tests`, the validate binary, both builds): `the_rig_and_the_shipped_cases_are_tg0s` (the drive
+to 1e-8, the three expansions to 1e-12, the start state, and both shipped cases lower to level 1 with 320 cells),
+`the_oracle_on_the_device_cells_balances_the_drive` ((143.6) on the tangent cells to 1e-6; prints the oracle on the
+six cell sets), `the_replay_holds_inside_the_bands_and_misses_outside_them` (synthetic records whose Blasius,
+log-law and defect errors converge at second order: inside rows pass, outside rows MISS, the oracle rows hold),
+`every_gate_is_open_and_not_run_when_no_run_is_recorded` (eight OPEN gates, no row), `the_recorded_runs_replay`
+(prints the verdicts above), and the ignored `record_pipe`. `ofgpu-validate -sections 69` prints 17/17 checks passed
+and registers 3 MISSES and 2 OPEN gates, the same in both builds (the single build's oracle, on f32-rounded nodes,
+moves by 1.3e-6 at most).
+
+**Not claimed.** One model (SST); the Wilcox 2006 rows of 짠143.2 stay in the oracle. The 3-D quarter pipe of
+docs/17 짠12.7 item 6 is not built: the wedge holds the oracle to 4e-5. The cyclic wall-function finding above is a
+measurement of the JSONC route; an OpenFOAM-format case whose field files name `cyclic` on the pair is not
+affected, because `faces_where` reads those names.
 
 ## 144. The flat-plate harness, Blasius, T3A leg 4 and the ZPG plate
 

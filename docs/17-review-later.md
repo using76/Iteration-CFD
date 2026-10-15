@@ -45,6 +45,23 @@
 | A25 | F32-14 | single, section 26-65: 실행한 34개 section에서 473행 중 416행 통과 | 미실행(600 s 두 번 초과): 29 (공액 계면, 상한 시점에 33행 중 19행 실패, 루프 미수렴), 44 (95-G, 모든 외부 루프가 2000 pass), 52 (100-C, 4000회에도 미수렴), 57 (94-D), 61 (CMP-B). Gate 105-B MISSED (피스톤 균일 상태 1.58e-2~6.01e-2, 역방향 차수 0.737 부족), Gate 95-D MISSED (외부 루프 수렴 D행 3개; 응력은 0.01에서 통과), Gate 95-A single 3/21 (어떤 메시에서도 block-coupled 루프 미수렴). 100-A: 60 pass에 1e-13 상대 변화에 못 닿는다 (마지막 3.1e-7). 100-D: T가 5.2e5 K로 발산. Scalar로 계산하는 닫힌 식·장부 행 다수 (§31, 32, 33/34, 38, 39, 40, 26, 27, 30, 48, 49, 50; 표는 SPEC-LIT 118.14). 95-E, 105-A, 110-C(16/16)는 f64 띠에서 통과 | SPEC-LIT 118.14, `8d2ba83` |
 | A26 | STU-19 | gui_control 모든 type이 4 s 안에 답한다는 게이트 미달 2건 | open_result: 14 walk 중 4개가 3.55-4.83 s. headless Chromium SwiftShader에서 viewer의 첫 엔진 초기화(WebGPURenderer.init의 WebGL2 fallback, PMREM, 첫 shader compile)가 답에 포함되고 4 CPU를 3 레인이 나눠 쓴다. Cartesian open_result_in_view: 3 walk 4.05-4.87 s, 2 walk 5 s hub TIMEOUT: walk의 start_run이 fixture를 다시 써서 서버가 dataset을 다시 읽는다. 실행 중인 결과를 열면 gui_control이 time out될 수 있다는 실제 지연이다. viewer 동작을 바꾸는 해결책은 만들지 않았다 | `cf5aac6` |
 | A27 | AUT-12 | tuning 투영 NO-GO: G-FAIL 71/420 > 23 (180 test body에서 30.4개 예상, 한계 10), G-COST 셀 중앙값 52,632 대 9,008 = 5.84배 (기준 1.5배) | G-FAIL 실패: A 날개 39 (대부분 F3d/F3e의 EXHAUSTED, NO-REMEDY), F 15 (RM-TE가 13개에서 이득 없음), G 15, D 1, E 1. G-FAIL의 나머지 세 조건과 G-BLC-0/1, G-QUAL은 통과. G-COST는 L5의 82.5배에서 R-ECON으로 내려왔지만 layer 8개와 R-WIN 벽 level이 남는다. D-8(1.5배 유지 여부)이 사용자 결정으로 남는 한 GO가 나올 수 없다 | `tools/autonomy/projection/AUT12.md`, `10ad60a` |
+| A28 | TET-11, TET-12 | single 빌드에서 §92.3 G2 closure 미달 (기준 1e-10): TET-10b 구-상자 메시 9 309셀 중 8 468셀, box_sphere_tet 20 309셀 중 18 828셀 실패, 최대 4.533e-7 | `quality::check`가 f32로 반올림된 면적 벡터(HostMesh `sf`/`b_sf`)로 합을 구한다. 그래서 single에서는 tet 경로가 메시를 쓰지 못하고, hex automesher 메시도 같을 가능성이 크다. f64는 통과. 고친다면 §92.3 합(G1-G6)을 f64 shadow `HostGeom64`에서 계산한다(§116.2의 'gate는 f64' 규칙과 같다). gate 평가 방식 변경이라 사용자 결정 | `5bd3662`, `a91ed37` |
+| A29 | TET-12 | tet 경로 refine(§116.13)이 box_sphere.json의 0.125 m flat band에서 끝나지 않는다 | 570 pass 뒤 40 000점 상한(34 s). [0,10]^3 무상한은 10분 넘게 진행. 같은 0.125 m라도 band 거리 0이면 28.7 s에 끝난다. 예제는 sphere h 0.25 m, curvature_cells 0으로 바꿨다. TET-09의 종료 문제와 같은 계열이며 116.13/116.8을 바꿔야 고쳐진다 | `a91ed37` |
+| A30 | TET-13a | 삼각화된 구의 모든 점에서 most-normal normal(116.22)이 1e-6 rad 안에서 반지름 방향이 아니다 | level 3 최대 4.4585e-3 rad, level 4 2.3553e-3 rad. O(h/R) 이산화로 level마다 절반이 된다. (116.22)가 정확히 radial인 점(정이십면체, level 1, level 3의 5-valent 점)에서는 1e-15 수준으로 통과. 기준은 그대로 | `79e3414` |
+| A31 | TET-15 | '1 M-tet 구-상자 end to end 120 s 이하' 미달 | base 0.25 m(약 1.3 M tet)에서 refine이 9 s 만에 'kept tetrahedron ... has no finite circumcentre'로 멈춘다. `refine::circumsphere`가 2 a·(b×c)로 나누므로 부동소수 행렬식이 0인 tet에서 무한대가 된다. refine.rs 견고성 버그이며 `tests/tetmesh_perf.rs perf::million_tets --ignored`로 9 s에 재현된다. 0.27 m(약 1.0 M)는 10분 넘게 진행. 시간 대부분은 refine/optimise에 있다 | `db5c2d6` |
+| A32 | VAL-11 | Gate 95-A의 GMRES(50) 루프(142.2)가 5:1, 10:1에서 변위 차수로만 미달 | n_y 16→32의 p_u 1.415 / 1.754 (기준 1.9). 12 메시 모두 수렴, p_sigma 1.45-1.47, tip 0.017 % 이내. fixed point 자체의 차수가 1.416 / 1.745라서 루프가 아니라 이산화 몫이다. D-VAL-7 미발동. 방안: n_y = 64 메시 추가(메시 변경). 별도로 109.7의 Anderson 10:1 근접(1.896)은 반복 오차라서 Anderson stop을 더 깊게 하면 바뀐다(게이트 controls 변경, 사용자 결정) | `c212549` |
+| A33 | VAL-32 | 앞전 Tu가 TMR의 3.300 % 대비 0.5 % 기준 밖 (두 모델 모두 1.616 %) | 원인은 기준값: §88.10의 1-D 닫힌 해가 TMR inflow에서 3.353046 %를 준다. 솔버는 닫힌 해를 9.5e-5로 재현한다. OPEN 2개로 등록. '0.5 %'를 닫힌 해에만 적용하고 TMR 행은 §88.10의 5 %로 읽으면 통과한다. 게이트 해석은 사용자 결정 | `676a22d` |
+| A34 | VAL-32, VAL-33 | 미세 격자 kOmegaSSTLM / kOmegaSSTGamma가 40 000회 상한에서 C_f 정지 규칙(100회당 1e-6) 미충족, f64와 single 모두 | 10 000→40 000회 동안 100회당 C_f 변화 1.0e-6–2.8e-5 (LM), 4.7e-6–7.0e-5 (Gamma). 멈춘 곳에서 두 빌드의 최소 C_f 차 0.4 % / 0.03 %. leg 1(Tu_LE)은 영향 없음 | `676a22d` |
+| A35 | VAL-33 | Gate 88-T leg 4: kOmegaSSTLM 천이 시작 -35.88 % (밴드 15 %), 층류 구간 Blasius 대비 +16.29 % (LM) / +15.78 % (Gamma) (밴드 10 %) | 메시·자유류는 원인이 아니다 (세 level 8.65e4-8.89e4, p 2.4). 전천이 층 안의 자유류 k/omega 와점성이 유력하나 확인하지 않았고 수치 변경은 없다. Gamma onset(+12.72 %, 외삽 +18.3 %)과 LM 난류 C_f(-7.07 %, study 발산)는 OPEN(미결) | `86ce3a2` |
+| A36 | VAL-34 | Gate 132-Z: SA C_f vs Karman-Schoenherr OPEN(미결; Re_theta 4000에서 -4.46 %, u_val 6.34 %, study 진동), SST C_f OPEN(밴드 밖; -4.31 %, u_val 0.63 %, p 1.42) | 3 % 기준은 TMR 자체 해들의 산포 안에 있다 (CFL3D도 4000에서 -3.63 % / -3.92 %). SA의 C_f(x)에 약 10열 주기 파동. 두 f64 미세 실행이 10 000회 상한에서 정지 규칙 미충족 (SA 100회당 1.4e-5) | `f9bcb4a` |
+| A37 | VAL-34 | single 빌드 device 벽거리(SPEC-LIT 6.6, `turbWallDistance`)가 벽 인접 셀에서 짧다 | ZPG 미세 메시(벽 셀 y 5.1e-7 m)에서 평균 6.0 %, 최대 16 % (중간 2.9 %, 거친 0.12 %, f64 0.10 %). y = sqrt(gg + 2 phi) − sqrt(gg)를 f32로 계산해서 생기는 상쇄 오차. single SA C_f 산포가 넓어진다. 고치려면 수치 변경(사용자 결정) | `f9bcb4a` |
+| A38 | VAL-23 | Gate 131-P: kOmegaSST가 TG0 core defect 밴드 미달 (-11.21 % / -18.39 %, 기준 10 %), Re_tau 2358 log-law 1.230 (기준 1.0) | 576.69의 Prandtl f(+5.18 %)와 log law(1.177)는 OPEN(미결). device가 1-D oracle을 4e-5로 재현하므로 솔버가 아니라 모델의 값이다. 방안: core 와점성이 작은 모델(사용자 결정) | `67af46d` |
+| A39 | VAL-23 | **솔버 버그 (고치지 않음, 기존 결과가 바뀜)**: JSONC 케이스에서 cyclic 쌍에 필요한 catch-all 'wall' 규칙이 cyclic 패치의 k/omega/epsilon/nut를 wall function 이름으로 채우고, `field_setup::faces_where`(`WallFaces::from_case`)가 패치 kind(Cyclic)를 보지 않아 cyclic 면 옆 셀이 벽 셀로 고정된다 | TG0 pipe level 1, 8000회에서 축 방향 station 차 0.4425 m/s (U_axis의 6.7 %), Prandtl 대비 f +22.5 % (우회 시 +4.44 %). VAL-23은 케이스 쪽에서 우회했다. 수정하면 기존 f64 결과가 바뀌므로 사용자 결정 | `67af46d` |
+| A40 | VAL-51 | Gate 110-A (MKM 1999): B2가 세 Re_tau 모두 미달 (1.3555 / 1.2729 / 1.0541 wall unit, 기준 1.0), B1 OPEN(미결, U_b+ +6.60 / +5.89 / +4.51 %) | 메시 원인이 아니다 (study가 DNS에서 멀어진다, 외삽 +8.8 / +8.6 / +7.7 %). 원인은 케이스의 LaunderSharmaKE low-Re 모델이 log-layer intercept를 올리는 것 | `f49a16c` |
+| A41 | VAL-51 | single 빌드 Re_tau 178.12 미세 실행(N_y 128)이 외부 반복 32503에서 발산 (T 비유한) | 단열벽, 열원 없음. T가 f32에서 293.147-293.152 K로 표류한 뒤 발산하며 재실행해도 같은 반복에서 발산한다. 392.24 / 587.19 single은 f64 밴드 안. 고치려면 수치 변경(사용자 결정) | `f49a16c` |
+| A42 | VAL-53 | Gate 110-C (McCaffrey plume): 세 leg 모두 OPEN이고 예측보다 크게 빗나간다 | 미세 메시(0.025 m, 2.79 M셀) 중심선 dT +133.6–+212.6 %, w +34.6–+76.1 % (110.4 예측은 +16–41 %, +8–19 %). 복사만으로는 설명되지 않는다 (P4가 암시하는 chi_c 0.224). P3 기울기 -2.130 (−5/3 ± 0.25 밖). dT_c(2.00 m) study 진동 발산. P2는 P1의 study로 판정해 UNDECIDED이며, P2에 자체 study를 둘지는 사용자 결정 | `77f8626` |
+| A43 | VAL-52 | Gate 110-B MISSES: 세 메시 study가 만들어지지 않는다 | `-inflow uniform`으로 유입류를 고친 뒤 1400x180이 1232스텝에서 Mach guard(M 3.615, 셀 56, 거친 level의 재부착 지점 x ≈ 5.65H), 2800x360이 30스텝(M 1.920)에서 멈춘다. 결정적이다. 수렴한 0.2H level의 x_r/H 5.637 (6.26 ± 0.10 밖). relaxation, 벽 모델, 초기화는 바꾸지 않았다 | `5401c84` |
+| A44 | VAL-52 | single 빌드 `ofgpu-lowmach`가 step 세 level 모두 step 0에서 멈춘다 | 플래그 없는 `step` preset 700x90도 step 0 (M inf), `channel` preset은 step 19에서 멈춘다. `step 70 20 1`과 `cavity`는 20회 돈다. 이 크기의 lowmach 디렉터리 케이스 single 견고성 문제로 보이며 진단하지 않았다 (A4, A21 계열일 수 있다) | `5401c84` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -69,6 +86,8 @@
 | B17 | AUT-12 | AUT-09의 refinement round (`optimise.py --refine`, 약 1.5 h, 26 body)를 돌리지 않았다. AUT-09의 사전 등록 hurdle CV가 실패했으므로(BLC_8 RMSE 0.152787 > 0.15) round를 돌려도 optimiser를 켤 수 없고, AUT-12 행으로 다시 CV하면 사전 등록되지 않은 실행이 된다 | 사용자가 R-ECON 행으로 새 사전 등록 surrogate 실행을 원하면 |
 | B18 | F32-14 | Gate 105-C를 양쪽 빌드에서 실행하지 않았다. `cases/turekHron/mesh*`가 이 트리에서 생성되지 않았다 | `python tools/mesh/examples/turek_hron.py --level 1..4` 뒤 실행 |
 | B19 | F32-13/14 | 나눠 돌리지 않은 `ofgpu-validate` 전체 실행 (section 1-65, 양쪽 빌드). 각 단위는 600 s 상한의 `-sections` 묶음으로 쟀다 | F32-18 |
+| B20 | VAL-23 | 계획의 '각 8000회'로는 fixed point에 닿지 않아 반복 수만 늘려 기록했다 (576.69: 12k/24k/80k, 2358: 16k/32k/80k; 80k는 restart로 40k 두 번) | 더 빠른 길(높은 relaxation, SIMPLEC)은 수치 결정이라 쓰지 않았다 | 사용자가 수치 변경을 허락하면 |
+| B21 | VAL-32, VAL-34 | `cases/t3aPlate{LM,Gamma}.jsonc`, `cases/zpgPlateSA.jsonc`를 싣지 않았다 | 드라이버가 gamma/ReThetat를 시드하지 못하고 JSONC가 nuTilda와 SA를 만들지 못한다. 케이스는 harness(`validate_gates/t3a.rs`, `zpg.rs`) 안에 있다. `cases/zpgPlateSST.jsonc`는 UNVERIFIED로 실었다 | JSONC가 SA/전이 모델을 받으면 |
 
 ## C. 모델·설계 선택 (권고대로 진행, 검토 대기)
 
@@ -89,6 +108,15 @@
 | C13 | BC-16 | DFSEM 와류 모양 F(q) = (1−q)², 상수 G = 512π/45045, 강도 규칙 A = (tr R/2 I − R)/G는 자체 설계다 (Poletto et al. 2013은 유료라 식을 보지 못했다) | SPEC-LIT 120.12 |
 | C14 | AMG-05, AMX-02 | `-backend auto`가 이제 GAMG와 AMGX도 잰다. 큰 메시(gb_800000)에서는 auto가 GAMG나 AMGX를 골라 결과가 PBiCGStab와 solver 허용오차만큼 달라진다. AMGX 구조 재사용은 기본 켜짐 (`OFGPU_AMGX_REUSE=0`으로 끔) | SPEC-LIT 141.8, 141.21 |
 | C15 | AUT-10 | D-6 비공허 기준을 권고로 정했다: real − rules ≥ 1, real − shuffled 평균 ≥ 1.0 (기하 개수). 이 기준으로는 AM-L 2026-10-02 통과(241/241/240.667)가 FAIL, AM-13과 oracle은 통과(oracle은 margin 1.000으로 경계). 계획 §11 item 5에 따라 **사용자 승인이 필요**하다 | `c71a9e8` |
+| C16 | TET-11 | (116.26) f32 검사는 `to_vec3`로 반올림하고 `to_dvec3`로 넓혀 f64 exact orient3d로 판정하며 single에서만 돈다. emit은 f32 검사 → `to_poly_mesh` → `quality::check` 순서 (F32-03 이후 `PolyMeshRaw.points`가 두 빌드 모두 f64이기 때문) | SPEC-LIT 116.16 |
+| C17 | TET-15 | 시간 대부분을 쓰는 refine.rs / optimise.rs의 구조 변경은 이전 단위들이 잰 메시를 바꾸므로 하지 않았다 | SPEC-LIT 116.18 |
+| C18 | VAL-11 | GMRES는 block-coupled map에만 제공한다 (`mechanics.solver.outer = 'anderson' \| 'gmres'`, 기본 anderson). segregated 루프와 `coupled: true` 없는 'gmres'는 이름으로 거부. Gate 95-A는 같은 section 43에서 Anderson 행 뒤에 GMRES(50) 행을 둔다 | SPEC-LIT 142.2, 96.3 |
+| C19 | VAL-32 | 계획의 '0.5 %'를 두 비교 모두의 기준으로 읽었다 (A33). runs는 validate의 ignored recorder 테스트이고 기록은 상수로 replay한다 (§110.1) | SPEC-LIT 144.3 |
+| C20 | VAL-33 | onset = 최소 C_f, 난류 구간 = onset 뒤 최대 측정 C_f부터, 층류 구간 = 2e4 ≤ Re_x ≤ 최소 측정 C_f 앞 station. 밴드 규칙은 110.1 원문(양쪽 u_val 안이면 undecided). 정의는 brief에서 replay 전에 고정했지만 VAL-32 기록이 이미 트리에 있어 blind는 아니었다 | SPEC-LIT 144.4 |
+| C21 | VAL-51 | `band_of`를 110.1의 양쪽 규칙으로 고쳤다 (110-A/B/C 모두 같은 규칙). 당시 110-B/110-C 기록이 없어 바뀐 출력은 없었다 | SPEC-LIT 110.5 |
+| C22 | VAL-52 | 유입류는 입력 수정으로 해결: `ofgpu-generate-mesh step -inflow uniform` (step 전용). 기존 preset 출력은 바이트 단위로 같다 | SPEC-LIT 110.3 |
+| C23 | VAL-53 | P2(w_c)는 110.4가 명시한 하나의 study(z = 2.00 m의 dT_c)의 상대 u_val로 판정한다 (A42) | SPEC-LIT 110.5 |
+| C24 | TET-16 | STEP 경로는 제품 밖 선택적 외부 경로로 남기고, PROVENANCE의 gmsh 문단 위치만 바로잡았다 (계획 §11 item 6, 권고대로) | PROVENANCE |
 
 ## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
@@ -129,6 +157,11 @@
 - F32-13/14: lane M의 W4 VAL 단위가 F32-13/14 이전 트리에서 새로 넣은 행은 plain `c.check`라서 'N rows carry no class yet'으로 나온다. 행마다 class를 붙이고 새 section 함수는 `c.ran`으로 감싸야 한다 (SPEC-LIT 118.14 규칙, F32-18 전에 0이어야 함). 함수 안의 `worst = worst.max(..)` 접기는 아직 NaN을 버린다.
 - AMG-06b: JSONC의 `JsonGamg`(deny_unknown_fields)에 `precision`이 없어서 JSONC `gamg.precision`이 unknown field로 거부된다 (S 레인 case_json.rs/schema 몫).
 - AMG-06b: f32 GAMG 사본은 V-cycle만 돈다 (`set_cycle(K)`는 이름으로 거부). `DistGamg`에는 f32 사본이 없다.
+- TET-11 → TET-13b: emitter는 tet 전용이다. prism 면과 (116.26)의 prism 분할(세 tet)은 TET-13b 몫.
+- TET-11/12: §92.3을 `HostGeom64`에서 평가하도록 바꾸기 전까지 single에서는 tet 경로가 메시를 쓰지 못한다 (A28).
+- VAL-23: cyclic 패치에 wall function 이름이 붙는 버그(A39)는 `faces_where`가 패치 kind를 보도록 고치면 된다. 기존 결과가 바뀌므로 보류.
+- VAL-33: Gamma onset과 LM 난류 C_f는 네 번째(더 고운) level이나 미세 실행이 정지 규칙을 만족하면 판정된다.
+- VAL-52: gui registry의 `ofgpu-generate-mesh`에 `-inflow` 플래그를 오케스트레이터가 병합 때 추가했다 (`c9224d8`). `MESH_KINDS`의 `plate`는 여전히 없다.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
