@@ -1126,3 +1126,96 @@ extern "C" __global__ void cmpBcMassFlowInlet
         refGrad[f] = z;
     }
 }
+
+
+/*
+  ==========================================================================
+  The compressible outlets. SPEC-LIT 126.4, 126.5, 126.9 (CMP-17). Two
+  kernels, each over the faces [start, start + n) of one patch, from the
+  OWNER cell's state (u_n,P = u_P . n, c_P = sqrt(gamma R_s T_P)):
+  cmpBcSupersonicSwitch rewrites fr of a fixed-p outlet by (126.5);
+  cmpBcWaveSpeed fills (126.6)'s w and K for the Robin rewrite of BC-09's
+  fldAdvectiveRobinScalar in cuda/field.cu, which this file does not
+  restate. Both clip at zero only what 126.9 names: w (backflow holds the
+  face's time extrapolation, as (120.4b)) and K (no incoming characteristic
+  when M_n >= 1). No floor elsewhere: a NaN state stays a NaN.
+  ==========================================================================
+*/
+
+//- (126.5) of SPEC-LIT 126.4 on one fixed-p patch: fr = 1 while
+//  u_n,P / c_P < 1, fr = 0 (extrapolated) otherwise; refGrad = 0, and
+//  refValue - the stated p - is left as set up, so a subsonic face is the
+//  fixedValue face it was. grs = fl(gamma R_s).
+extern "C" __global__ void cmpBcSupersonicSwitch
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar grs
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = (u.x*s.x + u.y*s.y + u.z*s.z)/bMagSf[f];
+    const ofscalar c = sqrt(grs*T[P]);
+    fr[f] = (un/c < (ofscalar)1) ? (ofscalar)1 : (ofscalar)0;
+    refGrad[f] = (ofscalar)0;
+}
+
+//- (126.6) of SPEC-LIT 126.5 on one waveTransmissive patch:
+//    w = max(u_n,P + c_P, 0)  (acoustic = 1, on p)   or  max(u_n,P, 0)
+//    K = max(sigmaByL c_P (1 - M_n^2), 0),  M_n = u_n,P / c_P
+//  sigmaByL = fl(sigma / lInf), 0 when lInf is not stated. Under localEuler
+//  (local = 1) both are divided by the owner's r_P = 1/dt_P, so that BC-09's
+//  kernel, called with (a_n, a_0, a_00) = (1, -1, 0), forms (126.7) with
+//  the owner's dt_P (SPEC-LIT 126.9); otherwise rDeltaT is not read.
+extern "C" __global__ void cmpBcWaveSpeed
+(
+    ofscalar* __restrict__ w,
+    ofscalar* __restrict__ kRelax,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const ofscalar* __restrict__ rDeltaT,
+    oflabel local,
+    oflabel acoustic,
+    oflabel start,
+    oflabel n,
+    ofscalar grs,
+    ofscalar sigmaByL
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = (u.x*s.x + u.y*s.y + u.z*s.z)/bMagSf[f];
+    const ofscalar c = sqrt(grs*T[P]);
+    const ofscalar mn = un/c;
+    ofscalar ww = acoustic ? un + c : un;
+    ofscalar kk = sigmaByL*c*((ofscalar)1 - mn*mn);
+    if (ww < (ofscalar)0) ww = (ofscalar)0;
+    if (kk < (ofscalar)0) kk = (ofscalar)0;
+    if (local)
+    {
+        const ofscalar r = rDeltaT[P];
+        ww = ww/r;
+        kk = kk/r;
+    }
+    w[f] = ww;
+    kRelax[f] = kk;
+}

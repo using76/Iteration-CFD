@@ -44820,7 +44820,7 @@ when CMP-17 runs, CMP-17 writes the kernel to BC-09's contract.
 **`sigma` has no recalled default.** The plan quotes about 0.27 from Rudy & Strikwerda
 (1980); that paper is not read here. CMP-17 reads it and records the value with its
 page in this subsection, or, failing that, `sigma` is a required entry when `lInf` is
-stated. The reflection coefficient Selle et al. (2004) derive for this condition is not
+stated. CMP-17 did not read it, so `sigma` is required (§126.9). The reflection coefficient Selle et al. (2004) derive for this condition is not
 used by any gate: Gate CMP-NR measures the reflection directly (§127.6).
 
 ### 126.6 The characteristic far-field (`characteristicFarfield`; JSONC `farfield`)
@@ -44859,7 +44859,7 @@ slip wall makes the quasi-1-D duct and the Ringleb walls of §127.3.
 
 ### 126.8 The inlets as built (CMP-16)
 
-`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` and the last three
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` and three
 kernels of `cuda/compressible.cu` (`cmpBcTotalTemperature`, `cmpBcTotalPressure`,
 `cmpBcMassFlowInlet`) implement §126.1 and §126.3 exactly as written there: (126.1) on
 `T`, (126.3) on `p`, (126.4) on `U`. §126.2's preset needs no kernel: CMP-14 already
@@ -44928,6 +44928,132 @@ sum equals `-mdot` up to round-off by construction (§126.3), so it is an R-clas
 f32. The driver adds `an_openfoam_case_with_the_compressible_inlets_runs` (the
 OpenFOAM route reads both kinds and runs) and a refusal row for `totalPressure` without
 `gamma`.
+
+### 126.9 The outlets as built (CMP-17)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`OutletRule`,
+`CompressibleOutlets`) and two kernels appended to `cuda/compressible.cu`
+(`cmpBcSupersonicSwitch`, `cmpBcWaveSpeed`) implement §126.4 and §126.5. The Robin rewrite
+of (126.7) is BC-09's own kernel (`fldAdvectiveRobinScalar`, (120.4d) of SPEC-LIT 120.4),
+called through `field_ops::advective_robin_scalar` with (126.6)'s `w` and `K` as its
+face-field inputs, as docs/17 §5.2.3 planned. `field.rs` is not edited and no `BcKind` is
+added: the outlets carry their own kind mask (`BcKind::Advective` on their faces, -1
+elsewhere), which is the buffer the kernel matches.
+
+**Names.** On the OpenFOAM route, `waveTransmissive` on `p` or `T` with the optional entries
+`lInf`, `fieldInf`, `sigma` and `gamma`. `sigma` is this solver's own entry: Rudy &
+Strikwerda (1980) is not read, so §126.5's fallback holds and `sigma` is REQUIRED when
+`lInf` is stated, with no default. `bc::lower` reads every value in f64 and refuses by
+name: `lInf <= 0`; `lInf` without `sigma` or without `fieldInf`; `sigma <= 0`; `sigma` or
+`fieldInf` without `lInf` (read by nothing, since `K = 0` then); a stated `gamma` that is
+not the gas's (§126.8's rule); a `phi`, `rho` or `psi` entry naming another field than
+`phi`, `rho` and `thermo:psi` (or `psi`), since (126.6) is formed from the solver's own
+state; and `waveTransmissive` on `U`, which is not built (a non-reflecting outlet takes
+`U` zero-gradient). `Compressible::set_outlet_rules` refuses it under `steadyState` (no
+time step) and `CrankNicolson` ((120.4c) is defined for Euler and backward only).
+`advective` stays refused in `ofgpu-compressible`, with a message naming
+`waveTransmissive`. §120's catalogue keeps `waveTransmissive` as owned by CMP-17, for the
+reason §126.8 gives for `totalTemperature`: the catalogue describes `BcKind::from_name`.
+
+**The supersonic switch** is attached to every `fixedValue` `p` patch as read (§126.4 does
+not name a type; the static-pressure outlet is the fixed `p`). `cmpBcSupersonicSwitch`
+writes `fr = 1` where `u_n,P / c_P < 1` and `fr = 0` otherwise, and `refGrad = 0`; it
+leaves `refValue` (the stated `p`) as set up. A subsonic face therefore carries the triple
+it had, and a supersonic inflow face (`u_n < 0`) stays fixed. `u_n,P = (u_P . Sf)/|Sf|`
+and `c_P = sqrt(fl(gamma R_s) T_P)` are the owner cell's.
+
+**`waveTransmissive`.** It is built as a `zeroGradient` placeholder, so `phi_b^o` starts
+at the owner's value. `cmpBcWaveSpeed` forms, per face,
+
+```
+w = max(u_n,P + c_P, 0)   on p ,     w = max(u_n,P, 0)   on T
+K = max(sigma_by_l c_P (1 - M_n^2), 0) ,   M_n = u_n,P / c_P ,   sigma_by_l = fl(sigma / lInf)
+```
+
+Both clips are *DESIGN*, ours, and the only ones. `w >= 0` is (120.4b)'s rule: a back-flow
+`T` face holds its time extrapolation (`fr = 1`). `K >= 0` holds because at `M_n >= 1`
+there is no incoming characteristic to relax. Without `lInf`, `sigma_by_l = 0` and
+`K = 0`. Time:
+
+* Under `Euler` or `backward`, `w` and `K` are used as formed, with the run's own
+  `(a_n, a_0, a_00)` (`Ddt::face_coeffs`). That is (120.4d), which is (126.7) under Euler.
+* Under `localEuler`, `cmpBcWaveSpeed` divides `w` and `K` by the owner's `r_P = 1/dt_P`,
+  and the Robin kernel takes `(1, -1, 0)`. Then `d = 1 + K dt_P` and
+  `fr = d/(d + w dt_P Delta_b)`, which is (126.7) with §126.5's "under LTS `dt` is the
+  owner's `dt_P`".
+
+`phi_b^o` and `phi_b^oo` are set to the face values in `Compressible::initialise`, and
+rotated (`oo <- o`, `o <- phi_b`) once at the top of every step. The rewrite runs at the
+top of every outer iteration, after the inlets and the switches. The order is `p`'s
+faces, then `T`'s, each followed by its §4 evaluation, and then `psi` and `rho` on the
+boundary faces (§126.8 step 4). The start of a run applies the switches only, because it
+has no step yet.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `robin_form_matches_advective_update_exactly` | R, `tol_r(1e-13)` | 4 faces at `M_n` 0.3, 0.8, 1.2 (`K` clipped) and -0.4 (`w` clipped on `T`), `p` and `T` with `lInf`, Euler and LTS, the cells moved off `phi_b^o`. The device `fr`, `refValue` against (126.7), and the face value against the face update `(phi_b - phi_b^o)/dt + w Delta_b (phi_b - phi_P) = K (phi_inf - phi_b)` solved directly | <= 3.8e-16; <= 8.6e-8 |
+| `supersonic_switch_by_owner_mach` | D | `M_n` 0.5, 0.999, 1.5 and -1.5. `fr` 1, 1, 0, 1 bitwise, `refValue` kept, and `p_b` the owner's on the supersonic face | bitwise in both |
+| `subsonic_fixed_p_outlet_is_bitwise_unchanged` | D | 40-cell tube, 10 Euler steps, with and without the switch attached: `p`, `p_b`, `T`, `rho`, `rho_b`, `u_x` | 0 differing values in both |
+| `gate_cmp_nr_acoustic_pulse` | P | Gate CMP-NR, below | below |
+| `outlet_refusals_name_the_setting` | D | the refusals above | - |
+
+The driver adds `an_openfoam_case_with_a_wave_transmissive_outlet_runs`: the OpenFOAM route
+reads `waveTransmissive` on `p` and runs.
+
+**Gate CMP-NR as measured.** The tube is 200 cells of 5 mm, closed on the left, with air at
+300 K and `p_op = 1e5` Pa. The pulse is `p' = A exp(-((x - x0)/W)^2)` with `A = 1e-3 p`,
+`W = 10` cells (an e-folding width of 20 cells) and `x0` 40 cells from the outlet. It is
+initialised as a simple wave (`u' = p'/(rho_0 c_0)`, isentropic `T'`). The run uses Euler,
+acoustic CFL 0.2, one outer iteration and 3 correctors. The outlet is
+`waveTransmissive` with `lInf 1`, `sigma 0.25` and `fieldInf 0`.
+
+**Reflection** is the largest `|p'_run - p'_ref|` at the probe (cell 190, 10 cells from the
+outlet) over 400 steps, divided by the largest `|p'_ref|`. Here `ref` is the same run in a
+400-cell tube, whose outlet nothing can come back from within the window. *DESIGN*, ours.
+The characteristic split `max|p-|/max|p+|` with `p+- = (p' +- rho_0 c_0 u')/2` is printed
+only: in the reference run, where nothing is reflected, it already reads 0.089, because
+the discrete wave's `u'/p'` is not `1/(rho_0 c_0)`.
+
+**The long-time mean** is the outlet face's `p` averaged over the last tenth of 16 000
+steps (46.1 ms = 4/K with `K = sigma c / lInf`), against `fieldInf`, relative to `A`.
+
+| row | bar | f64 | f32 |
+|---|---|---|---|
+| reflection, `waveTransmissive` | <= 0.05 | **0.1821, MISSED** | **0.1828, MISSED** |
+| reflection, fixed `p` (control) | >= 0.9 | 0.9776 | 0.9778 |
+| long-time outlet mean | <= 1e-3 of `A` | 2.57e-4 | **1.102e-3, MISSED** |
+
+**The miss.** It is asserted as MISSED (user rule of 2026-10-14) and recorded for review. The
+measurements give two parts:
+
+1. The pulse crosses the tube at 1.186 `c_0`, about `sqrt(gamma) c_0`, in both the
+   200-cell and the 400-cell tubes. The speed was measured from the peak's arrival at the
+   probe, and in a separate two-probe run at CFL 0.2 and 0.05 (1.1878 and 1.1862 `c_0`, so
+   it does not depend on `dt`). So the CMP-09..CMP-13 solver carries sound about
+   `sqrt(gamma)` too fast, and (126.6)'s `w = u_n + c_P` with the true `c` is slower than
+   the solver's own wave. The outlet then reflects an inverted copy of the pulse.
+   CMP-20's Gate CMP-AC ("speed within 1 % of (122.4)'s `c`") is the gate that owns this
+   speed.
+2. A diagnostic build that formed `w` with `fl(gamma^2 R_s)` brought the reflection down to
+   0.119 (0.122 with `lInf`), not to 0.05. The rest grows as `dt` falls: 0.117, 0.140,
+   0.179 and 0.261 at CFL 1.0, 0.5, 0.2 and 0.05 with `K = 0` and the true `c`. The
+   half-cell advective closure (126.7), coupled to the segregated pressure equation by
+   its Robin coefficient alone, is therefore not the scheme's own non-reflecting
+   relation.
+
+`K` is not the cause (0.1792 with `K = 0`), and more outer iterations or correctors do not
+help (0.2288 with 3 outer iterations, 0.1821 with 6 correctors). Each cure changes
+numerics, either the solver's acoustic speed (the energy-pressure coupling of §124/§125)
+or the outlet's closure (a characteristic condition on `U` as well), and is the user's
+decision.
+
+The f32 long-time row misses on its own (§112.3's rule: its own row, both values). The f64
+outlet mean decays like `exp(-t/tau)`, halving about every 2000 steps, down to 5.5e-3 Pa at
+step 20 000. Under single it stops decaying at step 14 000 and wanders between -0.07 and
++0.16 Pa (to 24 000 steps, sampled every 2000). That is a few f32 ulps of the absolute
+state about `p_op = 1e5` Pa: an f32 floor, for §112's owner, not a property of the outlet.
 
 ---
 
@@ -45386,7 +45512,10 @@ acoustics, Ghia and the AR-138 experiment.
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| CMP-17 | CMP-NR reflection, `waveTransmissive` (bar <= 0.05) | f64 0.1821, f32 0.1828: **MISSED** (§126.9) | CMP-17 |
+| CMP-17 | CMP-NR reflection, fixed `p` (bar >= 0.9) | f64 0.9776, f32 0.9778 | CMP-17 |
+| CMP-17 | CMP-NR long-time outlet mean / `A` (bar <= 1e-3) | f64 2.57e-4; f32 1.102e-3 **MISSED** (f32 floor, §126.9) | CMP-17 |
+| CMP-17 | the pulse's speed in the solver (cause of the miss) | 1.186 `c_0`, about `sqrt(gamma) c_0`, both builds | CMP-17 |
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 

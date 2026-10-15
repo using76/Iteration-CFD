@@ -30,9 +30,32 @@
 //! The shared setup is not touched, so the incompressible `totalPressure`
 //! (no `gamma`) of every other driver is what it was, bit for bit.
 //!
+//! The outlets of SPEC-LIT §126.4-§126.5, as built in §126.9 (docs/17
+//! CMP-17): the supersonic switch of every fixed-`p` outlet, and
+//! `waveTransmissive` on `p` or `T`:
+//!
+//! ```text
+//! p_b = p_set  if u_n,P / c_P < 1  (fr = 1),  extrapolated otherwise      (126.5)
+//! d phi/dt + w d phi/dn = K (phi_inf - phi),  w = u_n,P + c_P on p, u_n,P else,
+//!   K = sigma c_P (1 - M_n^2) / lInf                                       (126.6)
+//! fr = (1 + K dt) / (1 + alpha + K dt),  ref = (phi_b^o + K dt phi_inf) / (1 + K dt)
+//!                                                                          (126.7)
+//! ```
+//!
+//! (126.7) is BC-09's Robin rewrite (SPEC-LIT (120.4d) of §120.4), whose
+//! kernel takes the wave speed and the rate as face-field inputs:
+//! [`CompressibleOutlets`] fills them from the owner cell and calls
+//! `field_ops::advective_robin_scalar` with a kind mask of its own, so no
+//! `BcKind` is added. A `waveTransmissive` entry is built as a
+//! `zeroGradient` placeholder; a fixed-`p` entry is built as it is read.
+//!
 //! Written from:
 //!   ofgpu `SPEC-LIT.md` §126 intro, §126.1, §126.3 - the equations and
-//!     the inflow convention; §126.8 - this file as built, its contract
+//!     the inflow convention; §126.8 - this file as built, its contract;
+//!     §126.4, §126.5 and §126.9 - the outlets and their contract;
+//!     §120.4 - the Robin form (120.4d) the outlets reuse
+//!   Carlson (2011) §2.4, eq. (25) - the static-pressure outlet and its
+//!     supersonic extrapolation, which (126.5) restates
 //!   NACA Report 1135 (Ames Research Staff, 1953), eqs. (43)-(45): the
 //!     isentropic total-to-static relations (126.1)-(126.2) restate
 //!   Carlson, "Inflow/Outflow Boundary Conditions with Application to
@@ -46,11 +69,13 @@ use std::collections::BTreeMap;
 
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 
-use crate::device::{cfg_for, Gpu, KernelSet};
+use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::field_ops::{self, FieldKernels};
 use crate::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
+use crate::field::BcKind;
 use crate::mesh::{GpuMesh, HostMesh};
+use crate::timescheme::DdtCoeffs;
 use crate::{Label, Scalar, Vec3};
 
 use super::thermo::PerfectGas;
@@ -103,6 +128,8 @@ pub struct Lowered {
     pub p: RawScalarField,
     pub t: RawScalarField,
     pub rules: Vec<BcRule>,
+    /// SPEC-LIT §126.9: the outlets, one per mesh patch that carries one.
+    pub outlets: Vec<OutletRule>,
 }
 
 /// A refusal naming the field and the patch key.
@@ -236,6 +263,97 @@ fn vector_kind(key: &str, spec: &PatchFieldSpec) -> Result<Option<f64>> {
     }
 }
 
+/// Which outlet an [`OutletRule`] is (SPEC-LIT §126.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutletKind {
+    /// (126.5) on `p`: every `fixedValue` `p` patch as read.
+    SupersonicSwitch,
+    /// (126.6)-(126.7) on `p` or `T`: `waveTransmissive`.
+    WaveTransmissive,
+}
+
+/// The field an [`OutletRule`] rewrites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutletField {
+    P,
+    T,
+}
+
+/// One patch's outlet: the faces `[start, start + size)` and, for
+/// `waveTransmissive`, `lInf` (0 when not stated, so `K = 0`), `sigma` and
+/// `fieldInf` (both 0 then). Every value is read in f64.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutletRule {
+    pub kind: OutletKind,
+    pub field: OutletField,
+    pub patch: String,
+    pub start: usize,
+    pub size: usize,
+    pub l_inf: f64,
+    pub sigma: f64,
+    pub field_inf: f64,
+}
+
+/// A `waveTransmissive` entry's `(lInf, sigma, fieldInf)`, `None` for any
+/// other type. Refused by name: a stated `gamma` that is not the gas's, a
+/// `phi`/`rho`/`psi` naming another field (the condition reads the solver's
+/// own state), `lInf <= 0`, `lInf` without `sigma` (no default is recalled,
+/// SPEC-LIT §126.5) or without `fieldInf`, `sigma <= 0`, and `sigma` or
+/// `fieldInf` without `lInf` (read by nothing, since `K = 0` then).
+fn wave_entry(field: &str, key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) -> Result<Option<(f64, f64, f64)>> {
+    if spec.type_name != "waveTransmissive" {
+        return Ok(None);
+    }
+    check_gamma(spec, field, key, "waveTransmissive", gas)?;
+    let own: [(&str, &[&str]); 3] = [("phi", &["phi"]), ("rho", &["rho"]), ("psi", &["thermo:psi", "psi"])];
+    for (entry, names) in own {
+        if let Some(v) = spec.extra.get(entry) {
+            if !names.contains(&v.trim()) {
+                return Err(refuse(
+                    field,
+                    key,
+                    format!(
+                        "waveTransmissive names {entry} \"{v}\", but (126.6) is formed from the solver's own u, T and gas, so only {} is accepted (SPEC-LIT §126.9)",
+                        names.join(" or ")
+                    ),
+                ));
+            }
+        }
+    }
+    let l_inf = number64(spec, field, key, "lInf")?;
+    let sigma = number64(spec, field, key, "sigma")?;
+    let Some(l) = l_inf else {
+        for entry in ["sigma", "fieldInf"] {
+            if spec.extra.contains_key(entry) {
+                return Err(refuse(
+                    field,
+                    key,
+                    format!(
+                        "waveTransmissive states {entry} without lInf; K = 0 when lInf is not stated (126.6), so {entry} would be read by nothing. State lInf, or remove {entry} (SPEC-LIT §126.9)"
+                    ),
+                ));
+            }
+        }
+        return Ok(Some((0.0, 0.0, 0.0)));
+    };
+    if !(l > 0.0) {
+        return Err(refuse(field, key, format!("waveTransmissive lInf {l} is not above 0 m (SPEC-LIT §126.9)")));
+    }
+    let Some(sg) = sigma else {
+        return Err(refuse(
+            field,
+            key,
+            "waveTransmissive states lInf and no sigma; (126.6)'s K = sigma c (1 - M_n^2) / lInf has no recalled default for sigma, so it is a required entry when lInf is stated (SPEC-LIT §126.5)"
+                .into(),
+        ));
+    };
+    if !(sg > 0.0) {
+        return Err(refuse(field, key, format!("waveTransmissive sigma {sg} is not above 0 (SPEC-LIT §126.9)")));
+    }
+    let fi = required64(spec, field, key, "fieldInf", "waveTransmissive with lInf")?;
+    Ok(Some((l, sg, fi)))
+}
+
 /// SPEC-LIT §126.8: the three field files as read, with every compressible
 /// kind replaced by its placeholder, and one [`BcRule`] per mesh patch that
 /// carries one. Refused by name: `totalPressure` without `gamma`, a stated
@@ -249,13 +367,17 @@ pub fn lower(
     hm: &HostMesh,
     gas: &PerfectGas,
 ) -> Result<Lowered> {
-    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new() };
+    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new(), outlets: Vec::new() };
 
     // Every entry, by its own key (patterns too): validate and replace.
     let lower_scalar = |field: &str, b: &mut BTreeMap<String, PatchFieldSpec>| -> Result<()> {
         for (key, spec) in b.iter_mut() {
             if let Some((_, v)) = scalar_kind(field, key, spec, gas)? {
                 *spec = placeholder_scalar(v);
+            } else if wave_entry(field, key, spec, gas)?.is_some() {
+                // §126.9: zero-gradient until the first rewrite, so phi_b^o
+                // starts at the owner cell's value.
+                *spec = PatchFieldSpec { type_name: "zeroGradient".into(), ..PatchFieldSpec::default() };
             }
         }
         Ok(())
@@ -263,6 +385,14 @@ pub fn lower(
     lower_scalar("p", &mut out.p.boundary)?;
     lower_scalar("T", &mut out.t.boundary)?;
     for (key, spec) in out.u.boundary.iter_mut() {
+        if spec.type_name == "waveTransmissive" {
+            return Err(refuse(
+                "U",
+                key,
+                "waveTransmissive on U is not built: (126.6) is built on p and T (SPEC-LIT §126.9); U takes zeroGradient at a non-reflecting outlet"
+                    .into(),
+            ));
+        }
         if vector_kind(key, spec)?.is_some() {
             *spec = PatchFieldSpec {
                 type_name: "fixedValue".into(),
@@ -304,6 +434,27 @@ pub fn lower(
             if let Some((kind, p0)) = scalar_kind("p", name, spec, gas)? {
                 let t0 = t_rule.map_or(0.0, |(_, t0)| t0);
                 out.rules.push(BcRule { kind, patch: name.into(), start, size, value: p0, t0 });
+            }
+        }
+        // §126.9: the outlets. A fixed p is (126.5)'s static-pressure
+        // outlet; waveTransmissive is (126.6) on p or T.
+        for (field, raw) in [(OutletField::P, p), (OutletField::T, t)] {
+            let fname = if field == OutletField::P { "p" } else { "T" };
+            let Some(spec) = raw.spec(name)? else { continue };
+            let rule = |kind, (l_inf, sigma, field_inf)| OutletRule {
+                kind,
+                field,
+                patch: name.into(),
+                start,
+                size,
+                l_inf,
+                sigma,
+                field_inf,
+            };
+            if let Some(w) = wave_entry(fname, name, spec, gas)? {
+                out.outlets.push(rule(OutletKind::WaveTransmissive, w));
+            } else if field == OutletField::P && spec.type_name == "fixedValue" {
+                out.outlets.push(rule(OutletKind::SupersonicSwitch, (0.0, 0.0, 0.0)));
             }
         }
     }
@@ -445,6 +596,242 @@ impl CompressibleBcs {
         }
         if self.any(RuleKind::TotalPressure) {
             field_ops::correct_boundary_conditions(gpu, fldk, &mut s.p, m)?;
+        }
+        Ok(())
+    }
+}
+
+/// One field's `waveTransmissive` faces (SPEC-LIT §126.9): the kind mask
+/// BC-09's kernel matches (`BcKind::Advective` on the rule's faces, -1
+/// elsewhere), the wave speed and the rate (126.6), `phi_inf`, and the face
+/// values of the two previous steps. Every buffer covers the whole boundary.
+struct WaveFaces {
+    mask: DevBuf<Label>,
+    w: DevBuf<Scalar>,
+    k_relax: DevBuf<Scalar>,
+    phi_inf: DevBuf<Scalar>,
+    b_old: DevBuf<Scalar>,
+    b_old_old: DevBuf<Scalar>,
+}
+
+impl WaveFaces {
+    fn new(gpu: &Gpu, nbf: usize, rules: &[&OutletRule]) -> Result<Self> {
+        let mut mask = vec![-1 as Label; nbf];
+        let mut inf = vec![0.0 as Scalar; nbf];
+        for r in rules {
+            for f in r.start..r.start + r.size {
+                mask[f] = BcKind::Advective as Label;
+                inf[f] = r.field_inf as Scalar;
+            }
+        }
+        // A zero-length upload still needs a buffer the launchers accept.
+        let n = nbf.max(1);
+        mask.resize(n, -1);
+        inf.resize(n, 0.0);
+        Ok(Self {
+            mask: gpu.upload(&mask)?,
+            w: gpu.zeros(n)?,
+            k_relax: gpu.zeros(n)?,
+            phi_inf: gpu.upload(&inf)?,
+            b_old: gpu.zeros(n)?,
+            b_old_old: gpu.zeros(n)?,
+        })
+    }
+}
+
+/// The time coefficients (126.7) is formed with in one outer iteration
+/// (SPEC-LIT §126.9): the run's own `(a_n, a_0, a_00)` of a transient run
+/// (`Ddt::face_coeffs`, Euler or backward) with no local step, or, under
+/// `localEuler`, `(1, -1, 0)` with the per-cell `r_P = 1/dt_P` by which
+/// `cmpBcWaveSpeed` divides `w` and `K`.
+#[derive(Clone, Copy)]
+pub struct WaveTime<'a> {
+    pub c: DdtCoeffs,
+    pub r_delta_t: Option<&'a DevBuf<Scalar>>,
+}
+
+/// The two outlet kernels and the run's outlet rules (SPEC-LIT §126.9).
+pub struct CompressibleOutlets {
+    rules: Vec<OutletRule>,
+    switch: CudaFunction,
+    speed: CudaFunction,
+    /// `fl(gamma R_s)`.
+    grs: Scalar,
+    p_wave: Option<WaveFaces>,
+    t_wave: Option<WaveFaces>,
+}
+
+impl CompressibleOutlets {
+    /// Load the kernels for `rules` on `m`; a rule whose faces leave the
+    /// boundary arrays is refused.
+    pub fn new(gpu: &Gpu, m: &GpuMesh, gas: &PerfectGas, rules: Vec<OutletRule>) -> Result<Self> {
+        let nbf = m.n_boundary_faces;
+        for r in &rules {
+            if r.start + r.size > nbf {
+                return Err(Error::Refused(format!(
+                    "compressible::bc: outlet patch {} faces {}..{} leave the {nbf} boundary faces",
+                    r.patch,
+                    r.start,
+                    r.start + r.size
+                )));
+            }
+        }
+        let wave = |field: OutletField| -> Result<Option<WaveFaces>> {
+            let of: Vec<&OutletRule> =
+                rules.iter().filter(|r| r.kind == OutletKind::WaveTransmissive && r.field == field).collect();
+            if of.is_empty() {
+                Ok(None)
+            } else {
+                WaveFaces::new(gpu, nbf, &of).map(Some)
+            }
+        };
+        let (p_wave, t_wave) = (wave(OutletField::P)?, wave(OutletField::T)?);
+        let k = KernelSet::new(gpu, crate::kernels::COMPRESSIBLE)?;
+        Ok(Self {
+            switch: k.func("cmpBcSupersonicSwitch")?,
+            speed: k.func("cmpBcWaveSpeed")?,
+            grs: (gas.gamma * gas.r_s()) as Scalar,
+            rules,
+            p_wave,
+            t_wave,
+        })
+    }
+
+    pub fn rules(&self) -> &[OutletRule] {
+        &self.rules
+    }
+
+    /// Whether any rule is `waveTransmissive`, which needs a time step.
+    pub fn has_wave(&self) -> bool {
+        self.p_wave.is_some() || self.t_wave.is_some()
+    }
+
+    /// `phi_b^o = phi_b^oo = phi_b` from the face values as they stand: the
+    /// start of a run (`Compressible::initialise`).
+    pub fn store_initial(&mut self, gpu: &Gpu, fldk: &FieldKernels, s: &CompressibleState) -> Result<()> {
+        for (wf, bf) in [(&mut self.p_wave, &s.p.bf), (&mut self.t_wave, &s.t.bf)] {
+            if let Some(wf) = wf {
+                let n = s.p.n_boundary_faces;
+                field_ops::copy_field(gpu, fldk, &mut wf.b_old, bf, n)?;
+                field_ops::copy_field(gpu, fldk, &mut wf.b_old_old, bf, n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `phi_b^oo <- phi_b^o`, `phi_b^o <- phi_b`, once at the top of every
+    /// time step (§126.5: "refreshed once per step").
+    pub fn store_old_time(&mut self, gpu: &Gpu, fldk: &FieldKernels, s: &CompressibleState) -> Result<()> {
+        for (wf, bf) in [(&mut self.p_wave, &s.p.bf), (&mut self.t_wave, &s.t.bf)] {
+            if let Some(wf) = wf {
+                let n = s.p.n_boundary_faces;
+                field_ops::copy_field(gpu, fldk, &mut wf.b_old_old, &wf.b_old, n)?;
+                field_ops::copy_field(gpu, fldk, &mut wf.b_old, bf, n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One rewrite of every outlet's triple from the owner cells' `u` and
+    /// `T`, then the face values of each field a rule touched: the switches
+    /// (126.5), then `p`'s faces; with `time`, the `waveTransmissive` faces
+    /// of `p` (126.6) with `w = u_n + c`, then of `T` with `w = u_n`, each
+    /// by BC-09's Robin kernel and followed by that field's evaluation.
+    /// Without `time` (the start of a run) only the switches run. The
+    /// caller re-forms the boundary gas state.
+    pub fn apply(
+        &mut self,
+        gpu: &Gpu,
+        fldk: &FieldKernels,
+        s: &mut CompressibleState,
+        m: &GpuMesh,
+        time: Option<WaveTime<'_>>,
+    ) -> Result<()> {
+        let mut any_switch = false;
+        for r in self.rules.iter().filter(|r| r.kind == OutletKind::SupersonicSwitch && r.size > 0) {
+            let (start, n, grs) = (r.start as Label, r.size as Label, self.grs);
+            let f = self.switch.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut s.p.fr)
+                    .arg(&mut s.p.ref_grad)
+                    .arg(&s.u.f)
+                    .arg(&s.t.f)
+                    .arg(&m.b_face_cells)
+                    .arg(&m.b_sf)
+                    .arg(&m.b_mag_sf)
+                    .arg(&start)
+                    .arg(&n)
+                    .arg(&grs)
+                    .launch(cfg_for(r.size))?;
+            }
+            any_switch = true;
+        }
+        if any_switch {
+            field_ops::correct_boundary_conditions(gpu, fldk, &mut s.p, m)?;
+        }
+        let Some(time) = time else {
+            return Ok(());
+        };
+        let nbf = m.n_boundary_faces;
+        let (local, rdt) = match time.r_delta_t {
+            Some(r) => (1 as Label, r),
+            None => (0 as Label, &m.v),
+        };
+        for field in [OutletField::P, OutletField::T] {
+            let wf = match field {
+                OutletField::P => &mut self.p_wave,
+                OutletField::T => &mut self.t_wave,
+            };
+            let Some(wf) = wf else { continue };
+            let acoustic: Label = if field == OutletField::P { 1 } else { 0 };
+            for r in self.rules.iter().filter(|r| r.kind == OutletKind::WaveTransmissive && r.field == field && r.size > 0) {
+                let (start, n, grs) = (r.start as Label, r.size as Label, self.grs);
+                let sigma_by_l: Scalar = if r.l_inf > 0.0 { (r.sigma / r.l_inf) as Scalar } else { 0.0 };
+                let f = self.speed.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut wf.w)
+                        .arg(&mut wf.k_relax)
+                        .arg(&s.u.f)
+                        .arg(&s.t.f)
+                        .arg(&m.b_face_cells)
+                        .arg(&m.b_sf)
+                        .arg(&m.b_mag_sf)
+                        .arg(rdt)
+                        .arg(&local)
+                        .arg(&acoustic)
+                        .arg(&start)
+                        .arg(&n)
+                        .arg(&grs)
+                        .arg(&sigma_by_l)
+                        .launch(cfg_for(r.size))?;
+                }
+            }
+            let fld = match field {
+                OutletField::P => &mut s.p,
+                OutletField::T => &mut s.t,
+            };
+            field_ops::advective_robin_scalar(
+                gpu,
+                fldk,
+                &mut fld.fr,
+                &mut fld.ref_value,
+                &mut fld.ref_grad,
+                &wf.mask,
+                BcKind::Advective,
+                &wf.w,
+                &wf.k_relax,
+                &wf.phi_inf,
+                &wf.b_old,
+                &wf.b_old_old,
+                &m.b_delta_coeffs,
+                time.c,
+                nbf,
+            )?;
+            field_ops::correct_boundary_conditions(gpu, fldk, fld, m)?;
         }
         Ok(())
     }

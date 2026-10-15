@@ -32,8 +32,9 @@
 //!   CMP-13: `localEuler` on both equations builds them on Euler with a
 //!   per-cell step (125.2) attached;
 //! - `tests`, the outer loop's gate table (CMP-12);
-//! - still to come: `bc` (§126), the compressible boundary conditions,
-//!   CMP-16 to CMP-18.
+//! - [`bc`] (§126), the compressible boundary conditions: the inlets of
+//!   §126.8 (CMP-16) and the outlets of §126.9 (CMP-17); the far-field is
+//!   still to come (CMP-18).
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §125.3 - the outer loop, its order and its reports,
@@ -352,6 +353,9 @@ pub struct Compressible<'m> {
     /// SPEC-LIT §126.8: the compressible inlets, rewritten at the top of
     /// every outer iteration; `None` (no rule) rewrites nothing.
     bcs: Option<bc::CompressibleBcs>,
+    /// SPEC-LIT §126.9: the outlets (the supersonic switch of a fixed `p`,
+    /// `waveTransmissive`); `None` (no rule) rewrites nothing.
+    outlets: Option<bc::CompressibleOutlets>,
 }
 
 impl<'m> Compressible<'m> {
@@ -479,6 +483,7 @@ impl<'m> Compressible<'m> {
             host,
             steps: 0,
             bcs: None,
+            outlets: None,
         })
     }
 
@@ -499,14 +504,73 @@ impl<'m> Compressible<'m> {
         self.bcs.as_ref().map_or(&[], |b| b.rules())
     }
 
-    /// §126.8: rewrite the inlets' triples from the current state, evaluate
-    /// their faces, and re-form `psi` and `rho` on the boundary faces (the
-    /// cells are not touched). Nothing without a rule.
-    fn apply_boundary_rules(&self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
-        let Some(b) = &self.bcs else {
-            return Ok(());
+    /// SPEC-LIT §126.9: attach the outlets `bc::lower` found; an empty list
+    /// attaches nothing. `waveTransmissive` needs a time step, so it is
+    /// refused by name under `steadyState` and `CrankNicolson` (§126.5,
+    /// and (120.4c) of SPEC-LIT 120.4 is defined for Euler and backward
+    /// only); `localEuler` takes the owner's `dt_P`. Call before
+    /// [`Self::initialise`].
+    pub fn set_outlet_rules(&mut self, gpu: &Gpu, rules: Vec<bc::OutletRule>) -> Result<()> {
+        if let Some(r) = rules.iter().find(|r| r.kind == bc::OutletKind::WaveTransmissive) {
+            let ddt = self.ctrl.momentum.ddt;
+            let why = match ddt {
+                DdtScheme::SteadyState => Some("a steady SIMPLE run without localEuler has no time step"),
+                DdtScheme::CrankNicolson(_) => {
+                    Some("CrankNicolson weights the spatial operator, and (126.7) is formed for Euler and backward only")
+                }
+                _ => None,
+            };
+            if let Some(why) = why {
+                return Err(refuse(
+                    "Compressible::set_outlet_rules",
+                    format!(
+                        "patch {}: waveTransmissive is (126.6), a condition in time, and {why} \
+                         (ddtSchemes {ddt:?}); name Euler, backward or localEuler (SPEC-LIT §126.5)",
+                        r.patch
+                    ),
+                ));
+            }
+        }
+        self.outlets = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleOutlets::new(gpu, self.m, &self.ctrl.gas, rules)?)
         };
-        b.apply(gpu, &self.fldk, s, self.m)?;
+        Ok(())
+    }
+
+    /// The attached outlet rules (empty when none).
+    pub fn outlet_rules(&self) -> &[bc::OutletRule] {
+        self.outlets.as_ref().map_or(&[], |o| o.rules())
+    }
+
+    /// §126.8 and §126.9: rewrite the inlets' and then the outlets'
+    /// triples from the current state, evaluate their faces, and re-form
+    /// `psi` and `rho` on the boundary faces (the cells are not touched).
+    /// `wave` is false at the start of a run, which has no step yet: the
+    /// `waveTransmissive` faces then keep their set-up value. Nothing
+    /// without a rule.
+    fn apply_boundary_rules(&mut self, gpu: &Gpu, s: &mut CompressibleState, wave: bool) -> Result<()> {
+        if self.bcs.is_none() && self.outlets.is_none() {
+            return Ok(());
+        }
+        if let Some(b) = &self.bcs {
+            b.apply(gpu, &self.fldk, s, self.m)?;
+        }
+        if let Some(o) = &mut self.outlets {
+            let time = if wave && o.has_wave() {
+                Some(match self.mom.local_step() {
+                    Some(l) => bc::WaveTime {
+                        c: crate::timescheme::DdtCoeffs { a_n: 1.0, a_0: -1.0, a_00: 0.0 },
+                        r_delta_t: Some(&l.r_delta_t),
+                    },
+                    None => bc::WaveTime { c: self.mom.ddt.face_coeffs("waveTransmissive")?, r_delta_t: None },
+                })
+            } else {
+                None
+            };
+            o.apply(gpu, &self.fldk, s, self.m, time)?;
+        }
         let nbf = self.m.n_boundary_faces;
         let CompressibleState { psi, rho, p, t, .. } = s;
         thermo::gas_state(gpu, &self.thk, &self.gas, &mut psi.bf, &mut rho.bf, &p.bf, &t.bf, nbf)
@@ -601,8 +665,11 @@ impl<'m> Compressible<'m> {
         self.gas_state(gpu, s)?;
         // §126.8: the inlets from the state just formed, then mu and kappa
         // of the new boundary T.
-        if self.bcs.is_some() {
-            self.apply_boundary_rules(gpu, s)?;
+        if let Some(o) = &mut self.outlets {
+            o.store_initial(gpu, &self.fldk, s)?;
+        }
+        if self.bcs.is_some() || self.outlets.is_some() {
+            self.apply_boundary_rules(gpu, s, false)?;
             self.transport(gpu, s)?;
         }
 
@@ -641,6 +708,10 @@ impl<'m> Compressible<'m> {
             field_ops::advance_time_levels(gpu, &self.fldk, f)?;
         }
         field_ops::advance_time_levels_vector(gpu, &self.fldk, &mut s.u)?;
+        // §126.9: the waveTransmissive faces' phi_b^o, once per step.
+        if let Some(o) = &mut self.outlets {
+            o.store_old_time(gpu, &self.fldk, s)?;
+        }
         // §125.7: the pseudo step's own dt_P, once, from the state it
         // starts from.
         if self.local {
@@ -653,8 +724,9 @@ impl<'m> Compressible<'m> {
         for outer in 1..=n_outer {
             let is_final = !steady && outer == n_outer;
 
-            // 0. §126.8: the compressible inlets from the latest state.
-            self.apply_boundary_rules(gpu, s)?;
+            // 0. §126.8, §126.9: the compressible inlets and outlets from
+            // the latest state.
+            self.apply_boundary_rules(gpu, s, true)?;
 
             // 1. mu and kappa from T (psi follows at step 4).
             self.transport(gpu, s)?;

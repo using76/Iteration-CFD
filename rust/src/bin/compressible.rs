@@ -359,16 +359,18 @@ const STATIC_TYPES: &[&str] = &[
     "empty",
 ];
 
-/// SPEC-LIT §126.8's inlets, for the refusal's list of what is accepted.
+/// SPEC-LIT §126.8's inlets and §126.9's outlet, for the refusal's list of
+/// what is accepted.
 const CMP16_KINDS: &str =
-    "totalPressure (with gamma), totalTemperature, flowRateInletVelocity (with massFlowRate)";
+    "totalPressure (with gamma), totalTemperature, flowRateInletVelocity (with massFlowRate), \
+     waveTransmissive (on p or T)";
 
 /// The compressible kinds of SPEC-LIT §126 still to come, and the unit that
-/// brings each. CMP-16's three are lowered by `compressible::bc::lower`
-/// before this check sees the fields (§126.8).
+/// brings each. CMP-16's three and CMP-17's `waveTransmissive` are lowered by
+/// `compressible::bc::lower` before this check sees the fields (§126.8,
+/// §126.9).
 fn compressible_kind_unit(type_name: &str) -> Option<&'static str> {
     match type_name {
-        "waveTransmissive" | "advective" => Some("CMP-17 (SPEC-LIT §126.4-§126.5)"),
         "characteristicFarfield" | "farfield" => Some("CMP-18 (SPEC-LIT §126.6)"),
         _ => None,
     }
@@ -393,6 +395,12 @@ fn check_static_bcs(field: &str, boundary: &BTreeMap<String, PatchFieldSpec>) ->
             continue;
         }
         let why = match compressible_kind_unit(t) {
+            None if t == "advective" => format!(
+                "advective is the generic outlet of SPEC-LIT §120.4, whose wave speed is the \
+                 flux; a gas outlet is waveTransmissive, which adds the speed of sound on p \
+                 (SPEC-LIT §126.9). Accepted: {}, {CMP16_KINDS}",
+                STATIC_TYPES.join(", ")
+            ),
             Some(unit) => format!(
                 "{t} is a compressible condition rewritten each outer iteration, which \
                  {unit} implements; until then it is refused. Accepted now: {}, {CMP16_KINDS}",
@@ -812,6 +820,24 @@ fn run(o: &Options) -> Result<RunEnd> {
     for r in &inlets.rules {
         println!("inlet: {} on patch {} ({} faces), SPEC-LIT §126.8", rule_name(r.kind), r.patch, r.size);
     }
+    for r in &inlets.outlets {
+        use ofgpu::compressible::bc::{OutletField, OutletKind};
+        let field = if r.field == OutletField::P { "p" } else { "T" };
+        match r.kind {
+            OutletKind::SupersonicSwitch => println!(
+                "outlet: p fixedValue on patch {} ({} faces) switches to extrapolation where u_n/c >= 1, SPEC-LIT §126.9",
+                r.patch, r.size
+            ),
+            OutletKind::WaveTransmissive if r.l_inf > 0.0 => println!(
+                "outlet: {field} waveTransmissive on patch {} ({} faces), lInf {} sigma {} fieldInf {}, SPEC-LIT §126.9",
+                r.patch, r.size, r.l_inf, r.sigma, r.field_inf
+            ),
+            OutletKind::WaveTransmissive => println!(
+                "outlet: {field} waveTransmissive on patch {} ({} faces), no lInf (K = 0), SPEC-LIT §126.9",
+                r.patch, r.size
+            ),
+        }
+    }
 
     let dc = driver_controls(&o.case_path, &cc, lowered.as_ref(), gas, o.iters)?;
     print_controls(&dc);
@@ -927,6 +953,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     let mut s = CompressibleState::new(&gpu, &mesh, u, p, t)?;
     let mut solver = Compressible::new(&gpu, &mesh, dc.ctrl)?;
     solver.set_boundary_rules(&gpu, inlets.rules)?;
+    solver.set_outlet_rules(&gpu, inlets.outlets)?;
     solver.initialise(&gpu, &mut s)?;
 
     let dt = f64::from(dc.ctrl.momentum.delta_t);
@@ -1255,6 +1282,29 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
         let p = std::fs::read_to_string(dir.join("0.005").join("p")).expect("p is written");
         assert!(p.contains("totalPressure"), "the written p keeps the type as read");
+    }
+
+    /// SPEC-LIT §126.9: the OpenFOAM route reads `waveTransmissive` on `p`
+    /// and runs.
+    #[test]
+    fn an_openfoam_case_with_a_wave_transmissive_outlet_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = openfoam_cavity("cmp17_of_wave");
+        set_patch(
+            &dir,
+            "p",
+            "movingWall",
+            "waveTransmissive",
+            &[("lInf", "0.1"), ("sigma", "0.25"), ("fieldInf", "0"), ("gamma", "1.4")],
+        );
+        let o = parse(&argv(&[dir.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the cavity with a waveTransmissive p runs");
+        assert_eq!(end.steps, 5);
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
+        let p = std::fs::read_to_string(dir.join("0.005").join("p")).expect("p is written");
+        assert!(p.contains("waveTransmissive"), "the written p keeps the type as read");
     }
 
     /// SPEC-LIT §122.4: each thing v1 does not have is refused, and the

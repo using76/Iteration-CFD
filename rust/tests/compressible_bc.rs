@@ -5,9 +5,10 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! CMP-16's gate table, run in BOTH builds: the five tests of
+//! CMP-16's and CMP-17's gate tables, run in BOTH builds: the ten tests of
 //! `tests/shared/compressible_bc_cases.rs` are SPEC-LIT §126.8's rows for
-//! the compressible inlets. The same file is included by
-//! `src/compressible/bc.rs`, the lib tests of the module.
+//! the compressible inlets and §126.9's for the outlets, Gate CMP-NR among
+//! them. The same file is included by `src/compressible/bc.rs`, the lib
+//! tests of the module.
 
 include!("shared/compressible_bc_cases.rs");
