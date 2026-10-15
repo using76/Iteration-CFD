@@ -33,8 +33,8 @@
 //!   per-cell step (125.2) attached;
 //! - `tests`, the outer loop's gate table (CMP-12);
 //! - [`bc`] (§126), the compressible boundary conditions: the inlets of
-//!   §126.8 (CMP-16) and the outlets of §126.9 (CMP-17); the far-field is
-//!   still to come (CMP-18).
+//!   §126.8 (CMP-16), the outlets of §126.9 (CMP-17) and the
+//!   characteristic far-field of §126.10 (CMP-18).
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §125.3 - the outer loop, its order and its reports,
@@ -356,6 +356,9 @@ pub struct Compressible<'m> {
     /// SPEC-LIT §126.9: the outlets (the supersonic switch of a fixed `p`,
     /// `waveTransmissive`); `None` (no rule) rewrites nothing.
     outlets: Option<bc::CompressibleOutlets>,
+    /// SPEC-LIT §126.10: the characteristic far-fields; `None` (no rule)
+    /// rewrites nothing.
+    farfields: Option<bc::CompressibleFarfields>,
 }
 
 impl<'m> Compressible<'m> {
@@ -484,6 +487,7 @@ impl<'m> Compressible<'m> {
             steps: 0,
             bcs: None,
             outlets: None,
+            farfields: None,
         })
     }
 
@@ -544,18 +548,38 @@ impl<'m> Compressible<'m> {
         self.outlets.as_ref().map_or(&[], |o| o.rules())
     }
 
-    /// §126.8 and §126.9: rewrite the inlets' and then the outlets'
-    /// triples from the current state, evaluate their faces, and re-form
+    /// SPEC-LIT §126.10: attach the characteristic far-fields `bc::lower`
+    /// found; an empty list attaches nothing. Call before
+    /// [`Self::initialise`].
+    pub fn set_farfield_rules(&mut self, gpu: &Gpu, rules: Vec<bc::FarfieldRule>) -> Result<()> {
+        self.farfields = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleFarfields::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached far-field rules (empty when none).
+    pub fn farfield_rules(&self) -> &[bc::FarfieldRule] {
+        self.farfields.as_ref().map_or(&[], |f| f.rules())
+    }
+
+    /// §126.8, §126.10 and §126.9: rewrite the inlets', the far-fields'
+    /// and then the outlets' triples from the current state, evaluate their faces, and re-form
     /// `psi` and `rho` on the boundary faces (the cells are not touched).
     /// `wave` is false at the start of a run, which has no step yet: the
     /// `waveTransmissive` faces then keep their set-up value. Nothing
     /// without a rule.
     fn apply_boundary_rules(&mut self, gpu: &Gpu, s: &mut CompressibleState, wave: bool) -> Result<()> {
-        if self.bcs.is_none() && self.outlets.is_none() {
+        if self.bcs.is_none() && self.outlets.is_none() && self.farfields.is_none() {
             return Ok(());
         }
         if let Some(b) = &self.bcs {
             b.apply(gpu, &self.fldk, s, self.m)?;
+        }
+        if let Some(f) = &self.farfields {
+            f.apply(gpu, &self.fldk, s, self.m)?;
         }
         if let Some(o) = &mut self.outlets {
             let time = if wave && o.has_wave() {
@@ -654,8 +678,9 @@ impl<'m> Compressible<'m> {
     /// The start of a run: `u`'s, `p`'s and `T`'s boundary values; `mu`,
     /// `kappa`, `psi` and `rho` from them; `mdot = rho_f (u_f . Sf)` with
     /// `rho_f` linear; every old level seeded from the current field. The
-    /// inlets of [`Self::set_boundary_rules`], if any, are applied once
-    /// after the first gas state (SPEC-LIT §126.8).
+    /// inlets of [`Self::set_boundary_rules`] and the far-fields of
+    /// [`Self::set_farfield_rules`], if any, are applied once after the
+    /// first gas state (SPEC-LIT §126.8, §126.10).
     pub fn initialise(&mut self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
         let m = self.m;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut s.u, m)?;
@@ -668,7 +693,7 @@ impl<'m> Compressible<'m> {
         if let Some(o) = &mut self.outlets {
             o.store_initial(gpu, &self.fldk, s)?;
         }
-        if self.bcs.is_some() || self.outlets.is_some() {
+        if self.bcs.is_some() || self.outlets.is_some() || self.farfields.is_some() {
             self.apply_boundary_rules(gpu, s, false)?;
             self.transport(gpu, s)?;
         }
@@ -724,8 +749,8 @@ impl<'m> Compressible<'m> {
         for outer in 1..=n_outer {
             let is_final = !steady && outer == n_outer;
 
-            // 0. §126.8, §126.9: the compressible inlets and outlets from
-            // the latest state.
+            // 0. §126.8, §126.10, §126.9: the compressible inlets,
+            // far-fields and outlets from the latest state.
             self.apply_boundary_rules(gpu, s, true)?;
 
             // 1. mu and kappa from T (psi follows at step 4).

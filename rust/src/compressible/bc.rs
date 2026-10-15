@@ -49,11 +49,34 @@
 //! `BcKind` is added. A `waveTransmissive` entry is built as a
 //! `zeroGradient` placeholder; a fixed-`p` entry is built as it is read.
 //!
+//! The characteristic far-field of SPEC-LIT §126.6, as built in §126.10
+//! (docs/17 CMP-18): `characteristicFarfield` (JSONC `farfield`) on `U`,
+//! `p` and `T` together, Carlson's Riemann invariants with the owner's
+//! state inside and the stated free stream outside:
+//!
+//! ```text
+//! R+ = U_i + 2 c_i/(gamma-1),  R- = U_o - 2 c_o/(gamma-1)                  (126.8)
+//!   supersonic outflow: R- from the interior; supersonic inflow: R+ from
+//!   the free stream                                                       (126.9)
+//! U_b = (R+ + R-)/2,  c_b = (gamma-1)(R+ - R-)/4                           (126.10)
+//! u_b, s_b from the interior if U_b > 0, else from the free stream         (126.11)
+//! rho_b = (c_b^2/(gamma s_b))^(1/(gamma-1)),  p_b = rho_b c_b^2/gamma,
+//!   T_b = p_b/(rho_b R_s)                                                  (126.12)
+//! ```
+//!
+//! [`CompressibleFarfields`] runs one kernel that rewrites all three
+//! triples (`fr = 1`) per outer iteration; [`farfield_face`] is its f64
+//! host twin. A far-field entry is built as a `fixedValue` placeholder at
+//! its stated free stream.
+//!
 //! Written from:
 //!   ofgpu `SPEC-LIT.md` §126 intro, §126.1, §126.3 - the equations and
 //!     the inflow convention; §126.8 - this file as built, its contract;
 //!     §126.4, §126.5 and §126.9 - the outlets and their contract;
-//!     §120.4 - the Robin form (120.4d) the outlets reuse
+//!     §120.4 - the Robin form (120.4d) the outlets reuse; §126.6 and
+//!     §126.10 - the far-field and its contract
+//!   Carlson (2011) §2.2, eqs. (8)-(17) - the characteristic far-field,
+//!     which (126.8)-(126.12) restate
 //!   Carlson (2011) §2.4, eq. (25) - the static-pressure outlet and its
 //!     supersonic extrapolation, which (126.5) restates
 //!   NACA Report 1135 (Ames Research Staff, 1953), eqs. (43)-(45): the
@@ -130,6 +153,9 @@ pub struct Lowered {
     pub rules: Vec<BcRule>,
     /// SPEC-LIT §126.9: the outlets, one per mesh patch that carries one.
     pub outlets: Vec<OutletRule>,
+    /// SPEC-LIT §126.10: the far-fields, one per mesh patch whose `U`, `p`
+    /// and `T` all carry `characteristicFarfield` (or `farfield`).
+    pub farfields: Vec<FarfieldRule>,
 }
 
 /// A refusal naming the field and the patch key.
@@ -354,6 +380,132 @@ fn wave_entry(field: &str, key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) -
     Ok(Some((l, sg, fi)))
 }
 
+/// SPEC-LIT §126.10: whether `type_name` is the characteristic far-field,
+/// in either spelling (`farfield` is the JSONC kind, §122.6).
+fn is_farfield(type_name: &str) -> bool {
+    matches!(type_name, "characteristicFarfield" | "farfield")
+}
+
+/// One patch's characteristic far-field (SPEC-LIT §126.10): the faces
+/// `[start, start + size)` and the stated free stream, widened to f64 from
+/// the `value` entries of `U`, `p` (gauge, in the datum of `p`) and `T`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FarfieldRule {
+    pub patch: String,
+    pub start: usize,
+    pub size: usize,
+    pub u: [f64; 3],
+    pub p: f64,
+    pub t: f64,
+}
+
+/// A far-field entry's one stated value (its free-stream component): a
+/// `uniform` value is required, since (126.8) reads one free stream.
+fn farfield_scalar(field: &str, key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) -> Result<f64> {
+    check_gamma(spec, field, key, &spec.type_name, gas)?;
+    match spec.value.as_slice() {
+        [v] if v.is_finite() => Ok(super::w64(*v)),
+        _ => Err(refuse(
+            field,
+            key,
+            format!(
+                "{} needs one uniform `value`, the free stream's {field} (SPEC-LIT §126.10)",
+                spec.type_name
+            ),
+        )),
+    }
+}
+
+fn farfield_vector(key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) -> Result<[f64; 3]> {
+    check_gamma(spec, "U", key, &spec.type_name, gas)?;
+    match spec.value_v.as_slice() {
+        [v] if v.x.is_finite() && v.y.is_finite() && v.z.is_finite() => Ok([v.x, v.y, v.z].map(super::w64)),
+        _ => Err(refuse(
+            "U",
+            key,
+            format!("{} needs one uniform `value`, the free stream's U (SPEC-LIT §126.10)", spec.type_name),
+        )),
+    }
+}
+
+/// Which of (126.9)-(126.11)'s four cases a far-field face is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FarfieldBranch {
+    SubsonicInflow,
+    SubsonicOutflow,
+    SupersonicInflow,
+    SupersonicOutflow,
+}
+
+/// The far-field face state of [`farfield_face`]: `u_b`, the gauge `p_b`
+/// (`p_abs,b - p_op`) and `T_b`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FarfieldFace {
+    pub u: [f64; 3],
+    pub p: f64,
+    pub t: f64,
+    pub branch: FarfieldBranch,
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The host twin of `cmpBcFarfield`, in f64 and in the kernel's operation
+/// order: (126.8)-(126.12) of SPEC-LIT 126.6 for the unit outward normal
+/// `n`, the owner's `u_i`, gauge `p_i` and `T_i`, and the free stream
+/// `u_o`, gauge `p_o` and `T_o`. `c = sqrt(gamma R_s T)` and
+/// `rho = (p + p_op)/(R_s T)` on both sides (§126 intro, (122.10)).
+#[allow(clippy::too_many_arguments)]
+pub fn farfield_face(
+    gas: &PerfectGas,
+    n: [f64; 3],
+    u_i: [f64; 3],
+    p_i: f64,
+    t_i: f64,
+    u_o: [f64; 3],
+    p_o: f64,
+    t_o: f64,
+) -> FarfieldFace {
+    let (gamma, rs, pop) = (gas.gamma, gas.r_s(), gas.p_op);
+    let (gm1, tg, ex, grs) = (gamma - 1.0, 2.0 / (gamma - 1.0), 1.0 / (gamma - 1.0), gamma * rs);
+    let co = (grs * t_o).sqrt();
+    let pao = p_o + pop;
+    let so = pao / (pao / (rs * t_o)).powf(gamma);
+    let ui = dot3(u_i, n);
+    let ci = (grs * t_i).sqrt();
+    let uo = dot3(u_o, n);
+    let (mut rp, mut rm) = (ui + tg * ci, uo - tg * co);
+    let sup = ui.abs() / ci >= 1.0;
+    if ui > 0.0 && sup {
+        rm = ui - tg * ci;
+    }
+    if ui < 0.0 && sup {
+        rp = uo + tg * co;
+    }
+    let ub = 0.5 * (rp + rm);
+    let cb = gm1 * (rp - rm) * 0.25;
+    let (u, sb) = if ub > 0.0 {
+        let d = ub - ui;
+        let pa = p_i + pop;
+        let rhoi = pa / (rs * t_i);
+        ([u_i[0] + d * n[0], u_i[1] + d * n[1], u_i[2] + d * n[2]], pa / rhoi.powf(gamma))
+    } else {
+        let d = ub - uo;
+        ([u_o[0] + d * n[0], u_o[1] + d * n[1], u_o[2] + d * n[2]], so)
+    };
+    let cb2 = cb * cb;
+    let rhob = (cb2 / (gamma * sb)).powf(ex);
+    let pab = rhob * cb2 / gamma;
+    let branch = match (sup, ui > 0.0, ui < 0.0, ub > 0.0) {
+        (true, true, _, _) => FarfieldBranch::SupersonicOutflow,
+        (true, _, true, _) => FarfieldBranch::SupersonicInflow,
+        (_, _, _, true) => FarfieldBranch::SubsonicOutflow,
+        _ => FarfieldBranch::SubsonicInflow,
+    };
+    FarfieldFace { u, p: pab - pop, t: pab / (rhob * rs), branch }
+}
+
 /// SPEC-LIT §126.8: the three field files as read, with every compressible
 /// kind replaced by its placeholder, and one [`BcRule`] per mesh patch that
 /// carries one. Refused by name: `totalPressure` without `gamma`, a stated
@@ -367,13 +519,16 @@ pub fn lower(
     hm: &HostMesh,
     gas: &PerfectGas,
 ) -> Result<Lowered> {
-    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new(), outlets: Vec::new() };
+    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new(), outlets: Vec::new(), farfields: Vec::new() };
 
     // Every entry, by its own key (patterns too): validate and replace.
     let lower_scalar = |field: &str, b: &mut BTreeMap<String, PatchFieldSpec>| -> Result<()> {
         for (key, spec) in b.iter_mut() {
             if let Some((_, v)) = scalar_kind(field, key, spec, gas)? {
                 *spec = placeholder_scalar(v);
+            } else if is_farfield(&spec.type_name) {
+                // §126.10: fixed at the free stream until the first rewrite.
+                *spec = placeholder_scalar(farfield_scalar(field, key, spec, gas)?);
             } else if wave_entry(field, key, spec, gas)?.is_some() {
                 // §126.9: zero-gradient until the first rewrite, so phi_b^o
                 // starts at the owner cell's value.
@@ -392,6 +547,15 @@ pub fn lower(
                 "waveTransmissive on U is not built: (126.6) is built on p and T (SPEC-LIT §126.9); U takes zeroGradient at a non-reflecting outlet"
                     .into(),
             ));
+        }
+        if is_farfield(&spec.type_name) {
+            let v = farfield_vector(key, spec, gas)?;
+            *spec = PatchFieldSpec {
+                type_name: "fixedValue".into(),
+                value_v: vec![Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)],
+                ..PatchFieldSpec::default()
+            };
+            continue;
         }
         if vector_kind(key, spec)?.is_some() {
             *spec = PatchFieldSpec {
@@ -434,6 +598,45 @@ pub fn lower(
             if let Some((kind, p0)) = scalar_kind("p", name, spec, gas)? {
                 let t0 = t_rule.map_or(0.0, |(_, t0)| t0);
                 out.rules.push(BcRule { kind, patch: name.into(), start, size, value: p0, t0 });
+            }
+        }
+        // §126.10: the far-field decides U, p and T together, from one
+        // free stream, so all three carry it or none does.
+        let (su, sp, st) = (u.spec(name)?, p.spec(name)?, t.spec(name)?);
+        let ff = [su.map(|s| s.type_name.as_str()), sp.map(|s| s.type_name.as_str()), st.map(|s| s.type_name.as_str())]
+            .map(|t| t.is_some_and(is_farfield));
+        if ff.iter().any(|&b| b) {
+            if let (true, true, true, Some(su), Some(sp), Some(st)) = (ff[0], ff[1], ff[2], su, sp, st) {
+                let rule = FarfieldRule {
+                    patch: name.into(),
+                    start,
+                    size,
+                    u: farfield_vector(name, su, gas)?,
+                    p: farfield_scalar("p", name, sp, gas)?,
+                    t: farfield_scalar("T", name, st, gas)?,
+                };
+                if !(rule.t > 0.0) {
+                    return Err(refuse("T", name, format!("the far-field's free-stream T {} is not above 0 K (SPEC-LIT §122.3)", rule.t)));
+                }
+                if !(rule.p + gas.p_op > 0.0) {
+                    return Err(refuse(
+                        "p",
+                        name,
+                        format!("the far-field's free-stream p {} + pOperating {} is not above 0 Pa (SPEC-LIT §122.3)", rule.p, gas.p_op),
+                    ));
+                }
+                out.farfields.push(rule);
+            } else {
+                let on: Vec<&str> = ["U", "p", "T"].iter().zip(ff).filter(|(_, b)| *b).map(|(f, _)| *f).collect();
+                let field = ["U", "p", "T"].iter().zip(ff).find(|(_, b)| !*b).map_or("U", |(f, _)| *f);
+                return Err(refuse(
+                    field,
+                    name,
+                    format!(
+                        "characteristicFarfield is on {} only; (126.8)-(126.12) decide U, p and T together from one free stream, so the patch states it on all three (SPEC-LIT §126.10)",
+                        on.join(" and ")
+                    ),
+                ));
             }
         }
         // §126.9: the outlets. A fixed p is (126.5)'s static-pressure
@@ -832,6 +1035,109 @@ impl CompressibleOutlets {
                 nbf,
             )?;
             field_ops::correct_boundary_conditions(gpu, fldk, fld, m)?;
+        }
+        Ok(())
+    }
+}
+
+/// The far-field kernel and the run's far-field rules (SPEC-LIT §126.10).
+pub struct CompressibleFarfields {
+    rules: Vec<FarfieldRule>,
+    farfield: CudaFunction,
+    /// Per rule: `fl(u_o)`, `fl(c_o)` and `fl(s_o)`, formed in f64.
+    free: Vec<([Scalar; 3], Scalar, Scalar)>,
+    /// `fl(gamma)`, `fl(gamma - 1)`, `fl(2/(gamma-1))`, `fl(1/(gamma-1))`,
+    /// `fl(R_s)`, `fl(gamma R_s)`, `fl(p_op)`.
+    gas: [Scalar; 7],
+}
+
+impl CompressibleFarfields {
+    /// Load the kernel for `rules` on `m`; a rule whose faces leave the
+    /// boundary arrays is refused.
+    pub fn new(gpu: &Gpu, m: &GpuMesh, gas: &PerfectGas, rules: Vec<FarfieldRule>) -> Result<Self> {
+        let nbf = m.n_boundary_faces;
+        for r in &rules {
+            if r.start + r.size > nbf {
+                return Err(Error::Refused(format!(
+                    "compressible::bc: far-field patch {} faces {}..{} leave the {nbf} boundary faces",
+                    r.patch,
+                    r.start,
+                    r.start + r.size
+                )));
+            }
+        }
+        let (gamma, rs, pop) = (gas.gamma, gas.r_s(), gas.p_op);
+        let free = rules
+            .iter()
+            .map(|r| {
+                let pa = r.p + pop;
+                let so = pa / (pa / (rs * r.t)).powf(gamma);
+                (r.u.map(|v| v as Scalar), (gamma * rs * r.t).sqrt() as Scalar, so as Scalar)
+            })
+            .collect();
+        let k = KernelSet::new(gpu, crate::kernels::COMPRESSIBLE)?;
+        Ok(Self {
+            farfield: k.func("cmpBcFarfield")?,
+            free,
+            gas: [gamma, gamma - 1.0, 2.0 / (gamma - 1.0), 1.0 / (gamma - 1.0), rs, gamma * rs, pop].map(|v| v as Scalar),
+            rules,
+        })
+    }
+
+    pub fn rules(&self) -> &[FarfieldRule] {
+        &self.rules
+    }
+
+    /// One rewrite of every far-field face's three triples from the owner
+    /// cells' `u`, `p` and `T` (all read before any is written), then the
+    /// face values of `U`, `p` and `T`. The caller re-forms the boundary
+    /// gas state.
+    pub fn apply(&self, gpu: &Gpu, fldk: &FieldKernels, s: &mut CompressibleState, m: &GpuMesh) -> Result<()> {
+        let [gamma, gm1, tg, ex, rs, grs, pop] = self.gas;
+        let mut any = false;
+        for (r, (uo, co, so)) in self.rules.iter().zip(&self.free).filter(|(r, _)| r.size > 0) {
+            let (start, n) = (r.start as Label, r.size as Label);
+            let f = self.farfield.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut s.u.fr)
+                    .arg(&mut s.u.ref_value)
+                    .arg(&mut s.u.ref_grad)
+                    .arg(&mut s.p.fr)
+                    .arg(&mut s.p.ref_value)
+                    .arg(&mut s.p.ref_grad)
+                    .arg(&mut s.t.fr)
+                    .arg(&mut s.t.ref_value)
+                    .arg(&mut s.t.ref_grad)
+                    .arg(&s.u.f)
+                    .arg(&s.p.f)
+                    .arg(&s.t.f)
+                    .arg(&m.b_face_cells)
+                    .arg(&m.b_sf)
+                    .arg(&m.b_mag_sf)
+                    .arg(&start)
+                    .arg(&n)
+                    .arg(&uo[0])
+                    .arg(&uo[1])
+                    .arg(&uo[2])
+                    .arg(co)
+                    .arg(so)
+                    .arg(&gamma)
+                    .arg(&gm1)
+                    .arg(&tg)
+                    .arg(&ex)
+                    .arg(&rs)
+                    .arg(&grs)
+                    .arg(&pop)
+                    .launch(cfg_for(r.size))?;
+            }
+            any = true;
+        }
+        if any {
+            field_ops::correct_boundary_conditions_vector(gpu, fldk, &mut s.u, m)?;
+            field_ops::correct_boundary_conditions(gpu, fldk, &mut s.p, m)?;
+            field_ops::correct_boundary_conditions(gpu, fldk, &mut s.t, m)?;
         }
         Ok(())
     }

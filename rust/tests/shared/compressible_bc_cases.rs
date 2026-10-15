@@ -14,7 +14,10 @@
 // sum, and a short tube driven by its total conditions. CMP-17 adds
 // SPEC-LIT §126.9's rows for the outlets: the Robin form against (126.7),
 // the supersonic switch (126.5), the subsonic fixed-p outlet unchanged bit
-// for bit, Gate CMP-NR (§127.6) and the refusals.
+// for bit, Gate CMP-NR (§127.6) and the refusals. CMP-18 adds §126.10's
+// rows for the characteristic far-field (126.8)-(126.12): the free stream
+// preserved, the branch selection bit for bit, the host twin and the
+// invariants, a short tube and the refusals.
 //
 // An integration test's body cannot carry `//!` or `#![..]`, and neither can
 // this file - it is included, not compiled standalone. Every comparison is
@@ -24,7 +27,7 @@
 //
 // Provenance: ORIGINAL - the meshes, the fields and the answer keys below
 // are this tree's own construction; the relations they check are NACA
-// Report 1135's (43)-(44) and SPEC-LIT (126.4)-(126.7). No GPL-licensed
+// Report 1135's (43)-(44) and SPEC-LIT (126.4)-(126.12). No GPL-licensed
 // source was consulted.
 
 use ofgpu::blockgen::{self, BlockSpec, GradedAxis};
@@ -821,6 +824,378 @@ fn outlet_refusals_name_the_setting() -> Result<()> {
     let e = solver.set_outlet_rules(&g, low.outlets).err().expect("steadyState must refuse waveTransmissive").to_string();
     for w in ["patch xMax", "waveTransmissive", "steady", "localEuler"] {
         assert!(e.contains(w), "{w:?} not in {e}");
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  CMP-18: the characteristic far-field of SPEC-LIT §126.6, as built in
+//  §126.10 - the free stream preserved on all four branches, the branch
+//  selection by U_i and c_i, the device against the host twin and the
+//  invariants it carries, a short tube, and the refusals.
+// ==========================================================================
+
+use ofgpu::compressible::bc::{farfield_face, FarfieldBranch, FarfieldRule};
+
+/// A `characteristicFarfield` entry stating its free-stream component.
+fn ff_s(v: f64) -> PatchFieldSpec {
+    PatchFieldSpec { type_name: "characteristicFarfield".into(), value: vec![v as Scalar], ..PatchFieldSpec::default() }
+}
+
+fn ff_v(v: [f64; 3]) -> PatchFieldSpec {
+    PatchFieldSpec {
+        type_name: "characteristicFarfield".into(),
+        value_v: vec![Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)],
+        ..PatchFieldSpec::default()
+    }
+}
+
+/// A free stream `(u, p gauge, T)`.
+type Stream = ([f64; 3], f64, f64);
+
+/// The far-field face triples after `initialise` (which applies the rules
+/// once, §126.10): `U`, `p` and `T` `refValue` on every boundary face, and
+/// the rules `lower` found. The cells are `cell(i)`; `x0`/`x1` are the free
+/// streams of `xMin`/`xMax`. `fr` is 1 and `refGrad` 0 bitwise on every
+/// far-field face, and the face value IS `refValue`, bitwise.
+#[allow(clippy::type_complexity)]
+fn ff_run(
+    g: &Gpu,
+    gm: &GpuMesh,
+    hm: &HostMesh,
+    gas: PerfectGas,
+    cell: impl Fn(usize) -> Stream,
+    x0: Stream,
+    x1: Stream,
+) -> Result<(Vec<Vec3>, Vec<Scalar>, Vec<Scalar>, Vec<FarfieldRule>)> {
+    let u = raw_vector(hm, |i| { let v = cell(i).0; Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar) }, ff_v(x0.0), ff_v(x1.0));
+    let p = raw_scalar(hm, "p", |i| cell(i).1, ff_s(x0.1), ff_s(x1.1));
+    let t = raw_scalar(hm, "T", |i| cell(i).2, ff_s(x0.2), ff_s(x1.2));
+    let low = cbc::lower(&u, &p, &t, hm, &gas)?;
+    assert!(low.rules.is_empty() && low.outlets.is_empty());
+    assert_eq!(low.u.boundary["xMax"].type_name, "fixedValue", "the placeholder");
+    let rules = low.farfields.clone();
+    let mut uf = GpuVectorField::zeros(g, gm, "U")?;
+    let mut pf = GpuScalarField::zeros(g, gm, "p")?;
+    let mut tf = GpuScalarField::zeros(g, gm, "T")?;
+    setup_vector_field(g, &mut uf, &low.u, hm)?;
+    setup_scalar_field(g, &mut pf, &low.p, hm)?;
+    setup_scalar_field(g, &mut tf, &low.t, hm)?;
+    let mut s = CompressibleState::new(g, gm, uf, pf, tf)?;
+    let mut solver = Compressible::new(g, gm, controls(gas))?;
+    solver.set_farfield_rules(g, low.farfields)?;
+    assert_eq!(solver.farfield_rules(), &rules[..]);
+    solver.initialise(g, &mut s)?;
+    let (ur, pr, tr) = (g.download(&s.u.ref_value)?, g.download(&s.p.ref_value)?, g.download(&s.t.ref_value)?);
+    let (ub, pb, tb) = (g.download(&s.u.bf)?, g.download(&s.p.bf)?, g.download(&s.t.bf)?);
+    let (ufr, pfr, tfr) = (g.download(&s.u.fr)?, g.download(&s.p.fr)?, g.download(&s.t.fr)?);
+    let (ug, pg, tg) = (g.download(&s.u.ref_grad)?, g.download(&s.p.ref_grad)?, g.download(&s.t.ref_grad)?);
+    let one = (1.0 as Scalar).to_bits();
+    let zero = (0.0 as Scalar).to_bits();
+    for f in faces(hm, "xMin").chain(faces(hm, "xMax")) {
+        assert!([ufr[f], pfr[f], tfr[f]].iter().all(|x| x.to_bits() == one), "face {f}: fr = 1 on U, p and T");
+        assert!([ug[f].x, ug[f].y, ug[f].z, pg[f], tg[f]].iter().all(|x| x.to_bits() == zero), "face {f}: refGrad = 0");
+        assert!(
+            [(ub[f].x, ur[f].x), (ub[f].y, ur[f].y), (ub[f].z, ur[f].z), (pb[f], pr[f]), (tb[f], tr[f])]
+                .iter()
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "face {f}: the face value is refValue"
+        );
+    }
+    Ok((ur, pr, tr, rules))
+}
+
+/// The unit outward normal of boundary face `f`, in f64 from the mesh's
+/// `Scalar`s, as the kernel forms it.
+fn normal(hm: &HostMesh, f: usize) -> [f64; 3] {
+    let (s, m) = (hm.b_sf[f], w64(hm.b_mag_sf[f]));
+    [w64(s.x) / m, w64(s.y) / m, w64(s.z) / m]
+}
+
+/// A stream rounded to the build's `Scalar` and widened back: the state the
+/// device holds.
+fn held(s: Stream) -> Stream {
+    let r = |v: f64| w64(v as Scalar);
+    (s.0.map(r), r(s.1), r(s.2))
+}
+
+/// The host twin of face `f`, from the held owner state and free stream.
+fn twin(gas: &PerfectGas, hm: &HostMesh, f: usize, cell: Stream, fs: Stream) -> cbc::FarfieldFace {
+    let (c, o) = (held(cell), held(fs));
+    farfield_face(gas, normal(hm, f), c.0, c.1, c.2, o.0, o.1, o.2)
+}
+
+/// **SPEC-LIT §126.10, class R.** With the interior equal to the free
+/// stream at normal Mach +-0.5 and +-1.5 (all four branches), the face
+/// state is the free stream: `1e-10` relative in f64, `tol_r(1e-10)` =
+/// `1e-5` in f32.
+#[test]
+fn freestream_preserved_m0_5_and_m1_5() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let c = (gas.gamma * gas.r_s() * 300.0).sqrt();
+    let hm = tube_mesh([3, 2, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let tol = tol_r(1.0e-10);
+    let mut seen = Vec::new();
+    for mach in [0.5, 1.5] {
+        let fs: Stream = ([mach * c, 0.2 * c, 0.0], 2000.0, 300.0);
+        let (ur, pr, tr, rules) = ff_run(&g, &gm, &hm, gas, |_| fs, fs, fs)?;
+        assert_eq!(rules.len(), 2, "a far-field rule on xMin and on xMax");
+        let o = held(fs);
+        let mut worst = 0.0f64;
+        for f in faces(&hm, "xMin").chain(faces(&hm, "xMax")) {
+            let branch = twin(&gas, &hm, f, fs, fs).branch;
+            let du = ((w64(ur[f].x) - o.0[0]).powi(2) + (w64(ur[f].y) - o.0[1]).powi(2) + (w64(ur[f].z) - o.0[2]).powi(2)).sqrt();
+            let e_u = du / (o.0[0].powi(2) + o.0[1].powi(2)).sqrt();
+            let e_p = (w64(pr[f]) - o.1).abs() / (o.1 + P_OP);
+            let e_t = (w64(tr[f]) - o.2).abs() / o.2;
+            worst = worst.max(e_u).max(e_p).max(e_t);
+            if !seen.contains(&branch) {
+                seen.push(branch);
+            }
+            println!("  [§126.10] free stream M {mach} face {f} {branch:?}: e_u {e_u:.2e}, e_p {e_p:.2e}, e_T {e_t:.2e}");
+        }
+        assert!(worst <= tol, "M {mach}: the free stream is not preserved: {worst:.3e} > {tol:.1e}");
+    }
+    assert_eq!(seen.len(), 4, "all four branches are exercised: {seen:?}");
+    Ok(())
+}
+
+/// **SPEC-LIT §126.10, class D.** The branch is chosen by `U_i` and `c_i`
+/// (126.9) and the side by `U_b` (126.11), shown bit for bit: a face takes
+/// nothing from the side its branch does not read. Rows at `M_n` 0.5, 1.5,
+/// -0.5 and -1.5 on `xMax` (the opposite on `xMin`); each variation changes
+/// one side and leaves exactly the faces that do not read it unchanged.
+#[test]
+fn branch_selection_by_un_and_c() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let c = |t: f64| (gas.gamma * gas.r_s() * t).sqrt();
+    let hm = tube_mesh([3, 4, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let machs = [0.5, 1.5, -0.5, -1.5];
+    let row = |i: usize| ((w64(hm.c[i].y) / 0.075) as usize).min(3);
+    // The interior: `scale` on the normal Mach number, tangential `tan`, p, T.
+    let inside = |scale: f64, tan: [f64; 2], p: f64, t: f64| {
+        move |i: usize| -> Stream { ([scale * machs[row(i)] * c(t), tan[0] * c(t), tan[1] * c(t)], p, t) }
+    };
+    // A free stream entering through both ends: u_x = -+ m c on xMax/xMin.
+    let stream = |m: f64, tan: [f64; 2], p: f64, t: f64| -> (Stream, Stream) {
+        (([m * c(t), tan[0] * c(t), tan[1] * c(t)], p, t), ([-m * c(t), tan[0] * c(t), tan[1] * c(t)], p, t))
+    };
+    let (a0, a1) = stream(0.1, [0.2, 0.0], 0.0, 300.0);
+    let a_in = inside(1.0, [0.1, 0.0], 500.0, 300.0);
+    let base = ff_run(&g, &gm, &hm, gas, a_in, a0, a1)?;
+    // Each face's branch, from the host twin of the base run.
+    let all: Vec<usize> = faces(&hm, "xMin").chain(faces(&hm, "xMax")).collect();
+    let branch: Vec<FarfieldBranch> = all
+        .iter()
+        .map(|&f| {
+            let own = hm.b_face_cells[f] as usize;
+            let fs = if faces(&hm, "xMin").contains(&f) { a0 } else { a1 };
+            twin(&gas, &hm, f, a_in(own), fs).branch
+        })
+        .collect();
+    for (k, &f) in all.iter().enumerate() {
+        let own = hm.b_face_cells[f] as usize;
+        let side = if faces(&hm, "xMin").contains(&f) { -1.0 } else { 1.0 };
+        let m_n = side * machs[row(own)];
+        let want = match (m_n > 0.0, m_n.abs() >= 1.0) {
+            (true, false) => FarfieldBranch::SubsonicOutflow,
+            (true, true) => FarfieldBranch::SupersonicOutflow,
+            (false, false) => FarfieldBranch::SubsonicInflow,
+            (false, true) => FarfieldBranch::SupersonicInflow,
+        };
+        assert_eq!(branch[k], want, "face {f} at M_n {m_n}");
+    }
+    use FarfieldBranch::*;
+    let (b0, b1) = stream(0.1, [-0.3, 0.1], 3000.0, 300.0);
+    let (d0, d1) = stream(0.15, [-0.3, 0.1], -500.0, 280.0);
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, Box<dyn Fn(usize) -> Stream + '_>, Stream, Stream, &[FarfieldBranch])> = vec![
+        ("free-stream tangential u and p", Box::new(a_in), b0, b1, &[SubsonicOutflow, SupersonicOutflow]),
+        ("interior tangential u and p", Box::new(inside(1.0, [-0.25, 0.05], 1500.0, 300.0)), a0, a1, &[SubsonicInflow, SupersonicInflow]),
+        ("the whole free stream", Box::new(a_in), d0, d1, &[SupersonicOutflow]),
+        ("the whole interior", Box::new(inside(1.2, [-0.25, 0.05], 900.0, 320.0)), a0, a1, &[SupersonicInflow]),
+    ];
+    for (tag, cell, x0, x1, kept) in cases {
+        let run = ff_run(&g, &gm, &hm, gas, cell, x0, x1)?;
+        for (k, &f) in all.iter().enumerate() {
+            let same = [(base.0[f].x, run.0[f].x), (base.0[f].y, run.0[f].y), (base.0[f].z, run.0[f].z), (base.1[f], run.1[f]), (base.2[f], run.2[f])]
+                .iter()
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+            let keep = kept.contains(&branch[k]);
+            println!("  [§126.10] {tag}: face {f} {:?} unchanged {same}", branch[k]);
+            assert_eq!(same, keep, "{tag}: face {f} ({:?}) must be {}", branch[k], if keep { "unchanged bitwise" } else { "changed" });
+        }
+    }
+    Ok(())
+}
+
+/// **SPEC-LIT §126.10, class R.** On a varied interior against a free
+/// stream that differs from it, the device face state equals the host twin
+/// [`farfield_face`] (velocity relative to `c_o`, `p` to `p_abs`, `T` to
+/// itself), and the face carries the invariants of (126.8)-(126.9), the
+/// entropy and the tangential velocity of the side each comes from.
+#[test]
+fn invariants_exact_on_host_twin() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let (gamma, rs) = (gas.gamma, gas.r_s());
+    let tg = 2.0 / (gamma - 1.0);
+    let c = |t: f64| (gamma * rs * t).sqrt();
+    let hm = tube_mesh([4, 4, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let machs = [0.4, 1.3, -0.7, -1.2];
+    let row = |i: usize| ((w64(hm.c[i].y) / 0.075) as usize).min(3);
+    let cell = |i: usize| -> Stream {
+        let t = 305.0 + 0.5 * i as f64;
+        ([machs[row(i)] * c(t), 0.15 * c(t), 0.05 * c(t)], 200.0 + 37.0 * i as f64, t)
+    };
+    let co = c(310.0);
+    let x0: Stream = ([0.2 * co, -0.1 * co, 0.0], 1000.0, 310.0);
+    let x1: Stream = ([-0.2 * co, -0.1 * co, 0.0], 1000.0, 310.0);
+    let (ur, pr, tr, _) = ff_run(&g, &gm, &hm, gas, cell, x0, x1)?;
+    let entropy = |p: f64, t: f64| (p + P_OP) / ((p + P_OP) / (rs * t)).powf(gamma);
+    let tol = tol_r(1.0e-13);
+    let (mut e_twin, mut e_inv) = (0.0f64, 0.0f64);
+    let mut seen = Vec::new();
+    for f in faces(&hm, "xMin").chain(faces(&hm, "xMax")) {
+        let own = hm.b_face_cells[f] as usize;
+        let fs = if faces(&hm, "xMin").contains(&f) { x0 } else { x1 };
+        let tw = twin(&gas, &hm, f, cell(own), fs);
+        let (i, o) = (held(cell(own)), held(fs));
+        let co = c(o.2);
+        let ub = [w64(ur[f].x), w64(ur[f].y), w64(ur[f].z)];
+        let (pb, tb) = (w64(pr[f]), w64(tr[f]));
+        let du = (0..3).map(|k| (ub[k] - tw.u[k]).powi(2)).sum::<f64>().sqrt() / co;
+        let e1 = du.max((pb - tw.p).abs() / (tw.p + P_OP)).max((tb - tw.t).abs() / tw.t);
+
+        // The invariants the face carries, against the side each comes from.
+        let n = normal(&hm, f);
+        let dot = |a: [f64; 3]| a[0] * n[0] + a[1] * n[1] + a[2] * n[2];
+        let (un_b, cb) = (dot(ub), c(tb));
+        let (rp_b, rm_b) = (un_b + tg * cb, un_b - tg * cb);
+        let (rp_i, rm_i) = (dot(i.0) + tg * c(i.2), dot(i.0) - tg * c(i.2));
+        let (rp_o, rm_o) = (dot(o.0) + tg * co, dot(o.0) - tg * co);
+        let (rp_want, rm_want) = match tw.branch {
+            FarfieldBranch::SupersonicOutflow => (rp_i, rm_i),
+            FarfieldBranch::SupersonicInflow => (rp_o, rm_o),
+            _ => (rp_i, rm_o),
+        };
+        let up = match tw.branch {
+            FarfieldBranch::SupersonicOutflow | FarfieldBranch::SubsonicOutflow => i,
+            _ => o,
+        };
+        let tang = |u: [f64; 3], un: f64| [u[0] - un * n[0], u[1] - un * n[1], u[2] - un * n[2]];
+        let (tb_v, tu_v) = (tang(ub, un_b), tang(up.0, dot(up.0)));
+        let e_tan = (0..3).map(|k| (tb_v[k] - tu_v[k]).powi(2)).sum::<f64>().sqrt() / co;
+        let e_s = (entropy(pb, tb) - entropy(up.1, up.2)).abs() / entropy(up.1, up.2);
+        let e2 = ((rp_b - rp_want).abs() / (tg * co)).max((rm_b - rm_want).abs() / (tg * co)).max(e_tan).max(e_s);
+        e_twin = e_twin.max(e1);
+        e_inv = e_inv.max(e2);
+        if !seen.contains(&tw.branch) {
+            seen.push(tw.branch);
+        }
+        println!("  [§126.10] face {f} {:?}: twin {e1:.2e}, invariants {e2:.2e} (tangential {e_tan:.2e}, entropy {e_s:.2e})", tw.branch);
+    }
+    println!("  [§126.10] worst: device vs twin {e_twin:.3e}, invariants {e_inv:.3e}, tol {tol:.1e}");
+    assert_eq!(seen.len(), 4, "all four branches are exercised: {seen:?}");
+    assert!(e_twin <= tol, "the device misses the host twin: {e_twin:.3e} > {tol:.1e}");
+    assert!(e_inv <= tol, "the face misses its invariants: {e_inv:.3e} > {tol:.1e}");
+    Ok(())
+}
+
+/// **SPEC-LIT §126.10, class P.** A 50-cell tube with a far-field at both
+/// ends (free stream M 0.3 along x, 300 K) and a 305 K interior: 10 Euler
+/// steps, finite, no bounds violation.
+#[test]
+fn a_farfield_tube_runs() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let c = (gas.gamma * gas.r_s() * 300.0).sqrt();
+    let hm = tube_mesh([50, 1, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let fs = [0.3 * c, 0.0, 0.0];
+    let u = raw_vector(&hm, |_| Vec3::new(fs[0] as Scalar, 0.0, 0.0), ff_v(fs), ff_v(fs));
+    let p = raw_scalar(&hm, "p", |_| 0.0, ff_s(0.0), ff_s(0.0));
+    let t = raw_scalar(&hm, "T", |_| 305.0, ff_s(300.0), ff_s(300.0));
+    let low = cbc::lower(&u, &p, &t, &hm, &gas)?;
+    assert_eq!(low.farfields.len(), 2);
+    let mut uf = GpuVectorField::zeros(&g, &gm, "U")?;
+    let mut pf = GpuScalarField::zeros(&g, &gm, "p")?;
+    let mut tf = GpuScalarField::zeros(&g, &gm, "T")?;
+    setup_vector_field(&g, &mut uf, &low.u, &hm)?;
+    setup_scalar_field(&g, &mut pf, &low.p, &hm)?;
+    setup_scalar_field(&g, &mut tf, &low.t, &hm)?;
+    let mut s = CompressibleState::new(&g, &gm, uf, pf, tf)?;
+    let mut solver = Compressible::new(&g, &gm, controls(gas))?;
+    solver.set_farfield_rules(&g, low.farfields)?;
+    solver.initialise(&g, &mut s)?;
+    let r = solver.run(&g, &mut s, 10)?;
+    assert_eq!(r.steps, 10);
+    let last = r.last.expect("a step report");
+    let outer = last.outers.last().expect("an outer report");
+    assert_eq!(outer.bounds.total(), 0);
+    for (name, v) in [("p", g.download(&s.p.f)?), ("T", g.download(&s.t.f)?), ("rho", g.download(&s.rho.f)?)] {
+        assert!(v.iter().all(|x| x.is_finite()), "{name} is not finite");
+    }
+    let (tb, pb) = (g.download(&s.t.bf)?, g.download(&s.p.bf)?);
+    let (i0, i1) = (faces(&hm, "xMin").start, faces(&hm, "xMax").start);
+    println!(
+        "  [§126.10] tube: inflow T_b {:.4} K p_b {:.3} Pa, outflow T_b {:.4} K p_b {:.3} Pa, M_max {:.4}",
+        w64(tb[i0]), w64(pb[i0]), w64(tb[i1]), w64(pb[i1]), outer.mach_max
+    );
+    Ok(())
+}
+
+/// §126.10's refusals in `lower`, each naming the field, the patch and the
+/// reason; and the JSONC spelling `farfield` is the same condition.
+#[test]
+fn farfield_refusals_name_the_setting() -> Result<()> {
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([2, 1, 1], 1.0)?;
+    let zg = || entry("zeroGradient");
+    let fu = [30.0, 0.0, 0.0];
+    let u_ff = raw_vector(&hm, |_| Vec3::ZERO, zg(), ff_v(fu));
+    let p_ff = raw_scalar(&hm, "p", |_| 0.0, zg(), ff_s(0.0));
+    let t_ff = raw_scalar(&hm, "T", |_| T0, zg(), ff_s(T0));
+    let u0 = raw_vector(&hm, |_| Vec3::ZERO, zg(), zg());
+    let t_zg = raw_scalar(&hm, "T", |_| T0, zg(), zg());
+    let no_value = PatchFieldSpec { type_name: "characteristicFarfield".into(), ..PatchFieldSpec::default() };
+    let cases: Vec<(&str, RawVectorField, RawScalarField, RawScalarField, &[&str])> = vec![
+        ("U only", u_ff.clone(), raw_scalar(&hm, "p", |_| 0.0, zg(), fixed(0.0)), t_zg.clone(),
+            &["p patch xMax", "on U only", "U, p and T together"]),
+        ("p and T only", u0.clone(), p_ff.clone(), t_ff.clone(), &["U patch xMax", "on p and T only"]),
+        ("no value", u_ff.clone(), raw_scalar(&hm, "p", |_| 0.0, zg(), no_value), t_ff.clone(), &["p patch xMax", "uniform `value`"]),
+        ("T 0", u_ff.clone(), p_ff.clone(), raw_scalar(&hm, "T", |_| T0, zg(), ff_s(0.0)), &["T patch xMax", "not above 0 K"]),
+        ("p_abs 0", u_ff.clone(), raw_scalar(&hm, "p", |_| 0.0, zg(), ff_s(-2.0e5)), t_ff.clone(), &["p patch xMax", "not above 0 Pa"]),
+        ("gamma", u_ff.clone(), raw_scalar(&hm, "p", |_| 0.0, zg(), with(ff_s(0.0), &[("gamma", "1.3")])), t_ff.clone(),
+            &["p patch xMax", "gamma 1.3"]),
+    ];
+    for (tag, u, p, t, wanted) in cases {
+        let e = cbc::lower(&u, &p, &t, &hm, &gas).err().unwrap_or_else(|| panic!("{tag}: lower must refuse")).to_string();
+        for w in wanted {
+            assert!(e.contains(w), "{tag}: {w:?} not in {e}");
+        }
+    }
+    // The JSONC kind `farfield` (§122.6) is the same condition.
+    let rename = |mut s: PatchFieldSpec| {
+        s.type_name = "farfield".into();
+        s
+    };
+    let u = raw_vector(&hm, |_| Vec3::ZERO, zg(), rename(ff_v(fu)));
+    let p = raw_scalar(&hm, "p", |_| 0.0, zg(), rename(ff_s(0.0)));
+    let t = raw_scalar(&hm, "T", |_| T0, zg(), rename(ff_s(T0)));
+    let low = cbc::lower(&u, &p, &t, &hm, &gas)?;
+    let xmax = faces(&hm, "xMax");
+    assert_eq!(
+        low.farfields,
+        vec![FarfieldRule { patch: "xMax".into(), start: xmax.start, size: xmax.len(), u: fu, p: 0.0, t: T0 }]
+    );
+    for (field, spec) in [("p", &low.p.boundary["xMax"]), ("T", &low.t.boundary["xMax"])] {
+        assert_eq!(spec.type_name, "fixedValue", "{field}: the placeholder");
     }
     Ok(())
 }

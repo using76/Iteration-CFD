@@ -40,7 +40,8 @@
 //!     routes a case states its gas by
 //!   ofgpu SPEC-LIT.md §125.3, §125.6, §125.7 - the outer loop this runs
 //!   ofgpu SPEC-LIT.md §126, §126.7 - which boundary conditions carry no
-//!     compressible algebra, and which arrive with CMP-16 to CMP-18
+//!     compressible algebra; §126.8-§126.10 - the ones CMP-16 to CMP-18
+//!     rewrite each outer iteration
 //!   ofgpu SPEC-LIT.md §13.4, §13.4.1, §44 - refusals, the standing pair
 //!     test, the output block
 //!
@@ -359,22 +360,12 @@ const STATIC_TYPES: &[&str] = &[
     "empty",
 ];
 
-/// SPEC-LIT §126.8's inlets and §126.9's outlet, for the refusal's list of
-/// what is accepted.
+/// SPEC-LIT §126.8's inlets, §126.9's outlet and §126.10's far-field, for
+/// the refusal's list of what is accepted. `compressible::bc::lower` turns
+/// each into a placeholder and a rule before this check sees the fields.
 const CMP16_KINDS: &str =
     "totalPressure (with gamma), totalTemperature, flowRateInletVelocity (with massFlowRate), \
-     waveTransmissive (on p or T)";
-
-/// The compressible kinds of SPEC-LIT §126 still to come, and the unit that
-/// brings each. CMP-16's three and CMP-17's `waveTransmissive` are lowered by
-/// `compressible::bc::lower` before this check sees the fields (§126.8,
-/// §126.9).
-fn compressible_kind_unit(type_name: &str) -> Option<&'static str> {
-    match type_name {
-        "characteristicFarfield" | "farfield" => Some("CMP-18 (SPEC-LIT §126.6)"),
-        _ => None,
-    }
-}
+     waveTransmissive (on p or T), characteristicFarfield or farfield (on U, p and T)";
 
 /// The case-file name of a §126.8 inlet, for the run's report.
 fn rule_name(k: ofgpu::compressible::bc::RuleKind) -> &'static str {
@@ -394,24 +385,20 @@ fn check_static_bcs(field: &str, boundary: &BTreeMap<String, PatchFieldSpec>) ->
         if STATIC_TYPES.contains(&t) {
             continue;
         }
-        let why = match compressible_kind_unit(t) {
-            None if t == "advective" => format!(
+        let why = if t == "advective" {
+            format!(
                 "advective is the generic outlet of SPEC-LIT §120.4, whose wave speed is the \
                  flux; a gas outlet is waveTransmissive, which adds the speed of sound on p \
                  (SPEC-LIT §126.9). Accepted: {}, {CMP16_KINDS}",
                 STATIC_TYPES.join(", ")
-            ),
-            Some(unit) => format!(
-                "{t} is a compressible condition rewritten each outer iteration, which \
-                 {unit} implements; until then it is refused. Accepted now: {}, {CMP16_KINDS}",
-                STATIC_TYPES.join(", ")
-            ),
-            None => format!(
+            )
+        } else {
+            format!(
                 "{t} is not a static condition, and ofgpu-compressible rewrites no boundary \
-                 between iterations but the compressible inlets of SPEC-LIT §126.8 (§126, \
-                 §126.7). Accepted: {}, {CMP16_KINDS}",
+                 between iterations but the compressible conditions of SPEC-LIT §126.8-§126.10 \
+                 (§126, §126.7). Accepted: {}, {CMP16_KINDS}",
                 STATIC_TYPES.join(", ")
-            ),
+            )
         };
         return Err(refuse(&format!("{field} patch {patch}"), &why));
     }
@@ -820,6 +807,12 @@ fn run(o: &Options) -> Result<RunEnd> {
     for r in &inlets.rules {
         println!("inlet: {} on patch {} ({} faces), SPEC-LIT §126.8", rule_name(r.kind), r.patch, r.size);
     }
+    for r in &inlets.farfields {
+        println!(
+            "far-field: characteristicFarfield on patch {} ({} faces), free stream U ({}, {}, {}) p {} T {}, SPEC-LIT §126.10",
+            r.patch, r.size, g(r.u[0]), g(r.u[1]), g(r.u[2]), g(r.p), g(r.t)
+        );
+    }
     for r in &inlets.outlets {
         use ofgpu::compressible::bc::{OutletField, OutletKind};
         let field = if r.field == OutletField::P { "p" } else { "T" };
@@ -954,6 +947,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     let mut solver = Compressible::new(&gpu, &mesh, dc.ctrl)?;
     solver.set_boundary_rules(&gpu, inlets.rules)?;
     solver.set_outlet_rules(&gpu, inlets.outlets)?;
+    solver.set_farfield_rules(&gpu, inlets.farfields)?;
     solver.initialise(&gpu, &mut s)?;
 
     let dt = f64::from(dc.ctrl.momentum.delta_t);
@@ -1416,6 +1410,43 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         assert!(last.mach_max > 0.14 && last.mach_max < 0.15, "M_max {}", last.mach_max);
         let files = five_fields(&dir.join("case_jsonc").join("0.0003"));
         assert!(files[4].contains("object      Mach;"), "{}", files[4]);
+    }
+
+    /// SPEC-LIT §126.10 through the JSONC route: the tube with a `farfield`
+    /// at both ends (free stream 50 m/s, 300 K) runs, and the written `p`
+    /// keeps the type as lowered, `characteristicFarfield`.
+    #[test]
+    fn a_jsonc_farfield_tube_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (dir, case) = tube("cmp18_farfield");
+        let ff = r#"{ "match": "(inlet|outlet)", "kind": "farfield", "freestream": { "U": [50, 0, 0], "p": 0, "T": 300 } },"#;
+        edit(
+            &case,
+            r#"{ "match": "inlet", "kind": "inlet", "U": { "type": "fixedValue", "value": [50, 0, 0] }, "T": { "type": "fixedValue", "value": 320 } },"#,
+            ff,
+        );
+        edit(
+            &case,
+            r#"    { "match": "outlet", "kind": "open", "U": { "type": "zeroGradient" }, "p": { "type": "fixedValue", "value": 0 }, "T": { "type": "zeroGradient" } },
+"#,
+            "",
+        );
+        edit(&case, r#""T": 300.0 }"#, r#""T": 305.0 }"#);
+        let o = parse(&argv(&[case.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the far-field tube runs");
+        assert_eq!(end.steps, 3);
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
+        let root = dir.join("case_jsonc");
+        let last = std::fs::read_dir(&root)
+            .expect("the case is written")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.parse::<f64>().is_ok_and(|t| t > 0.0))
+            .max_by(|a, b| a.parse::<f64>().unwrap().total_cmp(&b.parse::<f64>().unwrap()))
+            .expect("a written time");
+        let files = five_fields(&root.join(last));
+        assert!(files[1].contains("characteristicFarfield"), "{}", files[1]);
     }
 
     /// The OpenFOAM route: the cavity runs and writes the five fields.

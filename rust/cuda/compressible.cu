@@ -1219,3 +1219,121 @@ extern "C" __global__ void cmpBcWaveSpeed
     w[f] = ww;
     kRelax[f] = kk;
 }
+
+
+/*
+  ==========================================================================
+  The characteristic far-field. SPEC-LIT 126.6, 126.10 (CMP-18). One kernel
+  over the faces [start, start + n) of one characteristicFarfield patch,
+  from the OWNER cell's state (i) and the stated free stream (o), writing
+  all three triples (U, p, T) at once with fr = 1 and refGrad = 0. Carlson
+  (2011) eqs. (8)-(17) as (126.8)-(126.12) restate them. No floor and no
+  clip: c_b <= 0 (an expansion the two invariants cannot carry) is written
+  as the formulas give it, and the bounds counter of SPEC-LIT 122.3 sees it.
+  ==========================================================================
+*/
+
+//- (126.8)-(126.12) of SPEC-LIT 126.6:
+//    n = Sf/|Sf|,  U_i = u_P . n,  c_i = sqrt(grs T_P),  U_o = u_o . n
+//    R+ = U_i + tg c_i,  R- = U_o - tg c_o,   tg = fl(2/(gamma-1))
+//    U_i > 0, |U_i|/c_i >= 1:  R- = U_i - tg c_i     (supersonic outflow)
+//    U_i < 0, |U_i|/c_i >= 1:  R+ = U_o + tg c_o     (supersonic inflow)
+//    U_b = (R+ + R-)/2,  c_b = (gamma-1)(R+ - R-)/4
+//    U_b > 0:  u_b = u_P + (U_b - U_i) n,  s_b = (p_P + pop)/rho_i^gamma,
+//              rho_i = (p_P + pop)/(rs T_P)
+//    else:     u_b = u_o + (U_b - U_o) n,  s_b = so
+//    rho_b = (c_b^2/(gamma s_b))^(1/(gamma-1)),  pa = rho_b c_b^2/gamma,
+//    T_b = pa/(rho_b rs),  p_b = pa - pop
+//  co = fl(sqrt(gamma R_s T_o)) and so = fl(p_abs,o / rho_o^gamma) are formed
+//  on the host in f64, as are gm1 = fl(gamma - 1), tg and ex = fl(1/(gamma-1)).
+extern "C" __global__ void cmpBcFarfield
+(
+    ofscalar* __restrict__ uFr,
+    ofvec3* __restrict__ uRef,
+    ofvec3* __restrict__ uGrad,
+    ofscalar* __restrict__ pFr,
+    ofscalar* __restrict__ pRef,
+    ofscalar* __restrict__ pGrad,
+    ofscalar* __restrict__ tFr,
+    ofscalar* __restrict__ tRef,
+    ofscalar* __restrict__ tGrad,
+    const ofvec3* __restrict__ U,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ T,
+    const oflabel* __restrict__ bFaceCells,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar uox,
+    ofscalar uoy,
+    ofscalar uoz,
+    ofscalar co,
+    ofscalar so,
+    ofscalar gamma,
+    ofscalar gm1,
+    ofscalar tg,
+    ofscalar ex,
+    ofscalar rs,
+    ofscalar grs,
+    ofscalar pop
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const oflabel P = bFaceCells[f];
+    const ofvec3 u = U[P];
+    const ofvec3 s = bSf[f];
+    const ofscalar mag = bMagSf[f];
+    ofvec3 nf;
+    nf.x = s.x/mag;
+    nf.y = s.y/mag;
+    nf.z = s.z/mag;
+    const ofscalar Ui = u.x*nf.x + u.y*nf.y + u.z*nf.z;
+    const ofscalar ci = sqrt(grs*T[P]);
+    const ofscalar Uo = uox*nf.x + uoy*nf.y + uoz*nf.z;
+    ofscalar rp = Ui + tg*ci;
+    ofscalar rm = Uo - tg*co;
+    const bool sup = fabs(Ui)/ci >= (ofscalar)1;
+    if (Ui > (ofscalar)0 && sup) rm = Ui - tg*ci;
+    if (Ui < (ofscalar)0 && sup) rp = Uo + tg*co;
+    const ofscalar Ub = (ofscalar)0.5*(rp + rm);
+    const ofscalar cb = gm1*(rp - rm)*(ofscalar)0.25;
+    ofvec3 ub;
+    ofscalar sb;
+    if (Ub > (ofscalar)0)
+    {
+        const ofscalar d = Ub - Ui;
+        ub.x = u.x + d*nf.x;
+        ub.y = u.y + d*nf.y;
+        ub.z = u.z + d*nf.z;
+        const ofscalar pa = p[P] + pop;
+        const ofscalar rhoi = pa/(rs*T[P]);
+        sb = pa/pow(rhoi, gamma);
+    }
+    else
+    {
+        const ofscalar d = Ub - Uo;
+        ub.x = uox + d*nf.x;
+        ub.y = uoy + d*nf.y;
+        ub.z = uoz + d*nf.z;
+        sb = so;
+    }
+    const ofscalar cb2 = cb*cb;
+    const ofscalar rhob = pow(cb2/(gamma*sb), ex);
+    const ofscalar pab = rhob*cb2/gamma;
+    ofvec3 z;
+    z.x = (ofscalar)0;
+    z.y = (ofscalar)0;
+    z.z = (ofscalar)0;
+    uFr[f] = (ofscalar)1;
+    uRef[f] = ub;
+    uGrad[f] = z;
+    pFr[f] = (ofscalar)1;
+    pRef[f] = pab - pop;
+    pGrad[f] = (ofscalar)0;
+    tFr[f] = (ofscalar)1;
+    tRef[f] = pab/(rhob*rs);
+    tGrad[f] = (ofscalar)0;
+}

@@ -43760,7 +43760,7 @@ field (§122.2) and `T` is in kelvin.
 
 * `supersonicInlet` (§126.2) lowers `U`, `p` and `T` to `fixedValue` at that state.
 * `farfield` (§126.6) lowers all three to `characteristicFarfield`, with the free stream
-  as each field's `value`. CMP-18 registers and implements the kind.
+  as each field's `value`. CMP-18 implements the kind (§126.10).
 
 Both kinds are refused in a case without `physics.compressible`, without a
 `freestream`, or with a `U`, `p` or `T` entry of their own, because the preset decides
@@ -44672,10 +44672,10 @@ condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixed
 `mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
 as set up is the whole condition (§126.7). Every other type is refused with the field, the
 patch and the type. CMP-16's inlets (`totalPressure` with `gamma`, `totalTemperature`,
-`flowRateInletVelocity` with `massFlowRate`) are lowered before this check (§126.8). The
-compressible kinds still to come name the unit that builds them (CMP-17 and CMP-18,
-§126.4-§126.6), and the rest say that this driver rewrites no boundary between iterations
-but §126.8's inlets.
+`flowRateInletVelocity` with `massFlowRate`) are lowered before this check (§126.8), and so
+are CMP-17's `waveTransmissive` (§126.9) and CMP-18's `characteristicFarfield` (§126.10).
+Every other type is refused with a message saying that this driver rewrites no boundary
+between iterations but §126.8-§126.10's conditions.
 `output.restart` is refused through `OutputPlan::refuse_restart`, because no checkpoint of
 the compressible state exists.
 
@@ -44719,7 +44719,7 @@ test row).
 ## 126. The compressible boundary conditions — each a §4 triple rewrite
 
 `No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3 (as built in
-§126.8), CMP-17 §126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+§126.8), CMP-17 §126.4-§126.5 (as built in §126.9) and CMP-18 §126.6 (as built in §126.10), in `src/compressible/bc.rs` and `cuda/compressible.cu`.
 docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
 it lands. Every one is a kernel that rewrites the §4 triple
 `psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
@@ -45054,6 +45054,66 @@ outlet mean decays like `exp(-t/tau)`, halving about every 2000 steps, down to 5
 step 20 000. Under single it stops decaying at step 14 000 and wanders between -0.07 and
 +0.16 Pa (to 24 000 steps, sampled every 2000). That is a few f32 ulps of the absolute
 state about `p_op = 1e5` Pa: an f32 floor, for §112's owner, not a property of the outlet.
+
+### 126.10 The far-field as built (CMP-18)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`FarfieldRule`,
+`CompressibleFarfields`, the host twin `farfield_face`) and one kernel appended to
+`cuda/compressible.cu` (`cmpBcFarfield`) implement §126.6 exactly as written there:
+(126.8)-(126.12), Carlson (2011) §2.2 eqs. (8)-(17). `field.rs` is not edited and no
+`BcKind` is added. §120's catalogue keeps `characteristicFarfield` and `farfield` as owned
+by CMP-18, for the reason §126.8 gives for `totalTemperature`: the catalogue describes
+`BcKind::from_name`, and the shared setup still refuses both.
+
+**Names.** `characteristicFarfield` on `U`, `p` and `T` of the same patch, each with one
+uniform `value`: the free stream's `u_o`, gauge `p_o` (in the datum of `p`) and `T_o`. The
+JSONC kind `farfield` lowers to exactly that (§122.6), and `bc::lower` also accepts the
+spelling `farfield` in a field file. `bc::lower` refuses by name: the kind on one or two of
+the three fields only (one free stream decides all three), a missing or non-uniform
+`value`, `T_o <= 0`, `p_o + p_op <= 0` (§122.3), and a stated `gamma` that is not the gas's
+(§126.8's rule). Each entry is built as a `fixedValue` placeholder at its free-stream value,
+so the faces hold the free stream until the first rewrite. The supersonic switch of §126.9
+is not attached: it is attached to a `fixedValue` `p` as read, and this one is not.
+
+**The kernel.** One thread per face of one patch, from the OWNER cell `P`:
+
+```
+n = Sf/|Sf| ,  U_i = u_P . n ,  c_i = sqrt(fl(gamma R_s) T_P) ,  U_o = u_o . n
+rho_i = (p_P + p_op) / (fl(R_s) T_P)                                    (122.10)'s state
+```
+
+then (126.8)-(126.12) in that order, with `fl(2/(gamma-1))`, `fl(1/(gamma-1))`,
+`fl(gamma - 1)`, `fl(gamma)`, `fl(R_s)` and `fl(p_op)` formed on the host in f64 and
+rounded once, and `c_o = fl(sqrt(gamma R_s T_o))` and `s_o = fl(p_abs,o / rho_o^gamma)`
+formed there per patch. (126.9)'s test is `|U_i|/c_i >= 1`, written as a division, as
+§126.9's switch writes it. `c_b = (gamma - 1)(R+ - R-) * 0.25`, and the gauge `p` is
+`rho_b c_b^2/gamma - p_op`. It writes `fr = 1` and `refGrad = 0` on all three fields and
+`refValue = u_b`, `p_abs,b - p_op` and `T_b`, reading only cells, so every face sees the
+state of the same moment. There is no floor and no clip: `c_b <= 0` (an expansion the two
+invariants cannot carry) is written as the formulas give it, and §122.3's counter sees the
+state that follows. `farfield_face` is the f64 host twin in the kernel's operation order;
+it also names the face's branch.
+
+**When.** `Compressible::set_farfield_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, after the inlets of
+§126.8 and before the outlets of §126.9; then `U`'s, `p`'s and `T`'s face values, and `psi`
+and `rho` on the boundary faces (§126.8 step 4). It needs no time step, so steady runs
+take it. A run with no far-field launches none of this.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `freestream_preserved_m0_5_and_m1_5` | R, `tol_r(1e-10)` (1e-10; 1e-5) | interior equal to the free stream (`u = (M c, 0.2 c, 0)`, `p` 2000 Pa gauge, 300 K) on a far-field at both ends, `M` 0.5 and 1.5, so normal Mach +-0.5 and +-1.5, all four branches. `u_b` against `u_o` relative to `\|u_o\|`, `p_b` relative to `p_o + p_op`, `T_b` relative | `e_u` 2.2e-16, `e_p` 2.9e-16, `e_T` 1.9e-16; 1.6e-7, 1.5e-7, 1.0e-7 |
+| `branch_selection_by_un_and_c` | D | rows at `M_n` +-0.5 and +-1.5 against a free stream entering at 0.1 `c`. Changing the free stream's tangential `u` and `p` at fixed `T` leaves the two outflow branches bitwise unchanged; changing the interior's leaves the two inflow branches; the whole free stream leaves supersonic outflow only; the whole interior (in-branch) leaves supersonic inflow only. Every other face changes. `fr = 1` and `refGrad = 0` bitwise, and the face value is `refValue` bitwise | bitwise in both |
+| `invariants_exact_on_host_twin` | R, `tol_r(1e-13)` | varied interior (`M_n` 0.4, 1.3, -0.7, -1.2; 305 to 312.5 K; tangential `u`) against a free stream at 310 K entering at 0.2 `c_o`: the device state against `farfield_face` (velocity relative to `c_o`), and on the device face `R+`, `R-` against the sides (126.8)-(126.9) take them from, the entropy and the tangential velocity against the side (126.11) takes them from | twin 4.3e-16, invariants 3.4e-16; 6.2e-7, 1.7e-7 |
+| `a_farfield_tube_runs` | P | 50-cell tube, far-field at both ends (free stream M 0.3 along x, 300 K), 305 K interior, 10 Euler steps: finite and no bounds violation | `M_max` 0.3054 in both |
+| `farfield_refusals_name_the_setting` | D | the refusals above; `farfield` lowers to the same rule | - |
+
+The f32 rows of the first and third tests are R-class rows under D-F32-1: `tol_r(1e-10)`
+and `tol_r(1e-13)` are both `1e-5` in f32, the plan's figure for the first. The driver adds
+`a_jsonc_farfield_tube_runs`: the JSONC route lowers `farfield` with its `freestream`, runs
+the tube with no bounds violation, and writes `p` with the type `characteristicFarfield`.
 
 ---
 
