@@ -34,13 +34,19 @@
 //!     in `crate::wallfunctions`/`cuda/wallfunctions.cu`, this module only
 //!     owns the wall-BC wiring - which faces, and where in [`Energy::correct`]
 //!     the triple gets rewritten)
+//!   M. S. Day, J. B. Bell, *Combust. Theory Model.* 4 (2000) 535-556, DOI
+//!     10.1088/1364-7830/4/4/309, eqs. (3) and (7) - the mixture molar mass
+//!     in the equation of state and the molar-change term of the divergence
+//!     constraint, SPEC-LIT 133.2 and 133.10 ([`GasMixture`],
+//!     [`GasState::update_density_mixture`])
 //! No GPL-licensed source was consulted.
 //!
 //! # What lives here, and what does not
 //!
 //! * [`GasProperties`] / [`GasState`] - S25: the ideal-gas density
 //!   `rho = p0/(R_s T)` and the thermodynamic pressure `p0(t)`, sealed or
-//!   open.
+//!   open; with a [`GasMixture`], `rho = p0 W_mix(Y)/(R T)` and the
+//!   constraint's molar-change term (SPEC-LIT 133.10).
 //! * [`EnergySources`] - S18/S26: the registry every volumetric heat source
 //!   pushes into - a heater, a porous zone, the dispersed phase's convective
 //!   exchange. This module sums what is registered; it does not know how any
@@ -667,6 +673,195 @@ impl EnergyKernels {
 //  §25  Gas state - rho(p0, T) and the p0(t) ODE
 // ==========================================================================
 
+/// The members of a reacting gas and their molar masses - SPEC-LIT 133.10.
+///
+/// The solved members `k` in the order their mass-fraction fields are handed
+/// to [`GasState::update_density_mixture`], and the inert remainder `N` that
+/// closes them (§19, `Y_N = 1 - Σ_k Y_k`). (133.19):
+///
+/// ```text
+/// 1/W = 1/W_N + Σ_k Y_k (1/W_k - 1/W_N)
+/// ```
+///
+/// which is (133.3)'s `Σ_m Y_m/W_m` with the inert's fraction written out,
+/// and equals it while `Σ_k Y_k <= 1` (where §19's clip of `Y_N` at zero is
+/// idle; [`crate::species::Species::max_sum_error`] measures when it is not).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GasMixture {
+    names: Vec<String>,
+    w: Vec<f64>,
+    inert: String,
+    w_inert: f64,
+}
+
+impl GasMixture {
+    /// `solved` as `(name, W)` and the inert `(name, W)`, `W` in kg/mol.
+    /// A molar mass that is not finite and positive is refused, naming the
+    /// member.
+    pub fn new(solved: &[(&str, f64)], inert: (&str, f64)) -> Result<Self> {
+        for (name, w) in solved.iter().chain(std::iter::once(&inert)) {
+            if !(*w > 0.0) || !w.is_finite() {
+                return Err(Error::Config(format!(
+                    "gas mixture: the molar mass of \"{name}\" is {w} kg/mol; (133.3) \
+                     needs a finite positive W for every member (SPEC-LIT 133.10)"
+                )));
+            }
+        }
+        Ok(Self {
+            names: solved.iter().map(|(n, _)| (*n).to_string()).collect(),
+            w: solved.iter().map(|(_, w)| *w).collect(),
+            inert: inert.0.to_string(),
+            w_inert: inert.1,
+        })
+    }
+
+    /// The solved members' names, in field order.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
+    pub fn inert_name(&self) -> &str {
+        &self.inert
+    }
+
+    pub fn n_solved(&self) -> usize {
+        self.names.len()
+    }
+
+    /// `1/W_k - 1/W_N`, mol/kg: member `k`'s coefficient in (133.19) and
+    /// in (133.21)'s molar sum.
+    pub fn coefficient(&self, k: usize) -> f64 {
+        1.0 / self.w[k] - 1.0 / self.w_inert
+    }
+
+    /// (133.19) on the host from the solved fractions `y`, mol/kg - the
+    /// formula [`GasState::update_density_mixture`] evaluates on the device,
+    /// in the same order.
+    pub fn inverse_molar_mass(&self, y: &[f64]) -> f64 {
+        let mut acc = 1.0 / self.w_inert;
+        for (k, yk) in y.iter().enumerate().take(self.n_solved()) {
+            acc += self.coefficient(k) * yk;
+        }
+        acc
+    }
+}
+
+/// The two domain integrals of SPEC-LIT (133.22)'s sealed `p0` ODE, f64 in
+/// both builds: [`Energy::constraint_integrals`] forms them from the last
+/// [`Energy::update_target_divergence`] on a [`GasState`] with a mixture,
+/// and [`GasState::advance_p0_mixture`] takes them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConstraintIntegrals {
+    /// `∫ D dV`, m3/s: (133.21)'s dilatation without its `dp0/dt` term.
+    pub dilatation: f64,
+    /// `∫ (1/γ) dV`, m3, with `1/γ_c = 1 - R_s,c/cp_c`.
+    pub inv_gamma_volume: f64,
+}
+
+/// `cuda/energy.cu`'s (133.19)-(133.20) kernels.
+struct MixKernels {
+    fill: CudaFunction,
+    axpy: CudaFunction,
+    density: CudaFunction,
+    round: CudaFunction,
+}
+
+impl MixKernels {
+    /// `acc[..len] = v`.
+    fn fill(&self, gpu: &Gpu, acc: &mut DevBuf<Acc>, v: Acc, len: usize) -> Result<()> {
+        let nl = len as Label;
+        unsafe {
+            gpu.stream().launch_builder(&self.fill).arg(acc).arg(&v).arg(&nl).launch(cfg_for(len))?;
+        }
+        Ok(())
+    }
+
+    /// `acc[..len] += a x`.
+    fn axpy(&self, gpu: &Gpu, acc: &mut DevBuf<Acc>, x: &DevBuf<Scalar>, a: Acc, len: usize) -> Result<()> {
+        let nl = len as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.axpy)
+                .arg(acc)
+                .arg(x)
+                .arg(&a)
+                .arg(&nl)
+                .launch(cfg_for(len))?;
+        }
+        Ok(())
+    }
+
+    /// (133.19) into `acc[..len]`: `1/W_N`, then each member `k`'s
+    /// `(1/W_k - 1/W_N) Y_k` from `y(k)`, in member order.
+    fn inv_w<'a>(
+        &self,
+        gpu: &Gpu,
+        table: &GasMixture,
+        acc: &mut DevBuf<Acc>,
+        y: impl Fn(usize) -> &'a DevBuf<Scalar>,
+        len: usize,
+    ) -> Result<()> {
+        self.fill(gpu, acc, 1.0 / table.w_inert, len)?;
+        for k in 0..table.n_solved() {
+            self.axpy(gpu, acc, y(k), table.coefficient(k), len)?;
+        }
+        Ok(())
+    }
+
+    /// (133.20): `rho[..len] = (p0/R)/(T (1/W))`.
+    fn density(
+        &self,
+        gpu: &Gpu,
+        rho: &mut DevBuf<Scalar>,
+        t: &DevBuf<Scalar>,
+        inv_w: &DevBuf<Acc>,
+        p0_over_r: Acc,
+        len: usize,
+    ) -> Result<()> {
+        let nl = len as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&self.density)
+                .arg(rho)
+                .arg(t)
+                .arg(inv_w)
+                .arg(&p0_over_r)
+                .arg(&nl)
+                .launch(cfg_for(len))?;
+        }
+        Ok(())
+    }
+
+    /// `out[..len] = acc`, rounded once.
+    fn round(&self, gpu: &Gpu, out: &mut DevBuf<Scalar>, acc: &DevBuf<Acc>, len: usize) -> Result<()> {
+        let nl = len as Label;
+        unsafe {
+            gpu.stream().launch_builder(&self.round).arg(out).arg(acc).arg(&nl).launch(cfg_for(len))?;
+        }
+        Ok(())
+    }
+}
+
+/// A [`GasState`]'s mixture: the table, its kernels and the buffers
+/// (133.19)-(133.21) are formed in.
+struct MixState {
+    table: GasMixture,
+    k: MixKernels,
+    /// `[n_cells]` (133.19) at the current level, in `Acc`.
+    inv_w: DevBuf<Acc>,
+    /// `[n_cells]` the same, rounded to the build's scalar - what
+    /// [`Energy`]'s `rho* cp` under backward divides by.
+    inv_w_s: DevBuf<Scalar>,
+    /// `[max(n_cells, n_boundary_faces)]` (133.19) of the other three
+    /// levels, one at a time.
+    scratch: DevBuf<Acc>,
+    /// `[n_cells]` `Σ_k (1/W_k - 1/W_N) S_k`, mol/(m3 s), as last set.
+    mol: DevBuf<Acc>,
+    /// Whether [`GasState::update_density_mixture`] has run since
+    /// [`GasState::use_mixture`].
+    formed: bool,
+}
+
 /// `rho = p0/(R_s T)` on the device, and the thermodynamic pressure `p0(t)`
 /// on the host - SPEC-LIT S25. `rho` carries its own old time levels so that
 /// [`Energy`]'s `rho*cp`-weighted `ddt` (S26) has `rho^{n-1}`, `rho^{n-2}`
@@ -686,6 +881,9 @@ pub struct GasState<'m> {
 
     rho: GpuScalarField,
     fldk: FieldKernels,
+    /// SPEC-LIT 133.10: `None` is §25's one gas of constant `W`, and every
+    /// launch it ran before CHR-11.
+    mix: Option<MixState>,
 }
 
 impl<'m> GasState<'m> {
@@ -714,6 +912,7 @@ impl<'m> GasState<'m> {
             dp0dt: 0.0,
             rho: GpuScalarField::zeros(gpu, m, "rho")?,
             fldk: FieldKernels::new(gpu)?,
+            mix: None,
         })
     }
 
@@ -771,6 +970,14 @@ impl<'m> GasState<'m> {
     /// - two existing, already-tested launches per level cost less than a new
     /// one to save them.
     pub fn update_density(&mut self, gpu: &Gpu, t: &GpuScalarField) -> Result<()> {
+        if self.mix.is_some() {
+            return Err(Error::Config(
+                "GasState::update_density on a gas with a mixture: its rho is \
+                 p0 W_mix(Y)/(R T), so call GasState::update_density_mixture with \
+                 the members' mass fractions (SPEC-LIT 133.10)"
+                    .to_string(),
+            ));
+        }
         let n = self.m.n_cells;
         let nbf = self.m.n_boundary_faces;
         let rs = self.props.r_s();
@@ -810,6 +1017,15 @@ impl<'m> GasState<'m> {
     /// law no longer makes sense, almost always a `dt` far larger than the
     /// heat input can be integrated explicitly at.
     pub fn advance_p0(&mut self, total_q: Scalar, dt: Scalar) -> Result<Scalar> {
+        if self.mix.is_some() {
+            return Err(Error::Config(
+                "GasState::advance_p0 on a gas with a mixture: (25.2)'s (gamma-1)/V \
+                 integral(Q) holds for one constant W only, so advance p0 with \
+                 GasState::advance_p0_mixture and Energy::constraint_integrals \
+                 (SPEC-LIT 133.10)"
+                    .to_string(),
+            ));
+        }
         if !(dt >= 0.0) || !dt.is_finite() {
             return Err(Error::Config(format!(
                 "GasState::advance_p0: dt is {dt}"
@@ -849,6 +1065,220 @@ impl<'m> GasState<'m> {
             }
         }
         Ok(self.p0)
+    }
+
+    /// Give this gas a mixture - SPEC-LIT 133.10. From here on its `rho` is
+    /// (133.20), formed by [`Self::update_density_mixture`] (and
+    /// [`Self::update_density`] is refused), its sealed `p0` advances by
+    /// (133.22) through [`Self::advance_p0_mixture`] (and [`Self::advance_p0`]
+    /// is refused), and [`Energy::update_target_divergence`] forms (133.21).
+    /// The molar-change sum starts at zero.
+    pub fn use_mixture(&mut self, gpu: &Gpu, table: GasMixture) -> Result<()> {
+        let k = KernelSet::new(gpu, crate::kernels::ENERGY)?;
+        let n = self.m.n_cells.max(1);
+        let n_any = self.m.n_cells.max(self.m.n_boundary_faces).max(1);
+        self.mix = Some(MixState {
+            table,
+            k: MixKernels {
+                fill: k.func("energyFillAcc")?,
+                axpy: k.func("energyAxpyAcc")?,
+                density: k.func("energyMixtureDensity")?,
+                round: k.func("energyRoundAcc")?,
+            },
+            inv_w: gpu.zeros(n)?,
+            inv_w_s: gpu.zeros(n)?,
+            scratch: gpu.zeros(n_any)?,
+            mol: gpu.zeros(n)?,
+            formed: false,
+        });
+        Ok(())
+    }
+
+    /// The mixture [`Self::use_mixture`] gave, if any.
+    pub fn mixture(&self) -> Option<&GasMixture> {
+        self.mix.as_ref().map(|x| &x.table)
+    }
+
+    /// `(1/W, Σ_k (1/W_k - 1/W_N) S_k)` per cell in `Acc`, for
+    /// [`Energy::update_target_divergence`]'s (133.21); `None` without a
+    /// mixture. Refused before the first [`Self::update_density_mixture`].
+    fn mixture_cells(&self) -> Result<Option<(&DevBuf<Acc>, &DevBuf<Acc>)>> {
+        match &self.mix {
+            None => Ok(None),
+            Some(x) if !x.formed => Err(Error::Config(
+                "the gas mixture's 1/W has not been formed: call \
+                 GasState::update_density_mixture before the target divergence \
+                 (SPEC-LIT 133.10)"
+                    .to_string(),
+            )),
+            Some(x) => Ok(Some((&x.inv_w, &x.mol))),
+        }
+    }
+
+    /// The current level's (133.19), rounded, when this gas has a formed
+    /// mixture: what `rho* cp` under backward divides by.
+    fn mixture_inv_w_scalar(&self) -> Option<&DevBuf<Scalar>> {
+        self.mix.as_ref().filter(|x| x.formed).map(|x| &x.inv_w_s)
+    }
+
+    /// (133.19)-(133.20): `1/W` from the solved members' mass fractions `ys`
+    /// (in [`GasMixture::names`] order) and `rho = p0/(R T (1/W))`, on every
+    /// cell and boundary face at the current level and on the cells at the
+    /// two old levels, each level from its own `T`, `Y` and `p0` - the levels
+    /// [`Self::update_density`] refreshes, with the members' own old levels
+    /// in place of a constant `W`. Every sum and quotient is formed in `Acc`
+    /// and rounded once. Refused by name: no mixture, a field count other
+    /// than the table's, a field shorter than the mesh.
+    pub fn update_density_mixture(
+        &mut self,
+        gpu: &Gpu,
+        t: &GpuScalarField,
+        ys: &[&GpuScalarField],
+    ) -> Result<()> {
+        let (n, nbf) = (self.m.n_cells, self.m.n_boundary_faces);
+        let r = Acc::from(self.props.r_universal);
+        let (p0, p0_0, p0_00) = (Acc::from(self.p0), Acc::from(self.p0_0), Acc::from(self.p0_00));
+        let GasState { mix, rho, .. } = self;
+        let Some(x) = mix.as_mut() else {
+            return Err(Error::Config(
+                "GasState::update_density_mixture on a gas without a mixture: call \
+                 GasState::use_mixture first (SPEC-LIT 133.10)"
+                    .to_string(),
+            ));
+        };
+        if ys.len() != x.table.n_solved() {
+            return Err(Error::Config(format!(
+                "GasState::update_density_mixture: {} mass-fraction fields for the {} \
+                 solved members {:?} of the mixture (SPEC-LIT 133.10)",
+                ys.len(),
+                x.table.n_solved(),
+                x.table.names
+            )));
+        }
+        for (y, name) in ys.iter().zip(&x.table.names) {
+            if y.f.len() < n || y.f0.len() < n || y.f00.len() < n || y.bf.len() < nbf {
+                return Err(Error::Config(format!(
+                    "GasState::update_density_mixture: the field of \"{name}\" is not on \
+                     this mesh ({n} cells, {nbf} boundary faces) (SPEC-LIT 133.10)"
+                )));
+            }
+        }
+        let MixState { table, k, inv_w, inv_w_s, scratch, formed, .. } = x;
+        if n > 0 {
+            k.inv_w(gpu, table, inv_w, |m| &ys[m].f, n)?;
+            k.density(gpu, &mut rho.f, &t.f, inv_w, p0 / r, n)?;
+            k.round(gpu, inv_w_s, inv_w, n)?;
+            k.inv_w(gpu, table, scratch, |m| &ys[m].f0, n)?;
+            k.density(gpu, &mut rho.f0, &t.f0, scratch, p0_0 / r, n)?;
+            k.inv_w(gpu, table, scratch, |m| &ys[m].f00, n)?;
+            k.density(gpu, &mut rho.f00, &t.f00, scratch, p0_00 / r, n)?;
+        }
+        if nbf > 0 {
+            k.inv_w(gpu, table, scratch, |m| &ys[m].bf, nbf)?;
+            k.density(gpu, &mut rho.bf, &t.bf, scratch, p0 / r, nbf)?;
+        }
+        *formed = true;
+        Ok(())
+    }
+
+    /// (133.21)'s molar sum `Σ_k (1/W_k - 1/W_N) S_k` per cell, mol/(m3 s),
+    /// from each solved member's net mass source `S_k = W_k omega_k - div
+    /// Γ_k` in kg/(m3 s), in [`GasMixture::names`] order; the inert's
+    /// `S_N = -Σ_k S_k` is the closure the coefficient already holds. Held
+    /// until the next call (zero after [`Self::use_mixture`]). A reaction
+    /// source of §19's constant-density equation is `(Y* - Y°)/dt` in 1/s and
+    /// is multiplied by `rho` before it comes here. Refused by name: no
+    /// mixture, a count other than the table's, a buffer shorter than the
+    /// mesh.
+    pub fn set_molar_change(&mut self, gpu: &Gpu, sources: &[&DevBuf<Scalar>]) -> Result<()> {
+        let n = self.m.n_cells;
+        let Some(x) = self.mix.as_mut() else {
+            return Err(Error::Config(
+                "GasState::set_molar_change on a gas without a mixture: call \
+                 GasState::use_mixture first (SPEC-LIT 133.10)"
+                    .to_string(),
+            ));
+        };
+        if sources.len() != x.table.n_solved() {
+            return Err(Error::Config(format!(
+                "GasState::set_molar_change: {} sources for the {} solved members {:?} \
+                 of the mixture (SPEC-LIT 133.10)",
+                sources.len(),
+                x.table.n_solved(),
+                x.table.names
+            )));
+        }
+        for (src, name) in sources.iter().zip(&x.table.names) {
+            if src.len() < n {
+                return Err(Error::Config(format!(
+                    "GasState::set_molar_change: the source of \"{name}\" has {} cells, the \
+                     mesh has {n} (SPEC-LIT 133.10)",
+                    src.len()
+                )));
+            }
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        let MixState { table, k, mol, .. } = x;
+        k.fill(gpu, mol, 0.0, n)?;
+        for (m, src) in sources.iter().enumerate() {
+            k.axpy(gpu, mol, src, table.coefficient(m), n)?;
+        }
+        Ok(())
+    }
+
+    /// (133.22): one explicit-Euler step of the sealed `p0` ODE
+    ///
+    /// ```text
+    /// dp0/dt = p0 ∫ D dV / ∫ (1/γ) dV      sealed;   dp0/dt = 0   open
+    /// ```
+    ///
+    /// from [`Energy::constraint_integrals`], in f64, `p0` rounded once.
+    /// Returns `dp0/dt` in f64; [`Self::dp0dt`] holds it rounded. With one
+    /// constant `W` and `γ = cp/(cp - R/W)` it is (25.2)'s `(γ-1)/V ∫Q`.
+    /// Refused by name: no mixture, a non-finite integral, a `∫ (1/γ) dV`
+    /// that is not positive, and a `p0` that leaves the positive reals.
+    pub fn advance_p0_mixture(&mut self, c: ConstraintIntegrals, dt: Scalar) -> Result<f64> {
+        if self.mix.is_none() {
+            return Err(Error::Config(
+                "GasState::advance_p0_mixture on a gas without a mixture: its p0 \
+                 advances by GasState::advance_p0 (SPEC-LIT 25.2, 133.10)"
+                    .to_string(),
+            ));
+        }
+        if !(dt >= 0.0) || !dt.is_finite() {
+            return Err(Error::Config(format!("GasState::advance_p0_mixture: dt is {dt}")));
+        }
+        if !c.dilatation.is_finite() || !(c.inv_gamma_volume > 0.0) || !c.inv_gamma_volume.is_finite() {
+            return Err(Error::Config(format!(
+                "GasState::advance_p0_mixture: the constraint integrals are {} m3/s and {} \
+                 m3; (133.22) needs finite values and a positive volume integral of 1/gamma \
+                 (SPEC-LIT 133.10)",
+                c.dilatation, c.inv_gamma_volume
+            )));
+        }
+        match self.domain {
+            DomainKind::Open => {
+                self.dp0dt = 0.0;
+                Ok(0.0)
+            }
+            DomainKind::Sealed => {
+                let p0 = Acc::from(self.p0);
+                let rate = p0 * c.dilatation / c.inv_gamma_volume;
+                let next = (p0 + rate * Acc::from(dt)) as Scalar;
+                if !(next > 0.0) || !next.is_finite() {
+                    return Err(Error::Config(format!(
+                        "GasState::advance_p0_mixture: p0 advanced to {next}, which is not a \
+                         usable absolute pressure - dt is probably too large for an explicit \
+                         step (SPEC-LIT 133.10)"
+                    )));
+                }
+                self.p0 = next;
+                self.dp0dt = rate as Scalar;
+                Ok(rate)
+            }
+        }
     }
 
     /// Rotate `p0^{n-2} <- p0^{n-1} <- p0`, in that order - SPEC-LIT S13.3,
@@ -1684,6 +2114,25 @@ pub struct Energy<'m> {
     /// `None` is the constant `props.cp` and every bit that path produced
     /// before.
     cp_field: Option<CpField>,
+
+    /// SPEC-LIT 133.10: the (133.21) launch and its (133.22) partial sums,
+    /// built the first time [`Self::update_target_divergence`] meets a gas
+    /// with a mixture. `None` until then.
+    mix: Option<MixConstraint>,
+}
+
+/// [`Energy`]'s half of SPEC-LIT 133.10: `energyMixtureConstraint`, the
+/// constant `cp` it reads without a field, and the per-block sums of
+/// `D V` and `V/γ` the last launch left.
+struct MixConstraint {
+    constraint: CudaFunction,
+    /// `[1]`: `props.cp`, read at stride 0 when no `cp` field is set.
+    cp_one: DevBuf<Scalar>,
+    part_d: DevBuf<Acc>,
+    part_g: DevBuf<Acc>,
+    /// How many partials the last launch wrote; zero when the last target
+    /// divergence was not a mixture's.
+    nparts: usize,
 }
 
 impl<'m> Energy<'m> {
@@ -1749,6 +2198,7 @@ impl<'m> Energy<'m> {
             cht: None,
             k_curve: None,
             cp_field: None,
+            mix: None,
         })
     }
 
@@ -2678,6 +3128,18 @@ impl<'m> Energy<'m> {
             field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
             field_ops::add_field(gpu, &self.fldk, &mut self.t_star, &self.t.f0, n)?;
             for level in [&mut self.rho_cp, &mut self.rho_cp0, &mut self.rho_cp00] {
+                // (133.20) at T*: `(p0/R) cp / ((1/W) T*)`, the current level's
+                // 1/W, as (133.13) takes the cp field as last set.
+                if let Some(iw) = gas.mixture_inv_w_scalar() {
+                    field_ops::set_field(gpu, &self.fldk, level, gas.p0() / gas.props().r_universal, n)?;
+                    field_ops::divide_field(gpu, &self.fldk, level, iw, n)?;
+                    match &self.cp_field {
+                        None => field_ops::scale_field(gpu, &self.fldk, level, cp, n)?,
+                        Some(f) => field_ops::multiply_field(gpu, &self.fldk, level, &f.cp.f, n)?,
+                    }
+                    field_ops::divide_field(gpu, &self.fldk, level, &self.t_star, n)?;
+                    continue;
+                }
                 match &self.cp_field {
                     None => field_ops::set_field(gpu, &self.fldk, level, cp * gas.p0() / rs, n)?,
                     // (133.13) under backward: `(p0/R_s) cp_c / T*_c`.
@@ -3291,6 +3753,12 @@ impl<'m> Energy<'m> {
         // idempotent and `correct` runs it again.
         self.prepare_coefficients(gpu, nut, k, nu, gas)?;
         self.update_conduction_source(gpu)?;
+        if let Some((inv_w, mol)) = gas.mixture_cells()? {
+            return self.mixture_target_divergence(gpu, gas, inv_w, mol);
+        }
+        if let Some(mx) = &mut self.mix {
+            mx.nparts = 0;
+        }
         let inv_gamma_p0 = 1.0 / (self.props.gamma * gas.p0());
         self.ek.target_divergence(
             gpu,
@@ -3304,6 +3772,97 @@ impl<'m> Energy<'m> {
             gas.dp0dt(),
             n,
         )
+    }
+
+    /// SPEC-LIT (133.21) on every cell, for a gas with a mixture:
+    ///
+    /// ```text
+    /// D_c = Q_c R_s,c/(cp_c p0) + (R T_c/p0) Σ_k (1/W_k - 1/W_N) S_k,c,   R_s,c = R (1/W)_c
+    /// (div u)_target,c = D_c - (1/γ_c) (dp0/dt)/p0,                        1/γ_c = 1 - R_s,c/cp_c
+    /// ```
+    ///
+    /// with `Q` §26.1's two halves as [`Self::update_target_divergence`]
+    /// has them, `cp_c` the field when one is set (else `props.cp`), `R` and
+    /// `p0` the gas's, and `dp0/dt` its lagged value. The same launch leaves
+    /// the per-block sums of `D V` and `V/γ` that
+    /// [`Self::constraint_integrals`] totals.
+    fn mixture_target_divergence(
+        &mut self,
+        gpu: &Gpu,
+        gas: &GasState,
+        inv_w: &DevBuf<Acc>,
+        mol: &DevBuf<Acc>,
+    ) -> Result<()> {
+        let n = self.m.n_cells;
+        let (cfg, nparts) = solver::reduce_geometry(n);
+        if self.mix.is_none() {
+            let k = KernelSet::new(gpu, crate::kernels::ENERGY)?;
+            self.mix = Some(MixConstraint {
+                constraint: k.func("energyMixtureConstraint")?,
+                cp_one: gpu.upload(&[self.props.cp])?,
+                part_d: gpu.zeros(nparts)?,
+                part_g: gpu.zeros(nparts)?,
+                nparts: 0,
+            });
+        }
+        let Energy { mix, cp_field, sources, cond_div, t, target_div, m, .. } = self;
+        let mx = mix.as_mut().expect("built above");
+        if mx.part_d.len() < nparts {
+            mx.part_d = gpu.zeros(nparts)?;
+            mx.part_g = gpu.zeros(nparts)?;
+        }
+        let (cp, stride): (&DevBuf<Scalar>, Label) = match cp_field {
+            Some(f) => (&f.cp.f, 1),
+            None => (&mx.cp_one, 0),
+        };
+        let r = Acc::from(gas.props().r_universal);
+        let p0 = Acc::from(gas.p0());
+        let dp0dt = Acc::from(gas.dp0dt());
+        let nl = n as Label;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&mx.constraint)
+                .arg(&mut *target_div)
+                .arg(&mut mx.part_d)
+                .arg(&mut mx.part_g)
+                .arg(sources.q())
+                .arg(&*cond_div)
+                .arg(&t.f)
+                .arg(inv_w)
+                .arg(mol)
+                .arg(cp)
+                .arg(&stride)
+                .arg(&m.v)
+                .arg(&r)
+                .arg(&p0)
+                .arg(&dp0dt)
+                .arg(&nl)
+                .launch(cfg)?;
+        }
+        mx.nparts = nparts;
+        Ok(())
+    }
+
+    /// SPEC-LIT (133.22)'s two integrals, `∫ D dV` and `∫ (1/γ) dV`, from
+    /// the last [`Self::update_target_divergence`]: the per-block sums of
+    /// its launch, read back and totalled on the host in block order, in
+    /// f64 in both builds. Refused by name when that target divergence was
+    /// not a mixture's.
+    pub fn constraint_integrals(&self, gpu: &Gpu) -> Result<ConstraintIntegrals> {
+        let Some(mx) = self.mix.as_ref().filter(|x| x.nparts > 0) else {
+            return Err(Error::Config(
+                "Energy::constraint_integrals: the last target divergence was not a \
+                 mixture's; call Energy::update_target_divergence on a GasState with \
+                 GasState::use_mixture first (SPEC-LIT 133.10)"
+                    .to_string(),
+            ));
+        };
+        let d = gpu.download(&mx.part_d)?;
+        let g = gpu.download(&mx.part_g)?;
+        Ok(ConstraintIntegrals {
+            dilatation: d[..mx.nparts].iter().sum(),
+            inv_gamma_volume: g[..mx.nparts].iter().sum(),
+        })
     }
 
     /// [`Self::update_target_divergence`] with SPEC-LIT S77.6's volumetric

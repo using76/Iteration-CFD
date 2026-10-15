@@ -2417,8 +2417,11 @@ hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
 `p0` only:
 
 ```
-rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
+rho = p0 / (R_s T),   R_s = R / W        (one gas of constant W; a mixture: (133.20))
 ```
+
+A reacting gas carries `W_mix(Y)`: (133.3)'s equation of state, built as
+(133.20) in §133.10.
 
 **Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`). It is the binary
 that builds a `GasState` and calls `Energy::update_target_divergence`, and
@@ -2443,6 +2446,9 @@ Q   = ∇·(k_eff ∇T) + whatever §18's registry holds
 
 Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
 
+With a mixture this constraint is (133.4), with the molar-change term and the
+mixture's own `γ`; what is built is (133.21) of §133.10.
+
 **All three terms of `Q`, in BOTH places `Q` is used** (this field, and §25.2's
 `p0` ODE). The CONDUCTION term was implemented late — the crate ran for several
 rounds with `Q` = the §18 registry alone, an omission that was documented but
@@ -2459,6 +2465,9 @@ Integrate the constraint over the domain. Boundary volume flux `Φ_b`:
 dp0/dt = (γ / V_dom) [ ((γ−1)/γ) ∫ Q dV  −  p0 Φ_b ]      (sealed: Φ_b = 0)
 open domain:  p0 = const,  dp0/dt = 0
 ```
+
+With a mixture the sealed ODE is (133.22) of §133.10, which reduces to this
+one for a constant `W`.
 
 *Test (decisive)*: a sealed box with a known heater power P raises p0 at
 exactly `dp0/dt = (γ−1) P / V` — analytic, no tolerance excuses.
@@ -47436,12 +47445,13 @@ with a factor `f < 1`, that pulls a fractional-step solution back onto (133.3).
 Its exact coefficient is not restated here, because the open copy's text layer
 is garbled at that line. It is **named and not
 adopted in v1**. §25's loop holds the equation of state by recomputing `rho`
-from (133.3), and CHR-11 measures the drift that remains. If that drift needs
+from (133.3), and CHR-11 measures the drift that remains: first order in
+`Δt` (§133.10), so the term is not needed for it. If that drift needs
 the term, it is a numerics change and goes to the user (docs/17 §5.3.4).
 
-**§25 is amended in place by CHR-11**, not here. §25.1's "v1: constant W = air,
-stated" becomes a pointer to (133.4). This section is the derivation that
-amendment cites.
+**§25 is amended in place by CHR-11** (§133.10), not here. §25's
+"constant W" line points to (133.20), and §25.1 and §25.2 point to (133.21)
+and (133.22). This section is the derivation those pointers cite.
 
 ### 133.3 The species fluxes must sum to zero
 
@@ -47696,7 +47706,7 @@ shorter than the mesh, is refused by name, naming the cell or boundary face.
 
 **What still reads the constant `cp`, stated.** `k_eff`'s turbulent part
 `rho cp nu_t/Pr_t` (S26, both `Pr_t` models), §25.1's target divergence
-(which (133.4) replaces in CHR-11), and the S29.3 thermal wall function.
+on a gas without a mixture (with one, (133.21) of §133.10 reads the field), and the S29.3 thermal wall function.
 The §120.8 Danckwerts inlet reads `phi_m` itself, so it follows (133.14).
 `assembly_budget` divides by (133.14)'s own `cp_f` and weighs by the cell's
 `cp_c`; its mass diagnostics come from the same pass on `rho_f phi_f`, exact,
@@ -47814,6 +47824,100 @@ functions are its only change).
 | `energy_species_enthalpy_matches_host` | 4^3 walled box, `T` 900-1845 K, every `Y` varying: (133.18) on every cell and boundary face against `ThermoSet::cp_mass`, relative; (133.17) against an f64 host evaluation from the device's own Gauss gradients, over the largest value; refusals named (a member without thermo, a heat release before any step, a metered registration without meters) | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 `2.92e-16` and `5.60e-16` of `1.04e5` W/m3; f32 `3.98e-8` and `3.70e-8` |
 
 Labels: (133.15)-(133.18).
+
+### 133.10 The mixture molar mass in the equation of state and the molar-change term of the constraint (CHR-11, `src/energy.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (3) and (7) as (133.3) and (133.4) of §133.1-§133.2 state and derive
+them; nothing is added to them. What this section adds is how they are
+evaluated.
+
+**The mixture.** `GasMixture` names the solved members `k`, in the order
+their mass-fraction fields are handed over, and §19's inert remainder `N`,
+each with its molar mass. (133.3)'s `Σ_m Y_m/W_m`, with `Y_N = 1 - Σ_k Y_k`
+written out, is
+
+```
+1/W = 1/W_N + Σ_k Y_k (1/W_k - 1/W_N)                                                          (133.19)
+rho^(l) = p0^(l) / ( R T^(l) (1/W)^(l) ),    l = n, n-1, n-2 on the cells, and l = n on the boundary faces   (133.20)
+```
+
+`GasState::update_density_mixture` forms both on every level §25's
+`update_density` refreshes, each level from its own `T`, `Y` and `p0`.
+*DESIGN.* (133.19) equals (133.3)'s sum while `Σ_k Y_k <= 1`, where §19's
+clip of `Y_N` at zero is idle (`Species::max_sum_error` measures when it is
+not), and it reads the solved members' own old levels, which the inert field
+does not keep.
+
+**The constraint.** In (133.4), the first line and the `- h_m/(cp T)` part of
+the third are `Q/(rho cp T)`, with `Q` §26.1's registry and conduction (CHR-10b
+registers the heat release (133.16) and the enthalpy diffusion (133.17) there).
+What is new is `(1/rho) Σ_m (W/W_m) S_m` with `S_m = W_m omega_m - div Γ_m`,
+the member's net mass source, and `S_N = -Σ_k S_k` by the closure. By (133.3),
+`W/rho = R T/p0` and `1/(rho cp T) = R_s/(cp p0)` exactly, so per cell
+
+```
+D_c = Q_c R_s,c / (cp_c p0) + (R T_c / p0) Σ_k (1/W_k - 1/W_N) S_k,c,    R_s,c = R (1/W)_c
+(div u)_target,c = D_c - (1/γ_c) (dp0/dt) / p0,    1/γ_c = 1 - R_s,c / cp_c                    (133.21)
+```
+
+with `cp_c` CHR-10a's field when one is set and the constant `cp` otherwise,
+`dp0/dt` at §25's one-iteration lag. Integrating (133.21) over a sealed domain,
+where `∫ div u dV = 0`:
+
+```
+dp0/dt = p0 ∫ D dV / ∫ (1/γ) dV     (sealed),     dp0/dt = 0     (open)                         (133.22)
+```
+
+With one constant `W` and `γ = cp/(cp - R/W)` this is (25.2)'s
+`(γ - 1)/V_dom ∫ Q dV`. On the gate's box (uniform, `Q = 0`, one solved `A`
+against the inert `N`, `Σ_m omega_m = S_A/W_A + S_N/W_N`) it is the closed form
+
+```
+dp0/dt = γ R T S_A (1/W_A - 1/W_N) = γ R T Σ_m omega_m,     γ = cp / (cp - R (1/W))             (133.23)
+```
+
+**As built.** `cuda/energy.cu` gains `energyFillAcc` and `energyAxpyAcc`
+((133.19), and the molar sum `Σ_k (1/W_k - 1/W_N) S_k` that
+`GasState::set_molar_change` forms from the members' sources in kg/(m3 s)),
+`energyMixtureDensity` ((133.20)) and `energyMixtureConstraint` ((133.21) on
+every cell, grid-stride, with the per-block sums of `D V` and `V/γ`). Every sum
+and quotient is in `ofacc` (double in both builds, §118.1), rounded once to the
+build's scalar; `Energy::constraint_integrals` totals the block sums on the
+host in block order, and `GasState::advance_p0_mixture` takes one explicit
+Euler step of (133.22) in f64 and rounds `p0` once. Because the rate never
+passes through a rounded `rho`, class A holds in f32. A gas without a mixture
+runs every launch it ran before (the old `energyTargetDivergence`, `update_density`,
+`advance_p0`), and on a gas with one `update_density` and `advance_p0` are refused
+by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
+with the current level's `1/W`, as it takes the `cp` field as last set.
+
+**What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
+`set_molar_change` takes the net source, and CHR-12b forms it from the species
+equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
+still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
+measured drift below is first order in `Δt`.
+
+**Gates, measured 2026-10-15 (both builds, `tests/gas_wmix.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `gas_constant_w_default_bitwise` | a sealed 4^3 walled box without a mixture, `T` 300-330 K, a uniform 1e3 W/m3 heater, three Euler steps of `update_density`, `update_target_divergence`, `correct` and `advance_p0`: SHA-256 of every `rho`, target divergence, `T`, `p0` and `dp0/dt`, against pins captured at the parent commit 41d449a, one per build | bitwise | D | equal in both builds |
+| `gas_wmix_sealed_box_p0_closed_form` | a sealed 2^3 walled box, `T` held at 300 K (isothermal: the energy equation not solved), no flow, no heat source, `A` with NO2's `W` and the inert `N = 2 A` (the shape of 2 NO2 -> N2O4, heat-neutral by construction), `S_A = -2 kg/(m3 s)`, `Y_A` in {0.9, 0.6, 0.3}: `dp0/dt` against (133.23) evaluated in f64 from the stored inputs; `p0` one Euler step of it (D); `rho` against (133.20) and, at the new `p0`, the target divergence against its own `D` (R, D-F32-1); seven refusals by name | `1e-12` relative (A); `1e-12`, `1e-5` in f32 (R) | A, D, R | `dp0/dt` `1.15e-16` (f64) and `1.19e-16` (f32); `rho` `2.29e-16` and `4.35e-8`; target divergence `2.05e-16` and `1.76e-8` |
+| (diagnostic, same test) | the same box adiabatic, `T` solved (Euler, one outer iteration per step, `ofgpu-lowmach`'s order), `Y_A(t) = 0.9 + S_A t/rho`, to `t = 0.05` s: `p0` against the exact `rho R Z (T_0 - p0_0/(rho cp))/(1 - R Z/cp)`, `Z = 1/W(t)`, and the mass drift `Σ rho V` | printed | — | 10 steps: `p0` error `1.05e-3` of its change, mass drift `5.8e-4`; 20 steps: `5.4e-4`, `2.9e-4`; order `0.96` in both builds |
+
+**The order of a step matters, measured.** The adiabatic leg first ran with
+`Y` at the step's new value on its current level and the old value on the
+previous one when `T` was solved. Then §26's conservative ddt row
+`(rho^n T - rho^(n-1) T°) cp/Δt` saw `rho^n ≠ rho^(n-1)` from `W` alone. `T`
+fell 9 K where the exact fall is 1.66 K, and the error did not shrink with
+`Δt`. In `ofgpu-lowmach`'s order the species are solved after `T`, so `Y`
+holds the step's opening value on both levels and `rho^n = rho^(n-1)` at the
+energy solve, as on the constant-`W` path. The numbers above are for that
+order. CHR-12b keeps it.
+
+Labels: (133.19)-(133.23).
 
 ---
 

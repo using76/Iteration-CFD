@@ -19,7 +19,11 @@
       summed into, kernel energyAccumulate
     M. S. Day, J. B. Bell, Combust. Theory Model. 4 (2000) 535-556, eqs.
       (1)-(6) - the species' enthalpy flux in the temperature equation,
-      SPEC-LIT 133.9, kernels energyMixtureCpAdd, energyEnthalpyDiffusionAdd
+      SPEC-LIT 133.9, kernels energyMixtureCpAdd, energyEnthalpyDiffusionAdd;
+      eqs. (3) and (7) - the mixture molar mass in the equation of state and
+      the molar-change term of the divergence constraint, SPEC-LIT 133.10,
+      kernels energyFillAcc, energyAxpyAcc, energyMixtureDensity,
+      energyMixtureConstraint
   No GPL-licensed source was consulted.
 
   Every other piece of the energy equation - the ideal-gas density, the
@@ -412,4 +416,128 @@ extern "C" __global__ void energyRoundAcc
     const oflabel i = OFGPU_TID;
     if (i >= n) return;
     out[i] = (ofscalar)acc[i];
+}
+
+// --------------------------------------------------------------------------
+//  SPEC-LIT 133.10 (CHR-11): W_mix(Y) in the equation of state (133.19)-
+//  (133.20) and the molar-change term of the divergence constraint (133.21),
+//  with the two domain integrals of the sealed p0 ODE (133.22). Every sum
+//  and every quotient is formed in ofacc (double in both builds, SPEC-LIT
+//  118.1) and rounded once to the build's scalar.
+// --------------------------------------------------------------------------
+
+//- acc[i] = v -
+extern "C" __global__ void energyFillAcc
+(
+    ofacc* __restrict__ acc,
+    const ofacc v,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    acc[i] = v;
+}
+
+//- acc[i] += a x[i]: one solved member of (133.19) (x = Y_k,
+//  a = 1/W_k - 1/W_N) or of (133.21)'s molar sum (x = S_k) -
+extern "C" __global__ void energyAxpyAcc
+(
+    ofacc* __restrict__ acc,
+    const ofscalar* __restrict__ x,
+    const ofacc a,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    acc[i] += a * (ofacc)x[i];
+}
+
+//- (133.20): rho[i] = p0/(R T[i] (1/W)[i]), `p0OverR` = p0/R of the level -
+extern "C" __global__ void energyMixtureDensity
+(
+    ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ t,
+    const ofacc* __restrict__ invW,
+    const ofacc p0OverR,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    rho[i] = (ofscalar)(p0OverR / ((ofacc)t[i] * invW[i]));
+}
+
+//- Sum over the block, valid in thread 0 only; `warpAcc` is the caller's
+//  own shared array of 32, so two sums in one kernel never share one. Every
+//  thread of the block must reach it (no early return before it), and the
+//  launcher uses device::BLOCK == 256, a multiple of the warp size.
+OFGPU_DEV ofacc energyBlockSum_(ofacc v, ofacc* warpAcc)
+{
+    for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned wid = threadIdx.x >> 5;
+    const unsigned nw = (blockDim.x + 31u) >> 5;
+    if (lane == 0) warpAcc[wid] = v;
+    __syncthreads();
+    v = (threadIdx.x < nw) ? warpAcc[threadIdx.x] : (ofacc)0;
+    if (wid == 0)
+    {
+        for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
+    }
+    return v;
+}
+
+//- (133.21) on every cell, grid-stride, with (133.22)'s two integrals:
+//
+//      R_s = R (1/W)_c,   D_c = (q + qCond) R_s/(cp_c p0) + R T_c mol_c/p0,
+//      1/gamma_c = 1 - R_s/cp_c,   dst = D_c - (1/gamma_c) dp0dt/p0,
+//
+//  `mol` = sum_k (1/W_k - 1/W_N) S_k (mol/(m3 s)), `cp` read at
+//  cp[i*cpStride] (stride 0: the one constant), and the block's sums of
+//  D_c V_c and V_c/gamma_c into partialsD/partialsG[blockIdx.x] -
+extern "C" __global__ void energyMixtureConstraint
+(
+    ofscalar* __restrict__ dst,
+    ofacc* __restrict__ partialsD,
+    ofacc* __restrict__ partialsG,
+    const ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ qCond,
+    const ofscalar* __restrict__ t,
+    const ofacc* __restrict__ invW,
+    const ofacc* __restrict__ mol,
+    const ofscalar* __restrict__ cp,
+    const oflabel cpStride,
+    const ofscalar* __restrict__ v,
+    const ofacc rUniv,
+    const ofacc p0,
+    const ofacc dp0dt,
+    oflabel n
+)
+{
+    __shared__ ofacc warpD[32];
+    __shared__ ofacc warpG[32];
+    const oflabel stride = (oflabel)(blockDim.x*gridDim.x);
+    ofacc sd = 0;
+    ofacc sg = 0;
+    for (oflabel i = (oflabel)OFGPU_TID; i < n; i += stride)
+    {
+        const ofacc rs = rUniv * invW[i];
+        const ofacc cpc = (ofacc)cp[i*cpStride];
+        const ofacc d = ((ofacc)q[i] + (ofacc)qCond[i]) * rs / (cpc * p0)
+            + rUniv * (ofacc)t[i] * mol[i] / p0;
+        const ofacc ig = (ofacc)1 - rs / cpc;
+        dst[i] = (ofscalar)(d - ig * dp0dt / p0);
+        const ofacc vol = (ofacc)v[i];
+        sd += d * vol;
+        sg += ig * vol;
+    }
+    sd = energyBlockSum_(sd, warpD);
+    sg = energyBlockSum_(sg, warpG);
+    if (threadIdx.x == 0)
+    {
+        partialsD[blockIdx.x] = sd;
+        partialsG[blockIdx.x] = sg;
+    }
 }
