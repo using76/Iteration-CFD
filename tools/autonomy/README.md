@@ -506,6 +506,25 @@ The fresh test seed — a second claim (docs/15 §F) needs a fresh test seed and
   lock, the in-memory regen and the lock history. The seed-1 split and its
   lock are never rewritten.
 
+Any fresh seed N (AUT-13) — `split.py --write-fresh N` and `--check-fresh N`
+  take any corpus seed N >= 2 the same way: `manifests/seedN/`, split name
+  `testN` (`split.fresh_seed_of`), sealed outside mode evaluate, and the guard
+  seals the ids of every `seedN/split.lock` present (`split.fresh_seeds`).
+  `--check-fresh N`'s disjoint line also counts the ids shared with every other
+  fresh lock. A write INTO THE TREE is refused before anything is written
+  unless `--go PROJECTION.json` names a `projection.py` report whose verdict
+  is GO, or `--user-spend` records the user's explicit spend (D-9); a write
+  under `--out DIR` elsewhere needs neither. `evaluate.py --manifest testN
+  --scope reduced|full` runs fresh seed N under `fresh_plan(N)` (seed 2's plan
+  with its seed: the G-BLC-1 targets stay D-L9's 0.09 / 0.05) and reports in
+  `evaluate/seedN/<scope>`; `--plan --manifest testN` exits 2 naming the
+  missing lock while seed N is unwritten. Seed 2's plan, departures and files
+  are byte-unchanged. **Seed 3 is not written:** AUT-12 projected NO-GO
+  (`projection/AUT12.json`: G-FAIL 71/420 > 23, G-COST 5.84x), so AUT-13
+  built and tested the generalisation in temporary directories only; its
+  full-size `--write-fresh 3` / `--check-fresh 3` there matched an
+  independent re-derivation of the section E draw byte for byte (180 rows).
+
 ## sensitivity.py — G-PILOT
 
 - `sensitivity.py` — docs/15 §B's measured failure turned into a decision: a

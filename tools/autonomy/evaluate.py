@@ -163,14 +163,27 @@ REDUCED_GDET_FAMILIES = ("D", "F")
 BLC1_8_MIN = 0.09
 BLC1_FULL_MIN = 0.05        # docs/15 section F G-BLC-1, the user's targets (D-L9, 2026-10-03)
 FID_METRICS_FRESH = FID_METRICS + (("feature_capture", "ge"),)   # the F3e row
-FRESH_PLAN = {"seed": FRESH_SEED, "scopes": list(SCOPES),
-              "reduced": {"salt": REDUCED_SALT, "per_family": 1,
-                          "d_commensurate": True,
-                          "gdet_families": list(REDUCED_GDET_FAMILIES)},
-              "blc1": {"families": list(baseline.TIER1),
-                       "blc8_min": BLC1_8_MIN,
-                       "blc_full_min": BLC1_FULL_MIN},
-              "fid_metrics": [m for m, _op in FID_METRICS_FRESH]}
+
+
+def fresh_plan(seed):
+    """The fresh plan of seed N (AUT-13): seed 2's plan with its seed; the
+    G-BLC-1 targets stay D-L9's 0.09 / 0.05."""
+    return {"seed": seed, "scopes": list(SCOPES),
+            "reduced": {"salt": REDUCED_SALT, "per_family": 1,
+                        "d_commensurate": True,
+                        "gdet_families": list(REDUCED_GDET_FAMILIES)},
+            "blc1": {"families": list(baseline.TIER1),
+                     "blc8_min": BLC1_8_MIN,
+                     "blc_full_min": BLC1_FULL_MIN},
+            "fid_metrics": [m for m, _op in FID_METRICS_FRESH]}
+
+
+def fresh_dir(seed):
+    """Where fresh seed N's plan lock lives; each scope reports below it."""
+    return os.path.join(REPORT_DIR, "seed%d" % seed)
+
+
+FRESH_PLAN = fresh_plan(FRESH_SEED)
 FRESH_DEPARTURES = (
     "The fresh test seed is corpus seed 2: one pool per family at seed 2 with the seed-1 sizes, the same stratified "
     "largest-remainder draw (salt 17, no spent ids), and only its 180 test rows are written, to "
@@ -191,6 +204,22 @@ FRESH_DEPARTURES = (
     "records the plan; the reduced and full scopes share that one plan, and a run with any other plan is refused: "
     "the seed is spent (§F).",
 )
+
+
+def fresh_departures(seed):
+    """FRESH_DEPARTURES for fresh seed N: seed 2's text verbatim, and for
+    N > 2 the seed, its directory and its split name substituted."""
+    if seed == FRESH_SEED:
+        return FRESH_DEPARTURES
+    first = FRESH_DEPARTURES[0].replace(
+        "corpus seed 2: one pool per family at seed 2",
+        "corpus seed %d: one pool per family at seed %d" % (seed, seed)).replace(
+        "corpus/manifests/seed2/", "corpus/manifests/seed%d/" % seed).replace(
+        "the seed-1 split and its lock are untouched and spent",
+        "the seed-1 split, the earlier fresh seeds and their locks are untouched and spent")
+    last = FRESH_DEPARTURES[-1].replace(
+        "split.load('test2', 'evaluate')", "split.load('test%d', 'evaluate')" % seed)
+    return (first,) + FRESH_DEPARTURES[1:-1] + (last,)
 
 
 def _dump_json(path, obj):
@@ -240,9 +269,9 @@ def verify_seal(report_dir=baseline.REPORT_DIR):
 
 
 def lock_test_ids(manifest="test"):
-    """The seed-1 lock's test ids, or the fresh lock's for FRESH_SPLIT."""
-    if manifest == FRESH_SPLIT:
-        return split.fresh_test_ids(FRESH_SEED)
+    """The seed-1 lock's test ids, or the fresh lock's for a testN."""
+    if split.fresh_seed_of(manifest):
+        return split.fresh_test_ids(split.fresh_seed_of(manifest))
     lock = split.read_lock(os.path.join(split.MANIFEST_DIR, "split.lock"))
     return lock["test_ids"].split()
 
@@ -301,7 +330,7 @@ def reduced_gdet(ids) -> list:
 
 def open_split(manifest):
     """The evaluation's only manifest readers; "test" opens the sealed
-    split, FRESH_SPLIT the fresh one (mode evaluate only)."""
+    split, a testN the fresh seed N's (mode evaluate only)."""
     if manifest == "test":
         rows = split.load("test", split.EVALUATE)
         if len(rows) != TEST_N:
@@ -309,13 +338,13 @@ def open_split(manifest):
                             % (len(rows), TEST_N))
         return {"source": "test", "sha256": campaign.manifest_sha("test"),
                 "rows": rows, "rehearsal": False}
-    if manifest == FRESH_SPLIT:
-        rows = split.load(FRESH_SPLIT, split.EVALUATE)
+    if split.fresh_seed_of(manifest):
+        rows = split.load(manifest, split.EVALUATE)
         if len(rows) != TEST_N:
             raise EvalError("open_split: the fresh split holds %d rows, "
                             "not %d" % (len(rows), TEST_N))
-        return {"source": FRESH_SPLIT,
-                "sha256": campaign.manifest_sha(FRESH_SPLIT),
+        return {"source": manifest,
+                "sha256": campaign.manifest_sha(manifest),
                 "rows": rows, "rehearsal": False}
     rows = campaign.load_manifest(manifest, split.EVALUATE)
     for r in rows:
@@ -1072,29 +1101,34 @@ def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
             or not 1 <= streams <= campaign.MAX_STREAMS:
         raise EvalError("streams: %r is not an int in 1..%d"
                         % (streams, campaign.MAX_STREAMS))
+    fseed = split.fresh_seed_of(manifest)
     if scope is not None:
         if scope not in SCOPES:
             raise EvalError("scope: %r is not one of %s"
                             % (scope, ", ".join(SCOPES)))
         if manifest == "test":
             raise EvalError("the seed-1 test split is spent: a scope runs on "
-                            "the fresh split %s or a rehearsal file"
-                            % FRESH_SPLIT)
-        if manifest == FRESH_SPLIT:
+                            "a fresh split testN (N >= %d) or a rehearsal "
+                            "file" % split.FRESH_SEED_MIN)
+        if fseed is not None:
             if attempt_fn or probe_fn or snap_fn or hooks or baselines \
                     or gdet_n is not None:
                 raise EvalError("the fresh evaluation runs the real system on "
                                 "B0-template measured fresh: no fakes, no "
                                 "hooks, no --baselines, no --gdet-n")
-            want_dir = os.path.join(FRESH_DIR, scope)
+            want_dir = os.path.join(fresh_dir(fseed), scope)
             if report_dir is None:
                 report_dir = want_dir
             elif os.path.abspath(report_dir) != os.path.abspath(want_dir):
                 raise EvalError("a %s run of the fresh seed reports in %s "
                                 "(--report-dir)" % (scope, want_dir))
-            ids_all = lock_test_ids(FRESH_SPLIT)
+            ids_all = lock_test_ids(manifest)
+            if not ids_all:
+                raise EvalError("fresh seed %d has no lock: %s is not written "
+                                "(split.py --write-fresh %d, only on a GO)"
+                                % (fseed, manifest, fseed))
             rehearsal = False
-            fresh_seed = FRESH_SEED
+            fresh_seed = fseed
         else:
             if baselines or gdet_n is not None:
                 raise EvalError("a fresh rehearsal measures B0-template "
@@ -1113,17 +1147,18 @@ def run(work, *, manifest="test", baselines=None, gdet_n=None, streams=6,
             fresh_seed = None
         lock_dir = os.path.dirname(report_dir)
         gdet_all = gdet_ids(ids_all)
-        source = FRESH_SPLIT if manifest == FRESH_SPLIT \
+        source = manifest if fseed is not None \
             else os.path.abspath(manifest).replace(os.sep, "/")
         base_fresh = {"b0-template": "measured fresh",
                       "b0-lhs": "not measured"}
         plan = plan_of({"source": source,
                         "sha256": campaign.manifest_sha(source),
                         "n": len(ids_all)}, rehearsal, gdet_all, streams,
-                       binary, base_fresh, fresh=FRESH_PLAN)
+                       binary, base_fresh,
+                       fresh=fresh_plan(FRESH_SEED if fseed is None else fseed))
         write_lock(lock_dir, plan)
-        if manifest == FRESH_SPLIT:
-            opened = open_split(FRESH_SPLIT)
+        if fseed is not None:
+            opened = open_split(manifest)
         if opened["sha256"] != plan["manifest"]["sha256"] \
                 or len(opened["rows"]) != plan["manifest"]["n"]:
             raise EvalError("the opened split (%s, n %d) differs from the "
@@ -1378,7 +1413,8 @@ def report(report_dir=REPORT_DIR, *, write=True, quiet=False):
         stale = ("The sealed B0-template rows",
                  "The test manifest is opened once")
         rep["departures"] = [d for d in DEPARTURES
-                             if not d.startswith(stale)] + list(FRESH_DEPARTURES)
+                             if not d.startswith(stale)] + list(
+                                 fresh_departures(fresh["seed"] or FRESH_SEED))
     if write:
         _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
         _write_text(os.path.join(report_dir, REPORT_MD), report_md(rep))
@@ -1524,8 +1560,8 @@ def report_md(rep):
     L = []
     fr = rep.get("fresh")
     if fr:
-        L.append("# Fresh-seed evaluation (corpus seed 2, scope %s)"
-                 % fr["scope"])
+        L.append("# Fresh-seed evaluation (corpus seed %d, scope %s)"
+                 % (fr["seed"] or FRESH_SEED, fr["scope"]))
         L.append("")
         if fr["reduced"]:
             L.append("REDUCED: a pre-registered subset of %d of the %d fresh "
@@ -1977,18 +2013,18 @@ def _cli_plan(report_dir):
     return 0
 
 
-def _cli_plan_fresh():
-    """--plan --manifest test2: the fresh lock's facts, nothing opened."""
-    sha = campaign.manifest_sha(FRESH_SPLIT)
-    ids = lock_test_ids(FRESH_SPLIT)
+def _cli_plan_fresh(manifest=FRESH_SPLIT):
+    """--plan --manifest testN: the fresh lock's facts, nothing opened."""
+    sha = campaign.manifest_sha(manifest)
+    ids = lock_test_ids(manifest)
     print("[eval] fresh split %s: %d geometries in the fresh lock (manifest "
-          "sha %s), not opened" % (FRESH_SPLIT, len(ids), sha[:12]))
+          "sha %s), not opened" % (manifest, len(ids), sha[:12]))
     print("[eval] campaigns: %s" % ", ".join(c[0] for c in CAMPAIGNS))
     print("[eval] G-DET ids: %s" % " ".join(gdet_ids(ids)))
     print("[eval] G-BLC-1 targets: BLC_8 >= %.2f, BLC_full >= %.2f "
           "(tier 1: %s)"
           % (BLC1_8_MIN, BLC1_FULL_MIN, "/".join(baseline.TIER1)))
-    lpath = os.path.join(FRESH_DIR, LOCK_NAME)
+    lpath = os.path.join(fresh_dir(split.fresh_seed_of(manifest)), LOCK_NAME)
     print("[eval] lock: %s"
           % ("present" if os.path.isfile(lpath) else "absent"))
     return 0
@@ -2013,23 +2049,24 @@ def main(argv=None):
     if a.report_dir:
         rdir = a.report_dir
     elif a.scope:
-        rdir = os.path.join(FRESH_DIR, a.scope)
+        rdir = os.path.join(fresh_dir(split.fresh_seed_of(a.manifest)
+                                      or FRESH_SEED), a.scope)
     else:
         rdir = REPORT_DIR
     try:
         if a.selftest:
             return _selftest()
         if a.plan:
-            if a.manifest == FRESH_SPLIT:
-                return _cli_plan_fresh()
+            if split.fresh_seed_of(a.manifest):
+                return _cli_plan_fresh(a.manifest)
             return _cli_plan(rdir)
         if a.run:
             if not a.work:
                 print("evaluate: --run needs --work", file=sys.stderr)
                 return 2
-            if a.manifest == FRESH_SPLIT and not a.scope:
+            if split.fresh_seed_of(a.manifest) and not a.scope:
                 print("evaluate: --manifest %s needs --scope (%s)"
-                      % (FRESH_SPLIT, "/".join(SCOPES)), file=sys.stderr)
+                      % (a.manifest, "/".join(SCOPES)), file=sys.stderr)
                 return 2
             sources = None
             if a.baselines:
@@ -2656,6 +2693,23 @@ def _selftest():
         rf = g_fid(ff, fb, True, metrics=FID_METRICS_FRESH)
         assert rf["worse"] == [["B", "feature_capture"]], rf["worse"]
         assert rf["compared"] == 4 and rf["verdict"] == FAIL
+        # AUT-13: any fresh seed N; seed 2's plan and text are unchanged
+        assert fresh_plan(2) == FRESH_PLAN and fresh_dir(2) == FRESH_DIR
+        p3 = fresh_plan(3)
+        assert p3["seed"] == 3 and dict(p3, seed=2) == FRESH_PLAN
+        assert p3["blc1"]["blc8_min"] == 0.09 \
+            and p3["blc1"]["blc_full_min"] == 0.05
+        assert fresh_dir(3) == os.path.join(REPORT_DIR, "seed3")
+        lock2 = os.path.join(FRESH_DIR, LOCK_NAME)
+        if os.path.isfile(lock2):
+            assert _read_json(lock2)["plan"]["fresh"] == fresh_plan(2)
+        assert fresh_departures(2) is FRESH_DEPARTURES
+        d3 = fresh_departures(3)
+        assert len(d3) == len(FRESH_DEPARTURES)
+        assert d3[1:-1] == FRESH_DEPARTURES[1:-1]
+        assert "corpus seed 3: one pool per family at seed 3" in d3[0]
+        assert "corpus/manifests/seed3/" in d3[0] and "seed2" not in d3[0]
+        assert "split.load('test3', 'evaluate')" in d3[-1]
         p9 = plan_of({"source": "x", "sha256": "y", "n": 4}, True, ["D-1-010"],
                      2, campaign.BINARY_DEFAULT,
                      {"b0-template": "a", "b0-lhs": "b"})
@@ -2731,6 +2785,34 @@ def _selftest():
             raise AssertionError("a scope on the seed-1 split was accepted")
         except EvalError as e:
             assert "spent" in str(e), e
+        # AUT-13: testN for any N; seed 3 is not written (AUT-12 NO-GO)
+        try:
+            run(os.path.join(tmp, "w10z"), manifest="test3", scope="reduced",
+                attempt_fn=prior._wall_oracle, quiet=True)
+            raise AssertionError("a fake on test3 was accepted")
+        except EvalError as e:
+            assert "no fakes" in str(e), e
+        if 3 not in split.fresh_seeds():
+            try:
+                run(os.path.join(tmp, "w10z"), manifest="test3",
+                    scope="reduced", quiet=True)
+                raise AssertionError("test3 ran without its lock")
+            except EvalError as e:
+                assert "fresh seed 3 has no lock" in str(e), e
+            assert not os.path.exists(fresh_dir(3))
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
+            p5 = subprocess.run([sys.executable, os.path.abspath(__file__),
+                                 "--plan", "--manifest", "test3"],
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", env=env,
+                                timeout=300)
+            assert p5.returncode == 2 and "no split.lock" in p5.stderr, \
+                (p5.returncode, p5.stderr[-300:])
+        rep3 = dict(rep_r, fresh=dict(rep_r["fresh"], seed=3))
+        assert "# Fresh-seed evaluation (corpus seed 3, scope reduced)" \
+            in report_md(rep3)
+        assert "# Fresh-seed evaluation (corpus seed 2, scope reduced)" \
+            in report_md(rep_r)
 
     for name, fn in (("constants, the seal, the G-DET ids", g1),
                      ("statistics", g2),
