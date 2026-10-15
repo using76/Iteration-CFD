@@ -71,6 +71,14 @@ export interface BinarySpec {
    * ofgpu-par's ranks / transport pair, -np and -comm (PAR-17).
    */
   runOptions?: RunOptionGroup[]
+  /**
+   * Set on a driver that reads only a case stating a gas: a JSONC case with
+   * `physics.compressible`, an OpenFOAM case with
+   * `constant/thermophysicalProperties` (SPEC-LIT §122.6). `driversFor` keeps
+   * it out of every other case's suggestions and keeps the others out of a
+   * gas case's.
+   */
+  compressible?: true
 }
 
 export interface RunOptionGroup {
@@ -373,6 +381,31 @@ export const BINARIES: BinarySpec[] = [
     longRunning: true,
     gpu: true,
     usageKind: 'constUsage',
+  },
+  {
+    name: 'ofgpu-compressible',
+    source: 'src/bin/compressible.rs',
+    purpose: 'Pressure-based all-speed compressible solver (SPEC-LIT §122 to §127), driven by nothing but the case: the gas is the JSONC `physics.compressible` block or an OpenFOAM case\'s constant/thermophysicalProperties. `ddt` steadyState or localEuler is a steady SIMPLE run, Euler or backward a transient PIMPLE run at the case\'s deltaT. v1 is laminar on one GPU and refuses by name what it does not have (turbulence, decomposition, mesh motion, sources, a Boussinesq body force, non-Newtonian rheology; §122.4). Writes p (gauge, about pOperating), U, T, rho and Mach through the one output pipeline (§44).',
+    summary: 'All-speed compressible solver, laminar (JSONC case with physics.compressible, or OpenFOAM directory).',
+    kind: 'solver',
+    positionals: [{ name: 'case', type: 'path', description: 'A .jsonc case file with physics.compressible, or an OpenFOAM case directory with constant/thermophysicalProperties.' }],
+    flags: [
+      { name: '-iters', type: 'int', description: 'Steps (transient) or SIMPLE iterations (steady); default endTime/deltaT of the case.' },
+      { name: '-reportEvery', type: 'int', default: 10, description: 'Print the last outer iteration\'s line every N steps (always on the first and the last step).' },
+      OUTPUT_LIST,
+      { name: '-writeInterval', type: 'time', description: 'Transient runs only: write every W seconds of physical time (SPEC-LIT §44.4).' },
+      { name: '-writeEvery', type: 'int', description: 'Steady runs only: write every N iterations.' },
+      { name: '-noWrite', type: 'flag', description: 'Write nothing, not even the final state.' },
+      PERMISSIVE,
+    ],
+    accepts: ['jsonc', 'foamDir'],
+    builds: ['laminar'],
+    residualStyle: 'generic',
+    writes: { formats: ['foam', 'vtu', 'nvdb', 'vdb', 'usda'], restart: false, csv: false },
+    longRunning: true,
+    gpu: true,
+    usageKind: 'usageFn',
+    compressible: true,
   },
   {
     name: 'ofgpu-datacentre',
@@ -806,7 +839,7 @@ export const MODELS: ModelSpec[] = [
   { name: 'Smagorinsky', family: 'LES', title: 'Smagorinsky LES', equations: [], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: {}, specRef: '§30', notes: 'Werner-Wengle wall model by default.' },
   { name: 'WALE', family: 'LES', title: 'WALE LES', equations: [], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: {}, specRef: '§30', notes: '' },
   { name: 'kEqn', family: 'LES', title: 'Deardorff one-equation LES', equations: ['k'], drivers: ['ofgpu-buoyant', 'ofgpu-lowmach'], kind: 'LES', requires: { initial: ['k'] }, specRef: '§30', notes: '' },
-  { name: 'laminar', family: 'laminar', title: 'Laminar (no closure)', equations: [], drivers: ['ofgpu-k-epsilon', 'ofgpu-buoyant', 'ofgpu-lowmach', 'ofgpu-vof', 'ofgpu-cht'], kind: 'RAS', requires: {}, specRef: '§5', notes: 'nu_t frozen at zero.' },
+  { name: 'laminar', family: 'laminar', title: 'Laminar (no closure)', equations: [], drivers: ['ofgpu-k-epsilon', 'ofgpu-buoyant', 'ofgpu-lowmach', 'ofgpu-vof', 'ofgpu-cht', 'ofgpu-compressible'], kind: 'RAS', requires: {}, specRef: '§5', notes: 'nu_t frozen at zero.' },
 ]
 
 export function getModel(name: string): ModelSpec | undefined {
@@ -819,7 +852,8 @@ export const PICK_LISTS = {
   wallTreatments: ['standard', 'spalding', 'rough', 'lowRe'],
   algorithms: ['SIMPLE', 'PISO', 'PIMPLE'],
   meshKinds: ['cartesian'],
-  patchKinds: ['wall', 'inlet', 'open', 'empty', 'symmetry'],
+  // PatchPresetKind of docs/schema/case-1.json; farfield and supersonicInlet need physics.compressible
+  patchKinds: ['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'],
   buoyancy: ['densityRatio', 'boussinesq'],
   ddt: ['steadyState', 'Euler', 'backward', 'CrankNicolson', 'localEuler'],
   exactFormats: ['foam', 'vtu'],
@@ -844,16 +878,30 @@ export function isJsonCase(path: string): boolean {
   return /\.jsonc?$/i.test(path)
 }
 
-/** Drivers that can run a given model on a given case format, in preference order. */
-export function driversFor(model: string | null, format: CaseFormat): string[] {
+/**
+ * Drivers that can run a given model on a given case format, in preference order.
+ * `compressible` says whether the case states a gas (`statesCompressible`): true keeps
+ * only the drivers marked `compressible`, false drops them, absent does not filter.
+ */
+export function driversFor(model: string | null, format: CaseFormat, compressible?: boolean): string[] {
   const out: string[] = []
   for (const b of BINARIES) {
     if (b.kind !== 'solver') continue
     if (!b.accepts.includes(format)) continue
     if (model && !b.builds.includes(model)) continue
+    if (compressible !== undefined && compressible !== (b.compressible === true)) continue
     out.push(b.name)
   }
   return out
+}
+
+/** Whether a parsed JSONC case states a gas: `physics.compressible` is an object (SPEC-LIT §122.6). */
+export function statesCompressible(json: unknown): boolean {
+  if (!json || typeof json !== 'object') return false
+  const physics = (json as { physics?: unknown }).physics
+  if (!physics || typeof physics !== 'object') return false
+  const gas = (physics as { compressible?: unknown }).compressible
+  return !!gas && typeof gas === 'object' && !Array.isArray(gas)
 }
 
 /** A number, or a string that is entirely a number. Anything else is NaN. */

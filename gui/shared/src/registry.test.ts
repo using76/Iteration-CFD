@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BINARIES, checkArgValue, getBinary, type FlagSpec } from './registry.js'
+import { BINARIES, checkArgValue, driversFor, getBinary, statesCompressible, type FlagSpec } from './registry.js'
 
 const spec = (type: FlagSpec['type'], name = '-x'): FlagSpec => ({ name, type, description: 'test' }) as FlagSpec
 
@@ -64,5 +64,32 @@ describe('run options (PAR-17)', () => {
     // threads only: PAR-06 (MPI) is deferred, so mpi is never offered
     expect(par.flags.find((f) => f.name === '-comm')?.values).toEqual(['threads'])
     expect(checkArgValue(par.flags.find((f) => f.name === '-comm')!, 'mpi')).toMatch(/must be one of threads/)
+  })
+})
+
+describe('ofgpu-compressible (CMP-29)', () => {
+  it('is offered with the flags of its usage(), reads both case formats and is laminar only', () => {
+    const c = getBinary('ofgpu-compressible')!
+    expect(c.pending).toBeUndefined()
+    expect([c.source, c.kind, c.usageKind, c.residualStyle, c.gpu, c.compressible]).toEqual(['src/bin/compressible.rs', 'solver', 'usageFn', 'generic', true, true])
+    expect(c.flags.map((f) => f.name)).toEqual(['-iters', '-reportEvery', '-output', '-writeInterval', '-writeEvery', '-noWrite', '-permissive'])
+    expect(c.accepts).toEqual(['jsonc', 'foamDir'])
+    expect(c.builds).toEqual(['laminar'])
+    expect(c.writes).toEqual({ formats: ['foam', 'vtu', 'nvdb', 'vdb', 'usda'], restart: false, csv: false })
+  })
+
+  it('driversFor routes a case that states a gas to it alone, and no other case to it', () => {
+    expect(driversFor(null, 'jsonc', true)).toEqual(['ofgpu-compressible'])
+    expect(driversFor('laminar', 'jsonc', true)).toEqual(['ofgpu-compressible'])
+    expect(driversFor('kEpsilon', 'jsonc', true)).toEqual([])
+    expect(driversFor('laminar', 'jsonc', false)).not.toContain('ofgpu-compressible')
+    expect(driversFor('laminar', 'jsonc', false)).toContain('ofgpu-lowmach')
+    expect(driversFor('kEpsilon', 'jsonc')).toEqual(driversFor('kEpsilon', 'jsonc', false))
+    expect(driversFor(null, 'jsonc')).toContain('ofgpu-compressible')
+  })
+
+  it('statesCompressible reads physics.compressible as an object', () => {
+    expect(statesCompressible({ physics: { compressible: { gamma: 1.4 } } })).toBe(true)
+    for (const v of [{ physics: {} }, { physics: { compressible: null } }, { physics: { compressible: [] } }, { physics: null }, null, 'x', {}]) expect(statesCompressible(v)).toBe(false)
   })
 })

@@ -23,6 +23,17 @@ describe('case schema', () => {
     }
   })
 
+  it('takes boussinesq, beta and a stated gas on plume.jsonc (CMP-29)', () => {
+    const json = parseJsonc(fs.readFileSync(path.join(REPO_ROOT, 'cases', 'plume.jsonc'), 'utf8'), [], { allowTrailingComma: true }) as { physics: Record<string, unknown> & { fluid: Record<string, unknown> } }
+    json.physics.buoyancy = 'boussinesq'
+    json.physics.fluid.beta = 3.4e-3
+    expect(schema.validate(json)).toEqual([])
+    json.physics.compressible = { gamma: 1.4, W: 0.0289647, viscosity: { model: 'const', mu: 1.8e-5 }, pOperating: 1e5 }
+    expect(schema.validate(json)).toEqual([])
+    json.physics.buoyancy = 'bogus'
+    expect(schema.validate(json).map((e) => e.pointer)).toContain('/physics/buoyancy')
+  })
+
   it('reports JSON pointers for a broken case', () => {
     const errors = schema.validate({ name: 42, mesh: { kind: 'polar', bounds: { min: [0, 0, 0], max: [1, 1, 1] }, cells: [1, 2] }, physics: {}, patches: [], initial: {}, numerics: {}, run: { endTime: 'soon' }, bogus: true })
     const pointers = errors.map((e) => e.pointer)
@@ -37,7 +48,9 @@ describe('case schema', () => {
   it('merges the enum pick-lists from $defs, including oneOf enum + const shapes', () => {
     const lists = mergePickLists(schema.schema)
     expect(lists.algorithms).toEqual(['SIMPLE', 'PISO', 'PIMPLE'])
-    expect(lists.patchKinds).toEqual(['wall', 'inlet', 'open', 'empty', 'symmetry'])
+    expect(lists.patchKinds).toEqual(['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'])
+    // the static fallback the system prompt prints is the generated list, not an older one
+    expect(PICK_LISTS.patchKinds).toEqual(lists.patchKinds)
     expect(lists.wallTreatments).toEqual(['standard', 'spalding', 'rough', 'lowRe'])
     expect(lists.turbulenceKinds).toEqual(['RAS', 'LES'])
     expect(lists.meshKinds).toEqual(['cartesian'])
