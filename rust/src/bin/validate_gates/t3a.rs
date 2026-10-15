@@ -920,8 +920,9 @@ fn study_of(
 /// §110.1's band rule as its text states it (§32.4): a result within its
 /// `u_val` of the band edge, on either side, is undecided - not a pass and
 /// not a miss. Inside is `|E| + u_val <= band`, outside `|E| - u_val > band`.
-/// (`crate::band_of`, which 110-A/B/C use, makes only the outside half
-/// undecided.) A NaN is outside.
+/// (`crate::band_of`, which 110-A/B/C use, states the same rule since
+/// docs/17 VAL-51; before it made only the outside half undecided.) A NaN is
+/// outside.
 pub(crate) fn band_110(e_abs: f64, band: f64, u_val: f64) -> Band {
     if e_abs + u_val <= band {
         Band::Inside

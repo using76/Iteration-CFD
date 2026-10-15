@@ -13374,7 +13374,12 @@ struct PlumeRecord {
     stations_m: [Scalar; 6], dt_c: [[Scalar; 6]; 3], w_c: [[Scalar; 6]; 3], iterations: usize, residual_u: Scalar,
 }
 
-const CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [None, None, None]; // 178.12, 392.24, 587.19
+// 178.12, 392.24, 587.19: the recorded runs of docs/17 VAL-51 (validate_gates/channel_dns.rs)
+static CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [
+    Some(&validate_gates::channel_dns::RECORDS[0]),
+    Some(&validate_gates::channel_dns::RECORDS[1]),
+    Some(&validate_gates::channel_dns::RECORDS[2]),
+];
 const STEP_RECORD: Option<&StepRecord> = None;
 const PLUME_RECORD: Option<&PlumeRecord> = None;
 
@@ -13427,10 +13432,16 @@ enum Band {
     Outside,
 }
 
+/// SPEC-LIT 110.1's rule as its text states it: "a result that lands within
+/// the uncertainty of a band edge is reported UNDECIDED, not as inside it",
+/// on either side of the edge - inside is `|E| + u_val <= band`, outside
+/// `|E| - u_val > band` (the rule `validate_gates::t3a::band_110` states; this
+/// one made only the outside half undecided until docs/17 VAL-51). A NaN is
+/// outside.
 fn band_of(e_abs: Scalar, band: Scalar, u_val: Scalar) -> Band {
-    if e_abs <= band {
+    if e_abs + u_val <= band {
         Band::Inside
-    } else if e_abs <= band + u_val {
+    } else if e_abs - u_val <= band {
         Band::Undecided
     } else {
         Band::Outside
@@ -13812,7 +13823,13 @@ fn check_channel_dns(c: &mut Checks) -> Result<()> {
             Err(why) => c.note(&answer_key_missing_line(id, file, &why)),
         }
     }
-    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS)
+    // The single build's finest runs of the same three legs (class R,
+    // docs/17 section 5.1 rule 4): a record, or the reason the run left none.
+    let single = std::array::from_fn(|i| {
+        let s = &validate_gates::channel_dns::SINGLE[i];
+        Some(s.as_ref().ok_or(validate_gates::channel_dns::SINGLE_NOT_RECORDED[i]))
+    });
+    check_channel_dns_on(c, keys, CHANNEL_DNS_RECORDS, single)
 }
 
 /// The worker behind [`check_channel_dns`]: parsed keys and record slots are
@@ -13823,6 +13840,7 @@ fn check_channel_dns_on(
     c: &mut Checks,
     keys: [Option<MkmProfile>; 3],
     records: [Option<&ChannelDnsRecord>; 3],
+    single: [Option<std::result::Result<&validate_gates::channel_dns::ChannelDnsSingle, &'static str>>; 3],
 ) -> Result<()> {
     // The key's own consistency rows (C-KEYCHK), per loaded file.
     for (i, k) in keys.iter().enumerate() {
@@ -13895,11 +13913,14 @@ fn check_channel_dns_on(
         }
         return Ok(());
     }
-    // C-VERDICT, per leg: the key and the record both exist.
+    // C-VERDICT, per leg: the key and the record both exist. Every row and
+    // verdict below is judged on a RECORDED run (docs/17 VAL-51), so it is
+    // counted as replayed and its verdict says so (SPEC-LIT 110.1).
     for i in 0..3 {
         let (Some(key), Some(rec)) = (&keys[i], records[i]) else {
             continue;
         };
+        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
         let u_tau = (rec.body_force * H_CHANNEL).sqrt();
         let (_ub_sim, ub_dns, b2, b3) =
             channel_functionals(rec.profile_fine, u_tau, NU_CHANNEL, key)?;
@@ -13911,31 +13932,54 @@ fn check_channel_dns_on(
             })
             .collect();
         let study = vv::grid_study(&levels)?;
-        let u_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs() * ub_dns;
+        let rel_input = (rec.tau_w_measured_kin / (rec.body_force * H_CHANNEL) - 1.0).abs();
+        let u_input = rel_input * ub_dns;
         let val = vv::validation(rec.u_b_plus[2], ub_dns, study.u_fine, u_input, 0.0);
+        c.note(&format!(
+            "110.5 {leg}: {} iterations per level, finest |U| res {}; U_b+ = {} / {} / {} at N_y = \
+             {} / {} / {}; DNS U_b+ = {} (trapezoid over the key's rows); binaries built at {}",
+            rec.iterations,
+            sci(f64::from(rec.residual_u), 3),
+            sci(f64::from(rec.u_b_plus[0]), 5),
+            sci(f64::from(rec.u_b_plus[1]), 5),
+            sci(f64::from(rec.u_b_plus[2]), 5),
+            rec.n_y[0],
+            rec.n_y[1],
+            rec.n_y[2],
+            sci(f64::from(ub_dns), 5),
+            validate_gates::channel_dns::BUILT_AT,
+        ));
         c.note(&study.one_line());
         c.note(&val.one_line("U_b+ on the finest mesh"));
         c.note(&format!(
             "u_input (S32.4): the driver's measured wall shear misses g_x h by \
-             {} relative - quoted, never folded into the band",
+             {} relative ({} in U_b+) - quoted, never folded into the band",
+            sci(f64::from(rel_input), 3),
             sci(f64::from(u_input), 3)
         ));
-        let leg = &MKM_KEYS[i].0["mkm99-".len()..];
-        match band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns) {
-            Band::Inside => c.check(
-                &format!(
-                    "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau \
-                     (absolute prediction, SPEC-LIT S110.2)"
-                ),
-                val.e.abs() / ub_dns,
-                0.05,
-            ),
+        c.note(&format!(
+            "110.2 {leg}: B2 sup-norm {} wall units, B3 worst sublayer deviation {}",
+            sci(f64::from(b2), 4),
+            sci(f64::from(b3), 4)
+        ));
+        let b1 = band_of(val.e.abs() / ub_dns, 0.05, val.u_val / ub_dns);
+        match b1 {
+            Band::Inside => c.replaying(|c| {
+                c.check(
+                    &format!(
+                        "Gate 110-A {leg}: U_b+ within 5% of the DNS at the case's own u_tau, \
+                         |E|/D + u_val/D (absolute prediction, SPEC-LIT S110.2)"
+                    ),
+                    (val.e.abs() + val.u_val) / ub_dns,
+                    0.05,
+                )
+            }),
             Band::Undecided => report_110a(
                 c,
                 Verdict::Open,
-                How::Live,
+                How::Replayed,
                 format!(
-                    "undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
+                    "{leg} B1 undecided: |E|/D = {} is within u_val/D = {} of the 5% edge (S32.4)",
                     sci(f64::from(val.e.abs() / ub_dns), 3),
                     sci(f64::from(val.u_val / ub_dns), 3)
                 ),
@@ -13945,9 +13989,9 @@ fn check_channel_dns_on(
             Band::Outside => report_110a(
                 c,
                 Verdict::Misses,
-                How::Live,
+                How::Replayed,
                 format!(
-                    "U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
+                    "{leg} B1: U_b+ = {} against the DNS {} - {:+.1}% of D, outside the 5% band; the \
                      study's order p = {}",
                     sci(f64::from(rec.u_b_plus[2]), 5),
                     sci(f64::from(ub_dns), 5),
@@ -13961,22 +14005,84 @@ fn check_channel_dns_on(
                 Some(Uncertainty::Study(study)),
             ),
         }
-        c.check(
-            &format!(
-                "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
-                 within 1.0 wall unit (SPEC-LIT S110.2)"
-            ),
-            b2,
-            1.0,
+        // B2 is a comparison with published data: outside its bar it is a
+        // MISS, asserted and printed by name (the user's 2026-10-14 rule),
+        // never a quietly failed row.
+        let b2_label = format!(
+            "Gate 110-A {leg}: B2 sup-norm of |u+_sim - u+_DNS| over 30 <= y+ <= Re_tau \
+             within 1.0 wall unit (SPEC-LIT S110.2)"
         );
-        c.check(
-            &format!(
-                "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
-                 to 2% (not a verdict, SPEC-LIT S110.2)"
-            ),
-            b3,
-            0.02,
-        );
+        if b2 <= 1.0 {
+            c.replaying(|c| c.check(&b2_label, b2, 1.0));
+        } else {
+            report_110a(
+                c,
+                Verdict::Misses,
+                How::Replayed,
+                format!(
+                    "{leg} B2: the finest column's u+ departs from the DNS by {} wall units over \
+                     30 <= y+ <= Re_tau, against the 1.0 bar",
+                    sci(f64::from(b2), 4)
+                ),
+                vec![],
+                Some(Uncertainty::SingleMesh("B2 is read on the finest mesh alone (SPEC-LIT 110.2)")),
+            );
+        }
+        c.replaying(|c| {
+            c.check(
+                &format!(
+                    "Gate 110-A {leg}: B3 self-check, recorded cells with y+ <= 4 obey u+ = y+ \
+                     to 2% (not a verdict, SPEC-LIT S110.2)"
+                ),
+                b3,
+                0.02,
+            )
+        });
+        // Class R (docs/17 section 5.1 rule 4): the single build's finest run lands in
+        // each band the f64 build's finest run landed in, B1 at the f64
+        // study's u_val.
+        let s = match single[i] {
+            None => {
+                c.note(&format!("110.5 {leg}: no single-build run is recorded on the finest level"));
+                continue;
+            }
+            // A run that diverged or stopped is recorded as exactly that
+            // (SPEC-LIT 110.1): the class-R row cannot be taken, and the miss
+            // is registered by name (the user's 2026-10-14 rule; SPEC-LIT §69.2 keeps
+            // the verdict word in the registry).
+            Some(Err(why)) => {
+                report_110a(
+                    c,
+                    Verdict::Misses,
+                    How::Replayed,
+                    format!("{leg} class R: the single build's finest run left no record - {why}"),
+                    vec![],
+                    Some(Uncertainty::SingleMesh("the single build's finest level alone (docs/17 section 5.1 rule 4)")),
+                );
+                continue;
+            }
+            Some(Ok(s)) => s,
+        };
+        let (_, _, b2s, b3s) = channel_functionals(s.profile_fine, u_tau, NU_CHANNEL, key)?;
+        let e_s = (s.u_b_plus - ub_dns).abs() / ub_dns;
+        let b1s = band_of(e_s, 0.05, val.u_val / ub_dns);
+        c.note(&format!(
+            "110.5 {leg} single build, N_y {}: U_b+ = {} (|E|/D {}), B2 {}, B3 {}, {} iterations, |U| res {}",
+            s.n_y,
+            sci(f64::from(s.u_b_plus), 5),
+            sci(f64::from(e_s), 3),
+            sci(f64::from(b2s), 4),
+            sci(f64::from(b3s), 4),
+            s.iterations,
+            sci(f64::from(s.residual_u), 3),
+        ));
+        let same = b1s == b1 && (b2s <= 1.0) == (b2 <= 1.0) && (b3s <= 0.02) == (b3 <= 0.02);
+        c.replaying(|c| {
+            c.require(
+                &format!("Gate 110-A {leg} single build: B1, B2 and B3 land where the f64 build's do (class R)"),
+                same,
+            )
+        });
     }
     Ok(())
 }
@@ -23617,7 +23723,7 @@ buoyancy_constant 0.935
             rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
         };
         let mut c = Checks::new();
-        check_channel_dns_on(&mut c, [Some(half), None, None], [None, None, None])
+        check_channel_dns_on(&mut c, [Some(half), None, None], [None, None, None], [None, None, None])
             .expect("the gate runs");
         assert_eq!(c.failures, 0, "3 rows is (5 + 1)/2, what ny = 5 asks for");
         let whole = MkmProfile {
@@ -23626,7 +23732,7 @@ buoyancy_constant 0.935
             rows: vec![(0.0, 0.0, 0.0), (0.01, 2.0, 2.0), (1.0, 178.12, 18.301)],
         };
         let mut c = Checks::new();
-        check_channel_dns_on(&mut c, [Some(whole), None, None], [None, None, None])
+        check_channel_dns_on(&mut c, [Some(whole), None, None], [None, None, None], [None, None, None])
             .expect("the gate runs");
         assert_eq!(c.failures, 1, "3 rows against ny = 3's (3 + 1)/2 = 2 fails");
     }
@@ -23679,6 +23785,11 @@ buoyancy_constant 0.935
         assert_eq!(band_of(0.04, 0.05, 0.01), Band::Inside);
         assert_eq!(band_of(0.055, 0.05, 0.01), Band::Undecided);
         assert_eq!(band_of(0.07, 0.05, 0.01), Band::Outside);
+        // SPEC-LIT 110.1: "a result that lands within the uncertainty of a
+        // band edge is reported UNDECIDED, not as inside it" - on the inside
+        // of the edge too (docs/17 VAL-51 found the one-sided rule).
+        assert_eq!(band_of(0.045, 0.05, 0.01), Band::Undecided);
+        assert_eq!(band_of(0.05, 0.05, 0.0), Band::Inside);
     }
 
     /// The synthetic DNS profile: `u+ = y+` to y+ 11, the log law above it.
@@ -23739,33 +23850,72 @@ buoyancy_constant 0.935
         assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
     }
 
-    /// (g) THIS TREE's own truth: the two tracked transcriptions load and
-    /// their key rows run, the three `fetched` DNS keys are absent on a
-    /// clean clone, and no record exists - so the three top-level checks
-    /// each register exactly one open, live verdict, BY NAME, in C-GATES
-    /// order, and nothing a key alone could close has closed.
+    /// (g) THIS TREE's own truth for 110-B and 110-C: the two tracked
+    /// transcriptions load and their key rows run, and no record exists - so
+    /// each registers exactly one open, live verdict, BY NAME, in C-GATES
+    /// order, and nothing a key alone could close has closed. (110-A has its
+    /// records since docs/17 VAL-51: test (g2).)
     #[test]
     fn the_three_sections_report_not_closed_by_name_on_this_tree() {
         let mut c = Checks::new();
-        check_channel_dns(&mut c).expect("110-A runs");
         check_backstep_reattachment(&mut c).expect("110-B runs");
         check_mccaffrey_plume(&mut c).expect("110-C runs");
         assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
-        assert_eq!(c.gates.len(), 3, "one report per gate");
+        assert_eq!(c.gates.len(), 2, "one report per gate");
         let gates: Vec<&str> = c.gates.iter().map(|g| g.gate).collect();
         assert_eq!(
             gates,
             [
-                "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
                 "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
                 "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
             ],
-            "the three gate names, in order"
+            "the two gate names, in order"
         );
         for g in &c.gates {
             assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
             assert_eq!(g.how, How::Live, "{}", g.headline);
         }
+    }
+
+    /// (g2) Gate 110-A on this tree (docs/17 VAL-51): its three legs are
+    /// recorded. Without the fetched keys (a clean clone) the gate reports
+    /// one open, live `answer key missing` verdict and compares nothing; with
+    /// them placed, every verdict is REPLAYED and they are the ones SPEC-LIT
+    /// 110.5's results rows state.
+    #[test]
+    fn gate_110a_replays_its_three_recorded_legs() {
+        let placed = MKM_KEYS.iter().all(|(id, _)| key::load_text(id).is_ok());
+        let mut c = Checks::new();
+        check_channel_dns(&mut c).expect("110-A runs");
+        if !placed {
+            assert_eq!(c.gates.len(), 1, "one report");
+            assert_eq!(c.gates[0].verdict, Verdict::Open);
+            assert_eq!(c.gates[0].how, How::Live);
+            assert!(c.gates[0].headline.starts_with("answer key missing"), "{}", c.gates[0].headline);
+            return;
+        }
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        for g in &c.gates {
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let got: Vec<(Verdict, &str)> =
+            c.gates.iter().map(|g| (g.verdict, g.headline.split(':').next().unwrap_or(""))).collect();
+        assert_eq!(
+            got,
+            [
+                (Verdict::Open, "chan180 B1 undecided"),
+                (Verdict::Misses, "chan180 B2"),
+                (Verdict::Misses, "chan180 class R"),
+                (Verdict::Open, "chan395 B1 undecided"),
+                (Verdict::Misses, "chan395 B2"),
+                (Verdict::Open, "chan590 B1 undecided"),
+                (Verdict::Misses, "chan590 B2"),
+            ],
+            "SPEC-LIT 110.5's results rows"
+        );
+        // Replayed rows: B3 on each leg, and the class-R row on the two legs
+        // whose single-build run finished (chan180's diverged, 110.5).
+        assert_eq!(c.replayed, 5, "three B3 rows and two class-R rows");
     }
 
     /// A recorded step run whose finest-mesh reattachment lands inside the

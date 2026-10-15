@@ -36,3 +36,7 @@ pub(crate) mod zpg;
 /// SPEC-LIT §143.5, Gate 131-P: TG0's turbulent pipe with kOmegaSST on the
 /// true wedge against its four bands (recorded ofgpu-lowmach runs, replayed).
 pub(crate) mod pipe;
+
+/// SPEC-LIT §110.2/§110.5, Gate 110-A: the plane channel's recorded runs at
+/// three `Re_tau` (data replayed by `validate.rs`'s channel gate).
+pub(crate) mod channel_dns;

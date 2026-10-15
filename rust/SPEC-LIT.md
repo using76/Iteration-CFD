@@ -34054,11 +34054,62 @@ has been made, and no verdict in this table is a claim.
 
 | gate | datum | finest-mesh value | study | verdict |
 |---|---|---|---|---|
-| Gate 110-A Re_tau 178.12 | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-A Re_tau 392.24 | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-A Re_tau 587.19 | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-A Re_tau 178.12 | MKM99 `chan180`: U_b+ = 15.6787 (trapezoid over the key's 65 rows) | U_b+ = 16.7138 at N_y 128, E = +6.60 % of D; B2 = 1.3555 wall units (at y+ 130.6); B3 = 1.171e-2 | 15.2919 / 16.2777 / 16.7138, monotone, p = 1.177, u_num = 0.4325 (2.76 % of D), u_input = 2.8e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; class R MISSES (the single-build run diverged) |
+| Gate 110-A Re_tau 392.24 | MKM99 `chan395`: U_b+ = 17.5448 (129 rows) | U_b+ = 18.5775 at N_y 128, E = +5.89 % of D; B2 = 1.2729 (at y+ 162.5); B3 = 6.34e-3 | 16.9912 / 18.0618 / 18.5775, monotone, p = 1.054, u_num = 0.5989 (3.41 % of D), u_input = 9.4e-7 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
+| Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
 | Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
+
+**The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
+stands, with nothing edited but `cells`: `cases/channelDns{180,395,590}.jsonc` (LaunderSharmaKE,
+`wallTreatment` lowRe, two-sided expansion 200) on scratch copies at `N_y = 32 / 64 / 128`, each
+`ofgpu-lowmach -iters 40000 -check 5000` in the f64 release build at `67af46d`, and each column
+from `ofgpu-sample column <copy> 40000 y 0.045 0.02 -mean`. The single build ran the three finest
+copies the same way. The records are constants in `src/bin/validate_gates/channel_dns.rs`, printed
+from the runs' own outputs by its ignored test `record_channel_dns`, and the gate replays them;
+`U_b+` is the sampler's column mean over the case's `u_tau = sqrt(g_x h)`, the profile is the
+finest column's 64 cells below `y = h`, and the measured shear is the driver's printed kinematic
+wall sink over its printed wall area (§32.5.2). Every run reached its 40 000 iterations with the
+§32.5.2 balance closed to 0.000 %, and the measured shear meets `g_x h` to 2.8e-6, 9.4e-7 and
+1.5e-6 relative, so `u_input` is negligible beside `u_num`. The iterations are converged in the
+quantity the gate reads: the finest `Re_tau = 178.12` copy run to 20 000 iterations gives a column
+mean `U_x` of 2.23283 m/s against 2.23279 at 40 000, 1.8e-5 relative. The last printed `|U| res` is
+3.0e-2 to 1.6e-1 and does not fall further; it is the normalised SIMPLE residual of a periodic case
+and is recorded, not read as convergence. The runs took 291-1 366 s each, about 1.8 h of card time
+in all, because other lanes' and another project's jobs held the card at up to 94 % (the uncontended
+price above is 4-5 min per run).
+
+What the record says. **B1 is OPEN (undecided) at all three `Re_tau`**: the finest `U_b+` lies
++6.60 %, +5.89 % and +4.51 % above the DNS, and `u_val/D` = 2.76 %, 3.41 % and 4.02 %, so each
+`|E|/D` is within `u_val/D` of the 5 % edge, one of them on the inside. **B2 MISSES at all three**,
+1.3555, 1.2729 and 1.0541 wall units against the 1.0 bar, against a published measurement-grade
+datum (§110.2's datum kind). B3 holds (1.17e-2, 6.3e-3, 4.9e-3 against 0.02). The disagreement is
+the model's, not the mesh's: on every leg `|E| > u_val`, and the three-mesh study runs AWAY from the
+DNS with refinement (the extrapolated `U_b+` is 17.060, 19.057 and 20.094, +8.8 %, +8.6 % and
++7.7 %), at an observed order near 1. The finest profile sits above the DNS over the whole of
+`30 <= y+ <= Re_tau`, by 0.25-0.45 at `y+ = 30` and most in the outer layer (the worst rows at
+`y+` = 130.6, 162.5 and 203.7), which is a raised log-layer intercept and wake: the low-Re
+Launder-Sharma model of this case under-predicts the friction at a given bulk speed. §110.2's
+expectation, stated in advance, was B1 inside at all three and B2 near its limit at the lowest
+`Re_tau`; B1 is not inside at any, and B2 misses at every one. That is recorded as found.
+
+The single build. At `Re_tau = 392.24` and `587.19` the single build's finest run lands in every band
+the f64 run lands in (class R holds): `U_b+` 18.5775 and 19.4942 against 18.5775 and 19.4944. At
+`Re_tau = 178.12` the single-build run DIVERGES: at outer iteration 32 503 the temperature goes
+non-finite (`T [inf, -inf]`) in a case whose walls are adiabatic and which has no heat source, after
+`T` had drifted to [293.147, 293.152] K from its uniform 293.15 under f32 round-off. A re-run
+diverges at the same iteration with the same residuals, so it is deterministic. The class-R row of
+that leg is not taken, and the gate registers a MISSES verdict for it ("chan180 class R") that
+quotes the driver's own `run ended:` line. No input or numerics was
+changed to make it run.
+
+The band rule. `band_of`, which Gates 110-A, 110-B and 110-C share, made only the OUTSIDE side of a
+band edge undecided, so a result inside the band by less than its `u_val` passed. §110.1 says
+otherwise: "a result that lands within the uncertainty of a band edge is reported UNDECIDED, not as
+inside it". Since VAL-51 `band_of` is inside when `|E| + u_val <= band` and outside when
+`|E| - u_val > band`, as §144.3's `band_110` already was. Under the old rule `Re_tau = 587.19`'s B1
+would have passed at 4.51 %; under the rule as written it is undecided. Gates 110-B and 110-C have
+no record yet, so nothing they print changed.
 
 ---
 
