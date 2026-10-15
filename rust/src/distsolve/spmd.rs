@@ -39,6 +39,13 @@
 //! faces only, so a cut face is absent from them (§73.5). It is still not
 //! partition-invariant, and [`SpmdWorkspace::partition_invariant`] says so.
 //!
+//! The **distributed GAMG** of SPEC-LIT §141.11 (AMG-07b) is attached by
+//! [`SpmdWorkspace::set_gamg`]: an `amg::DistGamg`, this rank's part of a
+//! block-local hierarchy with its coarsest level solved on every rank. It is
+//! `Preconditioner::Gamg` of both solvers and, through [`spmd_gamg`],
+//! `LinearSolverKind::Gamg` of [`spmd_solve`]. A cut changes the hierarchy,
+//! so it is not partition-invariant either.
+//!
 //! Every exchange and every collective is a host round trip, so
 //! [`spmd_pcg`], [`spmd_pbicgstab`] and [`spmd_solve`] inside `Gpu::capture`
 //! are refused by name (§81.3).
@@ -51,6 +58,7 @@
 
 use cudarc::driver::PushKernelArg;
 
+use crate::amg::DistGamg;
 use crate::comm::Comm;
 use crate::device::{cfg_for, DevBuf, Gpu};
 use crate::error::{Error, Result};
@@ -183,6 +191,9 @@ pub struct SpmdWorkspace {
     // ---- the part-local colouring, `None` until `colour` -----------------
     multicolour: Option<MultiColour>,
 
+    // ---- the distributed GAMG cycle, `None` until `set_gamg` (§141.11) ---
+    gamg: Option<DistGamg>,
+
     // ---- scalars, one value each -----------------------------------------
     rho: DevBuf<Scalar>,
     alpha: DevBuf<Scalar>,
@@ -253,6 +264,7 @@ impl SpmdWorkspace {
             s_hat: gpu.zeros(local)?,
             t: gpu.zeros(local)?,
             multicolour: None,
+            gamg: None,
             rho: gpu.zeros(1)?,
             alpha: gpu.zeros(1)?,
             beta: gpu.zeros(1)?,
@@ -302,7 +314,9 @@ impl SpmdWorkspace {
 
     /// Whether a solve with this workspace and `precon` produces bits that
     /// do not depend on how the mesh was cut - [`super::DistWorkspace`]'s
-    /// answer, reached the same way.
+    /// answer, reached the same way. `Gamg` is `false`: the distributed
+    /// cycle aggregates block-locally, so every cut is another hierarchy
+    /// (SPEC-LIT §141.11).
     pub fn partition_invariant(&self, precon: Preconditioner) -> bool {
         let reduction_ok = self.reduce == DistReduce::Exact;
         let precon_ok = matches!(precon, Preconditioner::None | Preconditioner::Diagonal);
@@ -378,6 +392,42 @@ impl SpmdWorkspace {
         self.multicolour.as_ref().map_or(0, |m| m.n_colours())
     }
 
+    /// Attach this rank's distributed GAMG cycle (SPEC-LIT §141.11), so
+    /// `Preconditioner::Gamg` becomes available to both solvers and
+    /// `LinearSolverKind::Gamg` to [`spmd_solve`]. It was built for this
+    /// rank, this world size and this part's owned and halo cells, or it is
+    /// refused by name. Local: it sends nothing, and every rank must attach
+    /// one, because the cycle is a collective.
+    pub fn set_gamg(&mut self, g: DistGamg) -> Result<()> {
+        if g.rank() != self.rank || g.n_ranks() != self.n_ranks {
+            return Err(Error::Config(format!(
+                "distsolve: the GAMG cycle was built on rank {} of {}, this \
+                 workspace is rank {} of {}",
+                g.rank(),
+                g.n_ranks(),
+                self.rank,
+                self.n_ranks
+            )));
+        }
+        if g.n_fine() != self.n || g.n_fine_local() != self.n_local {
+            return Err(Error::Config(format!(
+                "distsolve: the GAMG cycle was built for a part of {} owned + \
+                 {} halo cells, this workspace for {} owned + {} halo cells",
+                g.n_fine(),
+                g.n_fine_local() - g.n_fine(),
+                self.n,
+                self.n_local - self.n
+            )));
+        }
+        self.gamg = Some(g);
+        Ok(())
+    }
+
+    /// The attached distributed GAMG cycle, if any.
+    pub fn gamg(&self) -> Option<&DistGamg> {
+        self.gamg.as_ref()
+    }
+
     /// Which preconditioner a solve will really run, under the SPEC-LIT
     /// §13.4 rule: supported, or refused by name with the alternative.
     ///
@@ -401,14 +451,22 @@ impl SpmdWorkspace {
                     )
                 }
             }
-            Preconditioner::Gamg => crate::io::contract::unsupported(
-                "solvers/<var>/preconditioner",
-                requested.name(),
-                &["none", "diagonal"],
-                "diagonal (Jacobi): GAMG preconditioning of a distributed \
-                 solve arrives with AMG-07b",
-                Preconditioner::Diagonal,
-            ),
+            Preconditioner::Gamg => {
+                if self.gamg.is_some() {
+                    Ok(requested)
+                } else {
+                    crate::io::contract::unsupported(
+                        "solvers/<var>/preconditioner",
+                        requested.name(),
+                        &["none", "diagonal"],
+                        "diagonal (Jacobi): this SPMD workspace has no \
+                         distributed GAMG cycle attached; build one with \
+                         amg::DistGamg::new and attach it with \
+                         SpmdWorkspace::set_gamg (SPEC-LIT 141.11)",
+                        Preconditioner::Diagonal,
+                    )
+                }
+            }
         }
     }
 }
@@ -554,6 +612,53 @@ fn preflight(
     Ok((n, precon))
 }
 
+/// `dst = M^-1 src` on this rank's part: the distributed GAMG cycle for
+/// `Gamg` (SPEC-LIT §141.11), the parent's `dist_precondition` for ONE part
+/// - `solver::precondition_parts` unchanged - for every other kind.
+#[allow(clippy::too_many_arguments)]
+fn apply_preconditioner(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    gamg: &mut Option<DistGamg>,
+    dst: &mut DevBuf<Scalar>,
+    src: &DevBuf<Scalar>,
+    r_diag: &DevBuf<Scalar>,
+    multicolour: Option<&MultiColour>,
+    sys: &DistSystem,
+    precon: Preconditioner,
+    n: usize,
+) -> Result<()> {
+    if precon == Preconditioner::Gamg {
+        let Some(g) = gamg.as_mut() else {
+            return Err(Error::Config(
+                "distsolve: GAMG was selected without a distributed cycle; \
+                 SpmdWorkspace::effective_preconditioner should have rejected \
+                 this already"
+                    .to_string(),
+            ));
+        };
+        return g.precondition(gpu, comm, &sys.mesh[0], &sys.a[0], dst, src);
+    }
+    solver::precondition_parts(
+        gpu,
+        sol,
+        dst,
+        src,
+        r_diag,
+        multicolour,
+        &sys.a[0],
+        &sys.mesh[0],
+        precon,
+        n,
+    )
+}
+
+/// The cycle's halo exchanges so far, 0 without a cycle.
+fn gamg_exchanges(w: &SpmdWorkspace) -> u64 {
+    w.gamg.as_ref().map_or(0, |g| g.n_exchanges())
+}
+
 /// Build the preconditioner on this rank's part - the parent's
 /// `dist_build_preconditioner` for ONE part, the same kernels in the same
 /// order: nothing for `None`, `invert_diag` for `Diagonal`, the part's own
@@ -582,6 +687,11 @@ fn build_preconditioner(
                 .arg(&nl)
                 .launch(cfg_for(n))?;
         }
+        return Ok(());
+    }
+    // GAMG launches nothing here: the cycle was built and uploaded when
+    // `DistGamg::new` ran, and `set_gamg` checked its shape (§141.11).
+    if precon == Preconditioner::Gamg {
         return Ok(());
     }
     let SpmdWorkspace { r_diag, multicolour, .. } = w;
@@ -623,7 +733,8 @@ fn build_preconditioner(
 /// **Symmetric positive definite only**, and nothing here checks it - the
 /// same rule and the same reason as the serial solver. `Diagonal`, `None`
 /// and, once the workspace is coloured, the block-local `Dic` and `Dilu`
-/// precondition.
+/// precondition, and, once a cycle is attached, the distributed GAMG with a
+/// symmetric cycle (`n_pre == n_post`, §141.11).
 #[allow(clippy::too_many_arguments)]
 pub fn spmd_pcg(
     gpu: &Gpu,
@@ -683,11 +794,28 @@ pub(super) fn spmd_pcg_float(
     // BEFORE anything is launched or sent: a refusal that only one rank can
     // see would leave the other ranks waiting in a collective -------------
     let (n, precon) = preflight(gpu, comm, psi, sys, halo, w, ctrl, "spmd_pcg", "dist_pcg")?;
+    // A V-cycle with nPreSweeps != nPostSweeps is not a symmetric operator,
+    // and CG needs one - refused before any launch, as `solve_pcg` does
+    // (SPEC-LIT 141.5, 141.11). Every rank was built from the same config.
+    if precon == Preconditioner::Gamg {
+        if let Some(g) = w.gamg.as_ref().filter(|g| !g.is_symmetric_cycle()) {
+            return Err(Error::Config(format!(
+                "spmd_pcg: GAMG preconditioning with nPreSweeps {} and \
+                 nPostSweeps {} is not a symmetric operator (the cycle is \
+                 symmetric only when they are equal), and conjugate gradients \
+                 need a symmetric one; make the cycle symmetric or use \
+                 spmd_pbicgstab",
+                g.config().n_pre,
+                g.config().n_post
+            )));
+        }
+    }
 
     if sys.n_global_cells() == 0 {
         return Ok(perf);
     }
     perf.converged = false;
+    let ex0 = gamg_exchanges(w);
 
     // ---- dist_build_preconditioner for ONE part -------------------------
     // `Dic`/`Dilu` reach here only on a coloured workspace: row 8 refused
@@ -771,15 +899,16 @@ pub(super) fn spmd_pcg_float(
 
     // z = M^-1 r ; p = z ; rho = (r,z) - `dist_precondition` for ONE part,
     // the part's own colouring when `Dic`/`Dilu`, `None` otherwise
-    solver::precondition_parts(
+    apply_preconditioner(
         gpu,
         sol,
+        comm,
+        &mut w.gamg,
         p_hat,
         r,
         r_diag,
         w.multicolour.as_ref(),
-        &sys.a[0],
-        &sys.mesh[0],
+        sys,
         precon,
         n,
     )?;
@@ -878,15 +1007,16 @@ pub(super) fn spmd_pcg_float(
                 }
             }
 
-            solver::precondition_parts(
+            apply_preconditioner(
                 gpu,
                 sol,
+                comm,
+                &mut w.gamg,
                 p_hat,
                 r,
                 r_diag,
                 w.multicolour.as_ref(),
-                &sys.a[0],
-                &sys.mesh[0],
+                sys,
                 precon,
                 n,
             )?;
@@ -940,6 +1070,8 @@ pub(super) fn spmd_pcg_float(
             perf.converged = abs || rel;
         }
     }
+    // The cycle's level products are matrix products too (§141.11).
+    perf.n_exchanges += (gamg_exchanges(w) - ex0) as usize;
     Ok(perf)
 }
 
@@ -975,8 +1107,9 @@ pub(super) fn spmd_pcg_float(
 /// Every launch is `dist_pbicgstab`'s for one part (§138.5's rule), so every
 /// rank's field is bit for bit `dist_pbicgstab`'s field for its part, and
 /// with the exact reduction and `Diagonal` or `None` also the one-part field.
-/// `Diagonal`, `None` and, on a coloured workspace, the block-local `Dic`
-/// and `Dilu` precondition. The flag vote's refusal starts `spmd_pbicgstab:
+/// `Diagonal`, `None`, on a coloured workspace the block-local `Dic` and
+/// `Dilu`, and with a cycle attached the distributed GAMG (§141.11)
+/// precondition. The flag vote's refusal starts `spmd_pbicgstab:
 /// `, naming the solver that took the vote.
 #[allow(clippy::too_many_arguments)]
 pub fn spmd_pbicgstab(
@@ -1052,6 +1185,7 @@ pub(super) fn spmd_pbicgstab_float(
         return Ok(perf);
     }
     perf.converged = false;
+    let ex0 = gamg_exchanges(w);
 
     // ---- dist_build_preconditioner for ONE part -------------------------
     build_preconditioner(gpu, sol, sys, w, precon)?;
@@ -1207,15 +1341,16 @@ pub(super) fn spmd_pbicgstab_float(
             }
 
             // pHat = M^-1 p ; exchange 1 ; v = A pHat ; alpha = rho / (r0,v)
-            solver::precondition_parts(
+            apply_preconditioner(
                 gpu,
                 sol,
+                comm,
+                &mut w.gamg,
                 p_hat,
                 p,
                 r_diag,
                 w.multicolour.as_ref(),
-                &sys.a[0],
-                &sys.mesh[0],
+                sys,
                 precon,
                 n,
             )?;
@@ -1239,15 +1374,16 @@ pub(super) fn spmd_pbicgstab_float(
             }
 
             // sHat = M^-1 s ; exchange 2 ; t = A sHat
-            solver::precondition_parts(
+            apply_preconditioner(
                 gpu,
                 sol,
+                comm,
+                &mut w.gamg,
                 s_hat,
                 s,
                 r_diag,
                 w.multicolour.as_ref(),
-                &sys.a[0],
-                &sys.mesh[0],
+                sys,
                 precon,
                 n,
             )?;
@@ -1354,6 +1490,281 @@ pub(super) fn spmd_pbicgstab_float(
             perf.converged = abs || rel;
         }
     }
+    perf.n_exchanges += (gamg_exchanges(w) - ex0) as usize;
+    Ok(perf)
+}
+
+// ==========================================================================
+//  The stationary distributed GAMG - SPEC-LIT §141.11
+// ==========================================================================
+
+/// The distributed V-cycle as a solver on its own (SPEC-LIT §141.11), the
+/// SPMD form of `solver::solve_gamg`: `psi <- V(psi, b)` per iteration, one
+/// iteration one cycle, with §8.4's residual of `b - A psi` tested every
+/// `check_interval` iterations by the kernels and the flag vote of
+/// [`spmd_pcg`]. The cycle comes from the workspace
+/// ([`SpmdWorkspace::set_gamg`]); a request without one is refused by name,
+/// and `ctrl.precon` is ignored - the cycle IS the method here.
+///
+/// Under `single` the solve is refined (SPEC-LIT §118.12's outer loop
+/// around this float body, AMG-06a, §141.9), every refusal first - before
+/// the refinement's first collective - as [`spmd_pcg`]'s is.
+#[allow(clippy::too_many_arguments)]
+pub fn spmd_gamg(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    psi: &mut DevBuf<Scalar>,
+    sys: &DistSystem,
+    halo: &mut SpmdHalo,
+    w: &mut SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
+    #[cfg(feature = "single")]
+    {
+        if let Some(i) = w.ir.as_mut() {
+            i.outer_steps = 0;
+        }
+        if super::refine::refines(ctrl, sys.n_global_cells()) {
+            gamg_preflight(gpu, comm, psi, sys, halo, w, ctrl)?;
+            return super::refine::spmd_refined(
+                gpu,
+                sol,
+                comm,
+                psi,
+                sys,
+                halo,
+                w,
+                ctrl,
+                super::refine::Method::Gamg,
+            );
+        }
+    }
+    spmd_gamg_float(gpu, sol, comm, psi, None, sys, halo, w, ctrl)
+}
+
+/// [`spmd_gamg`]'s refusals: §138.5's preflight with `ctrl.precon` not
+/// read - the rows are checked with `None`, so a preconditioner this
+/// workspace cannot build does not refuse a method that never applies
+/// one - and a workspace without a cycle. Returns the owned cell count.
+fn gamg_preflight(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    psi: &DevBuf<Scalar>,
+    sys: &DistSystem,
+    halo: &SpmdHalo,
+    w: &SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<usize> {
+    let plain = SolverControls {
+        precon: Preconditioner::None,
+        ..*ctrl
+    };
+    let (n, _) = preflight(gpu, comm, psi, sys, halo, w, &plain, "spmd_gamg", "solve_gamg")?;
+    if w.gamg.is_none() {
+        return Err(Error::Config(
+            "spmd_gamg: solver GAMG was requested, but this SPMD workspace \
+             has no distributed GAMG cycle attached; build one with \
+             amg::DistGamg::new and attach it with SpmdWorkspace::set_gamg \
+             (SPEC-LIT 141.11), or solve with PCG or PBiCGStab"
+                .to_string(),
+        ));
+    }
+    Ok(n)
+}
+
+/// [`spmd_gamg`]'s float body against `rhs` (`None`: the part's
+/// `a.source`, the f64 path) - unchanged otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spmd_gamg_float(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    comm: &dyn Comm,
+    psi: &mut DevBuf<Scalar>,
+    rhs: Option<&DevBuf<Scalar>>,
+    sys: &DistSystem,
+    halo: &mut SpmdHalo,
+    w: &mut SpmdWorkspace,
+    ctrl: &SolverControls,
+) -> Result<DistPerformance> {
+    let mut perf = DistPerformance {
+        converged: true,
+        ..Default::default()
+    };
+    let n = gamg_preflight(gpu, comm, psi, sys, halo, w, ctrl)?;
+    if sys.n_global_cells() == 0 {
+        return Ok(perf);
+    }
+    perf.converged = false;
+    let ex0 = gamg_exchanges(w);
+
+    let w = &mut *w;
+    let SpmdWorkspace {
+        r,
+        apsi,
+        tmp,
+        y,
+        b,
+        red,
+        x_ref,
+        norm_factor,
+        initial_res,
+        final_res,
+        flag,
+        gamg,
+        ..
+    } = w;
+    let reduce = w.reduce;
+
+    // ---- dist_norm_factor for ONE part, as `spmd_pcg` -------------------
+    solver::vec_copy(gpu, sol, b, rhs.unwrap_or(&sys.a[0].source), n)?;
+    reduce_into(gpu, sol, comm, red, reduce, What::Sum(psi), x_ref, &mut perf)?;
+    let inv_n = 1.0 / (sys.n_global_cells() as Scalar);
+    if n > 0 {
+        let nl = solver::to_label(n)?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&sol.broadcast_scaled)
+                .arg(&mut *tmp)
+                .arg(&*x_ref)
+                .arg(&inv_n)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
+    }
+    spmd_amul(gpu, sol, comm, halo, sys, y, tmp, &mut perf)?;
+    spmd_amul(gpu, sol, comm, halo, sys, apsi, psi, &mut perf)?;
+    reduce_into(
+        gpu,
+        sol,
+        comm,
+        red,
+        reduce,
+        What::NormFactor(apsi, b, y, solver::NORM_EPS),
+        norm_factor,
+        &mut perf,
+    )?;
+    solver::vec_sub(gpu, sol, r, b, apsi, n)?;
+    reduce_into(
+        gpu,
+        sol,
+        comm,
+        red,
+        reduce,
+        What::SumMag(r),
+        initial_res,
+        &mut perf,
+    )?;
+    solver::copy_scalar(gpu, sol, final_res, initial_res)?;
+    gpu.fill_zero(flag)?;
+
+    let max_iter = ctrl.max_iter.max(0) as usize;
+    let interval = ctrl.check_interval.max(1) as usize;
+    let checking = !ctrl.fixed_iters;
+
+    if checking {
+        solver::convergence_test(
+            gpu,
+            sol,
+            flag,
+            initial_res,
+            initial_res,
+            norm_factor,
+            ctrl,
+            0,
+        )?;
+        perf.converged = read_flag_and_vote(
+            gpu,
+            comm,
+            w.flag_vote,
+            w.n_ranks,
+            &mut w.n_flag_votes,
+            flag,
+            "spmd_gamg",
+        )?;
+    }
+
+    if !perf.converged {
+        let g = gamg.as_mut().ok_or_else(|| {
+            Error::Config("spmd_gamg: the GAMG cycle vanished mid-solve".to_string())
+        })?;
+        for it in 0..max_iter {
+            let iters = it + 1;
+            // One iteration is one cycle, from the current psi.
+            g.cycle(gpu, comm, &sys.mesh[0], &sys.a[0], psi, b)?;
+            perf.n_iterations = iters;
+
+            if checking && iters % interval == 0 {
+                spmd_amul(gpu, sol, comm, halo, sys, apsi, psi, &mut perf)?;
+                solver::vec_sub(gpu, sol, r, b, apsi, n)?;
+                reduce_into(
+                    gpu,
+                    sol,
+                    comm,
+                    red,
+                    reduce,
+                    What::SumMag(r),
+                    final_res,
+                    &mut perf,
+                )?;
+                let itl = solver::to_label(iters)?;
+                solver::convergence_test(
+                    gpu,
+                    sol,
+                    flag,
+                    final_res,
+                    initial_res,
+                    norm_factor,
+                    ctrl,
+                    itl,
+                )?;
+                if read_flag_and_vote(
+                    gpu,
+                    comm,
+                    w.flag_vote,
+                    w.n_ranks,
+                    &mut w.n_flag_votes,
+                    flag,
+                    "spmd_gamg",
+                )? {
+                    perf.converged = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // ---- dist_finish for ONE part, as `spmd_pcg` ------------------------
+    if ctrl.report_residuals {
+        spmd_amul(gpu, sol, comm, halo, sys, apsi, psi, &mut perf)?;
+        solver::vec_sub(gpu, sol, tmp, b, apsi, n)?;
+        reduce_into(
+            gpu,
+            sol,
+            comm,
+            red,
+            reduce,
+            What::SumMag(tmp),
+            final_res,
+            &mut perf,
+        )?;
+
+        gpu.sync()?;
+        perf.initial_residual = gpu.download(initial_res)?[0];
+        perf.final_residual = gpu.download(final_res)?[0];
+        let nf = gpu.download(norm_factor)?[0];
+        if nf > 0.0 {
+            perf.initial_residual /= nf;
+            perf.final_residual /= nf;
+        }
+        if ctrl.fixed_iters {
+            let abs = perf.final_residual <= ctrl.tolerance;
+            let rel = ctrl.rel_tol > 0.0
+                && perf.final_residual <= ctrl.rel_tol * perf.initial_residual;
+            perf.converged = abs || rel;
+        }
+    }
+    perf.n_exchanges += (gamg_exchanges(w) - ex0) as usize;
     Ok(perf)
 }
 
@@ -1363,11 +1774,11 @@ pub(super) fn spmd_pbicgstab_float(
 
 /// Solve `A psi = b` on this rank's part with the method the case asked for.
 ///
-/// Dispatches on `ctrl.solver` exactly as [`super::dist_solve`] does. `GAMG`
-/// is refused by name for the same reason it is refused there - it is a
-/// pressure *backend* in this code, not a Krylov method, and no pressure
-/// backend has a decomposed form at all (§73.7) - with `PBiCGStab` as the
-/// alternative.
+/// Dispatches on `ctrl.solver` as `solver::solve` does: `PCG` and
+/// `PBiCGStab` as [`super::dist_solve`] does, and `GAMG` - since SPEC-LIT
+/// §141.11 - as the distributed cycle on its own, [`spmd_gamg`], which
+/// needs a cycle attached by [`SpmdWorkspace::set_gamg`] and refuses by name
+/// without one.
 #[allow(clippy::too_many_arguments)]
 pub fn spmd_solve(
     gpu: &Gpu,
@@ -1382,16 +1793,6 @@ pub fn spmd_solve(
     match ctrl.solver {
         LinearSolverKind::PBiCGStab => spmd_pbicgstab(gpu, sol, comm, psi, sys, halo, w, ctrl),
         LinearSolverKind::PCG => spmd_pcg(gpu, sol, comm, psi, sys, halo, w, ctrl),
-        LinearSolverKind::Gamg => {
-            crate::io::contract::unsupported::<()>(
-                "solvers/<var>/solver",
-                "GAMG",
-                &["PCG", "PBiCGStab"],
-                "PBiCGStab: GAMG is a pressure backend in this code, not a \
-                 Krylov method, and no pressure backend has a decomposed form",
-                (),
-            )?;
-            spmd_pbicgstab(gpu, sol, comm, psi, sys, halo, w, ctrl)
-        }
+        LinearSolverKind::Gamg => spmd_gamg(gpu, sol, comm, psi, sys, halo, w, ctrl),
     }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkArgValue, getBinary, type FlagSpec } from './registry.js'
+import { BINARIES, checkArgValue, getBinary, type FlagSpec } from './registry.js'
 
 const spec = (type: FlagSpec['type'], name = '-x'): FlagSpec => ({ name, type, description: 'test' }) as FlagSpec
 
@@ -51,5 +51,17 @@ describe('ofgpu-datacentre writes what the driver writes', () => {
     // registry.ts:365 said ['foam'] and there is no foam writer in datacentre.rs.
     expect(dc.writes).toEqual({ formats: [], restart: false, csv: true, json: true })
     expect(dc.flags.map((f) => f.name)).toEqual(['-json', '-run-id', '-csv', '-schema', '-permissive'])
+  })
+})
+
+describe('run options (PAR-17)', () => {
+  it('every run option group names flags its own binary has, and ofgpu-par groups ranks / transport', () => {
+    for (const b of BINARIES) for (const g of b.runOptions ?? []) for (const f of g.flags) expect(b.flags.some((x) => x.name === f), `${b.name} ${g.key} ${f}`).toBe(true)
+    const par = getBinary('ofgpu-par')!
+    expect(par.pending).toBeUndefined()
+    expect(par.runOptions).toEqual([{ key: 'ranksTransport', flags: ['-np', '-comm'] }])
+    // threads only: PAR-06 (MPI) is deferred, so mpi is never offered
+    expect(par.flags.find((f) => f.name === '-comm')?.values).toEqual(['threads'])
+    expect(checkArgValue(par.flags.find((f) => f.name === '-comm')!, 'mpi')).toMatch(/must be one of threads/)
   })
 })

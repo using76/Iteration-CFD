@@ -2180,6 +2180,65 @@ non-closed surface (SPEC-LIT §13.4 contract; `-permissive` downgrades to a
 warning and uses parity voting, §23.3). Degenerate triangles (zero area at
 f64) are dropped with a count.
 
+#### 23.2.1 Filling a hole (`tools/geom/stl_repair.py`, AUT-02c)
+
+The reader never edits a surface; the repair tool writes a NEW file and fills
+a boundary loop v_0 … v_{n-1} (walk order along the open edges, n ≤
+`--max-hole-edges`, default 64) as follows. A 3-edge loop is one triangle. A
+planar loop of 4 to 32 edges — every v_i within the weld tolerance of the plane
+through the loop's mean point orthogonal to its Newell normal — is ear-clipped
+in that plane (Meisters's two-ears theorem), exactly as before AUT-02c. Every
+other loop, and a planar one in which no ear is found, is filled by the
+minimum-weight triangulation and refinement of P. Liepa, "Filling Holes in
+Meshes", Proc. Eurographics Symposium on Geometry Processing 2003, 200–206
+(DOI 10.2312/SGP/SGP03/200-206), then faired:
+
+```
+1. minimum-weight triangulation (dynamic programme over the loop):
+     W(i, i+1) = (0, 0)
+     W(i, k)   = min_{i<m<k} W(i, m) ⊕ W(m, k) ⊕ Ω(i, m, k)
+     (a, A) ⊕ (b, B) = (max(a, b), A + B), compared lexicographically
+     Ω(i, m, k) = (largest dihedral angle between triangle (v_i, v_m, v_k)
+                   and its neighbours, area(v_i, v_m, v_k))
+   the neighbours are the triangles W(i, m) and W(m, k) chose on the edges
+   (i, m) and (m, k), or the surface triangle on a loop edge, and at the root
+   (0, n-1) also the surface triangle on the closing edge; the dihedral angle
+   is the angle between the two normals, 0 for a flat continuation.
+2. refinement, α = √2:
+     σ(v_i) = the mean length of v_i's surface edges
+     for each patch triangle (v_i, v_j, v_k) with centroid v_c,
+       σ(v_c) = (σ(v_i) + σ(v_j) + σ(v_k)) / 3;
+       if α‖v_c − v_m‖ > σ(v_c) and α‖v_c − v_m‖ > σ(v_m) for every
+       m ∈ {i, j, k}: split it into (v_c, v_j, v_k), (v_i, v_c, v_k),
+       (v_i, v_j, v_c) and relax its three edges
+     stop when a pass splits nothing; otherwise relax every interior patch edge
+     and repeat
+   relax (v_a, v_b), shared by (v_a, v_b, v_c) and (v_b, v_a, v_d): swap it for
+   (v_c, v_d) when v_d lies strictly inside the sphere whose equator is the
+   circumcircle of (v_a, v_b, v_c)
+3. fairing: the inserted points solve the membrane U(v) = 0 with the
+   scale-dependent umbrella
+     U(v) = (2/E) Σ_j (v_j − v) / |e_j|,   E = Σ_j |e_j|
+   over v's patch neighbours v_j, the lengths taken before the solve and the
+   loop held fixed (M. Desbrun, M. Meyer, P. Schröder, A. H. Barr, "Implicit
+   fairing of irregular meshes using diffusion and curvature flow", SIGGRAPH
+   1999, 317–324)
+```
+
+Patch triangles take the reversed walk winding, so each loop edge is used once
+each way. *DESIGN*, beyond the paper: a chord that is already a surface edge,
+and a zero-area triangle, are never chosen; a swap is not made when its new
+edge already exists, a new triangle would have zero area, or a new triangle's
+normal would turn against the pair's; refinement stops after 32 passes and a
+relaxation after 64 sweeps. The fairing operator is this tool's choice. The
+thin-plate form U²(v) = 0, which also holds the surface's ring around the hole
+for tangent continuity, was measured and rejected: on the three tuning hole
+rows where refinement inserts a point (G-1-060, G-1-090, G-1-114) it moved
+that point 0.72–3.3 h_f off the parent surface, with the same umbrella, while
+the membrane keeps it within 0.002 h_f (h_f = base_size / 2^max_level of the
+setup rules). A fill that would give an edge a third use or hold a zero-area
+triangle is refused whole and named in the report.
+
 ### 23.3 Inside/outside classification
 
 Column-parity ray casting, the standard voxelizer construction:
@@ -19358,6 +19417,18 @@ is what gate 78-A does, to `10^-8` — is a transcription check, and calling it 
 validation would be exactly the confusion §69 exists to prevent. §78.12 names
 it.
 
+**Addendum (VAL-70, §146.2): both criteria are now measured, against another
+experiment.** The measurement is Riboux & Gordillo's (2014) splash threshold
+speeds for millimetric drops of eight liquids on smooth glass (§146.1). Each
+criterion, at its shipped default, predicts each row's threshold through
+(78.4c), and the band is ±20 % per row with at least 6 of the 8 liquids inside
+(146.5)-(146.6). Mundo is low on every row (`e` from −0.73 to −0.21, no liquid
+inside). Bai & Gosman crosses the data near ethanol (one liquid inside, `e`
+from −0.40 to +0.69). Both are registered `MISSES`, each under its own name.
+Mundo's own droplet-wall data are still not transcribed, so the paragraph
+above still holds for them. The 4.78 comparison in the table above is
+unchanged and stays `OPEN`.
+
 **Why `mundo` is the default** is not a physical argument and is not presented
 as one: it is the threshold the design note prescribes, and (78.4b) makes its
 decision polynomial and therefore bit-stable where `La^(-0.18)` is not (§38.6).
@@ -29976,7 +30047,8 @@ form (Timoshenko & Goodier ch. 4):
 ```
 
 and it is read with (S95.27) at `P = (r_in, 0, L/2)`, where on the symmetry
-plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10.
+plane `y = 0` it is `sigma_yy`. Three meshes, `nr = 12, 24, 48`, as §95.10,
+and since VAL-14 a fourth, `nr = 96` (the ring's fourth mesh, below).
 Held: the point value within `1 %` of (S95.28) on the finest mesh, and the
 observed order of its error between the two finest meshes at `p >= 0.9` -
 the bar docs/09's risk 2 wrote for exactly this read-out.
@@ -30001,7 +30073,7 @@ nearest cell's value and both relative errors; per body, its slenderness
 (`Verdict::Misses`, `How::Live`) whose `against` names the restatement and
 not the primary, whose headline carries the finest point value and its
 error, and whose uncertainty is §94's study of the point value over the
-three meshes (LE10: its three finest) - or, when three values cannot form
+three meshes (the ring and LE10: their three finest) - or, when three values cannot form
 one, §94.3's single-mesh declaration saying so. The three targets are
 answer keys `nafems-le1`, `nafems-le10` and `nafems-le11` of
 `reference/PROVENANCE.md`, `literal` rows that name the restatement as their
@@ -30088,6 +30160,47 @@ modelling choice, not the restated condition; nothing measured here separates th
 The full run: `ofgpu-validate` 1021/1026, its five failing rows Gate 95-A's four at 5:1 and
 10:1 and the ring's order row; every row outside LE10's scope is digit-identical to the run of
 2026-09-26 (§105.14), and the registry's gates with the verdict of a shortfall fall from 6 to 5.
+
+**The ring's fourth mesh, the user's decision D-VAL-6 (VAL-14).** The ring's order row was the
+one shortfall of Gate 95-G left, its point error falling at `p = 0.842` between `nr = 24` and
+`nr = 48`. The user decided, as for LE10, to add a finer mesh and measure again, the gate's
+definition and both bars unchanged. The mesh added is `nr = 96`, `annulus(96, 192, 2)`, 36,864
+cells: the third mesh halved in `r` and `theta`, the two layers in `z` kept, as every ring mesh
+has them. The meshes are `LAME_RING_NR = [12, 24, 48, 96]` in `ofgpu-validate`, next to the gate
+as `LE10_MESHES` is; `lame_ring(nr)` takes any `nr >= 2` and did not change. The bar on the
+point value is read on `nr = 96`. The order row is read on the finest pair, `nr = 48 -> 96`.
+§94's study takes the three finest, `nr = 24, 48, 96`, finest first, under §94.3's four-mesh
+declaration when they cannot form one, and `nr = 12` is run and printed beside them. Nothing else
+moved: the segregated loop and its controls, the fit (S95.27), its `2 x 2 x 2` corner stencil,
+the closed form (S95.28) and the `1 %` and `p >= 0.9` bars. The ring's scope grows from 5 rows
+to 6, one converged row at `nr = 96`, and its two bar rows name `nr = 96` and `nr 48 -> 96`.
+`ofgpu-validate` gains one host test, `ring_gate_runs_four_meshes`, that pins the four meshes and
+builds the finest ring.
+
+**Gate 95-G ring, measured on four meshes** on 2026-10-14 on the machine of record (one RTX
+5070 Ti, f64; other workflows were compiling on the CPU), with the meshes and controls above and
+nothing tuned:
+
+```text
+                          nr = 12       nr = 24       nr = 48       nr = 96     finest    bar
+  ring sigma_tt(bore)   1.701161e6    1.688910e6    1.679071e6    1.673195e6    0.39 %    1 %    holds
+       order of its error, nr 48 -> 96:  p = 0.926                                     0.9    holds
+```
+
+The loop converged on every mesh: 23, 24, 24 and 22 outer iterations (16,521 linear at
+`nr = 96`). The first three columns are digit-identical to the run before this unit, and so is
+every LE1, LE10 and LE11 row. The point error falls at `p = 0.633` from 12 to 24, `0.842` from
+24 to 48 and `0.926` from 48 to 96. §94's study over the finest three is monotone, `p = 0.743`,
+`phi_ext = 1.664479e6`, `U_fine = 1.090e4` (Fs 1.25, power series). The nearest cell's own value
+is 0.52 % off at `nr = 96`, where the fit is 0.39 %. Gate 95-G's section is 28/28 rows in 58 s,
+and it registers nothing.
+
+What this says, and what it does not. The order of the point error rises with each refinement,
+and the bar of docs/09's risk 2 holds on the finest pair. The order measured over the three finest values
+themselves (0.743) is lower than that pair's 0.926, so the ring is not yet in a clean asymptotic
+range, and the bar is held on one pair. The study's extrapolation stops 0.13 % below (S95.28), and
+the band `phi_fine +- U_fine`, 1.662295e6 to 1.684095e6, contains the closed form. Gate 95-D's
+cell-centre hoop-stress order (§95.10, 0.848 on `nr = 24, 48`) was not re-measured on `nr = 96`.
 
 
 ## 96. What a thermo-elastic case says, the refusal list, and the pair tests
@@ -33772,6 +33885,61 @@ for from reaching a verdict. The gate then loads the
 key, prints its digest line beside the verdict, and runs the key's own consistency
 rows; the recorded runs are still this subsection's to make.
 
+**Pricing (docs/17 VAL-50).** Before any recorded run is scheduled, every case of this
+recipe was run for 200 iterations at each of its three levels and timed. The build was the f64
+release `ofgpu-lowmach` at `c1ebdb4`, on the one RTX 5070 Ti of record, on scratch copies made
+exactly as above (only `cells` edited; the step through `backstep.cmd`'s generator line and its
+two edits), `-iters 200 -check 50` (`-check 5` on the step's two finer levels). Each stdout
+line was time-stamped as it arrived, and the rate is taken between the `iter 0` and the last
+`iter` line, so mesh build, setup and the final write are outside it. The rate is given two
+ways: the mean over the run, and the last window of about 50 iterations. The projection takes
+the larger of the two: setup, plus that rate times the recorded iteration count, plus the
+write. Memory is the pool peak of §111.2, from the run's `device memory` line. The two step
+levels that stopped early have no such line, so their peak is from a 2-iteration run of the
+same mesh; on the fine plume a 2-iteration run reads the same 7,177 MiB as the 200-iteration one.
+This is a PRICE, not a measurement of the recorded runs. It prices the first 200 iterations
+from each case's initial field, and solver work changes as the flow develops: the fine
+plume's rate falls from 545 to 307 ms per iteration across the 200, and the coarse step's
+rises from 133 to 216. While these were timed, the card's other load was the desktop at
+0-36 % utilisation, and 64-97 % on the step's two finer levels. A first pass made while
+another lane's tests held the card at 84-89 % ran slower: 13-17 ms on the channel, 641 ms on
+the fine plume and 2,364 ms on the fine step. The table gives the second pass.
+
+| gate | level | cells | ms/iter, mean | ms/iter, last window | recorded iterations | projected wall time | pool peak |
+|---|---|---|---|---|---|---|---|
+| 110-A Re_tau 180 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.23 / 5.85 / 6.92 | 5.98 / 5.27 / 7.14 | 40 000 | 4.2 / 3.9 / 4.8 min | 4,709 / 4,541 / 4,457 B/cell |
+| 110-A Re_tau 395 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.67 / 6.09 / 7.48 | 6.92 / 5.78 / 7.76 | 40 000 | 4.6 / 4.1 / 5.2 min | as 180 |
+| 110-A Re_tau 590 | N_y 32 / 64 / 128 | 256 / 512 / 1,024 | 6.33 / 5.97 / 7.26 | 6.80 / 5.65 / 7.96 | 40 000 | 4.5 / 4.0 / 5.3 min | as 180 |
+| 110-B step | 700 × 90 | 57,500 | 167 | 216 | 6 000 | 21.7 min | 230 MiB, 4,210 B/cell |
+| 110-B step | 1400 × 180 | 230,000 | 469 (iterations 0-20) | — | 6 000 | 46.9 min | 920 MiB, 4,199 B/cell |
+| 110-B step | 2800 × 360 | 920,000 | 2,201 (iterations 0-150) | 2,188 | 6 000 | 3.67 h | 3,679 MiB, 4,193 B/cell |
+| 110-C plume | 33 × 33 × 40 | 43,560 | 12.9 | 12.3 | 4 000 | 0.9 min | 116 MiB, 2,796 B/cell |
+| 110-C plume | 66 × 66 × 80 | 348,480 | 45.9 | 33.0 | 4 000 | 3.1 min | 907 MiB, 2,731 B/cell |
+| 110-C plume | 132 × 132 × 160 | 2,787,840 | 425 | 307 | 4 000 | 28.5 min | 7,177 MiB, 2,700 B/cell |
+
+The nine channel runs price at 41 min, mostly launch latency (a 1,024-cell iteration costs
+about what a 256-cell one does). The three plume runs price at 33 min. The three step runs,
+had they run, price at 4.8 h. The whole of §110's recorded set is about 6.0 h of card time,
+one night. Memory is not what limits any of it. The largest level, the fine plume, peaks at
+7,177 MiB of pool at 2.79 M cells, which is below the 4.72 M cells at which `docs/11` read its
+cliff. §111.1 shows that cliff was a whole-card reading taken beside a second process, not an
+allocation. The idle card leaves about 14.66 GiB for the pool (§111.4). At the plume's
+2,700 B/cell that holds 5.83 M cells, and at the step's 4,193 B/cell it holds 3.75 M, so the
+fine plume uses 48 % of it.
+
+**What the pricing found on the step.** Both finer step levels stop on the Mach guard of
+§93.6. The 1400 × 180 level stops at step 24, with M = 0.730 at cell 221598, and so does its
+re-run. The 2800 × 360 level stops at step 152, with M = 0.490 at cell 914399, in both
+passes. The coarse level runs its 200 iterations. The recipe as written also does not set
+the flow it states. The generator's inflow is the `step` preset's power-law profile,
+`u = U_ref (1 - min(1 - 1e-9, |y|/h))^(1/7)` (`initial_velocity` in `src/blockgen.rs`), with
+`U_ref = 10` and `h = 1`, centred on `y = 0`. The recipe's `-extent ... 0 9` puts the whole
+inlet at `y` in [1, 9], where the clamp holds, so `0/U`'s inlet is `uniform (0.517947 0 0)`,
+which is 10 × (1e-9)^(1/7), and not 10 m/s. With the recipe's ν = 2.7778e-4 that is
+Re_H ≈ 1.86e3, not 36 000. Both are recorded here as found and are not changed: this
+pricing edits no recipe. The step's prices above are for the recipe as it stands, and
+docs/17 VAL-52 settles its inflow and its divergence before any run of it is recorded.
+
 **Results.** Every cell below is filled by the run that produced it; until then none
 has been made, and no verdict in this table is a claim.
 
@@ -34079,6 +34247,12 @@ It is `#[cfg(not(feature = "single"))]` because its subject is the f64 discrete 
 `tests/dust_fsc.rs`, an integration test that passes 7 of 7: the kernels are 0 float ulp from their
 f64 twins, and the zero counter matches the host. The same cases run as the lib tests
 `dust::fsc::tests` and carry no ignore attribute, so they move neither bold count.
+§155.9 adds the progress-variable rows. The DST-04 cases run in the `single` build as
+`tests/dust_progress.rs`, which passes 8 of 8 with every accuracy row at the f64 tolerance. The
+bounds row and the planar monotonicity rows are asserted as MISSED in a recorded form: the float
+diagonal lets a diffusion-dominated burned plateau drift above 1, by up to 1.5e−4 (§155.9). The
+same cases run as the lib tests `dust::progress::tests` and carry no ignore attribute, so they
+move neither bold count.
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **486** library
@@ -34724,12 +34898,18 @@ contraction 0.33) against the segregated loop's 22 outer iterations
 plane strain - span `l` along `x`, depth `2c = 0.2`, one cell through the
 thickness with symmetry planes on both faces, the closed form's parabolic
 shear on the free end and its own displacement on the built-in end, `E = 200`
-GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on three meshes
-of cubic cells with `n_y = 4, 8, 16` through the depth. Per ratio: the loop
+GPa, `nu = 0.3`, `P = 1e5` - at `l/(2c)` of 2.5, 5 and 10, each on four meshes
+of cubic cells with `n_y = 4, 8, 16, 32` through the depth. Per ratio: the loop
 converges on every mesh, the observed order of the cell-centre displacement
-error is at least 1.9, that of the cell-centre stress error at least 0.9, and
-the finest mesh's tip deflection is within 5 % of the closed form; §94's
-study of the tip deflection is its uncertainty. The measured table is §109.7's.
+error on the finest pair (`n_y` 16 -> 32) is at least 1.9, that of the
+cell-centre stress error at least 0.9, and the finest mesh's tip deflection is
+within 5 % of the closed form; §94's study of the tip deflection on the finest
+three meshes (`n_y = 8, 16, 32`) is its uncertainty. The coarsest mesh is still
+run and printed, and held to "converges"; if it does not, it fails by name. The
+fourth mesh is the user's decision D-VAL-6 (docs/17, VAL-12), taken after
+§142.1 found the slender beams read before their asymptotic range; the bars
+are unchanged, and the precedent is Gate 95-G LE10's fourth mesh (§95.11). The
+measured table is §109.7's.
 
 ### 109.7 Gate 95-A, measured
 
@@ -34745,13 +34925,24 @@ stress errors volume-weighted rms against `P l c / I`).
 | 2.5:1 | 4 | 40 | 93 | 0.641 | 1663 | 2.71e-2 | 2.75e-2 | 1.44e-2 | 1.34e-2 |
 | 2.5:1 | 8 | 160 | 33 | 0.545 | 1203 | 4.02e-3 | 4.05e-3 | 3.91e-3 | 4.88e-3 |
 | 2.5:1 | 16 | 640 | 31 | 0.479 | 2363 | 6.73e-4 | 6.97e-4 | 1.35e-3 | 1.74e-3 |
+| 2.5:1 | 32 | 2560 | 33 | 0.574 | 4485 | 1.24e-4 | 1.37e-4 | 4.89e-4 | 6.19e-4 |
 | 5:1 | 4 | 80 | diverged at 673 | - | - | - | - | - | - |
 | 5:1 | 8 | 320 | 200 | 0.682 | 10198 | 1.98e-5 | 5.78e-4 | 3.76e-3 | 3.44e-3 |
 | 5:1 | 16 | 1280 | 52 | 0.553 | 6124 | 2.59e-4 | 2.63e-4 | 1.34e-3 | 1.23e-3 |
+| 5:1 | 32 | 5120 | 65 | 0.739 | 13180 | 9.76e-5 | 9.81e-5 | 4.86e-4 | 4.35e-4 |
 | 10:1 | 4 | 160 | 1000, not converged | 0.992 | 68571 | - | - | - | - |
 | 10:1 | 8 | 640 | 730 | 0.826 | 84432 | 1.40e-3 | 1.40e-3 | 3.66e-3 | 2.43e-3 |
 | 10:1 | 16 | 2560 | 200 | 0.626 | 43339 | 5.66e-4 | 5.66e-4 | 1.32e-3 | 8.64e-4 |
+| 10:1 | 32 | 10240 | 518 | 0.599 | 141094 | 1.52e-4 | 1.52e-4 | 4.86e-4 | 3.06e-4 |
 
+The `n_y = 32` rows are VAL-12's (2026-10-14, the same controls; the whole
+Gate 95-A section, all twelve meshes, took 68 s and 93 s in two runs on a GPU
+shared with other jobs). The rows of `n_y = 4, 8, 16` printed the same digits
+with the fourth mesh in place. The
+next paragraph is the gate as first measured, on three meshes; the one after
+it is the gate as it now stands.
+
+**On three meshes** (`n_y = 4, 8, 16`, the orders on 8 -> 16).
 **2.5:1 holds**: converged on all three meshes, `p_u = 2.54`, `p_sigma =
 1.49`, the finest tip 0.07 % off the closed form; §94's study of the tip is
 monotone with `p = 2.79` and `U_fine = 2.6e-7` (0.78 % of the tip).
@@ -34762,6 +34953,28 @@ tip is 0.026 % off. **10:1 misses**: the coarsest mesh stalls at `q_obs =
 0.992` to the cap, and `p_u = 1.31`; `p_sigma = 1.47`, the finest tip 0.057 %
 off. The two studies of 5:1 and 10:1 read nothing, because their coarse level
 is not a converged solve.
+
+**On four meshes** (VAL-12: the orders on 16 -> 32, §94's study on
+`n_y = 8, 16, 32`). Every order pair is printed; a pair with a mesh that is
+not a converged solve prints no order.
+
+| ratio | `p_u` 8→16 | `p_u` 16→32 | `p_sigma` 16→32 | tip study (8, 16, 32) | `U_fine` / tip | finest tip | Gate 95-A |
+|---|---|---|---|---|---|---|---|
+| 2.5:1 | 2.539 | 2.348 | 1.466 | monotone, `p = 2.608` | 0.11 % | 0.012 % | **holds** |
+| 5:1 | 1.136 | **1.423** | 1.458 | oscillatory | 0.079 % | 0.010 % | misses: `n_y = 4` diverges, `p_u` |
+| 10:1 | 1.308 | **1.896** | 1.445 | monotone, `p = 1.015` | 0.051 % | 0.015 % | misses: `n_y = 4` stalls, `p_u` |
+
+The two slender beams still miss, now each for the same two named reasons:
+the coarsest mesh is not a converged solve (the loop's half of §142.1, which
+VAL-11's GMRES outer iteration is for), and the displacement order on the
+finest pair is short of 1.9 - by 0.48 at 5:1 and by 0.004 at 10:1. The fourth
+mesh moves both orders toward 2 (5:1 from 1.14 to 1.42, 10:1 from 1.31 to
+1.90). Neither settles near 1: both rise with the fourth mesh, which is
+§142.1's reading of a pre-asymptotic range, so on this measurement the D-VAL-7
+trigger for §109.4's implicit tangential stencil (VAL-13) does not fire. Three
+levels per ratio past the coarsest still cannot say where the 5:1 order
+settles. The stress order holds at 1.44-1.47 on every beam, and the finest tip is within 0.015 % of the closed
+form on all three. No bar moved.
 
 What the block solve changes, read beside the segregated loop on the same
 `n_y = 8` beams with the same controls (the ignored measurement
@@ -35324,7 +35537,7 @@ default, so `"tet": {}` is a complete block.
 | `recover.protect_angle_deg` | `90` | input angles below this get a protecting ball | §116.11 |
 | `recover.max_passes` | `64` | the cap on recovery passes. It is reported, never silently passed | §116.11 |
 | `refine.radius_edge` | `2` | `B` of (116.17) | §116.13 |
-| `refine.size_factor` | `sqrt(6)/4` | `c` of (116.18): the circumradius of the regular tetrahedron with edge `h` is `c h` | §116.13 |
+| `refine.size_factor` | `0.8` | `c` of (116.18): a kept tetrahedron's circumradius is at most `c h`. `0.8` is TET-09's measured value (§116.13); the regular tetrahedron's `sqrt(6)/4` was the first default | §116.13 |
 | `refine.max_inserted_points` | `50000000` | the cap on refinement insertions. It is reported, never silently passed | §116.13 |
 | `optimise.passes` | `8` | the number of flip/smooth alternations (§92.4's R1 and R2) | §116.14 |
 | `optimise.target_min_dihedral_deg` | `10` | the optimiser's goal for the smallest dihedral angle | §116.14 |
@@ -36626,15 +36839,133 @@ triangle or segment is split instead, first. Shewchuk (1998) proves termination 
 exception. Tetrahedra next to them are counted and reported, never hidden.
 `refine.max_inserted_points` caps the loop. Hitting it is a refusal.
 
-The default `c = sqrt(6)/4` is DESIGN. It is the circumradius of the regular tetrahedron of
-edge `h`. TET-09 measures the mean `edge / h(x)` against its band and records any changed
-default here with that measurement.
+The first default `c = sqrt(6)/4` was DESIGN. It is the circumradius of the regular
+tetrahedron of edge `h`. TET-09 measures the mean `edge / h(x)` against its band and records any
+changed default here with that measurement. **Changed by TET-09: the default is `c = 0.8`**
+(DESIGN, measured; see "The size factor, as TET-09 measured it" below).
 
 The predicted count uses the regular tetrahedron's volume, `h^3 / (6 sqrt 2)`:
 
 ```
 N_pred = 1.1 * integral over Omega of  dV / ( h(x)^3 / (6 sqrt 2) )                         (116.20)
 ```
+
+**The refinement, as TET-09 builds it.** `refine::refine(surface, recovery, start, spec, h)`
+takes a face recovery of §116.11, the surface it was built from, the carve start of §116.12 and
+the size field. The domain box is among the points as its eight corners, as in §116.12. The box
+is the bounding box of the points, and a missing corner is the refusal `refine/box`, because the
+convex hull is then not the box. The triangulation is updated by insertion and never rebuilt.
+The perturbed Delaunay triangulation is unique (§116.6), so it always equals a fresh build of the
+same points. Each **pass** takes the first of these steps that has work:
+
+1. **Conformity.** Each input triangle is re-triangulated in its frame by (116.15f). A
+   subsegment that is not an edge is split, and then a subtriangle that is not a face is split
+   by (116.15h). This repairs anything an insertion removed.
+2. **Encroachment, first** (Shewchuk 1998). A present subsegment with a link vertex strictly
+   inside its diametral ball is split. Next, a present subtriangle with an apex strictly inside
+   its diametral ball is split by (116.15h). These are the counts that §116.11 handed to this
+   unit.
+3. **Quality.** The carve of §116.12 names the kept tetrahedra. Each kept tetrahedron that
+   violates (116.17) or (116.18) is a candidate. The candidates are ordered worst first by
+   `max(rho / B, R / (c h(x_T)))`, with ties broken by slot. Take the candidate's circumcentre
+   `x` from (116.19).
+   - If `x` is not strictly inside the box, the box face is split instead. That face is the hull
+     face on the plane of the largest excess that holds the projection of `x`.
+   - Otherwise its **cavity** is built: every tetrahedron in conflict with `x` by (116.5a). If
+     `x` encroaches (116.15) a subsegment that is an edge of the cavity, those subsegments are
+     split. Otherwise, if it encroaches a subtriangle that is a face of the cavity, or the cavity
+     holds both tetrahedra of a subtriangle (inserting `x` would remove it), those are split by
+     (116.15h). Otherwise, if it encroaches a hull face of the cavity, that box face is split.
+   - Otherwise `x` is accepted, unless its cavity meets a tetrahedron marked earlier in the pass.
+     In that case it is deferred to a later pass. Accepting `x` marks its cavity and every
+     neighbour of the cavity.
+
+   The neighbour layer is what makes the pass equal to inserting its points one by one. Each new
+   tetrahedron around an accepted point `x` has a circumsphere in the pencil of one cavity boundary
+   face `f`. That sphere lies between the ball of the cavity tetrahedron on `f` and the ball of
+   the outer neighbour across `f`: `x` is inside the first and not inside the second. So its ball
+   lies inside the union of those two balls. A later point that conflicts with a new tetrahedron
+   therefore conflicts with a marked one, and its connected conflict region holds that marked
+   tetrahedron.
+
+The accepted points are inserted first, in the order they were accepted, so each one takes the id
+its cavity was computed with. The splits come next. A box face is split at its circumcentre with
+the plane coordinate set exactly, unless that point encroaches a box subsegment (a hull edge on a
+box edge), which is then split at its midpoint, exactly on its line. A box face whose
+circumcentre falls outside its rectangle gets its centroid instead. A subsegment `[a, b]` of edge
+`[p, q]` (length `L`, chain parameters `t_a < t_b`) is split on a **concentric shell** (Ruppert
+1995) when exactly one of its ends is an input vertex that is not protected:
+
+```
+s = 2^k,  k = ceil( log2( (t_b - t_a) L / 3 ) ),   t = t_a + s / L   (end p),   t = t_b - s / L   (end q)
+otherwise t = (t_a + t_b) / 2, which is (116.15e)                                         (116.20a)
+```
+
+This keeps the split in `[len/3, 2 len/3)`. Two subsegments from one vertex then split on the
+same radii, so a split on one does not encroach the other's piece next to the vertex. A protected
+vertex keeps the midpoints of (116.15e), whose shells are `r_v / 2^k`. A split whose `t` does not
+lie strictly between `t_a` and `t_b` is the refusal `refine/split`.
+
+**Small angles between unprotected segments.** Every surface edge is a segment (§116.11), and only
+angles at feature edges are protected. Shewchuk 1998's termination proof needs every input angle
+at 90 degrees or more, so it does not cover the remeshed surface. There the triangles meet at 25
+degrees or more inside nearly flat facets (§116.10). The remeshed fixtures terminate. An input
+that is not remeshed does not: the cube `[-0.5, 0.5]^3`, two triangles per face, in `[-1, 1]^3`
+at `h = 0.4` (its diagonals meet the face edges at 45 degrees) cascades. It reached 67 289 points
+after 91 passes, against about 930 predicted tetrahedra, and the cap is what ends it. The same
+cube remeshed at `h = 0.4` ends after 25 passes with 1 495 kept tetrahedra. The pipeline always
+remeshes first (§116.3), so this is recorded, not cured. The cures (facets as unions of coplanar
+triangles, or protection at every angle below 90 degrees) change §116.11 and are left for review.
+
+**Exempt tetrahedra.** A violating tetrahedron is exempt when one of its vertices, or its
+circumcentre, lies in a closed protecting ball, `|x - v| <= r_v (1 + 1e-9)`, where `r_v` is
+(116.15c). Exempt tetrahedra are never split. `Refined::exempt` lists them as indices into the
+kept tetrahedra, and `Refined::balls` lists the balls.
+
+**The end and the cap.** A pass with no work ends the loop, and it returns the final carve with
+every subsegment an edge and every subtriangle a face. A pass with work that schedules no point is
+the refusal `refine/stall`. `refine.max_inserted_points` bounds every inserted point, of every
+kind. A pass that would pass it is the refusal `refine/cap: n points inserted after k passes, the
+next pass needs m more, cap N`. The cap is exact: a run that inserts `n` points succeeds with
+`N = n` and refuses with `n - 1`. Other refusals are by name: a size that is not finite and
+positive (`refine/h`), a kept tetrahedron without a finite circumcentre (`refine/centre`), a
+chain point that is not an edge site (`refine/input`), a facet that cannot be triangulated
+(`refine/facet`), and the spec's three
+bounds with `TetSpec`'s messages. A refinement point off the surface is the recovery's new site
+`SteinerSite::Volume`.
+
+The gate measures (TET-09):
+
+```
+violators  = #{ kept T : rho(T) > B  or  R(T) > c h(x_T),  T not exempt }   = 0
+m_edge     = (1 / |E|) sum_{e in E} |e| / h(m_e),   E = the kept tetrahedra's unique edges,
+             m_e = the edge's midpoint                                                   (116.20b)
+N_pred     = 1.1 sum_{T kept} V_T / ( h(g_T)^3 / (6 sqrt 2) ),   g_T = the centroid       (116.20c)
+```
+
+(116.20c) is (116.20) by the midpoint rule on the kept tetrahedra themselves. The fixture is the
+sphere in a box. It is the level-3 icosphere, remeshed by §116.10 to a size field (§116.8) with
+one patch source on it (`h = 0.25`, flat distance 0), `H = 0.5` and `g = 1.2`, in `[-2, 2]^3`. It
+is recovered by §116.11 and refined from the hull. The gates are: `m_edge` in `[0.85, 1.15]`;
+`|N / N_pred - 1| <= 0.2`; no violator; and the split surface still recovered with the kept
+volume still closing by (116.16) at relative `1e-12`.
+
+**The size factor, as TET-09 measured it.** With the first default, `c = sqrt(6)/4`, the fixture
+came out at `m_edge = 0.7969` and `N / N_pred - 1 = +134 %`. That misses both bands. The bound
+caps the edges below `h` by construction. For four points on a sphere of radius `R`, the sum of
+the squared edges is `16 R^2 - |p_0 + p_1 + p_2 + p_3 - 4 x_T|^2 <= 16 R^2`. So the mean edge is
+at most the root mean square `sqrt(8/3) R`, with equality only for the regular tetrahedron.
+`R <= sqrt(6)/4 h` then gives a mean edge of at most `h`, and every tetrahedron short of regular,
+or of the bound, falls below it. A sweep of `c` on the fixture gave these results:
+
+| `c` | 0.612 | 0.70 | 0.75 | 0.78 | 0.80 | 0.82 | 0.85 |
+|---|---|---|---|---|---|---|---|
+| `m_edge` | 0.797 | 0.892 | 0.945 | 0.975 | 0.995 | 1.021 | 1.098 |
+| `N / N_pred - 1` | +134 % | +65 % | +37 % | +23 % | +15 % | +6 % | -12 % |
+
+The default is now `c = 0.8`. It is DESIGN: the value where `m_edge` is closest to 1. The same
+`c` holds both bands with the sphere's `h` at 0.18 (`m_edge` 1.032, `+6.5 %`) and at 0.35
+(1.006, `+15.3 %`, with `H = 2h`). Neither gate band changed.
 
 ### 116.14 Optimisation
 
@@ -36673,6 +37004,140 @@ These are §92.4's repair moves, now inside the generator:
 
 The targets `10` and `165` degrees are the bounds of Labelle & Shewchuk (2007),
 `10.7` and `164.8` degrees.
+
+**The flips, as TET-10a builds them.** `optimise::flip` takes the points, the kept tetrahedra
+(each with (116.2) > 0, no face on three or more) and a set of frozen faces, and returns new
+tetrahedra on the same points; no coordinate changes. The quality `q(T)` is the smallest of
+(116.21)'s six angles. Edge removal of the edge `ab` takes the `m` tetrahedra on it, `3 <= m <= 10`
+(DESIGN: the largest ring triangulated), and orders the other two vertices of each into the ring
+`u_0, .., u_{m-1}` with `orient3d(a, b, u_i, u_{i+1}) > 0`. An edge whose ring does not close (an
+edge on the boundary) or one with a frozen face `(a, b, u_i)` is not removed. A triangulation of
+the ring polygon gives two tetrahedra per triangle, and the best one is found by Klincsek (1980)'s
+dynamic programme, as Shewchuk (2002) uses it:
+
+```
+Q(i, i+1) = +inf
+Q(i, j)   = max over i < k < j of  min( Q(i, k), Q(k, j), q2(i, k, j) )                   (116.21a)
+q2(i, k, j) = min( q(u_i, u_k, u_j, b), q(u_k, u_i, u_j, a) ),
+              or -inf if either has orient3d <= 0, the face (u_i, u_k, u_j) exists, or an
+              edge (u_x, u_y) of the triangle that is not a ring edge exists
+```
+
+The removal is kept iff `Q(0, m-1)` exceeds the smallest `q` of the `m` old tetrahedra; `m = 3`
+is the 3-2 flip. The 2-3 flip of a face `pqr` that is on two tetrahedra, with apexes `s` and `t`,
+not frozen, with no edge `st`, makes the three tetrahedra `(s, t, u_i, u_{i+1})` over the ring
+`pqr` ordered so the first is positive; it is kept iff all three have `orient3d > 0` and their
+smallest `q` exceeds that of the two. A move's tetrahedra are positive and their chain has the old
+star's boundary, so they tile the old star exactly: the winding number of that boundary is 1
+inside and 0 outside, and positive tetrahedra add only `+1`s. So, for the whole mesh,
+
+```
+every orient3d > 0,  every face on at most 2 tetrahedra,  the faces on one tetrahedron
+unchanged,  sum of V(T) unchanged,  and  min over T of q(T) never decreasing             (116.21b)
+```
+
+A face on one tetrahedron is never interior to a move, so the boundary is untouched without being
+named; a frozen face (any winding) is never removed, which is how a subtriangle with kept
+tetrahedra on both sides would be protected. A pass takes the tetrahedra present at its start,
+worst `q` first (ties by index). For each one still present it evaluates the removal of its six
+edges and the 2-3 flip of its four faces, and keeps the candidate with the largest new worst `q`
+if any is kept by its rule (DESIGN). The passes stop after one with no move or after
+`optimise.passes`; TET-10b alternates them with the smoothing (below). The rule is strict in f64, so a
+move can gain a round-off amount (the sphere's smallest gain is `2.5e-14` degrees). That is still
+an increase of the sorted vector of the star's qualities, so no sequence of moves cycles.
+
+**The smoothing and the perturbation, as TET-10b builds them.** `optimise::optimise` takes the
+points, the kept tetrahedra, the frozen faces and one freedom per point, and returns moved points
+and new tetrahedra. `optimise::freedoms` sets the freedoms from the face recovery of §116.11, whose
+`point_tris` names the input triangles each point lies on:
+
+```
+on input triangles:  group them into exact planes (orient3d = 0 against the group's first one)
+    one plane of one patch            ->  Plane(n)            a surface vertex, tangential
+    two planes of one patch each      ->  Line(n_1 x n_2)     a feature vertex, along its edge
+    anything else                     ->  Fixed               a corner
+on no input triangle:  k = the coordinates equal to a bound of the domain box
+    k = 0 -> Free,   k = 1 -> Plane(axis),   k = 2 -> Line(axis),   k = 3 -> Fixed     (116.21c)
+x' = a + P (x - a),    P = I,  I - n n^T,  u u^T  or  0,    a = the input position of the point
+```
+
+A point that would be `Free` but lies on a boundary face, and a point on no tetrahedron, are
+`Fixed` (DESIGN). The surface here is the polyhedral surface given to §116.11 (for the sphere, the
+remeshed one), so a point of a curved, faceted surface moves only inside one facet or along one
+crease, and the polyhedron's own vertices are corners. Placing every move at `a + P (x - a)` from
+the input position, not from the last one, keeps the point on its plane or line to rounding. A
+moved surface point also stays inside the polygon its boundary faces tile: a face that left it
+would turn over in its plane, and its tetrahedron's `orient3d` would change sign, which no move
+allows.
+
+With `f_v(x)`, the smallest `q` over the tetrahedra on `v` when `v` is at `x`, a move of `v` from
+`x` to `x'` is kept iff every one of those tetrahedra has `orient3d > 0` at `x'` and
+`f_v(x') > f_v(x)`. Only that star changes, so (116.21b) holds as stated, with "the faces on one
+tetrahedron unchanged" read as index sets; the volume is unchanged to rounding because the
+boundary moves only within its own planes. The smoothing is Freitag & Ollivier-Gooch (1997)'s
+non-smooth ascent of `f_v`:
+
+```
+A = { angles theta_i of the star with theta_i(x) <= f_v(x) + 1e-3 rad },   g_i = P grad theta_i(x)
+d = the point of smallest norm in the convex hull of the g_i      (Gilbert 1966's iteration)
+stop when |d| l <= 1e-6;   else  x <- a + P (x + s d / |d| - a),   s = 0.25 l 2^-k,
+the first k < 12 that raises f_v                                                         (116.21d)
+```
+
+`l` is the shortest edge at `v`, and the gradients are central differences with step `1e-6 l`.
+Before the ascent the centroid of the star's other vertices, placed by `P`, is tried. That is the
+"smart" Laplacian step. A vertex gets at most 8 ascent steps per sweep. A sweep visits every vertex
+that is not `Fixed`, the smallest `f_v` first (ties by index). The constants are DESIGN.
+
+The sliver perturbation is DESIGN, a heuristic. Cheng et al. (2000)'s sliver exudation is the
+provable alternative, kept for TET-10c:
+
+```
+bad = { T : q(T) < target_min  or  max theta(T) > target_max },  the smallest q first (ties by index)
+for each vertex v of a bad T that is not Fixed, 4 trials at each r in {0.2, 0.1, 0.05}:
+    x' = a + P (x + r l P u / |P u| - a),   u uniform in the unit ball (splitmix64 of perturb_seed)
+keep the trial with the largest f_v(x') if it exceeds f_v(x)                               (116.21e)
+```
+
+A round is one flip pass of `optimise::flip`, then one smoothing sweep, then, with
+`optimise.perturb_slivers`, one perturbation sweep:
+
+```
+round = flip (1 pass, frozen faces kept), smoothing sweep (116.21d), perturbation sweep (116.21e)
+at most optimise.passes rounds, stopping after a round with no move                     (116.21f)
+```
+
+The generator is seeded once per call, and no step depends on hash order, so a run is
+deterministic.
+
+**Measured (TET-10b).** These are the defaults: 8 rounds, targets 10 and 165 degrees, and the
+perturbation on with seed 1.
+
+- **Sphere in a box (TET-09's).** There are 2 262 points: 913 free, 677 on planes, 450 on lines
+  and 222 fixed. The 9 989 tetrahedra become 9 309. The smallest dihedral per round is 1.0232,
+  18.2508, 23.3533, 24.8167, 25.4794, 26.0452, 26.2778, 26.4511 and 26.5925 degrees. The largest
+  goes from 178.1956 to 153.0691 degrees. That is 0 + 691 + 968 flip moves and 14 595 smoothing
+  moves, with no tetrahedron left for the perturbation. The volume is kept to a relative
+  1.14e-14, and the largest distance of a moved surface point from the surface is 1.57e-16.
+- **Cube minus a cylinder.** The body is `[-0.5, 0.5]^3` minus the cylinder of radius 0.25 along
+  `z`, with 24 facets. It is remeshed and refined at `h = 0.0625` on the body, `H = 0.4` and
+  `g = 1.2`, in `[-1.25, 1.25]^3`, with the flow outside and through the hole. The 71 074
+  tetrahedra become 66 072. The smallest dihedral goes from 0.1086 to 24.0054 degrees, and the
+  largest from 179.8283 to 149.9348 degrees. There are 14 perturbation moves, and the jump from
+  8.2006 to 23.8962 degrees comes in the round after them. The surface distance is 7.85e-17 and
+  the volume relative 1.64e-14.
+- **The 30-degree wedge: MISSED.** The body is the prism over the isosceles triangle with a
+  30-degree apex, `x` from -0.5 to 0.5 and `z` from -0.5 to 0.5, in the same box. §116.13's
+  refinement does not finish on it. At `h = 0.1` it reaches a cap of 20 000 inserted points after
+  187 passes, and the next pass would need 5 816 more. The whole sphere in a box has 2 262 points.
+  Probes at `h` from 0.04 to 0.15, with the default cap and with a cap of 60 000, did not finish
+  either: they hit the cap, the 240 s probe limit, or, at `h = 0.08`, `refine/facet`. So the gate
+  cannot be measured on the wedge. The cause is upstream. The 30-degree angle between the facets
+  at the apex edge breaks Shewchuk (1998)'s assumption of angles of at least 90 degrees, the same
+  family as TET-09's recorded miss. The cure is protection of small angles in the refinement
+  (§116.13), not in the optimiser, so neither the gate nor TET-10c's exudation applies yet. The
+  cube minus a cylinder does not finish at `h = 0.1` either: it reaches a cap of 60 000 after
+  520 passes. At `h = 0.0625` it finishes.
 
 ### 116.15 Prism layers by post-inflation
 
@@ -36904,6 +37369,22 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-08 | patch face counts: the cube with 6 patches, and the level-2 icosphere with a patch per hemisphere, each in `[-2, 2]^3` | cube: 4 faces per patch against 4 subtriangles each, 12 hull faces of 12; sphere: 168 and 152 against 168 and 152, 12 hull faces of 12; every face once, each subtriangle face the reverse of its input winding | the TET-08 commit |
 | TET-08 | R4 on a hollow cube (outer `[-1, 1]^3` outward, inner `[-0.5, 0.5]^3` inward) in `[-2, 2]^3`, not a plan gate | 3 regions. The hull start keeps `V` = 56.000000000000000 (printed to 15 places); the pocket is dropped and reported: fluid, 24 tetrahedra, volume 1, box `[-0.5, 0.5]^3` exactly; the solid shell: 72 tetrahedra, volume 7, box `[-1, 1]^3`. A seed at `(0.1, 0.2, 0.3)` keeps the pocket (1); a seed at `(0.75, 0, 0)` in the shell is the wrong-side refusal naming patch `out_xmin` | the TET-08 commit |
 | TET-08 | the f32 arm | `rust/tests/tetmesh_carve.rs`, 3 tests (the `Scalar` width; the sphere in a box with (116.16), (116.16b), the face counts and the fluid seed; the seed and hull refusals) pass under `--features single` with every printed number identical to the f64 build | the TET-08 commit |
+| TET-09 | §116.13, changed by this unit | the paragraphs "The refinement, as TET-09 builds it" and "The size factor, as TET-09 measured it", (116.20a)-(116.20c) and the gate measures were added; the DESIGN default `c = sqrt(6)/4` became `c = 0.8` (§116.3's table and `TetRefineSpec`), recorded with the sweep that set it; the gate bands are unchanged | the TET-09 commit |
+| TET-09 | sphere in a box: the level-3 icosphere remeshed to the size field (`h = 0.25` on the sphere, `H = 0.5`, `g = 1.2`) in `[-2, 2]^3`, refined from the hull with the defaults (`B = 2`, `c = 0.8`) | 2 262 points, 9 989 kept tetrahedra in 119 passes: 913 interior circumcentres, 366 subsegment splits, 0 facet points, 677 box-face and 84 box-edge points; 4 163 circumcentres rejected for encroachment or the box, 35 550 deferrals. 0 violators of (116.17) or (116.18), 0 exempt (no protecting ball); 1 156/1 156 subtriangles and 1 002/1 002 subsegments recovered; (116.16) relative 6.16e-15. `m_edge` (116.20b) = 0.9948 in `[0.85, 1.15]`; 9 989 against `N_pred` (116.20c) = 8 654.7, +15.42 % within 20 %. About 1 s in a release build | the TET-09 commit |
+| TET-09 | the same fixture with the first default `c = sqrt(6)/4` | 20 295 kept tetrahedra in 126 passes; `m_edge` = 0.7969 and +133.97 % against `N_pred` = 8 674.1: both bands missed, which set the new default (§116.13) | the TET-09 commit |
+| TET-09 | the cap and the refusals: the cube `[-0.5, 0.5]^3` remeshed at a uniform `h = 0.4` (57 points, 94 triangles, its 12 edges as features, no protected vertex) in `[-1, 1]^3` | 25 passes, 1 495 kept tetrahedra in 0.04 s, `k` = 375 points inserted (57 interior, 131 subsegment, 151 box-face and 36 box-edge); it succeeds again with `max_inserted_points = 375`, with the same stats and tetrahedra, and with 374 it refuses as `refine/cap: 363 points inserted after 24 passes, the next pass needs 12 more, cap 374`; the three spec bounds with `TetSpec`'s messages; `refine/box` for a missing box corner; `refine/h` for a size of NaN | the TET-09 commit |
+| TET-09 | the same cube NOT remeshed (two triangles per face, 45 degree diagonals), `h = 0.4`, not a plan gate | the refinement cascades toward the small angles: 67 289 points after 91 passes (about 930 tetrahedra predicted), stopped by hand; recorded in §116.13 and left for review | the TET-09 commit |
+| TET-09 | the f32 arm | `rust/tests/tetmesh_refine.rs`, 4 tests (the `Scalar` width; the bound, the recovery and (116.16); `m_edge`; the count) pass under `--features single` with every printed number identical to the f64 build | the TET-09 commit |
+| TET-10a | §116.14, changed by this unit | the paragraph "The flips, as TET-10a builds them", (116.21a)-(116.21b), the DESIGN ring limit `m <= 10`, the pass order and the candidate choice were added; Klincsek (1980) joined §116.19 | the TET-10a commit |
+| TET-10a | TET-09's sphere in a box (9 989 kept tetrahedra), the subtriangles frozen, `optimise.passes = 8` | 3 passes (the third with no move): 670 3-2 flips, 468 edge removals with `m >= 4`, 0 2-3 flips; 9 325 tetrahedra. The worst `q` per pass 1.0232, 10.4342, 10.4342, 10.4342 degrees: never decreasing. All `orient3d > 0`, no face on three; the volume relative 3.20e-15; the 2 690 boundary faces equal before and after and equal the carve's, every subtriangle still a face, the points untouched | the TET-10a commit |
+| TET-10a | TET-09's cube `[-0.5, 0.5]^3` at `h = 0.4` in `[-1, 1]^3` (1 495 kept tetrahedra) | 2 passes: 53 3-2 flips, 81 edge removals, 0 2-3 flips; 1 442 tetrahedra; the worst `q` 2.4429, 15.8028, 15.8028 degrees; the volume relative 2.03e-15 | the TET-10a commit |
+| TET-10a | the hand fixtures | three tetrahedra about the edge `(0, 0, +-1)` over a triangle in `z = 0`: one 3-2 flip, worst 38.5679 -> 62.7744 degrees, and no 2-3 flip brings them back; the same pair flattened to `z = +-0.05`: one 2-3 flip, 5.5507 -> 11.1014 degrees, refused when the shared face is frozen; the regular tetrahedron's six angles `arccos(1/3)` within 1e-12 rad | the TET-10a commit |
+| TET-10a | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 3 tests (the `Scalar` width; the monotone worst, validity and volume; the boundary faces) on the sphere in a box pass under `--features single` with every printed number identical to the f64 build; the largest dihedral, printed and not gated, goes 178.1956 -> 152.7733 degrees | the TET-10a commit |
+| TET-10b | §116.14, changed by this unit | the paragraphs "The smoothing and the perturbation, as TET-10b builds them" and "Measured (TET-10b)", (116.21c)-(116.21f), the DESIGN freedom rule and constants (active set 1e-3 rad, 8 ascent steps of 12 halvings, the centroid first, radii 0.2, 0.1 and 0.05 of the shortest edge with 4 trials each, splitmix64); Gilbert (1966) joined §116.19 | the TET-10b commit |
+| TET-10b | TET-09's sphere in a box at the default `tet.optimise` (8 rounds, perturbation on, seed 1) | 9 989 -> 9 309 tetrahedra; the smallest dihedral per round 1.0232, 18.2508, 23.3533, 24.8167, 25.4794, 26.0452, 26.2778, 26.4511, 26.5925 degrees, the largest 178.1956 -> 153.0691: min >= 10 and max <= 165 PASS; 691 3-2 flips, 968 edge removals, 14 595 smoothing moves, 0 perturbation moves; volume relative 1.14e-14; the largest distance of a moved surface point (359 moved) from the surface 1.57e-16 (bar 1e-12) PASS; the boundary faces unchanged | the TET-10b commit |
+| TET-10b | the cube `[-0.5, 0.5]^3` minus the 24-facet cylinder of radius 0.25, at `h = 0.0625`, `H = 0.4`, `g = 1.2` in `[-1.25, 1.25]^3` (71 074 kept tetrahedra) | 66 072 tetrahedra; the smallest dihedral 0.1086 -> 24.0054 degrees, the largest 179.8283 -> 149.9348: PASS; 14 perturbation moves; volume relative 1.64e-14; surface distance 7.85e-17 (5 127 surface points moved) PASS | the TET-10b commit |
+| TET-10b | the 30-degree wedge at `h = 0.1`, the same field and box | **MISSED**: §116.13's refinement does not finish (a cap of 20 000 inserted points after 187 passes; probes at `h = 0.04-0.15` with caps up to 60 000 did not finish either), so the gate cannot be measured; the cause is the 30-degree facet angle at the apex edge in the refinement, not the optimiser. `optimise::tests::dihedral_bounds_wedge` asserts that cause | the TET-10b commit |
+| TET-10b | the f32 arm | `rust/tests/tetmesh_optimise.rs`, 4 tests (TET-10a's 3 and `optimise_dihedral_bounds` on the sphere in a box) pass under `--features single`, and the printed optimise line is byte-identical to the f64 build's | the TET-10b commit |
 
 ### 116.19 References
 
@@ -36933,9 +37414,14 @@ Crossref metadata was checked against the title, authors, year and pages given h
   `10.1002/(SICI)1097-0207(19971115)40:21<3979::AID-NME251>3.0.CO;2-9`.
 - Geuzaine, C. & Remacle, J.-F. (2009). Gmsh. *Int. J. Numer. Meth. Engng* 79(11), 1309-1331.
   DOI `10.1002/nme.2579`. Cited for its licence. Not read.
+- Gilbert, E. G. (1966). An iterative procedure for computing the minimum of a quadratic form on
+  a convex set. *SIAM J. Control* 4(1), 61-80. DOI `10.1137/0304007` (checked against Crossref by
+  the supervisor of TET-10b, 2026-10-15).
 - Kallinderis, Y., Khawaja, A. & McMorris, H. (1996). Hybrid prismatic/tetrahedral grid
   generation for viscous flows around complex geometries. *AIAA J.* 34(2), 291-298. DOI
   `10.2514/3.13063`.
+- Klincsek, G. T. (1980). Minimal triangulations of polygonal domains. *Ann. Discrete Math.* 9,
+  121-123. DOI `10.1016/S0167-5060(08)70044-X`.
 - Labelle, F. & Shewchuk, J. R. (2007). Isosurface stuffing. *ACM Trans. Graph.* 26(3), 57.
   DOI `10.1145/1276377.1276448`.
 - Lawson, C. L. (1977). Software for C1 surface interpolation. In J. R. Rice (ed.),
@@ -39220,7 +39706,7 @@ in `cht.rs`) are still measured on the stored float field, so under `single`
 a region's report sits at the float floor. Ranged double kernels would be
 needed, and `cht.rs` is outside this unit's files; the item is F32-13/14's to
 class. GAMG as a solver was already refined (AMG-04a), and GAMG in f32 is
-AMG-06a's. **A refined PBiCGStab on the sealed all-Neumann box of section 6
+AMG-06a's (§141.9, which also refines the SPMD stationary `spmd_gamg`). **A refined PBiCGStab on the sealed all-Neumann box of section 6
 returns NaN under `single`.** That box is singular, and its float-rounded
 source is inconsistent by `O(n·u32)`. Once the refinement has removed
 everything else, the correction system is mostly that inconsistent
@@ -43774,8 +44260,8 @@ source plus `rho` times its flux sum, as the row says. The brief's first form
 ## 125. Energy, the outer loop, and the local time step
 
 `No GPL-licensed source was consulted.` CMP-11 implements §125.1-§125.2 in
-`src/compressible/energy.rs`, CMP-12 §125.3 in `src/compressible/mod.rs`, and CMP-13
-§125.4 in `src/compressible/lts.rs`.
+`src/compressible/energy.rs` (as built: §125.5), CMP-12 §125.3 in `src/compressible/mod.rs`
+(as built: §125.6), and CMP-13 §125.4 in `src/compressible/lts.rs` (as built: §125.7).
 
 ### 125.1 The energy equation, solved for `T`
 
@@ -43870,6 +44356,271 @@ every ddt difference is zero, so the fixed point does not depend on `CFL`. CMP-1
 `steady_fixed_point_independent_of_cfl` holds two CFLs to the same field within `1e-8`
 in f64 (class P; the same bar in f32 is reported as its own row if missed, §5.1.4) and
 `dt_field_matches_host_formula` holds (125.2) to its host twin (class R).
+*As built* (§125.7): the fixed-point row is MISSED. `rAU` (123.5) carries the time term's
+diagonal, so the Rhie-Chow flux keeps `CFL` at the fixed point.
+
+### 125.5 The assembly as built (CMP-11)
+
+`src/compressible/energy.rs` holds `RhoEnergy`, and `cuda/compressible.cu` gains three
+kernels. Like §123.3 and §124.4, this subsection adds no physics: it fixes the scaling,
+the order and the face values of (125.1). Everything §3, §7, §12 and §86.3 already
+compute is CALLED: the scalar operators of `src/fv.rs`, the time term
+`timescheme::Ddt::add_rho`, the face product of `cuda/momentum.cu` (`momMul`) and the
+face-flux sum of `cuda/simple.cu` (`smpFaceFluxSum`).
+
+**The scaling.** *DESIGN*: `c_p` is constant (`hConst`, §122.1), so the system
+assembled is (125.1) divided by `c_p`. The time term is `Ddt::add_rho` with weight `rho`
+on `T`'s old levels, the convection is `fvm_div_gauss` on `mdot`, the laplacian's
+coefficient is `kappa_f |Sf| / c_p`, and every explicit term carries
+`rcp = fl(1/c_p)`, formed in f64 and rounded once. The solution is (125.1)'s; only the
+rounding of the scaling differs. The system is
+
+```
+A T = b
+A T = ddt_rho(T) + sum_f mdot_f T~_f - sum_f rcp kappa_f |Sf| snGrad(T)                      (125.3)
+b   = sum_f ±e_f + rcp V_P [ (a_n p_P + a_0 p_P^o + a_00 p_P^oo)
+                             - (a_n rho_P K_P + a_0 rho_P^o K_P^o + a_00 rho_P^oo K_P^oo)
+                             + rho_P g . u_P ]
+e_f = rcp ( W_f - mdot_f K~_f ) ,   K = |u|^2 / 2 ,   W_f = u_f . (tau_f . Sf)                     (125.4)
+(tau_f . Sf)_i = mu_f ( sum_j (T_f,ij + T_f,ji) Sf_j - (2/3) tr(T_f) Sf_i ) ,   T_ij = d u_j/d x_i  (grad u)
+```
+
+`(a_n, a_0, a_00)` are this equation's own time coefficients (`DdtCoeffs`), so `dp/dt`,
+`d(rho K)/dt` and `d(rho T)/dt` are one scheme. `K^o` and `K^oo` are `|u^o|^2/2` and
+`|u^oo|^2/2`, formed from `u`'s old levels. `(tau . Sf)` is (123.2) contracted with
+`Sf` in §123.2's three terms. `sum_f` runs over the cell's faces with the outward sign
+(owner `+`, neighbour `-`, boundary `+`).
+
+**Face values.** One set of weights serves `T~_f` and `K~_f`: §7's weights of the
+scheme on `mdot`, with `T` as the sensor (§125.1's DESIGN). A deferred-correction scheme
+(`linearUpwind`, `linearUpwindBlended`, `cubic`) has no weight for its face value, so it
+is refused by name. `u_f`, `mu_f` and the face tensor `T_f` of `grad u` (§123.3's `T`,
+not the temperature) are linear on the mesh weights:
+
+```
+internal face:                      K~_f = w_f K_P + (1 - w_f) K_N ,   T_f = l_f T_P + (1 - l_f) T_N ,   u_f likewise
+cyclic face with a cell across it:  the same with bw_b (K) and the mesh's b_weights (T_f, u_f)
+any other boundary face:            K~_b = |u_b|^2/2 ,   u_f = u_b ,   T_f = T_P                     (123.10)
+empty face:                         e_b = 0
+```
+
+`u_b` is the value of `u`'s §4 triple, as `T~_b` is the value of `T`'s, so a boundary
+face's flux is `mdot_b (T_b + K_b/c_p)` from the two triples.
+
+**The order** (`assemble_only`, and `solve` before its one linear solve):
+1. the weights, `rcp kappa_f |Sf|`, and, with `viscousWork`, `mu_f` and `grad u`; then `e_f`;
+2. zero the matrix;
+3. `Ddt::add_rho(rho, rho^o, rho^oo; T^o, T^oo, +1)`;
+4. `fvm_div_gauss(mdot, w, bw, T, +1)`;
+5. `fvm_laplacian(rcp kappa_f |Sf|, T, -1)`, and §12.3's correction with the Gauss `grad T`;
+6. `source += sum_f ±e_f` (`smpFaceFluxSum`, accumulating);
+7. the cell source, launched when the time coefficients are not all zero or `g != 0`;
+8. `ldu_ops::relax` by `alpha_T`, always (at 1 it only enforces dominance);
+9. the boundary fold.
+
+`solve` then solves for `T` and evaluates its boundary values. The solve's initial
+residual is the `h_0` residual of §125.3 step 8. `set_t_relax` sets `alpha_T` for a final
+corrector. Refused by name: `localEuler` and `CrankNicolson` (as §123.3 refuses them),
+`PCG`, `DIC` and `GAMG` (the convection makes the matrix asymmetric), `alpha_T` outside
+`(0, 1]`, and a `c_p` that is not positive and finite.
+
+| gate (lib: `compressible::energy::tests::*`, f64 build; the same names in `tests/compressible_energy.rs` run in both builds from one shared source) | bar | class |
+|---|---|---|
+| `uniform_flow_preserves_t` | §123.3's 6x5x4 box graded 3:1 in y, uniform `u = (37.5, -12.25, 4)`, `rho = 1.177`, `p = 250` and `T = 300` at every level; `u` fixed on every patch, `T` fixed on the inflow faces and zeroGradient on the outflow faces; `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air). Run for steadyState (`alpha_T = 0.9`), Euler and backward (`dt = 1e-3`) with upwind, and Euler with `Limited(VanLeer)`. The residual at `T = 300` satisfies `abs(r_P) <= 1e-13 S_P`, `S_P = abs(diag_P) T + sum_f abs(mdot_f) (T + K/c_p) + V_P abs(a_n) (rho T + (rho K + abs(p))/c_p)`. One solve leaves `T` within `1e-10 S_P/abs(diag_P)` of 300. Control: `T + 1` in one interior cell puts `abs(r_P)` within `[0.5, 1.5] abs(diag_P)` | R |
+| `slab_conduction_linear_exact` | an 8x3x2 box on `[0, 0.5] x [0, 0.2] x [0, 0.1]` graded 3:1 in x, `u = 0`, `mdot = 0`, `kappa = 0.0263`, `T = 300` at `x = 0` and `400` at `x = 0.5`, zeroGradient elsewhere. Steady, and Euler (`dt = 1e-3`) with the profile as the old levels, each from `T = 300`: every `abs(T_P - (300 + 200 x_P)) <= 1e-10 x 400` K | R |
+| `viscous_work_matches_couette_exact` | (127.12) on a 1x20x1 channel, `h = 0.01`, `U = 200` m/s, `T_top = 300` fixed, the bottom wall adiabatic, `mu = 1.8e-5`, `kappa = mu c_p/Pr` (air), `u = U y/h` fixed on every patch. The x and z boundary faces carry no mass flux (the channel is one-dimensional; see below). Steady: every `abs(T_P - T(y_P)) <= 0.005 (T_w - T_top)`, §127.4's allowance. Derived for this mesh: the discrete solution is the parabola lowered by `(dy/h)^2/4` of the rise (the half-cell closure at the isothermal wall), `6.25e-4`. Control: without the work the miss is more than 100 bars | P |
+| `h0_conserved_along_inviscid_duct_to_1e_6` | a 16x3x2 duct on `[0, 2] x [0, 0.3] x [0, 0.2]` graded 2:1 in x, `mdot = 117.7 Sf_x` (exactly divergence-free), `u = (100 + 200 x, 0, 0)` fixed on every patch but the outlet (zeroGradient), `mu = kappa = 0`, `T = 300` fixed at the inlet. Steady. Every cell's `abs(sum_f ±mdot_f (T~_f + K~_f/c_p)) <= 1e-6 sum_f abs(mdot_f) (abs(T~_f) + K~_f/c_p)` on the solve's weights, with upwind (one solve) and with `Limited(VanLeer)` (200 outer solves: step 8's dominance enforcement makes a partly central convection reach (125.3) only at its outer fixed point, about 150 solves in f64). With upwind every `abs(h0_P - h0_in) <= 1e-6 h0_in`, `h0 = T + K/c_p`. Control: `T` falls by more than 100 K along the duct | A |
+| `energy_refusals_name_the_setting` | `RhoEnergy::new` refuses `localEuler`, `CrankNicolson`, `LinearUpwind`, `Cubic`, `t_relax = 0`, `cp = 0`, `PCG`, `GAMG` and `DIC`, each by name | D |
+| `the_compressible_energy_equation_replays_bitwise` (lib) | §81.7's row for `src/compressible/energy.rs`. One energy solve - every term of (125.3)-(125.4) live (Euler, `g = (0, -9.81, 0)`, non-uniform `u` with an old level, `rho`, `p`, `mu`, `kappa` and `T`) and a fixed 4-sweep Jacobi solve - captures into one graph and replays bitwise | D |
+
+The R rows take `tol32 = max(tol64, min(tol64·2^29, 1e-5))` (D-F32-1): `1e-5` for the
+`1e-10` and `1e-13` bars. The P and A rows are the same in both builds.
+
+**Landed (CMP-11).** Measured on the RTX 5070 Ti, f64 first and then `single`; each
+number is the worst over the row.
+
+- The uniform flow: the residual is `2.4e-16` and `1.1e-7` of `S_P`, the solve's `T`
+  `4.7e-16` and `9.4e-8` of `S_P/abs(diag_P)`, and the control ratio is 1 to `3.4e-5`.
+- The slab: `2.8e-13` K and `1.3e-4` K (bars `4e-8` and `4e-3` K).
+- Couette: the rise is `14.133676596` K, and the worst cell is `6.250e-4` and `6.194e-4`
+  of it, the derived `6.25e-4` (bar `5e-3`). Without the work the miss is `0.9994` of the
+  rise.
+- The duct: the face sum is `4.1e-15` and `3.6e-8` with upwind, `2.9e-15` and `4.7e-8`
+  with van Leer; the upwind `h0` drift is `1.2e-14` and `7.8e-8`; `T` falls 110.09 K.
+- The replay gate captures 110 nodes (99 kernel, 11 memset) and replays three times
+  bitwise over 4 buffers and 174 values.
+
+*Finding (single).* A first form of the Couette row let the x boundary faces carry the
+channel's through-flow. Each cell's two x faces then carry K fluxes `4e4` times its viscous
+work, which cancel exactly only in exact arithmetic. Under `single` the rounding of that
+cancellation moved the worst cell to `3.5e-3` of the rise, inside the bar but six times the
+f64 error, and f64 was unchanged. The row now states the one-dimensional channel. A case
+whose energy balance is a small difference of large convected `K` fluxes carries that
+rounding in `single`.
+
+Every cubin but `compressible.cubin` is unchanged in SASS in both builds, apart from
+`solidblock.cubin` in f64, which flipped between its two known hashes on a rebuild with
+no edit to it (nvcc's nondeterminism, as CMP-08 recorded). CMP-08's, CMP-09's and
+CMP-10's integration tests are unchanged (4, 5 and 4 passed in both builds).
+
+### 125.6 The outer loop as built (CMP-12)
+
+`src/compressible/mod.rs` holds `Compressible`, the loop of §125.3 over CMP-08's gas law,
+CMP-09's momentum, CMP-10's pressure and CMP-11's energy equations. It adds no kernel:
+`cuda/compressible.cu` is unchanged, and the only arithmetic of its own is step 6's
+relaxation through `simple.cu`'s `smpRelaxField`. `CompressibleState` holds `u`, the gauge
+`p` and `T` with the caller's boundary conditions, and `rho`, `psi`, `mu`, `kappa` and
+`mdot`. The boundary values of `rho`, `psi`, `mu` and `kappa` are formed elementwise from
+`p`'s and `T`'s evaluated boundary values. Their own boundary conditions are never
+evaluated.
+
+*DESIGN* - the choices §125.3 leaves open:
+
+* **Steady or transient** is the momentum equation's ddt scheme: `steadyState` is SIMPLE,
+  `Euler` or `backward` is PIMPLE. The energy equation must name the same scheme, `delta_t`
+  and `g`, or `Compressible::new` refuses by name. `c_p` is never an input (§122.1), so
+  the loop writes `PerfectGas::cp` into the energy controls.
+* **"Final"** exists only in a transient run: on the last outer iteration `alpha_U` and
+  `alpha_T` are 1 (`RhoMomentum::set_u_relax`, `RhoEnergy::set_t_relax`), and `p` is not
+  relaxed. A steady run relaxes all three on every iteration.
+* **The old levels.** At the top of every step, `advance_time_levels` rotates `rho`, `u`,
+  `T` and `p`, and `K^o` follows because the energy source forms it from `u^o`. Both
+  equations' `TimeState::advance` runs at every step but the first, so a first backward
+  step is Euler (§13.3). `initialise` seeds both old levels from the initial fields. It
+  evaluates the boundaries of `u`, `p` and `T`, forms `mu`, `kappa`, `psi` and `rho`, and
+  sets `mdot = rho_f (u_f . Sf)` with a linear `rho_f`.
+* **Steps 1 and 4.** Step 1 is `transport` (`mu`, `kappa`). Step 4 is `gas_state`, which
+  gives `psi` AND `rho* = psi (p* + p_op)`, the consistent `rho*` that CMP-10's corrector
+  needs. The corrector leaves `rho = psi (p + p_op)` to round-off, so a second corrector
+  starts from a consistent `rho*` too.
+* **Step 6.** `p` is relaxed against its value before the correctors, in a steady run and
+  on a transient run's non-final outer iterations. Then `p`'s boundary is evaluated and
+  `gas_state` restores the gas law. Every outer iteration therefore ends with
+  `rho = psi (p + p_op)`.
+* **Step 7 is absent.** The gas is laminar until CMP-14's SA lands.
+* **Step 8.** The mass imbalance is formed in f64 on the host after the correctors, on the
+  momentum equation's time coefficients. A steady run has no `ddt(rho)` and divides by its
+  `delta_t`. The `h_0` residual is the energy solve's initial residual. The bounds count
+  tests `!(x > 0)`, so a NaN counts. Its order is `T`, then `p_abs = p + p_op`, then
+  `rho`, each by cell index, and the first violation found is the one named. `M_max` and
+  `M_mean` are (93.7). `OuterReport::line` prints all of these, and `BOUNDS n` when `n` is
+  nonzero. `residualControl` (`u`, `p` on the first corrector, `T`) stops only a steady
+  `run`. A transient step reports it and stops nothing.
+* **Capture.** The registry row is `Refused`: step 8 reads `T`, `p`, `rho`, `u` and
+  `mdot` back after every outer iteration and stops on what it reads. Each of the four
+  equations is gated on its own.
+
+*Tree over plan.* The row names `mod.rs` and `tests.rs`. The final-corrector rule also
+needs `RhoMomentum::set_u_relax`, which is additive, and the module root needs its
+capture-registry row.
+
+CMP-12's gate table (`tests/shared/compressible_solver_cases.rs`, included by
+`src/compressible/tests.rs` and by `tests/compressible_solver.rs`, so it runs in both
+builds):
+
+| test | class | what |
+|---|---|---|
+| `one_step_twice_equals_two_steps_state` | D | A graded 5x4x3 channel, backward with `dt = 1e-4`, two outer iterations and two correctors. `step; step` equals `run(2)` in every bit of 30 buffers. After each step every `^o` is the state the step started from, and `^oo` is the one before. Control: step 1 moves `T`, `u` and `p` |
+| `quiescent_box_stays_at_rest` | R | The closed box at rest under Euler (two outer iterations), backward and steady SIMPLE, three steps each: `|u| <= tol_r(1e-12) c_0`, `|T - 300| <= tol_r(1e-12) 300`, `|p| <= tol_r(1e-12) p_op`, `|rho - rho_0| <= tol_r(1e-12) rho_0`, mass imbalance `<= tol_r(1e-12)`, bounds 0. Control: one cell 2e4 Pa above the rest moves the gas by more than 100 bars |
+| `bounds_counter_fires_and_names_the_cell` | D | `T = -50 K` in cell 7 stops step 1 with `Error::Refused`, which names `T`, the cell and the value after the solve (still negative, so nothing clipped it) and counts `rho <= 0: 1`. Gauge `p = -1.5e5` in cell 11 is named as `p_abs`. Control: `T = 50 K` runs two steps and counts zero |
+| `solver_refusals_name_the_setting` | D | `nOuterCorrectors` 0, `nCorrectors` 0, `p_relax` 0 and 1.5, a `ddtSchemes`, `delta_t` or `g` mismatch, `gamma = 1` |
+
+The old-level row was checked against its bug: a refresh inside the outer loop (on the
+second outer iteration) fails it at once ("p: after step 1 the old level is not the
+initial state").
+
+*Landed* (f64, then single):
+
+- The quiescent box, Euler, backward and steady: `|u|` is `4.6e-14`, `3.9e-14` and `0`
+  m/s, then `1.4e-5`, `2.1e-5` and `0` m/s. The bars are `3.47e-10` and `3.47e-3`.
+- `|p|` is `6.0e-11`, `8.2e-11` and `0` Pa, then `3.3e-3`, `4.4e-2` and `0` Pa. The bars
+  are `1e-7` and `1` Pa.
+- `|T - 300|` is at most `3.4e-13` K, then `1.8e-4` K (bars `3e-10` and `3e-3` K).
+- The control reaches `0.674` m/s in both builds: `1.9e9` bars in f64, `194` bars in single.
+- The channel's last mass imbalance is `1.7e-16`, then `6.9e-8`.
+- The bounds messages give `T = -50.00000018123904` in f64 and `T = -50` in single (the
+  conduction step is below f32's resolution of 50), and `p_abs = -50000.14526378136`, then
+  `-50000.140625`.
+
+No `.cu`, `build.rs`, driver or validate code changed.
+
+### 125.7 The local time step as built (CMP-13)
+
+`src/compressible/lts.rs` holds (125.2) and the per-cell time terms, and
+`cuda/compressible.cu` gains four kernels after CMP-08's to CMP-11's nineteen, which are
+untouched. `cmpLtsRDeltaT` forms the reciprocal step `r_P = (|u_P| + c_P) / (CFL V_P^(1/3))`
+with `c_P = sqrt(grs T_P)` as (122.12) forms it. `cmpDdtRhoLocal`, `cmpPressureDdtLocal` and
+`cmpEnergySourceLocal` are `tsDdtGeneralRho`, `cmpPressureDdt` and `cmpEnergySource` with the
+Euler coefficients `a_n = r_P`, `a_0 = -r_P`, `a_00 = 0` taken per cell, in the same expression
+order. They carry no floor and no clip (§122.5).
+
+*DESIGN* - the choices §125.4 leaves open:
+
+* **Selection.** A run names `localEuler` for the momentum AND the energy equation (one
+  scheme for both, as §125.6 already requires). `Compressible::new` then builds both
+  equations on `Euler` and attaches a `LocalStep` to each (`attach_local_step`). The
+  pressure equation reads the momentum equation's, because (124.1) shares its ddt. The run
+  is steady: every outer iteration is relaxed, and `residualControl` stops it. `CFL` is
+  `CompressibleControls::lts.cfl`, finite and above 0, or `Compressible::new` refuses it by
+  name. The default is 1, the acoustic Courant limit of an explicit scheme. A lone
+  `RhoMomentum` or `RhoEnergy` still refuses `localEuler` by name.
+* **When `r` is formed.** Once per pseudo step, at its top, right after the old levels
+  rotate. It is formed from the cell `u` and `T` the step starts from, so every outer
+  iteration and every corrector of the step uses one step field. The energy equation's
+  field is a device copy of the momentum equation's.
+* **The mass imbalance** of §125.6 step 8 takes `a_n = r_P`, `a_0 = -r_P` per cell, and its
+  denominator is `sum_P rho_P V_P r_P`.
+* **Capture.** The registry row is `Via` the module root, which is `Refused`. The step is
+  formed inside `Compressible::step`, and the three time-term kernels run only in equations
+  that `Compressible::new` attached it to. The equations' own capture gates run their scalar
+  coefficients.
+
+*Tree over plan.* The row names `lts.rs` and `compressible.cu`. The equations also need an
+optional attached step: `RhoMomentum::attach_local_step` and `RhoEnergy::attach_local_step`
+(additive), one branch in each time term, and the module root's wiring.
+
+**The fixed-point row is MISSED** (an open finding for the user). §125.4 argues that every
+ddt difference is zero at a converged fixed point, so the fixed point does not depend on
+`CFL`. The argument misses one term. `rAU = V/a_P` (123.5) carries the time term's diagonal
+`V_P r_P rho_P`, and the Rhie-Chow flux of (123.6)-(123.7) carries `rAU` at the fixed point,
+where the ddt differences themselves vanish. So the fixed point moves with `CFL`, just as
+steady SIMPLE's moves with `alpha_U`, whose relaxed diagonal enters `rAU` the same way. A
+cure would change the Rhie-Chow numerics (a time-step-independent `rAU` or a ddt
+correction), so it is the user's decision (docs/17 §5.3.4).
+
+CMP-13's gate table (`tests/shared/compressible_lts_cases.rs`, included by
+`src/compressible/lts.rs` and by `tests/compressible_lts.rs`, so it runs in both builds):
+
+| test | class | what |
+|---|---|---|
+| `dt_field_matches_host_formula` | R | One pseudo step of the graded 5x4x3 channel at `CFL` 0.7. The momentum equation's `r_P` equals `1/host_delta_t` in f64 on the device's own inputs within `tol_r(1e-12)` relative, cell by cell. The energy equation's copy has the same bits. Control: `r` varies by more than 1.2 across the box |
+| `uniform_step_equals_euler` | R | A uniform 4^3 closed box at 300 K, with one cell 2e4 Pa up and gravity on, so `r_P = c/(CFL h)` is one value. One `localEuler` pseudo step (two outer iterations, relaxation 1) equals one Euler step at `dt = CFL h/c` within the quiescent box's bars (§125.6). Controls: `u` moves by more than 100 bars, and Euler at `2 dt` misses by more than 100 |
+| `steady_fixed_point_independent_of_cfl` | P | The steady channel, 1500 pseudo steps at `CFL` 2, 20 and 1e6 and steady SIMPLE at `alpha_U` 0.9 and 0.7, each at its initial-residual floor in f64. Records the miss: `CFL` 2 against 20 is above `1e-8`. Records the cause: SIMPLE's two `alpha_U` differ by more than `1e-8`, the distance to SIMPLE falls as `CFL` grows, and at `CFL` 1e6 `u` and `T` are SIMPLE's within `1e-8`. Under `single` every row is reported (§5.1.4). Control: five pseudo steps in, the two CFLs are `4.3e-3` apart |
+| `lts_refusals_name_the_setting` | D | `cfl` 0, -1, NaN and infinity. `localEuler` on the momentum equation alone (`ddtSchemes differ`). A lone `RhoMomentum` on `localEuler` |
+
+Each difference is taken over the field's largest magnitude: `max_P |a_P - b_P| / max_P |a_P|`
+(`u` in the Euclidean norm, gauge `p`, `T` in K).
+
+*Landed* (f64, then single):
+
+- (125.2): the worst relative deviation is `3.5e-16`, then `1.6e-7` (bars `1e-12` and `1e-5`).
+  `r` spans `2407` to `3003` 1/s.
+- The uniform step, at `dt = 2.88e-3` s: `|du|` is `1.7e-14` m/s, then `7.9e-6` m/s (bars
+  `3.47e-10` and `3.47e-3`). `|dp|` is `4.0e-12` Pa, then `4.3e-3` Pa. `|dT|` is `1.1e-13` K, then
+  `6.1e-5` K. `u` moves `1.42` m/s, which is `4.1e9` bars in f64 and `409` bars in single.
+- The fixed point in f64: `CFL` 2 against 20 differs by `2.85e-6` in `u`, `7.0e-2` in `p` and
+  `5.5e-9` in `T`. That is MISSED against `1e-8`. `max |p|` is `3.18e-2` Pa, so the `p` gap is
+  `2.2e-3` Pa, `6e-6` of the dynamic pressure. Steady SIMPLE at `alpha_U` 0.9 against 0.7
+  differs by `8.4e-7`, `1.5e-2` and `1.4e-9`. From SIMPLE at 0.9, `u` sits at `5.0e-6` (`CFL`
+  2), `2.1e-6` (`CFL` 20) and `6.7e-11` (`CFL` 1e6). `T` at 1e6 is `1.1e-13` and `p` at 1e6 is
+  `1.1e-6`. The initial-residual floors are about `3e-11` (`u`), `1e-9` (`p`) and `5e-9` (`h_0`).
+- The fixed point in single (reported): no run reaches an f64-like floor (the initial
+  residuals stay between `3e-3` and `0.61`). `CFL` 2 against 20 differs by `3.1e-6`, `0.11` and
+  `1.4e-6`, and SIMPLE's two `alpha_U` by `8.6e-7`, `2.1e-2` and `4.1e-7`.
+
+No driver or validate code changed. No existing kernel changed: the four kernels were
+appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
+both builds.
 
 ---
 
@@ -48929,7 +49680,9 @@ submatrix as §73.5 describes. Both are unchanged.
   `DistWorkspace::effective_preconditioner` does (§13.4).
 * `spmd_solve(gpu, sol, comm, psi, sys, halo, w, ctrl)` dispatches on
   `ctrl.solver` as `dist_solve` does. `GAMG` is refused by name, with
-  `PBiCGStab` as the alternative.
+  `PBiCGStab` as the alternative. (Amended by §141.11: `GAMG` runs `spmd_gamg`, the
+  distributed cycle on its own, when a cycle is attached, and is refused by name, with
+  `PCG` and `PBiCGStab` named, without one.)
 
 ```
 the same program on every rank r, on its own part:
@@ -48998,7 +49751,7 @@ that took the vote. The rows that are new or changed:
 | `SpmdWorkspace::colour`: the system's part is not the workspace's rank | starts `distsolve: `; `rank r` and `part p` |
 | `SpmdWorkspace::colour`: the system's cell counts are not the workspace's | starts `distsolve: `; the owned and halo cell counts of both |
 | `spmd_pcg` or `spmd_pbicgstab`: `Dic` or `Dilu` on an uncoloured workspace | §13.4's `Error::Refused`: the setting, the value, `diagonal` and `SpmdWorkspace::colour` |
-| `spmd_solve`: `GAMG` | §13.4's `Error::Refused`: the setting, `GAMG` and `PBiCGStab` |
+| `spmd_solve`: `GAMG` without a cycle (§141.11) | starts `spmd_gamg: `; `solver`, `GAMG`, `SpmdWorkspace::set_gamg` and `PBiCGStab` |
 
 **What must hold.** Class D: bytes and counts. Each rank is a `ThreadComm`
 thread with its own `Gpu` on device 0. The solver tolerance is `1e-12` in the
@@ -49189,7 +49942,7 @@ solver decomposed (PAR-10c, §139).
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
 aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin operator,
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
-AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5), since AMG-04b a case asks
+AMG-04a, the K-cycle of §141.6, AMG-04c, and the decomposed levels of §141.10, AMG-07a). Since AMG-04a `solver::solve` runs the cycle (§141.5), since AMG-04b a case asks
 for it and its settings (§141.7), and since AMG-05 it is a pressure backend the selector measures
 (§141.8). AMX-01 opens AMGX at run time (§141.20), and since AMX-02 AMGX keeps its hierarchy structure
 in the time loop and is compared with PBiCGStab and GAMG (§141.21).
@@ -49846,8 +50599,8 @@ on its own, so `solver::solve` no longer refuses `GAMG` (§8.3 is amended). `src
 gains a dense LU factor for an asymmetric coarsest level, because the Galerkin product of an
 asymmetric matrix is asymmetric and §141.4 factors only symmetric levels. `cuda/amg.cu` gains
 two kernels, `amgResidual` and `amgCoarseLu`. The tests are `tests/amg_cycle.rs`, an
-integration test (both builds; the iteration gates are f64 and wait for AMG-06a under
-`single`), and one library test, the capture gate of §81. No existing solve, case or SASS
+integration test (both builds; since AMG-06a the iteration and agreement gates hold their
+f64 numbers under `single` too, §141.9), and one library test, the capture gate of §81. No existing solve, case or SASS
 outside `amg.cubin` moves: a case could not ask for GAMG before AMG-04b, which also lifted
 the pressure backend's refusal (§141.7), and every other preconditioner and solver path is unchanged.
 
@@ -49950,13 +50703,16 @@ C = Cholesky, pinned Cholesky (§141.4) or LU (141.5.2)-(141.5.3)          (141.
 ```
 
 **Distributed solves** (`distsolve`, SPMD) refuse `Preconditioner::Gamg` by name until
-AMG-07b, and `partition_invariant(Gamg)` is `false`.
+AMG-07b, and `partition_invariant(Gamg)` is `false`. Since AMG-07b the SPMD solvers take it
+(§141.11); the in-process ones still refuse it, naming the SPMD route.
 
 **Precision** (§118, docs/17 §5.1.4). The LU rows are class A (hand values, `1e-15` relative
 in f64, `1e-6` under `single`), R (residual `1e-12` / `1e-5`) and D (device against host twin,
 bitwise in both builds). The device cycle against its host twin is class R, `1e-12` of `‖x‖_2`
 (f64) / `1e-5` (`single`), because level 0's product is `ldu_ops::amul` and `ldu.cu` is not on
-the `-fmad=false` list. The iteration gates are f64 rows; under `single` they wait for AMG-06a.
+the `-fmad=false` list. The iteration and agreement gates hold their f64 numbers in both builds
+since AMG-06a: under `single` every solve is refined (§118.4) and the answers compared are the
+double solutions (§141.9).
 
 **The matrices.** `POI(n)`: the uniform `n^3` box of unit cells, every wall Dirichlet, the §2
 laplacian negated so that `σ = +1`: `upper = lower = -|S_f| δ_f` on the internal faces, the
@@ -49984,8 +50740,8 @@ an M-matrix, asymmetric, column diagonally dominant.
 | `the_lu_factor_and_solution_of_small_asymmetric_matrices` | `[[4, -1], [-2, 3]]`, `b = (1, 2)`: `L_10 = -0.5`, `U = (4, -1; 2.5)`, `x = (0.5, 1)`; its negation: `σ = -1`, the same factor, `x = -(0.5, 1)`; device bitwise the host twin; `general` on `K4` and `SYM` is `new` bit for bit | A, D |
 | `the_lu_coarse_solve_on_the_convection_diffusion_coarsest_level` | the one coarse level of `CD(8)` with `max_levels = 2` (128 cells): its largest `|Â_ij - Â_ji|` is `>= 1` (measured 10, `Pe D` of an x-coupling, in both builds), method `Lu` in both builds, residual `<= 1e-12` (f64) / `1e-5` (f32), device bitwise the host twin, twice | R, D |
 | `an_asymmetric_level_that_cannot_be_factored_is_refused_by_name` | `[[1, 2], [3, 6]]`: `pivot` at 1 (`Error::Refused`, naming `-permissive`), and under `-permissive` `JacobiFallback`; `[[1, -1], [-2, 2]]`: `singular` | D |
-| `gamg_on_dirichlet_poisson_32_64_128` (f64) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
-| `gamg_pbicgstab_on_convection_diffusion` (f64) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
+| `gamg_on_dirichlet_poisson_32_64_128` (both builds, §141.9) | `POI(32)`, `POI(64)`, `POI(128)`, tol `1e-8`: DIC-PCG, GAMG-PCG and standalone GAMG all converge; at 128^3 GAMG-PCG takes `<= 1/3` of DIC-PCG's iterations; the iteration growth 32^3 -> 128^3 is measured and printed (table below); at 128^3 GAMG-PCG and Jacobi-PBiCGStab at tol `1e-8` agree to `‖x_g - x_b‖_2 <= 1e-8 ‖x_b‖_2`, and so do the two solved to `1e-12` (a stricter, additional row) | R, P |
+| `gamg_pbicgstab_on_convection_diffusion` (both builds, §141.9) | `CD(64)`, tol `1e-8`: DILU-PBiCGStab and GAMG-PBiCGStab converge, GAMG's iterations `<= 1/2` of DILU's | P |
 | `a_gamg_request_that_cannot_be_served_is_refused_by_name` | `solver GAMG` and `preconditioner GAMG` on a workspace without a hierarchy (`set_gamg`); PCG with V(1,2) (`nPreSweeps`); `set_gamg` with another cell count (`cells`); `ν1 = ν2 = 0` (`sweeps`); `dist_solve` with `Preconditioner::Gamg` (`AMG-07b`) | D |
 | `amg::cycle::tests::vcycle_replays_under_capture` (library) | the preconditioner on `POI(8)` with one coarse level and more, captured into a graph and replayed bitwise (§81) | D |
 
@@ -50007,8 +50763,143 @@ The LU row therefore stops `CD(8)` after one coarsening, where the x-couplings r
 At `1e-12` the two 128^3 answers differ by 2.02e-13. With l1-Jacobi instead of Chebyshev the
 GAMG-PCG counts were 26, 40, 62 and the standalone 154, 357, 810. The iteration growth
 32^3 -> 128^3 is 2.4x for GAMG-PCG and 5.1x for the standalone V-cycle: the h-dependence
-of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle is to
-remove. `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
+of a V-cycle with unsmoothed aggregation that docs/17 expects, and that AMG-04c's K-cycle
+removes (§141.6: 13, 13 and 14 K-cycle FCG iterations). `CD(64)`: DILU-PBiCGStab 47 iterations, GAMG-PBiCGStab 7 (16 with l1-Jacobi).
+
+### 141.6 The K-cycle and the flexible conjugate gradient (AMG-04c)
+
+`No GPL-licensed source was consulted.` `src/amg/cycle.rs` gains the K-cycle, selected on a
+built hierarchy by `Gamg::set_cycle(gpu, CycleKind::K { threshold })` (*DESIGN* default
+`DEFAULT_K_THRESHOLD = 0.25`); `src/solver.rs` gains the flexible conjugate gradient FCG(1),
+`solver::solve_fcg`, that takes it. `cuda/amg.cu` gains two vector kernels, `amgAxpy` and
+`amgCombine`. `Gamg::new` still builds the V-cycle of §141.5, and `Gamg::vcycle`, the cycle a
+capture replays, launches exactly what it launched before (the §141.5.1 rows and the V-cycle's
+host-twin and capture gates are unchanged). No case can ask for either yet: `LinearSolverKind`
+and the case keys live in `io/case.rs`, a lane-S file in this wave (docs/17 §7.4), so FCG is
+reached through `solve_fcg` and the K-cycle through `set_cycle`; the case key is a follow-up.
+
+Sources: **Notay (2010)**, the paper of §141.1 (open full text, read again on 2026-10-14),
+§3, p. 132: "We use multigrid as a preconditioner in a main iteration routine, which is based
+on the flexible conjugate gradient method (FCG), if the matrix is symmetric positive definite.
+More precisely, we use FCG(1) from [29] ... This method is similar to the standard conjugate
+gradient method, except that scalar coefficients are computed in a slightly different way, at
+the expense of one more inner product computation per iteration. This modification enhances
+the stability of the method in the presence of variable preconditioning. It is needed here,
+because use of the K-cycle induces slight variations in the multigrid preconditioning."
+Algorithm 3.2 (p. 133), "Multigrid as a preconditioner at level k", step 4, the K-cycle's FCG
+branch: "Perform 1 or 2 iterations with multigrid prec.: c = MGprec(r, k-1); v = A c;
+ρ1 = cᵀv; α1 = cᵀr; r̃ = r - (α1/ρ1) v; if ‖r̃‖ ≤ t ‖r‖, then x = (α1/ρ1) c; else d =
+MGprec(r̃, k-1); w = A d; γ = dᵀv; β = dᵀw; α2 = dᵀr̃; ρ2 = β - γ²/ρ1; x = (α1/ρ1 -
+γα2/(ρ1ρ2)) c + (α2/ρ2) d" (subscripts `k-1` dropped; the Greek letters were lost by the PDF's
+text layer and are re-checked below by the paper's own orthogonality argument), and p. 134:
+"at most 2 iterations are allowed, and the second one is skipped if the relative residual
+error is below the threshold t after the first step. In practice ... we use t = 0.25", and
+"the computed solution is the linear combination of c and d which minimizes the A-norm of the
+error in case of FCG". [29] is **Notay, Y. (2000), "Flexible conjugate gradients", *SIAM J.
+Sci. Comput.* 22(4) 1444-1460, doi:10.1137/S1064827599362314**; [31], "the conclusions from
+[31]" behind the two-iteration rule, is **Notay, Y. & Vassilevski, P. S. (2008), "Recursive
+Krylov-based multigrid cycles", *Numer. Linear Algebra Appl.* 15(5) 473-487,
+doi:10.1002/nla.542** (both checked against Crossref on 2026-10-14; Crossref dates the second's
+online issue 2007). Both are named by docs/17 for this row; neither was opened (paywalled), and
+no formula below is taken from them: FCG(1) is written out and derived here. No multigrid or
+Krylov code of any licence was read; OpenFOAM's GAMG, AGMG, hypre, ML, PETSc and PSBLAS were
+not opened.
+
+**The K-cycle** (Notay Algorithm 3.2 step 4 on the levels of (141.5.1)). The descent and the
+ascent of (141.5.1) are unchanged; what changes is how the coarse problem `A_m x_m = b_m` of a
+level `1 <= m < L` is solved. The V-cycle runs one cycle of level `m` from `x_m = 0`; the
+K-cycle runs one or two FCG iterations on it, each preconditioned by one cycle of level `m`,
+`B_m(r) = cycle_m(0, r)` (itself a K-cycle below). The coarsest level `L` keeps its exact
+solve, so a hierarchy with `L <= 1` cycles exactly as the V-cycle does. With `r = b_m`:
+
+```
+c = B_m(r);  v = A_m c;  ρ1 = (c, v);  α1 = (c, r);  r̃ = r - (α1/ρ1) v        (141.6.1)
+if (r̃, r̃) <= t² (r, r):   x_m = (α1/ρ1) c
+else:  d = B_m(r̃);  w = A_m d;  γ = (d, v);  β = (d, w);  α2 = (d, r̃);
+       ρ2 = β - γ²/ρ1;   x_m = (α1/ρ1 - γ α2/(ρ1 ρ2)) c + (α2/ρ2) d
+```
+
+The test `‖r̃‖ <= t‖r‖` is taken on squares. **Check of the second step** (derived here, the
+paper's p. 134 argument): FCG from `x = 0` takes `x1 = (α1/ρ1) c`, `r1 = r̃`; its second
+direction is `d' = d - (γ/ρ1) c` (A-orthogonal to `c`), with `(d', A d') = β - 2γ²/ρ1 + γ²/ρ1 =
+ρ2` and `(d', r̃) = (d, r̃) - (γ/ρ1)(c, r̃) = α2`, because `(c, r̃) = α1 - (α1/ρ1) ρ1 = 0`; so
+`x2 = x1 + (α2/ρ2) d'`, which is (141.6.1)'s second line. In exact arithmetic `ρ1 > 0` for an
+SPD level and preconditioner, and `ρ1 ρ2 = ρ1 β - γ² >= 0` by Cauchy-Schwarz in the `A`-inner
+product. *DESIGN* guards: `ρ1 = 0` (a zero residual, so `c = 0`) gives `x_m = 0`; `ρ1 < 0` or
+not finite is refused by name ("not positive"); `ρ2 <= 0` (no new `A`-direction) takes the
+one-iteration answer; `ρ2` not finite is refused by name. Every scalar is formed on the host in
+f64 from the device inner products (`solver::device_dot`, summed in `Acc` and rounded once to
+`Scalar`, §118.1); `amgAxpy` forms `r̃` in place of `b_m` (no caller reads `b_m` again), and
+`amgCombine`, `x = a c + b x`, forms both answers (`b = 0` for the first, `x` holding `d` for
+the second). `amg.cu` stays on the `-fmad=false` list, so the device K-cycle repeats a host
+twin's products and sums in the same order.
+
+**Cost and capture.** A level `m` is visited at most `2^(m-1)` times per top-level cycle; with
+the coarsening ratio near 4 of §141.1 the work stays a bounded multiple of the fine level's
+(Notay p. 135, (3.2)-(3.3)). The K-cycle reads its scalars back to the host and the threshold
+is a host decision, so a K-cycle cannot be recorded into a CUDA graph: inside a capture
+`Gamg::cycle` refuses it by name ("K-cycle", "capture"), and `Gamg::vcycle` remains the
+captured path (§81, `amg::cycle::tests::vcycle_replays_under_capture`).
+
+**FCG(1)** (*DESIGN* in the scalar forms; the method is Notay's FCG(1), whose text was not
+read). With `z_i = M_i^{-1} r_i` the preconditioner's answer at step `i`, `q = A d`:
+
+```
+r_0 = b - A ψ_0;  z_0 = M_0^{-1} r_0;  d_0 = z_0                                (141.6.2)
+step i:  q_i = A d_i;  α_i = (r_i, z_i) / (d_i, q_i);
+         ψ_{i+1} = ψ_i + α_i d_i;  r_{i+1} = r_i - α_i q_i;
+         z_{i+1} = M_{i+1}^{-1} r_{i+1};
+         β_{i+1} = (z_{i+1}, q_i) / (d_i, q_i);   d_{i+1} = z_{i+1} - β_{i+1} d_i
+```
+
+`β` makes `d_{i+1}` A-orthogonal to `d_i` whatever `M_{i+1}` was: `(d_{i+1}, q_i) = (z_{i+1},
+q_i) - β_{i+1} (d_i, q_i) = 0`. The inner products per step are `(d, q)`, `(r, z)` and `(z, q)`,
+one more than CG's two, as Notay's §3 states. For a fixed SPD `M`, `(z_{i+1}, q_i) = -(z_{i+1},
+r_{i+1})/α_i` (from `r_{i+1} - r_i = -α_i q_i` and `(z_{i+1}, r_i) = 0`), so `β_{i+1} =
+-(r_{i+1}, z_{i+1})/(r_i, z_i)` and `d_{i+1}` is PCG's `z + β p` direction: FCG(1) is PCG in exact
+arithmetic, and `fcg_with_a_fixed_preconditioner_agrees_with_pcg` measures it. The numerator of
+`α` is PCG's `(r, z)` (equal to `(d, r)` in exact arithmetic, because `(d_{i-1}, r_i) = 0`).
+`solve_fcg` is `pcg_float`'s skeleton - the §8.4 residual, the convergence test every
+`check_interval`, `fixed_iters` and `report_residuals` (§113), and under `single` the §118.4
+refinement around the float body - with `β` from (141.6.2): `w.v` still holds `q_i` and
+`w.den` still holds `(d_i, q_i)` when `z_{i+1}` is formed, and the new direction is built in
+`p_hat` by `solAxmy` and copied to `p`. It takes every preconditioner PCG takes, and symmetric
+positive definite systems only (§8.2). **Refusals:** PCG and PBiCGStab with a K-cycle `Gamg`
+preconditioner are refused by name ("variable", naming `solve_fcg` and `set_cycle`), since
+both assume a fixed preconditioner; `solve_gamg` (one iteration one cycle) runs the selected
+cycle, the K-cycle included.
+
+**Precision** (§118, docs/17 §5.1.4). The device K-cycle against its host twin is class R, as
+the V-cycle's (§141.5): `1e-12` of `‖x‖_2` (f64) / `1e-5` (`single`), level 0's product being
+`ldu_ops::amul`. The iteration gate and the agreement rows hold their f64 numbers in both
+builds since AMG-06a (§141.9), as §141.5.1's do.
+
+#### 141.6.1 The gates
+
+`tol = 1e-8` is the §8.4 residual; "iterations" is `SolverPerformance::n_iterations`.
+
+| test (`tests/amg_cycle.rs`) | what | class |
+|---|---|---|
+| `the_device_k_cycle_matches_its_host_twin` | `POI(16)` with `n_cells_coarsest = 16` (at least three coarse levels), K(2,2) Chebyshev at `t = 0.25` and `t = 0`, K(1,1) l1-Jacobi at `t = 0.25`, `z = 0; K(z, b)` with `b` = the test field: device against a host twin in `Scalar` written in the test; `t = 0` takes the second iteration every time, and the three take both branches | R |
+| `k_cycle_fcg_on_dirichlet_poisson_32_64_128` (both builds, §141.9) | docs/17's AMG-04c gate: `POI(32)`, `POI(64)`, `POI(128)`, default config with the K-cycle at `t = 0.25`, FCG(1), tol `1e-8`: converges at every size and the iteration growth 32^3 -> 128^3 is `<= 1.3x`; at every size its answer is within `1e-8 ‖x_b‖_2` of Jacobi-PBiCGStab's (§141.5.1's agreement row) | P, R |
+| `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (both builds, §141.9) | `POI(32)` with DIC, tol `1e-8`: DIC-FCG and DIC-PCG converge and agree to `1e-8` of `‖x‖_2` | R |
+| `the_k_cycle_refusals_are_named` | thresholds `1`, `-0.1`, NaN, ∞ (`threshold`; the V-cycle is kept); a K-cycle inside a capture (`K-cycle`, `capture`); PCG and PBiCGStab with a K-cycle preconditioner (`variable`, `solve_fcg`) | D |
+
+**Measured** (supervisor's run of `tests/amg_cycle.rs`, f64, 2026-10-14, RTX 5070 Ti; default
+config: K(2,2) with Chebyshev, `n_cells_coarsest = 64`, `t = 0.25`; the level
+sizes are §141.5's):
+
+| `n^3` | GAMG-PCG, V-cycle (§141.5) | K-cycle FCG | K-cycle FCG vs Jacobi-PBiCGStab at `1e-8` | set-up / solve |
+|---|---|---|---|---|
+| 32^3 | 16 | 13 | 1.61e-9 | 0.05 s / 0.04 s |
+| 64^3 | 24 | 13 | 2.48e-9 | 0.50 s / 0.10 s |
+| 128^3 | 38 | 14 | 5.38e-9 | 5.1 s / 0.41 s |
+
+The iteration growth 32^3 -> 128^3 is 14/13 = 1.08x for the K-cycle, inside the 1.3x gate, and
+2.4x for the V-cycle: the h-dependence §141.5 measured is removed. DIC-FCG and DIC-PCG on
+`POI(32)` both take 39 iterations and agree to 3.5e-16. The host twin agrees to 9.4e-16
+(K(2,2), `t = 0.25`: 4 one-step and 0 two-step inner solves), 1.0e-15 (`t = 0`: 15 two-step)
+and 2.9e-16 (K(1,1) l1-Jacobi: 8 one-step, 5 two-step).
 
 ### 141.7 GAMG from a case: the settings, and the pressure backend that serves them (AMG-04b)
 
@@ -50180,6 +51071,357 @@ the two solvers stop at different points of an unconverged SIMPLE iteration, whi
 rule's difference and not the backend's. The comparison ran in the f64 build; the single build's
 drivers were not run (`--features single` builds the library, and the three integration tests run
 there).
+
+### 141.9 GAMG in f32 (AMG-06a)
+
+`No GPL-licensed source was consulted.` Under `--features single` the native GAMG of §141.5,
+§141.6 and §141.11 converges, and it meets the f64 numbers of those sections' gates. The
+plan's row asked for "the f32 residual floor". docs/17 §12's note 4 tightened that: under
+§118.4's refinement the f32 build reaches AMG-04a's f64 tolerances, and the floor of the raw
+float hierarchy is reported beside that. The unit is AMG-06a.
+
+**What was already refined.** The serial `solve_gamg` (one iteration one cycle) was already
+inside §118.4's outer loop, and so were PCG, PBiCGStab and FCG with `Preconditioner::Gamg`
+(F32-06, AMG-04a, AMG-04c). In each, the float cycle is the unchanged inner method, solving
+for a correction. AMG-06a adds no kernel, no equation and no solver path to the serial solve.
+The refinement is (118.4.1)-(118.4.9), and the residual is §8.4's.
+
+**What AMG-06a wraps.** The SPMD stationary cycle `spmd_gamg` of §141.11 was a float solve.
+At tol `1e-6` it stalled at a true residual of `4.3e-6` after 500 cycles on POI 32³. It is now
+refined by §118.12's outer loop, exactly as `spmd_pcg` and `spmd_pbicgstab` are:
+- `distsolve::refine::Method::Gamg` is the new method;
+- the float body `spmd_gamg_float` takes the correction's right-hand side, `None` being the
+  part's own `a.source`;
+- every refusal of `spmd_gamg` (the §138.5 preflight, and a workspace without a cycle) comes
+  before the refinement's first collective;
+- `vote_verdict` names `spmd_gamg`.
+
+The in-process `dist_solve` has no GAMG form, so `Method::Gamg` there is refused by name,
+pointing to the SPMD route. A `fixed_iters` solve and an empty system are not refined, as in
+§118.4. The f64 build runs the same float body through `spmd_gamg_float(.., None, ..)`, and its
+answers are unchanged.
+
+**What the gates compare.** Under `single` the answer of a refined solve is its double
+solution `x` (`SolverWorkspace::refined_solution`, `SpmdWorkspace::refined_solution`). The
+stored field `psi = fl32(x)` of (118.4.9) is that answer rounded once. That one rounding is
+up to `2^-24` relative per entry, and on its own it moves two converged answers apart by
+`1.5e-8` to `2.4e-8` (measured below). That is why the `1e-8` agreement rows of §141.5.1 and
+§141.6.1 were ignored under `single` before this unit. They now compare the double answers,
+and every one of them holds at its f64 number.
+
+**The hierarchy differs between builds.** Aggregation reads the strengths in `Scalar`
+(§141.1), so ties break differently in f32. Level 1 of POI(64) has 65546 cells in f64 and
+65536 under `single`. An iteration count under `single` is therefore a count on a different
+hierarchy as well as at a different precision. It is gated against the f64 count, as the row
+asks.
+
+**`cuda/amg.cu`** holds no double-only literal (`1e-300`, `1e300`, `DBL_MIN`). The §112.1 scan
+test (`types::tests::no_kernel_unit_carries_a_double_only_literal_outside_its_pair`) reads
+every `.cu` in `cuda/`, `amg.cu` included. The `f64::MIN_POSITIVE` bounds of `src/amg/smooth.rs`
+are host arithmetic in `f64` (the Lanczos bracket of §141.3), not device floors.
+
+Sources: the refinement and its sources are §118.4's: **Moler (1967)**, J. ACM 14(2) 316-321,
+doi:10.1145/321386.321394; **Carson & Higham (2018)**; and **Higham (2002)** ch. 12. The
+residual is §8.4's. The cycle is §141.5's (Saad 2003 §13.4.3, the author's open copy).
+
+#### 141.9.1 The gates
+
+`tol = 1e-8` is the §8.4 residual. "Iterations" is `SolverPerformance::n_iterations`, which
+under `single` counts every inner iteration of every outer step.
+
+| test | what | class |
+|---|---|---|
+| `gamg_pcg_holds_in_f32_on_poisson_64` (`tests/amg_cycle.rs`) | **the AMG-06a gate.** `POI(64)`, default config, GAMG-PCG at tol `1e-8` from zero. In f64 it converges in the reference 24 iterations of §141.5's table, asserted equal so that the reference cannot drift. Under `single` the refined solve converges at the same tol, after at least one outer step, in `4 it <= 5 · 24` (that is `<= 1.25x`). In both builds the answer's §8.4 residual, recomputed on the host in f64 against the stored coefficients, is `<= 1e-8`. Reported beside that: the §8.4 residual of the stored field, and the floor of the raw float cycle (`fixed_iters`, never refined) after 24, 48 and 96 iterations | P, R |
+| `gamg_on_dirichlet_poisson_32_64_128`, `gamg_pbicgstab_on_convection_diffusion` (§141.5.1), `k_cycle_fcg_on_dirichlet_poisson_32_64_128`, `fcg_with_a_fixed_preconditioner_agrees_with_pcg` (§141.6.1) | no longer ignored under `single`. Every row keeps its f64 number: `1/3` and `1/2` of the iterations, `1.3x` growth, and the `1e-8` and `1e-12`-solve agreements on the double answers | P, R |
+| `tests/amg_dist_cycle.rs` (§141.11.1) | the solver tolerance is `1e-11` and the answer gate `1e-8` in BOTH builds. Before this unit they were `1e-5` and `1e-5` under `single`. The stationary `spmd_gamg` is refined | R, count |
+| `types::tests::no_kernel_unit_carries_a_double_only_literal_outside_its_pair` (library, f64) | the §112.1 scan, `cuda/amg.cu` among the files it reads | D |
+
+**Measured** (supervisor's runs, 2026-10-15; `single` first, f64 in brackets; the f64
+numbers are §141.5's and §141.6's, unchanged).
+
+- `POI(64)` GAMG-PCG: 20 iterations in 2 outer steps [24], against a gate of 30.
+  - The answer's §8.4 residual is 2.96e-10 [2.20e-10].
+  - The stored field's residual is 3.37e-7.
+  - The raw float cycle stops at **1.332e-6** after 24, 48 and 96 iterations alike. Its
+    float update no longer moves `psi`. In f64 the raw cycle reaches 2.20e-10 at 24 iterations
+    and 4.08e-15 at 48 and 96.
+
+  So the f32 hierarchy without refinement floors near `1e-6`. The refined answer is four orders
+  of magnitude below that floor, and even rounded once to f32 it is 4x below the floor.
+- §141.5.1 under `single`, for POI 32³ / 64³ / 128³:
+  - DIC-PCG takes 53 / 113 / 235 iterations [39 / 78 / 155].
+  - GAMG-PCG takes 14 / 20 / 30 [16 / 24 / 38].
+  - The standalone GAMG takes 56 / 111 / 283 [67 / 151 / 343].
+  - GAMG-PCG against Jacobi-PBiCGStab at `1e-8` differs by 8.69e-9 / 5.01e-9 / 7.12e-9. On
+    the stored fields, before this unit, the 128³ difference was 2.38e-8.
+  - The 128³ pair solved to `1e-12` differs by 7.50e-13 [2.02e-13].
+  - On `CD(64)`, DILU-PBiCGStab takes 79 iterations [47] and GAMG-PBiCGStab 7 [7].
+
+  The refined DIC counts are higher than f64's, because every outer step restarts the
+  recurrence. The GAMG counts are lower, on the f32 hierarchy.
+- §141.6.1 under `single`:
+  - K-cycle FCG takes 11 / 12 / 12 iterations [13 / 13 / 14], a growth of 1.09x [1.08x].
+  - Against Jacobi-PBiCGStab it differs by 7.68e-9 / 3.55e-9 / 5.91e-9. On the stored fields
+    the POI(32) difference was 2.37e-8.
+  - DIC-FCG takes 56 iterations and DIC-PCG 53 [39 and 39], and the two differ by 3.11e-9
+    [3.5e-16]. On the stored fields the difference was 1.49e-8.
+- §141.11.1 under `single` at tol `1e-11`:
+  - Serial GAMG-PCG takes 20 iterations on POI 32³ and 12 on the cyclic box.
+  - The serial stationary GAMG takes 78 and 35.
+  - Every SPMD row converged on one iteration across its ranks.
+  - The worst relative difference from serial is 7.0e-12 (cyclic box, P = 2, Hilbert, GAMG-PCG).
+  - The worst iteration ratio is 14/12 = 1.17 (cyclic box, P = 4, linear, GAMG-PCG).
+  - The answers of the four cuts differ in their bits in 6 of 6 pairs.
+
+  The f64 rows are the table of §141.11.1, unchanged.
+
+### 141.10 Decomposed levels: block-local aggregation, coarse processor faces and coarse halos (AMG-07a)
+
+`No GPL-licensed source was consulted.` `src/amg/dist.rs` holds the decomposed levels, host
+code only; `src/halo.rs` gains `LevelHalo`, the exchange plan of one level, from which
+`HaloExchange::from_levels` and `SpmdHalo::from_level` build the in-process and the SPMD
+exchange (§71.4, §138.3) exactly as `new` builds them from a `PartMesh`, which they now
+delegate to. `Aggregation::from_map` (§141.1) builds the members CSR and the fold table of a
+given (141.8)-numbered map with the code that ends `aggregate_level`, moved and not changed.
+The tests are `tests/amg_dist.rs`, an integration test that runs in both builds (§118).
+Nothing in the solve path called this when it landed; the distributed cycle is AMG-07b's
+(§141.11), so no existing solve, case or SASS moved. Multi-GPU runs are deferred by the user: every rank is a
+`ThreadComm` thread on device 0 (§138.7). Sources: Notay (2010) of §141.1 for the aggregation
+and the Galerkin product; the decomposition into blocks is this project's own design, and no
+multigrid code of any licence was read for this subsection.
+
+**A decomposed level** is one part's LDU level (§1, §71): owned cells `0..n`, ghosts
+`n..n+n_h`, internal faces among owned cells, and boundary faces. A boundary face with
+`b_nbr_cell >= n` is a **processor face**: its coefficient enters the operator as
+`-boundary_coeffs · psi[b_nbr_cell]`, the sign of (141.2) and of `split_matrix` (§71.6). The
+finest level is the part's mesh with its split and folded matrix; a coarse level has only
+processor faces.
+
+**Block-local aggregation** (*DESIGN*, docs/17 AMG-07a). Each part runs §141.1 on its own
+cells, with every processor face read as uncoupled. A cyclic couple inside the part stays an
+edge. So every aggregate lies inside one part, and no aggregate spans a cut, which is a gate.
+`σ` of (141.3) is the part's own; §141.1 gives `A` and `-A` the same aggregation, so a part
+whose diagonal sum differs in sign from the whole matrix's would only be an indefinite input.
+
+**Keys** (*DESIGN*; they are what makes the parts' sums the serial sums, bit for bit). Every
+local cell and every boundary face carries a global key:
+
+```
+fine cell c:            key(c)  = global cell id
+fine boundary face bf:  key(bf) = (global face slot, -1)   (f, or n_if + bf of the whole mesh)
+aggregate I:            key(I)  = min_{c in I} key(c)        (its root)
+coarse processor face:  key(I, H) = (min(key I, key H), max(key I, key H))      (141.40)
+```
+
+A part's owned cells are ascending in global id (§71.4), so the (141.8) numbering inside a
+part is ascending in root, and the union of the parts' aggregations, numbered by root, is
+numbered by (141.8) on the whole level. By induction the same holds at every level. The
+halo of every level is ordered by (owning part, key), as the fine halo is (§71.4).
+
+**The coarse level of a part.** Its own cells and faces are §141.2 on the part, unchanged: a
+`GalerkinPlan` of the block-local aggregation, its sums (141.14)-(141.16), and its list order.
+That order is the serial one, because the part's cells, internal faces and inherited boundary
+faces are each ascending in their global ids. Its processor faces are new:
+
+```
+coarse halo:  the distinct (q, R) over the fine processor faces, q the ghost's owning part,
+              R the ghost's aggregate on q (its local id), ascending in (q, R)
+send to q:    the distinct own aggregates I joined to q by a fine processor face, ascending
+coarse face:  every distinct (I, h_c), I own, h_c a coarse ghost, ascending, with
+    a_{I,H} = round( Σ_{bf -> (I, h_c), ascending in key(bf)} -boundary_coeffs[bf] )
+    boundary_coeffs_c = -a_{I,H}                                          (141.41)
+```
+
+summed in an f64 accumulator (`ofacc`'s width in both builds) and rounded once, as the host
+twin of §141.2 sums. IEEE negation is exact, so (141.41) stores the bits the serial sum
+produces. A part receives from `q` exactly the aggregates `q` sends, in the same order,
+because every cut face is a processor face on both sides (§71.6) and `q`'s local order is
+its key order; no extra message settles the plan. The ghost's `R` and root come from the
+owner: in one process by a key lookup in the owner's level (`halo_aggregates`), and SPMD by
+two label exchanges over the level's own plan (`spmd_halo_aggregates`).
+
+**Why the gathered level is the serial product.** For a coarse face `(I, J)` with `I` on part
+`p` and `J` on part `q`, every fine entry in its two slots crosses the cut, so its upper slot
+`(A_c)_{IJ}` is exactly the sum `p` forms for `(I, H = J)`, and its lower slot is the one `q`
+forms. A fine cut face gives `p` the coefficient `-upper[g]` or `-lower[g]` (§71.6), so
+`-boundary_coeffs` is the serial term. The serial list order is internal faces ascending,
+then coupled faces ascending (§141.2); a fine key is the face's global slot, internal before
+boundary, so the key order is that order. At a coarse level the gathered level has no
+boundary faces and its faces are ascending by `(owner, neighbour)` in global numbering, which
+is the order of (141.40). The diagonal slots never see a processor face, because no
+aggregate spans parts.
+
+**The hierarchy.** `DistHierarchy::build_in_process` and the collective
+`DistHierarchy::build_spmd` stop by §141.3's rule on the WHOLE level: at `n_cells_coarsest`
+or `max_levels`, dropping a coarsening that does not shrink the whole level. Every part
+therefore has the same number of levels. SPMD, the counts travel in one allgather per step,
+which is also a vote, so a step refused on one rank is refused on every rank before the next
+collective. `gather_level` puts the parts' coarse levels into one `HostLevel`, numbered by
+key; AMG-07b uses it for the coarsest level (§141.11).
+
+**Refused by name** (`Error::Config`, every message starts with `amg::dist: `): array
+lengths that disagree with the level; a halo plan of another part or cell count; owned keys
+not strictly ascending, or a halo group's keys not strictly ascending; a `b_nbr_cell` past the
+halo; halo aggregates or roots of the wrong length; an aggregate that arrives with two keys
+or out of key order; two processor faces with one key; `gather_level` given a level with a
+non-processor boundary face, or with an entry from two places or one side only;
+`n_cells_coarsest = 0` or `max_levels = 0`. `Aggregation::from_map` refuses a map not
+numbered by (141.8) (`amg::aggregate: `), and a level plan that sends a cell it does not
+own is refused by both exchanges (`halo: `).
+
+**Precision.** Every row is class D (docs/17 §5.1.4): bitwise in both builds. The f32
+matrices aggregate differently from their f64 parents (§141.1, rounded coefficients), so the
+level counts differ between the builds; the gate holds in each.
+
+#### 141.10.1 The gates
+
+The meshes are boxes with every patch a wall: 9×7×5 with (141.18), 8×6×5 cyclic on x, y and
+z with (141.18), and 12×10×8 with the folded §2 laplacian. The partitions are Hilbert,
+linear, and blocks of three cells dealt round robin; `n_cells_coarsest = 4`.
+
+| test (`tests/amg_dist.rs`) | what | class |
+|---|---|---|
+| `gathered_coarse_levels_are_the_galerkin_product_of_the_gathered_fine_level` | **the AMG-07a gate.** The three meshes, `P = 2, 3, 4`, the three partitions: the fine level gathered from the parts is the whole matrix bit for bit; then at every level, the union of the block-local aggregations is a (141.8) map in which no aggregate spans parts, and the parts' next level, gathered, is bit for bit `GalerkinPlan(from_map(union), gathered level).coarse_host`. Measured: 95 levels (f64) and 94 (`single`), 5319 and 4761 cross-part coarse faces, 3584 and 3500 of their slots summing three or more sources. Summing the processor sources in reverse key order fails it (checked in f64) | D |
+| `one_part_is_the_serial_hierarchy` | `P = 1` on the three meshes: aggregations, plans and levels equal `HostHierarchy::build`'s | D |
+| `an_spmd_build_is_the_in_process_build_and_its_coarse_halos_carry_the_owners_value` | the first two meshes, Hilbert, `P = 2, 3, 4`: `build_spmd` on `ThreadComm` ranks (device 0) equals the in-process build; at every level `HaloExchange::from_levels` and `SpmdHalo::from_level` bring every ghost its owner's value `1 + key/2` (3588 ghosts in f64, 3632 in `single`) | D |
+| `a_malformed_decomposed_level_is_refused_by_name` | the refusals above | D |
+
+### 141.11 The distributed V-cycle over SPMD ranks, and GAMG on the SPMD path (AMG-07b)
+
+`No GPL-licensed source was consulted.` `src/amg/distcycle.rs` holds `DistGamg`, one rank's
+part of the cycle of §141.5 on the decomposed hierarchy of §141.10. `src/distsolve/spmd.rs`
+takes it, attached by `SpmdWorkspace::set_gamg`, as `Preconditioner::Gamg` of `spmd_pcg` and
+`spmd_pbicgstab` and, through the new `spmd_gamg`, as `LinearSolverKind::Gamg` of
+`spmd_solve`, which no longer refuses `GAMG` (§138.6 is amended). `src/amg/smooth.rs` splits
+`SmootherSetup::new` into `without_interval` and `set_interval`, the same arithmetic in the
+same order, so every serial setup keeps its bits, and gains `GpuSmoother::smooth_with`, a
+sweep whose product the caller forms. No kernel and no `.cu` file changes. The tests are
+`tests/amg_dist_cycle.rs`, an integration test in both builds (§118). Multi-GPU runs are
+deferred by the user: every rank is a `ThreadComm` thread with its own `Gpu` on device 0
+(§138.7). Sources: Saad (2003) §13.4.3 Algorithm 13.3 and Notay (2010) eq. (2.1), as in
+§141.5, and Saad's Algorithm 6.15 (Lanczos), as in §141.3. The decomposition of the cycle
+over the parts, the redundant coarsest solve and the rank-ordered sums are this project's own
+design; no multigrid code of any licence was read for this subsection.
+
+**Tree vs plan.** docs/17's AMG-07b row asks that `dist_solve` stop refusing GAMG. Since
+PAR-04a/b the solve a rank runs is `spmd_solve` (§138.5, §138.6), and `dist_solve` holds
+every part in one process as the bitwise reference of those gates. The cycle is a collective
+over one part per rank, so the SPMD path takes GAMG; the in-process `dist_solve` and
+`DistWorkspace` keep a refusal that names the SPMD route (*DESIGN*, taken by recommendation:
+a second, lockstep copy of the cycle for the in-process form would add no gate of the row).
+
+**The level product.** Level `l` of rank `r` is a `DistLevel` of §141.10. After the level's
+halo is filled by its own `SpmdHalo::from_level` (§138.3), its product is the row of
+`lduAmul` (§70):
+
+```
+(A_l x)_c = d_c x_c + Σ_{f: o(f) = c} u_f x_{n(f)} + Σ_{f: n(f) = c} l_f x_{o(f)}
+            - Σ_{bf: c(bf) = c, b_nbr(bf) >= 0} bc_bf x_{b_nbr(bf)}                  (141.42)
+```
+
+On level 0 the coupled boundary faces are the part's cyclic couples and its processor faces,
+and `ldu_ops::amul` runs on the part's mesh. On a coarse level they are the processor faces
+of (141.41), and the same kernel runs on the level's own merged row map: per cell its internal
+faces in ascending face id, then its processor faces in ascending face id.
+
+**The smoothers.** Each part runs §141.3's smoother on its own rows: the diagonal and, as
+off-diagonal entries, its faces and its coupled boundary faces of (141.42), whose columns may
+be ghosts. The smoothing diagonal `m` of (141.3.3)/(141.3.4) is therefore the whole matrix's
+row value. `σ` is the part's own. When every part's setup succeeds, every row has
+`σ a_cc > 0` with one sign, so all parts' `σ` agree, and an allgather checks it. The global
+quantities are taken over the whole level:
+
+```
+g = max_r g_r                                Gershgorin's bound of (141.3.7)
+θ = §141.3's Lanczos on the whole level, with
+    v_c = frac((key_c + 1) s) - 1/2          the start by GLOBAL key (§141.10)
+    (a, b) = Σ_{r = 0 .. P-1} (a, b)_r       each rank's f64 partial, allgathered and
+                                             added from 0 in rank order
+    S v = σ |D|^-1/2 A_l |D|^-1/2 v          (141.42) in f64, after an f64 halo exchange   (141.43)
+```
+
+Every rank therefore holds the same bits of `θ`, `g` and the coefficients of (141.3.5). On
+level 0 the keys are the global cell ids, so the start vector is the serial one, permuted.
+
+**The coarsest level** (*DESIGN*, docs/17 AMG-07b: "coarsest level allgatherv'd and solved
+redundantly"). At setup every rank allgathervs its coarsest `DistLevel`. `gather_level`
+(§141.10) puts them into one `HostLevel` numbered by key, and every rank factors it as
+`Gamg::new` factors its coarsest level, `CoarseSetup::general` (§141.4, (141.5.4)). Every
+cycle then runs
+
+```
+b[gid(key_c)] = b_L[c] of every rank (one allgatherv);   x = C(b) on every rank;
+x_L[c] = x[gid(key_c)]                                                                (141.44)
+```
+
+where `gid(k)` is the rank of `k` among the whole coarsest level's keys. Every rank solves the
+same bits with the same kernel, so every rank's copy of `x` is the same.
+
+**The cycle** is (141.5.1) with (141.42) for every `A_l`, the smoothers above, the part-local
+`GpuGalerkin` of the block-local aggregation for `P_l` and `P_l^T` (no aggregate spans a cut,
+so the transfers send nothing), and (141.44) for `C`. Only the V-cycle is built, and a
+hierarchy without a coarse level is refused, because such a system belongs on one rank. PCG
+takes the cycle only with `n_pre = n_post`, as `solve_pcg` does. `spmd_gamg` is
+`solve_gamg` (§141.5) on SPMD: one iteration is one cycle, and the residual of §8.4 is tested
+every `check_interval` iterations with `spmd_pcg`'s norm factor, reductions and flag vote. The
+exchanges of the cycle's products are counted in `DistPerformance::n_exchanges`.
+
+**Not partition-invariant** (§73.5's pattern). A cut changes the block-local aggregation and
+so the whole hierarchy. `SpmdWorkspace::partition_invariant(Gamg)` and
+`DistWorkspace::partition_invariant(Gamg)` are `false`, and the answer moves under a cut,
+which a gate shows. The gates hold the answer against the serial GAMG, not bits.
+
+**Refused by name.** `DistGamg::new` (`amg::distcycle: `, voted on every rank): a hierarchy
+without a coarse level, `n_pre + n_post = 0`, a part given to another rank, a part with no
+cell on some level, parts whose `σ` differ, and a coarsest level `CoarseSetup` refuses (for
+example more than `MAX_DENSE_CELLS` cells). `DistGamg::cycle`: a CUDA-graph capture, a handle
+of another rank or world, an operator or field of another shape. `SpmdWorkspace::set_gamg`:
+a cycle of another rank, world or part shape (`distsolve: `). `Preconditioner::Gamg` without
+a cycle: §13.4's `Error::Refused`, naming `SpmdWorkspace::set_gamg`. `spmd_gamg` without a
+cycle: `spmd_gamg: solver GAMG was requested`, naming `set_gamg`, `PCG` and `PBiCGStab`.
+`spmd_pcg` with `n_pre != n_post`. In one process, `dist_solve` with `GAMG` and
+`DistWorkspace::effective_preconditioner(Gamg)` name the SPMD route.
+
+**Precision.** The answer gate is class R (docs/17 §5.1.4): `1e-8` relative to the serial
+answer. The iteration gate is a count. As AMG-07b landed, the SPMD solves under `single` were
+float solves without §118.4's refinement, so they ran at the solver tolerance `1e-5` of the
+SPMD gates of §138.5 against `tol32 = 1e-5`. At `1e-6` the stationary float cycle stalled at
+its floor (a true residual of `4.3e-6` after 500 cycles on POI 32³), while the refined serial
+solve converged in 42 cycles. That is a property of the unrefined float solve, not of the
+cycle. F32-07 then refined `spmd_pcg` and `spmd_pbicgstab` (§118.12), and AMG-06a refined
+`spmd_gamg` (§141.9). Since AMG-06a both numbers are the f64 ones in both builds: the solver
+tolerance is `1e-11`, and the gate `1e-8` on the double answers.
+
+#### 141.11.1 The gates
+
+POI is the §2 laplacian negated (`σ = +1`), walls folded as Dirichlet zero, cyclic couples as
+`boundary_coeffs`, and `b = 1 + (c mod 7)/7`. The config is the default (Chebyshev degree 2,
+V(2,2), `n_cells_coarsest = 64`), and the solver tolerance is `1e-11` in both builds (it was
+`1e-5` under `single` before AMG-06a), from zero.
+
+| test (`tests/amg_dist_cycle.rs`) | what | class |
+|---|---|---|
+| `distributed_gamg_matches_serial_gamg_in_both_builds` | **the AMG-07b gate.** POI 32³ and POI 24×16×12 cyclic in x; `P = 2, 4` ThreadComm ranks; Hilbert and linear cuts. `spmd_pcg` + `Gamg` against the serial GAMG-PCG and `spmd_solve` `GAMG` against the serial `solve_gamg`: every rank converged on the same iteration, `max|x - x_s| / max|x_s| <= 1e-8` in both builds (it was `1e-5` under `single` before AMG-06a), and `10 it <= 13 it_s`. 16 rows | R, count |
+| `the_distributed_cycle_moves_the_answer_under_a_cut_and_says_so` | POI 16×12×10, `P = 2, 4`, Hilbert and linear: `partition_invariant(Gamg)` is `false` on every rank and in one process, every cut is within the answer gate of the serial GAMG-PCG, and the answers of the cuts differ in their bits (6 of 6 pairs, both builds) | R, D |
+| `a_distributed_gamg_request_that_cannot_be_served_is_refused_by_name` | the in-process refusals, then on two ranks: no coarse level, `ν1 = ν2 = 0`, PCG and `spmd_solve` `GAMG` without a cycle, the cycle inside a capture, PCG with V(1,2). 12 rank messages | D |
+
+Measured as AMG-07b landed (f64; `single`, then at tol `1e-5` without refinement, in brackets;
+§141.9 has the refined `single` numbers at `1e-11`). Serial GAMG-PCG takes 21 [9] iterations on POI 32³ and
+15 [5] on the cyclic box; the serial stationary GAMG takes 93 [34] and 44 [16].
+
+| mesh | P, cut | GAMG-PCG iterations | GAMG iterations | worst relative difference |
+|---|---|---|---|---|
+| POI 32³ | 2, Hilbert | 21 [9] | 93 [34] | 3.0e-12 [1.4e-6] |
+| POI 32³ | 2, linear | 21 [9] | 94 [34] | 2.4e-12 [1.4e-6] |
+| POI 32³ | 4, Hilbert | 21 [9] | 95 [34] | 2.9e-12 [1.4e-6] |
+| POI 32³ | 4, linear | 22 [9] | 93 [34] | 5.3e-12 [1.4e-6] |
+| 24×16×12 cyclic x | 2, Hilbert | 15 [5] | 46 [16] | 4.0e-12 [8.9e-7] |
+| 24×16×12 cyclic x | 2, linear | 15 [6] | 46 [15] | 5.1e-12 [4.7e-6] |
+| 24×16×12 cyclic x | 4, Hilbert | 15 [5] | 47 [16] | 2.9e-12 [7.9e-7] |
+| 24×16×12 cyclic x | 4, linear | 15 [6] | 42 [16] | 5.5e-12 [5.0e-6] |
+
+The worst iteration ratio is 47/44 = 1.07 in f64 and 6/5 = 1.2 under `single`, against the
+gate's 1.3.
 
 ### 141.20 AMGX by dynamic load (AMX-01)
 
@@ -50760,14 +52002,175 @@ only in the oracle: there is no device kernel, case keyword or registry row (VAL
 ## 144. The flat-plate harness, Blasius, T3A leg 4 and the ZPG plate
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
-VAL-30 to VAL-34, and §12's rows place the T3A key here as §144.1 (VAL-04). §144.2 (the
-Blasius harness, VAL-31), §144.3 (the T3A case, VAL-32), §144.4 (leg 4, VAL-33) and §144.5
-(the ZPG plate, VAL-34) are not yet written. §88.10 and §90.10 name the T3A rig's open legs:
-"no published digit-level onset `Re_x` for T3A was found to compare against". This section's
-first part is the measured key leg 4 will be held against. No solver, gate or test that
-existed before it changes.
+VAL-30 to VAL-34. §144.1 is the flat-plate mesh (VAL-30), and it claims nothing about a
+solution. §144.2 is the Blasius gate (VAL-31). §144.3 (the T3A case, VAL-32), §144.4 (leg 4,
+VAL-33) and §144.5 (the ZPG plate, VAL-34) are the plan's numbers and are not yet written;
+they go between §144.2 and §144.6. §144.6 is the T3A key (VAL-04). The plan's row gives it
+§144.1, and it was written as §144.1 in its own lane, but VAL-30 had taken §144.1, so it was
+renumbered when the lanes merged and the plan's numbers for VAL-32 to VAL-34 were kept.
+§88.10, §40.7 and §56.11 each record that this tree had no flat-plate harness, and §88.10 and
+§90.10 name the T3A rig's open legs: "no published digit-level onset `Re_x` for T3A was found
+to compare against". §144.6 is the measured key leg 4 will be held against, and it changes no
+solver, gate or test that existed before it.
 
-### 144.1 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
+### 144.1 The flat-plate mesh
+
+`blockgen::FlatPlateSpec` is a 2-D box with the leading edge at `x = 0`. The floor `y = 0` is a symmetry plane over
+`[-x_up, 0]` and the wall `plate` over `[0, L]`. The domain is `[0, H]` above it, with one `empty` cell of `depth` in
+z. The floor is split by the one `PatchWindow` its slot may carry (`build_patches` refuses a second): the window is
+the first `n_up` floor columns, named `symmetry` with type `symmetryPlane`, and it is written before the rest of the
+slot, `plate` (`wall`). The patches in face order are `inlet`, `outlet`, `symmetry`, `plate`, `top`, `back` and
+`front`. `inlet` and `outlet` are the two x faces and `top` is an open `patch`; the boundary conditions on them are
+each case's.
+
+The x axis is two graded segments meeting at the edge. No single `GradedAxis` expresses that, so the nodes are
+computed in f64 whatever `Scalar` is (§118.2: host geometry is f64), rounded once into the grid, and the mesh points
+are exactly those roundings. A segment `[a, b]` of `n` cells whose last cell divided by its first is `E` has the
+nodes of `fill_graded`'s law:
+
+```text
+r = E^(1/(n-1)),   x_i = a + (b - a)(r^i - 1)/(r^n - 1),   i = 0..n                  (144.1a)
+```
+
+with `E = 1` or `n = 1` uniform and both endpoints set, not accumulated. The plate's nodes are
+
+```text
+s = segment(0, x_up, n_up, r_up),   x_i = 0 - s_(n_up - i)   for i = 0..n_up
+x_(n_up + i) = segment(0, L, n_plate, r_plate)_i              for i = 1..n_plate
+y = segment(0, H, n_y, r_y),   z = {0, depth}                                     (144.1b)
+```
+
+`r_up` is the inlet cell over the edge cell, `r_plate` the trailing-edge cell over the edge cell, `r_y` the top cell
+over the wall cell. The upstream segment is graded outward from the edge and mirrored, so the smallest cells sit at
+the smallest coordinates and `x_(n_up)` is exactly `+0.0`: the leading edge is a node, and the last symmetry face
+and the first plate face share its two points.
+
+The generator prints an estimate of the wall cell's y+ to choose `dy_1` by. It is Blasius's local skin friction,
+`C_f = 2 f''(0) Re_x^(-1/2)` with `f''(0) = 0.332057` (Blasius, *Z. Math. Phys.* 56 (1908) 1-37; the value §88.7
+measures, so `2 f''(0) = 0.664114`, of which the estimate takes the classical `0.664`), at the wall cell's centre
+`y_P = dy_1/2`:
+
+```text
+C_f = 0.664 Re_x^(-1/2),   Re_x = U x/nu,   u_tau = U sqrt(C_f/2),   y+_P = y_P u_tau/nu   (144.1c)
+```
+
+It is printed at the first plate face's centre and at the trailing edge. It is an estimate for sizing a mesh, not a
+measurement and not a gate.
+
+`FlatPlateSpec::laminar()` is `cases/flatPlateLaminar`'s plate: `x_up = 0.25 m` (the TMR T3A rig's distance,
+§88.10), `L = 1 m`, `H = 0.25 m`, `depth = 0.01 m`, `30 + 120` cells along x and 80 across, `r_up = r_plate = 20`,
+`r_y = 200`, `U = 1 m/s`, `nu = 5e-6 m^2/s`, so `Re_L = 2e5`. On it the two cells at the edge are `1.2847e-3 m` and
+`1.3067e-3 m` (ratio 1.0171), the wall cell is `8.1466e-5 m`, and (144.1c) gives `y+ = 1.388` at the first plate face
+and `0.223` at the trailing edge. `ofgpu-generate-mesh plate <dir> [nx ny 1]` writes it as a laminar case, splitting
+`nx` a fifth ahead of the edge. The flags `-upstream`, `-length`, `-height`, `-ratios rUp rPlate rY`, `-uInf` and
+`-nu` set the spec; `-stl`, `-cutcell`, `-extent`, `-grading` and `-cyclic` are refused by name.
+`blockgen::build_flat_plate_mesh` is the same mesh in memory.
+
+`cases/flatPlateLaminar.jsonc` is the same plate, box and patches on the JSONC reader's `cartesian` mesh. That mesh
+carries one grading ratio per axis toward an end of the axis, so the file is uniform in x (the edge on node 30) and
+graded only to the wall. Its header says so.
+
+Gate (`tests/flat_plate_mesh.rs`, both builds): the patch face ranges are exact (starts 0, 80, 160, 190, 310, 460 and
+12460 after 23770 internal faces); the edge is a node shared by the last symmetry face and the first plate face; the
+cell-size ratios of the three segments hold to `1e-12` on the f64 nodes; the points are the nodes rounded to `Scalar`;
+and (144.1c) matches a hand evaluation to `1e-12`. Precision classes: D for the ranges, the edge node and the points,
+A for the ratios and the estimate (evaluated in f64, the same tolerance in both builds).
+
+**Not claimed.** No flow has been solved on this mesh. The Blasius comparison is VAL-31's, and the mesh's
+fitness for it is that gate's to show.
+
+### 144.2 Gate 132-L: the laminar plate against Blasius
+
+`No GPL-licensed source was consulted.` The plan names this gate 132-L (docs/17's row VAL-31); it lives here
+in §144, not in §132. `src/bin/validate_gates/blasius_plate.rs` solves §144.1's plate laminar and steady on three
+meshes and holds the wall shear and one velocity profile against the Blasius similarity solution. That solution
+is exact for the boundary-layer equations (H. Blasius, *Z. Math. Phys.* 56 (1908) 1-37), so a miss is the verdict
+MISSES. No published table is read. `f''' + f f''/2 = 0` with `f(0) = f'(0) = 0` and `f'(inf) = 1` is integrated
+by RK4 at `h = 1e-3` with a secant shot on `f''(0)` that drives `f'(10)` to 1, as §88.7 does, and the shot's own
+`f''(0)` is the gate's first row. Between the RK4 nodes `f'` is the cubic Hermite interpolant whose slopes are the
+nodes' `f''`. The gate compares against:
+
+```text
+C_f,B = 2 f''(0) Re_x^(-1/2),   Re_x = U x/nu                                          (144.2a)
+u/U = f'(eta),   eta = y sqrt(U/(nu x))                                                (144.2b)
+```
+
+**The meshes.** The meshes keep `FlatPlateSpec::laminar()`'s box, end-cell ratios (`r_up = r_plate = 20`,
+`r_y = 200`) and free stream (`U = 1 m/s`, `nu = 5e-6 m^2/s`, `Re_L = 2e5`). They differ only in their counts
+`n_up + n_plate x n_y`: `32 + 128 x 96` (15 360 cells), `16 + 64 x 48` (3 840) and `8 + 32 x 24` (960). Each
+level halves every count of the one before, so (94.1)'s `h = sqrt(A/N)` doubles exactly: `4.5105e-3`, `9.0211e-3`
+and `1.8042e-2` m. The boundary conditions are `cases/flatPlateLaminar.jsonc`'s:
+
+- the inlet carries the free stream, with zero-gradient `p`;
+- the outlet and the top have zero-gradient `U` at `p = 0`;
+- `symmetry` is a symmetry plane;
+- the plate is no-slip;
+- `back` and `front` are `empty`.
+
+The run seeds the free stream and its face fluxes. It is steady SIMPLE with `alpha_U = 0.7` and `alpha_p = 0.3`
+(§5.2), `linearUpwind` on `div(phi,U)` with the bounded form, and no eddy viscosity.
+
+**The wall shear.** On a plate face with centre `c_f`, unit normal `n` and wall cell `P`, all in f64 from
+`geom64()`:
+
+```text
+tau_w = nu u_P,x / d,   d = |(c_P - c_f) . n|,   C_f = 2 tau_w / U^2                   (144.2d)
+```
+
+This is the one-sided wall gradient that the momentum equation's own wall flux uses. The study's quantity, `C_f` at
+`Re_x = 1e5` (`x = 0.5 m`), interpolates `C_f sqrt(Re_x)` linearly in `x` between the two faces that bracket it,
+because Blasius makes that product constant:
+
+```text
+C_f(Re) = [g_a + t (g_b - g_a)] / sqrt(Re),   g = C_f sqrt(Re_x),   t = (Re - Re_a)/(Re_b - Re_a)   (144.2c)
+```
+
+**The stopping rule.** Every 50 SIMPLE iterations, after at least 200, the run takes the largest relative change of
+`C_f` over the band's faces since the last check. It stops when that change is `1e-6` or less, with a cap of
+20 000 iterations. A non-finite initial residual is an `Err`, never a row.
+
+**The rows**, all in `ofgpu-validate`'s section `Gate 132-L`:
+
+1. `|f''(0) - 0.332057| <= 1e-6`: the reference itself.
+2. Each mesh meets the stopping rule within the cap.
+3. On the finest mesh, `max |C_f/C_f,B - 1| <= 0.03` over every plate face with `2e4 <= Re_x <= Re_L`, by (144.2a)
+   and (144.2d).
+4. On the finest mesh, `max |u/U - f'(eta)| <= 0.02` (fractions of `U`) over the column of cells above the plate face
+   nearest `Re_x = 1e5`, for `eta <= 8`. Here `eta` is (144.2b) evaluated at the column's own centroid `x`. The rows
+   above `eta = 8`, where `f' = 1` to `1e-5`, are free stream and are not read.
+5. §94's `grid_study` reads the three levels of (144.2c).
+
+The study and the (94.10) metric against `D = C_f,B(1e5)` are printed as notes. `u_input = 0` because the inputs
+are exact, and `u_D = 0` because Blasius is exact. A failure of row 3 or row 4 registers `Verdict::Misses` with the
+study as its `Uncertainty`. A pass registers nothing (§69).
+
+**Measured** on this tree, on this machine's GPU, in both builds:
+
+| row | f64 | single |
+|---|---|---|
+| `f''(0)` (shot, f64 in both) | `0.33205734`, err `3.37e-7` | the same |
+| iterations, finest / medium / coarse | 1500 / 500 / 250 | 1600 / 500 / 250 |
+| `C_f` at `Re_x = 1e5`, finest / medium / coarse | `2.098053e-3` / `2.095611e-3` / `2.084387e-3` | `2.098052e-3` / `2.095612e-3` / `2.084389e-3` |
+| `C_f / C_f,B` at `Re_x` 2e4, 5e4, 1e5 (finest) | 1.0047, 1.0016, 0.9990 | the same |
+| row 3: worst face | `1.299e-2` (bar `0.03`), at `x = 0.9877 m`, the last plate face | the same |
+| row 4: worst cell | `3.163e-3` (bar `0.02`), at `eta = 4.404` of the column at `x = 0.4983 m`, 44 cells | the same |
+| study | monotone, `p = 2.201`, `phi_ext = 2.099110e-3`, `U_fine = 3.117e-6` (Fs 3, second order, unweighted) | `phi_ext = 2.099109e-3`, `U_fine = 3.118e-6` |
+| (94.10) | `E = -2.062e-6 +/- 3.117e-6` (`-0.10 % +/- 0.15 %` of D): `abs(E) <= u_val` | `E = -2.063e-6 +/- 3.118e-6` |
+| section wall time, two runs each | 51.7 s, 63.7 s | 23.9 s, 23.8 s |
+
+The gate HOLDS in both builds. The run's single-build `C_f` agrees with the f64 build's to `1e-6` relative. The
+initial residual at the stop is `1.1e-9` in f64 and `5.2e-4` under single, so the `C_f` rule is the one that both
+builds can meet. Precision classes: A for row 1 (host f64 in both builds), and R for rows 3 and 4 (a solved field
+against an exact solution, with the same bars in both builds).
+
+**Not claimed.** The leading-edge region `Re_x < 2e4` is not gated. There the boundary-layer approximation and the
+mesh both fail by design, so the band starts at `x = 0.1 m`. The worst face of row 3 is the last plate face, whose
+cell touches the zero-gradient outlet. It is 1.3 % low there, and that end effect is not diagnosed further. §144.1's
+`laminar()` mesh (`30 + 120 x 80`) is not one of the three levels, because halving its 30 and 120 twice is not whole.
+The levels keep its box and ratios instead. Nothing here holds a transition model or a turbulent plate; those are
+the later subsections of §144, by the plan's allocation.
+
+### 144.6 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
 
 **Source.** The ERCOFTAC Classic Collection, case 020, "Flat Plate Transitional Boundary
 Layers - Experiments by Coupland" (<http://cfd.mace.manchester.ac.uk/ercoftac/doku.php?id=cases:case020>,
@@ -50791,7 +52194,7 @@ traverse, from `x = 45` to `1495 mm`. The columns are the run number, the axial 
 from the leading edge (mm), the Reynolds number on `x` and `U0`,
 
 ```
-  Re_x = x U0 / nu                                                                  (144.1)
+  Re_x = x U0 / nu                                                                  (144.6)
 ```
 
 the local free-stream velocity `U0` (m/s), the skin-friction coefficient `Cf`, the shape
@@ -50843,11 +52246,12 @@ quality of the measurement beyond what the host page states.
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §145 to VAL-03 (§145.1, the
-answer key) and VAL-60 (§145.2, the live gate, not yet written). §22's table has named this
+answer key) and VAL-60 (§145.2, the live gate, Gate 145-A). §22's table has named this
 benchmark since the first release ("Dam break — surge front position vs time") without a
-number to hold it against: `ofgpu-vof -surge` and `vof::tests` say why at `bin/vof.rs` and
-`vof.rs` ("nobody here has the paper"). This section is the key that closes that gap. No
-solver, gate or test that existed before it changes.
+number to hold it against: `ofgpu-vof -surge` and `vof::tests` said why at `bin/vof.rs` and
+`vof.rs` ("nobody here has the paper"), and VAL-60 replaced both sentences with pointers to
+this section. This section is the key that closes that gap. No solver, gate or test that
+existed before it changes.
 
 Source: **J. C. Martin and W. J. Moyce, "Part IV. An experimental study of the collapse of
 liquid columns on a rigid horizontal plane", *Phil. Trans. R. Soc. Lond. A* 244 (1952)
@@ -50947,12 +52351,115 @@ A misread digit that breaks a series' order, a dropped or doubled row, or a mean
 the wrong series fails the test. A misread digit that keeps every order is not caught; the
 re-reading above is the only guard against it.
 
+### 145.2 Gate 145-A: the dam break, live, against the key
+
+`ofgpu-validate`'s section "Gate 145-A" (`src/bin/validate_gates/martin_moyce.rs`, the first
+file of docs/17's `validate_gates/`; VAL-60) runs §22's dam break through the `ofgpu::vof`
+library exactly as `ofgpu-vof -surge` runs it, and holds the surge front against §145.1's
+key. docs/17's VAL-60 row calls this "Gate 133-A"; §133 of this file is the mixture-averaged
+transport, and the gate takes this section's number.
+
+**The case, fixed before any run.** `a = 2 1/4 in. = 0.05715 m`, the scale of the nine-record
+series. The column is `a` wide and `n^2 a = 2a` high against the `x = 0` wall, which is the
+plane of symmetry of §145.1. The tank is `9a x 3a` and two-dimensional (one cell deep, `empty`
+front and back). The column's wall, the far wall and the floor are no-slip walls (`U = 0`,
+`alpha` and `p_rgh` zero-gradient). The top is open: `U` is zero-gradient and `p_rgh = 0`.
+Water and air are `998.2 / 1.2 kg/m^3`, `1.002e-3 / 1.8e-5 Pa s`, `sigma = 0.0728 N/m`,
+`g = 9.81 m/s^2` along `-y`, and `c_alpha = 1`. Three uniform meshes are run, `h = a/12, a/18,
+a/27` (`r = 1.5`), with the time step `dt = 0.25 h / (2 (g h0)^(1/2))`, `h0 = 2a`, up to
+`T = 6` in (145.1). The controls are `vof::tests`' dam break: PISO with 3 correctors, `U` to
+`1e-8` (relTol 0, 200 iterations), `p_rgh` to `1e-9` (relTol `1e-3`, DIC, 2000 iterations),
+and uncorrected `snGrad`. The front is `bin/vof.rs`'s sampler on the bottom row of cells: the
+last cell with `alpha >= 1/2`, linear to the first one below, measured from the column's wall
+in world coordinates (`HostMesh::world`, §118.7). It is sampled after every step.
+
+**The time origin.** The run starts its clock when the column is released, and the paper's
+clock is unknown (§145.1). The gate puts the run's own `Z = 1.44` at the key's `T = 1.19`:
+
+```
+  T_S(t) = 2^(1/2) t (g/a)^(1/2),    dT = 1.19 - T_S(t_1.44),    Z_S(T) = Z(t) at T_S(t) + dT = T   (145.5)
+```
+
+with `t_1.44` the first time the sampled front reaches `Z = 1.44`, linear between the two
+steps either side of it, and `Z_S` linear between steps.
+
+**The band.** At station `k` of a printed-mean series, `|Z_S(T_k) - Z_k| <= b_k` with
+
+```
+  b_k = max( u_D,T |dZ/dT|_k , 0.1 Z_k ),    u_D,T = 0.17 (145.4)                                      (145.6)
+```
+
+and `|dZ/dT|_k` the secant of that series' printed means through station `k`'s neighbours
+(one-sided at the series' last station). The first term is (145.4) converted to `Z` by §145.1's
+rule. The second is docs/17's VAL-60 row. The window is every station with
+`1.44 < Z_k <= 7.0`. `Z = 1.44` itself holds by (145.5), and `Z = 7.0` is two column widths
+short of the far wall. Both printed means are compared on the finest mesh: 12 stations of the
+`1 1/8 in.` series and 15 of the `2 1/4 in.` series. The row is `max_k |Z_S(T_k) - Z_k| / b_k <= 1`
+per series. A station the run never reaches counts as infinite.
+
+**What must hold, besides.** On every mesh and after every step, the front is behind
+Ritter's (1892) frictionless front, started from the column's edge, plus the one cell that the
+sampler resolves:
+
+```
+  z(t) <= a + 2 (g h0)^(1/2) t + h                                                                     (145.7)
+```
+
+The bound is the classical one: along the characteristic from the still reservoir the
+shallow-water invariant `u + 2c = 2 (g h0)^(1/2)` holds, and `c = (g h)^(1/2) = 0` at a dry
+front (A. Ritter, *Z. Ver. Dtsch. Ing.* 36 (1892) 947, cited as `vof::tests` cites it; the
+paper was not re-read for this section).
+
+The water volume `sum_c alpha_c V_c` is conserved over the run to `1e-12` relative. That row
+is precision class R (docs/17 §5.1 rule 4), so its tolerance is `tol32 = 1e-5` under `single`.
+The §94 study takes `Z_S(T = 2)` on the three meshes through `vv::grid_study`, and its (94.10)
+line is printed against `D`, the `2 1/4 in.` mean at `T = 2`. `D` is interpolated linearly
+between `(2.33, 1.98)` and `(2.56, 2.20)` to `D = 2.3509`, with `u_D = 0.17 x 0.23/0.22 = 0.1777`.
+A row requires the study to be computed. A comparison row that fails also registers the
+verdict `MISSES` with the study, which is Gate 105-C's pattern. A missing key registers
+`OPEN`, as Gate 94-D does.
+
+**What was measured** (f64, 2026-10-14, RTX 5070 Ti sm_120, shared with two other lanes, section
+63 alone, `1 m 16 s` wall):
+
+| mesh | cells | steps | Ritter margin `min(bound - z)/a` | volume change | `max(alpha) - 1` |
+|---|---|---|---|---|---|
+| a/27 | 19683 | 1296 | 0.0463 | 0 | 4.7e-7 |
+| a/18 | 8748 | 864 | 0.0694 | 0 | 2.5e-7 |
+| a/12 | 3888 | 576 | 0.1042 | 0 | 1.4e-7 |
+
+On a/27 the front reaches `Z = 1.44` at `T_S = 0.9151`, so `dT = +0.2749`. The worst
+`|dZ|/b` is **0.934** against the `1 1/8 in.` mean (at `T = 2.23`, `Z_key = 2.78`, `Z_S =
+2.520`) and **0.531** against the `2 1/4 in.` mean (at `T = 2.32`, `Z_key = 2.78`, `Z_S =
+2.632`). Both rows pass. Between `T = 1.6` and `3.3` the run trails both means by
+2-10 % of `Z`. From `T = 4.0` on it is within 2.4 % of the larger-scale series, and past
+`T = 4.3` it leads the smaller-scale one by up to 6.8 %. `Z_S(T = 2)` is `2.2483, 2.2548, 2.2741` on a/27, a/18 and a/12: the study is
+monotone with `p = 2.708`, `phi_ext = 2.2412` and `U_fine = 2.115e-2` (Fs 3). Against `D`,
+`E = -0.1026 +/- 0.1790` (`-4.36 % +/- 7.61 %`), so `|E| <= u_val`: at this resolution the
+comparison cannot see a modelling error. The verdict is a pass, and the gate registers
+nothing.
+
+Under `single` (the same GPU, `1 m 20 s`), the volume changes by `2.6e-7`, `1.8e-7` and
+`2.3e-7` on a/27, a/18 and a/12. These are class-R rows held to `1e-5`, and they pass. The
+alpha excursions are `1.5e-8` below 0 and at most `2.9e-6` above 1. The Ritter margins are the
+same to four digits (a/18 takes 865 steps, one more than f64's 864, because its `dt` is
+rounded to f32). `dT`, both worst ratios (`0.934`, `0.531`), the study's three values and
+the (94.10) line are the f64 run's to the digits printed; `phi_ext` differs in the seventh
+digit.
+
+**What this gate does not do.** It does not model the release of the column, and that is
+the reason for (145.5). It does not put `u_num` into the band (145.6): the band is the
+datum's alone, and the study is printed beside it. It compares the `1 1/8 in.` series at the
+`2 1/4 in.` scale. The scale gap between the two series is the larger part of (145.4)'s `0.17`,
+and no surface-tension scaling is applied. Tables 1 and 3 (`n^2 = 1, 4`) are not
+transcribed, so they are not gated.
+
 ---
 
 ## 146. Riboux & Gordillo's splash threshold — the measured key for Gate 78-D
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §146 to VAL-05 (§146.1, the
-answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D, not yet written). §78.10 says
+answer key) and VAL-70 (§146.2, the measured leg of Gate 78-D). §78.10 says
 that neither splash criterion of §78.4 is measured against an experiment here, because Mundo's
 boundary is a figure and nothing in this repository transcribes it. This section is the key
 that closes that gap with a different experiment. No solver, gate or test that existed before
@@ -51087,6 +52594,76 @@ that stays inside the print's own precision is not caught. `R = 1.34` read as `1
 `μ = 1.3 cP`, or water's `0.95 cP` read as `0.9`, both pass. The re-reading of the page is the
 only guard against them. A misread `V*` away from Fig. 1's row is caught only by check (b)
 above, which is not a test.
+
+### 146.2 Gate 78-D's measured leg: each criterion against the measured threshold
+
+`src/bin/validate_gates/splash.rs`, `check_splash_thresholds`, the section titled "Gate 78-D
+measured leg" in `ofgpu-validate`. Host only: no mesh and no device. It runs in well under a
+second.
+
+**What is predicted.** For every row of §146.1's key, each criterion of §78.4 gives the lowest
+normal speed at which the impact map returns `Splash`. That speed is the closed-form inverse
+(78.4c), taken from the crate's own `WallImpactControls::boundary_speed`, so the leg measures the
+criterion the parcel kernel decides with. The inputs are the row's printed `ρ`, `σ` and `μ`,
+with `σ` held constant (`SurfaceTension::Constant`) and the diameter `d = 2R` of (146.2). The
+constants are the shipped defaults, `K_crit = 57.7` for Mundo and `A = 2630` (the smooth, dry
+end) for Bai & Gosman. Nothing is fitted to the key.
+
+**The band, stated before the run.** With `V_c,i` the criterion's speed for row `i` and `V*_i`
+the key's measured one,
+
+```
+  e_i = (V_c,i − V*_i) / V*_i,     row i is inside when  |e_i| <= 0.20                  (146.5)
+```
+
+Docs/17's row allows the paper's own error bar where one is printed. None is. Fig. 1's bracket
+(`2.01 < 2.19 < 2.28 m/s`) is the two neighbouring impacts of one series and not an error bar,
+and at −8.2 % and +4.1 % it is narrower than the band anyway. So every row has the same ±20 %.
+A NaN is never inside.
+
+**How a liquid counts.** The key has 17 rows for eight liquids, and docs/17 counts liquids.
+
+```
+  liquid L is inside when every one of its rows is inside (146.5);
+  a criterion holds when at least 6 of the 8 liquids are inside                         (146.6)
+```
+
+No averaging over a liquid's radii can then hide a row that misses. A criterion that holds
+passes a check row. A criterion that does not is registered as `MISSES` under its own gate name,
+`SPEC-LIT 146.2 Gate 78-D measured leg, mundo` or `…, baiGosman`, each reported inside its own
+scope (§69.4). The `78-D` row of §78.10, the 4.78 between the two criteria, is untouched and
+stays `OPEN`.
+
+**Precision.** The band is a physics band, class P (docs/17 §5.1.4): the same in both builds.
+The key and `e_i` are `f64`. `boundary_speed` runs in `Scalar`, and under `single` its relative
+error, of order `1e-6`, is far below the nearest row's distance from the band edge (`2.3e-3` in
+`e`).
+
+**The viscosity's printed digits.** §146.1 found the table's `μ` printed to one or two
+significant figures. The leg is also run with `μ_Oh = Oh (ρ σ R)^(1/2)`, the viscosity that
+reproduces the printed `Oh`. That run is printed as a note and decides nothing. It moves `V_c`
+by at most 2.2 % (Mundo) and 2.0 % (Bai & Gosman), on acetone, and changes no liquid's count.
+
+**What was measured, on this machine** (`-sections 64`, both builds the same to the printed
+digits).
+
+| criterion | rows inside (146.5) | liquids inside (146.6) | `e` from | to | verdict |
+|---|---|---|---|---|---|
+| Mundo, `K_crit = 57.7` | 0 of 17 | 0 of 8 | −0.734 (water, `R = 1.96 mm`) | −0.214 (PDMS, `R = 0.89 mm`) | `MISSES` |
+| Bai & Gosman, `A = 2630` | 3 of 17 | 1 of 8 (ethanol) | −0.396 (water, `R = 1.96 mm`) | +0.690 (PDMS, `R = 0.89 mm`) | `MISSES` |
+
+Mundo predicts splash at 0.27 to 0.79 of the measured speed on every row: it is low everywhere.
+Bai & Gosman is low on the three thin liquids (acetone, water and methanol, −0.22 to −0.40) and
+high on the four silicone liquids (+0.15 to +0.69). It crosses the measurements near ethanol,
+whose two rows and the larger decamethyltetrasiloxane drop are the three inside. Bai & Gosman's
+dodecamethylpentasiloxane row at `R = 1.37 mm` sits at `e = +0.2023`, outside by 0.0023. The
+band is not moved for it.
+
+**What the leg does not say.** It does not say why. Both criteria come from other experiments. Neither contains a gas property, and Riboux & Gordillo's own model of `V*` does (their
+Table II's mean free path, gas viscosity and density). The leg cannot separate that from the
+other differences: drop size, the surface, and how each paper defines the onset of splash. Mundo's
+own droplet-wall data are still not transcribed (§78.10), so this leg measures the criteria on
+millimetric drops on glass, which is a different experiment from the one either was fitted to.
 
 ---
 
@@ -52528,6 +54105,141 @@ tolerance in f64 and f32, ≤ 8 min per build:
 * `dust::progress::tests::bounded`: c~ ∈ [0, 1] throughout every test above; the bounds counter
   is 0 (D).
 
+### 155.9 What DST-04 landed
+
+`src/dust/progress.rs` (the module `dust::progress`: `ProgressEquation`, the host relations
+(155.1), (155.2), (155.10) and the exact planar solution `PlanarExact` of (155.5)-(155.6)),
+`src/dust/ignition.rs` (`IgnitionSource`, the host twin of (155.4)), `src/dust/courant.rs` (the
+prediction, the named refusal and the host twin of (155.9)), the harness `src/dust/tube1d.rs`,
+and five kernels appended to `cuda/dust.cu` with their launchers in `src/dust/device.rs`
+(`ProgressKernels`): `dustProgressSources`, `dustIgnition`, `dustFlameCourant`,
+`dustReynoldsMean` and `dustCountOutOfBounds`. Like the DST-03 kernels they compute in double in
+both builds and round once at the store, with every product that could be fused written
+`__dmul_rn`; `dustIgnition` writes a W below FLT_MIN as +0 in both builds, so no float word is
+subnormal. The DST-03 kernels are unchanged. The tests are written once in
+`tests/shared/dust_progress_cases.rs` and included twice: as the lib tests
+`dust::progress::tests` and by `tests/dust_progress.rs` in the default and the `single` build.
+The capture registry classifies `src/dust/progress.rs` as Refused (each solve reads the bounds
+counter back), and the new launchers are gated in `src/dust/device.rs` by
+`dust_progress_kernels_replay_under_capture`.
+
+**The equation.** `ProgressEquation` assembles (155.3) with
+`RasCore::assemble_transport_mass_weighted`, the assembly §86's `ScalarTransport` uses: the
+ρ-weighted ddt with (86.4)'s continuity coefficient, the limited convection on the face mass
+flux, and the Laplacian with `Γ = ρ_f (κ + D_t)`. `κ + D_t` is handed to it in the slot ν_t has
+(r_σ = 1, ν = 0). Then `fvm_su(S_U, +1)` and `fvm_sp(S_P', +1)` add the sources:
+`S_U = ρ_u U_t |∇c~| + ρ‾ (K + W)` and `S_P' = ρ‾ (K + W)`, where ρ_u is the caller's current
+ρ_u(p). `begin_step` stores the old level and takes `|∇c~|` from it once for the whole step, and
+`solve` is one outer iteration.
+
+**The 1-D tube.** The tube is a blockgen line of cubes (dx = dy = dz, `empty` across), with the
+burned end x_lo open and the fresh end x_hi closed and at rest. The density is BML (155.1) at the
+current iterate. The face mass flux is the cumulative sum of §155.8 taken from the fresh end. The
+FSC closures come from DST-03's `dustFsc` with frozen uniform k, ω and ν_t, at
+t_fd = max(t^{n+1} − t_0, 0). T comes from the published closure (153.1), and κ from the law the
+case states: zero, or `ρκ = ρ_u κ_u` (n = 1). Each step iterates c~ → ρ → ṁ → c~ until
+max |Δc~| < the outer tolerance (1e−8 in f64, 1e−6 under `single`, at most 20 iterations). The
+first density comes from the extrapolation 2c^n − c^{n−1}. The tests use Euler, bounded van
+Leer limited convection (`DivScheme::Limited(VanLeer)`), and PBiCGStab with DILU. Each solve cuts its residual 100-fold (`relTol 1e−2`), so the outer
+tolerance sets the converged state.
+
+**Decisions (TAKEN, by recommendation).**
+
+1. **`RasCore`, not `ScalarTransport`.** The laminar-limit and ignition sources need S_P on the
+   diagonal, and `ScalarTransport` has no slot for it. The assembly is the same function, so
+   `scalar_transport.rs` is untouched.
+2. **`|∇c~|` at the old time level, `cellLimited Gauss linear 1` (Barth-Jespersen).** In 1-D the
+   limited gradient is at most `2 (c_up − c~)/dx`, where c_up is the burned-side neighbour. The
+   explicit increment is then at most `2 Co_f (c_up − c~)`, and with Co_f ≤ 0.5 (155.9) it cannot
+   carry c~ past its neighbour. That bound holds for the old level's gradient, which is what
+   "explicit" means in §155.2. A gradient refreshed at each outer iterate was measured to lift c~
+   to 1 + 3e−8 on the σ = 1 tube.
+3. **The bounds margin.** Exactly c~ ∈ [0, 1] cannot be reached without clipping, because the
+   solve is iterative. A cell whose exact answer is 1 came back 2 ulp above it (ignition), and
+   17 ulp above it with a 1e−13 solver tolerance. So the counter counts c~ < −δ or c~ > 1 + δ,
+   with δ = `BOUNDS_TOL` = 64 ε of the build (1.4e−14 in f64, 7.6e−6 in float). It is raised to
+   the step's outer tolerance where that is coarser (`set_bounds_tolerance`). The count is taken
+   on each step's result, its last outer iterate; the earlier iterates are not states of the
+   solution. The largest excursion of every run is printed. Nothing is clipped.
+4. **The planar rows use κ = 0**, because (155.5) has no κ. Their FSC constants use the Leeds
+   T_b = 5.06·T_u at σ = 1 too: Q is off, and T_b only has to admit K_b.
+5. **The REMBE laminar state** is ρ_u from the formula-mode gas at 101 325 Pa and 273 K (152.9),
+   and κ_u = μ/(ρ_u Pr), with Sutherland air μ = 1.458e−6 T^{1.5}/(T + 110.4) and Pr = 0.7
+   (§151.5). The row is self-consistent in κ_u: t_r is formed from it by (153.2).
+6. **The laminar tubes** use 200 cells per δ_L on 4 δ_L behind the start, 8 δ_L of travel and 6
+   δ_L ahead (3600 cells). Each step moves the front two cells (dt = 2 dx/S_L), and the Euler
+   step's numerical diffusion dt S_L²/2 is then 1/200 of κ_u. The speed is the slope of the
+   c‾ = 0.5 crossing over the last half of the run. Ψ is `PsiProblem { PublishedCurve(σ), Θ/T_u,
+   n = 1 }` with the default options, because the tube's density and temperature are the
+   published closure.
+7. **δ_t is read with a parabolic peak.** The largest centre-to-centre |Δc‾/Δx| and its two
+   neighbours give a parabola, and its vertex is taken as the maximum. A raw maximum depends on
+   where the peak falls between samples by up to π(dx/2δ_t)² (2.7e−4 at 250 cells).
+8. **`flame_courant_independent`** compares the mean front speed x_f(20 ms)/20 ms of the σ = 5.06
+   planar tube on 250 cells at Co_f = 0.1 and 0.4. The row also asserts that the measured
+   maximum Co_f stays at or below the prediction.
+
+**Measured, f64** (RTX 5070 Ti; the eight tests run in 300 s):
+
+| row | measured | bar |
+|---|---|---|
+| planar σ = 1, 1000 cells | x_f +1.697e−3, δ_t −2.786e−3, L∞ 1.079e−3 | 5e−3, 2e−2, 2e−2 |
+| planar σ = 1, 250/500/1000 | x_f 2.618e−3, 2.552e−3, 1.697e−3; δ_t 1.161e−2, 5.652e−3, 2.786e−3; L∞ 3.199e−3, 1.918e−3, 1.079e−3 | non-increasing: holds |
+| planar σ = 5.06, 1000 cells | x_f −2.569e−5, δ_t −4.492e−4, L∞ 1.085e−4 | 5e−3, 2e−2, 2e−2 |
+| planar σ = 5.06, 250/500/1000 | x_f 1.411e−3, 3.140e−4, 2.569e−5; L∞ 5.632e−4, 1.935e−4, 1.085e−4; **δ_t −2.177e−4, −6.223e−4, −4.492e−4** | x_f and L∞ hold; **δ_t MISSED** |
+| laminar, regenerated Ψ | Leeds 0.120082 m/s (+6.80e−4), REMBE 0.241272 m/s (+6.81e−4) | 1 % |
+| laminar, ZFK t_r | Leeds 0.136035 against 0.135706 (+2.43e−3), REMBE 0.275197 against 0.274382 (+2.97e−3) | 1 % |
+| flame Courant | 0.849075 m/s at Co_f 0.1, 0.849657 at 0.4: 6.9e−4; measured Co_f max 0.0911 and 0.3645 | 5e−3 |
+| ignition | device against host ≤ 2 ulp; W held after t_0 bit for bit; c~ at the point 1.000000 from t_0 on | 4 ulp; ≥ 0.99 |
+| bounds | 0 counted in every row; largest excursion 2.2e−16 to 9.0e−12 | 0 |
+
+**The recorded finding (σ = 5.06).** H20's exactness claim for σ ≠ 1 holds to 2.6e−5 in x_f,
+4.5e−4 in δ_t and 1.1e−4 in L∞ on 1000 cells, far inside the bands. But the δ_t error does not
+fall with the mesh: it is −2.2e−4, −6.2e−4 and −4.5e−4 on 250, 500 and 1000 cells, all with the
+same sign. It sits at a floor near 5e−4 that the σ = 1 tube does not have, since there it halves
+with each refinement. The test asserts this as MISSED, in a recorded form: the sequence is not
+non-increasing, and every rise ends at an error within 1e−3, twenty times inside the 2 % band. Any other
+monotonicity miss fails the test. The cause is not settled. It is either the limit of H20's claim
+(the solution is exact only for σ = 1, §155.4) or a σ-dependent error of the BML/Euler
+discretisation that does not shrink at a fixed Co_f. The flame-Courant row (6.9e−4 between Co_f
+0.1 and 0.4 on 250 cells) bounds the time-step part.
+
+**Measured, `single`** (the same eight tests, 222 to 443 s on the shared card). Every accuracy row holds at the f64
+tolerance:
+
+| row | measured |
+|---|---|
+| planar σ = 1, 1000 cells | x_f +1.664e−3, δ_t −2.806e−3, L∞ 1.082e−3; every sequence non-increasing |
+| planar σ = 5.06, 1000 cells | x_f +3.811e−4, δ_t −5.021e−4, L∞ 2.324e−4 |
+| planar σ = 5.06, 250/500/1000 | x_f 1.375e−3, 3.705e−4, 3.811e−4 (MISSED, the float floor); δ_t 2.789e−4, 5.039e−4, 5.021e−4 (MISSED, as in f64); L∞ 5.522e−4, 1.993e−4, 2.324e−4 (MISSED, the float floor) |
+| laminar, regenerated Ψ (Leeds) | 0.120090 m/s (+7.54e−4) |
+| laminar, ZFK t_r (Leeds) | 0.136057 against 0.135706 (+2.59e−3) |
+| flame Courant | 0.849474 and 0.849612 m/s: 1.6e−4 |
+| ignition | device against host 0 float ulp; c~ = 1 at the point |
+| bounds | **MISSED in the diffusion-dominated tubes**: planar σ = 1 and 5.06 on 1000 cells (excursion 1.5e−4 and 1.6e−5), the laminar tubes (5.1e−5 and 3.1e−5); 0 in the ignition, bounded and flame-Courant tubes |
+
+**The float findings.** (i) Under `single` the burned plateau of a diffusion-dominated tube
+drifts above 1, by about 1.5e−6 a step on the σ = 1 tube at 1000 cells, uniformly across the
+plateau. The cause is the float matrix, not the scheme. In a uniform region the row's diagonal
+`ρV/dt + Σ a_N` is stored once, rounded, so the part `ρV/dt` that holds a constant field is
+represented only to `ε (1 + 2D)` of itself, D = Γ dt/dx² (about 40 there). The linear solve
+cannot remove this: the solver tolerance, set from 1e−7 to 1e−9 with §118.4's refinement on,
+did not move it (measured). The bounds test asserts it as MISSED in its recorded form: an excursion
+within 1e−3, `single` only. Any count in f64, or above 1e−3, fails. (ii) The same floor sets the
+finest-mesh x_f and L∞ errors of the σ = 5.06 tube near 4e−4, so those sequences stop falling at
+1000 cells. The planar monotonicity check accepts that under `single` in the same recorded form
+(every rise ends within 1e−3), and asserts it as MISSED. A cure would be a delta form of the c~
+solve or a rescaled ddt, and either one changes the numerics. It is left for review (docs/17
+review-later list).
+
+**For DST-06 and DST-10.** Build `ProgressEquation::new(gpu, hm, gm, ctrl)` with the c~
+equation's own `ddt`, `div(phi,c)` and solver, then call `initialise`. Each step, call
+`begin_step` once, then `solve(&ProgressCoupling { rho, rho_face, phi_mass, u, diffusivity:
+κ + D_t, u_t, k_rate, w_ign, rho_u: ρ_u(p) })` per outer iteration. `phi_mass` is the face MASS
+flux of the driver's continuity. ρ_u(p) is `progress::unburned_density`. The ignition bracket
+is `device::ignition(.., &src, src.local_point(hm), t, n)`. The flame-Courant refusal is
+`courant::check_fixed_step(dt, courant::predicted(dt, dx_min, u_max, σ, U_t,ISP), Co_f,max)`.
+
 ---
 
 ## 156. ρ-weighted k-ω SST-2003 and SST-sust
@@ -53206,6 +54918,191 @@ DST-13: `src/dust/char.rs`, `cuda/dustparticle.cu`, `src/dust/tests_char.rs`; �
   radiation term exactly (R); particles, gas and radiation close their energy to round-off (A);
   radiation off is bitwise unchanged (D). Tests `dust::particle::tests::{thin_cloud_emission,
   uniform_field_heating, radiation_energy_closes, radiation_off_bitwise}`.
+
+### 159.7 What DST-12 landed
+
+`No GPL-licensed source was consulted.` `src/dust/particle.rs` (the module `dust::particle`:
+`ParticleInputs`/`ParticleProps`, `ParticleState`, `GasAtParcel`, `Exchange` and the host twin
+`step`), the kernel `dustParticleStep` in the new `cuda/dustparticle.cu` with its launcher
+`particle_step` (`ParticleKernels`) in `src/dust/device.rs`, and `dustparticle.cu` in build.rs's
+`KERNEL_UNITS` and, as the fifth unit, `FMAD_OFF_UNITS`. The tests are written once in
+`tests/shared/dust_particle_cases.rs` and included as the lib tests `dust::particle::tests` and
+by `tests/dust_particle.rs` in the default and the `single` build. The launcher is gated under
+capture by `dust_particle_step_replays_under_capture` in `src/dust/device.rs`. Nothing outside
+`dust/` calls it yet: DST-14 to DST-18 (lane S) seed the cloud, deposit the accumulators and
+couple the radiation. Positions and the walk are not touched.
+
+**The step.** One call advances one particle of each parcel by Δt in a gas frozen over the step
+(the cell's T_g, water vapour Y_w, ρ_g and incident radiation G, and the parcel's |u_p − u|;
+μ, k_g and c_p,g are constants, as §76's `GasState` holds them). d_p is held fixed through drying
+and devolatilisation (the swelling or shrinking of a devolatilising particle is not modelled);
+DST-13's char stage shrinks it at constant ρ_p as (159.6) states. C_p is one value for the whole
+particle and m_p = m_w + m_v + m_c + m_a. The step is at most eight segments, taken in stage order:
+
+1. **Moisture**, while m_w > 0. Below the boiling point T_b(p) (the root of Hyland-Wexler's
+   (S54.3) at p_amb; 373.124 K at 1 atm) the loss rate is (76.1)'s Ranz-Marshall rung,
+   `ṁ = π d ρ_f D_f Sh (Y_s − Y_g)`, with §76.4's film (the 1/3 rule, ρ_f = ρ_g T_g/T_f,
+   D_f = D_ref (T_f/T_ref)^2.072 p_boil/p_amb), Watson's h_v(T_p) and §76.5's Y_s; it is
+   floored at 0, because a dust particle does not take water up. ΔH of (159.1) is h_v(T_p). The
+   segment ends when the moisture is gone (m_w is set to exactly 0), when T_p reaches T_b, or at
+   the end of the step. A particle at T_b whose net heat at T_b,
+   `Q_b = π d k_g Nu f_B (T_g − T_b) + π d² ε_0 (G/4 − σ_SB T_b⁴)`, is positive boils as in (76.9):
+   T_p is held at T_b and `ṁ = Q_b/h_v`. **[derived]** The boiling branch closes Bird's factor
+   by its convective part: with `ṁ = π d k_g Nu f(β) (T_g − T_b)/h_v` and β of (159.3),
+   `β = B f(β)` with `B = c_p,v (T_g − T_b)/h_v`, so `e^β − 1 = B`, `β = ln(1 + B)` and
+   `f_B = ln(1 + B)/B`, the Spalding factor §76.9's branch already uses; no iteration is needed.
+2. **Volatiles**, once m_w = 0 and while m_v > 0, for the rest of the step: (159.4) at the
+   frozen T_p, `Δm_v = m_v (1 − e^{−kΔt})` exactly (as `−expm1`). The stage ends when what is
+   left is at most `1e−6` of the parcel's remaining mass; the remnant leaves in that step, with
+   its ΔH. ṁ in (159.3) and the source of (159.1) are the segment's mean `Δm_v/Δt`.
+3. **Char and ash**: inert in DST-12, heated and radiating only; DST-13 adds (159.5).
+
+**[derived] The segment integrator.** Over a segment of length t the rates are frozen at its
+start: the conductance `a = π d k_g Nu f(β)`, the source `s = −ṁ ΔH`, and the radiation
+linearised about T_0, `rad(T) ≈ rad_0 − b (T − T_0)` with `rad_0 = π d² ε_0 (G/4 − σ_SB T_0⁴)`
+and `b = 4 π d² ε_0 σ_SB T_0³`. (159.1) is then linear in T and is integrated exactly:
+
+```
+  num = a (T_g − T_0) + rad_0 + s ,   λ = a + b ,   x = λ t/(m C)
+  T(t) = T_0 + num (t/(m C)) φ1(x)
+  Q_conv = a [ (T_g − T_0) t − num t² g2(x)/(m C) ] ,    Q_rad = rad_0 t − b num t² g2(x)/(m C)
+  φ1(x) = (1 − e^{−x})/x ,   g2(x) = (x − 1 + e^{−x})/x²                                       (159.9)
+```
+
+so that `m C (T(t) − T_0) = Q_conv + Q_rad + s t` identically. φ1 and g2 are their series
+`Σ (−x)^j/(j+1)!` and `Σ (−x)^j/(j+2)!` below x = 1 (stopped at a term below 1e−17 of the sum,
+at most 30 terms) and their closed forms above, where g2's cancellation costs at most a factor
+2.7; both are finite at λ = 0. The sub-cooled segment ends at T_b at
+`t_hit = −ln(1 − r) m C/λ`, `r = λ (T_b − T_0)/num`, when num > 0 and r < 1. For an ash particle
+at rest with no radiation this is the heat-up form of (159.6) to round-off in one segment per
+step.
+
+**The accumulators.** Each parcel carries six `Acc` (f64 in both builds) sums the kernel adds to
+and the caller zeroes: the water and the volatile mass given, each times the end-of-step T_p as
+the state stores it (77.5), `Q_conv` (the heat the gas gave by convection; the gas loses it) and
+`Q_rad` (the net radiation absorbed; DST-17 takes it from G's equation). As §77.4 says, the
+latent and devolatilisation heats are inside `Q_conv` and are not a second sink.
+
+**The device.** One thread per parcel; every intermediate is double in both builds and each state
+word is rounded once at its store, the DST-03 rule. The unit is compiled with `-fmad=false`, so
+the kernel rounds every product as the host twin does, and what is left between them is the last
+bit of exp, expm1, log, log1p, pow and cbrt. The host twin is f64 in both builds; its one contact
+with the build's precision is the stored end-of-step T_p of (77.5).
+
+**Measured** (RTX 5070 Ti, tests/dust_particle.rs). Isothermal devolatilisation over k t = 3 in
+40 steps: host 5.1e−16, device 3.9e−16 in f64 and 1.5e−7 under `single` (bar 1e−10; 1e−5 under
+`single` by D-F32-1). Heat-up over 3 τ_T in 40 steps: host 2.5e−16 of |T_0 − T_g| with the
+convective heat equal to `m C ΔT` exactly; device 2.5e−16, and 1.6e−7 under `single`. Bird: the
+factor is within 1.4e−15 of `1 − β/2 + β²/12` for |β| ≤ 1e−3 and exactly `1/(e − 1)` at β = 1.
+Stage order: the 100 µm parcel passes moisture, volatiles and char once each, in order, on the
+host and the device. **Device against host**, one 2 ms step of 4096 random parcels in 1024 cells
+(555 end their moisture inside the step, 320 boil): the ulps are counted at each word's operand
+scale - a mass at the mass it came from, T_p at itself, `m T` at `m_in T_out`, a heat at the
+step's integrand `(a_0 |ΔT| + ε_0 π d² (G/4 + σ_SB T⁴)) Δt` - because a mass left when a stage ends
+inside the step is a difference, and its own ulps count the cancellation, not the arithmetic. The
+3838 parcels that do not reach T_b in the step are within 3 ulp in f64 and 3 ulp under `single`
+(bar 4). **The 258 parcels that reach T_b in the step are MISSED in f64 at 6 ulp** (m_w and its
+accumulator; 3 ulp under `single`): t_hit moves by `1/(1 − r)` times any change in r, so as
+T_eq approaches T_b from above the crossing time, and with it the split of the drying between
+the two rates, is ill-conditioned in the model itself, and a 1-ulp difference in a transcendental
+becomes a few ulp of the moisture. The row reports the miss and asserts the crossing parcels stay
+within 16 × 4 ulp, far below what a branch taken differently would give.
+
+### 159.8 What DST-13 landed
+
+`No GPL-licensed source was consulted.` `src/dust/char.rs` (the module `dust::char`:
+`CharInputs`/`CharProps`, the rates `diff_coef`, `r_kin` and `rate` of (159.5), the shrinkage
+`shrink` of (159.10) and the segment `burn`), the char stage of `dustParticleStep` in
+`cuda/dustparticle.cu` (the device function `dustpCharBurn`) and of the host twin
+`dust::particle::step`, and the launcher `particle_step` with the char's fields. The tests are
+written once in `tests/shared/dust_char_cases.rs` and included as the lib tests `dust::char::tests`
+and by `tests/dust_char.rs` in the default and the `single` build. Nothing outside `dust/` calls
+the char stage yet: DST-14 to DST-18 (lane S) state it in the case, take p_O2 from the cell and
+deposit the accumulators.
+
+**The inputs and the interface.** `ParticleInputs` gains `char_rate: CharInputs { c0, a, e_a,
+h_c, h_s }`: C_0 (kg/(m s Pa K^0.75)), A (kg/(m² s Pa)) and E_a (J/mol) of (159.5), the heat
+released per kilogram of carbon burnt h_c (J/kg; ISL22's 32.9 MJ/kg), and h_s in [0, 1].
+`CharInputs::inert()` (all zero) leaves the char inert, as DST-12 did; each of C_0, A, E_a below 0,
+a non-finite h_c and an h_s outside [0, 1] is refused by name. `GasAtParcel` gains the cell's O2
+partial pressure p_O2 (Pa); no char burns where p_O2 ≤ 0. On the device `ParticleGasDev` gains the
+cell field `p_o2`, and the kernel now writes m_c and d_p.
+
+**[derived] The char segment.** Once m_w = m_v = 0 the particle is char and ash; while m_c > 0 and
+p_O2 > 0 it burns. Over a segment T_p, T_g and p_O2 are frozen at its start, so are
+`C' = R_diff d = C_0 T_m^{3/4}` and R_kin, and the particle shrinks at constant density
+`ρ_p = 6 m/(π d³)` (m = m_c + m_a, the density at the segment's start). Then
+`(ρ_p π d²/2) dd/dt = −π d² p_O2 C' R_kin/(C' + R_kin d)`, i.e. `(C' + R_kin d) dd = −K dt` with
+`K = 2 p_O2 C' R_kin/ρ_p`, whose integral is `C' Δ + R_kin (d_0 Δ − Δ²/2) = K t` for
+`Δ = d_0 − d`. Its root that starts at Δ = 0, in the form that does not cancel:
+
+```
+  Δ(t) = 2 K t / ( B + sqrt(B² − 2 R_kin K t) ) ,    B = C' + R_kin d_0                          (159.10)
+```
+
+With R_kin → ∞ it is `d_0 − sqrt(d_0² − 4 p_O2 C' t/ρ_p)`, the d² law of (159.6); with C' → ∞ it
+is `2 p_O2 R_kin t/ρ_p`, the linear shrinking. The char is gone when m = m_a, at
+`d_end = d_0 (m_a/m_0)^{1/3}`, after `t_out = (d_0 − d_end) (C' + R_kin (d_0 + d_end)/2)/K`
+(the integral at Δ = d_0 − d_end, where the root is still real). A segment that reaches t_out
+ends there with m_c = 0 exactly and d = d_end (0 for a particle with no ash), and the step goes
+on with the ash; otherwise it takes the rest of the step, and the char burnt is
+`Δm = m_0 Δ (d_0² + d_0 d + d²)/d_0³` (that is `m_0 (1 − (d/d_0)³)` without the cancellation). The
+new char mass is rounded to `Scalar` where it is stored, `m_c' = round(m_c − Δm)`, the carbon given
+is the difference of the two stored words `m_c − m_c'`, and the diameter follows the stored mass,
+`d = d_0 ((m_c' + m_a)/m_0)^{1/3}`, so mass and diameter keep one density and the carbon ledger
+telescopes in both builds. A remnant whose t_out is not positive (a char too small to move the
+diameter) leaves at once, its retained heat added to T_p as `h_s Δm h_c/(m C)`.
+
+**The heat.** The reaction releases `Q = Δm h_c`. (159.1)'s source in the segment integrator
+(159.9) is `s = h_s Q/t` (the h_s of §159.2), so `m C (T(t) − T_0) = Q_conv + Q_rad + h_s Q`; the
+rest, `(1 − h_s) Q`, is the gas's, accumulated as `q_char`. Bird's factor (159.3) is not applied in
+the char stage (f = 1): §159.1 states it for a vapour leaving the particle, and the net Stefan flux
+of `C + O2 → CO2` is the carbon alone; this is a choice made here.
+
+**The elements.** `C(s) + O2 → CO2` by mass, with the IUPAC conventional atomic weights
+`W_C = 12.011` and `W_O = 15.999` g/mol:
+
+```
+  m_O2 = Δm W_O2/W_C ,   m_CO2 = Δm W_CO2/W_C ,   W_O2 = 2 W_O ,   W_CO2 = W_C + W_O2              (159.11)
+```
+
+so that carbon plus oxygen is the CO2 by construction.
+
+**The accumulators.** Five more `Acc` per parcel, eleven in all: the carbon burnt Δm, the O2
+taken, the CO2 given, the carbon times the stored end-of-step T_p (as (77.5) for the vapours), and
+`q_char`. As for drying and devolatilisation, the particle's share h_s Q is inside the segment's
+heats and is not a second source.
+
+**The stop on a particle with no mass.** A parcel whose mass is all moisture, all volatile, or
+all char without ash loses all of it inside a step; DST-12's loop then took another segment with
+m C = 0 and returned NaN for T_p and the heats (`vanished_particle_stays_finite` failed so before
+the fix). The loop now stops when the mass is 0, on the host and the device; no DST-12 row moves.
+
+**The device.** As in §159.7: double intermediates, `-fmad=false`, each state word rounded once at
+its store, and the char mass rounded where the char segment ends, as the host twin does. The
+twin's contact with the build's precision is therefore the stored T_p of (77.5) and the stored char
+mass, so its closed-form char rows are class R as the device's are.
+
+**Measured** (RTX 5070 Ti, tests/dust_char.rs). Diffusion-limited (R_kin = 1e12, E_a = 0; C' /
+(R_kin d) below 1e−16), a pure-char 50 µm particle at 1500 K, 40 steps to 90 % burnout: d² within
+1.5e−15 of the d² law on the host and 3.9e−16 on the device in f64, 2.6e−7 and 3.1e−7 under
+`single` (bar 1e−8; 1e−5 under `single` by D-F32-1). Kinetic-limited (C_0 = 1e6, A = 1, E_a = 80
+kJ/mol): d within 2.9e−16 (host) and 8.8e−16 (device) of the line in f64, 3.6e−8 and 2.8e−7 under
+`single` (bar 1e−10, R). The harmonic combination is within 1/ratio of each limit and 2.2e−16 at a
+ratio of 1e16, (159.10) within 1.4e−16 d_0 of both closed forms there, and within 2.5e−16 of its own
+integral at finite rates (bar 1e−12 and 1e−13). Element balance, an 80 µm parcel with 30 % ash and
+a 30 µm pure-char parcel to burnout in 24 steps: the carbon given equals the char lost exactly,
+and O2, CO2 = C + O2 and the elements carried back by the CO2 are within 5.2e−16 in both builds,
+host and device (bar 1e−14). Retention, one step at h_s = 0.3: the gas's share is
+`(1 − h_s)(Δm h_c)` bit for bit, and the particle's share is within 2.9e−16 of `h_s Δm h_c` (host)
+and 9.5e−8 on the device under `single` (bar 1e−12, R); h_s = 1 gives the gas 0 and h_s = 0 keeps a
+particle at T_g bit for bit. **Device against host**, one 5 ms step of 4096 random dry parcels in
+1024 cells (332 burn out with ash left, 11 with nothing left, 3241 partly, 512 do not burn): m_c,
+d, T_p (at the scale `T + h_s h_c m_c/(m C)`, the retained heat of the char), the carbon given and
+the two heats (at DST-12's integrand plus `h_s m_c h_c`) are within 4 ulp in both builds (worst 4,
+on Q_conv/Q_rad in f64 and Q_rad under `single`), and the O2, the CO2, the carbon times T_p and the
+gas's heat are the products of the carbon given bit for bit, on the device as on the host. DST-12's
+six rows print what they printed before.
 
 ---
 

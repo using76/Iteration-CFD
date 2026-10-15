@@ -416,6 +416,25 @@ impl Grid {
         })
     }
 
+    /// A grid from node arrays someone else computed - SPEC-LIT 144.1's flat
+    /// plate, whose x axis is two graded segments meeting at the leading edge,
+    /// which no single [`GradedAxis`] can express. Each array must hold at
+    /// least two nodes; the counts are validated exactly as [`Grid::new`]
+    /// validates a spec's.
+    fn from_nodes(xn: Vec<Scalar>, yn: Vec<Scalar>, zn: Vec<Scalar>) -> Result<Self> {
+        if xn.len() < 2 || yn.len() < 2 || zn.len() < 2 {
+            return Err(Error::Mesh(format!(
+                "blockgen: a grid needs at least two nodes per axis, got {} x {} x {}",
+                xn.len(),
+                yn.len(),
+                zn.len()
+            )));
+        }
+        let (nx, ny, nz) = (xn.len() - 1, yn.len() - 1, zn.len() - 1);
+        counts_of(nx, ny, nz)?;
+        Ok(Self { nx, ny, nz, xn, yn, zn })
+    }
+
     #[inline]
     fn point(&self, i: usize, j: usize, k: usize) -> usize {
         i + (self.nx + 1) * (j + (self.ny + 1) * k)
@@ -940,8 +959,20 @@ struct Block {
 
 impl Block {
     fn new(b: &BlockSpec) -> Result<Self> {
+        Self::with_grid(b, Grid::new(b)?)
+    }
+
+    /// [`Block::new`] on a grid whose nodes did not come from `b`'s own axes
+    /// (SPEC-LIT 144.1). `b` still supplies the patches, windows and cyclic
+    /// pairs, and its cell counts must be the grid's.
+    fn with_grid(b: &BlockSpec, g: Grid) -> Result<Self> {
+        if (g.nx, g.ny, g.nz) != (b.x.n, b.y.n, b.z.n) {
+            return Err(Error::Mesh(format!(
+                "blockgen: the grid has {} x {} x {} cells but the spec names {} x {} x {}",
+                g.nx, g.ny, g.nz, b.x.n, b.y.n, b.z.n
+            )));
+        }
         let c = counts_of(b.x.n, b.y.n, b.z.n)?;
-        let g = Grid::new(b)?;
 
         let patch_size = patch_sizes(&g);
         let mut patch_start = [0usize; 6];
@@ -1515,6 +1546,353 @@ pub fn build_mesh(b: &BlockSpec) -> Result<HostMesh> {
 /// through it, so the two cannot drift.
 pub fn raw_mesh(b: &BlockSpec) -> Result<PolyMeshRaw> {
     poly_mesh_raw(&Block::new(b)?)
+}
+
+// ==========================================================================
+//  The flat plate - SPEC-LIT §144.1
+// ==========================================================================
+//
+// ORIGINAL: the mesh of docs/17's flat-plate harness (VAL-30..34). One block,
+// whose floor is split at the leading edge by the one window its slot may
+// carry (`build_patches`): `symmetry` upstream of the edge, the `plate` wall
+// downstream. The x axis is two graded segments that meet at the edge, which
+// no single `GradedAxis` can express, so the nodes are computed here in f64
+// whatever `Scalar` is (§118: host geometry is f64), rounded once into the
+// grid, and handed to `Block::with_grid`. No GPL-licensed source was
+// consulted.
+
+/// The flat plate's patches, in face order: the floor's window (`symmetry`)
+/// is written before the rest of its slot (`plate`).
+pub const FLAT_PLATE_PATCH_NAMES: [&str; 7] =
+    ["inlet", "outlet", "symmetry", "plate", "top", "back", "front"];
+
+/// A flat plate in a 2-D box (SPEC-LIT §144.1): the leading edge at `x = 0`,
+/// a symmetry floor over `[-x_upstream, 0]`, the wall over `[0, length]`, the
+/// domain `[0, height]` above it and one cell of `depth` in z.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatPlateSpec {
+    /// Length of the symmetry floor ahead of the leading edge, m.
+    pub x_upstream: f64,
+    /// Plate length `L`, m.
+    pub length: f64,
+    /// Domain height `H` above the plate, m.
+    pub height: f64,
+    /// Span of the one cell in z, m (`back` and `front` are `empty`).
+    pub depth: f64,
+    /// Cells ahead of the leading edge.
+    pub n_upstream: usize,
+    /// Cells along the plate.
+    pub n_plate: usize,
+    /// Cells across the layer, wall to top.
+    pub n_y: usize,
+    /// Inlet cell / leading-edge cell of the upstream segment; above 1 the
+    /// cells shrink toward the edge.
+    pub r_upstream: f64,
+    /// Trailing-edge cell / leading-edge cell along the plate.
+    pub r_plate: f64,
+    /// Top cell / wall cell.
+    pub r_y: f64,
+    /// Free-stream speed, m/s: the inlet value and the y+ estimate's `U`.
+    pub u_inf: f64,
+    /// Kinematic viscosity, m^2/s.
+    pub nu: f64,
+}
+
+impl FlatPlateSpec {
+    /// `cases/flatPlateLaminar`'s plate: `Re_L = U L/nu = 2e5`, the leading
+    /// edge 0.25 m from the inlet (the TMR T3A rig's distance, §88.10), and
+    /// 150 x 80 = 12 000 cells. The two cells either side of the edge differ
+    /// by 1.7 %.
+    pub fn laminar() -> Self {
+        Self {
+            x_upstream: 0.25,
+            length: 1.0,
+            height: 0.25,
+            depth: 0.01,
+            n_upstream: 30,
+            n_plate: 120,
+            n_y: 80,
+            r_upstream: 20.0,
+            r_plate: 20.0,
+            r_y: 200.0,
+            u_inf: 1.0,
+            nu: 5e-6,
+        }
+    }
+
+    /// [`Self::laminar`] at `nx x ny x nz` cells, the `ofgpu-generate-mesh`
+    /// resolution: one fifth of `nx` (rounded) ahead of the edge, the rest
+    /// on the plate. The case is 2-D, so `nz` must be 1.
+    pub fn with_resolution(nx: usize, ny: usize, nz: usize) -> Result<Self> {
+        if nz != 1 {
+            return Err(Error::Config(format!(
+                "flatPlate: the plate is 2-D (one empty cell in z), so nz must be 1, got {nz}"
+            )));
+        }
+        let mut s = Self::laminar();
+        (s.n_upstream, s.n_plate) = flat_plate_split(nx);
+        s.n_y = ny;
+        s.validate()?;
+        Ok(s)
+    }
+
+    /// Refuse, by name, a spec that cannot be meshed.
+    pub fn validate(&self) -> Result<()> {
+        let bad = |m: String| Err(Error::Config(format!("flatPlate: {m}")));
+        for (name, v) in [
+            ("x_upstream", self.x_upstream),
+            ("length", self.length),
+            ("height", self.height),
+            ("depth", self.depth),
+            ("r_upstream", self.r_upstream),
+            ("r_plate", self.r_plate),
+            ("r_y", self.r_y),
+            ("u_inf", self.u_inf),
+            ("nu", self.nu),
+        ] {
+            // `!(v > 0)` so a NaN is refused too.
+            if !(v > 0.0) || !v.is_finite() {
+                return bad(format!("{name} must be positive and finite, got {v}"));
+            }
+        }
+        for (name, n) in
+            [("n_upstream", self.n_upstream), ("n_plate", self.n_plate), ("n_y", self.n_y)]
+        {
+            if n < 1 {
+                return bad(format!("{name} must be at least 1"));
+            }
+        }
+        counts_of(self.n_upstream + self.n_plate, self.n_y, 1).map(|_| ())
+    }
+}
+
+/// `nx` split into `(upstream, plate)` cells: a fifth ahead of the edge,
+/// rounded, at least one.
+fn flat_plate_split(nx: usize) -> (usize, usize) {
+    let up = ((nx + 2) / 5).max(1);
+    (up, nx.saturating_sub(up))
+}
+
+/// (144.1a): `n + 1` nodes on `[a, b]` whose last cell divided by its first is
+/// `e`, `x_i = a + (b - a)(r^i - 1)/(r^n - 1)` with `r = e^(1/(n-1))`, in
+/// f64. `fill_graded`'s law; `e = 1` or `n = 1` is uniform, and both
+/// endpoints are set rather than accumulated.
+pub fn graded_segment_f64(a: f64, b: f64, n: usize, e: f64) -> Vec<f64> {
+    if n == 0 {
+        return vec![a];
+    }
+    let l = b - a;
+    let mut v = vec![0.0f64; n + 1];
+    if n == 1 || !(e > 0.0) || (e - 1.0).abs() < 1e-10 {
+        for (i, x) in v.iter_mut().enumerate() {
+            *x = a + l * (i as f64) / (n as f64);
+        }
+    } else {
+        let r = e.powf(1.0 / ((n - 1) as f64));
+        let den = r.powf(n as f64) - 1.0;
+        for (i, x) in v.iter_mut().enumerate() {
+            *x = a + l * (r.powf(i as f64) - 1.0) / den;
+        }
+    }
+    v[0] = a;
+    v[n] = b;
+    v
+}
+
+/// (144.1b): the plate's node arrays `[x, y, z]` in f64. The upstream segment
+/// is graded outward FROM the edge and mirrored, so the smallest cells sit at
+/// the small coordinates and `x[n_upstream]` is exactly `0`: the leading edge
+/// is a node.
+pub fn flat_plate_nodes(s: &FlatPlateSpec) -> Result<[Vec<f64>; 3]> {
+    s.validate()?;
+    let up = graded_segment_f64(0.0, s.x_upstream, s.n_upstream, s.r_upstream);
+    let plate = graded_segment_f64(0.0, s.length, s.n_plate, s.r_plate);
+    // `0.0 - t`, not `-t`: the edge node is +0.0, not -0.0.
+    let mut x: Vec<f64> = up.iter().rev().map(|&t| 0.0 - t).collect();
+    x.extend_from_slice(&plate[1..]);
+    let y = graded_segment_f64(0.0, s.height, s.n_y, s.r_y);
+    let z = vec![0.0, s.depth];
+    Ok([x, y, z])
+}
+
+/// The patches, extents and the one floor window. The axes' own grading is
+/// unused (the nodes come from [`flat_plate_nodes`]); their extents and
+/// counts are what the console summary and `Block::with_grid` read.
+fn flat_plate_block_spec(s: &FlatPlateSpec) -> BlockSpec {
+    let n = |name: &str| name.to_string();
+    BlockSpec {
+        x: GradedAxis {
+            lo: -s.x_upstream as Scalar,
+            hi: s.length as Scalar,
+            n: s.n_upstream + s.n_plate,
+            expansion: 1.0,
+            two_sided: false,
+        },
+        y: GradedAxis { lo: 0.0, hi: s.height as Scalar, n: s.n_y, expansion: 1.0, two_sided: false },
+        z: GradedAxis { lo: 0.0, hi: s.depth as Scalar, n: 1, expansion: 1.0, two_sided: false },
+        patch_name: [n("inlet"), n("outlet"), n("plate"), n("top"), n("back"), n("front")],
+        patch_type: [n("patch"), n("patch"), n("wall"), n("patch"), n("empty"), n("empty")],
+        // Slot 2 (-y) indexes its faces (i, k): the first `n_upstream`
+        // columns of the floor, the one k layer.
+        windows: vec![PatchWindow {
+            slot: 2,
+            lo: [0, 0],
+            hi: [s.n_upstream, 1],
+            name: n("symmetry"),
+            type_name: n("symmetryPlane"),
+        }],
+        cyclic: Vec::new(),
+    }
+}
+
+fn flat_plate_block(s: &FlatPlateSpec) -> Result<Block> {
+    let [x, y, z] = flat_plate_nodes(s)?;
+    let round = |v: Vec<f64>| v.into_iter().map(|t| t as Scalar).collect::<Vec<Scalar>>();
+    Block::with_grid(&flat_plate_block_spec(s), Grid::from_nodes(round(x), round(y), round(z))?)
+}
+
+/// The flat plate's raw mesh (SPEC-LIT §144.1), patches in
+/// [`FLAT_PLATE_PATCH_NAMES`] order.
+pub fn flat_plate_raw_mesh(s: &FlatPlateSpec) -> Result<PolyMeshRaw> {
+    poly_mesh_raw(&flat_plate_block(s)?)
+}
+
+/// The flat plate as a runnable [`HostMesh`], no file on disk.
+pub fn build_flat_plate_mesh(s: &FlatPlateSpec) -> Result<HostMesh> {
+    build_host_mesh(&flat_plate_raw_mesh(s)?)
+}
+
+/// (144.1c): Blasius's local skin friction `C_f = 0.664 Re_x^(-1/2)`.
+pub fn blasius_cf_local(re_x: f64) -> f64 {
+    0.664 / re_x.sqrt()
+}
+
+/// (144.1c): the y+ of a wall cell's centre, `y_P = dy_1/2`, under the
+/// Blasius wall shear at `x`: `u_tau = U sqrt(C_f/2)`, `y+ = y_P u_tau/nu`.
+/// An estimate for choosing `dy_1`, not a measurement.
+pub fn flat_plate_first_cell_yplus(dy1: f64, u_inf: f64, nu: f64, x: f64) -> f64 {
+    let u_tau = u_inf * (0.5 * blasius_cf_local(u_inf * x / nu)).sqrt();
+    0.5 * dy1 * u_tau / nu
+}
+
+/// What the plate generator prints, all in f64 from [`flat_plate_nodes`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatPlateSummary {
+    pub n_cells: usize,
+    /// The last upstream cell and the first plate cell, either side of the edge.
+    pub dx_le_upstream: f64,
+    pub dx_le_plate: f64,
+    /// The wall cell's height `dy_1`.
+    pub dy_wall: f64,
+    /// `U L/nu`.
+    pub re_l: f64,
+    /// Centre of the first plate face and its (144.1c) y+ estimate.
+    pub x_first_face: f64,
+    pub yplus_first_face: f64,
+    /// Centre of the last plate face and its estimate.
+    pub x_trailing_edge: f64,
+    pub yplus_trailing_edge: f64,
+}
+
+pub fn flat_plate_summary(s: &FlatPlateSpec) -> Result<FlatPlateSummary> {
+    let [x, y, _] = flat_plate_nodes(s)?;
+    let le = s.n_upstream;
+    let dy = y[1] - y[0];
+    let x_first = 0.5 * (x[le] + x[le + 1]);
+    let x_te = 0.5 * (x[x.len() - 2] + x[x.len() - 1]);
+    Ok(FlatPlateSummary {
+        n_cells: (s.n_upstream + s.n_plate) * s.n_y,
+        dx_le_upstream: x[le] - x[le - 1],
+        dx_le_plate: x[le + 1] - x[le],
+        dy_wall: dy,
+        re_l: s.u_inf * s.length / s.nu,
+        x_first_face: x_first,
+        yplus_first_face: flat_plate_first_cell_yplus(dy, s.u_inf, s.nu, x_first),
+        x_trailing_edge: x_te,
+        yplus_trailing_edge: flat_plate_first_cell_yplus(dy, s.u_inf, s.nu, x_te),
+    })
+}
+
+/// Write the flat plate as a runnable case: polyMesh, `system/`, a laminar
+/// `constant/`, and `0/` with the free stream everywhere, `fixedValue` on the
+/// inlet, `noSlip` on the plate and `symmetryPlane` ahead of it. `wall` and
+/// `roughness` are `write_case_with_override`'s: `None` is the legacy
+/// `standard` row with an adiabatic `T`. Prints the summary, the first-cell
+/// y+ estimate (144.1c) among it, and returns it.
+pub fn write_flat_plate_case(
+    case_dir: &Path,
+    s: &FlatPlateSpec,
+    wall: Option<WallTreatment>,
+    roughness: Option<Roughness>,
+) -> Result<FlatPlateSummary> {
+    write_flat_plate_impl(
+        case_dir,
+        s,
+        wall.unwrap_or(WallTreatment::Standard),
+        roughness,
+        wall.is_some(),
+    )
+}
+
+fn write_flat_plate_impl(
+    case_dir: &Path,
+    s: &FlatPlateSpec,
+    wall: WallTreatment,
+    roughness: Option<Roughness>,
+    thermal_wall: bool,
+) -> Result<FlatPlateSummary> {
+    let block = flat_plate_block(s)?;
+    let sum = flat_plate_summary(s)?;
+
+    write_poly_mesh(case_dir, &block)?;
+    write_system(case_dir)?;
+    write_constant(case_dir, s.nu as Scalar, "laminar", "")?;
+    write_initial_fields(
+        case_dir,
+        CaseKind::FlatPlate,
+        &block,
+        None,
+        s.nu as Scalar,
+        s.u_inf as Scalar,
+        s.height as Scalar,
+        1,
+        wall,
+        roughness,
+        thermal_wall,
+    )?;
+
+    println!(
+        "flatPlate: {} x {} x 1 = {} cells ({} ahead of the leading edge, {} on the plate), \
+         x [{}, {}] y [0, {}] -> {}",
+        s.n_upstream + s.n_plate,
+        s.n_y,
+        sum.n_cells,
+        s.n_upstream,
+        s.n_plate,
+        -s.x_upstream,
+        s.length,
+        s.height,
+        case_dir.display()
+    );
+    println!(
+        "  leading edge at x = 0: cells {:.6e} m ahead, {:.6e} m behind (ratio {:.6}); \
+         wall cell {:.6e} m",
+        sum.dx_le_upstream,
+        sum.dx_le_plate,
+        sum.dx_le_plate / sum.dx_le_upstream,
+        sum.dy_wall
+    );
+    println!(
+        "  first-cell y+ (Blasius estimate at the wall-cell centre, SPEC-LIT (144.1c)): \
+         {:.4} at x = {:.6e} m (first plate face), {:.4} at x = {:.6e} m (trailing edge); \
+         Re_L = {:.6e}",
+        sum.yplus_first_face,
+        sum.x_first_face,
+        sum.yplus_trailing_edge,
+        sum.x_trailing_edge,
+        sum.re_l
+    );
+    Ok(sum)
 }
 
 // ==========================================================================
@@ -2819,6 +3197,13 @@ fn write_cutcell_case_impl(
                 .to_string(),
         ));
     }
+    if kind == CaseKind::FlatPlate {
+        return Err(Error::Config(
+            "cutcell: flatPlate takes no surface - its block is the SPEC-LIT §144.1 plate, \
+             whose x nodes no carved or cut block reproduces"
+                .to_string(),
+        ));
+    }
 
     let mut b = case_block_spec(kind, nx, ny, nz);
     // Applied before anything reads the block, so the cut, the fields and the
@@ -3234,6 +3619,10 @@ pub enum CaseKind {
     /// `2a` released in a tank open at the top, in the geometry Martin & Moyce
     /// (1952) measured the surge front of. See [`DAM_BREAK_A`].
     DamBreak,
+    /// Laminar flat plate, 2-D (SPEC-LIT §144.1): a symmetry floor ahead of
+    /// the leading edge and the wall behind it, graded to the wall and to the
+    /// edge from both sides. See [`FlatPlateSpec::laminar`].
+    FlatPlate,
 }
 
 impl CaseKind {
@@ -3246,6 +3635,7 @@ impl CaseKind {
             Self::Plume => "plume",
             Self::Room => "room",
             Self::DamBreak => "damBreak",
+            Self::FlatPlate => "flatPlate",
         }
     }
 
@@ -3258,6 +3648,7 @@ impl CaseKind {
             "plume" => Some(Self::Plume),
             "room" => Some(Self::Room),
             "damBreak" | "dambreak" => Some(Self::DamBreak),
+            "flatPlate" | "flatplate" | "plate" => Some(Self::FlatPlate),
             _ => None,
         }
     }
@@ -3282,6 +3673,8 @@ impl CaseKind {
             // enough for the surge front to be resolved to a few per cent of
             // `a` without the case taking minutes.
             Self::DamBreak => (150, 90, 1),
+            // `FlatPlateSpec::laminar`: 30 + 120 cells along x, 80 across.
+            Self::FlatPlate => (150, 80, 1),
         }
     }
 }
@@ -3293,7 +3686,7 @@ impl std::str::FromStr for CaseKind {
         Self::from_name(s)
             .ok_or_else(|| {
                 Error::Config(format!(
-                    "unknown case '{s}' (channel|cavity|step|big|plume|room|damBreak)"
+                    "unknown case '{s}' (channel|cavity|step|big|plume|room|damBreak|flatPlate)"
                 ))
             })
     }
@@ -3396,6 +3789,7 @@ fn writes_p_and_t(kind: CaseKind) -> bool {
             | CaseKind::Big
             | CaseKind::Plume
             | CaseKind::Room
+            | CaseKind::FlatPlate
     )
 }
 
@@ -3435,6 +3829,14 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
     let mut b = BlockSpec::default();
 
     let (names, types): ([&str; 6], [&str; 6]) = match kind {
+        // SPEC-LIT §144.1: the plate's own spec owns its patches and its
+        // floor window; the nodes are not this block's (`flat_plate_block`).
+        CaseKind::FlatPlate => {
+            let mut s = FlatPlateSpec::laminar();
+            (s.n_upstream, s.n_plate) = flat_plate_split(nx);
+            s.n_y = ny;
+            return flat_plate_block_spec(&s);
+        }
         CaseKind::Channel => {
             // Plane channel, Re_tau style geometry. A streamwise cyclic pair
             // is the physical choice for a genuinely developed channel
@@ -3603,8 +4005,15 @@ fn case_block_spec(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> BlockSpec
 /// [`build_case`] so the file path and the in-memory path can never pick
 /// different numbers for the same case.
 fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Scalar, Scalar) {
-    // Air for the plume; every other case keeps the 1e-5 it has always had.
-    let nu: Scalar = if buoyant_case(kind) { 1.5e-5 } else { 1e-5 };
+    // Air for the plume; the plate's own nu (Re_L = 2e5); every other case
+    // keeps the 1e-5 it has always had.
+    let nu: Scalar = if buoyant_case(kind) {
+        1.5e-5
+    } else if kind == CaseKind::FlatPlate {
+        FlatPlateSpec::laminar().nu as Scalar
+    } else {
+        1e-5
+    };
 
     let inlet = b.windows.first().map(|w| window_extent(&block.g, w));
     let (u_ref, half_height): (Scalar, Scalar) = match kind {
@@ -3623,6 +4032,12 @@ fn case_run_params(kind: CaseKind, b: &BlockSpec, block: &Block) -> (Scalar, Sca
         // The room's inlet spans the whole 10 x 3 m wall; the mixing
         // length scales with that opening's half-height.
         CaseKind::Room => (ROOM_INLET_U, 1.5),
+        // The free stream, and the domain height for the (unused, laminar)
+        // turbulence fields' mixing length.
+        CaseKind::FlatPlate => {
+            let s = FlatPlateSpec::laminar();
+            (s.u_inf as Scalar, s.height as Scalar)
+        }
         CaseKind::Plume => {
             let side = match inlet {
                 Some((fx, fy)) => 0.25 * ((fx[1] - fx[0]) + (fy[1] - fy[0])),
@@ -3867,6 +4282,26 @@ pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(Ho
         )));
     }
 
+    if kind == CaseKind::FlatPlate {
+        // SPEC-LIT §144.1: the plate's nodes are its spec's, not a GradedAxis's.
+        let s = FlatPlateSpec::with_resolution(nx, ny, nz)?;
+        let block = flat_plate_block(&s)?;
+        let mesh = build_host_mesh(&poly_mesh_raw(&block)?)?;
+        let fields = build_initial_fields(
+            kind,
+            &block,
+            None,
+            s.nu as Scalar,
+            s.u_inf as Scalar,
+            s.height as Scalar,
+            1,
+            WallTreatment::Standard,
+            None,
+            false,
+        )?;
+        return Ok((mesh, fields));
+    }
+
     let b = case_block_spec(kind, nx, ny, nz);
     let block = Block::new(&b)?;
     let mesh = build_host_mesh(&poly_mesh_raw(&block)?)?;
@@ -3979,6 +4414,31 @@ fn write_case_impl(
         return Err(Error::Config(format!(
             "generate_cases: bad resolution {nx} x {ny} x {nz}"
         )));
+    }
+
+    // SPEC-LIT §144.1: the plate is its own spec. A surface, an override of a
+    // GradedAxis or a cyclic pair would each describe a block it is not.
+    if kind == CaseKind::FlatPlate {
+        if surface.is_some() {
+            return Err(Error::Config(
+                "flatPlate takes no -stl: the plate is the floor's wall patch".to_string(),
+            ));
+        }
+        if over.is_some_and(|o| *o != BlockOverride::default()) {
+            return Err(Error::Config(
+                "flatPlate takes no -extent or -grading: its block is two graded segments \
+                 meeting at the leading edge - set -upstream, -length, -height and -ratios"
+                    .to_string(),
+            ));
+        }
+        if !cyclic.is_empty() {
+            return Err(Error::Config(
+                "flatPlate takes no -cyclic: its x faces are the inlet and the outlet".to_string(),
+            ));
+        }
+        let s = FlatPlateSpec::with_resolution(nx, ny, nz)?;
+        write_flat_plate_impl(case_dir, &s, wall, roughness, thermal_wall)?;
+        return Ok(None);
     }
 
     let mut b = case_block_spec(kind, nx, ny, nz);
@@ -4889,6 +5349,9 @@ fn build_initial_fields(
 
         internal.push(if plume {
             Vec3::ZERO
+        } else if kind == CaseKind::FlatPlate {
+            // SPEC-LIT §144.1: the free stream everywhere, the inlet's value.
+            Vec3::new(u_ref, 0.0, 0.0)
         } else {
             initial_velocity(cavity, centre, lo, lx, ly, u_ref, half_height, wall_normal)
         });
@@ -4908,6 +5371,10 @@ fn build_initial_fields(
 
         let s = if pk == PatchKind::Empty {
             patch_spec("empty")
+        } else if pk == PatchKind::Symmetry {
+            // SPEC-LIT §144.1: the plate's floor ahead of the edge. The mesh
+            // has the last word here too (`topology_override`); the file agrees.
+            patch_spec("symmetryPlane")
         } else if pk == PatchKind::Cyclic {
             // SPEC-LIT §31.1: every field carries `cyclic` on a cyclic
             // patch - `kinds_from_patches` (field.rs) gives the mesh the
@@ -5010,9 +5477,15 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Symmetry {
+                // SPEC-LIT §144.1: the plate's floor ahead of the edge. The mesh
+                // has the last word here too (`topology_override`); the file agrees.
+                patch_spec("symmetryPlane")
             } else if pk == PatchKind::Cyclic {
                 patch_spec("cyclic")
-            } else if fp.name == "outlet" {
+            } else if fp.name == "outlet" || (kind == CaseKind::FlatPlate && fp.name == "top") {
+                // SPEC-LIT §144.1: the plate's top is open at the outlet's
+                // level too, so the free stream carries no pressure gradient.
                 let mut s = patch_spec("fixedValue");
                 s.value = vec![0.0];
                 s
@@ -5048,6 +5521,10 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Symmetry {
+                // SPEC-LIT §144.1: the plate's floor ahead of the edge. The mesh
+                // has the last word here too (`topology_override`); the file agrees.
+                patch_spec("symmetryPlane")
             } else if pk == PatchKind::Cyclic {
                 patch_spec("cyclic")
             } else if fp.name == "inlet" {
@@ -5110,6 +5587,10 @@ fn build_initial_fields(
 
             let s = if pk == PatchKind::Empty {
                 patch_spec("empty")
+            } else if pk == PatchKind::Symmetry {
+                // SPEC-LIT §144.1: the plate's floor ahead of the edge. The mesh
+                // has the last word here too (`topology_override`); the file agrees.
+                patch_spec("symmetryPlane")
             } else if pk == PatchKind::Cyclic {
                 patch_spec("cyclic")
             } else if pk == PatchKind::Wall {

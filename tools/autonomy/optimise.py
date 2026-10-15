@@ -224,6 +224,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
     ftr = rules.ft_radius_of(bundle.get("records") or [])
     w21 = rules.win_2to1_of(bundle.get("records") or [])
     glb = rules.glb_of(bundle.get("records") or [])
+    rsn = rules.r_snap_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -236,7 +237,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr, win_2to1=w21, glb=glb)
+                            ft_radius=ftr, win_2to1=w21, glb=glb, r_snap=rsn)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -2421,7 +2422,8 @@ def _g3_pool(H):
                     campaign.case_rel(gid), gid, gates=H["gates"],
                     knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
                     win_2to1=rules.win_2to1_of(H["rb"]["records"]),
-                    glb=rules.glb_of(H["rb"]["records"]))
+                    glb=rules.glb_of(H["rb"]["records"]),
+                    r_snap=rules.r_snap_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -2535,8 +2537,10 @@ def _g5_decide(H):
     assert pk["sobol_index"] == 54, pk["sobol_index"]
     # GLB-CONFIG: the box is centred on today's margined L1 (wall 4, growth 1.0,
     # the margin's choice, not the recorded 1.34), and the sharp-body radius is
-    # tau/h_f/2 of the point's own max_level, so the pick's config and scores moved
-    assert pk["config_sha256"].startswith("c06684029fe7"), \
+    # tau/h_f/2 of the point's own max_level, so the pick's config and scores moved.
+    # AUT-05: today's L1 carries R-SNAP's snap.tolerance and snap.iterations, which
+    # no surrogate feature reads, so the pick's config sha moved and its scores did not
+    assert pk["config_sha256"].startswith("2596dc125008"), \
         pk["config_sha256"][:12]
     assert abs(pk["p_fail"] - 0.013131) <= 1e-6, pk["p_fail"]
     assert abs(pk["p_fail_std"] - 0.003979) <= 1e-6, pk["p_fail_std"]
@@ -2777,7 +2781,8 @@ def _g10_live(H):
     rules.setup = functools.partial(
         setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
         win_2to1=rules.win_2to1_of(H["rb"]["records"]),
-        glb=rules.glb_of(H["rb"]["records"]))
+        glb=rules.glb_of(H["rb"]["records"]),
+        r_snap=rules.r_snap_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,

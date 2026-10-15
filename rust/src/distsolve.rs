@@ -97,7 +97,7 @@ use crate::{Label, Scalar};
 mod refine;
 pub mod spmd;
 
-pub use spmd::{spmd_pcg, spmd_pbicgstab, spmd_solve, SpmdWorkspace};
+pub use spmd::{spmd_gamg, spmd_pcg, spmd_pbicgstab, spmd_solve, SpmdWorkspace};
 
 // ==========================================================================
 //  Which cross-part reduction
@@ -516,8 +516,9 @@ impl DistWorkspace {
             // Block-local: the factorisation drops the couplings across every
             // cut, and it is coloured in local order.
             Preconditioner::Dic | Preconditioner::Dilu => false,
-            // The V-cycle runs whole-hierarchy; it reaches a distributed
-            // solve with AMG-07b.
+            // The distributed cycle aggregates block-locally, so every cut
+            // is another hierarchy (SPEC-LIT §141.11); in one process it is
+            // refused anyway, below.
             Preconditioner::Gamg => false,
         };
         reduction_ok && precon_ok
@@ -547,8 +548,11 @@ impl DistWorkspace {
                 "solvers/<var>/preconditioner",
                 requested.name(),
                 &["none", "diagonal"],
-                "diagonal (Jacobi): GAMG preconditioning of a distributed \
-                 solve arrives with AMG-07b",
+                "diagonal (Jacobi): the distributed GAMG cycle (AMG-07b, \
+                 SPEC-LIT 141.11) runs one part per rank, on the SPMD path - \
+                 amg::DistGamg attached with SpmdWorkspace::set_gamg, then \
+                 spmd_pcg or spmd_solve; this in-process workspace holds \
+                 every part and has no cycle",
                 Preconditioner::Diagonal,
             ),
         }
@@ -1524,10 +1528,10 @@ fn dist_pbicgstab_float(
 
 /// Solve `A psi = b` over a decomposition with the method the case asked for.
 ///
-/// `GAMG` is refused by name for the same reason [`solver::solve`] refuses
-/// it - it is a pressure *backend* here, not a Krylov method - and the
-/// distributed path adds a second reason: no pressure backend has a decomposed
-/// form at all (SPEC-LIT §73.7).
+/// `GAMG` is refused by name in this in-process form, with `PBiCGStab` as
+/// the alternative: the distributed GAMG cycle (SPEC-LIT §141.11) runs one
+/// part per rank, so it is [`spmd_solve`]'s, with a cycle attached by
+/// [`SpmdWorkspace::set_gamg`].
 pub fn dist_solve(
     gpu: &Gpu,
     sol: &SolverKernels,
@@ -1545,8 +1549,9 @@ pub fn dist_solve(
                 "solvers/<var>/solver",
                 "GAMG",
                 &["PCG", "PBiCGStab"],
-                "PBiCGStab: GAMG is a pressure backend in this code, not a \
-                 Krylov method, and no pressure backend has a decomposed form",
+                "PBiCGStab: the distributed GAMG cycle runs one part per rank \
+                 (spmd_solve with SpmdWorkspace::set_gamg, SPEC-LIT 141.11); \
+                 this in-process solve holds every part and has no cycle",
                 (),
             )?;
             dist_pbicgstab(gpu, sol, psi, sys, ex, w, ctrl)

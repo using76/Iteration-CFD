@@ -474,6 +474,83 @@ impl Delaunay {
         Ok(Located { tet, steps })
     }
 
+    /// The conflict region of a point that is not yet inserted (SPEC-LIT
+    /// §116.13): every live tet, finite or hull, that conflicts with `p`
+    /// by (116.5a) when `p` takes id `pid`, in breadth-first order from the
+    /// tet the walk of [`Delaunay::locate`] finds from `start`. Read-only:
+    /// it is the cavity `insert_point` would remove when `pid` is the next
+    /// id. A `p` outside (116.3f)'s domain, or equal to a vertex of the
+    /// located tet, is refused by name.
+    pub fn cavity(&self, p: &Point, pid: usize, start: u32) -> Result<Vec<u32>> {
+        self.check_new_point(p)?;
+        let t0 = self.locate(p, start)?.tet;
+        self.check_not_vertex(p, t0)?;
+        let mut cav: Vec<u32> = vec![t0];
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        seen.insert(t0);
+        let mut qi = 0;
+        while qi < cav.len() {
+            let t = cav[qi];
+            qi += 1;
+            for i in 0..4 {
+                let u = self.neigh[t as usize][i];
+                if !self.live[u as usize] || !seen.insert(u) {
+                    continue;
+                }
+                if self.conflict_test(u, p, pid).0 {
+                    cav.push(u);
+                }
+            }
+        }
+        Ok(cav)
+    }
+
+    /// Inserts one new point after the existing ones (SPEC-LIT §116.13) and
+    /// returns its id, `points().len()` before the call. The perturbed
+    /// Delaunay triangulation is unique (§116.6), so the tetrahedron set
+    /// equals a fresh build of all the points. A point outside (116.3f)'s
+    /// domain, or equal to an existing point, is refused by name and leaves
+    /// the triangulation unchanged.
+    pub fn insert_point(&mut self, p: Point) -> Result<u32> {
+        self.check_new_point(&p)?;
+        let t0 = self.locate(&p, self.last)?.tet;
+        self.check_not_vertex(&p, t0)?;
+        let pid = self.points.len() as u32;
+        self.points.push(p);
+        self.insert(pid)?;
+        Ok(pid)
+    }
+
+    /// (116.3f) on a new point's coordinates.
+    fn check_new_point(&self, p: &Point) -> Result<()> {
+        for (axis, x) in p.iter().enumerate() {
+            if !in_exact_domain(*x) {
+                return Err(Error::Refused(format!(
+                    "delaunay/domain: new point {} axis {} = {}",
+                    self.points.len(),
+                    ["x", "y", "z"][axis],
+                    x
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// A point that lies in the closed tet `t` and coincides with a point
+    /// already inserted coincides with one of `t`'s vertices.
+    fn check_not_vertex(&self, p: &Point, t: u32) -> Result<()> {
+        for &v in &self.verts[t as usize] {
+            if v != INF && self.points[v as usize] == *p {
+                return Err(Error::Refused(format!(
+                    "delaunay/duplicate: new point {} coincides with point {}",
+                    self.points.len(),
+                    v
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// The insertion counters.
     pub fn stats(&self) -> DelaunayStats {
         self.stats
@@ -551,24 +628,19 @@ impl Delaunay {
     /// finite neighbour, which counts one `coplanar_hull`. `pid` is `p`'s
     /// input point index, the id the perturbation sees.
     fn conflicts(&mut self, t: u32, p: &Point, pid: usize) -> bool {
+        let (c, coplanar) = self.conflict_test(t, p, pid);
+        if coplanar {
+            self.stats.coplanar_hull += 1;
+        }
+        c
+    }
+
+    /// The conflict rule (116.5a) without the counter: whether `t`
+    /// conflicts with `p`, and whether the hull branch `o = 0` decided it.
+    fn conflict_test(&self, t: u32, p: &Point, pid: usize) -> (bool, bool) {
         let v = self.verts[t as usize];
         if v[3] != INF {
-            insphere_perturbed(
-                [
-                    &self.points[v[0] as usize],
-                    &self.points[v[1] as usize],
-                    &self.points[v[2] as usize],
-                    &self.points[v[3] as usize],
-                    p,
-                ],
-                [
-                    v[0] as usize,
-                    v[1] as usize,
-                    v[2] as usize,
-                    v[3] as usize,
-                    pid,
-                ],
-            ) > 0
+            (self.conflicts_finite(t, p, pid), false)
         } else {
             let o = orient3d(
                 &self.points[v[0] as usize],
@@ -577,14 +649,13 @@ impl Delaunay {
                 p,
             );
             if o > 0.0 {
-                true
+                (true, false)
             } else if o < 0.0 {
-                false
+                (false, false)
             } else {
-                self.stats.coplanar_hull += 1;
                 let n3 = self.neigh[t as usize][3];
                 debug_assert!(!self.is_hull(n3), "hull neighbour 3 is finite");
-                self.conflicts_finite(n3, p, pid)
+                (self.conflicts_finite(n3, p, pid), true)
             }
         }
     }

@@ -71,6 +71,9 @@
 //! thing or not at all. `GAMG` runs natively since `SPEC-LIT` 141.5: one
 //! iteration is one V-cycle of [`crate::amg`] ([`solve_gamg`]), and the
 //! same cycle is available as the preconditioner `Preconditioner::Gamg`.
+//! Since `SPEC-LIT` 141.6 the cycle may be the K-cycle (`Gamg::set_cycle`),
+//! a variable preconditioner that PCG and PBiCGStab refuse and that the
+//! flexible conjugate gradient [`solve_fcg`] takes.
 //!
 //! # Mixed-precision refinement under `single`
 //!
@@ -1550,11 +1553,13 @@ pub(crate) fn precondition_parts(
             mc.apply(gpu, y, r_diag, a, m)
         }
 
-        // Only distributed code reaches this function, and it refuses GAMG
-        // first; reaching here means the refusal was bypassed.
+        // Only distributed code reaches this function: the SPMD solvers
+        // apply `amg::DistGamg` before it and the in-process ones refuse
+        // GAMG (SPEC-LIT 141.11); reaching here means that was bypassed.
         Preconditioner::Gamg => Err(Error::Config(
-            "precondition: GAMG reaches this partwise path by no route; a \
-             distributed GAMG preconditioner arrives with AMG-07b"
+            "precondition: GAMG reaches this partwise path by no route; the \
+             SPMD solvers apply the distributed cycle amg::DistGamg before \
+             it (SPEC-LIT 141.11)"
                 .to_string(),
         )),
     }
@@ -2071,6 +2076,7 @@ fn pbicgstab_float(
     }
 
     let precon = effective_preconditioner(ctrl.precon, w)?;
+    refuse_variable_preconditioner(w, precon, "solve_pbicgstab")?;
     build_preconditioner(gpu, k, w, a, m, precon)?;
 
     // ---- r = b - A·psi, and the normalisation the residual is measured in.
@@ -2352,6 +2358,7 @@ fn pcg_float(
     }
 
     let precon = effective_preconditioner(ctrl.precon, w)?;
+    refuse_variable_preconditioner(w, precon, "solve_pcg")?;
 
     // A V-cycle with nPreSweeps != nPostSweeps is not a symmetric
     // operator, and PCG needs one (SPEC-LIT 141.5) - refused before any
@@ -2436,6 +2443,197 @@ fn pcg_float(
             precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
             dot_then_ratio(gpu, k, &mut w.num, &mut w.beta, &mut w.rho, &w.r, &w.p_hat, &mut w.partials, n)?;
             cg_p_update(gpu, k, w, n)?;
+        }
+    }
+
+    finish_solve(gpu, k, psi, b, a, m, w, ctrl, &mut perf)?;
+    Ok(perf)
+}
+
+/// A K-cycle GAMG preconditioner is a VARIABLE operator of the residual
+/// (SPEC-LIT 141.6): conjugate gradients and BiCGStab assume a fixed
+/// one, so they refuse it by name and point to the flexible method.
+fn refuse_variable_preconditioner(
+    w: &SolverWorkspace,
+    precon: Preconditioner,
+    who: &str,
+) -> Result<()> {
+    if precon == Preconditioner::Gamg && w.gamg.as_ref().map(|g| g.is_variable()).unwrap_or(false) {
+        return Err(Error::Config(format!(
+            "{who}: the attached GAMG runs the K-cycle, a variable \
+             preconditioner (its inner FCG coefficients depend on the \
+             residual), and {who} needs a fixed one; solve with the \
+             flexible conjugate gradient solver::solve_fcg, or select the \
+             V-cycle with Gamg::set_cycle (SPEC-LIT 141.6)"
+        )));
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  Flexible conjugate gradient, FCG(1) - SPEC-LIT 141.6
+// ==========================================================================
+
+/// The flexible conjugate gradient FCG(1) of SPEC-LIT (141.6.2): PCG with
+/// the direction `d_i = z_i - beta_i d_{i-1}`, `beta_i = (z_i, q_{i-1}) /
+/// (d_{i-1}, q_{i-1})`, so that each direction is A-orthogonal to the
+/// previous one whatever the preconditioner did -
+/// the method a variable preconditioner, the K-cycle of §141.6, needs
+/// (Notay, ETNA 37 (2010) §3: "we use FCG(1) ... It is needed here,
+/// because use of the K-cycle induces slight variations in the multigrid
+/// preconditioning"). With a fixed SPD preconditioner it is PCG in exact
+/// arithmetic. Symmetric positive definite systems only, as PCG (§8.2).
+/// No case can ask for it yet: `LinearSolverKind` lives in `io/case.rs`.
+#[cfg(not(feature = "single"))]
+pub fn solve_fcg(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    fcg_float(gpu, k, psi, &a.source, a, m, w, ctrl)
+}
+
+/// [`solve_fcg`], SPEC-LIT §118.4 refined under `single`: the unchanged
+/// float body of [`fcg_float`] inside [`solve_refined`]. A `fixed_iters`
+/// solve and an empty system are NOT refined.
+#[cfg(feature = "single")]
+pub fn solve_fcg(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    if let Some(i) = w.ir.as_mut() {
+        i.outer_steps = 0;
+    }
+    if ctrl.fixed_iters || a.n_cells == 0 {
+        return fcg_float(gpu, k, psi, &a.source, a, m, w, ctrl);
+    }
+    solve_refined(gpu, k, psi, a, m, w, ctrl, fcg_float, "solve_fcg")
+}
+
+/// The float body of FCG(1) against an explicit right-hand side `b`, the
+/// [`pcg_float`] skeleton with (141.6.2)'s `beta`: `alpha = (r, z) /
+/// (d, q)` as PCG's, then `z = M^-1 r`, `rho = (r, z)`, `num = (z, q)`,
+/// `beta = num / (d, q)` and `d <- z - beta d`, `q` the product of the
+/// previous direction still in `w.v` and `(d, q)` still in `w.den`.
+#[allow(clippy::too_many_arguments)]
+fn fcg_float(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    psi: &mut DevBuf<Scalar>,
+    b: &DevBuf<Scalar>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    w: &mut SolverWorkspace,
+    ctrl: &SolverControls,
+) -> Result<SolverPerformance> {
+    let n = a.n_cells;
+    let mut perf = SolverPerformance {
+        converged: true,
+        ..Default::default()
+    };
+    if n == 0 {
+        return Ok(perf);
+    }
+    perf.converged = false;
+    refuse_round_trip_in_capture(gpu, ctrl, "solve_fcg")?;
+
+    check_workspace(w, n)?;
+    if psi.len() < n {
+        return Err(Error::Config(format!(
+            "solve_fcg: psi holds {} values, the system has {n} cells",
+            psi.len()
+        )));
+    }
+
+    let precon = effective_preconditioner(ctrl.precon, w)?;
+    build_preconditioner(gpu, k, w, a, m, precon)?;
+
+    device_norm_factor_rhs(gpu, k, w, &*psi, b, a, m)?;
+    vec_sub(gpu, k, &mut w.r, b, &w.apsi, n)?;
+
+    device_sum_mag(gpu, k, &mut w.initial_res, &w.r, &mut w.partials, n)?;
+    copy_scalar(gpu, k, &mut w.final_res, &w.initial_res)?;
+
+    gpu.fill_zero(&mut w.flag)?;
+
+    // z = M^-1 r ; d = z ; rho = (r,z)
+    precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
+    vec_copy(gpu, k, &mut w.p, &w.p_hat, n)?;
+    device_dot(gpu, k, &mut w.rho, &w.r, &w.p_hat, &mut w.partials, n)?;
+
+    let max_iter = ctrl.max_iter.max(0) as usize;
+    let interval = ctrl.check_interval.max(1) as usize;
+    let checking = !ctrl.fixed_iters;
+
+    if checking {
+        convergence_test(
+            gpu, k, &mut w.flag, &w.initial_res, &w.initial_res, &w.norm_factor, ctrl, 0,
+        )?;
+        perf.converged = read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)?;
+    }
+
+    if !perf.converged {
+        let nl = to_label(n)?;
+        for it in 0..max_iter {
+            let iters = it + 1;
+
+            // q = A d ; den = (d,q) ; alpha = rho/den.
+            amul(gpu, k, &mut w.v, &w.p, a, m)?;
+            dot_then_divide(gpu, k, &mut w.den, &mut w.alpha, &w.rho, &w.p, &w.v, &mut w.partials, n)?;
+
+            cg_axpy(gpu, k, psi, &w.p, &w.alpha, n)?;
+            cg_axmy(gpu, k, w, n)?;
+
+            perf.n_iterations = iters;
+
+            if checking && iters % interval == 0 {
+                let itl = to_label(iters)?;
+                sum_mag_then_test(
+                    gpu,
+                    k,
+                    &mut w.final_res,
+                    &mut w.flag,
+                    &w.r,
+                    &w.initial_res,
+                    &w.norm_factor,
+                    &mut w.partials,
+                    ctrl,
+                    itl,
+                    n,
+                )?;
+                if read_flag(gpu, &w.flag, &mut w.flag_host, &w.flag_event)? {
+                    perf.converged = true;
+                    break;
+                }
+            }
+
+            // z = M^-1 r ; rho = (r,z) ; beta = (z,q)/(d,q) ; d = z - beta·d
+            // (141.6.2). `w.v` still holds q of this step's direction and
+            // `w.den` its (d,q); the new direction is formed in `p_hat`
+            // and copied back to `p`.
+            precondition_ws(gpu, k, w, PreconTarget::PHatFromR, a, m, precon, n)?;
+            device_dot(gpu, k, &mut w.rho, &w.r, &w.p_hat, &mut w.partials, n)?;
+            device_dot(gpu, k, &mut w.num, &w.p_hat, &w.v, &mut w.partials, n)?;
+            divide_scalar(gpu, k, &mut w.beta, &w.num, &w.den)?;
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&k.axmy)
+                    .arg(&mut w.p_hat)
+                    .arg(&w.p)
+                    .arg(&w.beta)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            }
+            vec_copy(gpu, k, &mut w.p, &w.p_hat, n)?;
         }
     }
 
@@ -2541,8 +2739,9 @@ pub fn solve_gamg(
 }
 
 /// The unchanged float body against an explicit right-hand side `b`, the
-/// [`pcg_float`] skeleton around one [`crate::amg::Gamg::vcycle`] per
-/// iteration (SPEC-LIT 141.5).
+/// [`pcg_float`] skeleton around one [`crate::amg::Gamg::cycle`] per
+/// iteration - the V-cycle (SPEC-LIT 141.5), or the K-cycle when
+/// `Gamg::set_cycle` selected it (141.6).
 #[allow(clippy::too_many_arguments)]
 fn gamg_float(
     gpu: &Gpu,
@@ -2633,7 +2832,7 @@ fn gamg_float(
             let g = gamg
                 .as_mut()
                 .ok_or_else(|| Error::Config("solve_gamg: the GAMG hierarchy vanished mid-solve".to_string()))?;
-            g.vcycle(gpu, m, a, psi, b)?;
+            g.cycle(gpu, m, a, psi, b)?;
             perf.n_iterations = iters;
 
             if checking && iters % interval == 0 {

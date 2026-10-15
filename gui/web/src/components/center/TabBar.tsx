@@ -16,6 +16,7 @@ function tabIcon(tab: Tab): IconName {
     case 'geometry':
       return 'cube'
     case 'campaign':
+    case 'centerline':
       return 'chart'
     case 'file':
       return /\.jsonc?$/i.test(tab.path) ? 'braces' : /\.rs$/i.test(tab.path) ? 'gear' : 'file'

@@ -152,8 +152,19 @@ export function fakeDatasets(): DatasetService & { opened: string[]; openedOpts:
       svc.openedOpts.push(opts)
       return { datasetId: 'd_1', status: 'loading' as const, manifest: null, error: null }
     },
-    get: () => undefined,
+    // d_cut is the one dataset the fake knows by id: a non-lattice polyMesh that cuts on x = 0 only.
+    get: (id: string) => (id === 'd_cut' ? { id: 'd_cut', planeCut: true } : undefined),
     blob: async (id: string, key: string) => (id === 'd_1' && key === 'f32' ? Buffer.from(new Float32Array([1, 2, 3]).buffer) : null),
+    cut: async (id: string, plane: { origin: number[]; normal: number[] }) => {
+      if (plane.origin[0] !== 0) throw new Error('NO_PLANE_CUT: the fake cuts on x = 0 only')
+      return { key: 'cut.fake', id, origin: plane.origin, normal: plane.normal, triangleCount: 0 }
+    },
+    // The fake locates in the unit cube only: cell 0 inside, a miss outside, refused for y < -10.
+    locate: async (_id: string, point: [number, number, number]) => {
+      if (point[1] < -10) throw new Error('NO_POINT_LOCATE: the fake refuses y < -10')
+      const inside = point.every((v) => v >= 0 && v <= 1)
+      return { point, cell: inside ? 0 : null, method: inside ? 'contains' : null, center: inside ? [0.5, 0.5, 0.5] : null }
+    },
     ensureField: async () => {
       throw new Error('not in the fake')
     },

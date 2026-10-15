@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UI_COMMAND_TYPES, UiCommandSchema, type ClientMsg, type UiCommand, type UiCommandType } from '@cfd/shared'
 import type { ViewerTool } from '../viewer'
 import { createUiBridge } from './uiBridge'
+import { useGeometryStore } from '../state/geometryStore'
 
 interface FakeViewerState {
   camera: { position: [number, number, number]; target: [number, number, number]; projection: 'perspective' | 'orthographic' }
@@ -53,7 +54,14 @@ const fakeApi = {
 
 vi.mock('../viewer', () => ({ getViewerApi: () => fakeApi, setViewerApi: () => {} }))
 vi.mock('./actions', () => ({ actions: { setSettings: () => true, openSession: () => true }, activeCasePath: () => null }))
-vi.mock('../api/rest', () => ({ api: { geometrySave: vi.fn(), geometryEdit: vi.fn() }, ApiError: class extends Error {} }))
+vi.mock('../api/rest', () => ({
+  api: {
+    geometrySave: vi.fn(),
+    geometryEdit: vi.fn(),
+    geometryStlBoolean: vi.fn(async (b: { path: string; op: string }) => ({ path: b.path.replace(/\.stl$/i, `-${b.op}.stl`), op: b.op, a: 'a', b: 'b', volume: 1.5, volumeA: 1, volumeB: 1, triangles: 12, vertices: 8, openEdges: 0, nonManifoldEdges: 0 })),
+  },
+  ApiError: class extends Error {},
+}))
 
 /** A fresh fake ui store with every method uiBridge's apply can call. */
 function makeUi() {
@@ -82,15 +90,20 @@ function makeUi() {
     setLocale: vi.fn(),
     setActiveRun: vi.fn(),
     toggleAssistant: vi.fn(),
+    openPanel: vi.fn(),
+    setSelection: vi.fn(),
     setCompareRun: vi.fn(),
     setViewSplit: vi.fn(),
     setFocusedView: vi.fn(),
     setCamerasLinked: vi.fn(),
     openGeometryTab: vi.fn(),
     openCampaignTab: vi.fn(),
+    openCenterlineTab: vi.fn(),
     setOverlay: vi.fn(),
     closeTab: vi.fn(),
     activateTab: vi.fn(),
+    meshDialog: null,
+    showMeshDialog: vi.fn(),
   }
 }
 
@@ -157,14 +170,7 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
 const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  // STU-06a moved the mesh draft to the server; the dialog that shows it is STU-06b's.
-  open_mesh_dialog: 'STU-06b',
-  open_mesh_view: 'STU-06b',
-  set_patch: 'STU-07a',
-  open_boundary_editor: 'STU-07b',
   select_step: 'STU-08b',
-  set_centerline: 'STU-09',
-  run_custom_tool: 'STU-09',
 }
 
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
@@ -184,7 +190,7 @@ function freshBridge() {
     subscribeRun: vi.fn(),
     saveImage: vi.fn(),
   })
-  return { sent, bridge }
+  return { sent, bridge, ui }
 }
 
 /** The sent ui.result frame for a requestId. */
@@ -206,6 +212,7 @@ async function unimplementedTypes(): Promise<string[]> {
 }
 
 beforeEach(() => {
+  useGeometryStore.setState({ byPath: {} })
   fake.mounted = true
   fake.toolNow = 'select'
   fake.state = {
@@ -250,6 +257,36 @@ describe('uiBridge.census', () => {
     const r = resultFor(sent, 'census-no_such_command')
     expect(r?.ok).toBe(false)
     expect(r?.error).toBe('UNSUPPORTED (no_such_command): this screen does not implement it')
+  })
+
+  // STU-08a: open_panel's census row is green for every panel the schema names, not only the sample's.
+  it('open_panel answers ok for each of the four right panels', async () => {
+    for (const panel of ['AI Assistant', 'Post', 'Inspector', 'Properties'] as const) {
+      const { sent, bridge, ui } = freshBridge()
+      await bridge.handleCommand(`census-open_panel-${panel}`, { type: 'open_panel', panel })
+      const r = resultFor(sent, `census-open_panel-${panel}`)
+      expect(r?.error ?? null).toBeNull()
+      expect(r?.ok).toBe(true)
+      expect(ui.openPanel).toHaveBeenCalledWith(panel)
+    }
+  })
+
+  // STU-17: geometry_boolean's census row is green on an STL tab too, not only on a STEP.
+  it('geometry_boolean answers ok on a loaded two-part STL tab and opens the result', async () => {
+    const solid = (name: string, first: number) => ({ name, first, count: 12, bounds: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] }, area: 6, volume: 1, closed: true, openEdges: 0 })
+    useGeometryStore.getState().begin('cases/two.stl')
+    useGeometryStore.getState().setLoaded('cases/two.stl', {
+      id: 'g2',
+      info: { id: 'g2', path: 'cases/two.stl', format: 'stl-ascii', triangleCount: 24, vertexCount: 16, bounds: { min: [0, 0, 0], max: [1.5, 1, 1] }, area: 12, volume: 2, closed: true, openEdges: 0, solids: [solid('a', 0), solid('b', 12)], blobs: {} as never, readMs: 1, warnings: [], source: null },
+    })
+    const { sent, bridge, ui } = freshBridge()
+    ui.tabs = [{ id: 'geometry:cases/two.stl', kind: 'geometry', path: 'cases/two.stl' } as { id: string; kind: string }]
+    ui.activeTabId = 'geometry:cases/two.stl'
+    await bridge.handleCommand('census-geometry_boolean-stl', SAMPLES.geometry_boolean)
+    const r = resultFor(sent, 'census-geometry_boolean-stl')
+    expect(r?.error ?? null).toBeNull()
+    expect(r?.ok).toBe(true)
+    expect(ui.openGeometryTab).toHaveBeenCalledWith('cases/two-fuse.stl')
   })
 
   it('the unimplemented set is exactly the open list', async () => {

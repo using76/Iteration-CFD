@@ -294,6 +294,11 @@ export function createWsClient(url: string = wsUrlFor(window.location)): WsClien
         void uiBridge.handleCommand(msg.requestId, msg.cmd)
         return
       }
+      // The Mesh dialog's answer is screen state, not session state.
+      if (msg.t === 'mesh.status') {
+        ui.getState().setMeshStatus({ action: msg.action, ok: msg.ok, code: msg.code, error: msg.error }, msg.runId)
+        return
+      }
       enqueue(msg)
     }
     sock.onclose = () => {

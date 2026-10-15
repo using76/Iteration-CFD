@@ -10,6 +10,7 @@ import { closeOntologyHandles, ontologyHandle } from '../ontology/handle.js'
 import type { LlmClient } from './llm.js'
 import { createMockLlm } from './mockLlm.js'
 import { activeTurnWarning, createAgentService } from './service.js'
+import { getMeshDraft } from '../tools/guiMesh.js'
 import { fakeClient, fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type FakeHub, type FakeRuns, type TempWorkspace } from './test-fakes.js'
 import { until } from './test-util.js'
 import type { AgentService } from './types.js'
@@ -176,6 +177,24 @@ describe('agent service', () => {
     const state = agent.getSessionState(id)!
     expect(state.runs).toHaveLength(1)
     expect(state.messages.at(-1)?.blocks[0]).toMatchObject({ kind: 'text' })
+  })
+
+  it('the Mesh dialog frames edit the session draft and answer one mesh.status (STU-06b)', async () => {
+    const client = fakeClient()
+    await agent.handleClientMessage(client, { t: 'session.new' })
+    const id = client.of('session.state')[0].session.id
+    hub.clear()
+    const before = client.of('mesh.status').length
+    await agent.handleClientMessage(client, { t: 'mesh.start', sessionId: id })
+    expect(client.of('mesh.status').slice(before)).toEqual([{ t: 'mesh.status', sessionId: id, action: 'start', ok: false, code: 'NO_MESH_DRAFT', error: expect.stringContaining('no mesh draft'), runId: null }])
+    await agent.handleClientMessage(client, { t: 'mesh.draft', sessionId: id, edit: { type: 'open_mesh_dialog', preset: 'cavity', cells: [8, 8, 1], outputDir: 'cases/cav' } })
+    expect(client.of('mesh.status').at(-1)).toEqual({ t: 'mesh.status', sessionId: id, action: 'draft', ok: true, code: null, error: null, runId: null })
+    expect(getMeshDraft(id)).toMatchObject({ mode: 'preset', preset: 'cavity', cells: [8, 8, 1], outputDir: 'cases/cav' })
+    // The window is shown the whole draft, as gui_control's open_mesh_dialog shows it.
+    expect(hub.uiCalls.at(-1)).toMatchObject({ type: 'open_mesh_dialog', preset: 'cavity', cells: [8, 8, 1], outputDir: 'cases/cav' })
+    await agent.handleClientMessage(client, { t: 'mesh.draft', sessionId: id, edit: { type: 'open_mesh_dialog', cells: 8 } })
+    expect(client.of('mesh.status').at(-1)).toMatchObject({ action: 'draft', ok: false, code: 'CELLS_2D' })
+    expect(getMeshDraft(id)?.cells).toEqual([8, 8, 1])
   })
 
   it('notifyRunEnded appends a run notice and starts a turn when idle', async () => {

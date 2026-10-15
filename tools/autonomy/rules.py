@@ -6,7 +6,7 @@
 rules.py - the L1 setup rules: attempt 1 from a geometry's fingerprint and
 flow (AM-9, docs/15 §C).
 
-Eight pure rules run in a fixed order and each returns ONE DecisionRecord:
+Nine pure rules run in a fixed order and each returns ONE DecisionRecord:
 R-YP (the a priori first layer), R-DOM (the domain in L_ref multiples),
 R-PLANE (commensurate planar bodies put on cell planes, attraction off,
 SPEC-LIT §92.15.5), R-WIN (the coarsest wall level inside the §D.3 y+ window
@@ -14,9 +14,10 @@ and the largest growth under the stack limiter at the finest level on the
 patch: h/2 where R-FEAT will put the sharp edges, WIN-2TO1), R-CURV (h <= r_p5/8),
 R-GAP (h <= gap/3), R-FEAT (feature_level +1 on sharp edges, the attraction
 on at tau = h_f / 2: snap.feature_tolerance = 0.5 * 2**-max_level, SPEC-LIT
-§92.12's erratum) and R-BUDGET (a predicted cell ladder that coarsens far-field
-bands before wall bands).  A rule that refuses sets `stop`; the rules after
-it abstain.  On a box the delivered stack needs h <= ~42.9 t1 (the
+§92.12's erratum), R-BUDGET (a predicted cell ladder that coarsens far-field
+bands before wall bands) and R-SNAP (off R-PLANE, the (92.28) dead band at
+h_f / 256 and 60 snap iterations).  A rule that refuses sets `stop`; the rules
+after it abstain.  On a box the delivered stack needs h <= ~42.9 t1 (the
 box-corner G5 bound measured on cubep 2026-09-24), so R-PLANE uses 0.70 of
 the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
 
@@ -28,6 +29,7 @@ the §D.3 G5 edge; every other wall keeps the full edge (docs/15 §H, §I-1).
     python tools/autonomy/rules.py --ft-gate --campaign DIR
     python tools/autonomy/rules.py --win-gate --campaign DIR --ref DIR
     python tools/autonomy/rules.py --glb-gate [--bundle PATH] [--report-dir DIR]
+    python tools/autonomy/rules.py --snap-gate --out DIR [--streams N] [--ids A,B,...]
 """
 
 from __future__ import annotations
@@ -55,7 +57,8 @@ BINARY_DEFAULT = score.BINARY_DEFAULT
 REPORT_DIR = os.path.join(HERE, "rules")
 RESULT_SCHEMA = "autonomy-rules/1"
 GATE_SCHEMA = "autonomy-rules-gate/1"
-RULES = ("R-YP", "R-DOM", "R-PLANE", "R-WIN", "R-CURV", "R-GAP", "R-FEAT", "R-BUDGET")
+RULES = ("R-YP", "R-DOM", "R-PLANE", "R-WIN", "R-CURV", "R-GAP", "R-FEAT", "R-BUDGET",
+         "R-SNAP")
 CELL_FRAC = preflight.MESHER_DEFAULTS["/layers/cell_frac"]        # 0.5: a limiter (§I-5)
 G5_RATIO = preflight.REFERENCE_QUALITY["min_thickness_ratio"]     # 0.05
 G5_FACTOR = preflight.G5_FACTOR                                   # 3.0 (layers.rs:1306)
@@ -63,6 +66,8 @@ EDGE_MARGIN = 1e-6      # both window edges are kept this far inside (float h_i)
 CORNER_KAPPA = 0.70     # the box-corner G5 bound, measured 42.9 t1 = 0.715*60 t1 on cubep
 SNAP_G5_K = 1.10        # the convex-wall margin on a snapped wall's G5 edge (GLB-CONFIG): the user's G-L-b factor of 2026-10-03, against a measured zero-G5 t1 of 1.011 and 1.023 h/60 on the snapped sphere at levels 2 and 3
 FT_HALF_H_F = 0.5       # R-FEAT's attraction radius tau = 0.5 h_f (SPEC-LIT §92.12 erratum)
+SNAP_TOL_DIV = 256      # R-SNAP: the (92.28) dead band eps = h_f / 256 (snap.tolerance = 2^-max_level / 256)
+SNAP_ITERATIONS = 60    # R-SNAP: the snap iteration cap (README: 60 measured as enough for the 1e-6 band)
 T1_SIG = 4              # t1 floored to 4 significant digits, so the a priori y+ stays <= 1
 GROWTH_STEP_DIV = 1000  # growth steps are k / 1000
 BASE_FRAC = 0.5         # base_size = 0.5 L_ref (docs/15 §B's L4 recipe)
@@ -970,18 +975,66 @@ def r_budget(state: dict) -> dict:
                    round(target), suffix))
 
 
+# --- R-SNAP (AUT-05) ------------------------------------------------------------
+
+_SNAP_CITE = ("SPEC-LIT §92.11 (92.28) the dead band eps = snap.tolerance * base_size; "
+              "docs/15 §F G-FID; docs/17 §12.6 AUT-05")
+_SNAP_FORMULA = ("eps = snap.tolerance * base_size (92.28); h_f = base_size / 2**max_level; "
+                 "snap.tolerance = 2**-max_level / %d, so eps = h_f / %d; snap.iterations = %d"
+                 % (SNAP_TOL_DIV, SNAP_TOL_DIV, SNAP_ITERATIONS))
+
+
+def r_snap(state: dict) -> dict:
+    """The (92.28) dead band as a fixed fraction of the finest cell: off R-PLANE,
+    snap.tolerance = 2**-max_level / SNAP_TOL_DIV and snap.iterations =
+    SNAP_ITERATIONS, read after R-BUDGET has fixed max_level.  The default band
+    is 1e-3 base cells, 1e-3 * 2**max_level h_f, and p99/h_f sits on it."""
+    if state["plane"]:
+        return _rec("R-SNAP", "abstain", None, [], "", [], _SNAP_CITE,
+                    "R-SNAP: R-PLANE owns this body: its wall points already lie on the "
+                    "geometry, which the default band returns bit for bit, and its snap "
+                    "block stays R-PLANE's")
+    ml = state["config"]["refinement"]["max_level"]
+    band0 = preflight.MESHER_DEFAULTS["/snap/tolerance"] * 2.0 ** ml
+    trig = {"observable": "default dead band / h_f", "value": band0,
+            "threshold": 1.0 / SNAP_TOL_DIV, "op": ">",
+            "source": "preflight.MESHER_DEFAULTS /snap/tolerance * 2**max_level"}
+    inputs = [{"name": "max_level", "value": ml, "unit": "1"},
+              {"name": "default_band_over_h_f", "value": band0, "unit": "1"}]
+    if band0 <= 1.0 / SNAP_TOL_DIV:
+        return _rec("R-SNAP", "pass", trig, inputs, _SNAP_FORMULA, [], _SNAP_CITE,
+                    "R-SNAP: at max_level %d the default dead band is %.4g h_f, already "
+                    "inside h_f / %d; the snap block keeps its defaults"
+                    % (ml, band0, SNAP_TOL_DIV))
+    tol = 2.0 ** -ml / SNAP_TOL_DIV
+    snap = state["config"].setdefault("snap", {})
+    snap["tolerance"] = tol
+    snap["iterations"] = SNAP_ITERATIONS
+    return _rec("R-SNAP", "apply", trig,
+                inputs + [{"name": "tolerance", "value": tol, "unit": "1"},
+                          {"name": "iterations", "value": SNAP_ITERATIONS, "unit": "1"}],
+                _SNAP_FORMULA, _edit_records(state), _SNAP_CITE,
+                "R-SNAP: at max_level %d the default dead band of (92.28) is %.4g h_f, "
+                "and a snapped wall's p99 residual stops on it; snap.tolerance = "
+                "2^-%d / %d = %.6g puts it at h_f / %d, and snap.iterations = %d lets "
+                "the pull reach it (about one iteration per halving of the band)"
+                % (ml, band0, ml, SNAP_TOL_DIV, tol, SNAP_TOL_DIV, SNAP_ITERATIONS))
+
+
 # --- setup (C9) ----------------------------------------------------------------
 
 RULE_FN = {"R-YP": r_yp, "R-DOM": r_dom, "R-PLANE": r_plane, "R-WIN": r_win,
-           "R-CURV": r_curv, "R-GAP": r_gap, "R-FEAT": r_feat, "R-BUDGET": r_budget}
+           "R-CURV": r_curv, "R-GAP": r_gap, "R-FEAT": r_feat, "R-BUDGET": r_budget,
+           "R-SNAP": r_snap}
 
 
 def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str, *,
           flow=None, gates=None, knobs=None, requested_growth=None,
-          ft_radius=True, win_2to1=True, glb=True) -> dict:
-    """The eight L1 rules on one geometry; the autonomy-rules/1 result out.
+          ft_radius=True, win_2to1=True, glb=True, r_snap=True) -> dict:
+    """The nine L1 rules on one geometry; the autonomy-rules/1 result out.
     glb=False is the rule set every committed campaign was recorded under
-    (GLB-CONFIG off)."""
+    (GLB-CONFIG off); r_snap=False runs the eight rules before R-SNAP, the set
+    every campaign before AUT-05 was recorded under."""
     gates = gates or schema.load_gates()
     knobs = knobs or schema.load_knobs()
     errs = schema.errors(fingerprint, "Fingerprint")
@@ -1005,7 +1058,7 @@ def setup(row: dict, fingerprint: dict, stl_path: str, case_dir: str, name: str,
              "ft_radius": bool(ft_radius), "ft_set": False,
              "win_2to1": bool(win_2to1), "glb": bool(glb)}
     records = []
-    for rid in RULES:
+    for rid in (RULES if r_snap else RULES[:-1]):
         if state["stop"] is not None:
             records.append(_stopped(rid, state["stop"]))
             continue
@@ -1083,6 +1136,19 @@ def glb_of(records) -> bool:
                 or rec.get("verdict") != "apply":
             continue
         if any(i.get("name") == "margin" for i in rec.get("inputs") or []):
+            return True
+    return False
+
+
+def r_snap_of(records) -> bool:
+    """Which rule set a recorded campaign ran under: True when one of its records is
+    an R-SNAP record (AUT-05, the ninth rule), False for a campaign recorded before
+    it.  A reader that rebuilds recorded attempt-1 configs passes
+    setup(..., r_snap=r_snap_of(r)) beside ft_radius_of(r), win_2to1_of(r) and
+    glb_of(r)."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if isinstance(rec, dict) and rec.get("rule_id") == "R-SNAP":
             return True
     return False
 
@@ -1636,7 +1702,7 @@ def gate(parts, out_dir: str, streams: int = 6, binary: str | None = None) -> in
 # --- the selftest (C12) --------------------------------------------------------
 
 def selftest() -> int:
-    """20 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
+    """21 [ok] groups, no full mesher run, only -dryRun; under 60 s."""
     import random
     import shutil
     import tempfile
@@ -1887,22 +1953,27 @@ def selftest() -> int:
             for r in res["records"]:
                 for e in r["edits"]:
                     assert not e["pointer"].startswith("/snap/") \
-                        or r["rule_id"] in ("R-PLANE", "R-FEAT", "R-BUDGET"), (r["rule_id"], e)
+                        or r["rule_id"] in ("R-PLANE", "R-FEAT", "R-BUDGET", "R-SNAP"), \
+                        (r["rule_id"], e)
                     assert not e["pointer"].startswith("/snap/") or r["rule_id"] == "R-PLANE" \
-                        or e["pointer"] == "/snap/feature_tolerance", (r["rule_id"], e)
+                        or e["pointer"] == "/snap/feature_tolerance" \
+                        or (r["rule_id"] == "R-SNAP" and e["pointer"] in
+                            ("/snap/tolerance", "/snap/iterations")), (r["rule_id"], e)
         mls = []
         for res in (res_a, res_b):
             ml = res["config"]["refinement"]["max_level"]
             mls.append(ml)
-            assert res["config"]["snap"] == {"feature_tolerance": 0.5 * 2.0 ** -ml}, \
+            assert res["config"]["snap"] == {"feature_tolerance": 0.5 * 2.0 ** -ml,
+                                             "tolerance": 2.0 ** -ml / SNAP_TOL_DIV,
+                                             "iterations": SNAP_ITERATIONS}, \
                 res["config"]["snap"]
             assert any(e["pointer"] == "/snap/feature_tolerance"
                        for e in res["records"][6]["edits"]), res["records"][6]["edits"]
-        assert "snap" not in res_c["config"], res_c["config"].get("snap")
+        assert "feature_tolerance" not in res_c["config"]["snap"], res_c["config"]["snap"]
         assert res_d["config"]["snap"]["feature_tolerance"] == 0
         return ("+1, capped at 6, pass on smooth, abstain under R-PLANE; R-FEAT asks for "
                 "tau = h_f/2 (feature_tolerance 0.5 * 2^-max_level at max_level %d and %d); "
-                "only R-PLANE, R-FEAT and R-BUDGET write /snap/*" % tuple(mls))
+                "only R-PLANE, R-FEAT, R-BUDGET and R-SNAP write /snap/*" % tuple(mls))
 
     def g9():
         res = cube_setup()
@@ -1950,7 +2021,7 @@ def selftest() -> int:
     def g10():
         for gid in FIVE:
             res = setup_of(gid)
-            assert len(res["records"]) == 8 and res["verdict"] == "apply", gid
+            assert len(res["records"]) == len(RULES) == 9 and res["verdict"] == "apply", gid
             cfg = res["config"]
             pf = preflight.preflight(cfg, fingerprint=fp_of(gid),
                                      flow=by_id[gid]["flow"], gates=gates, knobs=knobs)
@@ -2020,7 +2091,7 @@ def selftest() -> int:
         p = run(["--id", "A-1-000", "--out-dir", out14])
         assert p.returncode == 0, (p.returncode, p.stderr[-800:])
         rec_lines = [l for l in p.stdout.splitlines() if l.startswith("[")]
-        assert len(rec_lines) == 8, rec_lines
+        assert len(rec_lines) == 9, rec_lines
         assert p.stdout.strip().splitlines()[-1].startswith("RULES APPLY A-1-000 ")
         lock = sp.read_lock(os.path.join(sp.MANIFEST_DIR, "split.lock"))
         tid = lock["test_ids"].split()[0]
@@ -2037,7 +2108,7 @@ def selftest() -> int:
         assert r.stdout.strip().splitlines()[-1].startswith("RULES APPLY cubep_cli ")
         with open(cfg_out, encoding="utf-8") as fh:
             json.load(fh)
-        return ("--id A-1-000 exit 0 with 8 record lines, a test id exits 2 naming "
+        return ("--id A-1-000 exit 0 with 9 record lines, a test id exits 2 naming "
                 "the seal, the STL form writes a config")
 
     def g15():
@@ -2049,7 +2120,7 @@ def selftest() -> int:
         assert ft_radius_of(res_n["records"]) is True
         assert ft_radius_of([{"record": r} for r in res_n["records"]]) is True
         assert ft_radius_of(res_o["records"]) is False
-        assert "snap" not in res_o["config"], res_o["config"].get("snap")
+        assert "feature_tolerance" not in res_o["config"]["snap"], res_o["config"]["snap"]
         assert "stays at its default 0.5" in res_o["records"][6]["message"]
         ml = res_n["config"]["refinement"]["max_level"]
         assert diff_edits(res_o["config"], res_n["config"]) == [
@@ -2058,7 +2129,9 @@ def selftest() -> int:
         res_b = setup_of("A-1-002")
         rb = res_b["records"][7]
         assert res_b["config"]["refinement"]["max_level"] == 5, res_b["summary"]
-        assert res_b["config"]["snap"] == {"feature_tolerance": 0.015625}
+        assert res_b["config"]["snap"] == {"feature_tolerance": 0.015625,
+                                           "tolerance": 2.0 ** -5 / SNAP_TOL_DIV,
+                                           "iterations": SNAP_ITERATIONS}
         assert {"pointer": "/snap/feature_tolerance", "from": 0.0078125,
                 "to": 0.015625} in rb["edits"], rb["edits"]
         assert "follows max_level 5" in rb["message"], rb["message"]
@@ -2312,6 +2385,52 @@ def selftest() -> int:
                 "A-1-007's R-BUDGET gives the margin up to the same config sha, the "
                 "R-PLANE cube identical, on the K = 1.1 margin off R-PLANE")
 
+    def g21():
+        # (a) a curved body at max_level 6: eps = h_f / 256 and 60 iterations, R-SNAP last
+        b1 = setup_of("B-1-000")
+        ml = b1["config"]["refinement"]["max_level"]
+        assert ml == 6, ml
+        assert [r["rule_id"] for r in b1["records"]] == list(RULES), \
+            [r["rule_id"] for r in b1["records"]]
+        rec = b1["records"][-1]
+        assert rec["rule_id"] == "R-SNAP" and rec["verdict"] == "apply", rec["message"]
+        assert b1["config"]["snap"] == {"tolerance": 6.103515625e-05, "iterations": 60}, \
+            b1["config"]["snap"]
+        assert 2.0 ** -ml / SNAP_TOL_DIV == 6.103515625e-05
+        assert rec["edits"] == [{"pointer": "/snap/tolerance", "from": None,
+                                 "to": 6.103515625e-05},
+                                {"pointer": "/snap/iterations", "from": None, "to": 60}], \
+            rec["edits"]
+        assert all(schema.check_edit(e["pointer"], e["to"], knobs) is None
+                   for e in rec["edits"])
+        # (b) r_snap=False is the eight-rule set: the same config without the snap block
+        b0 = setup_of("B-1-000", r_snap=False)
+        assert [r["rule_id"] for r in b0["records"]] == list(RULES[:-1])
+        assert "snap" not in b0["config"], b0["config"].get("snap")
+        c1 = copy.deepcopy(b1["config"])
+        del c1["snap"]
+        assert schema.canonical_sha256(c1) == b0["config_sha256"]
+        # (c) R-PLANE: abstain, no edit, the config byte-identical under both rule sets
+        cu1 = cube_setup()
+        cu0 = cube_setup(r_snap=False)
+        assert cu1["records"][-1]["rule_id"] == "R-SNAP" \
+            and cu1["records"][-1]["verdict"] == "abstain" \
+            and cu1["records"][-1]["edits"] == []
+        assert cu1["config_sha256"] == cu0["config_sha256"]
+        assert "tolerance" not in cu1["config"]["snap"]
+        # (d) max_level 1: the default band 1e-3 * 2 = 0.002 h_f is already inside h_f / 256
+        st = {"plane": None, "config": {"refinement": {"max_level": 1}}}
+        st["_before"] = copy.deepcopy(st["config"])
+        rp = r_snap(st)
+        assert rp["verdict"] == "pass" and rp["edits"] == [] and "snap" not in st["config"]
+        # (e) r_snap_of tells the two rule sets apart
+        assert r_snap_of(b1["records"]) is True
+        assert r_snap_of([{"record": r} for r in b1["records"]]) is True
+        assert r_snap_of(b0["records"]) is False and r_snap_of([]) is False
+        return ("B-1-000 at max_level 6: tolerance 2^-14 = h_f/256 and 60 iterations by "
+                "R-SNAP, the ninth record; r_snap=False is the same config without them; "
+                "the R-PLANE cube abstains byte-identical; max_level 1 passes; r_snap_of")
+
     failed = 0
     try:
         for name, fn in (("R-YP", g1), ("R-WIN", g2), ("window table", g3),
@@ -2321,7 +2440,7 @@ def selftest() -> int:
                          ("determinism", g13), ("cli", g14), ("FT-RADIUS rule", g15),
                          ("FT-RADIUS gate", g16), ("WIN-2TO1 rule", g17),
                          ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19),
-                         ("GLB-CONFIG rule", g20)):
+                         ("GLB-CONFIG rule", g20), ("R-SNAP rule", g21)):
             failed += group(name, fn)
             if failed:
                 for l in lines:
@@ -2348,12 +2467,13 @@ FT_HEADER = ("meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (I
              "Source-available, not Open Source. No GPL-licensed source was consulted.")
 
 
-def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=False) -> list:
+def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=False,
+                  r_snap=False) -> list:
     """Every tuning row, classed by setup on the fingerprint the committed rules
     campaign recorded: no_fingerprint, refused, plane (R-PLANE), smooth (no sharp edge)
     or sharp (the rows FT-RADIUS changes); the stl and case paths are campaign.py's.
-    The rules are FT-RADIUS's (win_2to1=False), so G-FT-RADIUS still reproduces;
-    the WIN-2TO1 gate builds a second population with win_2to1=True."""
+    The rules are FT-RADIUS's (win_2to1=False, r_snap=False), so G-FT-RADIUS still
+    reproduces; the WIN-2TO1 gate builds a second population with win_2to1=True."""
     ends = {g["geometry_id"]: g for g in bundle["geometries"]}
     out = []
     for row in rows:
@@ -2363,7 +2483,8 @@ def ft_population(bundle, rows, gates=None, knobs=None, win_2to1=False, glb=Fals
              "row": row, "fingerprint": fp, "result": None, "class": "no_fingerprint"}
         if fp is not None:
             res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                        gates=gates, knobs=knobs, win_2to1=win_2to1, glb=glb)
+                        gates=gates, knobs=knobs, win_2to1=win_2to1, glb=glb,
+                        r_snap=r_snap)
             p["result"] = res
             if res["verdict"] != "apply":
                 p["class"] = "refused"
@@ -2428,7 +2549,7 @@ def ft_identity(pop, bundle, gates=None, knobs=None) -> dict:
         else:
             old = setup(p["row"], p["fingerprint"], "stl/%s.stl" % gid, "cases/%s" % gid,
                         gid, gates=gates, knobs=knobs, ft_radius=False, win_2to1=False,
-                        glb=False)
+                        glb=False, r_snap=False)
             ok = r1 is None or r1["config_sha"] == old["config_sha256"]
             if cls in ("plane", "smooth"):
                 ok = ok and new["config_sha256"] == old["config_sha256"]
@@ -2966,9 +3087,9 @@ def glb_gate(bundle_path: str = AML_BUNDLE, report_dir: str = REPORT_DIR) -> int
             continue
         counts["rows"] += 1
         res0 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                     gates=gates, knobs=knobs, glb=False)
+                     gates=gates, knobs=knobs, glb=False, r_snap=False)
         res1 = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
-                     gates=gates, knobs=knobs, glb=True)
+                     gates=gates, knobs=knobs, glb=True, r_snap=False)
         cls = "refused" if res1["refused"] else \
             ("plane" if res1["summary"]["plane"] else "snapped")
         counts[cls] += 1
@@ -3052,6 +3173,373 @@ def _cli_glb_gate(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     try:
         return glb_gate(args.bundle, report_dir=args.report_dir)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
+
+# --- the R-SNAP gate (AUT-05): 4 B, 4 E and 4 G tuning bodies, three arms -------
+
+SNAP_SCHEMA = "autonomy-rsnap-gate/1"
+SNAP_FAMILIES = ("B", "E", "G")
+SNAP_PER_FAMILY = 4
+SNAP_ARMS = ("b0-template", "rules", "r-snap")   # B0-template; the rules before AUT-05; with R-SNAP
+SNAP_B0_BUNDLE = os.path.join(HERE, "baseline", "tuning_b0-template.json.gz")
+SNAP_AUDIT_OFF = 2 ** 40   # baseline.RCURV_AUDIT_OFF: no -check or rerun audit on a quick set
+
+
+def _read_gz(path: str) -> dict:
+    import gzip
+    with open(path, "rb") as fh:
+        return json.loads(gzip.decompress(fh.read()).decode("utf-8"))
+
+
+def _att1(bundle: dict) -> dict:
+    return {r["geometry_id"]: r for r in bundle["attempts"] if r["attempt"] == 1}
+
+
+def _median(vals):
+    import statistics
+    vals = [v for v in vals if v is not None]
+    return statistics.median(vals) if vals else None
+
+
+def snap_bars(b0_bundle: dict) -> dict:
+    """The bar per family: the committed tuning B0-template median p99/h_f over its
+    passing attempt-1 meshes (docs/15 §F G-FID reads 'among passing meshes')."""
+    t1 = _att1(b0_bundle)
+    out = {}
+    for fam in SNAP_FAMILIES:
+        vals = [r["outcome"]["p99_over_hf"] for g, r in sorted(t1.items())
+                if g.split("-")[0] == fam and not r["outcome"]["failure"]]
+        out[fam] = {"n_pass": len(vals), "p99_over_hf_median": _median(vals)}
+    return out
+
+
+def snap_quick_ids(b0_bundle: dict, rules_bundle: dict, rows: list) -> list:
+    """The quick set, pre-registered from COMMITTED bundles only: per family B, E
+    and G, ids sorted, first those whose tuning B0-template attempt 1 passed, then
+    those whose L5 rules attempt 1 passed; a body the rules put on R-PLANE (on its
+    L5 fingerprint) or refuse is skipped; the first SNAP_PER_FAMILY of each."""
+    by = {r["geometry_id"]: r for r in rows}
+    ends = {g["geometry_id"]: g for g in rules_bundle["geometries"]}
+    t1, r1 = _att1(b0_bundle), _att1(rules_bundle)
+    picked = []
+    for fam in SNAP_FAMILIES:
+        ids = sorted(g for g in by if by[g]["family"] == fam)
+        order = [g for g in ids if g in t1 and not t1[g]["outcome"]["failure"]] \
+            + [g for g in ids if g in r1 and not r1[g]["outcome"]["failure"]]
+        got = []
+        for gid in order:
+            fp = (ends.get(gid) or {}).get("fingerprint")
+            if gid in got or fp is None:
+                continue
+            res = setup(by[gid], fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid)
+            if res["verdict"] != "apply" or res["summary"]["plane"]:
+                continue
+            got.append(gid)
+            if len(got) == SNAP_PER_FAMILY:
+                break
+        if len(got) != SNAP_PER_FAMILY:
+            raise RulesError("snap_quick_ids: family %s gives %d bodies, not %d"
+                             % (fam, len(got), SNAP_PER_FAMILY))
+        picked.extend(got)
+    return picked
+
+
+def snap_plane_identity(rules_bundle: dict, rows: list) -> dict:
+    """Every tuning row with an L5 fingerprint through setup with and without
+    R-SNAP: an R-PLANE config must be byte-identical, and no refusal may move."""
+    ends = {g["geometry_id"]: g for g in rules_bundle["geometries"]}
+    n = {"rows": 0, "plane": 0, "snapped": 0, "refused": 0}
+    bad, refuse_bad = [], []
+    for row in rows:
+        gid = row["geometry_id"]
+        fp = (ends.get(gid) or {}).get("fingerprint")
+        if fp is None:
+            continue
+        n["rows"] += 1
+        new = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid)
+        old = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid, r_snap=False)
+        if new["refused"] != old["refused"]:
+            refuse_bad.append(gid)
+        if new["refused"]:
+            n["refused"] += 1
+        elif new["summary"]["plane"]:
+            n["plane"] += 1
+            if new["config_sha256"] != old["config_sha256"]:
+                bad.append(gid)
+        else:
+            n["snapped"] += 1
+    return {"counts": n, "plane_changed": bad, "refusals_changed": refuse_bad,
+            "ok": not bad and not refuse_bad and n["plane"] > 0}
+
+
+def _snap_arm(c, gctx, cfg, k, gates, knobs):
+    """One arm: the octree probe, preflight (recorded, never a veto here), the
+    full mesher run and its score; snap seconds from the summary's stages[snap]."""
+    import campaign
+    probe = campaign.octree_probe(c, gctx, cfg, k)
+    pf = preflight.preflight(cfg, fingerprint=gctx["fp"], flow=gctx["flow"],
+                             octree_probe=probe, gates=gates, knobs=knobs, cwd=c.dir)
+    campaign.write_config(c, gctx["gid"], k, cfg)
+    res = campaign.run_attempt(c, gctx, cfg, k, probe.get("n_leaves"))
+    oc = res["outcome"]
+    tag = "%s_a%d" % (gctx["gid"], k)
+    snap = {}
+    spath = os.path.join(c.dir, "cases", tag, tag + "_summary.json")
+    if os.path.isfile(spath):
+        with open(spath, encoding="utf-8") as fh:
+            st = {s["stage"]: s for s in json.load(fh)["stages"]}
+        snap = st.get("snap") or {}
+    sc = cfg.get("snap") or {}
+    return {"config_sha256": schema.canonical_sha256(cfg),
+            "max_level": cfg["refinement"]["max_level"],
+            "snap_tolerance": sc.get("tolerance"), "snap_iterations_cap": sc.get("iterations"),
+            "preflight_refused": list(pf["refused"]),
+            "failure": oc["failure"], "failure_class": oc["failure_class"],
+            "flags": oc["flags"], "p99_over_hf": oc["p99_over_hf"],
+            "max_over_hf": oc["max_over_hf"], "pinned_frac": oc["pinned_frac"],
+            "n_cells": oc["n_cells"], "seconds": oc["seconds"],
+            "snap_seconds": snap.get("seconds"), "snap_iterations": snap.get("iterations"),
+            "snap_converged": snap.get("converged")}
+
+
+def snap_summary(bodies: list) -> list:
+    out = []
+    for fam in SNAP_FAMILIES:
+        ms = [b for b in bodies if b["family"] == fam]
+        g = {"family": fam, "n": len(ms)}
+        for arm in SNAP_ARMS:
+            arms = [b["arms"][arm] for b in ms if arm in b["arms"]]
+            ok = [a for a in arms if not a["failure"]]
+            g[arm] = {"n": len(arms), "n_pass": len(ok),
+                      "failures": len(arms) - len(ok),
+                      "p99_over_hf_median_pass": _median([a["p99_over_hf"] for a in ok]),
+                      "p99_over_hf_median_all": _median([a["p99_over_hf"] for a in arms]),
+                      "snap_seconds_median": _median([a["snap_seconds"] for a in arms]),
+                      "snap_iterations_median": _median([a["snap_iterations"] for a in arms]),
+                      "cells_median": _median([a["n_cells"] for a in arms]),
+                      "seconds_median": _median([a["seconds"] for a in arms])}
+        out.append(g)
+    return out
+
+
+def snap_verdict(groups: list, bars: dict, identity: dict, n_errors: int) -> dict:
+    """PASS: in each family the R-SNAP arm's median p99/h_f over its passing meshes
+    is <= the committed tuning B0-template median (the bar) and <= the B0-template
+    arm's median on the same bodies wherever that arm passes any; the R-PLANE
+    identity holds; no body or arm ended in an error."""
+    fams = {}
+    for g in groups:
+        got = g["r-snap"]["p99_over_hf_median_pass"]
+        bar = bars[g["family"]]["p99_over_hf_median"]
+        same = g["b0-template"]["p99_over_hf_median_pass"]
+        ok = got is not None and bar is not None and got <= bar \
+            and (same is None or got <= same)
+        fams[g["family"]] = {"r_snap": got, "bar": bar, "same_body_b0": same, "ok": ok}
+    ok = all(f["ok"] for f in fams.values()) and identity["ok"] and n_errors == 0
+    return {"families": fams, "verdict": "PASS" if ok else "FAIL"}
+
+
+def snap_gate(out: str, *, streams: int = 6, binary: str = BINARY_DEFAULT,
+              ids=None, report_dir: str = REPORT_DIR) -> int:
+    """The AUT-05 quick set: every body meshed by B0-template, by the rules before
+    R-SNAP and by the rules with it; writes R-SNAP.json and R-SNAP.md."""
+    import threading
+    import campaign
+    import split
+    if os.path.isdir(out) and os.listdir(out):
+        raise RulesError("not empty: %s" % out)
+    os.makedirs(out, exist_ok=True)
+    b0b, rb = _read_gz(SNAP_B0_BUNDLE), _read_gz(AML_BUNDLE)
+    rows = split.load("tuning", "rules")
+    by = {r["geometry_id"]: r for r in rows}
+    ids = list(ids) if ids else snap_quick_ids(b0b, rb, rows)
+    bars = snap_bars(b0b)
+    identity = snap_plane_identity(rb, rows)
+    gates, knobs = schema.load_gates(), schema.load_knobs()
+    c = campaign.Campaign(out, campaign_id="r-snap", mode="rules", system="rules",
+                          ablate=(), split_mode="rules", binary=binary, streams=streams,
+                          timeout_s=campaign.TIMEOUT_S,
+                          probe_timeout_s=campaign.PROBE_TIMEOUT_S,
+                          audit_mod=SNAP_AUDIT_OFF, quiet=True, gates=gates, knobs=knobs)
+    c.start()
+    t0 = time.perf_counter()
+    bodies, errors, jobs = [], [], []
+    try:
+        with ThreadPoolExecutor(max_workers=streams) as ex:
+            obs = dict(zip(ids, ex.map(lambda g: campaign.observe(c, by[g]), ids)))
+        for gid in ids:
+            o = obs[gid]
+            if o.get("terminal") is not None:
+                errors.append({"geometry_id": gid, "error": "observe: %s: %s"
+                               % (o["terminal"], o.get("reason"))})
+                continue
+            mrow, fp = by[gid], o["fingerprint"]
+            stl, case = campaign.stl_rel(gid), campaign.case_rel(gid)
+            cfgs = {"b0-template": campaign.b0_template(mrow, fp),
+                    "rules": setup(mrow, fp, stl, case, gid, gates=gates, knobs=knobs,
+                                   r_snap=False)["config"],
+                    "r-snap": setup(mrow, fp, stl, case, gid, gates=gates,
+                                    knobs=knobs)["config"]}
+            b = {"geometry_id": gid, "family": mrow["family"], "stratum": mrow["stratum"],
+                 "arms": {}, "gctx": {"gid": gid, "areas": o["areas"], "fp": fp,
+                                      "flow": mrow["flow"], "audit": []}}
+            bodies.append(b)
+            for k, arm in enumerate(SNAP_ARMS, 1):
+                if cfgs[arm] is None:
+                    errors.append({"geometry_id": gid, "error": "%s refused" % arm})
+                    continue
+                jobs.append((b, arm, k, cfgs[arm]))
+        done = [0]
+        lock = threading.Lock()
+
+        def one(job):
+            b, arm, k, cfg = job
+            try:
+                b["arms"][arm] = _snap_arm(c, b["gctx"], cfg, k, gates, knobs)
+                a = b["arms"][arm]
+                line = "p99/h_f %s snap %.1f s (%s it) %s" % (
+                    "%.5f" % a["p99_over_hf"] if a["p99_over_hf"] is not None else "-",
+                    a["snap_seconds"] or 0.0, a["snap_iterations"],
+                    "FAIL " + str(a["failure_class"]) if a["failure"] else "pass")
+            except Exception as e:  # noqa: BLE001 - a harness error is reported by name
+                errors.append({"geometry_id": b["geometry_id"], "arm": arm,
+                               "error": "%s: %s" % (type(e).__name__, e)})
+                line = "harness error"
+            with lock:
+                done[0] += 1
+                print("[r-snap %d/%d %3.0f%%] %s %s: %s"
+                      % (done[0], len(jobs), 100.0 * done[0] / len(jobs),
+                         b["geometry_id"], arm, line), flush=True)
+        with ThreadPoolExecutor(max_workers=streams) as ex:
+            list(ex.map(one, jobs))
+    finally:
+        c.kill_all()
+        c.stop()
+    wall = time.perf_counter() - t0
+    for b in bodies:
+        del b["gctx"]
+    groups = snap_summary(bodies)
+    v = snap_verdict(groups, bars, identity, len(errors))
+    rep = {"$comment": FT_HEADER, "schema": SNAP_SCHEMA, "date": schema._now_iso()[:10],
+           "binary_sha256": c.binary_sha, "git_sha": c.git_sha,
+           "snap_tol_div": SNAP_TOL_DIV, "snap_iterations": SNAP_ITERATIONS,
+           "ids": ids, "bars": bars, "plane_identity": identity, "groups": groups,
+           "families": v["families"], "verdict": v["verdict"], "errors": errors,
+           "bodies": bodies, "streams": streams, "peak_rss_mib": c.peak_rss_mib,
+           "orphans": len(c.orphans()), "wall_seconds": wall}
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "R-SNAP.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        json.dump(rep, fh, indent=1, sort_keys=True, ensure_ascii=False)
+        fh.write("\n")
+    with open(os.path.join(report_dir, "R-SNAP.md"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(snap_md(rep))
+    for fam, f in sorted(v["families"].items()):
+        print("R-SNAP %s: median p99/h_f %s against the bar %s (same-body B0-template %s): %s"
+              % (fam, _f5(f["r_snap"]), _f5(f["bar"]), _f5(f["same_body_b0"]),
+                 "ok" if f["ok"] else "MISS"))
+    print("R-SNAP %s: %d bodies, R-PLANE identity %d/%d (%s), harness errors %d, "
+          "wall %.0f s" % (v["verdict"], len(bodies),
+                           identity["counts"]["plane"] - len(identity["plane_changed"]),
+                           identity["counts"]["plane"],
+                           "ok" if identity["ok"] else "FAIL", len(errors), wall))
+    return 0 if v["verdict"] == "PASS" else 1
+
+
+def _f5(x) -> str:
+    return "-" if x is None else "%.5f" % x
+
+
+def snap_md(rep: dict) -> str:
+    L = []
+    a = L.append
+    a("<!-- %s -->" % FT_HEADER)
+    a("# R-SNAP - the quick set (AUT-05)")
+    a("")
+    a("- date %s, git %s, binary %s" % (rep["date"], rep["git_sha"][:12],
+                                         rep["binary_sha256"][:12]))
+    a("- the rule: off R-PLANE, snap.tolerance = 2^-max_level / %d (eps = h_f / %d) "
+      "and snap.iterations = %d" % (rep["snap_tol_div"], rep["snap_tol_div"],
+                                    rep["snap_iterations"]))
+    a("- bodies (pre-registered from the committed bundles): %s" % " ".join(rep["ids"]))
+    pi = rep["plane_identity"]
+    a("- R-PLANE identity over %d tuning rows with an L5 fingerprint: %d/%d plane configs "
+      "byte-identical, %d refusals moved (%s)"
+      % (pi["counts"]["rows"], pi["counts"]["plane"] - len(pi["plane_changed"]),
+         pi["counts"]["plane"], len(pi["refusals_changed"]), "ok" if pi["ok"] else "FAIL"))
+    a("- %d errors; %d streams, peak RSS %.0f MiB, orphans %d, wall %.0f s"
+      % (len(rep["errors"]), rep["streams"], rep["peak_rss_mib"], rep["orphans"],
+         rep["wall_seconds"]))
+    a("")
+    a("| family | bar (tuning B0-template, passing) | B0-template same bodies | "
+      "rules before R-SNAP | R-SNAP | verdict |")
+    a("|---|---|---|---|---|---|")
+    for g in rep["groups"]:
+        f = rep["families"][g["family"]]
+        a("| %s | %s (n %d) | %s (%d/%d pass) | %s (%d/%d pass) | %s (%d/%d pass) | %s |"
+          % (g["family"], _f5(f["bar"]), rep["bars"][g["family"]]["n_pass"],
+             _f5(g["b0-template"]["p99_over_hf_median_pass"]),
+             g["b0-template"]["n_pass"], g["b0-template"]["n"],
+             _f5(g["rules"]["p99_over_hf_median_pass"]), g["rules"]["n_pass"],
+             g["rules"]["n"], _f5(f["r_snap"]), g["r-snap"]["n_pass"], g["r-snap"]["n"],
+             "ok" if f["ok"] else "MISS"))
+    a("")
+    a("Snap seconds, iterations and cells (medians over every body of the arm):")
+    a("")
+    a("| family | arm | snap s | snap iterations | full s | cells | failures |")
+    a("|---|---|---|---|---|---|---|")
+    for g in rep["groups"]:
+        for arm in SNAP_ARMS:
+            s = g[arm]
+            a("| %s | %s | %s | %s | %s | %s | %d |"
+              % (g["family"], arm, _sec1(s["snap_seconds_median"]),
+                 _g(s["snap_iterations_median"]), _sec1(s["seconds_median"]),
+                 _g(s["cells_median"]), s["failures"]))
+    a("")
+    a("| body | arm | max_level | tolerance | p99/h_f | snap s | iterations | verdict |")
+    a("|---|---|---|---|---|---|---|---|")
+    for b in rep["bodies"]:
+        for arm in SNAP_ARMS:
+            x = b["arms"].get(arm)
+            if x is None:
+                continue
+            a("| %s | %s | %d | %s | %s | %s | %s | %s |"
+              % (b["geometry_id"], arm, x["max_level"],
+                 "%.6g" % x["snap_tolerance"] if x["snap_tolerance"] else "default",
+                 _f5(x["p99_over_hf"]), _sec1(x["snap_seconds"]), x["snap_iterations"],
+                 ("FAIL " + str(x["failure_class"])) if x["failure"] else "pass"))
+    a("")
+    a("The bar is the gate; the full tuning effect is AUT-12's L-run.")
+    return "\n".join(L) + "\n"
+
+
+def _sec1(x) -> str:
+    return "-" if x is None else "%.1f" % x
+
+
+def _g(x) -> str:
+    return "-" if x is None else "%.10g" % x
+
+
+def _cli_snap_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --snap-gate")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--streams", type=int, default=6)
+    ap.add_argument("--binary", default=BINARY_DEFAULT)
+    ap.add_argument("--ids")
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    args = ap.parse_args(argv)
+    if not os.path.exists(args.binary):
+        sys.stderr.write("rules: the binary %s is missing\n" % args.binary)
+        return 2
+    try:
+        return snap_gate(args.out, streams=max(1, args.streams), binary=args.binary,
+                         ids=args.ids.split(",") if args.ids else None,
+                         report_dir=args.report_dir)
     except (RulesError, OSError, ValueError, schema.SchemaError) as e:
         sys.stderr.write("rules: %s\n" % e)
         return 2
@@ -3225,6 +3713,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cli_win_gate(argv[1:])
     if argv[0] == "--glb-gate":
         return _cli_glb_gate(argv[1:])
+    if argv[0] == "--snap-gate":
+        return _cli_snap_gate(argv[1:])
     ap = _ArgParser(prog="rules.py", description="the L1 setup rules (AM-9)")
     ap.add_argument("stl", nargs="?")
     ap.add_argument("--id")

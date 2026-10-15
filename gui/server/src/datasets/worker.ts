@@ -2,11 +2,15 @@
 // worker entry (when loaded by `new Worker`) and the pool the service uses.
 // `runTask` is the single implementation, so the pool can fall back to
 // running a task inline when no worker can be started.
+import fs from 'node:fs/promises'
+import path from 'node:path'
 import { Worker, isMainThread, parentPort } from 'node:worker_threads'
 import type { CartesianGrid } from '../formats/cartesian.js'
 import { readFoamField, type FoamField } from '../formats/foam.js'
 import type { Bounds, SurfaceGeometry } from '../formats/geometry.js'
-import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
+import { buildCellLocator, locatePoint, type CellLocator } from '../formats/pointLocate.js'
+import { cutPolyMesh } from '../formats/polycut.js'
+import { detectLattice, polyMeshBoundarySurface, polyMeshCellCenters, readPolyMesh, type PolyMesh, type PolyMeshPatch } from '../formats/polymesh.js'
 import { readVtuCellData, readVtuPointData, readVtuInfo, vtuBoundarySurface, type VtuArrayInfo } from '../formats/vtu.js'
 
 export type WorkerTask =
@@ -15,6 +19,8 @@ export type WorkerTask =
   | { op: 'vtuGeometry'; path: string }
   | { op: 'vtuCellData'; path: string; name: string }
   | { op: 'vtuPointData'; path: string; name: string }
+  | { op: 'polyCut'; dir: string; origin: [number, number, number]; normal: [number, number, number] }
+  | { op: 'locate'; dir: string; point: [number, number, number] }
 
 export interface FoamFieldResult {
   op: 'foamField'
@@ -64,7 +70,61 @@ export interface VtuPointDataResult {
   data: Float32Array
 }
 
-export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult
+/** An exact plane cut of the polyMesh in `dir` (SPEC-LIT §148.1). */
+export interface PolyCutResult {
+  op: 'polyCut'
+  /** Three corners per triangle, each polycut coordinate rounded once to f32. */
+  positions: Float32Array
+  /** Cell id per triangle. */
+  cells: Uint32Array
+  /** Distinct cells cut. */
+  cellCount: number
+  area: number
+  openCells: number
+}
+
+/** The cell of the polyMesh in `dir` that holds a point (docs/17 STU-13); cell null: no cell does. */
+export interface LocateResult {
+  op: 'locate'
+  cell: number | null
+  method: 'contains' | 'nearest-centre' | null
+  center: [number, number, number] | null
+}
+
+export type WorkerResult = FoamFieldResult | PolyMeshResult | VtuGeometryResult | VtuCellDataResult | VtuPointDataResult | PolyCutResult | LocateResult
+
+// The last polyMesh a cut read, per thread: a run of slices on one mesh parses it once.
+// Keyed by the directory and every file's size and mtime, so a re-meshed case is read again.
+let cutMesh: { key: string; mesh: PolyMesh } | null = null
+
+async function polyMeshStamp(dir: string): Promise<string> {
+  const names = (await fs.readdir(dir)).sort()
+  const parts = [dir]
+  for (const name of names) {
+    const st = await fs.stat(path.join(dir, name))
+    parts.push(`${name}:${st.size}:${st.mtimeMs}`)
+  }
+  return parts.join('|')
+}
+
+async function meshForCut(dir: string): Promise<PolyMesh> {
+  const key = await polyMeshStamp(dir)
+  if (cutMesh && cutMesh.key === key) return cutMesh.mesh
+  const mesh = await readPolyMesh(dir)
+  cutMesh = { key, mesh }
+  return mesh
+}
+
+// The locator of the last mesh a point was located in, per thread, under the same key as cutMesh.
+let locator: { key: string; loc: CellLocator } | null = null
+
+async function locatorFor(dir: string): Promise<CellLocator> {
+  const key = await polyMeshStamp(dir)
+  if (locator && locator.key === key) return locator.loc
+  const loc = buildCellLocator(await meshForCut(dir))
+  locator = { key, loc }
+  return loc
+}
 export type ResultOf<T extends WorkerTask> = Extract<WorkerResult, { op: T['op'] }>
 
 export async function runTask(task: WorkerTask): Promise<WorkerResult> {
@@ -95,6 +155,26 @@ export async function runTask(task: WorkerTask): Promise<WorkerResult> {
       const { components, data } = await readVtuPointData(info, task.name)
       return { op: 'vtuPointData', components, data }
     }
+    case 'polyCut': {
+      const mesh = await meshForCut(task.dir)
+      const cut = cutPolyMesh(mesh, { origin: task.origin, normal: task.normal })
+      const cells = new Uint32Array(cut.triCells.length)
+      const seen = new Uint8Array(mesh.nCells)
+      let cellCount = 0
+      for (let t = 0; t < cells.length; t++) {
+        const c = cut.triCells[t]
+        cells[t] = c
+        if (!seen[c]) {
+          seen[c] = 1
+          cellCount++
+        }
+      }
+      return { op: 'polyCut', positions: Float32Array.from(cut.triPositions), cells, cellCount, area: cut.area, openCells: cut.openCells }
+    }
+    case 'locate': {
+      const hit = locatePoint(await locatorFor(task.dir), task.point)
+      return hit ? { op: 'locate', cell: hit.cell, method: hit.method, center: hit.center } : { op: 'locate', cell: null, method: null, center: null }
+    }
   }
 }
 
@@ -109,6 +189,10 @@ function transferables(result: WorkerResult): ArrayBuffer[] {
     case 'vtuCellData':
     case 'vtuPointData':
       add(result.data)
+      break
+    case 'polyCut':
+      add(result.positions)
+      add(result.cells)
       break
     case 'polyMesh':
     case 'vtuGeometry':

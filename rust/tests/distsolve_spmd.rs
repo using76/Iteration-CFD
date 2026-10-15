@@ -1701,7 +1701,8 @@ fn an_spmd_solve_dispatches_and_refuses_gamg() {
         assert_eq!(perf.n_reductions, want_red, "{kind:?}");
     }
 
-    // GAMG is refused by name, in §13.4's voice, before anything is launched.
+    // GAMG without a distributed cycle attached (SPEC-LIT §141.11) is
+    // refused by name, in §13.4's voice, before anything is launched.
     {
         let comm1 = &ThreadComm::world(1).expect("world")[0];
         let mut halo = SpmdHalo::new(&gpu, &dec.parts[0], 1).expect("plan");

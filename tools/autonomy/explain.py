@@ -176,6 +176,10 @@ TEMPLATES = {
                  "title": "coarsen the ladder until the predicted cells fit the budget",
                  "because": "far-field bands are coarsened first and the wall last, so the cells fit "
                             "with the least loss at the wall"},
+    "R-SNAP": {"layer": "rule",
+               "title": "tighten the snap dead band to a fixed fraction of the finest cell",
+               "because": "a snapped wall point stops once it is inside the dead band, so the band, "
+                          "not the geometry, sets the wall residual"},
     "RM-BUDGET-FAR": {"layer": "remedy",
                       "title": "halve the far-field band distances",
                       "because": "a run over the cell budget or out of time sheds far-field cells "
@@ -955,7 +959,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 53, len(TEMPLATES)
+    assert len(TEMPLATES) == 54, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -964,9 +968,9 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 7, "R": 8, "RM": 17, "PR": 6,
+    assert counts == {"PF": 11, "WL": 7, "R": 9, "RM": 17, "PR": 6,
                       "OPT": 4}, counts
-    print("[ok] templates: 53 rule ids (PF 11, WL 7, R 8, RM 17, PR 6, OPT 4), "
+    print("[ok] templates: 54 rule ids (PF 11, WL 7, R 9, RM 17, PR 6, OPT 4), "
           "each with its "
           "prefix's layer, no digit in any template")
 
@@ -987,15 +991,15 @@ def _g2_static_scan():
     finally:
         os.remove(planted)
         os.rmdir(tmp)
-    print("[ok] static scan: 53 ids in %d source files, all templated, none dead, "
+    print("[ok] static scan: %d ids in %d source files, all templated, none dead, "
           "PF-TEST only in remedies.py; module tables templated; a planted "
-          "RM-NEW-THING is reported missing" % sc["files"])
+          "RM-NEW-THING is reported missing" % (len(sc["ids"]), sc["files"]))
 
 
 def _g3_records():
     fx = load_fixtures()
     recs = fx["records_by_id"]
-    assert len(recs) == 61, len(recs)
+    assert len(recs) == 64, len(recs)
     ids = set()
     for rec in recs:
         c = card(rec)
@@ -1006,7 +1010,7 @@ def _g3_records():
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
-    print("[ok] records: 61 fixture records of 43 ids render, every line starts with "
+    print("[ok] records: 64 fixture records of 44 ids render, every line starts with "
           "its rule id, 0 ungrounded; fmt == remedies._fmt on 9 values")
 
 

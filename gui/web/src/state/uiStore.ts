@@ -1,7 +1,8 @@
 // Layout and preference state, persisted to localStorage (versioned).
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Locale, ViewId } from '@cfd/shared'
+import type { Locale, MeshDraft, UiCommand, UiSelection, ViewId } from '@cfd/shared'
+import type { ProbeOutcome } from '../viewer/controller/ViewerController'
 import { tx } from '../i18n/extra'
 
 export type Theme = 'light' | 'dark'
@@ -19,6 +20,18 @@ export interface LogFilter {
 /** The metrics chart's mode: the metric picker or the linear-solver sweep counts (show_metric). */
 export type MetricMode = 'metrics' | 'sweeps'
 
+/** The line the centreline tab samples: set_centerline as gui_control resolved it on the server (STU-09). */
+export interface CenterlineLine {
+  /** Workspace-relative result root. */
+  path: string
+  field: string
+  component: 'magnitude' | 'x' | 'y' | 'z'
+  /** Time directory label the server sampled. */
+  time: string | null
+  p0: [number, number, number]
+  p1: [number, number, number]
+}
+
 export type Tab =
   | { id: string; kind: 'file'; path: string }
   | { id: 'viewer'; kind: 'viewer' }
@@ -26,8 +39,52 @@ export type Tab =
   | { id: string; kind: 'diff'; path: string; toolUseId: string | null }
   | { id: string; kind: 'geometry'; path: string }
   | { id: string; kind: 'campaign'; path: string }
+  | { id: 'centerline'; kind: 'centerline'; line: CenterlineLine }
 
 export type PanelLayout = Record<string, number>
+
+/** The answer the server gave the Mesh dialog's last mesh.draft / mesh.start. */
+export interface MeshStatus {
+  action: 'draft' | 'start'
+  ok: boolean
+  code: string | null
+  error: string | null
+}
+
+/** The Mesh dialog on screen (STU-06b): the session's draft as the server last sent it, the mesh run Start began, and the last answer. */
+export interface MeshDialogState {
+  draft: MeshDraft
+  runId: string | null
+  status: MeshStatus | null
+}
+
+/** A right-column panel (STU-08a): the panels open_panel names, in the column's tab order. */
+export type RightPanelId = Extract<UiCommand, { type: 'open_panel' }>['panel']
+export const RIGHT_PANELS: readonly RightPanelId[] = ['AI Assistant', 'Post', 'Inspector', 'Properties']
+
+/** What the Properties panel shows (STU-08a): the selected tree node and its keys. STU-08b's project tree sets it. */
+export interface PropertiesNode {
+  id: string
+  label: string
+  keys: Record<string, unknown>
+}
+
+/** The selection a probe outcome leaves (STU-08a): a hit selects its cell, a miss selects nothing, and
+ *  an outcome that read nothing (no viewer, no dataset, no structured grid) leaves the selection as it was (null). */
+export function selectionOfProbe(o: ProbeOutcome): UiSelection | null {
+  if (o.ok) {
+    // `located` only when the server located a point (STU-13), so a pick's selection keeps its shape.
+    const located = o.hit.located ? { located: o.hit.located } : {}
+    return { kind: 'cell', id: o.hit.cell, center: o.hit.center, value: o.hit.value, field: o.hit.field, patch: null, ...located }
+  }
+  return o.code === 'MISS' ? { kind: 'none' } : null
+}
+
+/** The Boundary editor on screen (STU-07b). */
+export interface BoundaryEditorState {
+  path: string
+  rev: number
+}
 
 export interface UiState {
   theme: Theme
@@ -62,6 +119,16 @@ export interface UiState {
   metricSlots: [string | null, string | null]
   /** metrics or the sweeps view of the same chart. */
   metricMode: MetricMode
+  /** The Mesh dialog; null when it is closed. Transient: the draft lives on the server. */
+  meshDialog: MeshDialogState | null
+  /** The Boundary editor (STU-07b): the case it shows, and a count that makes an open editor read its table again; null when it is closed. Transient. */
+  boundaryEditor: BoundaryEditorState | null
+  /** The right column's active panel (STU-08a); the column itself shows while assistantVisible. Transient. */
+  rightTab: RightPanelId
+  /** The last probe or screen pick (STU-08a), what Inspector shows; null before the first. Transient. */
+  selection: UiSelection | null
+  /** The node Properties shows (STU-08a); null when nothing is selected. Transient. */
+  propertiesNode: PropertiesNode | null
 }
 
 export interface UiActions {
@@ -82,6 +149,8 @@ export interface UiActions {
   openViewerTab(): void
   openGeometryTab(path: string): void
   openCampaignTab(path: string): void
+  /** Opens (or re-aims) the one centreline chart tab on a resolved set_centerline line. */
+  openCenterlineTab(line: CenterlineLine): void
   openResidualsTab(runId: string | null, chart?: ChartKind): void
   /** Merges a set_log_filter patch; streams land de-duplicated in canonical order. */
   setLogFilter(patch: Partial<LogFilter>): void
@@ -108,6 +177,19 @@ export interface UiActions {
   setSettingsOpen(open: boolean): void
   setCursor(cursor: { line: number; col: number } | null): void
   prefillComposer(text: string): void
+  /** Opens the Mesh dialog on a draft, or shows a new draft in the open one (its run and answer stay). */
+  showMeshDialog(draft: MeshDraft): void
+  closeMeshDialog(): void
+  /** Records the server's mesh.status; a start that began a run points the dialog's log at it. */
+  setMeshStatus(status: MeshStatus, runId: string | null): void
+  /** Opens the Boundary editor on a case, or has the open one read its table again. */
+  showBoundaryEditor(path: string): void
+  closeBoundaryEditor(): void
+  /** Shows the right column on one of its panels (open_panel's target). */
+  openPanel(panel: RightPanelId): void
+  setSelection(selection: UiSelection | null): void
+  /** Puts a node in the Properties panel (null clears it). */
+  selectNode(node: PropertiesNode | null): void
 }
 
 export type UiStore = UiState & UiActions
@@ -146,6 +228,11 @@ const INITIAL: UiState = {
   logFilter: { text: '', streams: ['stdout', 'stderr', 'system'], follow: true },
   metricSlots: [null, null],
   metricMode: 'metrics',
+  meshDialog: null,
+  boundaryEditor: null,
+  rightTab: 'AI Assistant',
+  selection: null,
+  propertiesNode: null,
 }
 
 export function fileTabId(path: string): string {
@@ -174,7 +261,9 @@ export function tabScreenLabel(tab: Tab, locale: Locale): string {
           ? `${tx(locale, 'tab.geometry')}: ${basename(tab.path)}`
           : tab.kind === 'campaign'
             ? `${tx(locale, 'autonomy.tab')}: ${basename(tab.path) || '.'}`
-            : `${tx(locale, 'tab.diff')}: ${basename(tab.path)}`
+            : tab.kind === 'centerline'
+              ? `${tx(locale, 'charts.centerline')}: ${tab.line.field}`
+              : `${tx(locale, 'tab.diff')}: ${basename(tab.path)}`
 }
 
 /** The label ui.state reports for a tab: its path, its chart, or 'viewer'. */
@@ -189,6 +278,8 @@ export function tabStateLabel(tab: Tab): string {
       return tab.chart ?? 'residuals'
     case 'viewer':
       return 'viewer'
+    case 'centerline':
+      return 'centerline'
   }
 }
 
@@ -288,6 +379,9 @@ export const useUiStore = create<UiStore>()(
       openCampaignTab(path) {
         const p = path.replace(/\/+$/, '')
         get().openTab({ id: `campaign:${p}`, kind: 'campaign', path: p })
+      },
+      openCenterlineTab(line) {
+        get().openTab({ id: 'centerline', kind: 'centerline', line: { ...line, p0: [...line.p0], p1: [...line.p1] } })
       },
       openResidualsTab(runId, chart) {
         set((s) => {
@@ -407,6 +501,30 @@ export const useUiStore = create<UiStore>()(
       },
       prefillComposer(text) {
         set((s) => ({ composerPrefill: { text, nonce: (s.composerPrefill?.nonce ?? 0) + 1 } }))
+      },
+      showMeshDialog(draft) {
+        set((s) => ({ meshDialog: { draft, runId: s.meshDialog?.runId ?? null, status: s.meshDialog?.status ?? null } }))
+      },
+      closeMeshDialog() {
+        set({ meshDialog: null })
+      },
+      setMeshStatus(status, runId) {
+        set((s) => (s.meshDialog ? { meshDialog: { ...s.meshDialog, status, runId: runId ?? s.meshDialog.runId } } : {}))
+      },
+      showBoundaryEditor(path) {
+        set((s) => ({ boundaryEditor: { path, rev: (s.boundaryEditor?.rev ?? 0) + 1 } }))
+      },
+      closeBoundaryEditor() {
+        set({ boundaryEditor: null })
+      },
+      openPanel(panel) {
+        set({ rightTab: panel, assistantVisible: true })
+      },
+      setSelection(selection) {
+        set({ selection })
+      },
+      selectNode(node) {
+        set({ propertiesNode: node })
       },
     }),
     {

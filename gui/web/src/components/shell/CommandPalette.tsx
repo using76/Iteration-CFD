@@ -6,7 +6,7 @@ import { matchPaths } from '../../assistant/mentions'
 import { useExplorerStore } from '../../state/explorerStore'
 import { useSessionStore } from '../../state/sessionStore'
 import { selectActiveFile, useUiStore, type Tab } from '../../state/uiStore'
-import { actions } from '../../ws/actions'
+import { actions, activeCasePath } from '../../ws/actions'
 import { Icon, type IconName } from '../common/Icon'
 
 interface Item {
@@ -32,6 +32,8 @@ function tabLabel(tab: Tab, t: ReturnType<typeof useT>): string {
       return `${t('tab.geometry')}: ${basename(tab.path)}`
     case 'campaign':
       return `${t('autonomy.tab')}: ${basename(tab.path)}`
+    case 'centerline':
+      return `${t('charts.centerline')}: ${tab.line.field}`
   }
 }
 
@@ -91,6 +93,20 @@ export function CommandPalette() {
           if (target) s.openGeometryTab(target)
         },
       },
+      // The server holds the mesh draft: an empty edit makes or fetches it and opens the dialog on it.
+      { id: 'c:mesh', group: 'commands', label: t('meshDialog.open'), icon: 'mesh', hint: online ? undefined : t('conn.offline'), run: () => actions.meshDraft({ type: 'open_mesh_dialog' }) },
+      // The Boundary editor reads the open case's table from the server itself.
+      {
+        id: 'c:boundary',
+        group: 'commands',
+        label: t('boundary.open'),
+        icon: 'mesh',
+        hint: activeCasePath() === null ? t('boundary.noCase') : undefined,
+        run: () => {
+          const p = activeCasePath()
+          if (p !== null) s.showBoundaryEditor(p)
+        },
+      },
       { id: 'c:newchat', group: 'commands', label: t('palette.newChat'), icon: 'plus', hint: 'Ctrl+Alt+N', run: () => actions.newSession() },
       ...(['mesh', 'run', 'postprocess', 'validate', 'export'] as QuickAction[]).map<Item>((a) => ({
         id: `q:${a}`,
@@ -101,7 +117,7 @@ export function CommandPalette() {
         run: () => actions.quick(a),
       })),
     ]
-    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' || tab.kind === 'geometry' || tab.kind === 'campaign' ? tab.path : undefined, icon: tab.kind === 'viewer' || tab.kind === 'geometry' ? 'cube' : tab.kind === 'campaign' || tab.kind === 'residuals' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
+    const tabItems: Item[] = tabs.map((tab) => ({ id: `t:${tab.id}`, group: 'tabs', label: tabLabel(tab, t), hint: tab.kind === 'file' || tab.kind === 'geometry' || tab.kind === 'campaign' ? tab.path : undefined, icon: tab.kind === 'viewer' || tab.kind === 'geometry' ? 'cube' : tab.kind === 'campaign' || tab.kind === 'residuals' || tab.kind === 'centerline' ? 'chart' : tab.kind === 'diff' ? 'diff' : 'file', run: () => s.activateTab(tab.id) }))
     const fileItems: Item[] = matchPaths(files, q, 12).map((p) => ({ id: `f:${p}`, group: 'files', label: basename(p), hint: p, icon: /\.(ste?p|stl|obj)$/i.test(p) ? 'cube' : /\.jsonc?$/.test(p) ? 'braces' : /\.rs$/.test(p) ? 'gear' : 'file', run: () => s.openFile(p) }))
     const lq = q.toLowerCase()
     const filt = (i: Item) => !lq || i.label.toLowerCase().includes(lq) || (i.hint ?? '').toLowerCase().includes(lq)

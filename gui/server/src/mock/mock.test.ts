@@ -166,3 +166,24 @@ describe('mock ofgpu-cht', () => {
     }
   })
 })
+
+describe('mock ofgpu-par (PAR-17)', () => {
+  it('prints par.rs line shapes that the studio report reads as a PASS', async () => {
+    const { mockParLines, mockParRefusal } = await import('./par.js')
+    const { parRotationOk, parseParReport } = await import('@cfd/shared')
+    const r = parseParReport(mockParLines(parseMockArgs('ofgpu-par', ['cases/plume.jsonc', '-np', '2,3', '-comm', 'threads', '-method', 'hilbert'])))
+    expect(r.transport).toBe('threads')
+    expect(r.ranks).toEqual([2, 3])
+    expect(r.rotations.map((x) => `${x.np}/${x.method}/${x.rot}`)).toEqual(['2/hilbert/0', '2/hilbert/1', '3/hilbert/0', '3/hilbert/1', '3/hilbert/2'])
+    expect(r.rotations[0].ghosts).toBe(1680)
+    expect(r.rotations[2].krylov.map((k) => k.iterations)).toEqual([[125, 125, 125], [79, 79, 79]])
+    expect(r.rotations.every(parRotationOk)).toBe(true)
+    expect(r.verdict?.ok).toBe(true)
+    expect(r.references.map((x) => x.label)).toEqual(['PCG', 'PBiCGStab'])
+    const quiet = parseParReport(mockParLines(parseMockArgs('ofgpu-par', ['cases/plume.jsonc', '-np', '2', '-quiet'])))
+    expect(quiet.rotations).toHaveLength(6)
+    expect(quiet.mesh).toBeNull()
+    expect(mockParRefusal(parseMockArgs('ofgpu-par', ['cases/plume.jsonc', '-comm', 'threads']))).toBeNull()
+    expect(mockParRefusal(parseMockArgs('ofgpu-par', ['cases/plume.jsonc', '-comm', 'mpi']))).toBe('-comm mpi: the MPI transport is deferred (PAR-06) and is not built. Use -comm threads')
+  })
+})

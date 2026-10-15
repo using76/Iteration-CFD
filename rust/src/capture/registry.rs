@@ -107,6 +107,18 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("vcycle_replays_under_capture"),
     ),
     (
+        "src/amg/distcycle.rs",
+        Stance::Refused(
+            "the distributed V-cycle fills every level's halo through \
+             SpmdHalo and allgathervs the coarsest right-hand side on every \
+             cycle - host round trips by construction; DistGamg::cycle \
+             refuses a capture by name (SPEC-LIT 141.11, \
+             a_distributed_gamg_request_that_cannot_be_served_is_refused_by_name). \
+             Alternative: the one-process V-cycle amg::Gamg, gated by \
+             vcycle_replays_under_capture",
+        ),
+    ),
+    (
         "src/amg/galerkin.rs",
         Stance::Gate("galerkin_replays_under_capture"),
     ),
@@ -127,6 +139,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/compressible/energy.rs",
+        Stance::Gate("the_compressible_energy_equation_replays_bitwise"),
+    ),
+    (
         "src/compressible/momentum.rs",
         Stance::Gate("the_compressible_momentum_predictor_replays_bitwise"),
     ),
@@ -142,11 +158,49 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/dust/device.rs",
         Stance::Gate("dust_fsc_replays_under_capture"),
     ),
+    (
+        "src/dust/particle.rs",
+        Stance::Outside(
+            "the reacting dust parcel's step is the f64 host twin of SPEC-LIT \
+             159.7; it launches nothing, and its device counterpart \
+             particle_step in src/dust/device.rs is gated there by \
+             dust_particle_step_replays_under_capture",
+        ),
+    ),
+    (
+        "src/dust/progress.rs",
+        Stance::Refused(
+            "`ProgressEquation::solve` is one outer iteration of the c~ equation \
+             of SPEC-LIT 155.2, and it READS BACK the bounds counter after every \
+             solve: 155.2 reports each cell outside [0, 1] and clips none, so the \
+             count must reach the host. The linear solve's residual check reads \
+             back too. Its kernels' launchers in src/dust/device.rs are gated \
+             there by dust_progress_kernels_replay_under_capture",
+        ),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",
         Stance::Gate("the_solid_side_iteration_replays_bitwise"),
     ),
+    (
+        "src/compressible/mod.rs",
+        Stance::Refused(
+            "`Compressible::step` is the outer loop of SPEC-LIT 125.3, and its \
+             step 8 READS BACK `T`, `p`, `rho`, `u` and `mdot` after every outer \
+             iteration: SPEC-LIT 122.3 counts the out-of-bounds cells on the \
+             host and stops the run on a nonzero count, and residualControl \
+             stops a steady run on the solvers' residuals. A data-dependent \
+             stop is the one thing a graph cannot hold. Its equations are each \
+             gated on their own (thermo, momentum, pressure, energy). \
+             Alternative: a captured inner region per outer iteration with the \
+             count reduced on the device; not implemented",
+        ),
+    ),
+    // SPEC-LIT 125.7: the local step is formed at the top of each pseudo
+    // step of `Compressible::step`, and its three time-term kernels run only
+    // in the equations `Compressible::new` attached it to.
+    ("src/compressible/lts.rs", Stance::Via("src/compressible/mod.rs")),
     (
         "src/compressible/exact/riemann.rs",
         Stance::Outside(

@@ -8,7 +8,8 @@
 //! The distributed Krylov under `single`, refined: SPEC-LIT §118.4's
 //! mixed-precision iterative refinement around §73's `dist_pcg` /
 //! `dist_pbicgstab` and §138's `spmd_pcg` / `spmd_pbicgstab` (SPEC-LIT
-//! §118.12, F32-07). `single` only; the f64 build does not compile this file.
+//! §118.12, F32-07), and since AMG-06a (§141.9) around §141.11's stationary
+//! `spmd_gamg`. `single` only; the f64 build does not compile this file.
 //!
 //! The outer loop is (118.4.1)-(118.4.9) on every part at once: the
 //! solution `x` in double on each part, the double residual and §8.4 factor
@@ -49,6 +50,10 @@ use super::{DistPerformance, DistSystem, DistWorkspace};
 pub(super) enum Method {
     Pcg,
     Pbicgstab,
+    /// The stationary distributed V-cycle, [`super::spmd::spmd_gamg`]
+    /// (SPEC-LIT §141.11), refined since AMG-06a (§141.9). SPMD only: the
+    /// in-process `dist_solve` refuses GAMG before it gets here.
+    Gamg,
 }
 
 /// The refinement's state, one entry per part this process holds (every
@@ -177,6 +182,12 @@ impl Parts for InProcess<'_> {
                 self.w,
                 ctrl,
             ),
+            Method::Gamg => Err(Error::Config(
+                "dist_solve: the stationary GAMG has no in-process form; it runs \
+                 on the SPMD path, spmd_solve with SpmdWorkspace::set_gamg \
+                 (SPEC-LIT 141.11)"
+                    .to_string(),
+            )),
         }
     }
 }
@@ -215,6 +226,7 @@ impl Parts for Spmd<'_> {
         let who = match self.method {
             Method::Pcg => "spmd_pcg",
             Method::Pbicgstab => "spmd_pbicgstab",
+            Method::Gamg => "spmd_gamg",
         };
         super::spmd::vote_verdict(self.comm, self.w, stop, who)
     }
@@ -240,6 +252,17 @@ impl Parts for Spmd<'_> {
                 ctrl,
             ),
             Method::Pbicgstab => super::spmd::spmd_pbicgstab_float(
+                gpu,
+                sol,
+                comm,
+                &mut d[0],
+                Some(&b[0]),
+                sys,
+                self.halo,
+                self.w,
+                ctrl,
+            ),
+            Method::Gamg => super::spmd::spmd_gamg_float(
                 gpu,
                 sol,
                 comm,
@@ -296,7 +319,7 @@ pub(super) fn dist_refined(
 }
 
 /// The SPMD refined solve: [`super::spmd_pcg`] / [`super::spmd_pbicgstab`]
-/// under `single`, on the rank's one part. The caller has run the SPMD
+/// / [`super::spmd_gamg`] under `single`, on the rank's one part. The caller has run the SPMD
 /// preflight, so every refusal came before the first collective.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spmd_refined(

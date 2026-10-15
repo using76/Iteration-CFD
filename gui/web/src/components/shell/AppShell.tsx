@@ -1,13 +1,20 @@
-// [activity | side | center(tabs / bottom) | assistant] / status.
+// [activity | side | center(tabs / bottom) | right column] / status. The right column
+// (STU-08a) holds the AI Assistant, Post, Inspector and Properties panels.
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import { AssistantPanel } from '../../assistant/AssistantPanel'
 import { BottomPanel } from '../../terminal/BottomPanel'
 import { useUiStore } from '../../state/uiStore'
+import { InspectorPanel } from '../right/InspectorPanel'
+import { PostPanel } from '../right/PostPanel'
+import { PropertiesPanel } from '../right/PropertiesPanel'
+import { RightTabStrip } from '../right/RightTabStrip'
 import { TabBar } from '../center/TabBar'
 import { TabHost } from '../center/TabHost'
 import { SidePanel } from '../side/SidePanel'
 import { ActivityBar } from './ActivityBar'
 import { CommandPalette } from './CommandPalette'
+import { BoundaryEditor } from '../side/BoundaryEditor'
+import { MeshDialog } from '../side/MeshDialog'
 import { StatusBar } from './StatusBar'
 import { TitleBar } from './TitleBar'
 
@@ -18,6 +25,9 @@ export function AppShell() {
   const mainLayout = useUiStore((s) => s.mainLayout)
   const centerLayout = useUiStore((s) => s.centerLayout)
   const setLayout = useUiStore((s) => s.setLayout)
+  const rightTab = useUiStore((s) => s.rightTab)
+  const openPanel = useUiStore((s) => s.openPanel)
+  const locale = useUiStore((s) => s.locale)
   const layoutKey = `${sideVisible ? 's' : ''}${assistantVisible ? 'a' : ''}`
   return (
     <div className="app" data-testid="app-shell">
@@ -57,7 +67,16 @@ export function AppShell() {
             <>
               <Separator className="rrp-sep" />
               <Panel id="assistant" defaultSize={420} minSize={300} maxSize="55%" groupResizeBehavior="preserve-pixel-size">
-                <AssistantPanel />
+                <div className="panel right-col" data-testid="right-column" data-panel={rightTab}>
+                  <RightTabStrip locale={locale} active={rightTab} onPick={openPanel} />
+                  {/* The assistant stays mounted under another panel so a chat keeps its state. */}
+                  <div className="right-pane" hidden={rightTab !== 'AI Assistant'}>
+                    <AssistantPanel />
+                  </div>
+                  {rightTab === 'Post' ? <PostPanel /> : null}
+                  {rightTab === 'Inspector' ? <InspectorPanel /> : null}
+                  {rightTab === 'Properties' ? <PropertiesPanel /> : null}
+                </div>
               </Panel>
             </>
           ) : null}
@@ -65,6 +84,8 @@ export function AppShell() {
       </div>
       <StatusBar />
       <CommandPalette />
+      <MeshDialog />
+      <BoundaryEditor />
     </div>
   )
 }
