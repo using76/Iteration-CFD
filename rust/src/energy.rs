@@ -964,7 +964,8 @@ pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
              (p~ << p0), and at M = 0.3 the isentropic density ratio \
              rho/rho0 = (1 + 0.2 M^2)^-2.5 is already 0.956, a 4.4 % density \
              change. The run stops (SPEC-LIT §93.6); -permissive continues \
-             with a warning",
+             with a warning. ofgpu-compressible solves this flow with the \
+             full gas law (SPEC-LIT §122-§127)",
             r.max, r.cell_of_max, when, LOW_MACH_LIMIT
         )));
     }
@@ -975,7 +976,8 @@ pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
              SPEC-LIT §25's premise M << 1 no longer holds (at M = 0.3 \
              rho/rho0 = 0.956 already, a 4.4 % density change) and the \
              acoustic filtering is unjustified - continuing because \
-             -permissive was given (SPEC-LIT §93.6)",
+             -permissive was given (SPEC-LIT §93.6); ofgpu-compressible \
+             solves this flow with the full gas law (SPEC-LIT §122-§127)",
             r.max, r.cell_of_max, when, LOW_MACH_LIMIT
         ),
     );
@@ -3497,7 +3499,7 @@ mod tests {
 
         let hot = MachReport { max: 0.31, cell_of_max: 7, volume_mean: 0.2 };
         let e = refuse_above_low_mach(&hot, "step 12").unwrap_err().to_string();
-        for wanted in ["0.31", "cell 7", "step 12", "0.3", "§25", "-permissive"] {
+        for wanted in ["0.31", "cell 7", "step 12", "0.3", "§25", "-permissive", "ofgpu-compressible"] {
             assert!(e.contains(wanted), "{wanted:?} not in {e}");
         }
 

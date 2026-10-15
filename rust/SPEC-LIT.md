@@ -43639,7 +43639,8 @@ error, inside CMP-08's 1 % bar (0.410 % at 288.15 K and 0.014 % at 273.15 K).
 
 `p_op` is stated by the case (`pOperating` / `physics.compressible.pOperating`,
 CMP-14), with no default: a compressible case that omits it is refused by name. A
-written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well.
+written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well;
+it is not (§125.8).
 
 ### 122.3 Floors, bounds and what is never clipped
 
@@ -43661,7 +43662,8 @@ written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as
 
 v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), laminar or
 Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
-radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
+radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15; the list
+is in §125.8).
 
 ### 122.5 The device twins of the gas state (CMP-08)
 
@@ -44621,6 +44623,93 @@ Each difference is taken over the field's largest magnitude: `max_P |a_P - b_P| 
 No driver or validate code changed. No existing kernel changed: the four kernels were
 appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
 both builds.
+
+### 125.8 The driver as built (CMP-15)
+
+`No GPL-licensed source was consulted.` `rust/src/bin/compressible.rs` is `ofgpu-compressible`
+(a `[[bin]]` of its own). It reads a case in either format, refuses by name what §122.4
+leaves out, builds `Compressible` (§125.6) and calls `step` once per time step or SIMPLE
+iteration. It adds no numerics. The case's settings reach the controls through one
+function, `driver_controls`, which both `run` and the pair test call (§13.4.1).
+
+**The run mode is the case's.** `ddtSchemes default` (JSONC `numerics.ddt`) `steadyState`
+or `localEuler` makes a steady run, and `Euler` or `backward` a transient one at the
+case's `deltaT`. The number of steps is the case's `endTime/deltaT`
+(`TurbulenceControls::n_outer_iterations`, as both readers lower it), and `-iters N`
+overrides it. A steady run stops early when `residualControl` (`U`, `p`, `T`; OpenFOAM
+`SIMPLE/residualControl` only, because JSONC has no such key; the energy bar may be
+spelled `T`, `h` or `e`) is met on the initial residuals (§125.6). A bar the case does not
+name is 0 and is never met, and the banner says that the run will take every iteration.
+
+**What is read, and from where** (both formats through `common::CaseNumerics`):
+
+| control | setting |
+|---|---|
+| `momentum.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,U)`, `grad(U)`, `laplacianSchemes`/`snGradSchemes` `default` |
+| `energy.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,T)`, `grad(T)`, the same `default` |
+| `pressure.retarded` | `div(phid,p)`: `Gauss upwind` (and its absence) is `Retarded::Upwind`; a §7 limited scheme is `Retarded::Limited`, §124.1's `limitedRetarded`; any other scheme is refused by name |
+| `u_solver`, `p_solver`, `t_solver` | `solvers/U`, `solvers/p`, `solvers/T` (JSONC `numerics.solvers`) |
+| `u_relax`, `t_relax`, `p_relax` | `relaxationFactors` `U`, `T` (equations) and `p` (fields); JSONC `numerics.relaxation` |
+| `n_outer`, `n_corr`, `pressure.n_non_orth_corr` | `nOuterCorrectors`, `nCorrectors`, `nNonOrthogonalCorrectors` |
+| `lts.cfl` | `maxCo` (§125.7) |
+| `momentum.g`, `energy.g` | `constant/g` (JSONC `physics.gravity`) |
+| `gas` | `constant/thermophysicalProperties` or `physics.compressible` (§122.6) |
+
+`viscousWork` stays on, the §125.1 default when `mu > 0`; no case key exists for it yet. A
+`bounded` prefix on `div(phi,U)` or `div(phi,T)` is refused by name: both equations are
+conservative on the mass flux, and `div(mdot)` is `-ddt(rho)` there, not a convergence
+error. Under `-permissive` the scheme runs without the prefix and says so.
+
+**Refused by name** (§122.4): `-np` and `-parallel`, an mpiexec environment (`PMI_RANK`,
+`PMI_SIZE`) and a `processor*` directory (decomposition); the JSONC `motion` block and a
+`constant/dynamicMeshDict` other than `staticFvMesh` (motion); JSONC `sources` and the files
+`fvOptions`, `fvModels` and `fvConstraints` under `constant/` or `system/` (sources); every
+turbulence model but laminar; `physics.buoyancy` `boussinesq` (this solver carries the full
+density); a non-Newtonian rheology; a case with no gas. *DESIGN* (CMP-15): until CMP-25 builds
+(127.1), Spalart-Allmaras is refused too, with a message that names CMP-25, because the solver
+has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A boundary
+condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
+`mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
+as set up is the whole condition (§126.7). Every other type is refused with the field, the
+patch and the type. The compressible kinds name the unit that builds them (CMP-16 to CMP-18,
+§126.1-§126.6), and the rest say that this driver rewrites no boundary between iterations.
+`output.restart` is refused through `OutputPlan::refuse_restart`, because no checkpoint of
+the compressible state exists.
+
+**What is written.** `p` (the gauge `p` of §122.2), `U`, `T`, `rho` and `Mach` go through
+the one pipeline of §44, from the case's `output` block or from `-output`, `-writeInterval`
+(transient) and `-writeEvery` (steady). The writers are `foam`, `vtu`, `nvdb`, `vdb` and
+`usda`. `rho` is the solver's cell and boundary density. `Mach` is (122.12) on the host,
+from the written `u` and `T`, per cell and per boundary face. Both carry `calculated` on
+every patch but a constraint patch. *DESIGN* (§122.2 left it to CMP-15): `p_abs` is not
+written. `pOperating` is a constant of the case, so `p_abs = p + p_op` is recovered exactly
+from the written `p`, and a second pressure field would be a second statement of one
+unknown.
+
+**The low-Mach refusal.** `ofgpu-lowmach`'s `M > 0.3` refusal and its `-permissive`
+warning (`energy::refuse_above_low_mach`, §93.6) and its banner line now name
+`ofgpu-compressible` (message only).
+
+**Tests** (`cargo test --release --bin ofgpu-compressible`, module `compressible`):
+
+| test | class | what it holds |
+|---|---|---|
+| `every_knob_changes_the_run` | D | The 50-cell tube below, three steps. Each of 20 settings changes the written bytes: `div(phi,U)`, `div(phi,T)`, `div(phid,p)`, `grad` (with a limited scheme that reads it), `relaxation` `U`, `T` and `p` (with two outer correctors, so a non-final iteration is relaxed), `correctors`, `outerCorrectors`, the `p`, `U` and `T` solver tolerances, `ddt` Euler to backward, `deltaT`, `gamma`, `W`, `Pr`, the Sutherland `As`, `pOperating` and `gravity`. `nonOrthogonalCorrectors` is §13.4.1's one admissible exception (the tube is orthogonal, so the correction it repeats is zero) and is asserted on the controls |
+| `the_orthogonal_settings_reach_the_controls` | D | `nonOrthogonalCorrectors 2` reaches `pressure.n_non_orth_corr`; `-iters 7` overrides the case's 3 steps. On the OpenFOAM cavity made steady with `localEuler`, `SIMPLE/residualControl { p 1e-3; U 1e-4; h 1e-5; }` reaches the three bars and `maxCo 5` reaches `lts.cfl` (a steady run's stop and its pseudo step are not shown by three transient steps) |
+| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming CMP-25, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
+| `a_fifty_cell_tube_runs_in_under_thirty_seconds` | P | The smoke run: 1 m tube, 50 x 1 x 1 cells, air at 300 K and 50 m/s, a 320 K inlet, a fixed `p = 0` outlet, symmetry sides, Euler at `1e-5` s for 30 steps. It runs in under 30 s with no bounds violation, `M_max` in (0.14, 0.15) (50/347.2 = 0.144), and the five fields written |
+| `an_openfoam_case_runs_and_writes_the_five_fields` | P | A blockgen 8 x 8 x 1 cavity with `thermophysicalProperties` (§122.6's air), laminar, Euler at `1e-3` s for 5 steps, writes the five fields |
+
+The driver is a binary, and the tests are bin tests of the f64 build (the single lib test
+crate does not compile, §112.3). The single build compiles the binary
+(`cargo build --release --features single --bin ofgpu-compressible`). Its rows are class D
+and P: they ask for a bit difference, a finite run and a refusal text, so no f32 tolerance
+is involved.
+
+*Landed* (f64): `every_knob_changes_the_run` found no inert setting (20 of 20).
+The smoke run took `0.22` s for its 30 steps (bar 30 s), and `M_max` was `0.1440`. The
+single-precision binary runs the same tube in `0.31` s with `M_max` `0.1440` (reported, not a
+test row).
 
 ---
 

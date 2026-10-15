@@ -130,6 +130,10 @@ name = "ofgpu-lowmach"
 path = "src/bin/lowmach.rs"
 
 [[bin]]
+name = "ofgpu-compressible"
+path = "src/bin/compressible.rs"
+
+[[bin]]
 name = "ofgpu-cht"
 path = "src/bin/cht.rs"
 
