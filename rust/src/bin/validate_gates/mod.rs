@@ -44,3 +44,7 @@ pub(crate) mod acoustic;
 /// SPEC-LIT §127.6, Gate CMP-LM: the lid-driven cavity at lid Mach 0.05
 /// against Ghia, Ghia & Shin (1982) with Gate 94-D's tolerance (CMP-20).
 pub(crate) mod cavity_lm;
+
+/// SPEC-LIT §127.6, Gate CMP-COU: compressible Couette with viscous
+/// heating against (127.12) (CMP-22).
+pub(crate) mod couette;

@@ -3916,6 +3916,15 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_cavity_lm", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-COU: compressible Couette with viscous
+    // heating against (127.12) at U 200 m/s on 40 cells, live, in
+    // src/bin/validate_gates/couette.rs (CMP-22).
+    if c.section("Gate CMP-COU: compressible Couette with viscous heating, adiabatic-wall rise and T profile (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::couette::GATE);
+    let r = validate_gates::couette::check_couette(c, &gpu);
+    c.ran("check_couette", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

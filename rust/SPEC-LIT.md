@@ -46240,6 +46240,8 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-20 | CMP-AC pulse speed, PIMPLE (5 outer, `alpha_p` 1; printed only) | f64 0.99692 `c_0`, f32 0.99666 `c_0` | CMP-20 |
 | CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(u/U - Ghia)` over Table I (bar 0.02) | f64 2.716e-3, f32 2.718e-3 | CMP-20 |
 | CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(v/U - Ghia)` over Table II (bar 0.02) | f64 7.255e-3, f32 7.257e-3 | CMP-20 |
+| CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: adiabatic-wall `T_w - T_top`, error over `Pr U^2/(2 c_p)` (bar 0.5 %) | f64 1.103e-4, f32 5.842e-4 | CMP-22 |
+| CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: `T` profile L-infinity over the rise (bar 0.5 %) | f64 1.541e-4, f32 4.935e-4 | CMP-22 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -46382,6 +46384,73 @@ iterations in both builds, and the change falls by a factor of 0.4 to 0.7 per ch
 rows (2.7e-3 against 3.7e-3, 7.3e-3 against 8.2e-3), inside the bar either way. The run takes
 29 s (f64) and 27 s (f32) on this machine's GPU, and about 4 min in each build when two
 other lanes share that GPU.
+
+#### 127.6.4 Gate CMP-COU as built (CMP-22)
+
+`src/bin/validate_gates/couette.rs`, one `ofgpu-validate` section after Gate CMP-LM, live
+in both builds. **The key** is (127.12), derived in §127.4 and evaluated live by
+`compressible::exact` (`Couette`, `couette_adiabatic_wall_rise`; CMP-07). Both rows are
+class P, the same bar in both builds: the adiabatic-wall rise `T_w - T_top` within 0.5 %
+of `Pr U^2/(2 c_p)`, and the `T` profile L-infinity within 0.5 % of the rise,
+
+```
+profile_error = max_i |T_i - T(y_i)| / (T_w - T_top) ,     T from (127.12)             (127.21)
+```
+
+(decision TAKEN: normalised by the exact rise; relative to `T` itself the bar would be
+about 20 times looser).
+
+**The run.** A channel `h = 1e-3` m tall on 40 cells (`NY`) and 4 cells (`NX`) of the same
+size along x, one cell of `h/NY` across in z with both z sides `symmetry`; `xMin`/`xMax`
+are a cyclic pair (`BlockSpec::set_cyclic_axis`), the two y sides `wall`. The gas is
+`PerfectGas::air` at `p_op = 1e5` Pa with `Viscosity::Constant { mu }`, so `Pr = 0.71` and
+`c_p = 1004.69` J/(kg K). The wall at `y = h` moves at `U = 200` m/s (`U/c_0 = 0.576`) and
+is held at `T_top = 300` K; the wall at `y = 0` is stationary, its `T` zero-gradient
+(adiabatic), and `p` is zero-gradient on both walls. `mu = rho_0 U h/10` with
+`rho_0 = p_op/(R_s T_top) = 1.16124` kg/m^3 and `mu = 2.3224e-2` Pa s, so the run is at
+`Re = 10`: a low Re keeps the diffusion time short, and the rise of (127.12) does not
+depend on `mu`. The run starts at rest — `u = 0`, `p = 0` (gauge), `T = T_top`
+everywhere — NOT from the key. The march is CMP-LM's: SIMPLE with the local time step
+(125.2) at `CFL = 20`, `localEuler` on momentum and energy, `alpha_U = alpha_T = 0.7`,
+`alpha_p = 0.3`, `nOuterCorrectors 1`, no `residualControl`, PBiCGStab with DILU (`U` and
+`T` at `1e-9`, `relTol 0.01`; `p` at `1e-10`, `relTol 0.001`); the div schemes are the
+controls' defaults, and `viscousWork` stays on — it IS the heating. **The stop** is the
+field's own, tested in chunks of 200 iterations: no cell's
+`(T - T_top)/(T_w - T_top)` or `u/U` moves by more than `2.5e-5` across a chunk (a
+two-hundredth of the bar), capped at 16000 iterations. The change contracts by a factor
+`r` of about 0.84 per chunk, so the march's remaining distance from its fixed point is
+about `2.5e-5 r/(1 - r) = 1.3e-4` of the rise at the stop, below the fixed point's own
+offset derived next. A run that stops on a bound (§122.3)
+fails both rows with NaN and registers the verdict.
+
+**The discrete fixed point** (derived). With `u` linear and the flow parallel, the
+convective terms of (125.1) vanish, and the face fluxes of `kappa grad T` and of the
+viscous work are exact for a quadratic `T` and a linear `u` on a uniform mesh. Write
+`theta = (T - T_top)/(T_w - T_top)`, `eta = y/h` and `Delta = 1/NY`. The interior rows and
+the adiabatic wall's row are then met by `theta_i = C - eta_i^2` for any `C`. The
+isothermal wall's half-cell closure, `(0 - theta_N)/(Delta/2)`, fixes `C = 1 + Delta^2/4`.
+So every cell sits `Delta^2/4 = 1/(4 NY^2) = 1.56e-4` of the rise above (127.12), and the
+zero-gradient face value on `yMin`, `theta_1 = C - Delta^2/4 = 1`, is the exact rise.
+
+**Measured: both rows pass in both builds** (table above). In f64 the field stop is met at
+10200 iterations. The measured rise is `14.132118` K against the oracle `14.133677` K, an
+error of `1.10e-4`, which is the march's remaining distance. The profile L-infinity (127.21)
+is `1.541e-4`, the fixed point's `1.56e-4` offset less that distance near the adiabatic
+wall. `u` matches (127.12)'s `u = U y/h` to `4.4e-9` of `U`, and `M_max` is `0.5685`.
+With the coder's first stop of `2.5e-4` per chunk (7600 iterations), the march's remaining
+distance (`1.3e-3`) dominated: the rise read `1.10e-3` low and the profile `9.40e-4`, in
+both builds. In f32 the stop is met at 8600 iterations, earlier than in f64. At the stop a
+chunk's change is `2.5e-5` of the rise, about `1.8e-6` K per iteration, below `T`'s f32
+spacing at 300 K (`3.1e-5` K). So the f32 march stalls on round-off rather than reaching
+f64's fixed point. The rise reads `14.125420` K (error `5.84e-4`), the profile L-infinity
+is `4.935e-4`, and `u` is `4.0e-6` of `U`. Both values are the f32 floor of this march, an
+order of magnitude inside the bar. (127.12) fixes no pressure level, and the channel is
+sealed and cyclic, so the mass in it cannot leave while its mean `T` rises by `2/3` of the
+rise. The pressure settles about `3.1e3` Pa above `p_op` (derived, first order), and `T`
+never reads it. The last outer line's mass imbalance is `6.5e-16` (f64). The cyclic x pair
+runs in `ofgpu::compressible` as `build_mesh` declares it, with no solver change. One
+`-sections` run of the gate took 346 s (f64) and 199 s (f32) while another program shared
+this machine's GPU. The coder's runs of the first stop took 47 s and 48 s on an idle GPU.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
