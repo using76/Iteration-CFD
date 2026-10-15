@@ -27,7 +27,7 @@ campaign through the CLI), then baseline.py --selftest (the baselines: the refus
 L3 prior: the null policy and the features, the scaler and the abstention distance, the
 vote, the bank, the remedy path, the G-PRIOR gate on an oracle campaign and its disabled
 branch, the 2026-09-26 rule in the bank, the edge class and the whole-path rule, the hook
-seam, a live rules+prior campaign, the shipped prior disabled by the user's decision, the check and the CLI), then optimise.py --selftest
+seam, a live rules+prior campaign, the shipped prior disabled by its gate file, the check and the CLI, the gate-driven ship rule of AUT-11), then optimise.py --selftest
 (the L4 optimiser: the config rebuild, the knob features, the cross-fitted ensemble, the Sobol pool and the pick,
 the hook seam, the refinement rounds on two oracle campaigns and the disabled branch, the refit on
 new rows and its gate, a live rules+opt campaign, the

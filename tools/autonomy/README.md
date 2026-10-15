@@ -1141,8 +1141,9 @@ supervisor's run. For later units — AM-14: `prior/tuning_rules.json.gz`
 (`baseline.read_bundle`) holds every rules attempt on the tuning split with its outcome;
 AM-16: `rules+prior` and `full` call `prior.attempt1`, which reads
 `prior/aml/prior_model.json` and, when it is disabled, records PR-DISABLED on every geometry
-(the ablation "-prior" is then equal to it by construction); while `USER_SHIP` disables the shipped
-prior, attempt1 records PR-DISABLED "by the user's decision" even though the gate's model is enabled.
+(the ablation "-prior" is then equal to it by construction); since AUT-11 attempt1 enables the model
+only from its gate file (`USER_SHIP`'s gate-driven rule, below) and otherwise records PR-DISABLED "by its
+gate file" with the reasons.
 
 **The re-measure under the 2026-09-26 rule (PRIOR-FIX).** AM-16's held-out G-OPT miss
 came through family B, where the prior's paths regressed the lathes against rules-only
@@ -1186,7 +1187,8 @@ record of that run; optimise.py's SOURCES still read its bundles.
 was vacuous — real equals rules on every one of the 420 tuning geometries (0 gains, 0 losses) — so the
 user's decision of 2026-10-03 ships the prior DISABLED: while `USER_SHIP` disables it, `prior.attempt1`
 records PR-DISABLED "by the user's decision" on every attempt 1 of the gate's enabled model, and attempt 1
-stays the rules' config.
+stays the rules' config. AUT-11 replaced that decision with the gate-driven rule below; it is kept as
+`USER_SHIP["superseded"]`.
 
 **Gated by the surrogate, under D-6 (AUT-10, 2026-10-15).** `prior.py --gate --rules DIR --work DIR
 --surrogate [DIR]` gates the prior by AUT-09's hurdle surrogate (default `optimise/aml2`, model sha256
@@ -1220,6 +1222,26 @@ out-of-fold p_fail): the prior would act on 112 and abstain PR-RULES on 244; of 
 p_fail 1 exactly where the rules' attempt 1 fails, rules 2, real 5, shuffled 5, 2, 4, PR-KNN 3,
 PR-RULES 2, PR-FAR 3, every voter with a non-empty path, PASS; with p_fail 0 everywhere the prior acts
 nowhere and D-6 FAILs it. The prior still ships disabled (`USER_SHIP`).
+
+**Gate-driven since 2026-10-06 (AUT-11, the user's tranche-17 order).** `USER_SHIP` is no longer a ship
+decision but the recorded rule "gate-driven since 2026-10-06 (the user's tranche-17 order)": the prior
+and the optimiser are enabled only from the gate file beside their model (`G-PRIOR.json`, `G-OPT.json`).
+`prior.gate_status` and `optimise.gate_status` enable a model only when all of these hold, and list every
+one that fails as a reason: the file is there and readable; its canonical sha256 is the
+`gate.report_sha256` the gate writer recorded in the model after it wrote the file (canonical, so a CRLF
+checkout does not matter; the gate record is outside `model_sha`, so no model sha moved); its verdict is
+PASS; it is non-vacuous — for G-PRIOR, D-6 recomputed from the file's pass counts and the file's own
+`non_vacuous`; for G-OPT, `conditions.beats_rules` is true, so a CV-only PASS (a refit or the hurdle,
+`beats_rules` none) is vacuous; its `model_sha256` is the model's (for G-OPT, also the gate record's); and
+the model's own `enabled` flag is set. `prior.attempt1` records PR-DISABLED and `optimise.propose`
+records OPT-DISABLED "by its gate file" with the rule and the reasons as inputs (`ship_rule`,
+`gate_reasons`), so every card stays grounded; `make_hook` (the gates' own in-memory seam) is unchanged.
+Under the rule every committed gate keeps its layer off: `prior/aml` (a PASS that is vacuous, gain 0 and
+margin 0.333) and `prior/` (FAIL), `optimise/aml` and `optimise/aml2` (FAIL, ablation not measured), and
+the AM-14 record `optimise/` (PASS, beats the rules) because it was gated before AUT-11 and records no
+gate-file sha. The committed files are not rewritten. The selftests' property cases (prior group 14,
+optimise group 8): a genuine oracle gate enables; a FAIL, a vacuous PASS, a tampered gate file, a missing
+one and a model sha mismatch each keep the layer off with exactly that reason.
 
 ## optimise.py — the L4 optimiser (surrogate proposals, G-OPT)
 
@@ -1319,7 +1341,7 @@ hurdle group reproduces the committed `optimise/aml2` beyond the date.
 
 For later units — AM-16: modes `rules+opt` and `full` call `optimise.propose`, which reads
 `optimise/aml/opt_model.json` and `optimise/aml/train.json.gz` and refits in seconds; when it is disabled
-it records OPT-DISABLED at every EXHAUSTED; no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
+it records OPT-DISABLED at every EXHAUSTED (since AUT-11 the gate file decides, section "Gate-driven since 2026-10-06"); no pick sets feature_tolerance 0 on a body with sharp edges (section D); the shipped model is the 2026-10-03 refit (its training rows include attempts meshed before that rule), and it ships disabled.
 
 ## evaluate.py — the held-out evaluation (G-FAIL, G-BLC-0 and the guards)
 

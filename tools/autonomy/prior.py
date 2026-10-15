@@ -30,6 +30,10 @@ only where the out-of-fold p_fail of the rules' attempt 1 is at least 0.5
 (PR-RULES below it), only same-edge-class neighbours with a non-empty path vote,
 and every gate also needs D-6's non-vacuity (a net gain over rules-only and a
 margin over the shuffled mean, whole geometries); that gate writes prior/aml2/.
+Since AUT-11 USER_SHIP is the recorded rule "gate-driven since 2026-10-06 (the
+user's tranche-17 order)": attempt1 enables the model only from the G-PRIOR.json
+beside it - PASS, non-vacuous, its sha the one the model recorded, its model sha
+the model's (gate_status) - and otherwise records PR-DISABLED with the reasons.
 
     python tools/autonomy/prior.py --selftest
     python tools/autonomy/prior.py --plan --rules DIR [--surrogate [DIR]]
@@ -119,11 +123,19 @@ GATE_SCHEMA = "autonomy-prior-gate/1"
 CHECK_SCHEMA = "autonomy-prior-check/1"
 DECISION_SCHEMA = "autonomy-prior-decision/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
-_MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None}
-# the user's ship decision over the gate's: None leaves the gate's enabled flag in force
-USER_SHIP = {"enabled": False, "date": "2026-10-03",
-             "why": "its G-PRIOR pass was vacuous: real equals rules on every "
-                    "tuning geometry"}
+_MODEL = {"path": os.path.join(REPORT_DIR, MODEL_NAME), "v": None, "key": None,
+          "st": None, "st_key": None}
+# the ship rule (AUT-11): since the user's tranche-17 order the shipped prior is
+# enabled only by its gate file (gate_status); the 2026-10-03 decision it replaced
+# is kept as the record
+USER_SHIP = {"rule": "gate-driven since 2026-10-06 (the user's tranche-17 order)",
+             "since": "2026-10-06",
+             "requires": "a gate file whose verdict is PASS and non-vacuous (D-6), "
+                         "whose sha matches the model's record of it, and whose "
+                         "model sha matches the model",
+             "superseded": {"enabled": False, "date": "2026-10-03",
+                            "why": "its G-PRIOR pass was vacuous: real equals "
+                                   "rules on every tuning geometry"}}
 _REMEDY_BY_ID = {r["id"]: r for r in remedies.REMEDIES}
 
 
@@ -643,10 +655,10 @@ def _rules_decision(ctx, model, p_fail, bank_n, cls, class_n):
             "edits": [], "record": rec, "vote": None, "skipped": []}
 
 
-def disabled_decision(model, user=None):
+def disabled_decision(model, status=None):
     """The abstain decision recorded on every geometry when the prior ships
-    disabled; `user` (USER_SHIP) records the user's ship decision over the
-    gate's enabled flag."""
+    disabled; `status` (gate_status, AUT-11) records why USER_SHIP's gate-driven
+    rule keeps the shipped prior off."""
     g = model["gate"]
     inputs = [{"name": "verdict", "value": g["verdict"], "unit": ""},
               {"name": "rules_pass", "value": g["rules_pass"], "unit": ""},
@@ -659,13 +671,15 @@ def disabled_decision(model, user=None):
     formula = ("the gate did not earn the prior its place, so the setup rules "
                "decide attempt one")
     tail = ""
-    if user is not None:
-        head += " by the user's decision"
-        inputs.append({"name": "user_disabled", "value": user["date"],
+    if status is not None:
+        head += " by its gate file"
+        why = "; ".join(status["reasons"])
+        inputs.append({"name": "ship_rule", "value": USER_SHIP["rule"],
                        "unit": ""})
-        formula = ("the user disabled the prior, so the setup rules decide "
-                   "attempt one")
-        tail = "; %s" % user["why"]
+        inputs.append({"name": "gate_reasons", "value": why, "unit": ""})
+        formula = ("the ship rule is gate-driven: the gate file does not enable "
+                   "the prior, so the setup rules decide attempt one")
+        tail = "; %s: %s" % (USER_SHIP["rule"], why)
     msg = ("%s (G-PRIOR %s: attempt-1 passes rules %s, real %s, shuffled mean "
            "%s of %s%s); attempt 1 stays the rules' config"
            % (head, g["verdict"], explain.fmt(g["rules_pass"]),
@@ -789,16 +803,89 @@ def make_hook(model):
     return hook
 
 
+def gate_status(model, gate_path):
+    """USER_SHIP's gate-driven rule (AUT-11): {"enabled", "reasons", "path",
+    "gate_sha256"} of a model from the gate file beside it.  Enabled only when
+    the file's verdict is PASS, D-6 recomputed from its pass counts is
+    non-vacuous and the file records so, its canonical sha256 is the one the
+    model's gate record holds, its model_sha256 is this model's, and the model's
+    own enabled flag is set; every check that fails is a reason."""
+    rel = _rel_here(gate_path)
+    rep = _read_json_or_none(gate_path)
+    if not isinstance(rep, dict):
+        return {"enabled": False, "path": rel, "gate_sha256": None,
+                "reasons": ["no readable gate file at %s" % rel]}
+    reasons = []
+    g = model.get("gate") if isinstance(model.get("gate"), dict) else {}
+    gsha = schema.canonical_sha256(rep)
+    want = g.get("report_sha256")
+    if want is None:
+        reasons.append("the model records no sha of its gate file (gated "
+                       "before AUT-11)")
+    elif want != gsha:
+        reasons.append("the gate file is sha %s but the model recorded %s (it "
+                       "was edited or replaced after the gate)"
+                       % (gsha[:12], str(want)[:12]))
+    if rep.get("verdict") != "PASS":
+        reasons.append("the gate's verdict is %s" % rep.get("verdict"))
+    try:
+        sy = rep["systems"]
+        _c, d6 = conditions_of(sy["rules"]["pass"], sy["real"]["pass"],
+                               [sy[v]["pass"] for v in VARIANTS
+                                if v.startswith("shuffle-")])
+    except (KeyError, TypeError, ZeroDivisionError):
+        d6 = None
+    if d6 is None:
+        reasons.append("the gate file holds no pass counts for D-6")
+    elif not d6["non_vacuous"]:
+        reasons.append("the pass is vacuous (D-6: real - rules %s, needs %s; "
+                       "real - shuffled mean %s, needs %s)"
+                       % (explain.fmt(d6["gain"]), explain.fmt(NV_GAIN_MIN),
+                          explain.fmt(d6["margin"]), explain.fmt(NV_MARGIN_MIN)))
+    elif rep.get("non_vacuous") is not True:
+        reasons.append("the gate file does not record D-6's non-vacuity")
+    msha = model_sha(model)
+    if rep.get("model_sha256") != msha:
+        reasons.append("the gate file is for model %s, this model is %s"
+                       % (str(rep.get("model_sha256"))[:12], msha[:12]))
+    if not model.get("enabled"):
+        reasons.append("the model's enabled flag is false")
+    return {"enabled": not reasons, "path": rel, "gate_sha256": gsha,
+            "reasons": reasons}
+
+
+def _rel_here(path):
+    """path relative to tools/autonomy with forward slashes (absolute when it is
+    on another drive)."""
+    try:
+        return os.path.relpath(os.path.abspath(path), HERE).replace(os.sep, "/")
+    except ValueError:
+        return os.path.abspath(path).replace(os.sep, "/")
+
+
+def ship_status(path=None):
+    """(model, gate_status) of the shipped model (or `path`) and the
+    G-PRIOR.json beside it, cached by both files' mtimes."""
+    path = path or _MODEL["path"]
+    model = load_model(path)
+    gp = os.path.join(os.path.dirname(os.path.abspath(path)), REPORT_NAME)
+    key = (path, os.stat(path).st_mtime_ns,
+           os.stat(gp).st_mtime_ns if os.path.isfile(gp) else None)
+    if _MODEL.get("st_key") != key or _MODEL.get("st") is None:
+        _MODEL["st"], _MODEL["st_key"] = gate_status(model, gp), key
+    return model, _MODEL["st"]
+
+
 def attempt1(ctx):
     """The hook campaign.py's HOOKS names; the model comes from prior_model.json.
 
-    While USER_SHIP disables the shipped prior, an ENABLED model still records
-    PR-DISABLED here - "by the user's decision"; make_hook itself is unchanged
-    (the gate's own seam and the live group use it)."""
-    model = load_model()
-    if model.get("enabled") and USER_SHIP is not None \
-            and not USER_SHIP["enabled"]:
-        d = disabled_decision(model, USER_SHIP)
+    USER_SHIP's rule is gate-driven (AUT-11): unless gate_status enables the
+    model from its gate file, attempt 1 records PR-DISABLED with the reasons;
+    make_hook itself is unchanged (the gate's own seam and the live group use
+    it)."""
+    model, st = ship_status()
+    if not st["enabled"]:
+        d = disabled_decision(model, st)
         return {"verdict": d["verdict"], "record": d["record"]}
     return make_hook(model)(ctx)
 
@@ -1265,8 +1352,11 @@ def _report_and_bundles(head, bundle, shipped, rep, round_infos, report_dir,
                               "geometry_ids": info["geometry_ids"],
                               "bundle": bi})
     if write:
-        _dump(os.path.join(report_dir, MODEL_NAME), shipped)
+        # AUT-11: the model records its gate file's canonical sha as written
         _dump(os.path.join(report_dir, REPORT_NAME), rep)
+        shipped["gate"]["report_sha256"] = schema.canonical_sha256(
+            _read_json_or_none(os.path.join(report_dir, REPORT_NAME)))
+        _dump(os.path.join(report_dir, MODEL_NAME), shipped)
         _write_text(os.path.join(report_dir, REPORT_MD), report_md(rep))
     return rep
 
@@ -1718,9 +1808,12 @@ def _setup_of(H, gid):
 
 def _g1_constants(H):
     assert len(FEATURES) == 17 and K == 3 and SHUFFLES == 3 and EPS == 1e-6
-    assert USER_SHIP == {"enabled": False, "date": "2026-10-03",
-                         "why": "its G-PRIOR pass was vacuous: real equals rules "
-                                "on every tuning geometry"}, USER_SHIP
+    assert USER_SHIP["rule"] == ("gate-driven since 2026-10-06 (the user's "
+                                 "tranche-17 order)") and \
+        USER_SHIP["superseded"] == {"enabled": False, "date": "2026-10-03",
+                                    "why": "its G-PRIOR pass was vacuous: real "
+                                           "equals rules on every tuning "
+                                           "geometry"}, USER_SHIP
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
                         "RM-TOPO-REFINE", "RM-TE", "RM-SNAP-WALL", "RM-SNAP-FT",
                         "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
@@ -2127,12 +2220,10 @@ def _g9_hook(H):
     campaign._check_hook(res, "prior", H["cfg"]["F-1-009"], H["knobs"])
     pm_mod = importlib.import_module("prior")
     old = dict(pm_mod._MODEL)
-    old_ship = pm_mod.USER_SHIP
     try:
         # the importlib leg runs F-1-011 (a banked PR-KNN gid) beside D-1-010;
-        # the gate's own seam, so the user's ship decision stands aside here
+        # the oracle gate's file enables its model (PASS, non-vacuous, AUT-11)
         ids2 = ["F-1-011", "D-1-010"]
-        pm_mod.USER_SHIP = None
         pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out2 = os.path.join(H["tmp"], "hook-import")
@@ -2159,11 +2250,11 @@ def _g9_hook(H):
         recs3 = campaign.load_records(out3)
         assert sum(1 for gid in recs3 for t in recs3[gid]
                    if t["record"]["rule_id"] == "PR-DISABLED") == 2
-        # the shipped prior is disabled by the user's decision (USER_SHIP) even
-        # though this model's gate enabled it: attempt 1 stays the rules'
-        # config and PR-DISABLED says so, grounded on both geometries
-        pm_mod.USER_SHIP = old_ship
-        pm_mod._MODEL["path"] = os.path.join(rdir, MODEL_NAME)
+        # the shipped prior/aml model is enabled with a PASS gate, but the gate
+        # file does not enable it under USER_SHIP's rule (vacuous, gated before
+        # AUT-11): attempt 1 stays the rules' config and PR-DISABLED says why,
+        # grounded on both geometries
+        pm_mod._MODEL["path"] = os.path.join(REPORT_DIR, MODEL_NAME)
         pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
         out5 = os.path.join(H["tmp"], "hook-user")
         _fake_prior_campaign(out5, ids2)
@@ -2175,10 +2266,13 @@ def _g9_hook(H):
                 if t["record"]["rule_id"] == "PR-DISABLED"]
         assert len(dis5) == 2, dis5
         for t in dis5:
-            assert "by the user's decision" in t["record"]["message"], \
+            assert "by its gate file" in t["record"]["message"] and \
+                "the pass is vacuous" in t["record"]["message"], \
                 t["record"]["message"]
-            assert t["record"]["inputs"][-1] == \
-                {"name": "user_disabled", "value": "2026-10-03", "unit": ""}, \
+            assert t["record"]["inputs"][-2] == \
+                {"name": "ship_rule", "value": USER_SHIP["rule"], "unit": ""}, \
+                t["record"]["inputs"][-2]
+            assert t["record"]["inputs"][-1]["name"] == "gate_reasons", \
                 t["record"]["inputs"][-1]
             card5 = explain.card(t["record"])
             assert explain.ungrounded(card5["line"], [t["record"]]) == [], \
@@ -2193,12 +2287,11 @@ def _g9_hook(H):
     finally:
         pm_mod._MODEL.clear()
         pm_mod._MODEL.update(old)
-        pm_mod.USER_SHIP = old_ship
     print("[ok] hook seam: make_hook in a fake rules+prior campaign (3 prior rows, "
           "5 attempt-1 passes), attempt1 through importlib, PR-DISABLED on a "
           "disabled model, a missing model ends each geometry HARNESS-ERROR; every "
           "PR card grounded, audit and replay ok; the shipped prior disabled by "
-          "the user's decision (PR-DISABLED on both)")
+          "its gate file (vacuous; PR-DISABLED on both)")
 
 
 def _g10_live(H):
@@ -2233,6 +2326,110 @@ def _g10_live(H):
           "the rules (PR-NOEDIT on the plane); 0 harness errors, 0 orphans, at "
           "most 2 meshers"
           % (f["outcome"]["exit_code"], f["outcome"]["failure_class"]))
+
+
+def _g14_ship(H):
+    """AUT-11: only a PASS, non-vacuous gate file whose sha and model sha match
+    enables the model; every other case records PR-DISABLED with its reason."""
+    import prior as pm_mod
+    src = os.path.join(H["tmp"], "rep")          # the oracle gate (group 7)
+
+    def case(name, edit_rep=None, edit_model=None, rerecord=True, drop=False):
+        d = _copy_dir(src, os.path.join(H["tmp"], "ship-" + name))
+        rp, mp = os.path.join(d, REPORT_NAME), os.path.join(d, MODEL_NAME)
+        r, m = _read_json_or_none(rp), _read_json_or_none(mp)
+        if edit_rep:
+            edit_rep(r)
+            _dump(rp, r)
+        if edit_model:
+            edit_model(m)
+        if rerecord and not drop:
+            m["gate"]["report_sha256"] = schema.canonical_sha256(
+                _read_json_or_none(rp))
+        _dump(mp, m)
+        if drop:
+            os.remove(rp)
+        return mp
+
+    def fail(r):
+        r["verdict"], r["enabled"] = "FAIL", False
+
+    def vacuous(r):        # a PASS whose real equals rules (D-6 gain 0)
+        r["systems"]["rules"]["pass"] = r["systems"]["real"]["pass"]
+        for v in ("shuffle-0", "shuffle-1", "shuffle-2"):
+            r["systems"][v]["pass"] = r["systems"]["real"]["pass"] - 1
+        r["non_vacuous"] = False
+
+    def tamper(r):
+        r["systems"]["real"]["pass"] += 1
+
+    def other_model(m):
+        m["d_abstain"] = m["d_abstain"] * 2.0
+
+    m0 = _read_json_or_none(os.path.join(src, MODEL_NAME))
+    msha0 = model_sha(m0)
+    want = {
+        "genuine": (case("genuine"), []),
+        "fail": (case("fail", fail), ["the gate's verdict is FAIL"]),
+        "vacuous": (case("vacuous", vacuous),
+                    ["the pass is vacuous (D-6: real - rules 0, needs 1; real - "
+                     "shuffled mean 1, needs 1)"]),
+        "tampered": (case("tampered", tamper, rerecord=False), None),
+        "missing": (case("missing", drop=True),
+                    ["no readable gate file at %s" % _rel_here(
+                        os.path.join(H["tmp"], "ship-missing", REPORT_NAME))]),
+        "model": (case("model", edit_model=other_model), None),
+    }
+    gsha0 = schema.canonical_sha256(_read_json_or_none(
+        os.path.join(src, REPORT_NAME)))
+    assert m0["gate"]["report_sha256"] == gsha0, m0["gate"]
+    old = dict(pm_mod._MODEL)
+    try:
+        for name, (mp, reasons) in want.items():
+            pm_mod._MODEL["path"] = mp
+            pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+            model, st = pm_mod.ship_status()
+            got = st["reasons"]
+            if name == "tampered":
+                assert len(got) == 1 and got[0].startswith(
+                    "the gate file is sha ") and "edited or replaced" in got[0], got
+            elif name == "model":
+                assert got == ["the gate file is for model %s, this model is %s"
+                               % (msha0[:12], model_sha(model)[:12])], got
+            else:
+                assert got == reasons, (name, got)
+            assert st["enabled"] is (name == "genuine"), (name, st)
+            res = pm_mod.attempt1(H["ctx"]["F-1-009"])
+            rid = res["record"]["rule_id"]
+            if name == "genuine":
+                # decide() ran: the live bank holds F-1-009 itself (the gate's
+                # leave-one-out read it PR-FAR in group 7)
+                assert rid == "PR-KNN", rid
+                continue
+            assert rid == "PR-DISABLED" and res["verdict"] == "abstain", rid
+            rec = res["record"]
+            assert rec["inputs"][-1] == {"name": "gate_reasons",
+                                         "value": "; ".join(got), "unit": ""}
+            assert "; ".join(got) in rec["message"], rec["message"]
+            assert explain.ungrounded(explain.card(rec)["line"], [rec]) == []
+        # the committed gates: prior/aml (a vacuous PASS) and prior/ (a FAIL)
+        for d, first in ((REPORT_DIR, "the model records no sha"),
+                         (AM13_DIR, "the model records no sha")):
+            pm_mod._MODEL["path"] = os.path.join(d, MODEL_NAME)
+            pm_mod._MODEL["v"] = pm_mod._MODEL["key"] = None
+            _m, st = pm_mod.ship_status()
+            assert st["enabled"] is False and st["reasons"][0].startswith(first) \
+                and any(x.startswith("the pass is vacuous") for x in st["reasons"]), \
+                (d, st["reasons"])
+    finally:
+        pm_mod._MODEL.clear()
+        pm_mod._MODEL.update(old)
+    print("[ok] the gate-driven ship rule (AUT-11): only the genuine oracle gate "
+          "(PASS, non-vacuous, sha and model sha matching) enables the model; a "
+          "FAIL, a vacuous PASS, a tampered gate file, a missing one and a model "
+          "sha mismatch each keep it off and attempt1 records PR-DISABLED with "
+          "the reason (grounded); the committed prior/aml and prior/ stay off "
+          "(vacuous, gated before AUT-11)")
 
 
 def _copy_dir(src, dst):
@@ -2509,7 +2706,8 @@ def selftest():
               (_g9_hook, "hook seam"), (_g10_live, "live"),
               (_g11_check_cli, "check and CLI"),
               (_g12_rule, "the rule, the edge class, the whole path"),
-              (_g13_gated, "gated by the surrogate, D-6"))
+              (_g13_gated, "gated by the surrogate, D-6"),
+              (_g14_ship, "the gate-driven ship rule"))
     try:
         try:
             H["gates"] = schema.load_gates()
