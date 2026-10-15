@@ -477,7 +477,7 @@ pub(crate) fn check_blasius_plate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         b.fpp0,
         2.0 * b.fpp0
     ));
-    c.check(
+    c.check_p(
         "Gate 132-L: |f''(0) - 0.332057|, the reference itself (SPEC-LIT 88.7)",
         s((b.fpp0 - 0.332057).abs()),
         s(1e-6),
@@ -529,7 +529,7 @@ pub(crate) fn check_blasius_plate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         }
     }
     c.note(&format!("Gate 132-L finest: {} plate faces in 2e4 <= Re_x <= {re_l:.0e}; worst at {cf_where}", band.len()));
-    c.check(
+    c.check_p(
         "Gate 132-L: max |C_f/C_f,Blasius - 1|, finest mesh, 2e4 <= Re_x <= Re_L (144.2a)",
         s(cf_err),
         s(CF_TOL),
@@ -554,7 +554,7 @@ pub(crate) fn check_blasius_plate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         worst_u.1,
         b.f_prime(worst_u.0)
     ));
-    c.check(
+    c.check_p(
         "Gate 132-L: max |u/U - f'(eta)|, finest mesh, eta <= 8 at Re_x = 1e5 (144.2b)",
         s(worst_u.2),
         s(PROFILE_TOL),

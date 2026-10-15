@@ -38150,7 +38150,7 @@ subsections, by unit:
 - 118.8 — moving geometry in f64 on the device (F32-11)
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
-- 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13)
+- 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13 sections 1-25, F32-14 sections 26-65)
 
 and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -39781,7 +39781,7 @@ coefficients, the per-level vectors and level 0's operator `fl32(A)`, (141.45). 
 loop, because the outer solve already iterates in double. Under `--features single` the key is a
 no-op: the hierarchy is float there already, and §118.4 refines the solve around it (§141.9).
 
-### 118.14 Row classes in `ofgpu-validate` - sections 1-25, and the round-off tolerance
+### 118.14 Row classes in `ofgpu-validate` - every section, and the round-off tolerance
 
 Every row a gate or a test takes has a precision class (docs/17 §5.1 rule 4): **P**, a
 physics, discretisation or published band; **A**, an accumulated identity evaluated in f64;
@@ -39808,9 +39808,10 @@ holds it as `tol32` (computed in both builds, so the rule is tested in either), 
 **The mechanics.** `Checks` in `src/bin/validate.rs` takes a classed row through `check_p`,
 `check_a`, `check_d` or `check_roundoff(what, err, tol64)`; `require` is class D. Each is tallied
 once, and the summary prints `row classes (docs/17 5.1.4, SPEC-LIT 118.14): N P, N A, N R, N D;
-...; N rows carry no class yet`. A plain `check` remains for the sections F32-14 has not yet
-classified (26 onward); those rows are the "no class yet" count. Two more rules make "every row of
-sections 1-25 is reported" true under `single`:
+...; N rows carry no class yet`. A plain `check` is the "no class yet" count. After F32-14 no
+section row is taken through it (every run reports 0 there), and a row a later unit adds carries
+its class from birth (docs/17 §5.1 rule 4). Two more rules make "every row is reported" true
+under `single`:
 
 1. **A NaN is never dropped.** `f64::max` and `f32::max` return the other operand when one is NaN,
    so the sup norms `max_abs`, `max_abs_diff`, `max_rel_diff`, `max_abs_diff_vec3` and
@@ -39819,7 +39820,8 @@ sections 1-25 is reported" true under `single`:
    returns NaN on a NaN scale. `check` already failed a non-finite `err`. Local
    `worst = worst.max(..)` loops inside individual check functions are not swept by this unit.
 2. **Under `single` a section function that stops is a row, not the end of the run.** Each
-   section 1-25 function's `Result` goes through `Checks::ran`. Under `single` an `Err` is one
+   section function's `Result` goes through `Checks::ran` (sections 1-25 from F32-13, 26-65 from
+   F32-14). Under `single` an `Err` is one
    failed class D row, "`<function>` ran to its end", with the error as a note, and the run goes
    on; in the f64 build the `Err` aborts the run exactly as before. Inside §20's static drop
    (section 11) a step that stops under `single` leaves that block's three rows failed on a NaN,
@@ -39872,6 +39874,88 @@ unit traced them:
 
 A cure for each changes numerics (the library's arithmetic or the validation's own) and is not
 built here.
+
+**Sections 26-65 (F32-14).** docs/17's row for F32-14 names sections 26-51, the run order before
+tranche 17. The run has 65 sections now: tranche 17 added Gates 100-C and 100-D, 105-A..C, 94-D,
+110-A..C, CMP-B, 119-A, 145-A, 78-D's measured leg and 132-L after them. F32-14 classes every
+row of sections 26-65: 269 row sites in `src/bin/validate.rs` and 7 in
+`src/bin/validate_gates/` (`martin_moyce.rs`, `splash.rs`, `blasius_plate.rs`). Every section
+function of 26-65 goes through `Checks::ran`. The class of a row follows the four definitions
+above, with the precedents of sections 1-25:
+- A tolerance of `0` is D, except a one-sided physics shortfall such as `1.9 - p`, which is P.
+- An eps-scaled tolerance `k Scalar::EPSILON` becomes R at `k f64::EPSILON`. The two are the same
+  number in the f64 build, and under `single` (118.14.1) gives `k f32::EPSILON` exactly.
+- A hand-coded `if single { 1e-5 } else { tol64 }` is (118.14.1) itself, so it became R at
+  `tol64`: CMP-B's two symmetry rows (`1e-6`) and 145-A's volume row (`1e-12`).
+- A closed form against a printed constant is P when its tolerance is at least `1e-6` and R when
+  it is tighter. Below `1e-6` an f32 evaluation cannot resolve the digits, as in 49-C's view
+  factors (`1e-8`) and 100-B's piece jump at 1000 K (`1e-8`).
+- Gate 105-A's three space-conservation rows are A: the swept volumes are f64 on the device
+  (§118.8). Its uniform-flow row is R, as §118.8 says.
+- The parcel ledgers are R, as §118.9 says, and so are 100-A's two Kirchhoff rows. Those are f64
+  arithmetic on the f32 temperature field.
+
+A gate's own verdict line, the §99 report, keeps its f64 condition under `single`. Under `single`
+98-B, 98-C, 100-A and 100-B can print a MISSES verdict while their R rows pass at tol32. Making
+the verdicts read the class tolerance is a follow-up.
+
+**What was measured** (2026-10-15, RTX 5070 Ti, sm_120). The card was shared with lanes S and M,
+and one long run of theirs doubled the times for an hour. Each `-sections` command was capped at
+600 s, and a section over the cap was measured twice before it was called NOT RUN.
+- **f64 build:** 595 rows in sections 26-65, 591 ok. The four misses are Gate 95-A's, the same
+  as before. The class line for these sections is 137 P, 6 A, 153 R, 299 D, with 0 unclassified
+  (the four §69 audit rows of each run are not counted here).
+- **f64 identity:** each section's rows were compared with a run of the binary before this unit
+  (`f64-before`, a copy of HEAD 1a8b9ba's exe), every field but `seq`. Every row of 39 of the 40
+  sections is identical. For Gate 94-D the 600-s cap stopped the before run at 4 rows, and those
+  4 are identical in text.
+- **`single` build:** 416 of 473 rows pass in the 34 sections that ran, with 0 unclassified. 59
+  R rows pass at tol32 with an error above their tol64.
+- **Gates the row names:** 95-E and 105-A pass every row at their f64 bands, and so does 110-C
+  (16 of 16). 95-D's three stress rows pass at `0.01`, but its three "outer loop converged" rows
+  (D) fail, so 95-D is MISSED. 105-B is MISSED. 94-D is NOT RUN under `single` (Re = 100's four
+  rows pass at their f64 bands). 105-C is NOT RUN in either build, because the Turek-Hron meshes
+  of `cases/turekHron` are not generated in this tree.
+
+| # | section | f64 | single | single misses (class, err against the tolerance) |
+|---|---|---|---|---|
+| 26 | conjugate heat transfer | 16/16 | 15/16 | S47.12 Gate 2, k_solid -> inf (P): 3.66e-4 against 8.0e-5 |
+| 27 | Gate 93-B | 6/6 | 3/6 | leg B: no global tolerance in [1e-8, 1e-14] gives each region 1e-8 (D), so the series slab q (R) reads 1.0 and T_i (R) reads 4.75 against 1e-5 |
+| 28 | Gate 93-A | 8/8 | 8/8 | |
+| 29 | the conjugate fluid/solid interface | 48/48 | NOT RUN | over 600 s twice; at the cap 19 of the 33 rows taken failed: Gate 59-B's series and balance rows (R) 8.5e-4 .. 1.0e-1, 59-A, Gate 5 (P) |
+| 30 | surface-to-surface radiation | 47/47 | 45/47 | S50.4 fr in [0,1) (D); S50.2 the Neumann sweep count matches its table (D) |
+| 31 | fan curves, porous jumps, psychrometrics, metrics | 83/83 | 81/83 | S52.12 the lumped triple's flow rate (R) 2.74e-5; S52.5 Fritsch-Carlson monotone (R) 6.10e-5; both against 1e-5 |
+| 32 | Spalart-Allmaras, DES | 43/43 | 39/43 | S56.4 at chi = 1e14 (R) 9.0 against 1e-5; S57.3 tanh saturation derived == bisected (D); S57.3 f_d zero threshold (P) 7.38e-2 against 1e-5; S57.4 one ulp on the SA background (D) |
+| 33 | gamma-Re_theta | 20/20 | 19/20 | S88 the 596 breakpoint, not round-off (D) |
+| 34 | the 2015 gamma model | 24/24 | 21/24 | three S90.11 limiter and monotonicity rows (D) |
+| 35-37 | parcels, deposition, two-way coupling | 36/36 | 36/36 | |
+| 38 | droplet evaporation | 12/12 | 9/12 | 76-A d^2 line (P) 1.55e-2 against 5e-3; 76-A steady temperature (P) 5.62e-3 against 1e-3; 76-B the kernel's balance (R) 3.36e-4 against 1e-5 |
+| 39 | the vapour into the gas | 14/14 | 13/14 | 77-B the energy ledger (R) 1.85e-4 against 1e-5 |
+| 40 | droplet-wall impact, S38.9, S39.7 | 45/45 | 42/45 | 78-A the splash threshold (D); Buckingham-Reiner quadrature (P) 1.22e-4 against 1e-5; regularised HerschelBulkley plug (P) 0.465 against 0.05 |
+| 41 | Gate 95-D | 6/6 | 3/6 | outer loop converged at nr = 12, 24, 48 (D) |
+| 42 | Gate 95-E | 3/3 | 3/3 | |
+| 43 | Gate 95-A | 17/21 | 3/21 | the block-coupled loop converges on no mesh (D, 12 rows); the orders and tip rows (P) up to 1.4e16 |
+| 44 | Gate 95-G | 24/24 | NOT RUN | over 600 s twice: every outer loop runs its 2000 passes; the ring and LE1 bands that were reached pass (2.68e-3 against 0.01, 2.16e-3 against 0.03) |
+| 45-47 | imported region, region layout, 98-A | 9/9 | 9/9 | |
+| 48 | Gate 98-B | 4/4 | 3/4 | the Newton ratio over 2C (P) 6.33e6 against 1, measured at the f32 round-off floor |
+| 49 | Gate 98-C | 5/5 | 2/5 | (S98.10) re-radiating walls (R) 5.77e-2; black closure (R) 5.02e-4; the three relaxations converge in 4000 iterations (D) |
+| 50 | Gate 100-B | 5/5 | 4/5 | silicon, every knot to the bit (D) |
+| 51 | Gate 100-A | 4/4 | 0/1 | stopped: the outer loop's `1e-13` relative change is not reached in 60 passes (last 3.1e-7) |
+| 52 | Gate 100-C | 16/16 | NOT RUN | over 600 s twice: each channel runs its 4000 iterations unconverged (D); balance (R) 1.68e-4 and 1.86e-4 at ny = 16, 32 |
+| 53 | Gate 100-D | 11/11 | 0/1 | stopped: T reaches 5.2e5 K, outside water's mu(T) curve |
+| 54 | Gate 105-A | 10/10 | 10/10 | |
+| 55 | Gate 105-B | 14/14 | 8/14 | the piston's uniform state (R) 1.58e-2 .. 6.01e-2 against 1e-5; backward observed order (P) 0.737 against 0.1; the extrapolation moves toward the exact solution (D) |
+| 56 | Gate 105-C | skip | skip | NOT RUN in both builds: the meshes are not generated |
+| 57 | Gate 94-D | 8/8 | NOT RUN | over 600 s; Re = 100's four rows pass |
+| 58-60 | Gates 110-A..C | 17/17 | 17/17 | 110-A has no rows, because its fetched keys are absent |
+| 61 | Gate CMP-B | 13/13 | NOT RUN | over 600 s twice; Ra = 1e3 and 1e4: Nu passes, w (R) 5.07e-3 and 1.17e-3, s (R) 1.64e-3 and 8.61e-4 against 1e-5 |
+| 62-65 | 119-A, 145-A, 78-D leg, 132-L | 23/23 | 23/23 | |
+
+Each miss is a finding, recorded and not hidden; no tolerance moved. Most misses have one of two
+causes. Some are an iteration that stops short of its f64 criterion under `single`: 59-B, 95-A,
+95-D, 95-G, 98-C, 100-A, 100-C and CMP-B. The others evaluate a closed form or a ledger in
+`Scalar`: S52, S56.4, S57.3, 76, 77-B and Buckingham-Reiner. 100-D and 105-B diverge or drift
+under `single`. A cure changes numerics or a criterion and is not built here.
 
 ## 119. The true wedge: a rotational self-couple
 

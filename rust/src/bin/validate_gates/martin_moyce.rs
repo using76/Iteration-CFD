@@ -367,8 +367,6 @@ pub(crate) fn check_martin_moyce(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     for &n in &LEVELS {
         runs.push(run_level(gpu, n)?);
     }
-    // Class R (docs/17 5.1.4): tol32 = max(tol64, min(tol64 2^29, 1e-5)).
-    let tol_v = if cfg!(feature = "single") { 1.0e-5 } else { 1.0e-12 };
     for r in &runs {
         c.note(&format!(
             "a/{}: {} cells, h {:.4e} m, {} steps to T = {T_END}, {:.1} s; front at T = {T_END}: Z {:.3}; \
@@ -376,15 +374,16 @@ pub(crate) fn check_martin_moyce(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             r.n, r.n_cells, f64::from(r.h), r.steps, r.seconds,
             r.hist.last().map_or(0.0, |s| s.1), r.ritter_margin, r.alpha_lo, r.alpha_hi
         ));
-        c.check(
+        c.check_p(
             &format!("Gate 145-A a/{}: the front stays under Ritter's bound (145.7)", r.n),
             r.ritter_excess as Scalar,
             0.0,
         );
-        c.check(
+        // Class R (docs/17 5.1.4): tol32 = max(tol64, min(tol64 2^29, 1e-5)) under single.
+        c.check_roundoff(
             &format!("Gate 145-A a/{}: the water volume is conserved", r.n),
             ((r.v1 - r.v0) / r.v0).abs() as Scalar,
-            tol_v as Scalar,
+            1.0e-12,
         );
     }
 
@@ -426,7 +425,7 @@ pub(crate) fn check_martin_moyce(c: &mut Checks, gpu: &Gpu) -> Result<()> {
             "Gate 145-A a/{}: Z(T) against the {} in. printed mean, worst |dZ|/band (145.6)",
             fine.n, s.a_in
         );
-        c.check(&what, worst as Scalar, 1.0);
+        c.check_p(&what, worst as Scalar, 1.0);
         if !(worst <= 1.0) {
             missed.push(format!(
                 "the {} in. mean: worst |dZ|/band {:.3} at T = {:.2} (Z_key {:.2})",

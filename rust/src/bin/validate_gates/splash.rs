@@ -215,7 +215,7 @@ pub(crate) fn check_splash_thresholds(c: &mut Checks) -> Result<()> {
         );
         let (lo, hi) = l.e.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &e| (a.min(e), b.max(e)));
         if l.liquids_inside.len() >= LIQUIDS_NEEDED {
-            c.check(
+            c.check_d(
                 &format!("78-D leg ({}): liquids outside the band (146.6)", crit.name()),
                 (l.liquids - l.liquids_inside.len()) as Scalar,
                 (l.liquids - LIQUIDS_NEEDED) as Scalar,
