@@ -198,7 +198,7 @@ pub(crate) mod runner {
     }
 
     /// One field's boundary rules, as a driver would read them from `0/`.
-    fn raw(name: &str, internal: f64, rules: &[(&str, &str, Option<f64>)]) -> RawScalarField {
+    pub(crate) fn raw(name: &str, internal: f64, rules: &[(&str, &str, Option<f64>)]) -> RawScalarField {
         let mut boundary = BTreeMap::new();
         for &(patch, type_name, value) in rules {
             let spec = PatchFieldSpec {
@@ -219,7 +219,7 @@ pub(crate) mod runner {
 
     /// The rules of a transported field: `fixedValue v` at the inlet, `wall` at
     /// the plate, zero-gradient at the outlet and top, and the constraints.
-    fn transported(name: &str, v: f64, wall: (&'static str, Option<f64>)) -> RawScalarField {
+    pub(crate) fn transported(name: &str, v: f64, wall: (&'static str, Option<f64>)) -> RawScalarField {
         raw(
             name,
             v,
@@ -235,7 +235,7 @@ pub(crate) mod runner {
         )
     }
 
-    fn patch_index(hm: &HostMesh, name: &str) -> Result<usize> {
+    pub(crate) fn patch_index(hm: &HostMesh, name: &str) -> Result<usize> {
         hm.patches
             .iter()
             .position(|p| p.name == name)

@@ -28,3 +28,7 @@ pub(crate) mod blasius_plate;
 /// SPEC-LIT §144.3: the T3A plate on the flat-plate harness, leg 1 in 2-D
 /// (recorded runs, replayed).
 pub(crate) mod t3a;
+
+/// SPEC-LIT §144.5, Gate 132-Z: the TMR zero-pressure-gradient plate with SA
+/// and SST against Karman-Schoenherr and Coles (recorded runs, replayed).
+pub(crate) mod zpg;

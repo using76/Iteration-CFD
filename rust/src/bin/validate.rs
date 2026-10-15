@@ -3707,6 +3707,14 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) of kOmegaSSTLM and kOmegaSSTGamma against Roach & Brierley's T3A measurement, replayed (SPEC-LIT 144.4)") {
     validate_gates::t3a::check_t3a_leg4(c)?;
     }
+    // SPEC-LIT 144.5 - Gate 132-Z: the TMR zero-pressure-gradient plate with
+    // SA and SST on the same harness, its C_f(Re_theta) against
+    // Karman-Schoenherr and its u+(y+) at Re_theta 1e4 against Coles, replayed
+    // from the recorded runs of src/bin/validate_gates/zpg.rs (each model
+    // opens its own gate scopes).
+    if c.section("Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)") {
+    validate_gates::zpg::check_zpg(c)?;
+    }
 
     Ok(())
 }

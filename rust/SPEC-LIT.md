@@ -10917,6 +10917,17 @@ compared on everything they wrote. That is a statement about the plumbing -
 the case reader, the model and the writer - and it is a different statement
 from the two above.
 
+**Amended by docs/17 VAL-34 (§144.5).** The TMR's 2DZP *validation* case now
+runs, incompressible, on the flat-plate harness of §144.2: Gate 132-Z holds
+SA's (and SST's) `C_f(Re_theta)` against the Karman-Schoenherr file and
+`u+(y+)` at `Re_theta = 1e4` against the Coles file that the TMR's validation
+page publishes, on three meshes with the TMR grids' cell counts in its box,
+and both files are tracked answer keys. What this section declines is
+unchanged and still NOT run: the compressible verification case on the TMR's
+curvilinear grids and its grid-converged `C_d = 0.00286`. §144.5's plate is
+blockgen's axis-aligned graded block, and its two references are correlations,
+so its verdict word is OPEN rather than a pass or a miss of a measurement.
+
 ---
 
 ## 57. DES97, DDES and IDDES - the shielded length scale
@@ -52177,8 +52188,8 @@ only in the oracle: there is no device kernel, case keyword or registry row (VAL
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
 VAL-30 to VAL-34. §144.1 is the flat-plate mesh (VAL-30), and it claims nothing about a
 solution. §144.2 is the Blasius gate (VAL-31). §144.3 is the T3A case on the harness and leg 1 in 2-D
-(VAL-32). §144.4 is leg 4 of Gates 88-T and 90-T, the 2-D `C_f(Re_x)` against the key (VAL-33). §144.5 (the ZPG
-plate, VAL-34) is the plan's number and is not yet written; it goes between §144.4 and §144.6. §144.6 is the T3A key
+(VAL-32). §144.4 is leg 4 of Gates 88-T and 90-T, the 2-D `C_f(Re_x)` against the key (VAL-33). §144.5 is the TMR
+zero-pressure-gradient plate with SA and SST against Karman-Schoenherr and Coles, Gate 132-Z (VAL-34). §144.6 is the T3A key
 (VAL-04). The plan's row gives it
 §144.1, and it was written as §144.1 in its own lane, but VAL-30 had taken §144.1, so it was
 renumbered when the lanes merged and the plan's numbers for VAL-32 to VAL-34 were kept.
@@ -52661,6 +52672,227 @@ changed to close them, and none will be changed without the user.
 
 **Not claimed.** T3A- and T3B (§88.10 leg 3, VAL-35), or a fitted inflow. Nor the key's shape factor, `Re_theta` or
 profiles. Nor any reading of the measurement beyond §144.6's.
+
+### 144.5 Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles
+
+`No GPL-licensed source was consulted.` Docs/17's row VAL-34 reads "The TMR ZPG flat plate (Re_L 5e6) runs with SA
+and SST, and is held against Karman-Schoenherr and Coles (Gate 132-Z)". §56.11 records why the NASA TMR flat plate
+was not run when §56 was written: the TMR case is compressible at `M = 0.2`, its grids are curvilinear Plot3D files,
+and its grid-converged `C_d` lives in data files. This subsection runs the TMR's **validation** case (2DZP,
+<https://tmbwg.github.io/turbmodels/flatplate_val.html>, read 2026-10-15, a US Government work) on VAL-31's harness
+(§144.2), incompressible, with `SpalartAllmaras` (§56, its `noft2` default) and `kOmegaSST`, and
+holds the two quantities that page names against its two theory files. **The TMR's `C_d` is not used**: the plan
+row says so, and a drag coefficient integrates the whole plate, its leading edge included, which the page's two
+quantities leave out. The new code is `src/bin/validate_gates/zpg.rs`, two readers in
+`src/bin/validate_key/mod.rs`, one section of `ofgpu-validate` and `cases/zpgPlateSST.jsonc`. It changes no solver,
+model, kernel or driver.
+
+**What the TMR page states** (quoted, with its symbols):
+
+```text
+Re_theta = rho_inf U_inf theta / mu_inf,   theta = int_0^inf (rho/rho_inf)(u/U_inf)(1 - u/U_inf) dy
+c_f = tau_w / (rho_inf U_inf^2 / 2),   tau_w = mu_w (du/dy)_w
+u+ = u / v*,   y+ = y v* / nu_w,   v* = sqrt(tau_w / rho_w)
+c_f = ( 17.08 (log10 Re_theta)^2 + 25.11 log10 Re_theta + 6.012 )^-1          (Karman-Schoenherr)
+u+ = (1/kappa) ln(y+) + C + (2 Pi/kappa) sin^2(pi y/(2 delta))                  (Coles, with van Driest damping)
+```
+
+"Two quantities of interest are desired for comparison: wall skin friction coefficient vs. Retheta (for 4000 <
+Retheta < 13,000); u+ vs. y+ (at Retheta = 10,000)". The K-S relation is Schoenherr's (*Trans. SNAME* 40 (1932)
+279-313) as the page prints it; Coles' profile (*J. Fluid Mech.* 1 (1956) 191-226, DOI 10.1017/S0022112056000135,
+checked against Crossref 2026-10-15; RAND R-403-PR, 1962) was computed for the page with P. G. Huang's program
+(Bardina, Huang & Coakley, NASA TM 110446, 1997). Neither primary was read. The page says of both: "these particular
+theoretical correlations are not necessarily perfect". They are correlations, so a result outside its bar is a
+finding about a model against a correlation, and **the verdict word is OPEN**, never MISSES.
+
+**The keys.** `reference/tmr-zpg/cf_K-S.dat` (100 points, `Re_theta` 200 to 20 000 in steps of 200) and
+`reference/tmr-zpg/u+y+.dat` (2 685 points, `y+` 0.9 to 3 486) are the page's two data files, downloaded byte for
+byte (LF) and tracked: rows `tmr-ks-cf` and `tmr-coles-uplus` of `reference/PROVENANCE.md`, read through
+`validate_key::tmr_ks_cf` / `tmr_coles_uplus` with their digests. `parse_tmr_dat` refuses by name a file without its
+one `variables=` line, a point before it, a line that is not two finite numbers, and a first column that does not
+increase. The census of answer-key markers is now 45. Both curves are read linearly in their first column. A test
+holds every K-S row to the page's relation: the worst relative difference is `2.1e-6`, the file's six printed digits.
+
+**The rig, scaled.** The TMR runs `Re = 5e6` per unit length on a plate from `x = 0` to `2` in a box
+`x in [-1/3, 2]`, `y in [0, 1]` (read from the TMR grid files' coordinates). The harness runs it at `U = 1 m/s` and
+`nu = 2e-7 m^2/s`, so `Re_x = 1e7` at the trailing edge. The free stream is the TMR result pages': SA's
+`nu~ = 3 nu`, and SST's `Tu = 0.039 %` with `mu_t/mu = 0.009`, so
+
+```text
+k_0 = (3/2) (Tu U)^2 = 2.2815e-7 m^2/s^2,     omega_0 = k_0 / (0.009 nu) = 126.75 1/s              (144.5a)
+```
+
+**The meshes.** `FlatPlateSpec` (§144.1) with `x_up = 1/3 m`, `L = 2 m`, `H = 1 m`, `depth = 0.01 m`, and end-cell
+ratios `r_up = 10`, `r_plate = 10` (the TMR 137x97 grid's trailing-edge to leading-edge cell is 10.7) and
+`r_y = 54 200`, which puts the wall cell at `2.0e-6 m` at `n_y = 96`, the TMR 137x97 grid's own (the TMR's top cell
+over its wall cell there is 57 292). The levels have the cell counts of the TMR's 273x193, 137x97 and 69x49 grids:
+`48 + 224 x 192` (52 224 cells), `24 + 112 x 96` (13 056) and `12 + 56 x 48` (3 264); (94.1)'s `h` is `6.6843e-3`,
+`1.3369e-2` and `2.6737e-2 m`. The wall cell is `1.02e-6`, `2.0e-6` and `3.8e-6 m`; the largest wall-cell `y+` past
+`Re_x = 1e5` that the runs measured is `0.124`, `0.241` and `0.459` (f64; single within `0.001`).
+
+**Boundary conditions.** `U` and `p` are §144.2's. Every field is built as a `RawScalarField` and set by
+`setup_scalar_field`:
+
+| patch | `nuTilda` (SA) | `k` (SST) | `omega` (SST) | `nut` |
+|---|---|---|---|---|
+| `inlet` | `fixedValue 3 nu` | `fixedValue k_0` | `fixedValue omega_0` | `calculated` |
+| `outlet`, `top` | `zeroGradient` | `zeroGradient` | `zeroGradient` | `calculated` |
+| `symmetry` | `symmetryPlane` | `symmetryPlane` | `symmetryPlane` | `symmetryPlane` |
+| `plate` | `fixedValue 0` (§56.7) | `fixedValue 0` | `omegaWallFunction` | `nutLowReWallFunction` |
+| `back`, `front` | `empty` | `empty` | `empty` | `empty` |
+
+Every cell starts at the inflow state. **Numerics:** §144.2's SIMPLE (`alpha_U = 0.7`, `alpha_p = 0.3`, bounded
+`linearUpwind` on `div(phi,U)`), and `TurbulenceControls::default()` for the turbulence fields: bounded upwind,
+relaxed by 0.7. Stop: every 100 iterations after 1 000, the largest relative `C_f` change over the plate faces with
+`Re_x >= 1e5` at or below `1e-6`; caps 10 000 iterations on the finest level and 20 000 on the others, set from the
+price below.
+
+**The measurements.** On each plate column (the cells whose centres lie nearest one wall face's `x`), from the wall
+up, with the wall point `(0, 0)` first:
+
+```text
+U_e = max_j u_j,  delta_995 = least y with u >= 0.995 U_e (linear between points),
+theta = sum over segments to y = 2 delta_995 of  h [ (r_a + r_b)/2 - (r_a^2 + r_a r_b + r_b^2)/3 ],
+r = u/U_e piecewise linear, the last segment cut at 2 delta_995;   Re_theta = U_e theta / nu          (144.5b)
+```
+
+The bracket is the exact integral of `r (1 - r)` over a segment where `r` is linear, so (144.5b) is the TMR's
+`theta` of the piecewise-linear profile. `U_e` stands for `U_inf` because the harness's free stream is not exactly
+`1` above a growing layer with an open top, and `(1 - u/U_inf)` summed over the 1 m of free stream would weigh on
+`theta`; past `2 delta_995` the integrand is zero to the profile's own accuracy. `C_f` is §144.2's (144.2d).
+
+```text
+C_f(R) = C_f,a + t (C_f,b - C_f,a),   t = (R - Re_theta,a)/(Re_theta,b - Re_theta,a)                 (144.5c)
+```
+
+for the first two columns from the edge whose `Re_theta` bracket `R`, at `R = 4000, 4500, ..., 13 000` (19 stations).
+
+```text
+at R = 1e4 with (144.5c)'s a, b, t:   u_j = u_a,j + t (u_b,j - u_a,j) row by row,
+v* = U sqrt(C_f(1e4)/2),  y+_j = y_j v*/nu,  u+_j = u_j/v*,  u+ at y+ = 30, 40, 50, 60, 80, 100, 120, 150, 200,
+250, 300 linear in ln y+ between rows                                                           (144.5d)
+```
+
+The rows of the two columns share their `y` (the mesh is a tensor product).
+
+**The rows.** On the finest f64 record of each model:
+
+- `C_f`: `E = max_k |C_f(R_k)/C_f,KS(R_k) - 1|` over the 19 stations, bar 3 %.
+- `u+`: `E = max_j |u+_j - u+_Coles(y+_j)|` over the eleven points, bar 1.0.
+- `u_num` is §94's study over the three f64 levels of `C_f(1e4)` (relative to K-S at `1e4`) and of `u+` at
+  `y+ = 100`; `u_D = 0` (neither file states an uncertainty). §110.1's rule (`t3a::band_110`): inside when
+  `|E| + u_num <= bar`, and then the row is a replayed check; otherwise the gate is reported OPEN, "undecided" within
+  `u_num` of the bar and "outside the bar, against a correlation" beyond it.
+- Class R (§118): the single build's finest record of each model must land in the f64 build's band (a replayed
+  `require`).
+- A missing or altered key reports all four gates open by name, and an unrecorded model its two gates NOT RUN.
+
+**Prediction, stated in advance.** The TMR publishes its own CFL3D results on the 545x385 grid as post-processed
+files (`sa-cf_cfl3d.dat`, `sst-cf_cfl3d.dat`, `sa-upyp_cfl3d.dat`, `sst-upyp_cfl3d.dat`, read 2026-10-15; not
+tracked, not an answer key, §22). Held to the same two files the same way, CFL3D's SA `C_f` lies between `-3.63 %`
+and `-0.98 %` of K-S over `4000..13 000`, and its SST `C_f` between `-3.91 %` and `-1.58 %`: **the 3 % bar is missed
+near `Re_theta = 4000` by the TMR's own reference code**, on a grid of four times this finest level's cells. Its
+`u+ - u+_Coles` over `y+ 30..300` lies between `+0.09` and `+0.42` (SA) and `-0.37` and `+0.21` (SST), inside 1.0.
+
+**The price** (2026-10-15, the one RTX 5070 Ti shared with two other lanes' work): 200 timed iterations per level
+cost about `0.07`, `0.12` and `0.3-0.4 s` per iteration on the coarse, medium and fine levels, f64. The coarse and
+medium levels converged in 1 200 and 2 800-3 600 iterations, so the finest level was priced at about 10 000
+iterations (50 min) and capped there.
+
+**The records.** They were made 2026-10-15 at 86ce3a2 plus this unit's runner, on the one RTX 5070 Ti, the f64
+build first (shared with two other lanes' work) and the single build after it (a nearly idle card), by `price_zpg`
+with the caps above. The fine levels reached their cap with the stopping rule unmet, `C_f` still moving `1.4e-5`
+(SA) and `4.8e-6` (SST) per 100 iterations; SA's `C_f(1e4)` moved `4.7e-5` relative over its last 1 000. Card
+time: about 6 min of pricing, 48 min of f64 runs, 8 min of single runs and about 15 min of diagnostics. Errors are
+against K-S (`C_f`) and Coles (`u+`); "worst" is over the 19 stations or the eleven `y+` points.
+
+| model | build | level | iterations | rule met | last C_f change | worst C_f vs K-S | at 1e4 | at 13 000 | worst u+ - Coles | u+(100) | wall y+ | s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| SA | f64 | 48+224 x 192 | 10000 | false | 1.403e-5 | -4.46 % at 4000 | -2.35 % | -0.25 % | +0.550 at 30 | 16.489 | 0.1243 | 1422.2 |
+| SA | f64 | 24+112 x 96 | 3600 | true | 6.768e-7 | -3.01 % at 4000 | -0.48 % | +0.05 % | +0.387 at 30 | 16.294 | 0.2410 | 364.8 |
+| SA | f64 | 12+56 x 48 | 1200 | true | 1.078e-7 | -1.98 % at 4500 | -0.64 % | +0.13 % | +0.350 at 30 | 16.267 | 0.4588 | 97.8 |
+| SA | single | 48+224 x 192 | 10000 | false | 1.610e-5 | -6.88 % at 7500 | +1.10 % | -2.03 % | +0.280 at 30 | 16.148 | 0.1236 | 121.8 |
+| SA | single | 24+112 x 96 | 3700 | true | 9.800e-7 | -2.72 % at 4000 | -0.82 % | -0.37 % | +0.423 at 30 | 16.332 | 0.2415 | 41.2 |
+| SA | single | 12+56 x 48 | 1300 | true | 9.682e-7 | -2.36 % at 4000 | -0.67 % | -0.10 % | +0.344 at 30 | 16.257 | 0.4589 | 14.2 |
+| SST | f64 | 48+224 x 192 | 10000 | false | 4.780e-6 | -4.31 % at 4000 | -2.78 % | -2.38 % | +0.591 at 300 | 16.544 | 0.1273 | 667.3 |
+| SST | f64 | 24+112 x 96 | 2800 | true | 5.163e-7 | -5.36 % at 4000 | -3.62 % | -3.23 % | +0.582 at 300 | 16.541 | 0.2457 | 261.0 |
+| SST | f64 | 12+56 x 48 | 1200 | true | 3.214e-7 | -7.67 % at 4000 | -5.88 % | -5.41 % | +0.924 at 300 | 16.865 | 0.4572 | 56.1 |
+| SST | single | 48+224 x 192 | 10000 | false | 4.915e-6 | -4.10 % at 4000 | -2.44 % | -2.05 % | +0.372 at 300 | 16.339 | 0.1272 | 127.1 |
+| SST | single | 24+112 x 96 | 14100 | true | 9.750e-7 | -5.35 % at 4000 | -3.58 % | -3.19 % | +0.551 at 300 | 16.510 | 0.2457 | 114.9 |
+| SST | single | 12+56 x 48 | 3700 | true | 8.150e-7 | -7.67 % at 4000 | -5.88 % | -5.41 % | +0.923 at 300 | 16.863 | 0.4571 | 33.9 |
+
+Coles' `u+(100)` is `16.2376`; K-S is `3.14396e-3`, `2.63344e-3` and `2.51014e-3` at `Re_theta = 4000`, `1e4` and
+`13 000`. Each record carries its 19 stations and eleven `u+` in `zpg.rs`.
+
+**The verdicts.** On the finest f64 records (the gate's), with §94's studies:
+
+| gate | E | study | u_num | verdict |
+|---|---|---|---|---|
+| SA, `C_f` | `-4.46 %` at `Re_theta = 4000` | `C_f(1e4)`: oscillatory diverging, `Fs = 3` | `6.34 %` | **OPEN**, undecided |
+| SST, `C_f` | `-4.31 %` at `Re_theta = 4000` | monotone, `p = 1.42`, `phi_ext = 2.5733e-3` (`-2.28 %` of K-S) | `0.63 %` | **OPEN**, outside the bar |
+| SA, `u+` | `+0.550` at `y+ = 30` | `u+(100)`: monotone diverging, `Fs = 3` | `0.372` | holds (`0.921 <= 1.0`) |
+| SST, `u+` | `+0.591` at `y+ = 300` | `u+(100)`: oscillatory, `Fs = 3` | `0.153` | holds (`0.745 <= 1.0`) |
+
+Both single-build finest records land in their f64 bands (class R: the two replayed `require`s hold). Gate 132-Z's
+two `C_f` gates are therefore OPEN against a correlation, and its two `u+` gates hold.
+
+**What the misses are, as far as this unit measured.**
+
+- **Both models are 4.3-4.5 % low at `Re_theta = 4000`, and so is the TMR's reference code.** CFL3D on the TMR's
+  545x385 grid is `-3.63 %` (SA) and `-3.92 %` (SST) there, held to the same file the same way. The bar sits inside
+  the spread of the TMR's own solutions at the low end of its range. SST converges (`p = 1.42`); its extrapolated
+  `C_f(1e4)` is `-2.28 %`, against CFL3D's `-2.12 %`. SA's finest `C_f(1e4)`, `-2.35 %`, is the nearest of its three
+  levels to CFL3D's `-1.54 %`. At `13 000` the finest SA reads `-0.25 %` and CFL3D `-0.97 %`.
+- **SA's `C_f(x)` carries a streamwise wave; SST's does not.** On every level and in both builds SA's station
+  errors scatter by 1-2.5 points from one station to the next. SST's change smoothly, by about 0.1 point a station.
+  A column dump of the finest f64 SA state (a diagnostic run that repeats the recorded one to its printed digits;
+  not in the tree) shows the wave in the wall shear itself. Over `Re_theta` 3 500-13 500 (120 columns) `C_f` falls
+  and rises with a period of about ten columns, several layer thicknesses. Where it rises, it climbs by up to `0.13 %`
+  per column, so `C_f(x)` is not monotone there. `Re_theta(x)` is monotone, and the column's largest `u` lies
+  `0.14-0.20 %` above the free stream near the layer's edge. The wave is why SA's study oscillates and why SA's
+  `C_f` row is undecided rather than outside. Its cause is not diagnosed here. It is a property of the converged SA
+  solution on these meshes, not of (144.5b)-(144.5d).
+- **Under single, the wall distance at the fine level's wall cells is short by 6 %.** A probe (2026-10-15, not in
+  the tree) compared the device wall distance of §6.6 with the exact one (the cell centre's `y`) on the cells with
+  `0.5 < x < 1.5`. In f64 the wall-adjacent cells are short by `0.10 %` on the mean (`1.0 %` at worst). Under single
+  they are short by `6.0 %` (fine, worst `16 %` on the second row), `2.9 %` (medium) and `0.12 %` (coarse). The
+  cause is §6.6's formula itself, `y = sqrt(|grad phi|^2 + 2 phi) - |grad phi|`, evaluated in `ofscalar`. Near the plate,
+  `|grad phi|` is about `H = 1 m` and `y` about `5e-7 m`. Rounding the two square roots to f32's spacing near 1
+  (`6e-8`) costs up to about 12 % of `y`. SA reads `d` in its destruction term, and the single build's finest SA
+  scatter is wider than the f64 one (from `+3.0 %` to `-6.88 %` between stations, `+1.10 %` at `1e4`). SST reads `d`
+  only in its blending functions, and its finest single record lies within `0.35` points of the f64 one. The cure is not built, because
+  it changes a kernel's numerics: §6.6's algebraically identical form `y = 2 phi / (sqrt(|grad phi|^2 + 2 phi) +
+  |grad phi|)` has no cancellation, or the difference can be taken in `Acc`. Both are for the user to decide (§5.3,
+  docs/17-review-later.md).
+
+These are recorded for later review; no numerics were changed to close any of them.
+
+**Tests** (`zpg::tests`, in the validate binary, both builds):
+
+- `the_tmr_files_are_the_k_s_relation_and_a_coles_profile`: every K-S row against the page's relation to `5e-6`; Coles'
+  sublayer `u+ = y+` to `1e-3` for `y+ <= 1.2`, and `u+` increasing.
+- `theta_of_a_seventh_power_profile_is_seven_seventy_seconds_of_delta`: (144.5b) on `u/U = (y/delta)^(1/7)` gives
+  `7 delta/72` to `2e-3`; a column ending below `2 delta_995`, or with no positive `u`, has no `theta`.
+- `re_theta_stations_and_the_profile_station_interpolate_exactly`: (144.5c) and (144.5d) on synthetic columns.
+- `the_replay_passes_inside_the_bars_and_reports_open_outside_them`: synthetic records at `+1 %` / `+0.5` pass, at
+  `+5 %` / `+1.5` are OPEN, by gate name; the single rows hold.
+- `every_gate_is_open_when_a_key_is_missing_or_no_run_is_recorded`.
+- `the_recorded_runs_against_the_tmr_keys`: asserts the recorded verdicts below and prints each OPEN row.
+- `the_harness_runs_a_short_coarse_sa_solve`: 300 iterations on the coarse level, finite, `Re_theta` past 100.
+- Ignored: the six `record_zpg_*` recorders and `price_zpg` (`ZPG_PRICE=<sa|sst>,<level>,<iters>`).
+
+**The case file.** `cases/zpgPlateSST.jsonc` is the same plate, box, free stream and patches on the JSONC reader's
+`cartesian` mesh, which cannot grade `x` toward an interior edge from both sides (§144.1), so it is uniform in `x`
+(`dx = 1/120 m`, the edge on node 40) and graded `54 200` to the wall in `y`. Its plate takes §29.1's `standard` row
+(`kqRWallFunction`, `omegaWallFunction`, `nutkWallFunction`), because the reader's wall-consistency contract refuses
+the harness's `nutLowReWallFunction` beside `omegaWallFunction` as not one row of 29.1's table. It lowers in strict
+mode (`every_shipped_jsonc_case_passes_the_transient_algorithm_contract`), and no run of it is recorded. **The SA
+twin the plan names, `cases/zpgPlateSA.jsonc`, is not shipped**: the JSONC reader has no `nuTilda` entry and the
+JSONC drivers do not build SA (it runs through `ofgpu-sa` on a dictionary case), so the file could not state the
+case. Teaching the reader the field is the reader's owner's change.
+
+**Not claimed.** The TMR's `C_d`, its grid-convergence verification (§56.11), compressibility at `M = 0.2`, or any
+reading of the two correlations beyond the page's. Nor SA-neg, SA with `f_t2`, or the SST variants the TMR lists.
 
 ### 144.6 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
 

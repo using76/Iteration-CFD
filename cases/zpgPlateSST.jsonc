@@ -1,0 +1,145 @@
+// SPEC-LIT 144.5 - the NASA TMR zero-pressure-gradient turbulent flat plate
+// (2DZP, tmbwg.github.io/turbmodels/flatplate_val.html) with k-omega SST
+// (docs/17 VAL-34). The TMR's box, x [-1/3, 2] m, y [0, 1] m, one cell of
+// 0.01 m in z: the floor is a `symmetry` plane ahead of the leading edge at
+// x = 0 and the `plate` wall behind it. U_inf = 1 m/s and nu = 2e-7 m2/s make
+// the TMR's Re = 5e6 per unit length, so Re_x = 1e7 at the trailing edge and
+// Re_theta passes 13 000 before it. The free stream is the TMR SST page's:
+// Tu = 0.039 % and mu_t/mu = 0.009, so k = 1.5 (Tu U)^2 = 2.2815e-7 m2/s2 and
+// omega = k/(0.009 nu) = 126.75 1/s.
+//
+// THE MESH HERE IS NOT THE GATE'S. This reader's `cartesian` mesh carries one
+// grading ratio per axis, toward an END of the axis, so it cannot refine x
+// toward an interior leading edge from both sides (SPEC-LIT 144.1). This file
+// is therefore UNIFORM in x (dx = 1/120 m, the edge on node 40) and graded only
+// to the wall in y (ratio 54200, a wall cell of 2.0e-6 m, the TMR 137x97
+// grid's). Gate 132-Z (SPEC-LIT 144.5) solves the graded harness mesh in
+// memory, with the same box, patches, free stream and wall conditions, on
+// three meshes; it does not read this file. The graded mesh is
+//
+//   ofgpu::blockgen::build_flat_plate_mesh(&spec)   (x_up 1/3, L 2, H 1,
+//   r_up 10, r_plate 10, r_y 54200; validate_gates/zpg.rs's zpg_spec)
+//
+// Boundaries: the inlet is the free stream; the outlet and the top are open at
+// p = 0; front and back are the 2-D `empty` constraint. The plate is no-slip
+// and takes SPEC-LIT 29.1's `standard` row (kqRWallFunction, omegaWallFunction,
+// nutkWallFunction): at the plate's y+ < 1 omega's wall function is the viscous
+// omega and nutk's wall value is 0. The gate's harness pins k = 0 and
+// nutLowReWallFunction beside omegaWallFunction instead, a pairing this
+// reader's wall-consistency contract refuses as not one row of 29.1's table.
+//
+// The Spalart-Allmaras twin of this file is NOT shipped: the JSONC reader has
+// no `nuTilda` field, and the JSONC drivers do not build SA (SPEC-LIT 144.5).
+//
+// UNVERIFIED: no run of this file is recorded, and no number in it is a claim
+// about the solution.
+// ============================================================================
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "zpgPlateSST",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [-0.3333333333333333, 0.0, 0.0], "max": [2.0, 1.0, 0.01] },
+    "cells":  [280, 96, 1],
+
+    "boundaries": {
+      "xmin": "inlet", "xmax": "outlet",
+      "ymin": "plate", "ymax": "top",
+      "zmin": "back",  "zmax": "front",
+    },
+
+    // The floor's 40 columns whose centres lie ahead of the edge.
+    "regions": [
+      {
+        "name": "symmetry",
+        "on": "ymin",
+        "shape": { "kind": "box", "min": [-0.3333333333333333, -1, -1], "max": [0.0, 1, 1] },
+      },
+    ],
+
+    "grading": { "y": { "expansion": 54200.0 } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 2e-7, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kOmegaSST",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "wallTreatment": "standard",
+  },
+
+  "patches": [
+    { "match": "(back|front)", "kind": "empty" },
+    { "match": "symmetry", "kind": "symmetry" },
+    {
+      "match": "inlet",
+      "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [1.0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 293.15 },
+      "k": { "type": "fixedValue", "value": 2.2815e-7 },
+      "omega": { "type": "fixedValue", "value": 126.75 },
+      "nut": { "type": "calculated", "value": 0.0 },
+    },
+    {
+      "match": "(outlet|top)",
+      "kind": "open",
+      "U": { "type": "zeroGradient" },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "zeroGradient" },
+      "omega": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0.0 },
+    },
+    {
+      // The plate.
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+    },
+  ],
+
+  "initial": {
+    "U": [1.0, 0, 0],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 2.2815e-7,
+    "omega": 126.75,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,omega)": "bounded Gauss upwind",
+      "div(phi,T)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "p": 0.3, "T": 0.7, "k": 0.7, "omega": 0.7 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-12, "relTol": 0.05, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12, "relTol": 0.1,  "maxIter": 200 },
+      { "match": "(k|omega)", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 0.1, "maxIter": 200 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-9, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 20000,
+    "deltaT": 1,
+    "adjustTimeStep": false,
+  },
+}
