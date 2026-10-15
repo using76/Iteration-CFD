@@ -32,8 +32,9 @@
 //!   CMP-13: `localEuler` on both equations builds them on Euler with a
 //!   per-cell step (125.2) attached;
 //! - `tests`, the outer loop's gate table (CMP-12);
-//! - still to come: `bc` (§126), the compressible boundary conditions,
-//!   CMP-16 to CMP-18.
+//! - [`bc`] (§126), the compressible boundary conditions: the inlets of
+//!   §126.8 (CMP-16), the outlets of §126.9 (CMP-17) and the
+//!   characteristic far-field of §126.10 (CMP-18).
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §125.3 - the outer loop, its order and its reports,
@@ -50,6 +51,7 @@
 //! `smpRelaxField` kernel `simple.rs` uses). No GPL-licensed source was
 //! consulted.
 
+pub mod bc;
 pub mod energy;
 pub mod exact;
 pub mod gatemesh;
@@ -348,6 +350,17 @@ pub struct Compressible<'m> {
     host: HostTopology,
     /// Steps completed.
     steps: u64,
+    /// SPEC-LIT §126.8: the compressible inlets, rewritten at the top of
+    /// every outer iteration; `None` (no rule) rewrites nothing.
+    bcs: Option<bc::CompressibleBcs>,
+    /// SPEC-LIT §126.9: the outlets (the supersonic switch of a fixed `p`,
+    /// `waveTransmissive`); `None` (no rule) rewrites nothing.
+    outlets: Option<bc::CompressibleOutlets>,
+    /// SPEC-LIT §126.10: the characteristic far-fields; `None` (no rule)
+    /// rewrites nothing.
+    farfields: Option<bc::CompressibleFarfields>,
+    /// SPEC-LIT §126.11: the free-stream family, if any.
+    freestreams: Option<bc::CompressibleFreestreams>,
 }
 
 impl<'m> Compressible<'m> {
@@ -474,7 +487,147 @@ impl<'m> Compressible<'m> {
 
             host,
             steps: 0,
+            bcs: None,
+            outlets: None,
+            farfields: None,
+            freestreams: None,
         })
+    }
+
+    /// SPEC-LIT §126.8: attach the compressible inlets `bc::lower` found;
+    /// an empty list attaches nothing, so the loop is the one without them.
+    /// Call before [`Self::initialise`].
+    pub fn set_boundary_rules(&mut self, gpu: &Gpu, rules: Vec<bc::BcRule>) -> Result<()> {
+        self.bcs = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleBcs::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached inlet rules (empty when none).
+    pub fn boundary_rules(&self) -> &[bc::BcRule] {
+        self.bcs.as_ref().map_or(&[], |b| b.rules())
+    }
+
+    /// SPEC-LIT §126.9: attach the outlets `bc::lower` found; an empty list
+    /// attaches nothing. `waveTransmissive` needs a time step, so it is
+    /// refused by name under `steadyState` and `CrankNicolson` (§126.5,
+    /// and (120.4c) of SPEC-LIT 120.4 is defined for Euler and backward
+    /// only); `localEuler` takes the owner's `dt_P`. Call before
+    /// [`Self::initialise`].
+    pub fn set_outlet_rules(&mut self, gpu: &Gpu, rules: Vec<bc::OutletRule>) -> Result<()> {
+        if let Some(r) = rules.iter().find(|r| r.kind == bc::OutletKind::WaveTransmissive) {
+            let ddt = self.ctrl.momentum.ddt;
+            let why = match ddt {
+                DdtScheme::SteadyState => Some("a steady SIMPLE run without localEuler has no time step"),
+                DdtScheme::CrankNicolson(_) => {
+                    Some("CrankNicolson weights the spatial operator, and (126.7) is formed for Euler and backward only")
+                }
+                _ => None,
+            };
+            if let Some(why) = why {
+                return Err(refuse(
+                    "Compressible::set_outlet_rules",
+                    format!(
+                        "patch {}: waveTransmissive is (126.6), a condition in time, and {why} \
+                         (ddtSchemes {ddt:?}); name Euler, backward or localEuler (SPEC-LIT §126.5)",
+                        r.patch
+                    ),
+                ));
+            }
+        }
+        self.outlets = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleOutlets::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached outlet rules (empty when none).
+    pub fn outlet_rules(&self) -> &[bc::OutletRule] {
+        self.outlets.as_ref().map_or(&[], |o| o.rules())
+    }
+
+    /// SPEC-LIT §126.10: attach the characteristic far-fields `bc::lower`
+    /// found; an empty list attaches nothing. Call before
+    /// [`Self::initialise`].
+    pub fn set_farfield_rules(&mut self, gpu: &Gpu, rules: Vec<bc::FarfieldRule>) -> Result<()> {
+        self.farfields = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleFarfields::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached far-field rules (empty when none).
+    pub fn farfield_rules(&self) -> &[bc::FarfieldRule] {
+        self.farfields.as_ref().map_or(&[], |f| f.rules())
+    }
+
+    /// SPEC-LIT §126.11: attach the `supersonicFreestream` and
+    /// `freestreamPressure` rules `bc::lower` found; an empty list attaches
+    /// nothing. Call before [`Self::initialise`].
+    pub fn set_freestream_rules(&mut self, gpu: &Gpu, rules: Vec<bc::FreestreamRule>) -> Result<()> {
+        self.freestreams = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleFreestreams::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached free-stream rules (empty when none).
+    pub fn freestream_rules(&self) -> &[bc::FreestreamRule] {
+        self.freestreams.as_ref().map_or(&[], |f| f.rules())
+    }
+
+    /// Whether any boundary rule of §126.8-§126.11 is attached.
+    fn has_boundary_rules(&self) -> bool {
+        self.bcs.is_some() || self.outlets.is_some() || self.farfields.is_some() || self.freestreams.is_some()
+    }
+
+    /// §126.11, §126.8, §126.10 and §126.9: rewrite the free streams', the
+    /// inlets', the far-fields' and then the outlets' triples from the
+    /// current state (the free streams first, so an inlet `T` on the same
+    /// patch reads the new `u_b`), evaluate their faces, and re-form
+    /// `psi` and `rho` on the boundary faces (the cells are not touched).
+    /// `wave` is false at the start of a run, which has no step yet: the
+    /// `waveTransmissive` faces then keep their set-up value. Nothing
+    /// without a rule.
+    fn apply_boundary_rules(&mut self, gpu: &Gpu, s: &mut CompressibleState, wave: bool) -> Result<()> {
+        if !self.has_boundary_rules() {
+            return Ok(());
+        }
+        if let Some(f) = &self.freestreams {
+            f.apply(gpu, &self.fldk, s, self.m)?;
+        }
+        if let Some(b) = &self.bcs {
+            b.apply(gpu, &self.fldk, s, self.m)?;
+        }
+        if let Some(f) = &self.farfields {
+            f.apply(gpu, &self.fldk, s, self.m)?;
+        }
+        if let Some(o) = &mut self.outlets {
+            let time = if wave && o.has_wave() {
+                Some(match self.mom.local_step() {
+                    Some(l) => bc::WaveTime {
+                        c: crate::timescheme::DdtCoeffs { a_n: 1.0, a_0: -1.0, a_00: 0.0 },
+                        r_delta_t: Some(&l.r_delta_t),
+                    },
+                    None => bc::WaveTime { c: self.mom.ddt.face_coeffs("waveTransmissive")?, r_delta_t: None },
+                })
+            } else {
+                None
+            };
+            o.apply(gpu, &self.fldk, s, self.m, time)?;
+        }
+        let nbf = self.m.n_boundary_faces;
+        let CompressibleState { psi, rho, p, t, .. } = s;
+        thermo::gas_state(gpu, &self.thk, &self.gas, &mut psi.bf, &mut rho.bf, &p.bf, &t.bf, nbf)
     }
 
     pub fn controls(&self) -> &CompressibleControls {
@@ -554,7 +707,11 @@ impl<'m> Compressible<'m> {
 
     /// The start of a run: `u`'s, `p`'s and `T`'s boundary values; `mu`,
     /// `kappa`, `psi` and `rho` from them; `mdot = rho_f (u_f . Sf)` with
-    /// `rho_f` linear; every old level seeded from the current field.
+    /// `rho_f` linear; every old level seeded from the current field. The
+    /// inlets of [`Self::set_boundary_rules`] and the far-fields of
+    /// [`Self::set_farfield_rules`], if any, are applied once after the
+    /// first gas state (SPEC-LIT §126.8, §126.10), and so are the free
+    /// streams of [`Self::set_freestream_rules`] (§126.11).
     pub fn initialise(&mut self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
         let m = self.m;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut s.u, m)?;
@@ -562,6 +719,15 @@ impl<'m> Compressible<'m> {
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut s.t, m)?;
         self.transport(gpu, s)?;
         self.gas_state(gpu, s)?;
+        // §126.8: the inlets from the state just formed, then mu and kappa
+        // of the new boundary T.
+        if let Some(o) = &mut self.outlets {
+            o.store_initial(gpu, &self.fldk, s)?;
+        }
+        if self.has_boundary_rules() {
+            self.apply_boundary_rules(gpu, s, false)?;
+            self.transport(gpu, s)?;
+        }
 
         fv::interpolate_vector_flux(gpu, &self.fvk, &mut self.phi, &s.u, m)?;
         fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, &s.rho, m)?;
@@ -598,6 +764,10 @@ impl<'m> Compressible<'m> {
             field_ops::advance_time_levels(gpu, &self.fldk, f)?;
         }
         field_ops::advance_time_levels_vector(gpu, &self.fldk, &mut s.u)?;
+        // §126.9: the waveTransmissive faces' phi_b^o, once per step.
+        if let Some(o) = &mut self.outlets {
+            o.store_old_time(gpu, &self.fldk, s)?;
+        }
         // §125.7: the pseudo step's own dt_P, once, from the state it
         // starts from.
         if self.local {
@@ -609,6 +779,10 @@ impl<'m> Compressible<'m> {
         let mut outers = Vec::with_capacity(n_outer);
         for outer in 1..=n_outer {
             let is_final = !steady && outer == n_outer;
+
+            // 0. §126.11, §126.8, §126.10, §126.9: the compressible free
+            // streams, inlets, far-fields and outlets from the latest state.
+            self.apply_boundary_rules(gpu, s, true)?;
 
             // 1. mu and kappa from T (psi follows at step 4).
             self.transport(gpu, s)?;

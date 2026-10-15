@@ -2504,7 +2504,8 @@ fn run(o: &Options) -> Result<RunEnd> {
     let m0 = gas.mach(&gpu, s.u(), energy.field())?;
     println!(
         "  Mach number (SPEC-LIT §93.5) on the initial field: M max {} (cell {}) mean {}; \
-         the §25 premise is M << 1 and the run refuses above {} (-permissive warns instead)",
+         the §25 premise is M << 1 and the run refuses above {} (-permissive warns instead; \
+         ofgpu-compressible solves the flow above it, SPEC-LIT §122-§127)",
         g(f64::from(m0.max)),
         m0.cell_of_max,
         g(f64::from(m0.volume_mean)),

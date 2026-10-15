@@ -2417,8 +2417,11 @@ hydrodynamic perturbation the momentum equation sees. The ideal gas law uses
 `p0` only:
 
 ```
-rho = p0 / (R_s T),   R_s = R / W        (v1: constant W = air, stated)
+rho = p0 / (R_s T),   R_s = R / W        (one gas of constant W; a mixture: (133.20))
 ```
+
+A reacting gas carries `W_mix(Y)`: (133.3)'s equation of state, built as
+(133.20) in §133.10.
 
 **Which driver.** `ofgpu-lowmach` (`src/bin/lowmach.rs`). It is the binary
 that builds a `GasState` and calls `Energy::update_target_divergence`, and
@@ -2443,6 +2446,9 @@ Q   = ∇·(k_eff ∇T) + whatever §18's registry holds
 
 Check the limit: `Q = 0`, sealed, gives `∇·u = 0` — incompressible recovered.
 
+With a mixture this constraint is (133.4), with the molar-change term and the
+mixture's own `γ`; what is built is (133.21) of §133.10.
+
 **All three terms of `Q`, in BOTH places `Q` is used** (this field, and §25.2's
 `p0` ODE). The CONDUCTION term was implemented late — the crate ran for several
 rounds with `Q` = the §18 registry alone, an omission that was documented but
@@ -2459,6 +2465,9 @@ Integrate the constraint over the domain. Boundary volume flux `Φ_b`:
 dp0/dt = (γ / V_dom) [ ((γ−1)/γ) ∫ Q dV  −  p0 Φ_b ]      (sealed: Φ_b = 0)
 open domain:  p0 = const,  dp0/dt = 0
 ```
+
+With a mixture the sealed ODE is (133.22) of §133.10, which reduces to this
+one for a constant `W`.
 
 *Test (decisive)*: a sealed box with a known heater power P raises p0 at
 exactly `dp0/dt = (γ−1) P / V` — analytic, no tolerance excuses.
@@ -22948,7 +22957,8 @@ energy-balance gap. Here neither half is annihilated, because `Y` is not `T`
 and there is no ideal-gas identity to kill anything.
 
 `S` is `sum_c S_i,P V_P`, the §18 volumetric source term summed over the
-domain, and is zero unless a case names one. `sum_c Y_P R_P` is available to
+domain, and is zero unless a case names one or the split chemistry step of
+§132.11 fills the species' `su` (132.10). `sum_c Y_P R_P` is available to
 every mass-weighted run beside the budget it explains, with `R_P`'s L1 norm and
 worst cell. The record's first open candidate — *"the `d(rho)/dt` half of the
 difference above, which `bounded` does not touch"* — is that first term of
@@ -43833,7 +43843,8 @@ error, inside CMP-08's 1 % bar (0.410 % at 288.15 K and 0.014 % at 273.15 K).
 
 `p_op` is stated by the case (`pOperating` / `physics.compressible.pOperating`,
 CMP-14), with no default: a compressible case that omits it is refused by name. A
-written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well.
+written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as well;
+it is not (§125.8).
 
 ### 122.3 Floors, bounds and what is never clipped
 
@@ -43855,7 +43866,8 @@ written `p` field is the gauge `p`. CMP-15 decides whether `p_abs` is written as
 
 v1 is single-GPU (decomposition refused by name; docs/17 COMP decision 14), laminar or
 Spalart-Allmaras (§127.1), with constant `c_p`, no sources, no mesh motion and no
-radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15).
+radiation. Everything else is refused by name in `ofgpu-compressible` (CMP-15; the list
+is in §125.8).
 
 ### 122.5 The device twins of the gas state (CMP-08)
 
@@ -43952,7 +43964,7 @@ field (§122.2) and `T` is in kelvin.
 
 * `supersonicInlet` (§126.2) lowers `U`, `p` and `T` to `fixedValue` at that state.
 * `farfield` (§126.6) lowers all three to `characteristicFarfield`, with the free stream
-  as each field's `value`. CMP-18 registers and implements the kind.
+  as each field's `value`. CMP-18 implements the kind (§126.10).
 
 Both kinds are refused in a case without `physics.compressible`, without a
 `freestream`, or with a `U`, `p` or `T` entry of their own, because the preset decides
@@ -44816,12 +44828,102 @@ No driver or validate code changed. No existing kernel changed: the four kernels
 appended, and the other nineteen of `compressible.cu` have SASS identical to the baseline in
 both builds.
 
+### 125.8 The driver as built (CMP-15)
+
+`No GPL-licensed source was consulted.` `rust/src/bin/compressible.rs` is `ofgpu-compressible`
+(a `[[bin]]` of its own). It reads a case in either format, refuses by name what §122.4
+leaves out, builds `Compressible` (§125.6) and calls `step` once per time step or SIMPLE
+iteration. It adds no numerics. The case's settings reach the controls through one
+function, `driver_controls`, which both `run` and the pair test call (§13.4.1).
+
+**The run mode is the case's.** `ddtSchemes default` (JSONC `numerics.ddt`) `steadyState`
+or `localEuler` makes a steady run, and `Euler` or `backward` a transient one at the
+case's `deltaT`. The number of steps is the case's `endTime/deltaT`
+(`TurbulenceControls::n_outer_iterations`, as both readers lower it), and `-iters N`
+overrides it. A steady run stops early when `residualControl` (`U`, `p`, `T`; OpenFOAM
+`SIMPLE/residualControl` only, because JSONC has no such key; the energy bar may be
+spelled `T`, `h` or `e`) is met on the initial residuals (§125.6). A bar the case does not
+name is 0 and is never met, and the banner says that the run will take every iteration.
+
+**What is read, and from where** (both formats through `common::CaseNumerics`):
+
+| control | setting |
+|---|---|
+| `momentum.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,U)`, `grad(U)`, `laplacianSchemes`/`snGradSchemes` `default` |
+| `energy.div_scheme`, `grad_scheme`, `sn_grad` | `div(phi,T)`, `grad(T)`, the same `default` |
+| `pressure.retarded` | `div(phid,p)`: `Gauss upwind` (and its absence) is `Retarded::Upwind`; a §7 limited scheme is `Retarded::Limited`, §124.1's `limitedRetarded`; any other scheme is refused by name |
+| `u_solver`, `p_solver`, `t_solver` | `solvers/U`, `solvers/p`, `solvers/T` (JSONC `numerics.solvers`) |
+| `u_relax`, `t_relax`, `p_relax` | `relaxationFactors` `U`, `T` (equations) and `p` (fields); JSONC `numerics.relaxation` |
+| `n_outer`, `n_corr`, `pressure.n_non_orth_corr` | `nOuterCorrectors`, `nCorrectors`, `nNonOrthogonalCorrectors` |
+| `lts.cfl` | `maxCo` (§125.7) |
+| `momentum.g`, `energy.g` | `constant/g` (JSONC `physics.gravity`) |
+| `gas` | `constant/thermophysicalProperties` or `physics.compressible` (§122.6) |
+
+`viscousWork` stays on, the §125.1 default when `mu > 0`; no case key exists for it yet. A
+`bounded` prefix on `div(phi,U)` or `div(phi,T)` is refused by name: both equations are
+conservative on the mass flux, and `div(mdot)` is `-ddt(rho)` there, not a convergence
+error. Under `-permissive` the scheme runs without the prefix and says so.
+
+**Refused by name** (§122.4): `-np` and `-parallel`, an mpiexec environment (`PMI_RANK`,
+`PMI_SIZE`) and a `processor*` directory (decomposition); the JSONC `motion` block and a
+`constant/dynamicMeshDict` other than `staticFvMesh` (motion); JSONC `sources` and the files
+`fvOptions`, `fvModels` and `fvConstraints` under `constant/` or `system/` (sources); every
+turbulence model but laminar; `physics.buoyancy` `boussinesq` (this solver carries the full
+density); a non-Newtonian rheology; a case with no gas. *DESIGN* (CMP-15): until CMP-25 builds
+(127.1), Spalart-Allmaras is refused too, with a message that names CMP-25, because the solver
+has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A boundary
+condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
+`mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
+as set up is the whole condition (§126.7). Every other type is refused with the field, the
+patch and the type. CMP-16's inlets (`totalPressure` with `gamma`, `totalTemperature`,
+`flowRateInletVelocity` with `massFlowRate`) are lowered before this check (§126.8), and so
+are CMP-17's `waveTransmissive` (§126.9) and CMP-18's `characteristicFarfield` (§126.10).
+Every other type is refused with a message saying that this driver rewrites no boundary
+between iterations but §126.8-§126.10's conditions.
+`output.restart` is refused through `OutputPlan::refuse_restart`, because no checkpoint of
+the compressible state exists.
+
+**What is written.** `p` (the gauge `p` of §122.2), `U`, `T`, `rho` and `Mach` go through
+the one pipeline of §44, from the case's `output` block or from `-output`, `-writeInterval`
+(transient) and `-writeEvery` (steady). The writers are `foam`, `vtu`, `nvdb`, `vdb` and
+`usda`. `rho` is the solver's cell and boundary density. `Mach` is (122.12) on the host,
+from the written `u` and `T`, per cell and per boundary face. Both carry `calculated` on
+every patch but a constraint patch. *DESIGN* (§122.2 left it to CMP-15): `p_abs` is not
+written. `pOperating` is a constant of the case, so `p_abs = p + p_op` is recovered exactly
+from the written `p`, and a second pressure field would be a second statement of one
+unknown.
+
+**The low-Mach refusal.** `ofgpu-lowmach`'s `M > 0.3` refusal and its `-permissive`
+warning (`energy::refuse_above_low_mach`, §93.6) and its banner line now name
+`ofgpu-compressible` (message only).
+
+**Tests** (`cargo test --release --bin ofgpu-compressible`, module `compressible`):
+
+| test | class | what it holds |
+|---|---|---|
+| `every_knob_changes_the_run` | D | The 50-cell tube below, three steps. Each of 20 settings changes the written bytes: `div(phi,U)`, `div(phi,T)`, `div(phid,p)`, `grad` (with a limited scheme that reads it), `relaxation` `U`, `T` and `p` (with two outer correctors, so a non-final iteration is relaxed), `correctors`, `outerCorrectors`, the `p`, `U` and `T` solver tolerances, `ddt` Euler to backward, `deltaT`, `gamma`, `W`, `Pr`, the Sutherland `As`, `pOperating` and `gravity`. `nonOrthogonalCorrectors` is §13.4.1's one admissible exception (the tube is orthogonal, so the correction it repeats is zero) and is asserted on the controls |
+| `the_orthogonal_settings_reach_the_controls` | D | `nonOrthogonalCorrectors 2` reaches `pressure.n_non_orth_corr`; `-iters 7` overrides the case's 3 steps. On the OpenFOAM cavity made steady with `localEuler`, `SIMPLE/residualControl { p 1e-3; U 1e-4; h 1e-5; }` reaches the three bars and `maxCo 5` reaches `lts.cfl` (a steady run's stop and its pseudo step are not shown by three transient steps) |
+| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming CMP-25, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
+| `a_fifty_cell_tube_runs_in_under_thirty_seconds` | P | The smoke run: 1 m tube, 50 x 1 x 1 cells, air at 300 K and 50 m/s, a 320 K inlet, a fixed `p = 0` outlet, symmetry sides, Euler at `1e-5` s for 30 steps. It runs in under 30 s with no bounds violation, `M_max` in (0.14, 0.15) (50/347.2 = 0.144), and the five fields written |
+| `an_openfoam_case_runs_and_writes_the_five_fields` | P | A blockgen 8 x 8 x 1 cavity with `thermophysicalProperties` (§122.6's air), laminar, Euler at `1e-3` s for 5 steps, writes the five fields |
+
+The driver is a binary, and the tests are bin tests of the f64 build (the single lib test
+crate does not compile, §112.3). The single build compiles the binary
+(`cargo build --release --features single --bin ofgpu-compressible`). Its rows are class D
+and P: they ask for a bit difference, a finite run and a refusal text, so no f32 tolerance
+is involved.
+
+*Landed* (f64): `every_knob_changes_the_run` found no inert setting (20 of 20).
+The smoke run took `0.22` s for its 30 steps (bar 30 s), and `M_max` was `0.1440`. The
+single-precision binary runs the same tube in `0.31` s with `M_max` `0.1440` (reported, not a
+test row).
+
 ---
 
 ## 126. The compressible boundary conditions — each a §4 triple rewrite
 
-`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3, CMP-17
-§126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3 (as built in
+§126.8), CMP-17 §126.4-§126.5 (as built in §126.9) and CMP-18 §126.6 (as built in §126.10), in `src/compressible/bc.rs` and `cuda/compressible.cu`; BC-20 adds the free-stream family there (§126.11).
 docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
 it lands. Every one is a kernel that rewrites the §4 triple
 `psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
@@ -44922,7 +45024,7 @@ when CMP-17 runs, CMP-17 writes the kernel to BC-09's contract.
 **`sigma` has no recalled default.** The plan quotes about 0.27 from Rudy & Strikwerda
 (1980); that paper is not read here. CMP-17 reads it and records the value with its
 page in this subsection, or, failing that, `sigma` is a required entry when `lInf` is
-stated. The reflection coefficient Selle et al. (2004) derive for this condition is not
+stated. CMP-17 did not read it, so `sigma` is required (§126.9). The reflection coefficient Selle et al. (2004) derive for this condition is not
 used by any gate: Gate CMP-NR measures the reflection directly (§127.6).
 
 ### 126.6 The characteristic far-field (`characteristicFarfield`; JSONC `farfield`)
@@ -44958,6 +45060,368 @@ stream to the last digit printed (15) on all four branches.
 Unchanged: `noSlip` (with adiabatic `zeroGradient` or isothermal `fixedValue` on `T`),
 `slip`/`symmetryPlane` (§120's aliases) and `empty` carry no compressible algebra. A
 slip wall makes the quasi-1-D duct and the Ringleb walls of §127.3.
+
+### 126.8 The inlets as built (CMP-16)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` and three
+kernels of `cuda/compressible.cu` (`cmpBcTotalTemperature`, `cmpBcTotalPressure`,
+`cmpBcMassFlowInlet`) implement §126.1 and §126.3 exactly as written there: (126.1) on
+`T`, (126.3) on `p`, (126.4) on `U`. §126.2's preset needs no kernel: CMP-14 already
+lowers a JSONC `supersonicInlet` rule to `fixedValue` on `U`, `p` and `T` (§122.6).
+
+**Names.** On the OpenFOAM route (`0/p`, `0/T`, `0/U`) the three conditions are
+`totalPressure` with `p0` and `gamma` on `p`, `totalTemperature` with `T0` (and an
+optional `gamma`) on `T`, and `flowRateInletVelocity` with `massFlowRate` on `U`. JSONC has
+no spelling for them yet, because a new JSONC kind needs the schema and the gui pick-lists
+too. `bc::lower` reads every value in f64 in both builds and refuses by name: a
+`totalPressure` without `gamma` (that is the kinematic `p0 - |U|^2/2` condition of
+`field_setup.rs`, which a gas does not obey), a stated `gamma` that differs from the gas's
+by more than `1e-12` relative (the gas law carries one ratio), a missing `p0`, `T0` or
+`massFlowRate`, `p0 + p_op <= 0`, `T0 <= 0`, `massFlowRate <= 0`, a
+`volumetricFlowRate`, a kind on the wrong field, and a mass-flow inlet whose `p` is not
+`zeroGradient` (§126.3).
+
+**Lowering, not a new setup arm.** `bc::lower` hands the shared setup of `field_setup.rs` the
+three fields with each of these entries replaced by a `fixedValue` placeholder (at `p_0`,
+`T_0` or zero velocity), and returns one `BcRule` per mesh patch (its face range and its
+value). `Compressible::set_boundary_rules` attaches them. `field.rs` and `field_setup.rs` are
+not touched, so the incompressible `totalPressure` of every other driver is bitwise what it
+was. §120's catalogue keeps `totalTemperature` as owned by CMP-16, because the catalogue
+describes `BcKind::from_name`, and the shared setup still refuses it (it has no gas law).
+The driver writes the fields with the types as read.
+
+**When.** `Compressible::initialise` applies the rules once after its first gas state and
+then re-forms `mu` and `kappa`. `Compressible::step` applies them at the top of every
+outer iteration (step 0 of §125.6's loop), from the latest state, in this order:
+
+1. The mass-flow inlets, from `psi_b` and `p_b`, then `U`'s face values.
+2. The total temperatures, from `u_b`, then `T`'s face values.
+3. The total pressures, from `u_b` (and `T_b`), then `p`'s face values.
+4. `psi` and `rho` on the boundary faces only, by (122.10). The cells are not touched.
+
+A run with no rule launches none of this, so it is bitwise the CMP-15 driver.
+
+**`T_0` of `totalPressure`.** It is the same patch's `totalTemperature` `T0` when `T` carries
+one. Otherwise each face takes `T_0 = T_b + |u_b|^2 / (2 c_p)`, which is (126.1) solved for
+`T_0` at the face (NACA 1135 (43), derived). Either way (126.3) holds with the face Mach
+number `M^2 = |u_b|^2 / (gamma R_s T_b)`.
+
+**Constants and order.** The host forms `cp2 = fl(2 c_p)`, `ge = fl(gamma/(gamma-1))` and
+`pt = fl(p_0 + p_op)` in f64 and rounds each once. The kinetic term is `q / cp2`, a division
+by the doubled `c_p`, not a product with a rounded reciprocal. (126.4)'s sum
+`A = sum_f rho_f |Sf|` is accumulated in `ofacc` by one block of 256 threads, with a
+fixed-order tree in shared memory, so it is deterministic. `rho_f = psi_f (p_f + p_op)` is
+formed in the order `cmpGasState` forms `rho`, so it is the `rho` the boundary carries.
+Then `u_b = -(mdot/A) Sf/|Sf|`. There is no floor and no clip: `|u_b|^2 >= 2 c_p T_0` has no
+isentropic state, and the kernels write what (126.1) and (126.3) give there (§122.3).
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, included by the lib tests of
+`compressible::bc` and by `tests/compressible_bc.rs`, so both builds run it):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `total_conditions_satisfy_isentropic_relation_to_round_off` | R, `tol_r(1e-13)` | inflow faces at M 0.1, 0.5, 0.9; `T_b` and `p_b + p_op` against NACA 1135 (43)-(44), once with `totalTemperature`, once with a fixed `T` | `e_T` 0, `e_p` <= 1.43e-16; `e_T` <= 8.0e-9, `e_p` <= 2.5e-8 |
+| `outflow_face_is_zero_gradient` | D | `u_b . Sf > 0`: `fr = 0` and `refGrad = 0` bitwise, and the face value is the owner cell's, bitwise, on `p` and `T` | bitwise in both |
+| `mass_flow_inlet_delivers_mdot_to_1e_10` | A, 1e-10 (f32: `tol_r(1e-10)`) | a graded 6-face patch with a non-uniform `T`: `sum_f rho_f u_b . Sf = -mdot`, and `u_b` is normal to the face | rel. err 0; 1.5e-8 |
+| `a_total_pressure_tube_runs` | P | 50-cell tube, `p0 = 2000` Pa and `T0 = 300` K against a fixed `p = 0` outlet, 10 Euler steps: no bounds violation, finite, and the inflow accelerates from 10 m/s | `u_b` 14.54 m/s, `M_max` 0.042 in both |
+| `inlet_refusals_name_the_setting` | D | the refusals above name the field, the patch and the entry | - |
+
+The plan names the third test `mass_flow_inlet_delivers_mdot_to_1e-10`, which is not a
+Rust identifier, so it is spelled `..._1e_10`. Its f32 row takes D-F32-1's `tol32`: the
+sum equals `-mdot` up to round-off by construction (§126.3), so it is an R-class row in
+f32. The driver adds `an_openfoam_case_with_the_compressible_inlets_runs` (the
+OpenFOAM route reads both kinds and runs) and a refusal row for `totalPressure` without
+`gamma`.
+
+### 126.9 The outlets as built (CMP-17)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`OutletRule`,
+`CompressibleOutlets`) and two kernels appended to `cuda/compressible.cu`
+(`cmpBcSupersonicSwitch`, `cmpBcWaveSpeed`) implement §126.4 and §126.5. The Robin rewrite
+of (126.7) is BC-09's own kernel (`fldAdvectiveRobinScalar`, (120.4d) of SPEC-LIT 120.4),
+called through `field_ops::advective_robin_scalar` with (126.6)'s `w` and `K` as its
+face-field inputs, as docs/17 §5.2.3 planned. `field.rs` is not edited and no `BcKind` is
+added: the outlets carry their own kind mask (`BcKind::Advective` on their faces, -1
+elsewhere), which is the buffer the kernel matches.
+
+**Names.** On the OpenFOAM route, `waveTransmissive` on `p` or `T` with the optional entries
+`lInf`, `fieldInf`, `sigma` and `gamma`. `sigma` is this solver's own entry: Rudy &
+Strikwerda (1980) is not read, so §126.5's fallback holds and `sigma` is REQUIRED when
+`lInf` is stated, with no default. `bc::lower` reads every value in f64 and refuses by
+name: `lInf <= 0`; `lInf` without `sigma` or without `fieldInf`; `sigma <= 0`; `sigma` or
+`fieldInf` without `lInf` (read by nothing, since `K = 0` then); a stated `gamma` that is
+not the gas's (§126.8's rule); a `phi`, `rho` or `psi` entry naming another field than
+`phi`, `rho` and `thermo:psi` (or `psi`), since (126.6) is formed from the solver's own
+state; and `waveTransmissive` on `U`, which is not built (a non-reflecting outlet takes
+`U` zero-gradient). `Compressible::set_outlet_rules` refuses it under `steadyState` (no
+time step) and `CrankNicolson` ((120.4c) is defined for Euler and backward only).
+`advective` stays refused in `ofgpu-compressible`, with a message naming
+`waveTransmissive`. §120's catalogue keeps `waveTransmissive` as owned by CMP-17, for the
+reason §126.8 gives for `totalTemperature`: the catalogue describes `BcKind::from_name`.
+
+**The supersonic switch** is attached to every `fixedValue` `p` patch as read (§126.4 does
+not name a type; the static-pressure outlet is the fixed `p`). `cmpBcSupersonicSwitch`
+writes `fr = 1` where `u_n,P / c_P < 1` and `fr = 0` otherwise, and `refGrad = 0`; it
+leaves `refValue` (the stated `p`) as set up. A subsonic face therefore carries the triple
+it had, and a supersonic inflow face (`u_n < 0`) stays fixed. `u_n,P = (u_P . Sf)/|Sf|`
+and `c_P = sqrt(fl(gamma R_s) T_P)` are the owner cell's.
+
+**`waveTransmissive`.** It is built as a `zeroGradient` placeholder, so `phi_b^o` starts
+at the owner's value. `cmpBcWaveSpeed` forms, per face,
+
+```
+w = max(u_n,P + c_P, 0)   on p ,     w = max(u_n,P, 0)   on T
+K = max(sigma_by_l c_P (1 - M_n^2), 0) ,   M_n = u_n,P / c_P ,   sigma_by_l = fl(sigma / lInf)
+```
+
+Both clips are *DESIGN*, ours, and the only ones. `w >= 0` is (120.4b)'s rule: a back-flow
+`T` face holds its time extrapolation (`fr = 1`). `K >= 0` holds because at `M_n >= 1`
+there is no incoming characteristic to relax. Without `lInf`, `sigma_by_l = 0` and
+`K = 0`. Time:
+
+* Under `Euler` or `backward`, `w` and `K` are used as formed, with the run's own
+  `(a_n, a_0, a_00)` (`Ddt::face_coeffs`). That is (120.4d), which is (126.7) under Euler.
+* Under `localEuler`, `cmpBcWaveSpeed` divides `w` and `K` by the owner's `r_P = 1/dt_P`,
+  and the Robin kernel takes `(1, -1, 0)`. Then `d = 1 + K dt_P` and
+  `fr = d/(d + w dt_P Delta_b)`, which is (126.7) with §126.5's "under LTS `dt` is the
+  owner's `dt_P`".
+
+`phi_b^o` and `phi_b^oo` are set to the face values in `Compressible::initialise`, and
+rotated (`oo <- o`, `o <- phi_b`) once at the top of every step. The rewrite runs at the
+top of every outer iteration, after the inlets and the switches. The order is `p`'s
+faces, then `T`'s, each followed by its §4 evaluation, and then `psi` and `rho` on the
+boundary faces (§126.8 step 4). The start of a run applies the switches only, because it
+has no step yet.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `robin_form_matches_advective_update_exactly` | R, `tol_r(1e-13)` | 4 faces at `M_n` 0.3, 0.8, 1.2 (`K` clipped) and -0.4 (`w` clipped on `T`), `p` and `T` with `lInf`, Euler and LTS, the cells moved off `phi_b^o`. The device `fr`, `refValue` against (126.7), and the face value against the face update `(phi_b - phi_b^o)/dt + w Delta_b (phi_b - phi_P) = K (phi_inf - phi_b)` solved directly | <= 3.8e-16; <= 8.6e-8 |
+| `supersonic_switch_by_owner_mach` | D | `M_n` 0.5, 0.999, 1.5 and -1.5. `fr` 1, 1, 0, 1 bitwise, `refValue` kept, and `p_b` the owner's on the supersonic face | bitwise in both |
+| `subsonic_fixed_p_outlet_is_bitwise_unchanged` | D | 40-cell tube, 10 Euler steps, with and without the switch attached: `p`, `p_b`, `T`, `rho`, `rho_b`, `u_x` | 0 differing values in both |
+| `gate_cmp_nr_acoustic_pulse` | P | Gate CMP-NR, below | below |
+| `outlet_refusals_name_the_setting` | D | the refusals above | - |
+
+The driver adds `an_openfoam_case_with_a_wave_transmissive_outlet_runs`: the OpenFOAM route
+reads `waveTransmissive` on `p` and runs.
+
+**Gate CMP-NR as measured.** The tube is 200 cells of 5 mm, closed on the left, with air at
+300 K and `p_op = 1e5` Pa. The pulse is `p' = A exp(-((x - x0)/W)^2)` with `A = 1e-3 p`,
+`W = 10` cells (an e-folding width of 20 cells) and `x0` 40 cells from the outlet. It is
+initialised as a simple wave (`u' = p'/(rho_0 c_0)`, isentropic `T'`). The run uses Euler,
+acoustic CFL 0.2, one outer iteration and 3 correctors. The outlet is
+`waveTransmissive` with `lInf 1`, `sigma 0.25` and `fieldInf 0`.
+
+**Reflection** is the largest `|p'_run - p'_ref|` at the probe (cell 190, 10 cells from the
+outlet) over 400 steps, divided by the largest `|p'_ref|`. Here `ref` is the same run in a
+400-cell tube, whose outlet nothing can come back from within the window. *DESIGN*, ours.
+The characteristic split `max|p-|/max|p+|` with `p+- = (p' +- rho_0 c_0 u')/2` is printed
+only: in the reference run, where nothing is reflected, it already reads 0.089, because
+the discrete wave's `u'/p'` is not `1/(rho_0 c_0)`.
+
+**The long-time mean** is the outlet face's `p` averaged over the last tenth of 16 000
+steps (46.1 ms = 4/K with `K = sigma c / lInf`), against `fieldInf`, relative to `A`.
+
+| row | bar | f64 | f32 |
+|---|---|---|---|
+| reflection, `waveTransmissive` | <= 0.05 | **0.1821, MISSED** | **0.1828, MISSED** |
+| reflection, fixed `p` (control) | >= 0.9 | 0.9776 | 0.9778 |
+| long-time outlet mean | <= 1e-3 of `A` | 2.57e-4 | **1.102e-3, MISSED** |
+
+**The miss.** It is asserted as MISSED (user rule of 2026-10-14) and recorded for review. The
+measurements give two parts:
+
+1. The pulse crosses the tube at 1.186 `c_0`, about `sqrt(gamma) c_0`, in both the
+   200-cell and the 400-cell tubes. The speed was measured from the peak's arrival at the
+   probe, and in a separate two-probe run at CFL 0.2 and 0.05 (1.1878 and 1.1862 `c_0`, so
+   it does not depend on `dt`). So the CMP-09..CMP-13 solver carries sound about
+   `sqrt(gamma)` too fast, and (126.6)'s `w = u_n + c_P` with the true `c` is slower than
+   the solver's own wave. The outlet then reflects an inverted copy of the pulse.
+   CMP-20's Gate CMP-AC ("speed within 1 % of (122.4)'s `c`") is the gate that owns this
+   speed.
+2. A diagnostic build that formed `w` with `fl(gamma^2 R_s)` brought the reflection down to
+   0.119 (0.122 with `lInf`), not to 0.05. The rest grows as `dt` falls: 0.117, 0.140,
+   0.179 and 0.261 at CFL 1.0, 0.5, 0.2 and 0.05 with `K = 0` and the true `c`. The
+   half-cell advective closure (126.7), coupled to the segregated pressure equation by
+   its Robin coefficient alone, is therefore not the scheme's own non-reflecting
+   relation.
+
+`K` is not the cause (0.1792 with `K = 0`), and more outer iterations or correctors do not
+help (0.2288 with 3 outer iterations, 0.1821 with 6 correctors). Each cure changes
+numerics, either the solver's acoustic speed (the energy-pressure coupling of §124/§125)
+or the outlet's closure (a characteristic condition on `U` as well), and is the user's
+decision.
+
+The f32 long-time row misses on its own (§112.3's rule: its own row, both values). The f64
+outlet mean decays like `exp(-t/tau)`, halving about every 2000 steps, down to 5.5e-3 Pa at
+step 20 000. Under single it stops decaying at step 14 000 and wanders between -0.07 and
++0.16 Pa (to 24 000 steps, sampled every 2000). That is a few f32 ulps of the absolute
+state about `p_op = 1e5` Pa: an f32 floor, for §112's owner, not a property of the outlet.
+
+### 126.10 The far-field as built (CMP-18)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` (`FarfieldRule`,
+`CompressibleFarfields`, the host twin `farfield_face`) and one kernel appended to
+`cuda/compressible.cu` (`cmpBcFarfield`) implement §126.6 exactly as written there:
+(126.8)-(126.12), Carlson (2011) §2.2 eqs. (8)-(17). `field.rs` is not edited and no
+`BcKind` is added. §120's catalogue keeps `characteristicFarfield` and `farfield` as owned
+by CMP-18, for the reason §126.8 gives for `totalTemperature`: the catalogue describes
+`BcKind::from_name`, and the shared setup still refuses both.
+
+**Names.** `characteristicFarfield` on `U`, `p` and `T` of the same patch, each with one
+uniform `value`: the free stream's `u_o`, gauge `p_o` (in the datum of `p`) and `T_o`. The
+JSONC kind `farfield` lowers to exactly that (§122.6), and `bc::lower` also accepts the
+spelling `farfield` in a field file. `bc::lower` refuses by name: the kind on one or two of
+the three fields only (one free stream decides all three), a missing or non-uniform
+`value`, `T_o <= 0`, `p_o + p_op <= 0` (§122.3), and a stated `gamma` that is not the gas's
+(§126.8's rule). Each entry is built as a `fixedValue` placeholder at its free-stream value,
+so the faces hold the free stream until the first rewrite. The supersonic switch of §126.9
+is not attached: it is attached to a `fixedValue` `p` as read, and this one is not.
+
+**The kernel.** One thread per face of one patch, from the OWNER cell `P`:
+
+```
+n = Sf/|Sf| ,  U_i = u_P . n ,  c_i = sqrt(fl(gamma R_s) T_P) ,  U_o = u_o . n
+rho_i = (p_P + p_op) / (fl(R_s) T_P)                                    (122.10)'s state
+```
+
+then (126.8)-(126.12) in that order, with `fl(2/(gamma-1))`, `fl(1/(gamma-1))`,
+`fl(gamma - 1)`, `fl(gamma)`, `fl(R_s)` and `fl(p_op)` formed on the host in f64 and
+rounded once, and `c_o = fl(sqrt(gamma R_s T_o))` and `s_o = fl(p_abs,o / rho_o^gamma)`
+formed there per patch. (126.9)'s test is `|U_i|/c_i >= 1`, written as a division, as
+§126.9's switch writes it. `c_b = (gamma - 1)(R+ - R-) * 0.25`, and the gauge `p` is
+`rho_b c_b^2/gamma - p_op`. It writes `fr = 1` and `refGrad = 0` on all three fields and
+`refValue = u_b`, `p_abs,b - p_op` and `T_b`, reading only cells, so every face sees the
+state of the same moment. There is no floor and no clip: `c_b <= 0` (an expansion the two
+invariants cannot carry) is written as the formulas give it, and §122.3's counter sees the
+state that follows. `farfield_face` is the f64 host twin in the kernel's operation order;
+it also names the face's branch.
+
+**When.** `Compressible::set_farfield_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, after the inlets of
+§126.8 and before the outlets of §126.9; then `U`'s, `p`'s and `T`'s face values, and `psi`
+and `rho` on the boundary faces (§126.8 step 4). It needs no time step, so steady runs
+take it. A run with no far-field launches none of this.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `freestream_preserved_m0_5_and_m1_5` | R, `tol_r(1e-10)` (1e-10; 1e-5) | interior equal to the free stream (`u = (M c, 0.2 c, 0)`, `p` 2000 Pa gauge, 300 K) on a far-field at both ends, `M` 0.5 and 1.5, so normal Mach +-0.5 and +-1.5, all four branches. `u_b` against `u_o` relative to `\|u_o\|`, `p_b` relative to `p_o + p_op`, `T_b` relative | `e_u` 2.2e-16, `e_p` 2.9e-16, `e_T` 1.9e-16; 1.6e-7, 1.5e-7, 1.0e-7 |
+| `branch_selection_by_un_and_c` | D | rows at `M_n` +-0.5 and +-1.5 against a free stream entering at 0.1 `c`. Changing the free stream's tangential `u` and `p` at fixed `T` leaves the two outflow branches bitwise unchanged; changing the interior's leaves the two inflow branches; the whole free stream leaves supersonic outflow only; the whole interior (in-branch) leaves supersonic inflow only. Every other face changes. `fr = 1` and `refGrad = 0` bitwise, and the face value is `refValue` bitwise | bitwise in both |
+| `invariants_exact_on_host_twin` | R, `tol_r(1e-13)` | varied interior (`M_n` 0.4, 1.3, -0.7, -1.2; 305 to 312.5 K; tangential `u`) against a free stream at 310 K entering at 0.2 `c_o`: the device state against `farfield_face` (velocity relative to `c_o`), and on the device face `R+`, `R-` against the sides (126.8)-(126.9) take them from, the entropy and the tangential velocity against the side (126.11) takes them from | twin 4.3e-16, invariants 3.4e-16; 6.2e-7, 1.7e-7 |
+| `a_farfield_tube_runs` | P | 50-cell tube, far-field at both ends (free stream M 0.3 along x, 300 K), 305 K interior, 10 Euler steps: finite and no bounds violation | `M_max` 0.3054 in both |
+| `farfield_refusals_name_the_setting` | D | the refusals above; `farfield` lowers to the same rule | - |
+
+The f32 rows of the first and third tests are R-class rows under D-F32-1: `tol_r(1e-10)`
+and `tol_r(1e-13)` are both `1e-5` in f32, the plan's figure for the first. The driver adds
+`a_jsonc_farfield_tube_runs`: the JSONC route lowers `farfield` with its `freestream`, runs
+the tube with no bounds violation, and writes `p` with the type `characteristicFarfield`.
+
+### 126.11 The free-stream family as built (BC-20)
+
+`No GPL-licensed source was consulted.` docs/17 BC-20, reduced by docs/17 §5.2.3 item 3:
+`inletOutletTotalTemperature`, `supersonicFreestream`, `freestreamPressure` with its
+supersonic switch, and `fixedPressureCompressibleDensity`, built on `src/compressible/bc.rs`
+(`FreestreamRule`, `CompressibleFreestreams`, `check_rho` and the host twins
+`supersonic_freestream_face`, `freestream_fraction`, `prandtl_meyer`) and two kernels appended
+to `cuda/compressible.cu` (`cmpBcSupersonicFreestream`, `cmpBcFreestreamPressure`). BC-20's
+acoustic-pulse row is dropped as a duplicate of Gate CMP-NR (§126.9); each remaining name has
+a closed-form gate. `field.rs` is not edited and no `BcKind` is added: §120's catalogue keeps
+the three new names as planned by BC-20 and `freestreamPressure` as implemented and extended
+by BC-20, for the reason §126.8 gives for `totalTemperature` (the catalogue describes
+`BcKind::from_name`, and the shared setup is unchanged). Only `ofgpu-compressible` lowers
+them. The names follow the public user guides by name only; the equations below are NACA
+Report 1135's and this tree's DESIGN.
+
+**`inletOutletTotalTemperature`** on `T`, with `T0` (and an optional `gamma`, held to the
+gas's): (126.1) on an inflow face, zero gradient on an outflow face. That is exactly what
+§126.8's `totalTemperature` rule already does, so `bc::lower` returns the same
+`RuleKind::TotalTemperature` rule and `cmpBcTotalTemperature` runs it; the two names give
+bitwise the same triples.
+
+**`freestreamPressure`** on `p`, with `freestreamValue` (gauge, in the datum of `p`) and an
+optional `supersonic` switch (`true`/`false`, `yes`/`no`, `on`/`off`; absent is `false`).
+The public description of the name (docs/01-model-catalog.md) is a blend "between zero
+gradient for normal inlet and fixed value for normal outlet flow" by the velocity
+orientation. *DESIGN* - the blend is linear in the direction cosine of the face velocity:
+
+```
+cos = (u_b . Sf) / (|u_b| |Sf|), clamped to [-1, 1];  cos = 0 when |u_b| = 0
+fr  = 1/2 + cos/2   (subsonic, the default)
+fr  = 1/2 - cos/2   (supersonic true)                                                      (126.13)
+refValue = freestreamValue,  refGrad = 0
+```
+
+with `u_b` the face value of `U` (its own condition). The subsonic form fixes `p` where the
+flow leaves and extrapolates it where the flow enters, the one outgoing characteristic of a
+subsonic inflow; the supersonic form is the reverse, Carlson (2011) Table 1's "all"
+specified at a supersonic inflow and none at a supersonic outflow. The generic
+`freestreamPressure` of the other drivers (an `inletOutlet`, §120's table) is unchanged.
+
+**`supersonicFreestream`** on `U`, with `UInf` (a uniform vector), `pInf` (gauge, in the
+datum of `p`), `TInf` and an optional `gamma` (held to the gas's). *DESIGN* on NACA Report
+1135's isentropic relations (43)-(44) and its Prandtl-Meyer function (171): the stated
+stream is turned through the simple wave that takes it from `pInf` to the face pressure.
+With `M_inf^2 = |u_inf|^2/(gamma R_s T_inf)`, `T_0 = T_inf (1 + (gamma-1)/2 M_inf^2)` (43)
+and `p_0 = (p_inf + p_op)(T_0/T_inf)^(gamma/(gamma-1))` (44), on a face whose OWNER velocity
+enters (`u_P . n < 0`):
+
+```
+M_b^2 = 2/(gamma-1) expm1( (gamma-1)/gamma log( p_0 / (p_b + p_op) ) ),  raised to 1 below 1   (126.14)
+nu(M) = sqrt((gamma+1)/(gamma-1)) atan sqrt( (gamma-1)/(gamma+1) (M^2-1) ) - atan sqrt(M^2-1)  (126.15)
+delta = nu(M_b) - nu(M_inf),  T_b = T_0/(1 + (gamma-1)/2 M_b^2),  |u_b| = M_b sqrt(gamma R_s T_b)
+e = u_inf/|u_inf|,  t = n - (n . e) e
+u_b = |u_b| (cos delta  e - sin delta  t/|t|)   if |t| > 1e-6,   u_b = |u_b| e   otherwise      (126.16)
+```
+
+`fr = 1`, `refValue = u_b`, `refGrad = 0`. (126.14) is (44) solved for `M` and written with
+`expm1` so that `p_b = p_inf` returns `M_inf` without cancellation; (126.15) is NACA (171).
+`p_b` is `p`'s face value (its own condition, normally zero gradient or `freestreamPressure`
+with `supersonic`). An expansion (`p_b < p_inf`, `delta > 0`) turns the entering stream
+toward `-n`, into the domain, and a compression away from it: the sense of a simple wave
+whose lower pressure lies inside. A face whose owner velocity leaves (`u_P . n >= 0`) is
+vented: zero gradient. The limits, recorded: `M_b` is raised to 1 when `p_b` is at or above
+the free stream's total pressure (no Prandtl-Meyer wave is subsonic); a stream within about
+1e-6 rad of the face normal has no turning plane and keeps its direction; `delta` is not
+limited, so a turn past the face plane is written as the formulas give it; a non-positive
+`p_b + p_op` gives a NaN that §122.3's counter sees. A free stream below Mach 1 is refused by
+name (it takes `characteristicFarfield`, §126.10).
+
+**`fixedPressureCompressibleDensity`** on `rho`: the density at the patch from the equation
+of state at the patch pressure, which is (122.10) at the face, `rho_b = (p_b + p_op)/(R_s
+T_b)`. `ofgpu-compressible` does not solve `rho`; it forms it on EVERY boundary face from
+`p`'s and `T`'s face values at each gas-state update, so the condition is what every face
+already does. The driver reads a `rho` file when the OpenFOAM case has one, and
+`bc::check_rho` accepts `fixedPressureCompressibleDensity`, `calculated` and the constraint
+types (`empty`, `symmetry`, `symmetryPlane`, `wedge`, `cyclic`, `cyclicAMI`); any other type
+would state a second density and is refused by name. The written `rho` keeps §44's
+`calculated` types.
+
+**When.** `Compressible::set_freestream_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, FIRST (before §126.8's
+inlets, so an inlet `T` on the same patch reads the new `u_b`): the `supersonicFreestream`
+faces, then `U`'s face values, then the `freestreamPressure` faces from those `u_b`, then
+`p`'s face values; `psi` and `rho` on the boundary faces follow with the other rules. A
+`supersonicFreestream` reads `p`'s face value of the previous evaluation. All host constants
+(`e`, `T_0`, `p_0`, `nu(M_inf)`, `2/(gamma-1)`, `(gamma-1)/gamma`, `(gamma-1)/2`,
+`gamma R_s`, `sqrt((gamma+1)/(gamma-1))`, `(gamma-1)/(gamma+1)`, `p_op`, `1e-6`) are formed
+in f64 and rounded once. No time step is needed, so steady runs take them.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `inlet_outlet_total_temperature_is_total_temperature` | D, R `tol_r(1e-12)` | rows entering at M 0.3, 0.8 and 0.5 (tangential part) and one leaving: `T`'s `fr`, `refValue`, `refGrad` and face values bitwise those of `totalTemperature`; an inflow face against NACA (43); the leaving face the cell's | bitwise; `e_T` 1.9e-16; 2.9e-8 |
+| `freestream_pressure_blends_by_direction` | D, R `tol_r(1e-14)` | face velocity out, in, at 60 degrees and zero, both switch positions: `fr` of (126.13) (bitwise on the aligned and zero rows), `refValue` = `freestreamValue` bitwise, the face value the blend, the host twin | 0; 2.9e-9 |
+| `supersonic_freestream_matches_prandtl_meyer` | R `tol_r(1e-12)`, twin `tol_r(1e-13)`, D | M 2 at 10 degrees, face pressure 1.0, 0.8 and 1.15 of `p_inf` and one leaving row: the free stream returned at `p_inf`; `M_b` from `\|u_b\|` and (126.1) gives the face pressure by NACA (44); the turn is `nu(M_b) - nu(M_inf)` by NACA (171) (3.861 and -2.514 degrees), toward `-n` on the expansion, in the stream's plane; the leaving face vented bitwise | worst 2.8e-15, twin 2.3e-16; 4.3e-7, 1.3e-7 |
+| `fixed_pressure_compressible_density_is_the_gas_law` | R `tol_r(1e-12)` | every boundary face after `initialise`, a fixed `p` (3000 Pa) and `T` (320 K) at one end: `rho_b` against (122.10); `check_rho` accepts the name, `calculated` and `empty` | 1.9e-16; 4.5e-8 |
+| `a_supersonic_freestream_tube_runs` | P | 50-cell tube carrying M 2: `supersonicFreestream`, `freestreamPressure` (supersonic) and `inletOutletTotalTemperature` on both ends, 10 Euler steps: finite, no bounds violation | `M_max` 2.0000 in both |
+| `bc20_refusals_name_the_setting` | D | a missing or malformed `UInf`, `pInf`, `TInf`, `freestreamValue`, `T0`; `TInf <= 0`; an absolute `pInf` or `freestreamValue <= 0`; a subsonic `UInf`; another `gamma`; a `supersonic` that is not a switch; each name on the wrong field; a `fixedValue` `rho` | - |
+
+The f32 rows are R-class rows under D-F32-1: `tol_r(1e-12)`, `tol_r(1e-13)` and
+`tol_r(1e-14)` are `1e-5`, `1e-5` and `5.4e-6` in f32.
 
 ---
 
@@ -45416,7 +45880,10 @@ acoustics, Ghia and the AR-138 experiment.
 
 | unit | quantity | value | commit |
 |---|---|---|---|
-| — | — | — | — |
+| CMP-17 | CMP-NR reflection, `waveTransmissive` (bar <= 0.05) | f64 0.1821, f32 0.1828: **MISSED** (§126.9) | CMP-17 |
+| CMP-17 | CMP-NR reflection, fixed `p` (bar >= 0.9) | f64 0.9776, f32 0.9778 | CMP-17 |
+| CMP-17 | CMP-NR long-time outlet mean / `A` (bar <= 1e-3) | f64 2.57e-4; f32 1.102e-3 **MISSED** (f32 floor, §126.9) | CMP-17 |
+| CMP-17 | the pulse's speed in the solver (cause of the miss) | 1.186 `c_0`, about `sqrt(gamma) c_0`, both builds | CMP-17 |
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
@@ -47001,6 +47468,80 @@ paths are set (§129.6). JL4 is not in the tree (§129.6).
 
 No new equation labels.
 
+### 132.11 The split step as built (CHR-09, `src/chem/source.rs`, `src/species.rs`)
+
+`No GPL-licensed source was consulted.` The equations are §132.4's reactor and
+§132.5's split, (132.7)-(132.10); nothing is added to them.
+
+**The species set carries a source.** `Species::use_reaction_sources` gives
+each solved species one `[n_cells]` buffer `su`, allocated once (§81), and
+`Species::correct_with_density` hands species `i` its own buffer as the
+`su` of `ScalarTransport::correct_with_density`, which adds it as
+`fvm_su(su, +1)`: `source[P] += V_P su_P`, after the equation's own terms and
+before relaxation, where every other source of the solver goes (§18). A set
+without reaction sources hands every equation `None`, which is the call it
+made before CHR-09, so that path is the same arithmetic by construction and
+is held to a hash pinned before the change.
+
+**The split step fills it.** `chem::source::ChemSource::new` maps every
+mechanism species by name to a solved index or to the inert remainder of
+§19 and refuses, by name, a mechanism species that is not in the set and a
+member of the set that is not in the mechanism: the reactor needs the whole
+composition. `ChemSource::step(species, T, p, rho, dt)` then, for one flow
+step `dt`:
+
+1. packs `Y°` in mechanism order (the inert remainder included) and copies
+   `T°`, by device-to-device copies;
+2. runs CHR-07b's `integrate_fields` (§132.10) in place, every cell's reactor
+   at its `p` and in `double` in both builds (§132.6), with each cell's step
+   memory `h` seeded with `opts.h0` and carried from flow step to flow step
+   (`RosStats::h_next` out, the next step's first trial step in);
+3. writes, per solved species, (132.10) in the currency of the equation it
+   enters: `su_k = (Y*_k - Y°_k)/dt` on §19's constant-density equation
+   (`d(Y)/dt`), and `su_k = rho (Y*_k - Y°_k)/dt` on §86's mass-weighted one
+   (`d(rho Y)/dt`), with `rho` the density `correct_with_density` is handed.
+   `Y* - Y°` is formed from the two Scalar values, so it is exact
+   (Sterbenz) whenever the step changed `Y_k` by less than a factor of two.
+
+`T*` is kept (`ChemSource::temperature`) for (132.10)'s `Q_chem`, which is
+CHR-10b's; CHR-09 does not touch `T`. Refused by name: `dt` not finite or not
+above 0; a density on the constant-density set or none on the mass-weighted
+one (as §86.5 row 6); a set without reaction sources; `T` or `p` shorter than
+the cell count. A cell the reactor refuses carries NaN into its sources and
+its status into `ChemSource::refused_cells`, one read-back and so a
+diagnostic, not a loop step. The step allocates nothing and reads nothing
+back, and it captures (§81.7).
+
+**(133.5) is not built.** §133.5 lists `species_fluxes_sum_to_zero` under
+CHR-09, while the plan's CHR-09 row (docs/17 §12.2) names neither the
+correction nor its files or test. The correction is a new explicit face flux
+in every species equation. That is a numerics addition to species diffusion,
+and the diffusivity it corrects is not there yet: §133.4's route (b) is
+refused by name (§133.7), and on the Lewis route with one Lewis number for
+every species the correction is identically zero. This was decided by
+recommendation, and the row moves to the unit that brings species-specific
+mixture-averaged diffusivities into the species equation.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `species_box_matches_reactor` | a closed adiabatic box with no flow, 2^3 cells cyclic on all three axes and uniform (the plan's one-cell-wide periodic box is the same 0-D problem), stoichiometric H2-air with H, O, OH at 1e-4 moles each, `T0` 1400 K, 1 atm, on §132.8's 15-reaction fixture (placeholder rates); Lie split at `dt = 1e-6` s over 200 steps, `T` fed back from `T*`; every species of the set, solved and inert, against the host `ConstPressureReactor::advance` chained over the same 200 `dt` (each chunk's first trial step the last one's `h_next`), on both species equations | `max abs dY <= 1e-6`; the host must move `max abs dY > 1e-3` | P | host: `T` 1400 -> 1456.270 K, `max abs dY` `2.33e-2`. f64 build: `3.12e-13` (constant density) and `4.59e-13` (mass-weighted), `T*` within `1.7e-9` K. f32 build: solved species `7.04e-7` on both equations; **the inert N2 MISSED**, `1.086e-6` (constant density) and `1.026e-6` (mass-weighted), at step 196 |
+| `species_budget_closes_with_chemistry` | (86.5) with the source metered: a closed 4^3 box (walls, a non-solenoidal internal flux, conservative upwind, `rho` varying in space and held in time, non-uniform `T` and `Y`), the mass-weighted set with the split step's sources; per step and per solved species `abs(Δ Σ rho Y V - dt Σ su V - Δ clip) / Σ rho V`, three steps | `1e-12`, tol32 `1e-5` (D-F32-1); the chemistry term above `1e-6` of the mass | R | f64 build `1.23e-16`; f32 build `3.27e-9`; the chemistry term `2.52e-4` of the mass |
+| `species_without_chemistry_is_bitwise` | three steps of each species equation with no reaction sources, FNV-1a over every solved field and the inert remainder, against the hash pinned at afd0f30 before `src/species.rs` changed | bitwise | D | f64 `0x1bc5208b67b6041e`, f32 `0x018e7024cfdec719`: both unchanged |
+| `chem_source_replays_under_capture` | `ChemSource::step`, `T*` copied back into `T`, then `Species::correct` on a 3^3 box with a flux, captured and replayed | bitwise | D | 1027 nodes (896 kernel, 100 memset, 31 memcpy), 3 replays bitwise over 6 buffers / 162 values (f64 lib test) |
+
+**The f32 miss.** The inert remainder is `1 - Σ` over nine f32 fields, and
+each of them is rounded once per step, so the remainder carries their
+summed round-off. The test measures that cause: N2's error minus the
+negated sum of the solved species' errors is `8.1e-8` on both equations,
+while every solved species stays within `7.0e-7`. The miss is the f32
+storage of the mass fractions, which §19's construction sends to the inert
+species. A cure (f64 mass fractions, or a renormalised set) changes the
+species numerics and is the user's decision (docs/17 §5.3.4). Under the
+user's rule of 2026-10-14 the test asserts the miss as MISSED, prints its
+value and cause, and the unit lands.
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint
@@ -47098,12 +47639,13 @@ with a factor `f < 1`, that pulls a fractional-step solution back onto (133.3).
 Its exact coefficient is not restated here, because the open copy's text layer
 is garbled at that line. It is **named and not
 adopted in v1**. §25's loop holds the equation of state by recomputing `rho`
-from (133.3), and CHR-11 measures the drift that remains. If that drift needs
+from (133.3), and CHR-11 measures the drift that remains: first order in
+`Δt` (§133.10), so the term is not needed for it. If that drift needs
 the term, it is a numerics change and goes to the user (docs/17 §5.3.4).
 
-**§25 is amended in place by CHR-11**, not here. §25.1's "v1: constant W = air,
-stated" becomes a pointer to (133.4). This section is the derivation that
-amendment cites.
+**§25 is amended in place by CHR-11** (§133.10), not here. §25's
+"constant W" line points to (133.20), and §25.1 and §25.2 point to (133.21)
+and (133.22). This section is the derivation those pointers cite.
 
 ### 133.3 The species fluxes must sum to zero
 
@@ -47125,7 +47667,8 @@ form already does.
 
 **On the mesh**, (133.5) is evaluated per face with face-interpolated `Y_m`,
 and its sum over `m` is zero per face up to round-off. §86's species budget
-then closes with the correction metered, not hidden. CHR-09 proves it.
+then closes with the correction metered, not hidden. CHR-09 was to prove it;
+it did not build (133.5), and §132.11 says why.
 
 ### 133.4 Mixture-averaged coefficients
 
@@ -47195,7 +47738,7 @@ constant.
 | `transport_air_viscosity_vs_kadoya` | (133.8) on N2/O2 0.79/0.21 with route (a), 300-1500 K, against `reference/kadoya1985` | 2 % | P |
 | `transport_air_conductivity_vs_kadoya` | (133.9) and (133.11), same | 5 % | P |
 | `transport_route_b_named` | `D_kj` refused by name until Neufeld is read | — | D |
-| `species_fluxes_sum_to_zero` (CHR-09) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
+| `species_fluxes_sum_to_zero` (CHR-09; not built, §132.11) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
 | `gas_wmix_sealed_box_p0_closed_form` (CHR-11) | `dp0/dt` from (133.4) against the analytic sealed box | 1e-12 relative | A |
 | `gas_constant_w_default_bitwise` (CHR-11) | one species, constant W: (133.4) reduces to §25.1 bitwise | bitwise | D |
 
@@ -47334,9 +47877,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's and CHR-12a's; this
-unit builds the slot and the two rows that read it. Without a field nothing
-changes.
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
+and CHR-12a wires it from the case; this unit builds the slot and the two rows
+that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
 field enters both:
@@ -47357,7 +47900,7 @@ shorter than the mesh, is refused by name, naming the cell or boundary face.
 
 **What still reads the constant `cp`, stated.** `k_eff`'s turbulent part
 `rho cp nu_t/Pr_t` (S26, both `Pr_t` models), §25.1's target divergence
-(which (133.4) replaces in CHR-11), and the S29.3 thermal wall function.
+on a gas without a mixture (with one, (133.21) of §133.10 reads the field), and the S29.3 thermal wall function.
 The §120.8 Danckwerts inlet reads `phi_m` itself, so it follows (133.14).
 `assembly_budget` divides by (133.14)'s own `cp_f` and weighs by the cell's
 `cp_c`; its mass diagnostics come from the same pass on `rho_f phi_f`, exact,
@@ -47376,6 +47919,199 @@ The two exact zeros are not a promise: the uniform mesh's `w_f = 1/2` makes
 differ from `c` in its last bit, which the R tolerance allows.
 
 Labels: (133.13)-(133.14).
+
+### 133.9 Heat release and species-enthalpy diffusion in the temperature equation (CHR-10b, `src/energy.rs`, `src/chem/source.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (1)-(6) as (133.1)-(133.2) of §133.1 write them, and the split of
+(132.10) of §132.5; nothing is added to them.
+
+**The temperature form.** Subtract `Σ_m h_m` times (133.1) from (133.2), use
+continuity, and write `h = Σ_m Y_m h_m(T)` with `grad h_m = cp_m grad T`:
+
+```
+rho cp DT/Dt = div(λ grad T) - Σ_m Γ_m . grad h_m - Σ_m h_m W_m omega_m + dp0/dt              (133.15)
+```
+
+The first line of (133.4) is this equation divided by `rho cp T`, term for
+term. §26 already carries `rho cp DT/Dt` (with CHR-10a's `cp` field,
+§133.8), `div(λ grad T)` and `dp0/dt`. CHR-10b adds the other two terms, both
+as explicit sources on §18's `EnergySources`, so they also enter §25.1's `Q`
+and with it the target divergence and the sealed-box `p0`, as §26.1 requires
+of every heat source.
+
+**The heat release.** `-Σ_m h_m W_m omega_m` is the split step's: the reactor
+(132.7)-(132.8) has already integrated it over `Δt` into `T* - T°`, and
+(132.10) hands it to the transport step as `Q_chem = rho cp (T* - T°)/Δt`.
+The `rho cp` is the energy equation's own:
+
+```
+Q_chem,c = w_c (T*_c - T°_c) / Δt,    w_c = the ddt row's current-level weight                 (133.16)
+```
+
+`w` is `rho_c cp_c` (or `rho_c cp` on the constant path), and (133.13)'s
+`rho* cp` under backward, refreshed from the gas state exactly as
+`Energy::correct` refreshes it (`Energy::heat_release_weight`). *DESIGN.*
+With this weight a cell with no flux under Euler, at the first outer
+iteration of a step (`rho^n = rho^(n-1)`, `ofgpu-lowmach`'s order: open the
+step, then `update_density`), solves `w (T^(n+1) - T°)/Δt = Q_chem` and lands
+on `T*` to round-off: the 0-D box is the reactor. Under backward the row is
+`w (3/2 T - 2 T° + 1/2 T^(n-1))/Δt` and lands near, not on, `T*`; Lie
+splitting is first order in `Δt` either way (§132.5). `T* - T°` is formed
+from the two Scalar values (`ChemSource::start_temperature` keeps `T°`),
+exact whenever the step changed `T` by less than a factor of two.
+
+**The species-enthalpy diffusion.** §19's inert remainder `N` closes the
+fluxes as it closes the mass fractions, `Γ_N = -Σ_k Γ_k` over the solved
+species (§133.3's (133.5) is not built, §132.11), so with
+`Γ_k = -rho D_k grad Y_k`
+
+```
+- Σ_m Γ_m . grad h_m = Σ_{k solved} rho_c D_k (cp_k(T_c) - cp_N(T_c)) (grad Y_k)_c . (grad T)_c   (133.17)
+```
+
+per cell, from Gauss gradients of `T` and of each solved `Y_k`. `D_k` is
+the species' molecular diffusivity (`SpeciesCoeffs::d`), the laminar flux
+of Day & Bell's equations. *DESIGN, decided by recommendation:* the
+turbulent part `nu_t/Sc_t` of the species flux is not added, because §26's
+turbulent heat flux `rho cp nu_t/Pr_t grad T` is the model of the turbulent
+enthalpy transport and adding a second turbulent enthalpy flux would count
+it twice. `rho` is the cell density of §25. (133.17) is not a divergence, so
+its domain integral is not zero: it moves sensible heat between species of
+different `cp`, which the temperature equation sees as a source.
+
+**The mixture `cp`**, the producer §133.8 left open:
+
+```
+cp_c = Σ_m Y_m,c cp_m(T_c),   cp_m = (R/W_m)(a1 + a2 T + a3 T^2 + a4 T^3 + a5 T^4)            (133.18)
+```
+
+(128.7) with (128.1), the lower set at or below `t_mid` (128.5), on every
+cell and every boundary face from that face's `T` and `Y`, into the two
+buffers `Energy::set_cp_field` takes. A member with `Y_m = 0` adds exactly
+nothing, as `ThermoSet::cp_mass` skips it. The polynomial ranges are not
+checked here; a cell outside them is the reactor's refusal (§132.4).
+
+**As built.** `cuda/energy.cu` gains `energyMixtureCpAdd` (one member per
+launch), `energyEnthalpyDiffusionAdd` (one solved species per launch) and
+`energyRoundAcc`: every sum is formed in `ofacc` (double in both builds,
+§118.1) and rounded once to the build's scalar. `chem::source::SpeciesEnthalpy`
+holds one 12-value row per member (`R/W`, `t_mid`, the two sets'
+`a1..a5`), built by name from the `ThermoSet` and refused by name for a member
+it does not carry; `mixture_cp` and `diffusion_source` allocate nothing and
+read nothing back. `ChemSource::heat_release(weight, out)` forms (133.16)
+and is refused by name before the first step. `EnergySources::use_meters`
+gives the registry two opt-in meters, and `register_heat_release` and
+`register_enthalpy_diffusion` add into `q` and into their meter;
+`EnergyBudget` gains `heat_release_w` and `enthalpy_diffusion_w`, each
+`-Σ_c q_meter,c V_c`, two sub-entries of `sources_w` in the same sign. A
+registry without meters runs the launches it ran before, and the six
+existing kernels of `energy.cubin` keep their SASS (the cubin's three new
+functions are its only change).
+
+**Gates, measured 2026-10-15 (both builds, `tests/energy_chem.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `energy_box_matches_reactor` | §132.11's 0-D box (2^3 cyclic, uniform, no flow, open, `p0` 1 atm, H2-air 1400 K, CHR-06's fixture), Lie split at `dt = 1e-6` s over 200 steps, `T` from the energy equation (Euler) with (133.16) and (133.17) registered and the (133.18) field set every step, both species equations, against CHR-06's host `ConstPressureReactor::advance` chained over the same steps | `max abs dT <= 0.5 K`; the host must heat by more than 10 K | P | host 1400 -> 1456.270 K. f64 `1.43e-9` K (constant density), `7.71e-10` K (mass-weighted); f32 `3.33e-2` K and `3.51e-2` K |
+| `energy_budget_meters_heat_release` | a closed 4^3 box (adiabatic walls, no flow), `T` 1700 ± 60 K and `Y_H2`, `Y_OH` varying per cell, nine distinct `D_k`, three steps at `dt = 1e-5` s: (a) `abs(residual_w)`, (c) `abs(sources_w - heat_release_w - enthalpy_diffusion_w)`, both over the gross `Σ w T° V/dt`; (b) `heat_release_w` against the host's `-Σ w (T* - T°)/dt V` from the downloaded `w`, `T°`, `T*`, relative; the heat release above `1e-4` of the gross and the enthalpy diffusion nonzero | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 (a) `1.39e-16`, (b) `1.29e-16`, (c) `3.69e-18`; f32 (a) `1.41e-8`, (b) `8.28e-9`, (c) `9.65e-10`; heat release `2.28e-4` of the gross (0.863 W), enthalpy diffusion `1.09e-4` W |
+| `energy_species_enthalpy_matches_host` | 4^3 walled box, `T` 900-1845 K, every `Y` varying: (133.18) on every cell and boundary face against `ThermoSet::cp_mass`, relative; (133.17) against an f64 host evaluation from the device's own Gauss gradients, over the largest value; refusals named (a member without thermo, a heat release before any step, a metered registration without meters) | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 `2.92e-16` and `5.60e-16` of `1.04e5` W/m3; f32 `3.98e-8` and `3.70e-8` |
+
+Labels: (133.15)-(133.18).
+
+### 133.10 The mixture molar mass in the equation of state and the molar-change term of the constraint (CHR-11, `src/energy.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (3) and (7) as (133.3) and (133.4) of §133.1-§133.2 state and derive
+them; nothing is added to them. What this section adds is how they are
+evaluated.
+
+**The mixture.** `GasMixture` names the solved members `k`, in the order
+their mass-fraction fields are handed over, and §19's inert remainder `N`,
+each with its molar mass. (133.3)'s `Σ_m Y_m/W_m`, with `Y_N = 1 - Σ_k Y_k`
+written out, is
+
+```
+1/W = 1/W_N + Σ_k Y_k (1/W_k - 1/W_N)                                                          (133.19)
+rho^(l) = p0^(l) / ( R T^(l) (1/W)^(l) ),    l = n, n-1, n-2 on the cells, and l = n on the boundary faces   (133.20)
+```
+
+`GasState::update_density_mixture` forms both on every level §25's
+`update_density` refreshes, each level from its own `T`, `Y` and `p0`.
+*DESIGN.* (133.19) equals (133.3)'s sum while `Σ_k Y_k <= 1`, where §19's
+clip of `Y_N` at zero is idle (`Species::max_sum_error` measures when it is
+not), and it reads the solved members' own old levels, which the inert field
+does not keep.
+
+**The constraint.** In (133.4), the first line and the `- h_m/(cp T)` part of
+the third are `Q/(rho cp T)`, with `Q` §26.1's registry and conduction (CHR-10b
+registers the heat release (133.16) and the enthalpy diffusion (133.17) there).
+What is new is `(1/rho) Σ_m (W/W_m) S_m` with `S_m = W_m omega_m - div Γ_m`,
+the member's net mass source, and `S_N = -Σ_k S_k` by the closure. By (133.3),
+`W/rho = R T/p0` and `1/(rho cp T) = R_s/(cp p0)` exactly, so per cell
+
+```
+D_c = Q_c R_s,c / (cp_c p0) + (R T_c / p0) Σ_k (1/W_k - 1/W_N) S_k,c,    R_s,c = R (1/W)_c
+(div u)_target,c = D_c - (1/γ_c) (dp0/dt) / p0,    1/γ_c = 1 - R_s,c / cp_c                    (133.21)
+```
+
+with `cp_c` CHR-10a's field when one is set and the constant `cp` otherwise,
+`dp0/dt` at §25's one-iteration lag. Integrating (133.21) over a sealed domain,
+where `∫ div u dV = 0`:
+
+```
+dp0/dt = p0 ∫ D dV / ∫ (1/γ) dV     (sealed),     dp0/dt = 0     (open)                         (133.22)
+```
+
+With one constant `W` and `γ = cp/(cp - R/W)` this is (25.2)'s
+`(γ - 1)/V_dom ∫ Q dV`. On the gate's box (uniform, `Q = 0`, one solved `A`
+against the inert `N`, `Σ_m omega_m = S_A/W_A + S_N/W_N`) it is the closed form
+
+```
+dp0/dt = γ R T S_A (1/W_A - 1/W_N) = γ R T Σ_m omega_m,     γ = cp / (cp - R (1/W))             (133.23)
+```
+
+**As built.** `cuda/energy.cu` gains `energyFillAcc` and `energyAxpyAcc`
+((133.19), and the molar sum `Σ_k (1/W_k - 1/W_N) S_k` that
+`GasState::set_molar_change` forms from the members' sources in kg/(m3 s)),
+`energyMixtureDensity` ((133.20)) and `energyMixtureConstraint` ((133.21) on
+every cell, grid-stride, with the per-block sums of `D V` and `V/γ`). Every sum
+and quotient is in `ofacc` (double in both builds, §118.1), rounded once to the
+build's scalar; `Energy::constraint_integrals` totals the block sums on the
+host in block order, and `GasState::advance_p0_mixture` takes one explicit
+Euler step of (133.22) in f64 and rounds `p0` once. Because the rate never
+passes through a rounded `rho`, class A holds in f32. A gas without a mixture
+runs every launch it ran before (the old `energyTargetDivergence`, `update_density`,
+`advance_p0`), and on a gas with one `update_density` and `advance_p0` are refused
+by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
+with the current level's `1/W`, as it takes the `cp` field as last set.
+
+**What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
+`set_molar_change` takes the net source, and CHR-12b forms it from the species
+equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
+still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
+measured drift below is first order in `Δt`.
+
+**Gates, measured 2026-10-15 (both builds, `tests/gas_wmix.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `gas_constant_w_default_bitwise` | a sealed 4^3 walled box without a mixture, `T` 300-330 K, a uniform 1e3 W/m3 heater, three Euler steps of `update_density`, `update_target_divergence`, `correct` and `advance_p0`: SHA-256 of every `rho`, target divergence, `T`, `p0` and `dp0/dt`, against pins captured at the parent commit 41d449a, one per build | bitwise | D | equal in both builds |
+| `gas_wmix_sealed_box_p0_closed_form` | a sealed 2^3 walled box, `T` held at 300 K (isothermal: the energy equation not solved), no flow, no heat source, `A` with NO2's `W` and the inert `N = 2 A` (the shape of 2 NO2 -> N2O4, heat-neutral by construction), `S_A = -2 kg/(m3 s)`, `Y_A` in {0.9, 0.6, 0.3}: `dp0/dt` against (133.23) evaluated in f64 from the stored inputs; `p0` one Euler step of it (D); `rho` against (133.20) and, at the new `p0`, the target divergence against its own `D` (R, D-F32-1); seven refusals by name | `1e-12` relative (A); `1e-12`, `1e-5` in f32 (R) | A, D, R | `dp0/dt` `1.15e-16` (f64) and `1.19e-16` (f32); `rho` `2.29e-16` and `4.35e-8`; target divergence `2.05e-16` and `1.76e-8` |
+| (diagnostic, same test) | the same box adiabatic, `T` solved (Euler, one outer iteration per step, `ofgpu-lowmach`'s order), `Y_A(t) = 0.9 + S_A t/rho`, to `t = 0.05` s: `p0` against the exact `rho R Z (T_0 - p0_0/(rho cp))/(1 - R Z/cp)`, `Z = 1/W(t)`, and the mass drift `Σ rho V` | printed | — | 10 steps: `p0` error `1.05e-3` of its change, mass drift `5.8e-4`; 20 steps: `5.4e-4`, `2.9e-4`; order `0.96` in both builds |
+
+**The order of a step matters, measured.** The adiabatic leg first ran with
+`Y` at the step's new value on its current level and the old value on the
+previous one when `T` was solved. Then §26's conservative ddt row
+`(rho^n T - rho^(n-1) T°) cp/Δt` saw `rho^n ≠ rho^(n-1)` from `W` alone. `T`
+fell 9 K where the exact fall is 1.66 K, and the error did not shrink with
+`Δt`. In `ofgpu-lowmach`'s order the species are solved after `T`, so `Y`
+holds the step's opening value on both levels and `rho^n = rho^(n-1)` at the
+energy solve, as on the constant-`W` path. The numbers above are for that
+order. CHR-12b keeps it.
+
+Labels: (133.19)-(133.23).
 
 ---
 
