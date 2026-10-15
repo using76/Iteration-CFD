@@ -3,7 +3,9 @@
 // Three writers feed this: ofgpu-generate-mesh (preset block/carve lines),
 // ofgpu-convert-mesh (`[convert] ... cells, points, faces (internal, boundary)`,
 // `regions:`, the patch lines) and ofgpu-automesher (the §92.3 quality block
-// and its refusal naming cells). The STEP pipeline (tools/mesh/step_mesh.py)
+// and its refusal naming cells; on a `kind: "tet"` config, SPEC-LIT §116.16,
+// its `wrote ... (N tetrahedra, P prisms; ...)` line and its summary's `tet`
+// block). The STEP pipeline (tools/mesh/step_mesh.py)
 // is not a run-manager binary, but its log and its <name>_summary.json carry
 // the gmsh quality lines (minSICN, the thickness gate), so both are parsed
 // too. Whatever a mesh run ended with is written beside the mesh as
@@ -122,8 +124,34 @@ export interface MeshSurfaceFacts {
   [extra: string]: unknown
 }
 
+/**
+ * The `tet` block of a `kind: "tet"` summary (SPEC-LIT §116.16, driver.rs
+ * tet_summary_json), under the binary's own key names. `steiner_total` is
+ * `steiner.total` lifted out; `steiner` and `seconds` are kept verbatim.
+ */
+export interface MeshTetFacts {
+  n_tets: number | null
+  /** 0 until the prism layers of §116.15. */
+  n_prisms: number | null
+  /** Degrees, over the emitted cells. */
+  min_dihedral_deg: number | null
+  max_dihedral_deg: number | null
+  steiner_total: number | null
+  /** `{recover: {...}, refine: {...}, total}` as written; null when not an object. */
+  steiner: Record<string, unknown> | null
+  /** Seconds per stage, keyed by stage name. */
+  seconds: Record<string, number> | null
+  [extra: string]: unknown
+}
+
 /** What the automesher's summary says per stage; null for every other tool. */
 export interface MeshAutomesherFacts {
+  /** The summary's `kind`: "tet" on the tet path; a hex-dominant summary writes none, read as "hexDominant". */
+  kind: string
+  /** The tet path's `tet` block; null on the hex-dominant path. */
+  tet: MeshTetFacts | null
+  /** The tet path's stage rows (`surfprep` .. `emit`) by stage name, every key verbatim; null on the hex-dominant path. */
+  tetStages: Record<string, Record<string, unknown>> | null
   surface: MeshSurfaceFacts | null
   /** `stages[octree]`, `[castellate]`, `[split]`: every key verbatim. */
   octree: Record<string, unknown> | null
@@ -361,6 +389,14 @@ export function parseMeshLog(lines: string[]): MeshLogFacts {
       f.summaryJsonPath = m[1]
       continue
     }
+    // The tet path's line (SPEC-LIT §116.16): its cells are the tetrahedra and the prisms.
+    if ((m = /^ofgpu-automesher: wrote (.+?) \(([\d,]+) tetrahedra, ([\d,]+) prisms; dihedral \S+ \.\. \S+ degrees\)$/.exec(line))) {
+      seen(f, 'ofgpu-automesher')
+      f.polyMeshPath = m[1]
+      f.cells = num(m[2]) + num(m[3])
+      f.caseDirHint = m[1].replace(/[\\/]constant[\\/]polyMesh.*$/i, '')
+      continue
+    }
     if ((m = /^ofgpu-automesher: wrote (\S+) \(([\d,]+) cells\)$/.exec(line))) {
       seen(f, 'ofgpu-automesher')
       f.polyMeshPath = m[1]
@@ -414,12 +450,19 @@ export function parseAutomesherStages(o: Record<string, unknown>): MeshAutomeshe
   let snap: MeshSnapStage | null = null
   let split: Record<string, unknown> | null = null
   let layers: MeshLayersStage | null = null
+  const kind = typeof o.kind === 'string' ? o.kind : 'hexDominant'
+  const tet = kind === 'tet' ? normaliseTet(o.tet) : null
+  let tetStages: Record<string, Record<string, unknown>> | null = kind === 'tet' ? {} : null
   if (Array.isArray(o.stages)) {
     for (const raw of o.stages) {
       if (typeof raw !== 'object' || raw === null) continue
       const s = raw as Record<string, unknown>
       if (typeof s.stage !== 'string') continue
       stages.push(s.stage)
+      if (tetStages) {
+        if (!(s.stage in tetStages)) tetStages[s.stage] = { ...s }
+        continue
+      }
       if (s.stage === 'octree' && !octree) octree = { ...s }
       else if (s.stage === 'castellate' && !castellate) castellate = { ...s }
       else if (s.stage === 'snap' && !snap) snap = normaliseSnap(s)
@@ -427,7 +470,28 @@ export function parseAutomesherStages(o: Record<string, unknown>): MeshAutomeshe
       else if (s.stage === 'layers' && !layers) layers = normaliseLayers(s)
     }
   }
-  return { surface: parseAutomesherSurface(o.surface), octree, castellate, snap, split, layers, stages }
+  return { kind, tet, tetStages, surface: parseAutomesherSurface(o.surface), octree, castellate, snap, split, layers, stages }
+}
+
+function normaliseTet(src: unknown): MeshTetFacts | null {
+  if (typeof src !== 'object' || src === null || Array.isArray(src)) return null
+  const t = src as Record<string, unknown>
+  const steiner = typeof t.steiner === 'object' && t.steiner !== null && !Array.isArray(t.steiner) ? { ...(t.steiner as Record<string, unknown>) } : null
+  let seconds: Record<string, number> | null = null
+  if (typeof t.seconds === 'object' && t.seconds !== null && !Array.isArray(t.seconds)) {
+    seconds = {}
+    for (const [k, v] of Object.entries(t.seconds as Record<string, unknown>)) if (typeof v === 'number' && Number.isFinite(v)) seconds[k] = v
+  }
+  return {
+    ...t,
+    n_tets: pickQuality(t, 'n_tets'),
+    n_prisms: pickQuality(t, 'n_prisms'),
+    min_dihedral_deg: pickQuality(t, 'min_dihedral_deg'),
+    max_dihedral_deg: pickQuality(t, 'max_dihedral_deg'),
+    steiner_total: steiner ? pickQuality(steiner, 'total') : null,
+    steiner,
+    seconds,
+  }
 }
 
 function normaliseSnap(src: Record<string, unknown>): MeshSnapStage {

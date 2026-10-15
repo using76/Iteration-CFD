@@ -465,3 +465,110 @@ describe('the automesher stage block', () => {
     }
   })
 })
+
+// TET-17: the tet path's summary (SPEC-LIT 116.16, TET-12). The fixture is the
+// release binary's own output on tools/automesher/examples/box_sphere_tet.json.
+describe('the automesher tet summary', () => {
+  const HERE = path.dirname(fileURLToPath(import.meta.url))
+  const fixture = (name: string): any => JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', `${name}.automesher.json`), 'utf8'))
+  const TET_STAGES = ['surfprep', 'sizefield', 'remesh', 'recover', 'refine', 'optimise', 'emit']
+
+  it('reads the tet block, the counts and the seven stages of a kind tet summary', () => {
+    const F = fixture('box_sphere_tet')
+    const f = parseAutomesherSummary(F)
+    const a = f.automesher!
+    expect(a.kind).toBe('tet')
+    expect(a.tet!.n_tets).toBe(20309)
+    expect(a.tet!.n_prisms).toBe(0)
+    expect(a.tet!.min_dihedral_deg).toBe(29.168549739297372)
+    expect(a.tet!.max_dihedral_deg).toBe(152.34372986010993)
+    expect(a.tet!.steiner_total).toBe(3984)
+    expect((a.tet!.steiner as any).refine.interior).toBe(2668)
+    expect(a.tet!.seconds!.refine).toBe(F.tet.seconds.refine)
+    expect(a.stages).toEqual(TET_STAGES)
+    expect(Object.keys(a.tetStages!)).toEqual(TET_STAGES)
+    expect(a.tetStages!.refine.n_kept_tets).toBe(21793)
+    expect(a.tetStages!.optimise.worst_deg).toEqual(F.stages[5].worst_deg)
+    for (const k of ['octree', 'castellate', 'snap', 'split', 'layers'] as const) expect(a[k], k).toBeNull()
+    expect(a.surface!.n_triangles).toBe(9024)
+    expect([f.cells, f.internalFaces, f.boundaryFaces, f.points, f.faces]).toEqual([20309, 39083, 3070, 4207, 42153])
+    expect(f.patches!.length).toBe(7)
+    expect(f.patches![6]).toEqual({ name: 'sphere', type: 'wall', faces: 1140 })
+    expect(f.quality!.gate).toBe('passed')
+    expect(f.quality!.nonOrthMaxDeg).toBe(61.25954556458814)
+    expect(f.stoppedAfter).toBeNull()
+  })
+
+  it('keeps every key of the tet block verbatim through the record round trip', async () => {
+    const F = fixture('box_sphere_tet')
+    const tmp = await fs.promises.mkdtemp(path.join(process.env.TEMP ?? '/tmp', 'meshsummary-'))
+    try {
+      const record = buildMeshSummary('ofgpu-automesher', 'cases/t', parseAutomesherSummary(F), { runId: 'r_t' })
+      await writeMeshSummaryRecord(tmp, record)
+      const back = await readMeshSummaryRecord(tmp)
+      expect(back).toEqual(record)
+      for (const k of Object.keys(F.tet)) expect((back!.automesher!.tet as any)[k], k).toEqual(F.tet[k])
+      for (const s of F.stages) expect(back!.automesher!.tetStages![s.stage], s.stage).toEqual(s)
+    } finally {
+      await fs.promises.rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  it('a hex summary is kind hexDominant with no tet block, and a malformed tet block yields nulls', () => {
+    for (const name of ['cubep_nofeat', 'wing_a_L4']) {
+      const a = parseAutomesherSummary(fixture(name)).automesher!
+      expect(a.kind, name).toBe('hexDominant')
+      expect(a.tet, name).toBeNull()
+      expect(a.tetStages, name).toBeNull()
+    }
+    const bad = parseAutomesherSummary({ tool: 'ofgpu-automesher', kind: 'tet', tet: { n_tets: '12', min_dihedral_deg: null, steiner: 5, extra: [1] } }).automesher!
+    expect(bad.kind).toBe('tet')
+    expect(bad.tet!.n_tets).toBeNull()
+    expect(bad.tet!.min_dihedral_deg).toBeNull()
+    expect(bad.tet!.steiner).toBeNull()
+    expect(bad.tet!.steiner_total).toBeNull()
+    expect(bad.tet!.seconds).toBeNull()
+    expect(bad.tet!.extra).toEqual([1])
+    expect(parseAutomesherSummary({ kind: 7, tet: 'x' }).automesher!.kind).toBe('hexDominant')
+    expect(parseAutomesherSummary({ kind: 7, tet: 'x' }).automesher!.tet).toBeNull()
+  })
+
+  it('reads the tet path\'s wrote line', () => {
+    const f = parseMeshLog([
+      'ofgpu-automesher (SPEC-LIT §116, tet path)',
+      'automesher: 20309 cells, 39083 internal faces, 3070 boundary faces, 4207 points',
+      'ofgpu-automesher: wrote box_sphere_tet_case\\constant\\polyMesh (20309 tetrahedra, 0 prisms; dihedral 29.1685 .. 152.3437 degrees)',
+      'ofgpu-automesher: wrote box_sphere_tet_case\\box_sphere_tet_summary.json',
+    ])
+    expect(f.polyMeshPath).toBe('box_sphere_tet_case\\constant\\polyMesh')
+    expect(f.caseDirHint).toBe('box_sphere_tet_case')
+    expect(f.summaryJsonPath).toBe('box_sphere_tet_case\\box_sphere_tet_summary.json')
+    expect(f.cells).toBe(20309)
+    expect(parseMeshLog(['ofgpu-automesher: wrote my case/constant/polyMesh (100 tetrahedra, 20 prisms; dihedral 10.0000 .. 170.0000 degrees)']).cells).toBe(120)
+  })
+
+  it('a tet run leaves its record beside the mesh', async () => {
+    const root = await fs.promises.mkdtemp(path.join(process.env.TEMP ?? '/tmp', 'meshsummary-'))
+    try {
+      const F = fixture('box_sphere_tet')
+      await fs.promises.mkdir(path.join(root, 'box_sphere_tet_case'), { recursive: true })
+      await fs.promises.writeFile(path.join(root, 'box_sphere_tet_case', 'box_sphere_tet_summary.json'), JSON.stringify(F), 'utf8')
+      await writePolyMesh(path.join(root, 'box_sphere_tet_case', 'constant', 'polyMesh'), cube())
+      const runs = fakeRunManager()
+      runs.runs.set('r_8', fakeRun('r_8', { binary: 'ofgpu-automesher', status: 'done' }))
+      runs.lines.set('r_8', [
+        'ofgpu-automesher (SPEC-LIT §116, tet path)',
+        'ofgpu-automesher: wrote box_sphere_tet_case/constant/polyMesh (20309 tetrahedra, 0 prisms; dihedral 29.1685 .. 152.3437 degrees)',
+        'ofgpu-automesher: wrote box_sphere_tet_case/box_sphere_tet_summary.json',
+      ].map((text, i) => ({ seq: i + 1, stream: 'stdout' as const, text, ts: 0 })))
+      expect(await persistRunSummary({ runs, workspaceRoot: root }, 'r_8', 'ofgpu-automesher', null)).toBe('box_sphere_tet_case')
+      const back = await readMeshSummaryRecord(path.join(root, 'box_sphere_tet_case'))
+      expect(back!.counts.cells).toBe(20309)
+      expect(back!.automesher!.kind).toBe('tet')
+      expect(back!.automesher!.tet!.n_tets).toBe(20309)
+      expect(back!.automesher!.tet!.max_dihedral_deg).toBe(152.34372986010993)
+    } finally {
+      await fs.promises.rm(root, { recursive: true, force: true })
+    }
+  })
+})

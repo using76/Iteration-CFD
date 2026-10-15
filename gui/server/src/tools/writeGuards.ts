@@ -14,8 +14,10 @@ const isObj = (v: unknown): v is Json => typeof v === 'object' && v !== null && 
  * and it refuses -permissive itself; the solvers keep their own -permissive (SPEC-LIT §13.4).
  */
 export const MESHER_RUNS = ['ofgpu-automesher', 'autonomy-campaign'] as const
-/** The top-level keys of the automesher's AutomeshConfig (rust/src/automesher/mod.rs), `$schema` aside. */
-export const AUTOMESH_SECTIONS = ['input', 'domain', 'refinement', 'castellation', 'snap', 'layers', 'quality', 'output'] as const
+/** The top-level keys of the automesher's AutomeshConfig (rust/src/automesher/mod.rs), `$schema` aside; `kind` and `tet` are SPEC-LIT §116.3's (TET-12). */
+export const AUTOMESH_SECTIONS = ['input', 'domain', 'refinement', 'castellation', 'snap', 'layers', 'quality', 'output', 'kind', 'tet'] as const
+/** The sections that mark a document as a mesh config: every one but `kind`, a word too common to tell an automesher config by alone. */
+const MESH_CONFIG_MARKS: readonly string[] = AUTOMESH_SECTIONS.filter((k) => k !== 'kind')
 /** The schema fields of file_write and case_edit; any other key of a call is an extra zod drops unseen. */
 const FILE_WRITE_KEYS = ['path', 'content', 'createOnly'] as const
 const CASE_EDIT_KEYS = ['path', 'edits', 'dryRun'] as const
@@ -39,7 +41,7 @@ export function jsonDoc(v: unknown): unknown {
 
 /** A JSON object the automesher would read as its config: one of its top-level keys, squashed, is an AutomeshConfig section. */
 export function isMeshConfig(doc: unknown): doc is Json {
-  return isObj(doc) && Object.keys(doc).some((k) => (AUTOMESH_SECTIONS as readonly string[]).includes(squash(k)))
+  return isObj(doc) && Object.keys(doc).some((k) => MESH_CONFIG_MARKS.includes(squash(k)))
 }
 
 /** The first string anywhere in the call that is the flag's bare word (a model that dropped the dash); a string holding JSON is looked into. */
