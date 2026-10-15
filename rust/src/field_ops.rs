@@ -66,6 +66,11 @@ pub struct FieldKernels {
     // SPEC-LIT 120.10: the recycled inflow's two refresh kernels.
     mapped: CudaFunction,
     turbulent_inlet: CudaFunction,
+    // SPEC-LIT 120.12: the synthetic LES inflow's two per-face kernels and
+    // the one-thread state step after them.
+    digital_filter_inlet: CudaFunction,
+    dfsem_inlet: CudaFunction,
+    synthetic_step: CudaFunction,
 
     copy: CudaFunction,
     copy_vector: CudaFunction,
@@ -107,6 +112,9 @@ impl FieldKernels {
             extrapolated_sn_grad: k.func("fldExtrapolatedSnGrad")?,
             mapped: k.func("fldMapped")?,
             turbulent_inlet: k.func("fldTurbulentInlet")?,
+            digital_filter_inlet: k.func("fldDigitalFilterInlet")?,
+            dfsem_inlet: k.func("fldDfsemInlet")?,
+            synthetic_step: k.func("fldSyntheticStep")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -859,6 +867,98 @@ pub fn advance_turbulent_inlet_vector(
     let n_bf = f.n_boundary_faces;
     for ti in &mut f.turbulent {
         launch_turbulent(gpu, k, &f.name, n_bf, &mut f.ref_value, ti)?;
+    }
+    Ok(())
+}
+
+/// Draw the next time step of every synthetic-inflow patch of a vector field,
+/// SPEC-LIT 120.12's digital filter (120.12c)-(120.12e) or eddies
+/// (120.12g)-(120.12k): one per-face launch and one state step per rule in
+/// `f.synthetic`, no host sync; the state `[n, X]` lives on the device. Run
+/// it once per TIME STEP with that step's `dt`, before the step's first
+/// outer iteration, wherever the setup opted in with
+/// `BcInputs::turbulent_inlet`. A field with no rule launches nothing. The
+/// host twins are [`crate::field::synthetic::df_values`] and
+/// [`crate::field::synthetic::dfsem_values`]. A digital filter whose time
+/// filter at this `dt` would exceed its limits is refused by name.
+pub fn advance_synthetic_inlet_vector(
+    gpu: &Gpu,
+    k: &FieldKernels,
+    f: &mut GpuVectorField,
+    dt: Scalar,
+) -> Result<()> {
+    use crate::field::synthetic::{self, SyntheticRule};
+    let n_bf = f.n_boundary_faces;
+    let dt64 = dt as f64;
+    for sy in &mut f.synthetic {
+        let (start, size) = (sy.rule.start(), sy.rule.size());
+        if start + size > n_bf {
+            return Err(Error::Config(format!(
+                "advance_synthetic_inlet_vector: field {} carries a synthetic-inflow rule on \
+                 faces {start}..{} but the boundary has {n_bf} faces (SPEC-LIT 120.12)",
+                f.name,
+                start + size
+            )));
+        }
+        if size == 0 {
+            continue;
+        }
+        let start_l = start as Label;
+        let size_l = size as Label;
+        match &sy.rule {
+            SyntheticRule::DigitalFilter(r) => {
+                let bt = synthetic::df_time_filters(r, dt64)?;
+                let nt: [Label; 3] = [
+                    (bt[0].len() / 2) as Label,
+                    (bt[1].len() / 2) as Label,
+                    (bt[2].len() / 2) as Label,
+                ];
+                let seed = r.seed;
+                let func = k.digital_filter_inlet.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&func)
+                        .arg(&mut f.ref_value)
+                        .arg(&sy.params)
+                        .arg(&sy.nodes)
+                        .arg(&sy.state)
+                        .arg(&start_l)
+                        .arg(&size_l)
+                        .arg(&dt64)
+                        .arg(&seed)
+                        .arg(&nt[0])
+                        .arg(&nt[1])
+                        .arg(&nt[2])
+                        .launch(cfg_for(size))?;
+                }
+            }
+            SyntheticRule::Dfsem(r) => {
+                let seed = r.seed;
+                let func = k.dfsem_inlet.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&func)
+                        .arg(&mut f.ref_value)
+                        .arg(&sy.params)
+                        .arg(&sy.rel)
+                        .arg(&sy.state)
+                        .arg(&start_l)
+                        .arg(&size_l)
+                        .arg(&dt64)
+                        .arg(&seed)
+                        .launch(cfg_for(size))?;
+                }
+            }
+        }
+        let func = k.synthetic_step.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&func)
+                .arg(&mut sy.state)
+                .arg(&sy.params)
+                .arg(&dt64)
+                .launch(cfg_for(1))?;
+        }
     }
     Ok(())
 }

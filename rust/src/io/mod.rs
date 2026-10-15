@@ -81,6 +81,7 @@ pub use writer::{
 };
 pub use output_types::{FieldValues, OutputField};
 pub use output_plan::{
-    build_writers, parse_output_formats, refuse_output_named_twice, ExactSpec, FieldSelection,
-    OutputFormat, OutputPipeline, OutputPlan, RestartSpec, VisSpec, OUTPUT_FORMAT_NAMES,
+    build_writers, has_volume_format, parse_output_formats, refuse_output_named_twice, volume_target,
+    ExactSpec, FieldSelection, OutputFormat, OutputPipeline, OutputPlan, RestartSpec, VisSpec,
+    VolumeTarget, OUTPUT_FORMAT_NAMES,
 };

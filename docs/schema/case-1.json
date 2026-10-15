@@ -524,6 +524,63 @@
         "T"
       ]
     },
+    "JsonGamg": {
+      "description": "A rule's `gamg` block (SPEC-LIT 141.7): the keys of an OpenFOAM GAMG\nentry this solver honours, each optional. OpenFOAM's `mergeLevels` and\n`agglomerator` are not keys here; `deny_unknown_fields` refuses them by\nname with the accepted keys as the menu.",
+      "type": "object",
+      "properties": {
+        "cacheAgglomeration": {
+          "description": "Keep the hierarchy while the matrix is unchanged (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "maxLevels": {
+          "description": "The most levels, the finest counted (default 50, at least 1).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nCellsInCoarsestLevel": {
+          "description": "Coarsening stops at or below this many cells (default 64, at least 1).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nPostSweeps": {
+          "description": "Post-smoothing sweeps (default 2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "nPreSweeps": {
+          "description": "Pre-smoothing sweeps (default 2).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "smoother": {
+          "description": "`Chebyshev` (default), `l1Jacobi` or `Jacobi` (weighted, 2/3).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "JsonGrading": {
       "description": "[`JsonMesh::grading`]'s three optional per-axis entries. A missing axis is\nuniform; a present one is validated and lowered by\n[`apply_axis_grading`].",
       "type": "object",
@@ -817,6 +874,65 @@
         "snGrad",
         "nonOrthogonalCorrectors"
       ]
+    },
+    "JsonLattice": {
+      "description": "`output.visualisation.lattice` - SPEC-LIT 117.3's six keys, every one\noptional. Resolved, and every 117.12 refusal raised, by\n[`crate::io::output_plan::OutputPlan::from_json`]; nothing here\nvalidates.",
+      "type": "object",
+      "properties": {
+        "activation": {
+          "description": "`dense` (the default) or `fluid` - SPEC-LIT 117.6.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "background": {
+          "description": "The value of a voxel no cell claims; absent is `0.0`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "box": {
+          "description": "`[xlo, ylo, zlo, xhi, yhi, zhi]`, metres. Absent is the bounding box\nof the mesh points.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 6,
+          "minItems": 6
+        },
+        "maxVoxels": {
+          "description": "The voxel budget; absent is 8 000 000. An explicit `voxel` the\nbudget would coarsen more than 16 times is refused (117.3).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "sample": {
+          "description": "`cell` (the default) or `linear` - SPEC-LIT 117.5.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "voxel": {
+          "description": "The voxel edge `h`, in metres; voxels are cubes. Absent is\n`(min_c V_c)^(1/3)`, the cube root of the smallest cell volume.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
     },
     "JsonLiquid": {
       "description": "`parcels.evaporation.liquid` - a preset (`water`, the default, or\n`benzene`) and any of its nine properties overridden.",
@@ -1769,6 +1885,17 @@
       "description": "One `numerics.solvers` rule.",
       "type": "object",
       "properties": {
+        "gamg": {
+          "description": "The GAMG settings of SPEC-LIT 141.7, allowed only on a rule whose\n`solver` or `preconditioner` is `GAMG`. Absent: the cycle's\ndefaults (SPEC-LIT 141.5) and `cacheAgglomeration` true.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonGamg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "match": {
           "type": "string"
         },
@@ -1955,7 +2082,7 @@
       ]
     },
     "JsonVisualisation": {
-      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
+      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these six entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
       "type": "object",
       "properties": {
         "fields": {
@@ -1979,6 +2106,17 @@
             "null"
           ],
           "format": "double"
+        },
+        "lattice": {
+          "description": "The lattice a mesh that is not a uniform Cartesian box is sampled\nonto - SPEC-LIT 117.3. Absent is every default of that table. A\nuniform Cartesian box is written on its own cells and never reads it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonLattice"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "precision": {
           "description": "`fp32` (the default) or `fp16` - SPEC-LIT S44.3. This is the ONE\nplace in the case format where reduced precision is legitimate.",

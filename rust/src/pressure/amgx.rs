@@ -47,14 +47,22 @@
 //! `OFGPU_REQUIRE_AMGX=1` makes absence an error; without it absence prints
 //! "AMGX not loaded, skipped: ..." and the run goes on without AMGX.
 //!
-//! # A cost worth knowing about
+//! # The set-up, and keeping its structure (SPEC-LIT §141.21)
 //!
-//! `AMGX_solver_setup` is called on every solve, because the AMG hierarchy
-//! depends on the coefficient values and `rAUf` changes every outer iteration.
-//! On the plume-sized matrix that setup is most of AMGX's 31 ms. AMGX can be
-//! told to keep the coarsening and only rebuild the operators
-//! (`structure_reuse_levels`), which is the first thing to try if AMGX ever
-//! needs to win a measurement.
+//! The AMG hierarchy depends on the coefficient values and `rAUf` changes
+//! every outer iteration, so every solve needs a set-up. AMX-01 called
+//! `AMGX_solver_setup` each time, a full rebuild that was most of AMGX's
+//! time on the plume-sized matrix. Now the config carries
+//! `amg:structure_reuse_levels=-1` ([`REUSE_KEY`]) and every solve after a
+//! session's first calls `AMGX_solver_resetup`: the coarsening, the
+//! prolongation and the restriction are kept and only the Galerkin coarse
+//! operators, the smoothers and the coarsest solve are recomputed from the
+//! new matrix. `OFGPU_AMGX_REUSE=0` turns that off - no key, a full
+//! `AMGX_solver_setup` per solve, the AMX-01 behaviour - so the two can be
+//! measured against each other. The key is never paired with
+//! `AMGX_solver_setup`: with `-1` that call returns at once on a matrix it
+//! has seen, and the hierarchy, values included, would be the first
+//! matrix's for the whole run.
 //!
 //! # What it is fed
 //!
@@ -137,6 +145,34 @@ pub const DEFAULT_CONFIG: &str = concat!(
     "amg:print_solve_stats=0,",
     "amg:print_grid_stats=0",
 );
+
+/// The key that keeps AMGX's hierarchy structure across solves (SPEC-LIT
+/// §141.21): `-1` reuses every level's coarsening, prolongation and
+/// restriction on `AMGX_solver_resetup`, and the Galerkin coarse operators
+/// are recomputed. `amg` is [`DEFAULT_CONFIG`]'s preconditioner scope.
+pub const REUSE_KEY: &str = "amg:structure_reuse_levels=-1";
+
+/// The configuration a session is created with: `base`, plus [`REUSE_KEY`]
+/// when reuse is on (SPEC-LIT §141.21).
+pub fn config_for(base: &str, reuse: bool) -> String {
+    if reuse {
+        format!("{base},{REUSE_KEY}")
+    } else {
+        base.to_string()
+    }
+}
+
+/// `OFGPU_AMGX_REUSE`'s rule (SPEC-LIT §141.21, *DESIGN*): the value `0`,
+/// and only `0`, turns the structure reuse off; unset or anything else
+/// leaves it on.
+pub fn reuse_from(v: Option<&std::ffi::OsStr>) -> bool {
+    v.is_none_or(|v| v != "0")
+}
+
+/// [`reuse_from`] of the process environment.
+pub fn reuse_requested() -> bool {
+    reuse_from(std::env::var_os("OFGPU_AMGX_REUSE").as_deref())
+}
 
 // ==========================================================================
 //  Finding the library (compiled in BOTH feature states)
@@ -222,6 +258,8 @@ pub fn require_loaded() -> Result<bool> {
 /// NVIDIA AMGX.
 pub struct AmgxBackend {
     config: String,
+    /// Keep the hierarchy structure across solves (SPEC-LIT §141.21).
+    reuse: bool,
     #[cfg(feature = "amgx")]
     inner: Option<imp::Session>,
     #[cfg(not(feature = "amgx"))]
@@ -242,6 +280,7 @@ impl AmgxBackend {
     pub fn with_config(config: &str) -> Self {
         Self {
             config: config.to_string(),
+            reuse: reuse_requested(),
             #[cfg(feature = "amgx")]
             inner: None,
             #[cfg(not(feature = "amgx"))]
@@ -251,6 +290,30 @@ impl AmgxBackend {
 
     pub fn config(&self) -> &str {
         &self.config
+    }
+
+    /// The backend with the structure reuse of SPEC-LIT §141.21 set by the
+    /// caller instead of by `OFGPU_AMGX_REUSE`. Takes effect at the next
+    /// `setup`.
+    pub fn with_reuse(mut self, on: bool) -> Self {
+        self.reuse = on;
+        self
+    }
+
+    /// Whether the next session keeps the hierarchy structure (§141.21).
+    pub fn reuse(&self) -> bool {
+        self.reuse
+    }
+
+    /// The current session's (full set-ups, re-set-ups on the kept
+    /// structure), (141.21a)-(141.21c). `(0, 0)` before the first solve,
+    /// and always without the feature.
+    pub fn setup_counts(&self) -> (usize, usize) {
+        #[cfg(feature = "amgx")]
+        if let Some(s) = &self.inner {
+            return s.counts();
+        }
+        (0, 0)
     }
 
     /// `true` when the crate was built with the `amgx` feature.
@@ -365,7 +428,8 @@ impl PressureBackend for AmgxBackend {
         // and a coupled boundary face), and that refusal arrives from
         // `Session::new` below.
         library().map_err(Error::Config)?;
-        self.inner = Some(imp::Session::new(gpu, hm, m, &self.config)?);
+        let config = config_for(&self.config, self.reuse);
+        self.inner = Some(imp::Session::new(gpu, hm, m, &config, self.reuse)?);
         Ok(())
     }
 
@@ -381,6 +445,15 @@ impl PressureBackend for AmgxBackend {
             .as_mut()
             .ok_or_else(|| Error::Config("AMGX backend: setup() was not called".into()))?;
         s.solve(gpu, p, a, m)
+    }
+
+    /// The last solve's set-up (or re-set-up) time, SPEC-LIT §141.21.
+    fn setup_secs(&self) -> Option<f64> {
+        self.inner.as_ref().and_then(|s| s.last_setup_secs)
+    }
+
+    fn run_summary(&self) -> Option<String> {
+        self.inner.as_ref().map(|s| s.summary())
     }
 }
 
@@ -502,6 +575,9 @@ mod imp {
             unsafe extern "C" fn(*mut Handle, Handle, c_int, Handle) -> AmgxRc,
         pub AMGX_solver_destroy: unsafe extern "C" fn(Handle) -> AmgxRc,
         pub AMGX_solver_setup: unsafe extern "C" fn(Handle, Handle) -> AmgxRc,
+        /// SPEC-LIT §141.21: the set-up on the kept structure. AMGX 2.5.0's
+        /// `amgx_c.h` declares it in its "C-API deprecated" block.
+        pub AMGX_solver_resetup: unsafe extern "C" fn(Handle, Handle) -> AmgxRc,
         pub AMGX_solver_solve:
             unsafe extern "C" fn(Handle, Handle, Handle) -> AmgxRc,
         pub AMGX_solver_get_iterations_number:
@@ -562,6 +638,7 @@ mod imp {
                 AMGX_solver_create: resolve_symbol(&lib, p, "AMGX_solver_create")?,
                 AMGX_solver_destroy: resolve_symbol(&lib, p, "AMGX_solver_destroy")?,
                 AMGX_solver_setup: resolve_symbol(&lib, p, "AMGX_solver_setup")?,
+                AMGX_solver_resetup: resolve_symbol(&lib, p, "AMGX_solver_resetup")?,
                 AMGX_solver_solve: resolve_symbol(&lib, p, "AMGX_solver_solve")?,
                 AMGX_solver_get_iterations_number: resolve_symbol(
                     &lib,
@@ -664,10 +741,26 @@ mod imp {
         csr: GpuCsrMatrix,
         lduk: LduKernels,
         uploaded: bool,
+
+        /// SPEC-LIT §141.21: re-set-up on the kept structure after the
+        /// first solve, or a full set-up every time.
+        reuse: bool,
+        full_setups: usize,
+        full_secs: f64,
+        resetups: usize,
+        resetup_secs: f64,
+        /// The last solve's matrix upload plus set-up, wall seconds.
+        pub last_setup_secs: Option<f64>,
     }
 
     impl Session {
-        pub fn new(gpu: &Gpu, hm: &HostMesh, _m: &GpuMesh, config: &str) -> Result<Self> {
+        pub fn new(
+            gpu: &Gpu,
+            hm: &HostMesh,
+            _m: &GpuMesh,
+            config: &str,
+            reuse: bool,
+        ) -> Result<Self> {
             let pattern = CsrPattern::build(hm)?;
             let csr = pattern.upload(gpu)?;
             let lduk = LduKernels::new(gpu)?;
@@ -703,7 +796,42 @@ mod imp {
                 )?;
             }
 
-            Ok(Self { cfg, rsc, mtx, rhs, sol, slv, csr, lduk, uploaded: false })
+            Ok(Self {
+                cfg,
+                rsc,
+                mtx,
+                rhs,
+                sol,
+                slv,
+                csr,
+                lduk,
+                uploaded: false,
+                reuse,
+                full_setups: 0,
+                full_secs: 0.0,
+                resetups: 0,
+                resetup_secs: 0.0,
+                last_setup_secs: None,
+            })
+        }
+
+        /// (full set-ups, re-set-ups), (141.21a)-(141.21c).
+        pub fn counts(&self) -> (usize, usize) {
+            (self.full_setups, self.resetups)
+        }
+
+        /// The line `ofgpu-buoyant` prints at the end of a run.
+        pub fn summary(&self) -> String {
+            let mean = |s: f64, n: usize| if n == 0 { 0.0 } else { 1e3 * s / n as f64 };
+            format!(
+                "AMGX: {} full set-up(s), {:.2} ms each; {} re-set-up(s) on the kept structure, \
+                 {:.2} ms each; structure reuse {} (SPEC-LIT 141.21)",
+                self.full_setups,
+                mean(self.full_secs, self.full_setups),
+                self.resetups,
+                mean(self.resetup_secs, self.resetups),
+                if self.reuse { "on" } else { "off (OFGPU_AMGX_REUSE=0)" }
+            )
         }
 
         pub fn solve(
@@ -733,6 +861,14 @@ mod imp {
             // the lengths passed alongside them, and AMGX only reads/writes
             // within those lengths.
             let api = api().map_err(Error::Config)?;
+
+            // SPEC-LIT §141.21: the set-up is timed from the matrix upload to
+            // the end of the set-up call. Before it, the crate's stream is
+            // idle (`gpu.sync()` after `csr_fill`) and so is AMGX's (the last
+            // solve ended on a context sync); after it, the context is
+            // synchronised, which waits for AMGX's legacy stream too.
+            let resetup = self.reuse && self.full_setups > 0;
+            let t0 = std::time::Instant::now();
             unsafe {
                 if !self.uploaded {
                     check(
@@ -762,7 +898,28 @@ mod imp {
                         ),
                     )?;
                 }
+                if resetup {
+                    // (141.21b): the coarsening, P and R kept; the coarse
+                    // operators, smoothers and coarsest solve from the new A.
+                    check("solver_resetup", (api.AMGX_solver_resetup)(self.slv, self.mtx))?;
+                } else {
+                    // (141.21a), and (141.21c) with reuse off.
+                    check("solver_setup", (api.AMGX_solver_setup)(self.slv, self.mtx))?;
+                }
+            }
+            gpu.ctx().synchronize()?;
+            let secs = t0.elapsed().as_secs_f64();
+            if resetup {
+                self.resetups += 1;
+                self.resetup_secs += secs;
+            } else {
+                self.full_setups += 1;
+                self.full_secs += secs;
+            }
+            self.last_setup_secs = Some(secs);
 
+            // SAFETY: as above.
+            unsafe {
                 check(
                     "vector_upload(rhs)",
                     (api.AMGX_vector_upload)(self.rhs, n, 1, source as *const c_void),
@@ -771,8 +928,6 @@ mod imp {
                     "vector_upload(sol)",
                     (api.AMGX_vector_upload)(self.sol, n, 1, psi as *const c_void),
                 )?;
-
-                check("solver_setup", (api.AMGX_solver_setup)(self.slv, self.mtx))?;
                 check("solver_solve", (api.AMGX_solver_solve)(self.slv, self.rhs, self.sol))?;
                 check(
                     "vector_download",
@@ -941,5 +1096,32 @@ mod tests {
         assert!(err.contains("AMGX library not loaded"), "{err}");
         assert!(err.contains("Z:/no/such/dir/amgxsh.dll"), "{err}");
         assert!(err.contains("AMGX_DLL"), "{err}");
+    }
+
+    /// SPEC-LIT §141.21: `OFGPU_AMGX_REUSE=0`, and only `0`, turns the
+    /// structure reuse off.
+    #[test]
+    fn reuse_is_on_unless_the_value_is_0() {
+        use std::ffi::OsStr;
+
+        assert!(reuse_from(None));
+        assert!(!reuse_from(Some(OsStr::new("0"))));
+        assert!(reuse_from(Some(OsStr::new("1"))));
+        assert!(reuse_from(Some(OsStr::new(""))));
+        assert!(reuse_from(Some(OsStr::new("no"))));
+        assert!(AmgxBackend::new().with_reuse(false).with_reuse(true).reuse());
+        assert!(!AmgxBackend::new().with_reuse(false).reuse());
+        assert_eq!(AmgxBackend::new().setup_counts(), (0, 0));
+    }
+
+    /// The reuse key goes into the session's configuration only with reuse
+    /// on, never into [`DEFAULT_CONFIG`] itself: `-1` with a plain
+    /// `AMGX_solver_setup` would freeze the first matrix's hierarchy.
+    #[test]
+    fn the_reuse_key_is_appended_only_when_reuse_is_on() {
+        assert_eq!(config_for("a=1", true), "a=1,amg:structure_reuse_levels=-1");
+        assert_eq!(config_for("a=1", false), "a=1");
+        assert!(!DEFAULT_CONFIG.contains("structure_reuse_levels"));
+        assert!(DEFAULT_CONFIG.contains("preconditioner(amg)=AMG"));
     }
 }

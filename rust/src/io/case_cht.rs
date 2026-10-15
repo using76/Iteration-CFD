@@ -2392,9 +2392,36 @@ impl ChtCase {
         let output = match &self.output {
             Some(o) => {
                 let mut plan = OutputPlan::from_json(o)?;
-                // A multi-region mesh is not one Cartesian lattice, so there
-                // is no voxel grid to sample onto.
-                plan.refuse_visualisation_on_a_non_cartesian_mesh(false)?;
+                // SPEC-LIT 117.3 / 117.12 (VIO-05b): a multi-region mesh is
+                // not one lattice, so `output.visualisation` writes one
+                // `.vdb`/`.nvdb` per region - the region's cells on a
+                // uniform Cartesian region, else the lattice laid on that
+                // region alone (117.3's default box is the region's). Only a
+                // region on which no lattice can be laid is refused, by name.
+                if let Some(v) = &plan.vis {
+                    if let Some(f) = v.formats.iter().find(|f| !matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb)) {
+                        return Err(Error::Config(format!(
+                            "output/visualisation/format: ofgpu-cht writes `vdb` and `nvdb`, \
+                             one file per region; a `{}` scene (output.visualisation.usdScene) \
+                             is not built for a multi-region case. Drop usdScene; the region \
+                             VTU is output.exact's",
+                            f.name()
+                        )));
+                    }
+                    let mut menu = vec!["T"];
+                    if stress {
+                        menu.extend(["u", "sigma", "vonMises", "sigmaPrincipal", "magU"]);
+                    }
+                    plan.check_fields(&menu)?;
+                }
+                let no_lattice = plan.vis.as_ref().and_then(|v| {
+                    (0..meshes.len()).find_map(|r| {
+                        crate::pressure::cartesian::detect(&meshes[r]).err()?;
+                        v.lattice_refusal(&raws[r], &meshes[r])
+                            .map(|why| format!("region '{}': {why}", region_names[r]))
+                    })
+                });
+                plan.refuse_visualisation_without_a_lattice(no_lattice.as_deref())?;
                 plan.refuse_restart("ofgpu-cht", "run the case again")?;
                 let foam = plan
                     .exact
@@ -2408,8 +2435,15 @@ impl ChtCase {
                             .to_string(),
                     ));
                 }
-                let interval = plan.exact.as_ref().map_or(0.0, |e| e.interval);
-                if interval > 0.0 {
+                let positive: Vec<&str> = [
+                    ("output/exact/interval", plan.exact.as_ref().map_or(0.0, |e| e.interval)),
+                    ("output/visualisation/interval", plan.vis.as_ref().map_or(0.0, |v| v.interval)),
+                ]
+                .into_iter()
+                .filter(|(_, i)| *i > 0.0)
+                .map(|(k, _)| k)
+                .collect();
+                if !positive.is_empty() {
                     if self.run.steady {
                         plan.refuse_interval_when_steady(
                             "ofgpu-cht",
@@ -2419,13 +2453,13 @@ impl ChtCase {
                              state (SPEC-LIT 47.14)",
                         )?;
                     } else {
-                        return Err(Error::Config(
-                            "output/exact/interval: a positive interval names a \
+                        return Err(Error::Config(format!(
+                            "{}: a positive interval names a \
                              schedule this run has no clock for - ofgpu-cht's \
                              run_case returns one state, the final one. Drop the \
-                             interval (SPEC-LIT 44.4)"
-                                .to_string(),
-                        ));
+                             interval (SPEC-LIT 44.4)",
+                            positive.join(", ")
+                        )));
                     }
                 }
                 Some(plan)

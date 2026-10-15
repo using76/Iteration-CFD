@@ -1568,6 +1568,65 @@
         "expansion"
       ]
     },
+    "JsonLattice": {
+      "description": "`output.visualisation.lattice` - SPEC-LIT 117.3's six keys, every one\noptional. Resolved, and every 117.12 refusal raised, by\n[`crate::io::output_plan::OutputPlan::from_json`]; nothing here\nvalidates.",
+      "type": "object",
+      "properties": {
+        "activation": {
+          "description": "`dense` (the default) or `fluid` - SPEC-LIT 117.6.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "background": {
+          "description": "The value of a voxel no cell claims; absent is `0.0`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "box": {
+          "description": "`[xlo, ylo, zlo, xhi, yhi, zhi]`, metres. Absent is the bounding box\nof the mesh points.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 6,
+          "minItems": 6
+        },
+        "maxVoxels": {
+          "description": "The voxel budget; absent is 8 000 000. An explicit `voxel` the\nbudget would coarsen more than 16 times is refused (117.3).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "sample": {
+          "description": "`cell` (the default) or `linear` - SPEC-LIT 117.5.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "voxel": {
+          "description": "The voxel edge `h`, in metres; voxels are cubes. Absent is\n`(min_c V_c)^(1/3)`, the cube root of the smallest cell volume.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
     "JsonOutput": {
       "description": "What this run writes: three sub-blocks, three purposes - SPEC-LIT S44.\n\nThis block was a S13.4 refusal in its entirety until S44, and the reason\nis worth keeping: three of its knobs (`visualisation.fields`,\n`visualisation.precision`, `restart.keep`) had no implementation anywhere\nin the crate, so honouring `format` and `interval` because they happened\nto exist and dropping the other three in silence would have manufactured\nS13.4.1's own defect inside its fix. S44 builds all three\n([`crate::io::output_plan::FieldSelection`],\n[`crate::io::nvdb::Precision`] on both volume writers, and\n[`crate::restart::Checkpoints`]) and then honours the block whole.\n\nResolution, and every S13.4 refusal, is\n[`crate::io::output_plan::OutputPlan::from_json`]. A case that carries\nthis block must NOT also name `-output`/`-writeInterval`/`-restartWrite`\non the command line: those are the same settings said twice, and naming\nboth is an error rather than a silent winner (S44.6).",
       "type": "object",
@@ -1637,7 +1696,7 @@
       ]
     },
     "JsonVisualisation": {
-      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these five entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
+      "description": "The dense voxel grid a renderer reads - SPEC-LIT S44.1.\n\nResolved by [`crate::io::output_plan::OutputPlan::from_json`], which is\nwhere every S13.4 refusal about these six entries lives; nothing here\nvalidates, exactly as nothing else in this file does.",
       "type": "object",
       "properties": {
         "fields": {
@@ -1661,6 +1720,17 @@
             "null"
           ],
           "format": "double"
+        },
+        "lattice": {
+          "description": "The lattice a mesh that is not a uniform Cartesian box is sampled\nonto - SPEC-LIT 117.3. Absent is every default of that table. A\nuniform Cartesian box is written on its own cells and never reads it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonLattice"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "precision": {
           "description": "`fp32` (the default) or `fp16` - SPEC-LIT S44.3. This is the ONE\nplace in the case format where reduced precision is legitimate.",

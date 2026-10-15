@@ -158,6 +158,26 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         "src/dust/device.rs",
         Stance::Gate("dust_fsc_replays_under_capture"),
     ),
+    (
+        "src/dust/particle.rs",
+        Stance::Outside(
+            "the reacting dust parcel's step is the f64 host twin of SPEC-LIT \
+             159.7; it launches nothing, and its device counterpart \
+             particle_step in src/dust/device.rs is gated there by \
+             dust_particle_step_replays_under_capture",
+        ),
+    ),
+    (
+        "src/dust/progress.rs",
+        Stance::Refused(
+            "`ProgressEquation::solve` is one outer iteration of the c~ equation \
+             of SPEC-LIT 155.2, and it READS BACK the bounds counter after every \
+             solve: 155.2 reports each cell outside [0, 1] and clips none, so the \
+             count must reach the host. The linear solve's residual check reads \
+             back too. Its kernels' launchers in src/dust/device.rs are gated \
+             there by dust_progress_kernels_replay_under_capture",
+        ),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",

@@ -161,6 +161,13 @@ pub fn read_poly_mesh(case_dir: &Path) -> Result<PolyMeshRaw> {
         );
     }
 
+    // ---- SPEC-LIT 120.13: every cyclicAMI pair is imprinted first ---------
+    // After this the pair is two conformal patches, face k with face k, and
+    // the resolution below treats it as any other cyclic.
+    raw.patches = patches;
+    imprint_cyclic_ami(&mut raw, &pe, &bnd)?;
+    let mut patches = std::mem::take(&mut raw.patches);
+
     // ---- resolve a cyclic's neighbourPatch into an index ------------------
     for k in 0..patches.len() {
         if patches[k].kind != PatchKind::Cyclic {
@@ -202,6 +209,136 @@ pub fn read_poly_mesh(case_dir: &Path) -> Result<PolyMeshRaw> {
 
     raw.patches = patches;
     Ok(raw)
+}
+
+/// SPEC-LIT 120.13: imprint every `cyclicAMI` pair of the boundary file
+/// with BC-18's [`crate::mesh::imprint::imprint`] (SPEC-LIT 120.18), so the
+/// pair leaves the reader as two conformal patches written face for face,
+/// the form every cyclic has downstream. Static only: the imprint is made
+/// once, from these points. A side whose `neighbourPatch` is missing or
+/// unknown is left to the cyclic resolution that follows, which refuses it.
+fn imprint_cyclic_ami(raw: &mut PolyMeshRaw, pe: &[RawPatchEntry], bnd: &Path) -> Result<()> {
+    use crate::mesh::imprint::{imprint, ImprintOptions, ImprintTransform};
+
+    for k in 0..raw.patches.len() {
+        if raw.patches[k].type_name != "cyclicAMI" {
+            continue;
+        }
+        let Some(j) = raw.patches.iter().position(|p| p.name == pe[k].neighbour_patch) else {
+            continue;
+        };
+        let (a, b) = (raw.patches[k].name.clone(), raw.patches[j].name.clone());
+        if raw.patches[j].type_name != "cyclicAMI" {
+            return parse_err(
+                bnd,
+                format!(
+                    "cyclicAMI patch '{a}' names neighbourPatch '{b}', whose type is '{}'; \
+                     both sides of an arbitrary mesh interface are cyclicAMI (SPEC-LIT 120.13)",
+                    raw.patches[j].type_name
+                ),
+            );
+        }
+        if pe[j].neighbour_patch != a {
+            return parse_err(
+                bnd,
+                format!(
+                    "cyclicAMI patch '{a}' names neighbourPatch '{b}', but '{b}' names '{}'; \
+                     the two sides must name each other (SPEC-LIT 120.13)",
+                    pe[j].neighbour_patch
+                ),
+            );
+        }
+        if pe[k].transform == "rotational" || pe[j].transform == "rotational" {
+            return parse_err(
+                bnd,
+                format!(
+                    "cyclicAMI pair '{a}'/'{b}' has transform rotational; a cyclic pair here \
+                     maps one side onto the other by a translation only, so write the pair \
+                     with a translation or none (SPEC-LIT 31.1, 120.13)"
+                ),
+            );
+        }
+        if j < k {
+            continue;
+        }
+        let opts = ImprintOptions {
+            transform: ImprintTransform {
+                shift: ami_shift(raw, k, j),
+                ..ImprintTransform::identity()
+            },
+            ..ImprintOptions::default()
+        };
+        let out = match imprint(raw, &a, &b, &opts) {
+            Ok(out) => out,
+            Err(e) => return parse_err(bnd, format!("cyclicAMI pair '{a}'/'{b}': {e}")),
+        };
+        *raw = out.mesh;
+    }
+    Ok(())
+}
+
+/// (120.13a): the map of `imprint` (SPEC-LIT (120.18.1)) for a `cyclicAMI`
+/// pair, `R = I` and a shift `t`. When every point of `ib` lies within
+/// 120.18's `tau` of the plane of `ia` (through its area centroid `X_A`,
+/// along its summed area vector), the two sides meet and `t = 0` exactly,
+/// so an in-plane offset stays an offset and is refused by the coverage
+/// rule; otherwise the pair is periodic and `t = X_A - X_B`, the difference
+/// of the area centroids (SPEC-LIT 31.1's translation).
+fn ami_shift(raw: &PolyMeshRaw, ia: usize, ib: usize) -> [f64; 3] {
+    let n_if = raw.neighbour.len();
+    let faces_of = |pi: usize| {
+        let p = &raw.patches[pi];
+        n_if + p.start..n_if + p.start + p.size
+    };
+    // The area centroid and the summed area vector, each face fanned into
+    // triangles about its vertex mean.
+    let centroid = |pi: usize| -> (DVec3, DVec3) {
+        let (mut area, mut moment, mut s) = (0.0f64, DVec3::ZERO, DVec3::ZERO);
+        for f in faces_of(pi) {
+            let loop_ = &raw.faces[f];
+            let n = loop_.len();
+            let mut m = DVec3::ZERO;
+            for &v in loop_ {
+                m += raw.points[v as usize];
+            }
+            let m = m / n as f64;
+            for e in 0..n {
+                let x0 = raw.points[loop_[e] as usize];
+                let x1 = raw.points[loop_[(e + 1) % n] as usize];
+                let half = (x0 - m).cross(x1 - m) * 0.5;
+                let a = half.mag();
+                area += a;
+                s += half;
+                moment += (m + x0 + x1) * (a / 3.0);
+            }
+        }
+        (moment / area, s)
+    };
+    let (xa, sa) = centroid(ia);
+    let (xb, _) = centroid(ib);
+
+    let (mut lo, mut hi) = (
+        DVec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+        DVec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+    );
+    for f in faces_of(ia) {
+        for &v in &raw.faces[f] {
+            let x = raw.points[v as usize];
+            lo = DVec3::new(lo.x.min(x.x), lo.y.min(x.y), lo.z.min(x.z));
+            hi = DVec3::new(hi.x.max(x.x), hi.y.max(x.y), hi.z.max(x.z));
+        }
+    }
+    let tau = crate::mesh::imprint::ImprintOptions::default().rel_tol * (hi - lo).mag();
+    let na = sa / sa.mag();
+    let coplanar = faces_of(ib)
+        .flat_map(|f| raw.faces[f].iter())
+        .all(|&v| (raw.points[v as usize] - xa).dot(na).abs() <= tau);
+    if coplanar {
+        [0.0; 3]
+    } else {
+        let t = xa - xb;
+        [t.x, t.y, t.z]
+    }
 }
 
 fn find_poly_mesh_dir(case_dir: &Path) -> Result<PathBuf> {
@@ -696,6 +833,9 @@ struct RawPatchEntry {
     name: String,
     type_name: String,
     neighbour_patch: String,
+    /// The `transform` keyword, read only so that a `cyclicAMI` pair can
+    /// refuse `rotational` by name (SPEC-LIT 120.13).
+    transform: String,
     n_faces: Label,
     start_face: Label,
     have_n_faces: bool,
@@ -704,9 +844,9 @@ struct RawPatchEntry {
 
 /// `N ( name { type ...; nFaces N; startFace N; } ... )`.
 ///
-/// Anything that is not `type`, `neighbourPatch`, `nFaces` or `startFace` is
-/// skipped, sub-dictionaries included - real boundary files carry `inGroups`,
-/// `transform`, `matchTolerance` and friends.
+/// Anything that is not `type`, `neighbourPatch`, `transform`, `nFaces` or
+/// `startFace` is skipped, sub-dictionaries included - real boundary files
+/// carry `inGroups`, `matchTolerance` and friends.
 fn read_boundary_file(path: &Path) -> Result<Vec<RawPatchEntry>> {
     let mut ts = open(path)?;
 
@@ -743,6 +883,7 @@ fn read_boundary_file(path: &Path) -> Result<Vec<RawPatchEntry>> {
             match k.as_str() {
                 "type" => e.type_name = gather_raw(&mut ts)?,
                 "neighbourPatch" => e.neighbour_patch = gather_raw(&mut ts)?,
+                "transform" => e.transform = gather_raw(&mut ts)?,
                 "nFaces" => {
                     e.n_faces = ts.expect_label()?;
                     ts.expect_punct(';')?;

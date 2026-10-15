@@ -7958,6 +7958,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
         fields,
         precision: precision.map(str::to_string),
         usd_scene: false,
+        lattice: None,
     };
 
     // ---- the three columns, and the wrong-column refusals (44.1) ---------
@@ -20654,6 +20655,7 @@ fn check_thick_cylinder(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         check_interval: 1,
         fixed_iters: false,
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     };
 
     let (r_in, r_out) = (0.5 as Scalar, 1.0 as Scalar);
@@ -20816,6 +20818,7 @@ fn check_solid_bimetal(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         check_interval: 1,
         fixed_iters: false,
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     };
 
     let mut kappa_s = [0.0 as Scalar; 3];
@@ -23683,6 +23686,7 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         check_interval: 1,
         fixed_iters: false,
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     };
     let outer_controls = || OuterControls {
         relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
@@ -24055,6 +24059,7 @@ fn point_95g_inner(
         check_interval: 1,
         fixed_iters: false,
         report_residuals: true,
+        gamg: ofgpu::io::case::GamgControls::default(),
     };
     let mut d = Displacement::new(gpu, &gm, &b.mesh, mat, per_patch, ctrl)?;
     match temps {
