@@ -12,7 +12,7 @@ import type { Readable } from 'node:stream'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { getBinary, type BinarySpec, type StartRunRequest } from '@cfd/shared'
+import { DEFAULT_RUN_PRECISION, getBinary, SINGLE_PRECISION_PREVIEW, type BinarySpec, type RunPrecision, type StartRunRequest } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { scrubbedEnv } from '../env.js'
 import { RunRequestError } from './types.js'
@@ -45,8 +45,19 @@ export function buildArgv(req: Pick<StartRunRequest, 'casePath' | 'positionals' 
   return [...(req.casePath ? [req.casePath] : []), ...req.positionals, ...req.args.flatMap((a) => flagToArgv(a.flag, a.value))]
 }
 
-/** Directories a real binary might live in, in the order they are tried. */
-export function binarySearchDirs(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot'>): string[] {
+/** Where `cargo build --release --features single --target-dir target/single` puts the f32 binaries, relative to rust/. */
+export const SINGLE_TARGET_DIR = path.join('target', 'single', 'release')
+
+/** The one command that builds the single-precision binaries, quoted in the not-built refusal. */
+export const SINGLE_BUILD_COMMAND = 'cargo build --release --features single --target-dir target/single'
+
+/**
+ * Directories a real binary might live in, in the order they are tried. A single-precision run
+ * (F32-19) looks only in rust/target/single/release: OFGPU_BIN_DIR and target/release hold the f64
+ * build, and falling back to them would run a double binary under a single label.
+ */
+export function binarySearchDirs(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot'>, precision: RunPrecision = DEFAULT_RUN_PRECISION): string[] {
+  if (precision === 'single') return [path.join(config.workspaceRoot, 'rust', SINGLE_TARGET_DIR)]
   const dirs: string[] = []
   if (config.binDir) dirs.push(config.binDir)
   dirs.push(path.join(config.workspaceRoot, 'rust', 'target', 'release'))
@@ -54,9 +65,9 @@ export function binarySearchDirs(config: Pick<ServerConfig, 'binDir' | 'workspac
   return dirs
 }
 
-export function findBinary(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot'>, name: string): string | null {
+export function findBinary(config: Pick<ServerConfig, 'binDir' | 'workspaceRoot'>, name: string, precision: RunPrecision = DEFAULT_RUN_PRECISION): string | null {
   const exe = process.platform === 'win32' ? `${name}.exe` : name
-  for (const dir of binarySearchDirs(config)) {
+  for (const dir of binarySearchDirs(config, precision)) {
     const p = path.join(dir, exe)
     if (fs.existsSync(p)) return p
   }
@@ -87,6 +98,18 @@ export interface DispatchOptions {
   argv: string[]
   /** Absolute working directory (always inside the workspace). */
   cwd: string
+  /** The build to spawn (F32-19); absent = `double`. */
+  precision?: RunPrecision
+}
+
+/**
+ * The first line of every run's log (F32-19): the binary and the build it runs. `exe` is the path
+ * actually spawned, or null in demo mode, where the mock CLI stands in for both builds.
+ */
+export function runHeaderLine(binary: string, precision: RunPrecision, exe: string | null = null): string {
+  const where = exe ?? 'demo'
+  if (precision === 'double') return `run header: ${binary} precision double (f64 build, ${where})`
+  return `run header: ${binary} precision single (f32 build, ${where}${SINGLE_PRECISION_PREVIEW ? '; preview until F32-18' : ''})`
 }
 
 /**
@@ -178,7 +201,12 @@ export function dispatch(opts: DispatchOptions): SpawnedRun {
     return { child, argv: [opts.binary, ...opts.argv], mode: 'demo' }
   }
 
-  const exe = findBinary(opts.config, opts.binary)
+  const precision = opts.precision ?? DEFAULT_RUN_PRECISION
+  const exe = findBinary(opts.config, opts.binary, precision)
+  if (!exe && precision === 'single') {
+    const looked = binarySearchDirs(opts.config, precision).join(', ')
+    throw new RunRequestError(400, `${opts.binary} has no single-precision build on this machine (looked in ${looked}). Build it with \`${SINGLE_BUILD_COMMAND}\` in rust/, or run it at precision double.`)
+  }
   if (!exe) {
     const looked = binarySearchDirs(opts.config).join(', ')
     throw new RunRequestError(

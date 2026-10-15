@@ -169,9 +169,7 @@ const SAMPLES: Record<UiCommandType, UiCommand> = {
 /** type -> the later STU unit that implements it. Each later STU unit deletes
  *  its rows when its types are implemented; when the object is empty the last
  *  census test becomes a plain pass. */
-const OPEN_UNIMPLEMENTED: Record<string, string> = {
-  select_step: 'STU-08b',
-}
+const OPEN_UNIMPLEMENTED: Record<string, string> = {}
 
 type ResultFrame = Extract<ClientMsg, { t: 'ui.result' }>
 

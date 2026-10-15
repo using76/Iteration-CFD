@@ -325,3 +325,27 @@ describe('through gui_control', () => {
     expect(await guiControl.preview!({ type: 'select_tab', tab: 'results' }, c)).toBeNull()
   })
 })
+
+// F32-19: precision is a run setting. It survives a binary switch (it belongs
+// to the run, not to one binary), start_run hands it to run_start, and the
+// approval card says single; double is the default and adds nothing.
+describe('the precision run setting (F32-19)', () => {
+  it('set_run_setting {precision} is kept across a binary switch and reaches run_start and the approval card', async () => {
+    const fake = fakeUiHub()
+    fake.setUiState(caseState)
+    const runs = fakeRuns()
+    const c = ctx(fake.hub, runs)
+    expect((await applyRunSetting(setting({ precision: 'single' }), c)).ok).toBe(true)
+    expect(getRunDraft('s1')).toEqual({ binary: null, args: [], precision: 'single' })
+    await applyRunSetting(setting({ binary: 'ofgpu-k-epsilon', flag: '-iters', value: '4000' }), c)
+    expect(getRunDraft('s1')).toEqual({ binary: 'ofgpu-k-epsilon', args: [{ flag: '-iters', value: 4000 }], precision: 'single' })
+    expect(await guiRunPreview({ type: 'start_run' }, c)).toBe('ofgpu-k-epsilon cases/plume.jsonc -iters 4000 (precision single)')
+    const p = guiStartRun(c)
+    await vi.waitFor(() => expect(fake.pending).toHaveLength(1))
+    fake.pending[0].resolve({ ok: true, state: caseState, error: null })
+    expect((await p).ok).toBe(true)
+    expect(runs.started[0]?.precision).toBe('single')
+    await applyRunSetting(setting({ precision: 'double' }), c)
+    expect(await guiRunPreview({ type: 'start_run' }, c)).toBe('ofgpu-k-epsilon cases/plume.jsonc -iters 4000')
+  })
+})

@@ -222,6 +222,8 @@ export function ResidualsChart({ runId: runIdProp, compareRunId: compareRunIdPro
           <span className="faint truncate mono" style={{ fontSize: 'var(--fs-xs)' }}>
             {run.label ?? run.binary} · {run.targetIter ? `${run.iter.toLocaleString()} / ${run.targetIter.toLocaleString()}` : run.iter.toLocaleString()}
             {running ? ` · ${formatDuration(now - Date.parse(run.startedAt))}` : ''}
+            {/* F32-19: the build this run used; runs from before the field ran double. */}
+            {` · ${run.precision ?? 'double'}`}
           </span>
         ) : null}
         {compareRunId ? (

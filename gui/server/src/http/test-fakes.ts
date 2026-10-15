@@ -159,6 +159,16 @@ export function fakeDatasets(): DatasetService & { opened: string[]; openedOpts:
       if (plane.origin[0] !== 0) throw new Error('NO_PLANE_CUT: the fake cuts on x = 0 only')
       return { key: 'cut.fake', id, origin: plane.origin, normal: plane.normal, triangleCount: 0 }
     },
+    // The fake contours field p only.
+    iso: async (id: string, spec: { field: string; timeIndex: number; values: number[] }) => {
+      if (spec.field !== 'p') throw new Error('NO_POLY_ISO: the fake contours p only')
+      return { key: 'iso.fake', id, field: spec.field, timeIndex: spec.timeIndex, values: spec.values, triangleCount: 0 }
+    },
+    // The fake traces field U only, and echoes the parsed request.
+    streamlines: async (id: string, spec: { field: string; timeIndex: number; seeds: number[]; direction: string; maxLength: number | null }) => {
+      if (spec.field !== 'U') throw new Error('NO_POLY_STREAM: the fake traces U only')
+      return { key: 'stream.fake', id, field: spec.field, timeIndex: spec.timeIndex, seeds: spec.seeds, direction: spec.direction, maxLength: spec.maxLength, lineCount: spec.seeds.length / 3 }
+    },
     // The fake locates in the unit cube only: cell 0 inside, a miss outside, refused for y < -10.
     locate: async (_id: string, point: [number, number, number]) => {
       if (point[1] < -10) throw new Error('NO_POINT_LOCATE: the fake refuses y < -10')

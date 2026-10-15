@@ -129,6 +129,8 @@ export interface UiState {
   selection: UiSelection | null
   /** The node Properties shows (STU-08a); null when nothing is selected. Transient. */
   propertiesNode: PropertiesNode | null
+  /** The project tree's selected node id (STU-08b), what gui_state reports as activeStep; null before the first. Transient. */
+  activeStep: string | null
 }
 
 export interface UiActions {
@@ -190,6 +192,8 @@ export interface UiActions {
   setSelection(selection: UiSelection | null): void
   /** Puts a node in the Properties panel (null clears it). */
   selectNode(node: PropertiesNode | null): void
+  /** Selects a project tree node (STU-08b): it becomes the activeStep, fills Properties and opens that panel. */
+  selectStep(node: PropertiesNode): void
 }
 
 export type UiStore = UiState & UiActions
@@ -233,6 +237,7 @@ const INITIAL: UiState = {
   rightTab: 'AI Assistant',
   selection: null,
   propertiesNode: null,
+  activeStep: null,
 }
 
 export function fileTabId(path: string): string {
@@ -525,6 +530,9 @@ export const useUiStore = create<UiStore>()(
       },
       selectNode(node) {
         set({ propertiesNode: node })
+      },
+      selectStep(node) {
+        set({ activeStep: node.id, propertiesNode: node, rightTab: 'Properties', assistantVisible: true })
       },
     }),
     {

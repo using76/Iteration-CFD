@@ -52671,7 +52671,7 @@ millimetric drops on glass, which is a different experiment from the one either 
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §148 to the studio's
 post-processing on a polyMesh that is not a lattice: STU-12a (§148.1, the exact plane cut),
-STU-14 (the iso-surface, not yet written) and STU-15 (not yet written). The code lives in the
+STU-14 (§148.2, the iso-surface) and STU-15 (§148.3, streamlines). The code lives in the
 studio's server, `gui/server/src/formats/`. No solver, gate or test that existed before this
 section changes.
 
@@ -52777,6 +52777,196 @@ cube.
 
 The independent oracle intersects the plane with the cube's 12 edges, sorts the points by
 angle about their mean, and takes the shoelace area. It shares no code with `polycut.ts`.
+
+### 148.2 The iso-surface of a cell field on a polyhedral polyMesh
+
+`gui/server/src/formats/polyiso.ts`: `buildIsoMesh(mesh)` (the topology, built once per mesh),
+`reconstructPointValues(iso, cellValues)` and `isoSurface(iso, cellValues, isoValues)`. It
+contours a cell-centred field at one or more values on any polyMesh. The output is a triangle
+soup with a cell id and a unit normal per triangle, plus the area of each value's surface. The
+dataset service runs it in its worker pool for a polyMesh with no lattice (`manifest.planeCut`)
+at `POST /api/datasets/<id>/iso`. A vector is contoured by its magnitude, as the lattice's
+marching cubes is; a tensor or a point field is refused (`INVALID`). A lattice keeps its
+marching cubes, and a cut-cell lattice keeps its `ISO_CUTCELL` refusal.
+
+**Sources.** D. J. Mavriplis, "Revisiting the least-squares procedure for gradient
+reconstruction on unstructured meshes", AIAA 2003-3986, NASA/CR-2003-212683 (NTRS 20040010717,
+open). It is cited for the weighted least-squares fit and for inverse-distance weighting. Both
+are used in their standard form, and no equation is quoted from the paper. The paper fits a
+gradient at a cell centre. Here the same fit is made at a mesh point, with the point value as a
+fourth unknown. That adaptation, the ring rule and the column scaling are house-original. G. M.
+Treece, R. W. Prager and A. H. Gee, "Regularised marching tetrahedra: improved iso-surface
+extraction", *Computers & Graphics* 23(4) (1999) 583–598, doi:10.1016/S0097-8493(99)00076-X.
+The paper is paywalled and was not read. It is cited for marching tetrahedra in its textbook
+form: per tetrahedron, one triangle when one or three corners are above the value, and a quad
+when two are. Its regularisation (vertex clustering) is not used. The tetrahedra about the
+centroid and the face centres are house-original.
+
+**Face centres and centroids.** Each face's centre `F` is the mean of its vertices. The cell is
+the polyhedron bounded by its faces' fans `(F, a, b)` over each face edge `a → b`. Its volume
+centroid is taken about the mean `r` of its face centres:
+
+    V_t = s ((a − F) × (b − F)) · (F − r) / 6,   C = Σ_t V_t (r + F + a + b) / (4 Σ_t V_t)     (148.4)
+
+where `s = +1` when the cell owns the face (its stored order points out of the owner) and `−1`
+when it is the neighbour. `C` does not depend on `r`. For a linear field, the cell average
+equals the field's value at `C`, so `C` is where the cell value lives.
+
+**Point values.** At a mesh point `p`, the fit is made over the stencil's cells `c` with finite
+values:
+
+    minimise Σ_c w_c² (φ_c − φ_p − g · (x_c − x_p))²,   w_c = L / |x_c − x_p|                  (148.5)
+
+Here `x_c` is the centroid `C` of 148.4, and `L` is the largest `|x_c − x_p|`. The unknowns are
+`φ_p` and `g`. The rows `[L/d, Δx/d, Δy/d, Δz/d] = φ_c L/d` (`d = |x_c − x_p|`) have their four
+columns scaled to unit length, and the system is solved by Householder QR. The column scaling
+keeps a stretched stencil from reading as a flat one. **The fit has full rank when
+min |R_kk| > 0.1 · max |R_kk|.** The stencil starts with the cells that have `p` as a vertex.
+Until the fit has full rank, it grows by one point ring at a time: every cell that shares a
+point with the last ring is added. It stops after 6 rings or at 256 cells. A point that never
+reaches full rank takes the `1/d`-weighted mean of its stencil and is counted as a
+`fallbackPoint`. A point of no cell gets NaN. Wherever the fit has full rank, a linear field
+fits with zero residual, so `φ_p` is exact to round-off.
+
+The floor 0.1 was chosen by measurement, and it is a conditioning floor, not a gate. On the
+warped sphere-in-box (STU-12b's fixture) the boundary-face points have four nearly coplanar
+centroids. A floor of 1e-6 accepts that stencil, and the linear field comes back with errors up
+to 1.7e-11 (8.4e-12 without the column scaling). A floor of 1e-2 gives 1.6e-12, 3e-2 gives
+1.6e-13, and 0.1 gives 4.0e-15 with no fallback. Hex blocks with cells at 1000:1, and graded
+1.5 from 1e-5, give 4.0e-15 and 2.9e-15 with no fallback at 1e-2, 3e-2 and 0.1 (the floors measured on them).
+
+**Tetrahedra.** Each cell is split into the tetrahedra `(C, F, a, b)`, one per face edge, with
+the values
+
+    (φ_cell, φ_F = mean of the face's φ_p, φ_a, φ_b)                                           (148.6)
+
+For a linear field all four values are exact, so linear interpolation in every tetrahedron
+reproduces the field, and the iso-surface is the exact plane section of the union of the
+tetrahedra. The tetrahedra tile the face-fan polyhedron of 148.4. A tetrahedron with
+non-positive volume (`invertedTets`) is counted, and means a cell that is not star-shaped about
+its centroid; such a cell's surface can overlap itself. Two cells sharing a face use the same
+`F`, the same `φ_F` and the same edges, so the surface is watertight across faces.
+
+**Marching tetrahedra and the sign rule.** As in 148.1, **a corner with `φ ≥ φ_iso` is on the
++ side.** A tetrahedron with 0 or 4 corners on the + side gives nothing. With one or three it
+gives one triangle, and with two it gives the quad `a₀b₀, a₀b₁, a₁b₁, a₁b₀` as two triangles.
+Consecutive corners of that quad share an end. Each crossing is computed from its + end `u`
+toward its − end `v`:
+
+    t = (φ_u − φ_iso) / (φ_u − φ_v),   x = x_u + t (x_v − x_u)                                 (148.7)
+
+so an edge shared by tetrahedra gives the same bits in each. A triangle whose cross product is
+exactly zero is dropped. Each triangle is oriented so that its normal has a positive dot
+product with `x_max − x_min`, the corners with the largest + value and the smallest − value.
+The normal therefore points toward increasing `φ`. As in 148.1, a face lying exactly at the
+value is reported once, by the tetrahedron on its − side.
+
+**Gates (STU-14, `gui/server/src/formats/polyiso.test.ts`, 5 tests).** These run on the mixed
+unit cube of 148.1 (`formats/fixtures/mixedCube.ts`), with `f = 2x − y + 0.5z` and each cell
+value set to `f(C)`.
+
+| case | gate | measured |
+|---|---|---|
+| centroids | Σ V_c = 1 and Σ V_c C_c = (½, ½, ½) to 1e-14, no inverted tetrahedron | pass, 0 inverted |
+| point values | `|φ_p − f(x_p)| ≤ 1e-12` at every point, no fallback | worst 1.4e-15 over 22 points |
+| iso `f = 0.3` | every vertex within 1e-12 of the plane; the area equals the independent plane ∩ cube polygon area to 1e-9 relative; every normal · ∇f > 0 | worst distance 5.1e-16; 95 triangles in 6 cells; area 1.0998181667894014, relative error 0 |
+| values `[5, 0.3, −0.3, −2]` | in order; 0 triangles outside the field's range; `−0.3` has the independent area to 1e-9 | pass |
+| hex blocks, cells 1000:1 and graded 1.5 from 1e-5, `h = 2x − y + 500z` | exact points to 1e-12, no fallback | pass |
+
+The independent oracle is the one 148.1 describes, rewritten in the test for this plane. It
+shares no code with `polyiso.ts`. The wiring tests are
+`gui/server/src/datasets/__tests__/unstructuredIso.test.ts`, which checks that the warped
+sphere-in-box's stored triangles, f32 corners and normals are polyiso's bit for bit (p = 227.5
+gives 1004 triangles, 0 fallback points, 0 inverted tetrahedra), and that a lattice is refused
+`NO_POLY_ISO`. `gui/web/src/viewer/controller/unstructuredIso.test.ts` checks that add_layer iso
+through the bridge draws the served triangles and that the lattice, cut-cell and streamline
+paths are unchanged. Measured, not gated (Node 22, the shared 4-CPU host): on a 100³ hex cube
+(1 M cells), building the topology took 951 ms, the point values 984 ms and the contour 252 ms,
+giving 214 501 triangles. The area agreed with the oracle to 2.9e-13.
+
+### 148.3 Streamlines of a cell velocity on a polyhedral polyMesh
+
+`gui/server/src/formats/polystream.ts`: `buildStreamMesh(mesh)` (the topology, built once per
+mesh: the iso topology of 148.2, the cell locator's buckets of STU-13 and a length per cell) and
+`polyStreamlines(sm, cellU, seeds, options)`. It traces streamlines of a cell-centred velocity
+from seed points on any polyMesh. The output is one polyline per seed, upstream → seed →
+downstream, with the speed at every point. The dataset service runs it in its worker pool for a
+polyMesh with no lattice (`manifest.planeCut`) at `POST /api/datasets/<id>/streamlines`. A
+scalar, tensor or point field is refused (`INVALID`), and a request whose seeds are all outside
+the domain is refused (`OUTSIDE`). A lattice keeps its own trilinear tracer
+(`gui/web/src/viewer/worker/streamlines.ts`).
+
+**Sources.** C. Runge, "Über die numerische Auflösung von Differentialgleichungen",
+*Mathematische Annalen* 46 (1895) 167–178, doi:10.1007/BF01446807, and W. Kutta, "Beitrag zur
+näherungsweisen Integration totaler Differentialgleichungen", *Zeitschrift für Mathematik und
+Physik* 46 (1901) 435–453. Both are in the public domain (the Göttinger Digitalisierungszentrum
+holds a scan of the *Annalen*). They are cited for the classical fourth-order Runge–Kutta step,
+used in its textbook form. Neither paper was re-read for this section. The walk, the boundary
+rule and the Euler fallback are house-original.
+
+**Velocity.** Each component of the cell velocity is reconstructed at the mesh points by the fit
+of 148.5. Each cell is split into the tetrahedra of 148.6, with the corner values `U_C` (the cell
+value), `U_F` (the mean of the face's point values), `U_a` and `U_b`. At a point `x` in the
+tetrahedron `(P₀, P₁, P₂, P₃) = (C, F, a, b)`:
+
+    λ_i = V(P with P_i replaced by x) / V(P),   U(x) = Σ_i λ_i U_i                              (148.8)
+
+where `V` is the signed volume. For a linear velocity, every corner value is exact (148.5), so
+`U(x)` is exact. **A point is in a tetrahedron when every `λ_i ≥ −10⁻¹²`.** A tetrahedron with
+zero volume holds no point.
+
+**Integration.** The line is parameterised by arc length, as the lattice tracer is. With the
+direction `d(x) = s U(x) / |U(x)|` (`s = +1` downstream, `−1` upstream) and a step `h`:
+
+    k₁ = d(p),  k₂ = d(p + h k₁ / 2),  k₃ = d(p + h k₂ / 2),  k₄ = d(p + h k₃),
+    p' = p + (h / 6)(k₁ + 2 k₂ + 2 k₃ + k₄)                                                      (148.9)
+
+`h` is the option `step` when given. Otherwise it is `stepFactor` (0.5) times `V_c^{1/3}`, where
+`V_c` is the current cell's face-fan volume (148.4). A step that would pass `maxLength` is
+shortened to end on it. The line stops at a point whose speed is not above `minSpeedFraction`
+(10⁻⁶) times the largest cell speed (`stall`), after `maxSteps` (4000) steps (`steps`), and at
+`maxLength` (`length`).
+
+**The walk.** Every stage point and every new point is reached by walking the straight segment
+from `p` to it, starting in the tetrahedron that holds `p`. In a tetrahedron, with `λ(p)` and
+`λ(x)` the coordinates of the segment's start and end,
+
+    t_i = λ_i(p) / (λ_i(p) − λ_i(x))   for each i with λ_i(x) < −10⁻¹²,   exit through argmin t_i   (148.10)
+
+and when there is no such `i`, `x` is in the tetrahedron. `λ_i(p)` is clamped at 0, and the face
+the walk came in through is not a candidate. The face opposite `C` is part of a polyMesh face.
+At an internal face, the walk goes on in the neighbour cell's tetrahedron on the same face edge.
+At a boundary face, the segment leaves the domain at `p + t_i (x − p)`. The other three faces
+lead to tetrahedra of the same cell: the next or previous edge of the same face, or the cell's
+other face with the same edge. A walk that crosses more than 100 000 tetrahedra, or meets one
+with no volume, ends the line as `lost`.
+
+**The boundary rule.** When a stage point of (148.9) is outside the domain, the step falls back
+to forward Euler, `p' = p + h k₁`. When the segment to `p'` leaves the domain, the line ends at
+the exit point (`boundary`), with the speed interpolated there. A seed that no tetrahedron holds
+is refused: its line is empty and its index is reported. Seeds are found from the candidate
+cells of the locator's bucket and box (STU-13), each tested on its tetrahedra.
+
+**Gates (STU-15, `gui/server/src/formats/polystream.test.ts`, 3 tests).**
+
+| case | gate | measured |
+|---|---|---|
+| uniform `U = (0.8, 0.5, 0.3)` on the mixed unit cube of 148.1, seed `(0.3, 0.4, 0.5)`, both directions, step 0.02 | every point within 1e-12 of the line; both ends on the box, at the exact ray–cube exits, to 1e-12; both ends `boundary` | 64 points; worst distance 1.75e-15; end errors 1.81e-15 and 4.16e-16 |
+| `U = (−y, x, 0)` at the centroids of 20 × 20 × 20 hexes on `[−1, 1]³`, each split into six Kuhn tetrahedra (48 000 cells, `h = 0.1`), seed `(0.5, 0, 0.05)`, downstream, step `h/10`, `maxLength = 2π · 0.5` | radius drift ≤ 1e-3 relative; `|z − 0.05|` ≤ 1e-12; ends `length` | 316 points; drift 8.72e-11; `|Δz|` 0; the end is 5.2e-5 from the seed |
+| seeds `(1.5, 0.5, 0.5)` and `(0.5, −10⁻⁶, 0.5)` on the mixed cube, `(2, 0, 0)` on a 4³ Kuhn cube | refused, empty lines; the seed inside is traced | pass |
+
+The 5.2e-5 gap at the end is not a radius error. A line's length is the sum of its chords, which
+is shorter than the arc by about `h³ / (24 r²)` per step. Over 315 steps that is 5.2e-5 of arc
+past the seed. The row's "20³-cell tet mesh" is read as 20 hexes per axis, each split into six
+tetrahedra, so `h` is the hex spacing 0.1. The wiring tests are
+`gui/server/src/datasets/__tests__/unstructuredStream.test.ts` and
+`gui/web/src/viewer/controller/unstructuredStream.test.ts`. The server test checks that the warped
+sphere-in-box's stored lines are polystream's bit for bit: the offsets, and the points and speeds
+rounded once to f32. Three seeds give 29 points, the outside seed is refused, and all four traced
+directions end `boundary`. It also checks the `OUTSIDE`, `NO_POLY_STREAM` and `INVALID` refusals.
+The web test checks that add_layer streamlines through the bridge sends the layer's seeds and
+draws the served lines, that `OUTSIDE` answers `INVALID`, and that a lattice keeps its own
+tracer.
 
 ---
 

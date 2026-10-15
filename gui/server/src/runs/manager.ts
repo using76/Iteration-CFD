@@ -7,12 +7,12 @@
 // running run when launch throws (launch() below).
 import path from 'node:path'
 import readline from 'node:readline'
-import { BINARY_NAMES, checkArgValue, getBinary, LogLineParser, RESIDUAL_SERIES_ORDER, type LogLine, type MetricRecord, type ResidualRecord, type RunEndWord, type RunInfo, type RunStatus } from '@cfd/shared'
+import { BINARY_NAMES, checkArgValue, DEFAULT_RUN_PRECISION, getBinary, LogLineParser, RUN_PRECISIONS, RESIDUAL_SERIES_ORDER, type LogLine, type MetricRecord, type ResidualRecord, type RunEndWord, type RunInfo, type RunPrecision, type RunStatus } from '@cfd/shared'
 import type { ServerConfig } from '../config.js'
 import { createGpuMonitor, type GpuMonitor } from '../gpu/index.js'
 import { silentLogger, type Logger } from '../log.js'
 import { resolveInWorkspace } from '../workspace/paths.js'
-import { availableBinaries as detectBinaries, buildArgv, dispatch, killTree, type DispatchOptions, type SpawnedRun } from './dispatch.js'
+import { availableBinaries as detectBinaries, buildArgv, dispatch, killTree, runHeaderLine, type DispatchOptions, type SpawnedRun } from './dispatch.js'
 import { collectRunProvenance } from './provenance.js'
 import { loadPastRuns, nullRunFiles, openRun, readPastLog, readPastSeries, type RunFiles } from './store.js'
 import { isTerminal, RunRequestError, type LogWindow, type RunEvent, type RunManagerHandle, type StartRunOptions, type WaitOptions } from './types.js'
@@ -126,9 +126,15 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
 
   // ---- validation -----------------------------------------------------------
 
-  function validate(opts: StartRunOptions): { spec: NonNullable<ReturnType<typeof getBinary>>; cwdAbs: string; cwdRel: string; casePath: string | null; outputRoot: string | null } {
+  function validate(opts: StartRunOptions): { spec: NonNullable<ReturnType<typeof getBinary>>; cwdAbs: string; cwdRel: string; casePath: string | null; outputRoot: string | null; precision: RunPrecision } {
     const spec = getBinary(opts.binary)
     if (!spec) throw new RunRequestError(400, `unknown binary ${opts.binary}; available: ${BINARY_NAMES.join(', ')}`)
+
+    // F32-19: absent or null is the default f64 build. A pipeline is a script, not a Cargo
+    // binary, so it has no single-precision build to run.
+    const precision = opts.precision ?? DEFAULT_RUN_PRECISION
+    if (!(RUN_PRECISIONS as readonly string[]).includes(precision)) throw new RunRequestError(400, `precision must be one of ${RUN_PRECISIONS.join(', ')} (got ${String(precision)})`)
+    if (precision === 'single' && spec.pipeline) throw new RunRequestError(400, `${spec.name} is a pipeline script, not a Cargo binary: it has no single-precision build; run it at precision double`)
 
     for (const a of opts.args) {
       const flag = spec.flags.find((f) => f.name === a.flag)
@@ -157,7 +163,7 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
     for (let i = 0; i < positionalPaths.length; i++) if (positionalPaths[i] !== null) opts.positionals[i] = positionalPaths[i]!
 
     const outputRoot = casePath ? (casePath.endsWith('.jsonc') ? casePath.replace(/\.jsonc$/, '_jsonc') : casePath) : (positionalPaths.find((p) => p !== null) ?? null)
-    return { spec, cwdAbs: config.workspaceRoot, cwdRel: '', casePath, outputRoot }
+    return { spec, cwdAbs: config.workspaceRoot, cwdRel: '', casePath, outputRoot, precision }
   }
 
   // ---- the single-GPU queue -------------------------------------------------
@@ -194,7 +200,10 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
         void r.files.close()
         return
       }
-      const spawned = spawnRun({ config, binary: r.info.binary, argv: buildArgv({ casePath: r.info.casePath, positionals: r.positionals, args: r.args }), cwd: config.workspaceRoot })
+      const precision = r.info.precision ?? DEFAULT_RUN_PRECISION
+      const spawned = spawnRun({ config, binary: r.info.binary, argv: buildArgv({ casePath: r.info.casePath, positionals: r.positionals, args: r.args }), cwd: config.workspaceRoot, precision })
+      // The run header (F32-19), before the child's first line: which build this run is.
+      if (!getBinary(r.info.binary)?.pipeline) appendLines(r, [{ text: runHeaderLine(r.info.binary, precision, spawned.mode === 'real' ? (spawned.argv[0] ?? null) : null), stream: 'system' }])
       r.proc = spawned
       r.info.argv = spawned.argv
       r.info.mode = spawned.mode
@@ -237,7 +246,7 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
 
   // ---- the log --------------------------------------------------------------
 
-  function appendLines(r: LiveRun, items: Array<{ text: string; stream: 'stdout' | 'stderr' }>): void {
+  function appendLines(r: LiveRun, items: Array<{ text: string; stream: LogLine['stream'] }>): void {
     const now = Date.now()
     const lines: LogLine[] = items.map((i) => ({ seq: ++r.info.logLines, stream: i.stream, text: i.text, ts: now }))
     r.lines.push(...lines)
@@ -360,7 +369,7 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
 
     async start(opts) {
       if (closing) throw new RunRequestError(503, 'the server is shutting down')
-      const { spec, casePath, outputRoot } = validate(opts)
+      const { spec, casePath, outputRoot, precision } = validate(opts)
       const id = `r_${++counter}`
       // A mesh run a client started without saying so is still a mesh run:
       // the label is how a client tells mesh runs from solver runs.
@@ -402,6 +411,7 @@ export async function createRunManager(deps: RunManagerDeps): Promise<RunManager
         caseId: prov.caseId,
         meshId: prov.meshId,
         machine: prov.machine,
+        precision,
       }
       const r: LiveRun = {
         info,

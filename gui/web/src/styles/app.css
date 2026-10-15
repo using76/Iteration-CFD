@@ -188,6 +188,8 @@ a { color: var(--accent); }
 .outline-row { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px 0 18px; font-size: var(--fs-sm); cursor: pointer; }
 .outline-row:hover { background: var(--bg-hover); }
 .outline-row .kind { margin-left: auto; color: var(--fg-faint); font-size: 10px; }
+/* STU-08b: the project tree's selected node (the activeStep). */
+.outline-row.selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .task-row { display: flex; align-items: center; gap: 10px; height: 28px; width: 100%; padding: 0 12px 0 20px; font-size: var(--fs-md); text-align: left; color: var(--fg); }
 .task-row:hover:not(:disabled) { background: var(--bg-hover); }
 .task-row .ico { color: var(--fg-muted); display: inline-flex; }
