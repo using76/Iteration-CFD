@@ -13380,7 +13380,6 @@ static CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [
     Some(&validate_gates::channel_dns::RECORDS[1]),
     Some(&validate_gates::channel_dns::RECORDS[2]),
 ];
-const STEP_RECORD: Option<&StepRecord> = None;
 // the recorded runs of docs/17 VAL-53 (validate_gates/plume.rs)
 static PLUME_RECORD: Option<&PlumeRecord> = Some(&validate_gates::plume::RECORD);
 
@@ -14088,8 +14087,9 @@ fn check_channel_dns_on(
     Ok(())
 }
 
-/// Gate 110-B: load the Driver & Seegmiller key and the record slot, then
-/// hand the verdict to [`check_backstep_reattachment_on`] (S7's split).
+/// Gate 110-B: load the Driver & Seegmiller key, then hand it with the
+/// recorded runs (docs/17 VAL-52, `validate_gates/backstep.rs`) to
+/// [`check_backstep_runs_on`] (S7's split).
 fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
     // answer-key: driver-seegmiller1985
     let key = match key::load_text(DS_KEY.0) {
@@ -14108,20 +14108,13 @@ fn check_backstep_reattachment(c: &mut Checks) -> Result<()> {
             None
         }
     };
-    check_backstep_reattachment_on(c, key, STEP_RECORD)
+    check_backstep_runs_on(c, key, &validate_gates::backstep::RUNS, &validate_gates::backstep::SINGLE)
 }
 
-/// The worker behind [`check_backstep_reattachment`]: the parsed key
-/// `(D, u_D)` and the record slot are parameters (S7). With the key present
-/// and a record recorded, the datum's own +-0.10 IS the band - `u_num` from
-/// the three-mesh study decides undecided at its edge (SPEC-LIT 110.3) - and
-/// the inflow boundary layer and reference velocity are INPUT DIFFERENCES,
-/// printed beside the verdict, never folded in (S32.4).
-fn check_backstep_reattachment_on(
-    c: &mut Checks,
-    key: Option<(Scalar, Scalar)>,
-    rec: Option<&StepRecord>,
-) -> Result<()> {
+/// The key's own row, spelled once and run by both step workers (SPEC-LIT
+/// 69.3): the transcription is 6.26 with u_D 0.10, the TMR page's numbers,
+/// held to the digit before anything is compared against it.
+fn ds_key_row(c: &mut Checks, key: Option<(Scalar, Scalar)>) {
     if let Some((d, u_d)) = key {
         c.check(
             "D&S 1985 key: x_r/H = 6.26 with u_D = 0.10, as the TMR page states it",
@@ -14129,6 +14122,22 @@ fn check_backstep_reattachment_on(
             0.0,
         );
     }
+}
+
+/// The worker behind [`check_backstep_runs_on`]'s formed-study path: the
+/// parsed key `(D, u_D)` and the record slot are parameters (S7). With the
+/// key present and a record recorded, the datum's own +-0.10 IS the band -
+/// `u_num` from the three-mesh study decides undecided at its edge (SPEC-LIT
+/// 110.3) - and the inflow boundary layer and reference velocity are INPUT
+/// DIFFERENCES, printed beside the verdict, never folded in (S32.4). Every
+/// row and verdict here is REPLAYED: the record is a measurement this binary
+/// did not take on this run (SPEC-LIT 110.1).
+fn check_backstep_reattachment_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    rec: Option<&StepRecord>,
+) -> Result<()> {
+    ds_key_row(c, key);
     let (Some((d, u_d)), Some(r)) = (key, rec) else {
         if key.is_none() {
             report_110b(
@@ -14174,17 +14183,20 @@ fn check_backstep_reattachment_on(
     ));
     c.note(&study.one_line());
     c.note(&val.one_line("x_r/H on the finest mesh"));
+    c.note(&format!("110.5 step: binaries built at {}", validate_gates::backstep::BUILT_AT));
     match band_of(val.e.abs(), 0.10, study.u_fine) {
-        Band::Inside => c.check(
-            "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
-             SPEC-LIT S110.3)",
-            val.e.abs(),
-            0.10,
-        ),
+        Band::Inside => c.replaying(|c| {
+            c.check(
+                "Gate 110-B: x_r/H within the datum's own +-0.10 (absolute prediction, \
+                 SPEC-LIT S110.3)",
+                val.e.abs(),
+                0.10,
+            )
+        }),
         Band::Undecided => report_110b(
             c,
             Verdict::Open,
-            How::Live,
+            How::Replayed,
             format!(
                 "undecided: |E| = {} is within u_num = {} of the 0.10 edge (S32.4)",
                 sci(f64::from(val.e.abs()), 3),
@@ -14195,7 +14207,7 @@ fn check_backstep_reattachment_on(
         Band::Outside => report_110b(
             c,
             Verdict::Misses,
-            How::Live,
+            How::Replayed,
             format!(
                 "x_r/H = {:.3} against 6.26 - {:+.1}% of D, outside the datum's own \
                  +-0.10; the study's order p = {}",
@@ -14210,6 +14222,161 @@ fn check_backstep_reattachment_on(
         ),
     }
     Ok(())
+}
+
+/// Gate 110-B's replay worker behind [`check_backstep_reattachment`]: the
+/// key and the two recorded run arrays are parameters (S7) - the three f64
+/// levels, coarse to fine, and the same three meshes on the single build
+/// (docs/17 VAL-52, `validate_gates/backstep.rs`). Every level's record is
+/// named; a level that stopped is recorded as exactly that, and the gate
+/// MISSES, because a run that diverged is a finding (SPEC-LIT 110.1). With
+/// all three f64 levels converged the three-mesh study forms and the verdict
+/// is [`check_backstep_reattachment_on`]'s; while it does not, there is no
+/// u_num and the miss names the finest level that converged.
+fn check_backstep_runs_on(
+    c: &mut Checks,
+    key: Option<(Scalar, Scalar)>,
+    runs: &[validate_gates::backstep::StepRun; 3],
+    single: &[validate_gates::backstep::StepRun; 3],
+) -> Result<()> {
+    let Some((d, u_d)) = key else {
+        return check_backstep_reattachment_on(c, None, None);
+    };
+    let note = |c: &mut Checks, tag: &str, r: &validate_gates::backstep::StepRun| match &r.outcome {
+        Ok(f) => c.note(&format!(
+            "110.5 {tag} dx = {}H, {} cells: x_r/H = {:.4}, delta_99/H at x = -4H = {:.4} \
+             (U_e {:.4} m/s; the datum says approximately 1.5H), {} iterations, |U| res {}",
+            r.dx_over_h,
+            r.n_cells,
+            f.x_r_over_h,
+            f.delta99_over_h,
+            f.u_e,
+            f.iterations,
+            sci(f64::from(f.residual_u), 3),
+        )),
+        Err(why) => c.note(&format!(
+            "110.5 {tag} dx = {}H, {} cells: did not converge - {why}",
+            r.dx_over_h, r.n_cells
+        )),
+    };
+    for r in runs {
+        note(c, "step", r);
+    }
+    for r in single {
+        note(c, "single build", r);
+    }
+    if runs.iter().all(|r| r.outcome.is_ok()) {
+        backstep_class_r(c, d, u_d, runs, single);
+        let f: Vec<&validate_gates::backstep::StepConverged> =
+            runs.iter().map(|r| r.outcome.as_ref().expect("all three f64 levels converged")).collect();
+        let rec = StepRecord {
+            n_cells: [runs[0].n_cells, runs[1].n_cells, runs[2].n_cells],
+            dx_over_h: [runs[0].dx_over_h, runs[1].dx_over_h, runs[2].dx_over_h],
+            x_r_over_h: [f[0].x_r_over_h, f[1].x_r_over_h, f[2].x_r_over_h],
+            delta99_over_h_at_minus_4h: [
+                f[0].delta99_over_h,
+                f[1].delta99_over_h,
+                f[2].delta99_over_h,
+            ],
+            u_ref: [10.0, 10.0, 10.0],
+            iterations: f[2].iterations,
+            residual_u: f[2].residual_u,
+        };
+        return check_backstep_reattachment_on(c, key, Some(&rec));
+    }
+    // The three-mesh study of S110.3 is not formed: one miss, by name.
+    ds_key_row(c, key);
+    let stopped: Vec<String> = runs
+        .iter()
+        .filter_map(|r| match &r.outcome {
+            Err(why) => Some(format!("the dx = {}H level stopped - {why}", r.dx_over_h)),
+            Ok(_) => None,
+        })
+        .collect();
+    let mut headline = format!("study not formed: {}", stopped.join("; "));
+    let mut finest: Option<(
+        &validate_gates::backstep::StepRun,
+        &validate_gates::backstep::StepConverged,
+    )> = None;
+    for r in runs {
+        let Ok(f) = &r.outcome else { continue };
+        let finer = match finest {
+            Some((cur, _)) => f64::from(r.dx_over_h) < f64::from(cur.dx_over_h),
+            None => true,
+        };
+        if finer {
+            finest = Some((r, f));
+        }
+    }
+    match finest {
+        Some((r, f)) => {
+            let e = f.x_r_over_h - d;
+            let word = if e.abs() <= u_d { "inside" } else { "outside" };
+            headline.push_str(&format!(
+                "; on the finest level that converged, dx = {}H, x_r/H = {:.3} against 6.26, \
+                 E = {:+.3} ({:+.1}% of D), {} the datum's own +-0.10 at that level, with no u_num",
+                r.dx_over_h,
+                f.x_r_over_h,
+                e,
+                100.0 * e / d,
+                word
+            ));
+        }
+        None => headline.push_str("; no level converged"),
+    }
+    report_110b(
+        c,
+        Verdict::Misses,
+        How::Replayed,
+        headline,
+        Some(Uncertainty::SingleMesh(
+            "the three-mesh study of S110.3 is not formed: a level did not converge",
+        )),
+    );
+    backstep_class_r(c, d, u_d, runs, single);
+    Ok(())
+}
+
+/// Class R (docs/17 section 5.1 rule 4), one row per level: where the f64
+/// build converged, the single build's run lands on the same side of the
+/// datum's +-0.10 as the f64 build's, or its missing record is a miss; a
+/// level whose f64 run already stopped says no more than its note. At most
+/// one class-R verdict per level.
+fn backstep_class_r(
+    c: &mut Checks,
+    d: Scalar,
+    u_d: Scalar,
+    runs: &[validate_gates::backstep::StepRun; 3],
+    single: &[validate_gates::backstep::StepRun; 3],
+) {
+    for i in 0..3 {
+        match (&runs[i].outcome, &single[i].outcome) {
+            (Ok(f), Ok(s)) => c.replaying(|c| {
+                c.require(
+                    &format!(
+                        "Gate 110-B single build at dx = {}H: x_r/H lands on the same side \
+                         of the datum's +-0.10 as the f64 build's (class R)",
+                        single[i].dx_over_h
+                    ),
+                    ((f.x_r_over_h - d).abs() <= u_d) == ((s.x_r_over_h - d).abs() <= u_d),
+                )
+            }),
+            (Ok(_), Err(why)) => report_110b(
+                c,
+                Verdict::Misses,
+                How::Replayed,
+                format!(
+                    "class R: the single build's dx = {}H run left no record - {why}",
+                    single[i].dx_over_h
+                ),
+                Some(Uncertainty::SingleMesh(
+                    "the single build's run of a level the f64 build converged on \
+                     (docs/17 section 5.1 rule 4)",
+                )),
+            ),
+            (Err(_), _) => {}
+        }
+    }
 }
 
 /// Gate 110-C: load the McCaffrey key and the record slot, then hand the
@@ -23993,23 +24160,48 @@ buoyancy_constant 0.935
         assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
     }
 
-    /// (g) THIS TREE's own truth for 110-B: the tracked transcription loads
-    /// and its key rows run, and no record exists - so it registers exactly
-    /// one open, live verdict, BY NAME, and nothing a key alone could close
-    /// has closed. (110-A has its records since docs/17 VAL-51: test (g2);
-    /// 110-C since docs/17 VAL-53: test (g3).)
+    /// (g) Gate 110-B on this tree (docs/17 VAL-52): its three f64 levels
+    /// and the three single builds are recorded - the coarse f64 run
+    /// converged, and the other five left exactly the records the driver
+    /// printed (§110.1: a run that diverged is a finding). So the study is
+    /// not formed and the gate MISSES, twice, both REPLAYED, BY NAME: the
+    /// not-formed study, with the one converged level's x_r against the
+    /// datum in the headline, and the single build's missing coarse run.
+    /// (110-A has its records since docs/17 VAL-51: test (g2); 110-C since
+    /// docs/17 VAL-53: test (g3).)
     #[test]
-    fn the_three_sections_report_not_closed_by_name_on_this_tree() {
+    fn gate_110b_replays_its_recorded_runs() {
+        let placed = key::load_text(DS_KEY.0).is_ok();
         let mut c = Checks::new();
         check_backstep_reattachment(&mut c).expect("110-B runs");
-        assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
-        assert_eq!(c.gates.len(), 1, "one report");
+        if !placed {
+            assert_eq!(c.gates.len(), 1, "one report");
+            assert_eq!(c.gates[0].verdict, Verdict::Open);
+            assert_eq!(c.gates[0].how, How::Live);
+            assert!(c.gates[0].headline.starts_with("answer key missing"), "{}", c.gates[0].headline);
+            return;
+        }
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        assert_eq!(c.gates.len(), 2, "study not formed, then class R");
+        for g in &c.gates {
+            assert_eq!(
+                g.gate,
+                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+            );
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let got: Vec<(Verdict, &str)> =
+            c.gates.iter().map(|g| (g.verdict, g.headline.split(':').next().unwrap_or(""))).collect();
         assert_eq!(
-            c.gates[0].gate,
-            "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+            got,
+            [(Verdict::Misses, "study not formed"), (Verdict::Misses, "class R")],
+            "SPEC-LIT 110.5's results rows"
         );
-        assert_eq!(c.gates[0].verdict, Verdict::Open, "{}", c.gates[0].headline);
-        assert_eq!(c.gates[0].how, How::Live, "{}", c.gates[0].headline);
+        let h = &c.gates[0].headline;
+        assert!(h.contains("x_r/H = 5.637"), "{h}");
+        assert!(h.contains("-9.9% of D"), "{h}");
+        assert!(h.contains("outside"), "{h}");
+        assert_eq!(c.replayed, 0, "no require row ran: the only converged level's single build left no record");
     }
 
     /// (g2) Gate 110-A on this tree (docs/17 VAL-51): its three legs are
@@ -24094,6 +24286,56 @@ buoyancy_constant 0.935
         assert_eq!(c.gates.len(), 1, "exactly one report");
         assert_eq!(c.gates[0].verdict, Verdict::Misses);
         assert!(matches!(c.gates[0].uncertainty, Some(Uncertainty::Study(_))));
+    }
+
+    /// A converged step level with the recipe's mesh and the given
+    /// reattachment, for the synthetic replays below.
+    const fn ok_level(
+        nx: usize,
+        ny: usize,
+        n_cells: usize,
+        dx: Scalar,
+        x_r: Scalar,
+    ) -> validate_gates::backstep::StepRun {
+        validate_gates::backstep::StepRun {
+            nx,
+            ny,
+            n_cells,
+            dx_over_h: dx,
+            outcome: Ok(validate_gates::backstep::StepConverged {
+                x_r_over_h: x_r,
+                delta99_over_h: 1.5,
+                u_e: 10.5,
+                iterations: 6000,
+                residual_u: 1e-8,
+            }),
+        }
+    }
+
+    /// The replay's study path (docs/17 VAL-52): three converged f64 levels
+    /// whose reattachments approach 6.26 from above, and the same three
+    /// records on the single build. The three class-R rows pass in replay,
+    /// the study forms, the finest level's x_r/H lands inside the datum's
+    /// own +-0.10 - and the gate reports nothing: a pass is not a report
+    /// (SPEC-LIT 69).
+    #[test]
+    fn three_converged_step_levels_take_the_study_path() {
+        static RUNS_OK: [validate_gates::backstep::StepRun; 3] = [
+            ok_level(700, 90, 57500, 0.2, 6.40),
+            ok_level(1400, 180, 230000, 0.1, 6.30),
+            ok_level(2800, 360, 920000, 0.05, 6.27),
+        ];
+        static SINGLE_OK: [validate_gates::backstep::StepRun; 3] = [
+            ok_level(700, 90, 57500, 0.2, 6.40),
+            ok_level(1400, 180, 230000, 0.1, 6.30),
+            ok_level(2800, 360, 920000, 0.05, 6.27),
+        ];
+        let mut c = Checks::new();
+        check_backstep_runs_on(&mut c, Some((6.26, 0.10)), &RUNS_OK, &SINGLE_OK)
+            .expect("the replay runs");
+        assert_eq!(c.failures, 0, "the key row, the class-R rows and the inside row all pass");
+        assert!(c.gates.is_empty(), "inside the band, nothing to report");
+        assert!(c.replayed >= 3, "the three class-R rows: {}", c.replayed);
     }
 
     /// (g3) Gate 110-C on this tree (docs/17 VAL-53): its three levels and

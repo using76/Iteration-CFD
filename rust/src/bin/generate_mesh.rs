@@ -76,6 +76,8 @@
 //! absent. `rough` requires `-Ks`; `-Cs` defaults to `0.5`. Carved STL wall
 //! patches follow the same preset as the block's own walls.
 //!
+//! `-inflow uniform` - step only, SPEC-LIT 110.3: the free stream U_ref uniform.
+//!
 //! Carried across from this project's own earlier C++ case generator. Every
 //! geometric
 //! decision the C++ `main` made — extents, grading, patch names and types,
@@ -109,7 +111,7 @@ fn usage_text() -> String {
     format!(
         "usage: ofgpu-generate-mesh <channel|cavity|step|big|plume|room|damBreak|plate> <outputDir> \
          [nx ny nz] [-stl [name=]path]... [-cutcell [-s N] [-thetaMin X]]\n       \
-         [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... \
+         [-extent xlo xhi ylo yhi zlo zhi] [-grading x|y|z=r]... [-inflow uniform] \
          [-wallModel standard|spalding|rough|lowRe [-Ks x [-Cs y]]] [-cyclic x|y|z] \
          [-permissive]\n       \
          ofgpu-generate-mesh big <outputDir> [n | nx ny nz] [-stl ...]   # one n: an n^3 cube; three: per axis, e.g. big dir 128 52 41\n       \
@@ -335,6 +337,12 @@ fn run(args: &[String]) -> Result<()> {
     let mut extent: Option<[ofgpu::Scalar; 6]> = None;
     let mut grading: [Option<ofgpu::Scalar>; 3] = [None; 3];
     let mut grading_seen = [false; 3];
+    // SPEC-LIT 110.3: `-inflow uniform` replaces the step preset's own 1/7
+    // power-law inflow with the free stream `U_ref` (10 m/s), inlet and
+    // interior. Whether the preset can be given one at all is
+    // `BlockOverride::apply`'s refusal - so the library refuses exactly what
+    // the CLI would.
+    let mut inflow_uniform = false;
     let mut plate = PlateFlags::default();
     let mut i = 1usize;
     while i < args.len() {
@@ -435,6 +443,22 @@ fn run(args: &[String]) -> Result<()> {
                 grading_seen[axis] = true;
                 grading[axis] = Some(ratio);
             }
+            "-inflow" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    usage();
+                    return Err(Error::Config(
+                        "-inflow needs a profile word - the only one is uniform".to_string(),
+                    ));
+                };
+                if v != "uniform" {
+                    return Err(Error::Config(format!(
+                        "-inflow: '{v}' is not a supported inflow profile - the only one is \
+                         uniform"
+                    )));
+                }
+                inflow_uniform = true;
+            }
             _ => positional.push(&args[i]),
         }
         i += 1;
@@ -464,6 +488,10 @@ fn run(args: &[String]) -> Result<()> {
             (extent.is_some(), "-extent"),
             (grading_seen.iter().any(|&g| g), "-grading"),
             (!cyclic.is_empty(), "-cyclic"),
+            // The plate never reaches `BlockOverride::apply` (it is its own
+            // spec, refused before one could run), so `-inflow` is named here
+            // like the other non-plate flags.
+            (inflow_uniform, "-inflow"),
         ];
         if let Some((_, flag)) = refused.iter().find(|(given, _)| *given) {
             return Err(Error::Config(format!(
@@ -511,7 +539,7 @@ fn run(args: &[String]) -> Result<()> {
         .transpose()?
         .flatten();
 
-    let over = BlockOverride { extent, grading };
+    let over = BlockOverride { extent, grading, uniform_inflow: inflow_uniform };
 
     if stl_args.is_empty() {
         return write_case_with_override(
@@ -741,5 +769,25 @@ mod tests {
     fn a_zero_resolution_component_is_still_refused() {
         let e = resolve_dims(CaseKind::Big, &["0", "5", "5"]).unwrap_err().to_string();
         assert!(e.contains("bad resolution component 0"), "{e}");
+    }
+
+    /// SPEC-LIT 110.3: `-inflow` needs its one profile word, only `uniform`
+    /// exists, and the plate - whose own spec never reaches
+    /// `BlockOverride::apply` - refuses it by name like its other flags.
+    #[test]
+    fn inflow_takes_exactly_the_word_uniform_and_is_refused_on_the_plate() {
+        let e = run(&args(&["prog", "step", "unused_dir", "-inflow"])).unwrap_err();
+        assert!(e.to_string().contains("-inflow"), "no word must name -inflow: {e}");
+        let e = run(&args(&["prog", "step", "unused_dir", "-inflow", "powerLaw"])).unwrap_err();
+        assert!(
+            e.to_string().contains("-inflow"),
+            "'powerLaw' must be refused naming -inflow: {e}"
+        );
+        let e = run(&args(&["prog", "plate", "unused_dir", "-inflow", "uniform"])).unwrap_err();
+        assert!(
+            e.to_string().contains("plate takes no -inflow"),
+            "the plate must refuse -inflow by name: {e}"
+        );
+        assert!(usage_text().contains("[-inflow uniform]"), "the usage documents the flag");
     }
 }

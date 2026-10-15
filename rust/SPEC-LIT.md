@@ -33652,8 +33652,7 @@ Government data, and their files are the fenced blocks of §110.3 and §110.4 by
 byte, written by the same script's `write` and checked by its `--check`. So a clean
 clone reports Gate 110-A not closed with three `answer key <id> missing` lines, and
 Gates 110-B and 110-C load their keys, print the digest lines and run the keys' own
-rows; 110-B then reports that no driver run is recorded, and 110-C replays its record
-(docs/17 VAL-53, §110.5). With no key file present at
+rows; then each replays its record (docs/17 VAL-52 and VAL-53, §110.5). With no key file present at
 all, the three gates print five `answer key <id> missing` lines between them. That is
 the designed behaviour, not a failure; §110.5's *Placing a key* says what a user who
 wants the channel gate closed runs.
@@ -33800,6 +33799,18 @@ Re_H = U_ref H / nu = 36 000 ; M = 0.128 in the experiment, incompressible here
 study level = the streamwise spacing dx: 0.2H, 0.1H, 0.05H, with dy = dx/2,
           value = x_r/H
 ```
+
+**The inflow, and how delta_99 is read (docs/17 VAL-52).** The run's inflow is the free
+stream: `ofgpu-generate-mesh step ... -inflow uniform` sets `U = (U_ref, 0, 0)`,
+`U_ref = 10`, on the inlet and through the initial interior, so `Re_H = 36 000` holds at the
+inlet as stated. Without the flag the step preset keeps its own profile byte for byte, which
+on this recipe's inlet (`y` in [1H, 9H]) is the clamped power law of §110.5's pricing note,
+not the free stream; the flag is refused for every other preset. `delta_99` is read from the
+column through `(x, z) = (-4H, 0.5H)`: `U_e` is the column's largest `u_x`, and `delta_99` is
+the height above the upstream floor `y = 1H` at which `u_x` first reaches `0.99 U_e`,
+linearly interpolated between the two cell centres that bracket it. In this 8H channel both
+walls grow a layer and the core between them is nearly flat, so the column's largest `u_x`
+is the core speed.
 
 **Prediction, stated in advance.** The TMR's SSTm reattaches near `x/H = 6.50`; this
 crate's `kOmegaSST` is expected near there too, which is OUTSIDE the datum's ±0.10 on
@@ -33966,12 +33977,16 @@ lower index deterministically, the recipe never asks it to.
 
 **The step.** From `cases/`: `backstep.cmd backstep_c 700 90`, `backstep_m 1400 180`,
 `backstep_f 2800 360` — dx = 0.2H / 0.1H / 0.05H, dy = dx/2, the study's three levels.
-The recipe generates the castellated mesh from `backstep.stl`, swaps `kEpsilon` for
+The recipe generates the castellated mesh from `backstep.stl` with the free-stream inflow
+(`-inflow uniform`, §110.3), swaps `kEpsilon` for
 `kOmegaSST` and the `Re_H = 36 000` viscosity (the recipe, not the code, is where that
 is decided), runs `ofgpu-lowmach` 6 000 iterations, and prints the two measurements the
 record needs: the reattachment search (`ofgpu-sample wall <case> 6000 lowerWall x`) and
-the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5 -at 0.5,1,1.5,2,2.5,3,4,5`),
-whose delta_99 is the input difference §110.3 reports beside the band.
+the inflow column (`ofgpu-sample column <case> 6000 y -4 0.5`, every cell of it),
+whose delta_99 is the input difference §110.3 reports beside the band. Until docs/17 VAL-52
+the column line also carried `-at 0.5,1,1.5,2,2.5,3,4,5`; the sampler refuses it, because
+at `x = -4H` the column starts at the first cell centre above the floor `y = 1H` ("station
+0.5 is outside the column's range [1.05, 8.95]" on the coarse mesh).
 
 **The plume.** `cases/plumeMcCaffrey.jsonc` at `ofgpu-lowmach`, 4 000 iterations,
 `-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
@@ -34049,6 +34064,8 @@ which is 10 × (1e-9)^(1/7), and not 10 m/s. With the recipe's ν = 2.7778e-4 th
 Re_H ≈ 1.86e3, not 36 000. Both are recorded here as found and are not changed: this
 pricing edits no recipe. The step's prices above are for the recipe as it stands, and
 docs/17 VAL-52 settles its inflow and its divergence before any run of it is recorded.
+VAL-52 settled the inflow as an input (§110.3, `-inflow uniform`) and re-priced the step on it;
+the divergence remains, and its record is below.
 
 **Results.** Every cell below is filled by the run that produced it; until then none
 has been made, and no verdict in this table is a claim.
@@ -34058,7 +34075,7 @@ has been made, and no verdict in this table is a claim.
 | Gate 110-A Re_tau 178.12 | MKM99 `chan180`: U_b+ = 15.6787 (trapezoid over the key's 65 rows) | U_b+ = 16.7138 at N_y 128, E = +6.60 % of D; B2 = 1.3555 wall units (at y+ 130.6); B3 = 1.171e-2 | 15.2919 / 16.2777 / 16.7138, monotone, p = 1.177, u_num = 0.4325 (2.76 % of D), u_input = 2.8e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; class R MISSES (the single-build run diverged) |
 | Gate 110-A Re_tau 392.24 | MKM99 `chan395`: U_b+ = 17.5448 (129 rows) | U_b+ = 18.5775 at N_y 128, E = +5.89 % of D; B2 = 1.2729 (at y+ 162.5); B3 = 6.34e-3 | 16.9912 / 18.0618 / 18.5775, monotone, p = 1.054, u_num = 0.5989 (3.41 % of D), u_input = 9.4e-7 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
-| Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-B reattachment | Driver & Seegmiller (1985) through the TMR: x_r/H = 6.26 +- 0.10 | x_r/H = 5.637 at dx 0.2H, the one level that converged, E = -0.623 (-9.9 % of D); delta_99/H at x = -4H = 1.674 (U_e 10.554 m/s) against approximately 1.5 | not formed: dx 0.1H stopped at step 1232 (M 3.615, cell 56) and dx 0.05H at step 30 (M 1.920, cell 917604), both on the Mach guard of §93.6 | MISSES (the study is not formed; the one converged level lies outside the band); class R MISSES (the single build stops at step 0 on all three levels) |
 | Gate 110-C plume centreline | McCaffrey Table 1, plume region, at the declared Q = 57.5 kW: dT_c(2.00 m) = 101.356 K, w_c(2.00 m) = 3.4311 m/s | dT_c(2.00 m) = 265.214 K, w_c = 5.9370 m/s at 0.025 m; P1 worst +212.6 % (z = 1.25 m), P2 worst +76.1 % (z = 1.75 m); P3 slope -2.130; P4 chi_c = 0.224 | 231.556 / 224.483 / 265.214 K, oscillatory diverging, p n/a, u_num = 144.1 K (142 % of D), u_input = 0 (Q declared) | P1 OPEN (outside); P2 OPEN (undecided at u_val/D = 1.422); P3 OPEN (outside -5/3 +- 0.25); class R holds |
 
 **The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
@@ -34111,6 +34128,68 @@ inside it". Since VAL-51 `band_of` is inside when `|E| + u_val <= band` and outs
 `|E| - u_val > band`, as §144.3's `band_110` already was. Under the old rule `Re_tau = 587.19`'s B1
 would have passed at 4.51 %; under the rule as written it is undecided. Gates 110-B and 110-C have
 no record yet, so nothing they print changed.
+
+**The record of Gate 110-B (docs/17 VAL-52).** The runs are §110.5's step recipe with the
+free-stream inflow of §110.3 and nothing else changed: `ofgpu-generate-mesh step <copy> <nx>
+<ny> 1 -stl step=backstep.stl -extent -110 30 0 9 0 1 -grading x=1 -grading y=1 -wallModel
+spalding -inflow uniform` at 700 × 90, 1400 × 180 and 2800 × 360, the recipe's two edits
+(`nu` 2.7778e-4, `kOmegaSST`), `ofgpu-lowmach -iters 6000 -check 500` in the f64 release build
+at `77f8626` with this unit's flag, and the two samplers of §110.5. The single build ran the
+three levels the same way. The records are constants in `src/bin/validate_gates/backstep.rs`,
+printed from the runs' own outputs by its ignored test `record_backstep`, and the gate replays
+them.
+
+The price on the fixed inflow. Before recording, each level ran 200 iterations by VAL-50's
+method (time-stamped lines, the rate between `iter 0` and the last `iter` line, the larger of
+the mean and the last window of about 50 iterations). The probes ran on a `0/U` set to
+`uniform (10 0 0)`, the same file the flag writes (equal up to line endings). The coarse level
+costs 110 ms per iteration mean and 125 ms in the last window, the medium level 184 and 105 ms,
+and the fine level 2,393 ms over iterations 0-20 before it stopped at step 30. The projection
+is 12.5 min, 18.4 min and 3.99 h, 4.5 h for the step set, within VAL-50's 4.8 h. The recorded
+runs cost far less, because the coarse level converged early and the two finer ones stopped.
+
+| level | cells | outcome | x_r/H | delta_99/H at x = -4H |
+|---|---|---|---|---|
+| dx 0.2H | 57,500 | 6 000 iterations; `|U| res` 2.6e-8 by iteration 1 000 and 1.7e-8 at the end; M max 0.030902 from iteration 500 on | 5.637 | 1.674 (U_e 10.554 m/s) |
+| dx 0.1H | 230,000 | stopped at step 1232 on the Mach guard of §93.6: M = 3.615 at cell 56 | - | - |
+| dx 0.05H | 920,000 | stopped at step 30 on the Mach guard: M = 1.920 at cell 917604 | - | - |
+| dx 0.2H, single | 57,500 | stopped at step 0 on the Mach guard: M = 1.03e7 at cell 57149 | - | - |
+| dx 0.1H, single | 230,000 | stopped at outer iteration 0: a field went non-finite | - | - |
+| dx 0.05H, single | 920,000 | stopped at step 0 on the Mach guard: M = 2.89e8 at cell 919549 | - | - |
+
+The coarse level's lower wall changes sign twice: the corner eddy's `pos->neg` at
+`x = 0.744H` and the reattachment's `neg->pos` at `x = 5.637H`, which is the one the gate
+takes. Its inflow column has `delta_99 = 1.674H` against the datum's approximately 1.5H, an
+input difference of +0.17H (+11.6 %), reported beside the band and never folded into it.
+The core of the 8H channel runs at `U_e` = 10.554 m/s, above the 10 m/s inflow, because
+both walls' layers displace it.
+
+How the finer levels stop. Both stop from a quiet state in one step. Neither grows
+gradually. The fluid cells keep the block's order, so cell 56 of the medium mesh is on the
+bottom row of the downstream channel at `x` ≈ 5.65H, `y` = 0.025H, where the coarse level
+reattaches. A `-check 1` re-run shows `|U| res` between 2.6e-3 and 7.8e-3 and M max 0.0308 over
+steps 1150-1231, and then M = 3.615 at step 1232. Cell 917604 of the fine mesh is in the top
+row under the upper wall at `x` ≈ -89.8H, and step 29's M max is 0.0443. Each re-run stops at
+the same step with the same numbers, so both are deterministic. On VAL-50's old inflow the two
+levels stopped at steps 24 and 152. The inflow changed where they stop, not whether.
+
+What the record says. **Gate 110-B MISSES**, because the three-mesh study of §110.3 is not
+formed (§110.1: a run that diverged is a finding). On the one level that converged, dx = 0.2H,
+`x_r/H` = 5.637 against 6.26: E = -0.623 (-9.9 % of D), outside the datum's ±0.10 at that level,
+with no `u_num` from a single level. It lies on the LOW side, while §110.3 predicted the high
+side near the SSTm's 6.50. One coarse level does not establish where this model reattaches, and
+the record says only what it measured. **Class R MISSES**: the single build stops at step 0 on
+all three levels. That is not this recipe's alone. Under the single build the plain `step`
+preset at 700 × 90 with no flag at all also stops at step 0 (M non-finite), and the `channel`
+preset stops at step 19, while the `step` preset at 70 × 20 and the `cavity` preset run their
+20 iterations. This record notes that and does not diagnose it.
+
+No input other than the inflow, and no numerics, was changed to make a run converge. The
+candidate cures change the numerics or the model: under-relaxation, the wall treatment, or
+starting a level from the coarser level's solution, for which the tree has no field mapper.
+None was tried (docs/17 review-later). The card time was about 15 minutes in all: the probes,
+the six recorded runs, the medium re-run and the `-check 1` trace, beside another project's job
+that held the card at about 90 %.
 
 **The record of Gate 110-C (docs/17 VAL-53).** The three runs are §110.5's plume recipe as it
 stands, with nothing edited but `cells`: `cases/plumeMcCaffrey.jsonc` (kEpsilon, the hot-gas inlet

@@ -44,3 +44,8 @@ pub(crate) mod channel_dns;
 /// SPEC-LIT §110.4/§110.5, Gate 110-C: the hot-gas plume's recorded runs at
 /// three levels (data replayed by `validate.rs`'s plume gate).
 pub(crate) mod plume;
+
+/// SPEC-LIT §110.3/§110.5, Gate 110-B: the backward-facing step's recorded
+/// runs at three `dx/H` levels and three single builds (data replayed by
+/// `validate.rs`'s step gate).
+pub(crate) mod backstep;
