@@ -41,6 +41,10 @@
 | A21 | (기존, CMP-14/CHR-10a가 발견) | single 빌드가 `cases/channelThermalWF.jsonc`에서 11스텝째 발산 (Mach 거부, 셀 3199에서 M 1.8e9) | f64는 정상. f32 SIMPLE floor 계열(A4)로 보인다. CHR-10a의 해시 고정은 channelPeriodicFluxWF를 쓴다 | `5a79bf0` |
 | A22 | AUT-04 | quick set 날개 12개 중 4개가 RM-TE 뒤에도 F3를 통과하지 못한다 (게이트 목표 6/12는 8/12로 통과) | A-1-024: F3e, capture 0.357. A-1-049: bump 없음, F3e만, capture 0.284, NO-REMEDY. 둘 다 뭉툭한 뒷전 밑면이 0.46-0.66 h_f로, 한 셀보다 가까운 두 feature 사슬을 (92.62)가 예산 안의 어떤 level에서도 함께 잡지 못한다. A-1-098/099(6 % 날개): RM-TE로 max/h_f 0.21-0.23이지만 pin이 5.4-6.5 % (F3a, F3b). automesher snap 쪽 항목이며 수치 변경은 만들지 않았다 | `9a6862b` |
 | A23 | AUT-07 | R-ECON 뒤에도 G-COST 미달 | quick set 중앙값 B0-template의 6.18배 (기준 1.5배). layer 셀과 R-WIN/R-CURV 벽 level이 남는다. AUT-06이 이미 layer 8개로는 1.5배가 불가능함을 보였다. D-8은 사용자 결정으로 남는다 | `9e5d05e` |
+| A24 | F32-13 | single, section 1-25 미달 18행 (모두 SPEC-LIT 118.14 표에 기록, 허용오차 그대로) | section 6: 밀폐 상자 'cuFFT == iterative' (R)가 NaN으로 ok→FAIL (A18과 같은 원인, NaN을 버리던 `max_abs_diff`를 고쳐서 드러남). section 9 부력: 밀폐 상자 균일 T의 flux 2.03e-4, 정지 2.19e-4 (R, 기준 1e-5), 'T == T_ref면 체적력 0' 5.20e-9 (D, 기준 0): `buoyancy_flux`가 상수를 w T + (1−w) T로 보간하는데 f32에서는 T가 아니다. section 10: G_b 1.07e-5 (R). section 11 VOF: 정적 물방울 `vof.step`이 single에서 발산 (alpha Courant 1.7e18), P행 3개 NaN FAIL (이전에는 실행 전체가 여기서 중단). section 17: 벽 drag 1.46e-5 두 행 (R, Scalar로 200면 합산). section 23 Kays-Crawford: Pe_t→∞ 596 대 0.2 등 4행 (Scalar 계산의 상쇄). section 24: kEpsilon 균질 전단 고정점 9.7e-3, P/eps 1.93e-2 (P, 기준 5e-3; f64는 5.5e-4, 1.1e-3). 해결책은 모두 f64 누적·평가 같은 수치 변경이다 | SPEC-LIT 118.14, `1a8b9ba` |
+| A25 | F32-14 | single, section 26-65: 실행한 34개 section에서 473행 중 416행 통과 | 미실행(600 s 두 번 초과): 29 (공액 계면, 상한 시점에 33행 중 19행 실패, 루프 미수렴), 44 (95-G, 모든 외부 루프가 2000 pass), 52 (100-C, 4000회에도 미수렴), 57 (94-D), 61 (CMP-B). Gate 105-B MISSED (피스톤 균일 상태 1.58e-2~6.01e-2, 역방향 차수 0.737 부족), Gate 95-D MISSED (외부 루프 수렴 D행 3개; 응력은 0.01에서 통과), Gate 95-A single 3/21 (어떤 메시에서도 block-coupled 루프 미수렴). 100-A: 60 pass에 1e-13 상대 변화에 못 닿는다 (마지막 3.1e-7). 100-D: T가 5.2e5 K로 발산. Scalar로 계산하는 닫힌 식·장부 행 다수 (§31, 32, 33/34, 38, 39, 40, 26, 27, 30, 48, 49, 50; 표는 SPEC-LIT 118.14). 95-E, 105-A, 110-C(16/16)는 f64 띠에서 통과 | SPEC-LIT 118.14, `8d2ba83` |
+| A26 | STU-19 | gui_control 모든 type이 4 s 안에 답한다는 게이트 미달 2건 | open_result: 14 walk 중 4개가 3.55-4.83 s. headless Chromium SwiftShader에서 viewer의 첫 엔진 초기화(WebGPURenderer.init의 WebGL2 fallback, PMREM, 첫 shader compile)가 답에 포함되고 4 CPU를 3 레인이 나눠 쓴다. Cartesian open_result_in_view: 3 walk 4.05-4.87 s, 2 walk 5 s hub TIMEOUT: walk의 start_run이 fixture를 다시 써서 서버가 dataset을 다시 읽는다. 실행 중인 결과를 열면 gui_control이 time out될 수 있다는 실제 지연이다. viewer 동작을 바꾸는 해결책은 만들지 않았다 | `cf5aac6` |
+| A27 | AUT-12 | tuning 투영 NO-GO: G-FAIL 71/420 > 23 (180 test body에서 30.4개 예상, 한계 10), G-COST 셀 중앙값 52,632 대 9,008 = 5.84배 (기준 1.5배) | G-FAIL 실패: A 날개 39 (대부분 F3d/F3e의 EXHAUSTED, NO-REMEDY), F 15 (RM-TE가 13개에서 이득 없음), G 15, D 1, E 1. G-FAIL의 나머지 세 조건과 G-BLC-0/1, G-QUAL은 통과. G-COST는 L5의 82.5배에서 R-ECON으로 내려왔지만 layer 8개와 R-WIN 벽 level이 남는다. D-8(1.5배 유지 여부)이 사용자 결정으로 남는 한 GO가 나올 수 없다 | `tools/autonomy/projection/AUT12.md`, `10ad60a` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -61,6 +65,10 @@
 | B13 | single 빌드의 드라이버 비교 (AMG-05, AMX-02) | single에서는 라이브러리와 통합 테스트만 돌았다. `ofgpu-buoyant -backend gamg/amgx` 20회 비교는 f64에서만 했다 ('amgx single' bin 빌드 약 20분) | B1과 함께 |
 | B14 | STU-18 | GLM 주간 할당량이 2026-10-16까지 막혀 건너뛰었다 (live GLM-5.3-Flash studio 호출 필요) | 할당량이 돌아오면 G 레인에 다시 넣는다 |
 | B15 | AUT-04, AUT-07 효과의 family별 측정 | RM-TE는 bump가 있는 모든 sharp body에서 F3 remedy 중 먼저 걸린다 (가상 F3c에서 sharp 276행 중 169행). R-ECON quick set에는 sharp body가 없어 A, D, F family와 K = 4 remedy 캠페인 효과를 재지 않았다 | AUT-12의 L-run에서 family별 실패, BLC_8, F3를 L5 규칙과 비교 |
+| B16 | AUT-13, AUT-14, AUT-16 | AUT-12 NO-GO라서 seed 3을 쓰지 않았다 (D-9 권고). AUT-13의 `--write-fresh N`/`--check-fresh N`/`--manifest testN`은 임시 디렉터리에서만 시험했다. AUT-14(봉인 평가)와 AUT-16(G-YPLUS)은 실행하지 않았다 | GO가 나오거나 사용자가 명시적으로 쓰기로 할 때: `split.py --write-fresh 3 --go <GO 투영 JSON>` 또는 `--user-spend` |
+| B17 | AUT-12 | AUT-09의 refinement round (`optimise.py --refine`, 약 1.5 h, 26 body)를 돌리지 않았다. AUT-09의 사전 등록 hurdle CV가 실패했으므로(BLC_8 RMSE 0.152787 > 0.15) round를 돌려도 optimiser를 켤 수 없고, AUT-12 행으로 다시 CV하면 사전 등록되지 않은 실행이 된다 | 사용자가 R-ECON 행으로 새 사전 등록 surrogate 실행을 원하면 |
+| B18 | F32-14 | Gate 105-C를 양쪽 빌드에서 실행하지 않았다. `cases/turekHron/mesh*`가 이 트리에서 생성되지 않았다 | `python tools/mesh/examples/turek_hron.py --level 1..4` 뒤 실행 |
+| B19 | F32-13/14 | 나눠 돌리지 않은 `ofgpu-validate` 전체 실행 (section 1-65, 양쪽 빌드). 각 단위는 600 s 상한의 `-sections` 묶음으로 쟀다 | F32-18 |
 
 ## C. 모델·설계 선택 (권고대로 진행, 검토 대기)
 
@@ -117,6 +125,10 @@
 - F32-19: studio의 single 빌드 실행은 F32-18 전까지 preview다 (`SINGLE_PRECISION_PREVIEW = true`, `gui/shared/src/protocol.ts`). F32-18이 들어오면 한 줄을 false로 바꾸고 dispatch.test의 header 기대값 두 개에서 접미사를 지운다. G 트리 `rust/target/single/release`의 single exe 21개는 오래됐을 수 있다 (단위 검증은 `--lib`만 빌드).
 - STU-15: tet 100 000개 넘게 지나거나 부피 0인 tet(중심에 대해 star-shaped가 아닌 셀)을 만나면 그 유선은 'lost'로 끝난다. 볼록하지 않은 영역에서 나갔다 들어오는 선은 첫 출구에서 끝난다.
 - gui registry: `MESH_KINDS`에 VAL-30의 `plate`가 없어 studio에서 평판 preset을 고를 수 없다 (플래그는 오케스트레이터가 `b17d194`에서 맞췄다).
+- F32-14: gate verdict 줄(SPEC-LIT 99 보고)은 single에서도 f64 조건을 그대로 쓴다. 98-B, 98-C, 100-A, 100-B는 R행이 tol32로 통과해도 MISSES를 찍을 수 있다. `precision::roundoff_tol(tol64)`을 쓰면 single 빌드만 바뀐다 (F32-18 몫).
+- F32-13/14: lane M의 W4 VAL 단위가 F32-13/14 이전 트리에서 새로 넣은 행은 plain `c.check`라서 'N rows carry no class yet'으로 나온다. 행마다 class를 붙이고 새 section 함수는 `c.ran`으로 감싸야 한다 (SPEC-LIT 118.14 규칙, F32-18 전에 0이어야 함). 함수 안의 `worst = worst.max(..)` 접기는 아직 NaN을 버린다.
+- AMG-06b: JSONC의 `JsonGamg`(deny_unknown_fields)에 `precision`이 없어서 JSONC `gamg.precision`이 unknown field로 거부된다 (S 레인 case_json.rs/schema 몫).
+- AMG-06b: f32 GAMG 사본은 V-cycle만 돈다 (`set_cycle(K)`는 이름으로 거부). `DistGamg`에는 f32 사본이 없다.
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
