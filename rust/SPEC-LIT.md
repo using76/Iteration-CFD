@@ -36173,6 +36173,31 @@ feature. It is DESIGN (`H / 64` is §74.2's six-level octree cap):
 h_min = size.min_size  if given,  else  H / 64                                             (116.12)
 ```
 
+**Threads, as TET-15 builds them** (`tetmesh/sizefield.rs`). No equation changes and no crate is
+added: the workers are `std::thread::scope` threads, and a worker count changes the cost of the
+build, never its result. `OctreeOptions.threads` sets the count, `0` meaning every core
+`available_parallelism` reports (the default, and what `ofgpu-automesher` uses).
+
+- `par_map(n, threads, f)` is the one parallel primitive. The workers take the next index from
+  one atomic counter, and each result is stored under its own index, so the output is
+  `f(0), .., f(n-1)` in index order whatever the schedule. Every `f` it runs reads only shared,
+  read-only state.
+- The octree build expands the tree on the calling thread down to depth 2 (at most 64
+  subtrees) and hands the queued subtrees to `par_map`. Each node is built by the same code
+  from the same inputs as on one worker, so the tree is the same. The workers keep their own
+  stats, which are merged after the join: leaf counts and the candidate total add, the depth
+  and the largest candidate count take the maximum. The candidate total is an integer held in
+  an `f64`, exact below `2^53`, so the order of its sum does not matter, and the mean is the
+  same bit for bit.
+- The per-triangle passes run through `par_map`: the gap of (116.10a), one first-hit query of
+  the gap BVH per triangle and direction, and the curvature star of (116.9c). The sources are
+  then made from those values in triangle order on the calling thread, so the list of sources
+  is unchanged. `surface_sources_threads` takes the count; `surface_sources` passes `0`.
+
+TET-15's gate `perf::thread_invariant` (`rust/tests/tetmesh_perf.rs`, so it runs in both
+builds) checks this on 1, 4 and 8 workers. The checks are the sources, the stats, `h` at 20 000
+SplitMix64 probes bit for bit and every 97th probe's leaf box (§116.18 has the numbers).
+
 ### 116.9 Surface preparation
 
 **Implemented by TET-05** (`tetmesh/surfprep.rs`).
@@ -36513,6 +36538,20 @@ The bit-for-bit results on the axis-aligned fixtures follow from the arithmetic:
 `(a + b) * 0.5` of two equal coordinates is that coordinate, (116.14j) returns `y_i + t e_i`
 with `e_i = 0` on an axis where the segment's ends agree, and (116.14d) returns
 `a + v (b - a) + w (c - a)`, whose coordinate normal to an axis-aligned triangle is `a`'s.
+
+**Threads, as TET-15 builds them** (`tetmesh/remesh.rs`). `RemeshOptions.threads` sets the
+worker count, `0` meaning every core. The two vertex passes run on `par_map` (§116.8):
+
+- The tangential relaxation (116.14) is a Jacobi pass, so each vertex's new position reads
+  only the old positions.
+- The projection (116.14d)/(116.14j) moves each vertex alone against the read-only
+  `Projector` or its polyline.
+
+The splits, collapses and flips change the topology in sweep order, so they stay on the
+calling thread. The output is therefore the same for every worker count, point for point and
+bit for bit. `perf::thread_invariant` remeshes the 9024-triangle sphere at its size field and
+the six-patch cube (12 polylines, 8 corners) on 1, 4 and 8 workers, and compares the points as
+bits, the triangles, the patches, the feature tables and the stats.
 
 ### 116.11 Conforming boundary recovery
 
@@ -37555,6 +37594,10 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13a | the concave limit (116.24b) inside an open 16-sided pipe of radius 1 | all 48 points at `0.5 rho_c` = 0.331195617048069, `w / (3 phi)` with `w = 2 sin(pi/16)` and `phi = pi/8`, within 1e-12 relative, `n*` radial within 1e-12; outside the same pipe `T` is kept, with no gap and no `rho_c` | the TET-13a commit |
 | TET-13a | (116.22a) against a direct optimisation (the supervisor, outside the tree) | 300 random sets of 2 to 8 unit normals in a cap: Nelder-Mead from 20 starts never beat the candidate optimum by more than 3.3e-16 | the TET-13a commit |
 | TET-13a | the f32 arm | `rust/tests/tetmesh_inflate.rs` (the 7 shared tests) under `--features single`: all pass with the same printed numbers | the TET-13a commit |
+| TET-15 | `perf::thread_invariant`: the size field of the 9024-triangle sphere (18 048 curvature and proximity sources plus a band, a point and a box; 27 074 primitives, 164 431 leaves, depth 8), and the remesh of that sphere (3 417 points) and of the six-patch cube (459 points), on 1, 4 and 8 workers | identical: the sources, the stats, `h` at 20 000 probes and every 97th leaf box bit for bit, both remeshes point for point as bits; the field built in 3.10 s, 0.92 s and 0.60 s (4 CPUs, shared with two other lanes), the two remeshes in 0.13 s, 0.11 s and 0.12 s | the TET-15 commit |
+| TET-15 | `box_sphere_tet.json` end to end, release, before and after TET-15 | the same polyMesh byte for byte (points, faces, owner, neighbour, boundary); the size-field stage 0.8 s before, 0.1 s after; total 12.3 s and 11.8 s, of which refinement 6.2 s and optimisation 5.1 s | the TET-15 commit |
+| TET-15 | `perf::million_tets`: the example at `base_size` 0.25 m with the sphere at 0.125 m (about 1.3 M tetrahedra, the example's 20 309 times 4^3) | **MISSED**: stages 1-4 take 0.3 s; then the refinement of §116.13 refuses after 9.0 s with `refine/centre: kept tetrahedron [13317, 14196, 11265, 16918] has no finite circumcentre` | the TET-15 commit |
+| TET-15 | the same at `base_size` 0.27 m (about 1.0 M) and at 0.5 m with the sphere at 0.25 m (about 160 k) | **not finished**: stages 1-4 in 0.3 s, then the refinement was still running when it was stopped, after 10 min (0.27 m) and 19.8 min (0.5 m). At 1 m the same stage takes 6.2 s. The time is in refinement and optimisation, which TET-15 does not thread | the TET-15 commit |
 
 ### 116.19 References
 

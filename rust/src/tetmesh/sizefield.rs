@@ -94,11 +94,14 @@ pub struct PatchTris {
 }
 
 /// The background octree's DESIGN knobs: they change the cost of a query,
-/// never its answer, per §116.8.
+/// never its answer, per §116.8. `threads` is the number of workers the
+/// build uses, `0` meaning every core `available_parallelism` reports
+/// (TET-15); the tree is the same for every count, bit for bit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OctreeOptions {
     pub leaf_cap: usize,
     pub max_depth: u32,
+    pub threads: usize,
 }
 
 impl Default for OctreeOptions {
@@ -106,8 +109,66 @@ impl Default for OctreeOptions {
         OctreeOptions {
             leaf_cap: 16,
             max_depth: 12,
+            threads: 0,
         }
     }
+}
+
+/// The worker count `threads` asks for: `0` is every core the system
+/// reports (one when it reports none), any other value itself.
+pub fn resolve_threads(threads: usize) -> usize {
+    if threads > 0 {
+        return threads;
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// `f(0), f(1), .., f(n - 1)` in index order, computed by up to `threads`
+/// scoped workers (TET-15, SPEC-LIT §116.8). The workers take the next
+/// index from one atomic counter and each result is stored under its own
+/// index, so the output does not depend on the schedule or on the worker
+/// count: it is the sequential map whenever `f` reads only shared state.
+/// One worker, or one item, runs on the calling thread.
+pub fn par_map<T, F>(n: usize, threads: usize, f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(usize) -> T + Sync,
+{
+    let workers = resolve_threads(threads).min(n);
+    if workers <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut parts: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut got: Vec<(usize, T)> = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            return got;
+                        }
+                        got.push((i, f(i)));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    let mut slots: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    for part in parts.iter_mut() {
+        for (i, v) in part.drain(..) {
+            slots[i] = Some(v);
+        }
+    }
+    slots
+        .into_iter()
+        .map(|v| v.expect("par_map: every index is taken exactly once"))
+        .collect()
 }
 
 /// What a build produced, over the leaves of the finished tree.
@@ -364,7 +425,8 @@ pub struct SizeField {
 impl SizeField {
     /// Build the field. Refuses a bad domain, then each bad source in order,
     /// then flattens and splits the octree while the three DESIGN rules of
-    /// §116.8 all hold. Single-threaded and deterministic.
+    /// §116.8 all hold, on `opts.threads` workers (TET-15); the tree, the
+    /// stats and every query answer are the same for every worker count.
     pub fn build(
         params: SizeParams,
         sources: &[SizeSource],
@@ -493,7 +555,14 @@ impl SizeField {
             mean_candidates: 0.0,
         };
         let all: Vec<u32> = (0..prims.len() as u32).collect();
-        let root = build_node(lo, hi, 0, all, &prims, params, opts, eta, eta_d, &mut stats);
+        let grow = Grow {
+            prims: &prims,
+            p: params,
+            opts,
+            eta,
+            eta_d,
+        };
+        let root = build_root(lo, hi, all, &grow, &mut stats);
         // The mean accumulated a running sum over the leaves; divide it now.
         if stats.leaves > 0 {
             stats.mean_candidates /= stats.leaves as f64;
@@ -593,25 +662,34 @@ fn corners_of(lo: Point, hi: Point) -> Vec<Point> {
         .collect()
 }
 
-/// Build one node. Split into eight children while the candidate count is
-/// above `leaf_cap`, the depth is below `max_depth`, and the longest edge
-/// exceeds the node's own lower bound of `h`, (116.7f); a child keeps its
-/// parent's candidates minus those (116.7d) drops against the child's own
-/// bounds of (116.7c), then minus the tied band-interior triangles that
-/// (116.7e) drops.
-#[allow(clippy::too_many_arguments)]
-fn build_node(
-    lo: Point,
-    hi: Point,
-    depth: u32,
-    cand: Vec<u32>,
-    prims: &[Prim],
+/// The octree build's shared, read-only inputs: the primitives, the
+/// params, the options and the two culling margins of (116.7d), (116.7e).
+#[derive(Clone, Copy)]
+struct Grow<'a> {
+    prims: &'a [Prim],
     p: SizeParams,
     opts: OctreeOptions,
     eta: f64,
     eta_d: f64,
-    st: &mut SizeFieldStats,
-) -> Node {
+}
+
+/// The depth down to which a threaded build expands the tree on the
+/// calling thread before it hands the subtrees below to the workers: at
+/// most 8^2 = 64 subtrees (TET-15, DESIGN).
+const PAR_DEPTH: u32 = 2;
+
+/// A child's box and its candidates, as [`split_children`] returns them.
+type Child = (Point, Point, Vec<u32>);
+
+/// One node's split decision. `None` when the node is a leaf; otherwise
+/// its eight children in bit order, each with its box and its candidates.
+/// The node splits while the candidate count is above `leaf_cap`, the
+/// depth is below `max_depth`, and the longest edge exceeds the node's own
+/// lower bound of `h`, (116.7f); a child keeps its parent's candidates
+/// minus those (116.7d) drops against the child's own bounds of (116.7c),
+/// then minus the tied band-interior triangles that (116.7e) drops.
+fn split_children(lo: Point, hi: Point, depth: u32, cand: &[u32], g: &Grow<'_>) -> Option<Vec<Child>> {
+    let (prims, p, opts, eta, eta_d) = (g.prims, g.p, g.opts, g.eta, g.eta_d);
     let dx = hi[0] - lo[0];
     let dy = hi[1] - lo[1];
     let dz = hi[2] - lo[2];
@@ -626,7 +704,7 @@ fn build_node(
     ];
     let r = 0.5 * (dx * dx + dy * dy + dz * dz).sqrt();
     let mut m = f64::INFINITY;
-    for &j in &cand {
+    for &j in cand {
         let k = &prims[j as usize];
         let d = k.support.distance(c);
         m = m.min(k.h + s * (d - r - k.d_flat).max(0.0));
@@ -634,19 +712,10 @@ fn build_node(
     let lambda = p.min_size.max(p.base_size.min(m));
     let split = cand.len() > opts.leaf_cap && depth < opts.max_depth && dx.max(dy).max(dz) > lambda;
     if !split {
-        st.leaves += 1;
-        st.depth = st.depth.max(depth);
-        st.max_candidates = st.max_candidates.max(cand.len());
-        st.mean_candidates += cand.len() as f64;
-        return Node {
-            lo,
-            hi,
-            cand,
-            children: None,
-        };
+        return None;
     }
     let mid = c;
-    let mut children: Vec<Node> = Vec::with_capacity(8);
+    let mut children: Vec<Child> = Vec::with_capacity(8);
     for bit in 0..8usize {
         let clo = [
             if bit & 1 != 0 { mid[0] } else { lo[0] },
@@ -670,7 +739,7 @@ fn build_node(
         let r = 0.5 * (ex * ex + ey * ey + ez * ez).sqrt();
         let mut u_min = f64::INFINITY;
         let mut ds: Vec<f64> = Vec::with_capacity(cand.len());
-        for &j in &cand {
+        for &j in cand {
             let k = &prims[j as usize];
             let d = k.support.distance(c);
             ds.push(d);
@@ -709,10 +778,27 @@ fn build_node(
                 .filter(|&j| rep.get(&prims[j as usize].src).map_or(true, |&rj| rj == j))
                 .collect();
         }
-        children.push(build_node(
-            clo, chi, depth + 1, kept, prims, p, opts, eta, eta_d, st,
-        ));
+        children.push((clo, chi, kept));
     }
+    Some(children)
+}
+
+/// A leaf, counted into the stats.
+fn leaf(lo: Point, hi: Point, depth: u32, cand: Vec<u32>, st: &mut SizeFieldStats) -> Node {
+    st.leaves += 1;
+    st.depth = st.depth.max(depth);
+    st.max_candidates = st.max_candidates.max(cand.len());
+    st.mean_candidates += cand.len() as f64;
+    Node {
+        lo,
+        hi,
+        cand,
+        children: None,
+    }
+}
+
+/// An internal node over its eight children in bit order.
+fn internal(lo: Point, hi: Point, children: Vec<Node>) -> Node {
     Node {
         lo,
         hi,
@@ -721,6 +807,114 @@ fn build_node(
             children.try_into().expect("eight children built"),
         )),
     }
+}
+
+/// Build one node and everything below it on the calling thread.
+fn build_node(
+    lo: Point,
+    hi: Point,
+    depth: u32,
+    cand: Vec<u32>,
+    g: &Grow<'_>,
+    st: &mut SizeFieldStats,
+) -> Node {
+    match split_children(lo, hi, depth, &cand, g) {
+        None => leaf(lo, hi, depth, cand, st),
+        Some(kids) => {
+            let children: Vec<Node> = kids
+                .into_iter()
+                .map(|(clo, chi, kept)| build_node(clo, chi, depth + 1, kept, g, st))
+                .collect();
+            internal(lo, hi, children)
+        }
+    }
+}
+
+/// The tree above `PAR_DEPTH` while a threaded build runs: a finished
+/// leaf, a subtree waiting in the worker list, or a split node.
+enum Shape {
+    Done(Node),
+    Pending(usize),
+    Split(Point, Point, Vec<Shape>),
+}
+
+/// A subtree [`expand`] queued: its box, its depth and its candidates.
+type Queued = (Point, Point, u32, Vec<u32>);
+
+/// Expand down to `PAR_DEPTH` on the calling thread, queueing each node
+/// that reaches it, in the order the sequential build would visit them.
+fn expand(
+    lo: Point,
+    hi: Point,
+    depth: u32,
+    cand: Vec<u32>,
+    g: &Grow<'_>,
+    pending: &mut Vec<Queued>,
+    st: &mut SizeFieldStats,
+) -> Shape {
+    if depth >= PAR_DEPTH {
+        pending.push((lo, hi, depth, cand));
+        return Shape::Pending(pending.len() - 1);
+    }
+    match split_children(lo, hi, depth, &cand, g) {
+        None => Shape::Done(leaf(lo, hi, depth, cand, st)),
+        Some(kids) => Shape::Split(
+            lo,
+            hi,
+            kids.into_iter()
+                .map(|(clo, chi, kept)| expand(clo, chi, depth + 1, kept, g, pending, st))
+                .collect(),
+        ),
+    }
+}
+
+/// Put the workers' subtrees back where [`expand`] queued them.
+fn assemble(shape: Shape, built: &mut [Option<Node>]) -> Node {
+    match shape {
+        Shape::Done(n) => n,
+        Shape::Pending(i) => built[i].take().expect("each queued subtree is built once"),
+        Shape::Split(lo, hi, kids) => {
+            internal(lo, hi, kids.into_iter().map(|k| assemble(k, built)).collect())
+        }
+    }
+}
+
+/// The root build (TET-15): on one worker exactly [`build_node`]; on more,
+/// [`expand`] to `PAR_DEPTH`, the queued subtrees built by [`par_map`] each
+/// into its own stats, and the stats merged. Every node is built by the
+/// same code from the same inputs, so the tree is the same for every
+/// worker count. The merge sums the leaf counts and the candidate total
+/// (an integer held in an f64, exact below 2^53, so the order of the sum
+/// does not matter) and takes the maxima of the depth and the candidate
+/// count.
+fn build_root(lo: Point, hi: Point, cand: Vec<u32>, g: &Grow<'_>, st: &mut SizeFieldStats) -> Node {
+    let threads = resolve_threads(g.opts.threads);
+    if threads <= 1 {
+        return build_node(lo, hi, 0, cand, g, st);
+    }
+    let mut pending: Vec<Queued> = Vec::new();
+    let shape = expand(lo, hi, 0, cand, g, &mut pending, st);
+    let built: Vec<(Node, SizeFieldStats)> = par_map(pending.len(), threads, |i| {
+        let (clo, chi, depth, ref kept) = pending[i];
+        let mut sub = SizeFieldStats {
+            primitives: 0,
+            leaves: 0,
+            depth: 0,
+            max_candidates: 0,
+            mean_candidates: 0.0,
+        };
+        let n = build_node(clo, chi, depth, kept.clone(), g, &mut sub);
+        (n, sub)
+    });
+    let mut nodes: Vec<Option<Node>> = Vec::with_capacity(built.len());
+    for (n, sub) in built {
+        st.leaves += sub.leaves;
+        st.depth = st.depth.max(sub.depth);
+        st.max_candidates = st.max_candidates.max(sub.max_candidates);
+        st.mean_candidates += sub.mean_candidates;
+        nodes.push(Some(n));
+    }
+    assemble(shape, &mut nodes)
 }
 
 // ==========================================================================
@@ -853,11 +1047,12 @@ fn patch_of(surf: &TetSurface, t: usize) -> &str {
 pub fn triangle_curvatures(surf: &TetSurface, crease_deg: f64) -> Result<Vec<f64>> {
     validate_size_surface(surf)?;
     validate_crease_deg(crease_deg)?;
-    Ok(curvatures_validated(surf, crease_deg.to_radians()))
+    Ok(curvatures_validated(surf, crease_deg.to_radians(), 0))
 }
 
-/// The curvature pass on a validated surface, the crease angle in radians.
-fn curvatures_validated(surf: &TetSurface, crease_rad: f64) -> Vec<f64> {
+/// The curvature pass on a validated surface, the crease angle in radians;
+/// the per-triangle stars run on `threads` workers through [`par_map`].
+fn curvatures_validated(surf: &TetSurface, crease_rad: f64, threads: usize) -> Vec<f64> {
     let n = surf.tris.len();
     let mut normal = vec![[0.0; 3]; n];
     let mut area = vec![0.0f64; n];
@@ -897,10 +1092,10 @@ fn curvatures_validated(surf: &TetSurface, crease_rad: f64) -> Vec<f64> {
     // kappa_t (116.9c): the largest estimate over the edge star, the
     // triangle's own three edges plus every edge of each triangle sharing
     // a non-crease (estimated) edge with it.
-    let mut out = vec![0.0f64; n];
-    for i in 0..n {
+    par_map(n, threads, |i| {
+        let mut out_i = 0.0f64;
         if area[i] == 0.0 {
-            continue;
+            return out_i;
         }
         let t = &surf.tris[i];
         let own = [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])];
@@ -925,11 +1120,11 @@ fn curvatures_validated(surf: &TetSurface, crease_rad: f64) -> Vec<f64> {
         }
         for e in &star {
             if let Some(&k) = ekappa.get(e) {
-                out[i] = out[i].max(k);
+                out_i = out_i.max(k);
             }
         }
-    }
-    out
+        out_i
+    })
 }
 
 /// gap_t per triangle, (116.10a) with the facing rule; None where there is
@@ -940,9 +1135,7 @@ fn curvatures_validated(surf: &TetSurface, crease_rad: f64) -> Vec<f64> {
 pub fn triangle_gaps(surf: &TetSurface, side: GapSide) -> Result<Vec<Option<f64>>> {
     validate_size_surface(surf)?;
     let scanner = GapScanner::new(surf);
-    Ok((0..surf.tris.len())
-        .map(|t| scanner.gap_of(t, side))
-        .collect())
+    Ok(par_map(surf.tris.len(), 0, |t| scanner.gap_of(t, side)))
 }
 
 /// One node of the gap BVH: the union box of its triangles and either its
@@ -1264,12 +1457,23 @@ pub fn curvature_sources(
     n_curv: u32,
     crease_deg: f64,
 ) -> Result<Vec<SizeSource>> {
+    curvature_sources_t(surf, params, n_curv, crease_deg, 0)
+}
+
+/// [`curvature_sources`] on `threads` workers (`0`: every core).
+fn curvature_sources_t(
+    surf: &TetSurface,
+    params: &SizeParams,
+    n_curv: u32,
+    crease_deg: f64,
+    threads: usize,
+) -> Result<Vec<SizeSource>> {
     validate_size_surface(surf)?;
     validate_crease_deg(crease_deg)?;
     if n_curv == 0 {
         return Ok(Vec::new());
     }
-    let kap = curvatures_validated(surf, crease_deg.to_radians());
+    let kap = curvatures_validated(surf, crease_deg.to_radians(), threads);
     let mut out: Vec<SizeSource> = Vec::new();
     for (i, &k) in kap.iter().enumerate() {
         if k == 0.0 {
@@ -1300,14 +1504,28 @@ pub fn proximity_sources(
     n_gap: u32,
     side: GapSide,
 ) -> Result<Vec<SizeSource>> {
+    proximity_sources_t(surf, params, n_gap, side, 0)
+}
+
+/// [`proximity_sources`] on `threads` workers (`0`: every core): the gaps
+/// of (116.10a) through [`par_map`], the sources from them in triangle
+/// order on the calling thread.
+fn proximity_sources_t(
+    surf: &TetSurface,
+    params: &SizeParams,
+    n_gap: u32,
+    side: GapSide,
+    threads: usize,
+) -> Result<Vec<SizeSource>> {
     validate_size_surface(surf)?;
     if n_gap == 0 {
         return Ok(Vec::new());
     }
     let scanner = GapScanner::new(surf);
+    let gaps = par_map(surf.tris.len(), threads, |t| scanner.gap_of(t, side));
     let mut out: Vec<SizeSource> = Vec::new();
-    for t in 0..surf.tris.len() {
-        let gap = match scanner.gap_of(t, side) {
+    for (t, g) in gaps.into_iter().enumerate() {
+        let gap = match g {
             Some(g) if g > 0.0 => g,
             _ => continue,
         };
@@ -1334,8 +1552,21 @@ pub fn surface_sources(
     crease_deg: f64,
     side: GapSide,
 ) -> Result<Vec<SizeSource>> {
-    let mut out = curvature_sources(surf, params, spec.curvature_cells, crease_deg)?;
-    out.extend(proximity_sources(surf, params, spec.gap_cells, side)?);
+    surface_sources_threads(surf, params, spec, crease_deg, side, 0)
+}
+
+/// [`surface_sources`] on `threads` workers (`0`: every core, TET-15). The
+/// list is the same, source for source and bit for bit, for every count.
+pub fn surface_sources_threads(
+    surf: &TetSurface,
+    params: &SizeParams,
+    spec: &TetSizeSpec,
+    crease_deg: f64,
+    side: GapSide,
+    threads: usize,
+) -> Result<Vec<SizeSource>> {
+    let mut out = curvature_sources_t(surf, params, spec.curvature_cells, crease_deg, threads)?;
+    out.extend(proximity_sources_t(surf, params, spec.gap_cells, side, threads)?);
     Ok(out)
 }
 
@@ -1494,6 +1725,7 @@ mod tests {
             OctreeOptions {
                 leaf_cap,
                 max_depth: 12,
+                threads: 0,
             },
         )
         .unwrap()
@@ -2355,6 +2587,7 @@ mod tests {
         let opts = OctreeOptions {
             leaf_cap: 1,
             max_depth: 12,
+            threads: 0,
         };
         let src = |tris: Vec<[Point; 3]>| SizeSource::Patch {
             name: "fine".to_string(),
