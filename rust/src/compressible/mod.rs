@@ -50,6 +50,7 @@
 //! `smpRelaxField` kernel `simple.rs` uses). No GPL-licensed source was
 //! consulted.
 
+pub mod bc;
 pub mod energy;
 pub mod exact;
 pub mod gatemesh;
@@ -348,6 +349,9 @@ pub struct Compressible<'m> {
     host: HostTopology,
     /// Steps completed.
     steps: u64,
+    /// SPEC-LIT §126.8: the compressible inlets, rewritten at the top of
+    /// every outer iteration; `None` (no rule) rewrites nothing.
+    bcs: Option<bc::CompressibleBcs>,
 }
 
 impl<'m> Compressible<'m> {
@@ -474,7 +478,38 @@ impl<'m> Compressible<'m> {
 
             host,
             steps: 0,
+            bcs: None,
         })
+    }
+
+    /// SPEC-LIT §126.8: attach the compressible inlets `bc::lower` found;
+    /// an empty list attaches nothing, so the loop is the one without them.
+    /// Call before [`Self::initialise`].
+    pub fn set_boundary_rules(&mut self, gpu: &Gpu, rules: Vec<bc::BcRule>) -> Result<()> {
+        self.bcs = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleBcs::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached inlet rules (empty when none).
+    pub fn boundary_rules(&self) -> &[bc::BcRule] {
+        self.bcs.as_ref().map_or(&[], |b| b.rules())
+    }
+
+    /// §126.8: rewrite the inlets' triples from the current state, evaluate
+    /// their faces, and re-form `psi` and `rho` on the boundary faces (the
+    /// cells are not touched). Nothing without a rule.
+    fn apply_boundary_rules(&self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
+        let Some(b) = &self.bcs else {
+            return Ok(());
+        };
+        b.apply(gpu, &self.fldk, s, self.m)?;
+        let nbf = self.m.n_boundary_faces;
+        let CompressibleState { psi, rho, p, t, .. } = s;
+        thermo::gas_state(gpu, &self.thk, &self.gas, &mut psi.bf, &mut rho.bf, &p.bf, &t.bf, nbf)
     }
 
     pub fn controls(&self) -> &CompressibleControls {
@@ -554,7 +589,9 @@ impl<'m> Compressible<'m> {
 
     /// The start of a run: `u`'s, `p`'s and `T`'s boundary values; `mu`,
     /// `kappa`, `psi` and `rho` from them; `mdot = rho_f (u_f . Sf)` with
-    /// `rho_f` linear; every old level seeded from the current field.
+    /// `rho_f` linear; every old level seeded from the current field. The
+    /// inlets of [`Self::set_boundary_rules`], if any, are applied once
+    /// after the first gas state (SPEC-LIT §126.8).
     pub fn initialise(&mut self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
         let m = self.m;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut s.u, m)?;
@@ -562,6 +599,12 @@ impl<'m> Compressible<'m> {
         field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut s.t, m)?;
         self.transport(gpu, s)?;
         self.gas_state(gpu, s)?;
+        // §126.8: the inlets from the state just formed, then mu and kappa
+        // of the new boundary T.
+        if self.bcs.is_some() {
+            self.apply_boundary_rules(gpu, s)?;
+            self.transport(gpu, s)?;
+        }
 
         fv::interpolate_vector_flux(gpu, &self.fvk, &mut self.phi, &s.u, m)?;
         fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, &s.rho, m)?;
@@ -609,6 +652,9 @@ impl<'m> Compressible<'m> {
         let mut outers = Vec::with_capacity(n_outer);
         for outer in 1..=n_outer {
             let is_final = !steady && outer == n_outer;
+
+            // 0. §126.8: the compressible inlets from the latest state.
+            self.apply_boundary_rules(gpu, s)?;
 
             // 1. mu and kappa from T (psi follows at step 4).
             self.transport(gpu, s)?;

@@ -201,6 +201,9 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     // step of `Compressible::step`, and its three time-term kernels run only
     // in the equations `Compressible::new` attached it to.
     ("src/compressible/lts.rs", Stance::Via("src/compressible/mod.rs")),
+    // SPEC-LIT 126.8: the inlets are rewritten at the top of each outer
+    // iteration of `Compressible::step`, so they live inside its loop.
+    ("src/compressible/bc.rs", Stance::Via("src/compressible/mod.rs")),
     (
         "src/compressible/exact/riemann.rs",
         Stance::Outside(

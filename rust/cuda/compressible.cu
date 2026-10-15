@@ -970,3 +970,159 @@ extern "C" __global__ void cmpEnergySourceLocal
     const ofscalar gw = rho[i]*(gx*uc.x + gy*uc.y + gz*uc.z);
     source[i] += rcp*V[i]*(dpdt - drk + gw);
 }
+
+
+/*
+  ==========================================================================
+  The compressible inlets. SPEC-LIT 126.1, 126.3, 126.8 (CMP-16). Three
+  kernels, each over the faces [start, start + n) of one patch, each a
+  rewrite of the section-4 triple (fr, refValue, refGrad) and nothing else:
+  fldCorrectBcScalar / fldCorrectBcVector then evaluate the face value from
+  it, and the assemblies read the triple as they read any other.
+  No floor and no clip: |u_b|^2 >= 2 c_p T_0 has no isentropic state, and
+  the kernels write what (126.1) and (126.3) give there.
+  ==========================================================================
+*/
+
+//- (126.1) of SPEC-LIT 126.1 on one totalTemperature patch:
+//    inflow  (u_b . Sf < 0):  fr = 1, refValue = T_0 - |u_b|^2 / (2 c_p)
+//    outflow:                 fr = 0, refValue = 0, refGrad = 0
+//  cp2 = fl(2 c_p); the kinetic term is divided by it, not multiplied by a
+//  rounded reciprocal.
+extern "C" __global__ void cmpBcTotalTemperature
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ ub,
+    const ofvec3* __restrict__ bSf,
+    oflabel start,
+    oflabel n,
+    ofscalar t0,
+    ofscalar cp2
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = ub[f];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = u.x*s.x + u.y*s.y + u.z*s.z;
+    refGrad[f] = (ofscalar)0;
+    if (un < (ofscalar)0)
+    {
+        const ofscalar q = u.x*u.x + u.y*u.y + u.z*u.z;
+        fr[f] = (ofscalar)1;
+        refValue[f] = t0 - q/cp2;
+    }
+    else
+    {
+        fr[f] = (ofscalar)0;
+        refValue[f] = (ofscalar)0;
+    }
+}
+
+//- (126.3) of SPEC-LIT 126.1 on one totalPressure patch (with gamma):
+//    x     = |u_b|^2 / (2 c_p)
+//    T_0   = t0 when t0 > 0 (the patch's totalTemperature), else T_b + x,
+//            NACA 1135 (43) at the face (SPEC-LIT 126.8)
+//    p_b   = p_0 + (p_0 + p_op) expm1( ge log1p( -x / T_0 ) )
+//  on an inflow face (fr = 1); fr = 0, refValue = 0, refGrad = 0 on an
+//  outflow one. pt = fl(p_0 + p_op), ge = fl(gamma/(gamma-1)), both formed
+//  on the host in f64.
+extern "C" __global__ void cmpBcTotalPressure
+(
+    ofscalar* __restrict__ fr,
+    ofscalar* __restrict__ refValue,
+    ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ ub,
+    const ofscalar* __restrict__ Tb,
+    const ofvec3* __restrict__ bSf,
+    oflabel start,
+    oflabel n,
+    ofscalar p0,
+    ofscalar pt,
+    ofscalar t0,
+    ofscalar cp2,
+    ofscalar ge
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const oflabel f = start + i;
+    const ofvec3 u = ub[f];
+    const ofvec3 s = bSf[f];
+    const ofscalar un = u.x*s.x + u.y*s.y + u.z*s.z;
+    refGrad[f] = (ofscalar)0;
+    if (un < (ofscalar)0)
+    {
+        const ofscalar x = (u.x*u.x + u.y*u.y + u.z*u.z)/cp2;
+        const ofscalar T0 = (t0 > (ofscalar)0) ? t0 : Tb[f] + x;
+        fr[f] = (ofscalar)1;
+        refValue[f] = p0 + pt*expm1(ge*log1p(-x/T0));
+    }
+    else
+    {
+        fr[f] = (ofscalar)0;
+        refValue[f] = (ofscalar)0;
+    }
+}
+
+//- (126.4) of SPEC-LIT 126.3 on one mass-flow inlet, ONE block of
+//  OFGPU_CMP_BC_BLOCK threads for the whole patch:
+//    A   = sum_f rho_f |Sf|,  rho_f = psi_f (p_f + pop)   (ofacc, then the
+//          fixed-order tree in shared memory, so the sum is deterministic)
+//    u_b = -(mdot / A) Sf / |Sf|,   fr = 1, refGrad = 0
+//  rho_f is formed in the order cmpGasState forms rho, so it is the rho the
+//  boundary carries once the gas law has been evaluated on it.
+#define OFGPU_CMP_BC_BLOCK 256
+extern "C" __global__ void cmpBcMassFlowInlet
+(
+    ofscalar* __restrict__ fr,
+    ofvec3* __restrict__ refValue,
+    ofvec3* __restrict__ refGrad,
+    const ofscalar* __restrict__ psiB,
+    const ofscalar* __restrict__ pB,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    oflabel start,
+    oflabel n,
+    ofscalar mdot,
+    ofscalar pop
+)
+{
+    __shared__ ofacc part[OFGPU_CMP_BC_BLOCK];
+    const oflabel t = threadIdx.x;
+    ofacc a = 0;
+    for (oflabel i = t; i < n; i += OFGPU_CMP_BC_BLOCK)
+    {
+        const oflabel f = start + i;
+        const ofscalar rho = psiB[f]*(pB[f] + pop);
+        a += (ofacc)rho*(ofacc)bMagSf[f];
+    }
+    part[t] = a;
+    __syncthreads();
+    for (oflabel h = OFGPU_CMP_BC_BLOCK/2; h > 0; h >>= 1)
+    {
+        if (t < h) part[t] += part[t + h];
+        __syncthreads();
+    }
+    const ofacc speed = (ofacc)mdot/part[0];
+    for (oflabel i = t; i < n; i += OFGPU_CMP_BC_BLOCK)
+    {
+        const oflabel f = start + i;
+        const ofvec3 s = bSf[f];
+        const ofacc k = -speed/(ofacc)bMagSf[f];
+        ofvec3 v;
+        v.x = (ofscalar)(k*(ofacc)s.x);
+        v.y = (ofscalar)(k*(ofacc)s.y);
+        v.z = (ofscalar)(k*(ofacc)s.z);
+        ofvec3 z;
+        z.x = (ofscalar)0;
+        z.y = (ofscalar)0;
+        z.z = (ofscalar)0;
+        fr[f] = (ofscalar)1;
+        refValue[f] = v;
+        refGrad[f] = z;
+    }
+}

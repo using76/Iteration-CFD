@@ -359,15 +359,28 @@ const STATIC_TYPES: &[&str] = &[
     "empty",
 ];
 
-/// The compressible kinds of SPEC-LIT §126 and the unit that brings each.
+/// SPEC-LIT §126.8's inlets, for the refusal's list of what is accepted.
+const CMP16_KINDS: &str =
+    "totalPressure (with gamma), totalTemperature, flowRateInletVelocity (with massFlowRate)";
+
+/// The compressible kinds of SPEC-LIT §126 still to come, and the unit that
+/// brings each. CMP-16's three are lowered by `compressible::bc::lower`
+/// before this check sees the fields (§126.8).
 fn compressible_kind_unit(type_name: &str) -> Option<&'static str> {
     match type_name {
-        "totalPressure" | "totalTemperature" | "supersonicInlet" | "massFlowInlet" => {
-            Some("CMP-16 (SPEC-LIT §126.1-§126.3)")
-        }
         "waveTransmissive" | "advective" => Some("CMP-17 (SPEC-LIT §126.4-§126.5)"),
         "characteristicFarfield" | "farfield" => Some("CMP-18 (SPEC-LIT §126.6)"),
         _ => None,
+    }
+}
+
+/// The case-file name of a §126.8 inlet, for the run's report.
+fn rule_name(k: ofgpu::compressible::bc::RuleKind) -> &'static str {
+    use ofgpu::compressible::bc::RuleKind;
+    match k {
+        RuleKind::TotalPressure => "p totalPressure",
+        RuleKind::TotalTemperature => "T totalTemperature",
+        RuleKind::MassFlowInlet => "U flowRateInletVelocity (massFlowRate)",
     }
 }
 
@@ -382,12 +395,13 @@ fn check_static_bcs(field: &str, boundary: &BTreeMap<String, PatchFieldSpec>) ->
         let why = match compressible_kind_unit(t) {
             Some(unit) => format!(
                 "{t} is a compressible condition rewritten each outer iteration, which \
-                 {unit} implements; until then it is refused. Accepted now: {}",
+                 {unit} implements; until then it is refused. Accepted now: {}, {CMP16_KINDS}",
                 STATIC_TYPES.join(", ")
             ),
             None => format!(
                 "{t} is not a static condition, and ofgpu-compressible rewrites no boundary \
-                 between iterations (SPEC-LIT §126, §126.7). Accepted: {}",
+                 between iterations but the compressible inlets of SPEC-LIT §126.8 (§126, \
+                 §126.7). Accepted: {}, {CMP16_KINDS}",
                 STATIC_TYPES.join(", ")
             ),
         };
@@ -788,9 +802,16 @@ fn run(o: &Options) -> Result<RunEnd> {
     hm.print_report();
 
     let (fields, gas) = load_fields_and_gas(&o.case_path, &hm, lowered.as_ref())?;
-    check_static_bcs("U", &fields.u.boundary)?;
-    check_static_bcs("p", &fields.p.boundary)?;
-    check_static_bcs("T", &fields.t.boundary)?;
+    // SPEC-LIT §126.8: the compressible inlets become placeholders and
+    // rules; `fields` keeps the types as read, for the written fields.
+    let inlets = ofgpu::compressible::bc::lower(&fields.u, &fields.p, &fields.t, &hm, &gas)
+        .map_err(|e| refuse("boundaryField", &e.to_string()))?;
+    check_static_bcs("U", &inlets.u.boundary)?;
+    check_static_bcs("p", &inlets.p.boundary)?;
+    check_static_bcs("T", &inlets.t.boundary)?;
+    for r in &inlets.rules {
+        println!("inlet: {} on patch {} ({} faces), SPEC-LIT §126.8", rule_name(r.kind), r.patch, r.size);
+    }
 
     let dc = driver_controls(&o.case_path, &cc, lowered.as_ref(), gas, o.iters)?;
     print_controls(&dc);
@@ -900,11 +921,12 @@ fn run(o: &Options) -> Result<RunEnd> {
     let mut u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
     let mut p = GpuScalarField::zeros(&gpu, &mesh, "p")?;
     let mut t = GpuScalarField::zeros(&gpu, &mesh, "T")?;
-    setup_vector_field(&gpu, &mut u, &fields.u, &hm)?;
-    setup_scalar_field(&gpu, &mut p, &fields.p, &hm)?;
-    setup_scalar_field(&gpu, &mut t, &fields.t, &hm)?;
+    setup_vector_field(&gpu, &mut u, &inlets.u, &hm)?;
+    setup_scalar_field(&gpu, &mut p, &inlets.p, &hm)?;
+    setup_scalar_field(&gpu, &mut t, &inlets.t, &hm)?;
     let mut s = CompressibleState::new(&gpu, &mesh, u, p, t)?;
     let mut solver = Compressible::new(&gpu, &mesh, dc.ctrl)?;
+    solver.set_boundary_rules(&gpu, inlets.rules)?;
     solver.initialise(&gpu, &mut s)?;
 
     let dt = f64::from(dc.ctrl.momentum.delta_t);
@@ -1203,6 +1225,38 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         dir
     }
 
+    /// Rewrite one patch entry of the cavity's `0/<field>` (64 cells).
+    fn set_patch(dir: &Path, field: &str, patch: &str, type_name: &str, kv: &[(&str, &str)]) {
+        let path = dir.join("0").join(field);
+        let mut f = read_scalar_field(&path, 64).expect("read the cavity field");
+        let spec = f.boundary.get_mut(patch).expect("the cavity has the patch");
+        spec.type_name = type_name.to_string();
+        for (k, v) in kv {
+            spec.extra.insert((*k).to_string(), (*v).to_string());
+        }
+        ofgpu::io::fields::write_scalar_field(&path, &f, "0").expect("write the cavity field");
+    }
+
+    /// SPEC-LIT §126.8 on the OpenFOAM route: `totalPressure` with `gamma`
+    /// and `totalTemperature` read from `0/p` and `0/T` become two rules,
+    /// and the cavity runs with them (the lid's faces carry no normal flow,
+    /// so both are the zero-gradient branch).
+    #[test]
+    fn an_openfoam_case_with_the_compressible_inlets_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = openfoam_cavity("cmp16_of_inlets");
+        set_patch(&dir, "p", "movingWall", "totalPressure", &[("p0", "uniform 0"), ("gamma", "1.4")]);
+        set_patch(&dir, "T", "movingWall", "totalTemperature", &[("T0", "uniform 300"), ("gamma", "1.4")]);
+        let o = parse(&argv(&[dir.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the cavity with the inlets runs");
+        assert_eq!(end.steps, 5);
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
+        let p = std::fs::read_to_string(dir.join("0.005").join("p")).expect("p is written");
+        assert!(p.contains("totalPressure"), "the written p keeps the type as read");
+    }
+
     /// SPEC-LIT §122.4: each thing v1 does not have is refused, and the
     /// message names the setting.
     #[test]
@@ -1268,6 +1322,9 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
                 &["constant/momentumTransport"]),
             ("nothermo", Box::new(|d: &Path| std::fs::remove_file(d.join("constant/thermophysicalProperties")).unwrap()),
                 &["constant/thermophysicalProperties"]),
+            // SPEC-LIT §126.8: the kinematic totalPressure is not a gas's.
+            ("totalPressure", Box::new(|d: &Path| set_patch(d, "p", "movingWall", "totalPressure", &[("p0", "uniform 0")])),
+                &["p patch movingWall", "totalPressure", "gamma"]),
         ];
         for (tag, mutate, wanted) in of {
             let dir = openfoam_cavity(&format!("cmp15_of_{tag}"));

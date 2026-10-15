@@ -44671,8 +44671,11 @@ has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A 
 condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
 `mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
 as set up is the whole condition (§126.7). Every other type is refused with the field, the
-patch and the type. The compressible kinds name the unit that builds them (CMP-16 to CMP-18,
-§126.1-§126.6), and the rest say that this driver rewrites no boundary between iterations.
+patch and the type. CMP-16's inlets (`totalPressure` with `gamma`, `totalTemperature`,
+`flowRateInletVelocity` with `massFlowRate`) are lowered before this check (§126.8). The
+compressible kinds still to come name the unit that builds them (CMP-17 and CMP-18,
+§126.4-§126.6), and the rest say that this driver rewrites no boundary between iterations
+but §126.8's inlets.
 `output.restart` is refused through `OutputPlan::refuse_restart`, because no checkpoint of
 the compressible state exists.
 
@@ -44715,8 +44718,8 @@ test row).
 
 ## 126. The compressible boundary conditions — each a §4 triple rewrite
 
-`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3, CMP-17
-§126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+`No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3 (as built in
+§126.8), CMP-17 §126.4-§126.5 and CMP-18 §126.6, in `src/compressible/bc.rs` and `cuda/compressible.cu`.
 docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
 it lands. Every one is a kernel that rewrites the §4 triple
 `psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
@@ -44853,6 +44856,78 @@ stream to the last digit printed (15) on all four branches.
 Unchanged: `noSlip` (with adiabatic `zeroGradient` or isothermal `fixedValue` on `T`),
 `slip`/`symmetryPlane` (§120's aliases) and `empty` carry no compressible algebra. A
 slip wall makes the quasi-1-D duct and the Ringleb walls of §127.3.
+
+### 126.8 The inlets as built (CMP-16)
+
+`No GPL-licensed source was consulted.` `rust/src/compressible/bc.rs` and the last three
+kernels of `cuda/compressible.cu` (`cmpBcTotalTemperature`, `cmpBcTotalPressure`,
+`cmpBcMassFlowInlet`) implement §126.1 and §126.3 exactly as written there: (126.1) on
+`T`, (126.3) on `p`, (126.4) on `U`. §126.2's preset needs no kernel: CMP-14 already
+lowers a JSONC `supersonicInlet` rule to `fixedValue` on `U`, `p` and `T` (§122.6).
+
+**Names.** On the OpenFOAM route (`0/p`, `0/T`, `0/U`) the three conditions are
+`totalPressure` with `p0` and `gamma` on `p`, `totalTemperature` with `T0` (and an
+optional `gamma`) on `T`, and `flowRateInletVelocity` with `massFlowRate` on `U`. JSONC has
+no spelling for them yet, because a new JSONC kind needs the schema and the gui pick-lists
+too. `bc::lower` reads every value in f64 in both builds and refuses by name: a
+`totalPressure` without `gamma` (that is the kinematic `p0 - |U|^2/2` condition of
+`field_setup.rs`, which a gas does not obey), a stated `gamma` that differs from the gas's
+by more than `1e-12` relative (the gas law carries one ratio), a missing `p0`, `T0` or
+`massFlowRate`, `p0 + p_op <= 0`, `T0 <= 0`, `massFlowRate <= 0`, a
+`volumetricFlowRate`, a kind on the wrong field, and a mass-flow inlet whose `p` is not
+`zeroGradient` (§126.3).
+
+**Lowering, not a new setup arm.** `bc::lower` hands the shared setup of `field_setup.rs` the
+three fields with each of these entries replaced by a `fixedValue` placeholder (at `p_0`,
+`T_0` or zero velocity), and returns one `BcRule` per mesh patch (its face range and its
+value). `Compressible::set_boundary_rules` attaches them. `field.rs` and `field_setup.rs` are
+not touched, so the incompressible `totalPressure` of every other driver is bitwise what it
+was. §120's catalogue keeps `totalTemperature` as owned by CMP-16, because the catalogue
+describes `BcKind::from_name`, and the shared setup still refuses it (it has no gas law).
+The driver writes the fields with the types as read.
+
+**When.** `Compressible::initialise` applies the rules once after its first gas state and
+then re-forms `mu` and `kappa`. `Compressible::step` applies them at the top of every
+outer iteration (step 0 of §125.6's loop), from the latest state, in this order:
+
+1. The mass-flow inlets, from `psi_b` and `p_b`, then `U`'s face values.
+2. The total temperatures, from `u_b`, then `T`'s face values.
+3. The total pressures, from `u_b` (and `T_b`), then `p`'s face values.
+4. `psi` and `rho` on the boundary faces only, by (122.10). The cells are not touched.
+
+A run with no rule launches none of this, so it is bitwise the CMP-15 driver.
+
+**`T_0` of `totalPressure`.** It is the same patch's `totalTemperature` `T0` when `T` carries
+one. Otherwise each face takes `T_0 = T_b + |u_b|^2 / (2 c_p)`, which is (126.1) solved for
+`T_0` at the face (NACA 1135 (43), derived). Either way (126.3) holds with the face Mach
+number `M^2 = |u_b|^2 / (gamma R_s T_b)`.
+
+**Constants and order.** The host forms `cp2 = fl(2 c_p)`, `ge = fl(gamma/(gamma-1))` and
+`pt = fl(p_0 + p_op)` in f64 and rounds each once. The kinetic term is `q / cp2`, a division
+by the doubled `c_p`, not a product with a rounded reciprocal. (126.4)'s sum
+`A = sum_f rho_f |Sf|` is accumulated in `ofacc` by one block of 256 threads, with a
+fixed-order tree in shared memory, so it is deterministic. `rho_f = psi_f (p_f + p_op)` is
+formed in the order `cmpGasState` forms `rho`, so it is the `rho` the boundary carries.
+Then `u_b = -(mdot/A) Sf/|Sf|`. There is no floor and no clip: `|u_b|^2 >= 2 c_p T_0` has no
+isentropic state, and the kernels write what (126.1) and (126.3) give there (§122.3).
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, included by the lib tests of
+`compressible::bc` and by `tests/compressible_bc.rs`, so both builds run it):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `total_conditions_satisfy_isentropic_relation_to_round_off` | R, `tol_r(1e-13)` | inflow faces at M 0.1, 0.5, 0.9; `T_b` and `p_b + p_op` against NACA 1135 (43)-(44), once with `totalTemperature`, once with a fixed `T` | `e_T` 0, `e_p` <= 1.43e-16; `e_T` <= 8.0e-9, `e_p` <= 2.5e-8 |
+| `outflow_face_is_zero_gradient` | D | `u_b . Sf > 0`: `fr = 0` and `refGrad = 0` bitwise, and the face value is the owner cell's, bitwise, on `p` and `T` | bitwise in both |
+| `mass_flow_inlet_delivers_mdot_to_1e_10` | A, 1e-10 (f32: `tol_r(1e-10)`) | a graded 6-face patch with a non-uniform `T`: `sum_f rho_f u_b . Sf = -mdot`, and `u_b` is normal to the face | rel. err 0; 1.5e-8 |
+| `a_total_pressure_tube_runs` | P | 50-cell tube, `p0 = 2000` Pa and `T0 = 300` K against a fixed `p = 0` outlet, 10 Euler steps: no bounds violation, finite, and the inflow accelerates from 10 m/s | `u_b` 14.54 m/s, `M_max` 0.042 in both |
+| `inlet_refusals_name_the_setting` | D | the refusals above name the field, the patch and the entry | - |
+
+The plan names the third test `mass_flow_inlet_delivers_mdot_to_1e-10`, which is not a
+Rust identifier, so it is spelled `..._1e_10`. Its f32 row takes D-F32-1's `tol32`: the
+sum equals `-mdot` up to round-off by construction (§126.3), so it is an R-class row in
+f32. The driver adds `an_openfoam_case_with_the_compressible_inlets_runs` (the
+OpenFOAM route reads both kinds and runs) and a refusal row for `totalPressure` without
+`gamma`.
 
 ---
 
