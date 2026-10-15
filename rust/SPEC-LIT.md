@@ -52183,6 +52183,137 @@ a measurement of the intercept.
 that cell set with a pinned wall-cell omega, not a device run and not validation of the solver. Wilcox 2006 exists
 only in the oracle: there is no device kernel, case keyword or registry row (VAL-22a-c, conditional on D-VAL-5).
 
+### 143.5 Gate 131-P: TG0's turbulent pipe on the true wedge, kOmegaSST, replayed (VAL-23)
+
+`No GPL-licensed source was consulted.` Docs/17 VAL-23. 짠143.3 and 짠143.4 were allocated to VAL-22a and VAL-22c,
+which are not built because D-VAL-5 did not fire (짠143.2), so this unit records kOmegaSST only and there is no
+`kOmega2006` case keyword. No new equation: the metrics are (143.13) and the bands (143.17), evaluated by
+`vv::rans1d` itself.
+
+**The rig.** TG0's pipe (짠114.1) on 짠119.0's wedge: `R = 0.025 m`, `theta = 5 deg`, periodic length `L = 0.1 m`
+in 4 axial cells, `nu = 1.516e-5 m^2/s`, `x` the radius, `z` the axis, `zmin`/`zmax` a cyclic pair. The wedge is
+the tangent one, so its radial faces are the planes `x = r_i` and its wall is at `x = R`: (143.1) with
+`theta_deg = 0` (`rho = r`) is the same cell set, and `rans1d::PipeMesh` is built from the device's own graded
+nodes. The drive is (143.5)'s `g_z = 2 u_tau,in^2 / R`, `u_tau,in = Re_tau nu / R`: 9.78347667 m/s^2 at
+`Re_tau = 576.69`, 163.567108 at 2358. TG0's wall (`U = 0`, `k` and `nu_t` fixedValue 0, `omega`
+`omegaWallFunction`, `T` fixedValue), TG0's numerics (SIMPLE, relaxation 0.7 on `U`, `k`, `omega`, `T` and 0.3
+on `p`, `bounded Gauss linearUpwind grad(U)`, `bounded Gauss upwind` for `k` and `omega`), and 짠114.5's O1: the
+`k`/`omega` PBiCGStab `tolerance 1e-12`, `relTol 0.01`. The start state is `U_z = U_b` of Prandtl's law and TG0's
+own `k`, `omega` (`case_writer.py` `turb_refs`, `I = 1 %`, `l = 3 mm`). Levels `l = 0, 1, 2`: `n = 40 2^l`
+radial cells, the wall cell `(R/2358) 2^-l` (143.2), `mesh.grading.x.expansion = q^-(n-1)` = 0.00306719135840698,
+0.00297925479726894, 0.00293619304606138. `cases/pipeTurb576.jsonc` and `cases/pipeTurb2358.jsonc` are level 1;
+levels 0 and 2 are copies with only `cells` and `expansion` edited.
+
+**Found on the way: a cyclic patch inherits a wall function from the catch-all rule.** A JSONC case needs a
+catch-all patch rule for its cyclic pair (`cases/README.md`), and every catch-all rule in the shipped cases is
+`"kind": "wall"`. With `turbulence.wallTreatment` at its default, that rule's `k`, `omega` (or `epsilon`) and
+`nut` are completed to `kqRWallFunction`, `omegaWallFunction` and `nutkWallFunction` on the cyclic patches as well
+(짠29.1, route b). The solver's boundary kind there is still `Cyclic` (`field_setup::topology_override`), but its
+wall-cell set is read from the field's patch TYPE names (`field_setup::faces_where`, through
+`WallFaces::from_case`), which does not consult the patch kind, so every cell next to a cyclic face is pinned as a
+wall cell. Measured at `Re_tau = 576.69` with the catch-all naming only `U`, `p` and `T`: on level 0, after one
+iteration, `omega` in the cells next to the cyclic faces is 27.97 (the log-branch pin at
+half an axial cell from the "wall") where the two interior stations carry 34 to 46 across the core; on level 1 from rest, after 8000
+iterations, the four axial stations differ by up to 0.4425 m/s in `U_z` (6.7 % of `U_axis`), `|U_x|` reaches 5.08e-3 m/s, and
+`U_b = 5.55938`, `f = 0.0315835`, +22.5 % against Prandtl, against 6.02305 and +4.44 % with the workaround below.
+`cases/channelPeriodicWF.jsonc` (k-epsilon, standard wall functions, the same catch-all) shows it too: after one
+iteration its wall-row `epsilon` is 0.508872 in the two end cells and 0.545202 in the six interior ones. The
+pipe cases name `k` zeroGradient, `omega` zeroGradient and `nut` calculated in their catch-all, which gives the
+cyclic faces no wall-function type; then the stations agree to the written digit (spread 0) and `|U_x|` falls to
+3.4e-9 m/s. The cure, `faces_where` skipping a patch whose `topology_override` is not `None`, moves the results of
+every shipped JSONC case with a cyclic pair and a turbulence model, so it is not made here; it is a REVIEW-LATER
+item.
+
+**Measured: the plan's 8000 iterations do not reach the fixed point.** On level 1 at 576.69 from rest (TG0's
+start) `U_b` at 8000 is 6.023051, 6.8e-4 below the oracle's 6.027151 on the same cells, with `U_axis` still moving
+8.1e-4 of itself per 1000 iterations; from `U_b` it is 6.030511, 5.6e-4 above. From `U_b` the excess falls by a
+factor of about 5.5 per 2000 iterations on level 1 and about 0.80 per 1000 on level 2: the SIMPLE pseudo-time step of
+a core cell scales with its size squared, so each level takes about four times the iterations of the last. The
+records therefore run 12 000 (level 0), 24 000 (level 1) and 80 000 (level 2, two 40 000-iteration legs through
+`-restartWrite`/`-restartFrom`, which continues the count) iterations at 576.69, and 16 000, 32 000 and 80 000
+at 2358. Nothing else changed: the case, its numerics and the solver are as above.
+
+**The recorder.** Each run writes every 1000 iterations. The ignored test `record_pipe` of `ofgpu-validate`
+(`OFGPU_PIPE_CASE`, `OFGPU_PIPE_META`) lowers the run's case, checks that cell `i + n k` has the oracle's centre
+`i` to `1e-12 R`, reads `U` and `nut` of the last two writes (ASCII at six digits), averages the four axial
+stations, and puts the profile into a `rans1d::Solution` for `rans1d::metrics` and `rans1d::tg0_bands`. It records
+`change` (the largest change of a cell's `U_z` between the last two writes, over `U_axis`) and `spread` (the largest
+difference of a cell's `U_z` from its station mean, over `U_axis`). The records are constants of
+`src/bin/validate_gates/pipe.rs`, replayed by `ofgpu-validate`'s section 69.
+
+**The rows.** Per `Re_tau`, on the finest level (`n = 160`), the four band errors of (143.17): `E_P = f/f_P - 1`
+at the input `Re_tau`, `E_B = f/f_B(Re_D) - 1`, the log-law deviation in `u+`, and `E_D = defect/4.07 - 1`; `u_val`
+is `|U_fine|` of 짠94's study of the same error over the three levels at `h = R/n`; 짠110.1's rule (`band_110`)
+reads Inside as a passing row, Undecided as OPEN and Outside as MISSES (Nikuradse's measured pipes, via
+Schlichting). Each f64 record is held to the 짠143.1 oracle on the same cells: `U_b` and `f` within `1e-4`
+relative (class P; 짠114.2 measured 1e-5 once omega converges, and six written digits give 5e-7). Class R: the
+single build's finest record lands in the f64 band of each of the four rows.
+
+**The price** (2026-10-15, the one RTX 5070 Ti shared with two other lanes' work): level 1, 8000 iterations,
+100.7 s with the card to itself and 265.8 s beside another run; an iteration costs 11.8 to 28 ms on levels 1 and 2, as
+much by what else the card runs as by the level.
+The six f64 records took 4273 s of card time and the two single ones 2863 s; with the pricing and the
+diagnosis runs above (about 1160 s) the unit used about 2.3 h of the 3 h it was given.
+
+**The records** (2026-10-15, `ofgpu-lowmach` built at f9bcb4a, unchanged by this unit), with the oracle (143.1) on the
+same cells beside them:
+
+| Re_tau | level (n) | iterations | U_b | oracle U_b | f | defect | Re_D | E_P | E_B | log law (cells) | E_D | device vs oracle | change | s |
+|--------|-----------|-----------|-----|------------|---|--------|------|-----|-----|-----------------|-----|------------------|--------|---|
+| 576.69 | 2 (160) | 80 000 | 6.005781 | 6.005666 | 0.0271240 | 3.6136 | 19 808 | +5.18 % | +1.70 % | 1.177 (35) | -11.21 % | 3.96e-5 | 1.4e-6 | 1717 |
+| 576.69 | 1 (80) | 24 000 | 6.027165 | 6.027151 | 0.0269318 | 3.6140 | 19 879 | +4.43 % | +1.07 % | 1.072 (17) | -11.20 % | 6.7e-6 | 0 | 358 |
+| 576.69 | 0 (40) | 12 000 | 6.079581 | 6.079579 | 0.0264695 | 3.6158 | 20 051 | +2.64 % | -0.45 % | 0.993 (9) | -11.16 % | 2.7e-7 | 0 | 114 |
+| 2358 | 2 (160) | 80 000 | 30.005245 | 30.005124 | 0.0181678 | 3.3215 | 98 962 | +0.84 % | +1.84 % | 1.230 (70) | -18.39 % | 4.0e-6 | 2.9e-6 | 1558 |
+| 2358 | 1 (80) | 32 000 | 30.287038 | 30.287032 | 0.0178313 | 3.3223 | 99 891 | -1.03 % | +0.19 % | 1.049 (35) | -18.37 % | 8.6e-7 | 2.9e-7 | 394 |
+| 2358 | 0 (40) | 16 000 | 30.818480 | 30.818478 | 0.0172216 | 3.3234 | 101 644 | -4.41 % | -2.81 % | 0.630 (17) | -18.34 % | 2.1e-7 | 0 | 132 |
+| 576.69 | 2 (160), single | 80 000 | 6.005792 | - | 0.0271076 | 3.6146 | 19 808 | +5.11 % | +1.64 % | 1.172 (35) | -11.19 % | - | 1.4e-6 | 1241 |
+| 2358 | 2 (160), single | 80 000 | 30.004043 | - | 0.0181560 | 3.3227 | 98 958 | +0.78 % | +1.78 % | 1.225 (70) | -18.36 % | - | 3.0e-6 | 1622 |
+
+Every record is x-invariant to the written digit (spread 0, 1.4e-7 on 2358 level 0), and its measured `u_tau` is the
+input one within 2.1e-6 ((143.6) at the steady state). "device vs oracle" is the larger of the `U_b` and `f`
+relative differences; the device's band errors are the oracle's within 0.01 percentage point (0.001 in `u+`) on every
+level, so the verdicts below are the model's on these cells, as 짠114.3 and 짠143.2 found on TG0's own mesh. `nu_t` on the axis is
+0.124 `u_tau R` at 576.69 and 0.131 at 2358 (짠114.3: 0.124 to 0.131).
+
+**The verdicts** on the finest level, with 짠94's studies:
+
+| Re_tau | row | E | u_val | bar | verdict |
+|--------|-----|---|-------|-----|---------|
+| 576.69 | f against Prandtl | +5.18 % | 0.66 % (p 1.27) | 5 % | OPEN, undecided within u_val |
+| 576.69 | f against Blasius | +1.70 % | 0.56 % (p 1.27) | 5 % | holds |
+| 576.69 | log law | 1.177 | 0.237 (diverging, first order) | 1.0 | OPEN, undecided within u_val |
+| 576.69 | core defect | -11.21 % | 0.01 % (p 2.21) | 10 % | **MISSES** |
+| 2358 | f against Prandtl | +0.84 % | 2.88 % (p 0.86) | 5 % | holds |
+| 2358 | f against Blasius | +1.84 % | 2.53 % (p 0.86) | 5 % | holds |
+| 2358 | log law | 1.230 | 0.173 (p 1.21) | 1.0 | **MISSES** |
+| 2358 | core defect | -18.39 % | 0.04 % (p 0.63) | 10 % | **MISSES** |
+
+Class R holds at both `Re_tau`: each single-build band error lands in the f64 band of its row. The single runs'
+measured `u_tau` is 3.0e-4 (576.69) and 3.6e-4 (2358) below the input one, where the f64 runs hold it to 2.1e-6: the
+wall cell's `U_P / delta_w` with `delta_w` 1.3e-6 m is where f32 is shortest, so their `f` is 6e-4 and 7e-4 below
+the f64 record's. Their stations agree to 1.3e-5 and 7.2e-6 of `U_axis` (the written f32 digits).
+
+These are 짠143.2's oracle conclusions on the device: no mesh closes the defect (the model's centreline eddy
+viscosity, 짠114.3), the log law at 2358 is outside by more than its `u_val`, and at 576.69 `f` against Prandtl
+and the log law sit on their bars, where the finer oracle meshes of 짠143.2 (+5.81 % extrapolated, 1.240 at 640
+cells) fall outside. The case-side O1 does what 짠114.5 measured: with the 1e-12 tolerance the device and the
+oracle agree on every level.
+
+**Tests** (`pipe::tests`, the validate binary, both builds): `the_rig_and_the_shipped_cases_are_tg0s` (the drive
+to 1e-8, the three expansions to 1e-12, the start state, and both shipped cases lower to level 1 with 320 cells),
+`the_oracle_on_the_device_cells_balances_the_drive` ((143.6) on the tangent cells to 1e-6; prints the oracle on the
+six cell sets), `the_replay_holds_inside_the_bands_and_misses_outside_them` (synthetic records whose Blasius,
+log-law and defect errors converge at second order: inside rows pass, outside rows MISS, the oracle rows hold),
+`every_gate_is_open_and_not_run_when_no_run_is_recorded` (eight OPEN gates, no row), `the_recorded_runs_replay`
+(prints the verdicts above), and the ignored `record_pipe`. `ofgpu-validate -sections 69` prints 17/17 checks passed
+and registers 3 MISSES and 2 OPEN gates, the same in both builds (the single build's oracle, on f32-rounded nodes,
+moves by 1.3e-6 at most).
+
+**Not claimed.** One model (SST); the Wilcox 2006 rows of 짠143.2 stay in the oracle. The 3-D quarter pipe of
+docs/17 짠12.7 item 6 is not built: the wedge holds the oracle to 4e-5. The cyclic wall-function finding above is a
+measurement of the JSONC route; an OpenFOAM-format case whose field files name `cyclic` on the pair is not
+affected, because `faces_where` reads those names.
+
 ## 144. The flat-plate harness, Blasius, T3A leg 4 and the ZPG plate
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units

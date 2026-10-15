@@ -32,3 +32,7 @@ pub(crate) mod t3a;
 /// SPEC-LIT §144.5, Gate 132-Z: the TMR zero-pressure-gradient plate with SA
 /// and SST against Karman-Schoenherr and Coles (recorded runs, replayed).
 pub(crate) mod zpg;
+
+/// SPEC-LIT §143.5, Gate 131-P: TG0's turbulent pipe with kOmegaSST on the
+/// true wedge against its four bands (recorded ofgpu-lowmach runs, replayed).
+pub(crate) mod pipe;

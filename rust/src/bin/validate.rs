@@ -3715,6 +3715,13 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)") {
     validate_gates::zpg::check_zpg(c)?;
     }
+    // SPEC-LIT 143.5 - Gate 131-P: TG0's fully developed turbulent pipe with
+    // kOmegaSST on the true wedge, its four bands against Nikuradse's pipes
+    // via Schlichting, replayed from the recorded ofgpu-lowmach runs of
+    // src/bin/validate_gates/pipe.rs (each Re_tau opens its own gate scopes).
+    if c.section("Gate 131-P: TG0's turbulent pipe, kOmegaSST on the true wedge against Prandtl, Blasius, the log law and the core defect, three radial levels, replayed (SPEC-LIT 143.5)") {
+    validate_gates::pipe::check_pipe(c)?;
+    }
 
     Ok(())
 }
