@@ -13,9 +13,15 @@ the §92.3 gate before it will emit anything.
 
 Tranche 1 implements the **hex-dominant path** (octree refinement,
 castellation, snapping, layers) and is complete: one command takes a config
-file to a `constant/polyMesh` a solver can be pointed at. The tetrahedral path
-is §92.4 and the polyhedral path is §92.5; both are specified there and neither
-is implemented.
+file to a `constant/polyMesh` a solver can be pointed at. Tranche 17 adds the
+**tet path**, `"kind": "tet"`: SPEC-LIT §116's native tetrahedral mesher
+(surface preparation, size field, surface remesh, conforming Delaunay
+recovery, Delaunay refinement, carve, optimisation, emission behind the same
+§92.3 gate). **The STL to tetrahedra path needs no gmsh** and no other
+external program: no GPL, LGPL or AGPL source or library is on it (§116.1).
+Prism layers on tet meshes (§116.15, TET-13b) and declared bodies (TET-19)
+are not built yet and are refused by name. The polyhedral path is §92.5,
+specified and not implemented.
 
 ## Usage
 
@@ -80,7 +86,8 @@ ofgpu-automesher <config.json> [-stopAfter STAGE] [-tag NAME] [-check [<caseDir>
 | `run_automesher.cmd` | Runs the mesher in a visible console with every line also copied to `<case_dir>/work/run.log`. The long runs go through this. |
 | `sections.py` | Draws xy / yz / zx sections of a written polyMesh - the actual face polygons, not a block sketch. How a mesh is looked at before a solver is pointed at it. |
 | `examples/box_sphere.json` | The smallest config that exercises the whole pipeline: a 1 m sphere in a 10 m box. Seconds to run; the config to try a change against. |
-| `examples/make_box_sphere_stl.py` | Writes `box_sphere.stl` - a generator rather than a checked-in binary asset. |
+| `examples/box_sphere_tet.json` | The same sphere and box on the tet path (`"kind": "tet"`, SPEC-LIT §116): about 20 000 tetrahedra in under 30 s. |
+| `examples/make_box_sphere_stl.py` | Writes `box_sphere.stl` - a generator rather than a checked-in binary asset. Its default sphere is wound inward, which the hex path accepts; `--outward` writes the outward one the tet path needs (§116.9 refuses an inward shell by name). |
 | `examples/nh3_site.json` | The ammonia-terminal site of §92.1, the mesher's own yardstick. |
 
 A first run, end to end:
@@ -93,6 +100,20 @@ python make_box_sphere_stl.py box_sphere.stl
 ..\..\..\rust\target\release\ofgpu-automesher box_sphere.json -check
 python ..\sections.py box_sphere_case 5 5 5 sections
 ```
+
+The same sphere as tetrahedra:
+
+```bat
+python make_box_sphere_stl.py box_sphere_outward.stl --outward
+..\..\..\rust\target\release\ofgpu-automesher box_sphere_tet.json
+..\..\..\rust\target\release\ofgpu-automesher box_sphere_tet.json -check
+```
+
+A tet run prints seven stage banners (`surfprep`, `sizefield`, `remesh`,
+`recover`, `refine`, `optimise`, `emit`) and writes `constant/polyMesh` and
+`<name>_summary.json`, whose `tet` block carries the tetrahedron and
+prism counts, the smallest and largest dihedral angle, the Steiner counts and
+each stage's time (SPEC-LIT §116.16). `-stopAfter` is refused on a tet config.
 
 ### From Claude Studio
 
@@ -113,6 +134,8 @@ Both carry comments on every block. Every key of
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `$schema` | string | - | Accepted and ignored; points at the `-schema` output. |
+| `kind` | string | `"hexDominant"` | SPEC-LIT §116.3: `"hexDominant"` (this table's pipeline) or `"tet"` (§116). Absent is `"hexDominant"`, so every older config is unchanged. A `tet` config refuses, by name, a `snap` block other than the defaults, `domain.grading` other than `[1, 1, 1]`, a non-default `castellation.min_faces`, `castellation.bodies` and `layers.patches`. On the tet path `domain.base_size` is the largest size `H`, a `refinement` band is a size `H / 2^level` (§116.8) and `keep_region` picks the carve's start (§116.12). |
+| `tet` | object | `null` | `kind: "tet"` only (refused on a hex config): the tet path's own knobs, `size`, `recover`, `refine`, `optimise`, `layers`, every one defaulted, so `"tet": {}` is complete. The keys and defaults are SPEC-LIT §116.3's table. |
 | `input.surfaces` | array | *(required)* | The STL files the mesher casts against (stages 3-4). |
 | `input.surfaces[].path` | string | *(required)* | Path to one STL file. |
 | `input.surfaces[].name` | string | `null` | Replaces that file's own solid (patch) names wholesale. |

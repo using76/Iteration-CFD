@@ -9,6 +9,15 @@ ported stage for stage, with every number that script hard-coded made a config
 key. [`examples/nh3_site.json`](examples/nh3_site.json) is that site as a
 config.
 
+**Tetrahedra from STL need no gmsh.** A closed STL (or OBJ) surface is meshed
+with tetrahedra by `ofgpu-automesher` with `"kind": "tet"`, the native mesher of
+`rust/SPEC-LIT.md` §116 (`rust/src/tetmesh/`), with no gmsh, TetGen, Netgen or
+other GPL, LGPL or AGPL code anywhere on the path; see
+[`tools/automesher/README.md`](../automesher/README.md) and
+[`tools/automesher/examples/box_sphere_tet.json`](../automesher/examples/box_sphere_tet.json).
+This directory is the STEP route, which goes through gmsh and its OCC kernel,
+and is a separate program outside that path.
+
 ```
 python tools/mesh/step_mesh.py <config.json> [--from-checkpoint] [--stop-after-checkpoint]
                      [--tag NAME] [--run-id ID] [--dry-run]

@@ -35566,6 +35566,26 @@ measurement.
 - `layers.max_neighbour_ratio < 1`, or non-finite.
 - `layers.gap_fraction` or `layers.concave_fraction` outside `(0, 1]`.
 
+**The kind rules, as TET-12 builds them** (`automesher/mod.rs`). `kind` is absent or `"hexDominant"`
+on every config written before TET-12, and the default is not serialised back, so those configs
+and their summaries' `config` blocks are unchanged. `kind` and `tet` take `deny_unknown_fields`
+like every other key: a mistyped key in `tet`, a kind that is not one of the two, and a
+mistyped `kind` key are refused by name. `AutomeshConfig::validate` then refuses, by naming the
+key:
+
+- a `tet` block when the kind is `hexDominant`;
+- with `kind: "tet"`, every key the tet path would otherwise silently ignore: a `snap` block that
+  differs from the defaults (the tet path has no snap stage), `domain.grading` other than
+  `[1, 1, 1]` (sizes come from §116.8, not from a graded block) and a `castellation.min_faces`
+  other than its default `4`;
+- with `kind: "tet"`, the two parts of the list above that the tet path does not build yet:
+  `castellation.bodies` (TET-19) and `layers.patches` (prism layers, TET-13b).
+
+*Tree against the list above.* `bodies` and `layers` are reused by the design, but until TET-19
+and TET-13b land they are refused rather than ignored. `driver::run` (the hex path) refuses a
+`tet` config, `driver::run_tet` a hex one, and `ofgpu-automesher` refuses `-stopAfter` on a tet
+config: (92.55)'s stop rule names the hex stages.
+
 ### 116.4 Orientation and the exact predicates
 
 **Implemented by TET-01** (`tetmesh/predicates.rs`).
@@ -37251,6 +37271,52 @@ recorded in §116.18 and asserted by `tests/tetmesh_optimise.rs::optimise_then_e
 unchanged. A cure would evaluate §92.3's sums on the mesh's f64 shadow (`HostGeom64`), which is
 a change to the gate's evaluation, not to this unit.
 
+**The driver, as TET-12 builds it** (`automesher/driver.rs`'s `run_tet`, and `ofgpu-automesher`).
+Before any stage, the run refuses a surface point that is not strictly inside the open domain box
+(`tet/domain`), because the box is the mesh's outer boundary, and a surface patch named like one
+of the six domain patches (`tet/patches`). Then seven stages run, each with §92.14's banner and
+elapsed line:
+
+1. `surfprep`: §116.9, with `refinement.feature_angle_deg` as the feature angle.
+2. `sizefield`: §116.8, with `H = domain.base_size` and `tet.size`. The sources are
+   `sources_from_refinement`'s, then the curvature sources (crease angle = the feature angle) and
+   the proximity sources. Which side the gap is measured on is DESIGN: `Outward` for
+   `keep_region = "largest"`, and `Both` for `"seed"`, whose fluid side is not known before the
+   carve.
+3. `remesh`: §116.10, with its default 10 iterations.
+4. `recover`: the eight corners of `domain.extent` join the remeshed points, so the hull is the
+   domain box; then §116.11 with `tet.recover`.
+5. `refine`: §116.13 with `tet.refine`. The carve starts from the hull for `largest` and from
+   `seed_point` for `seed` (§116.12).
+6. `optimise`: §116.14 with `tet.optimise`. The freedoms (116.21c) come from the remeshed
+   triangles' patches, and the subtriangles are frozen.
+7. `emit`: the emission above, (116.26), §92.3, then (92.56)'s `output.patch_names`. A
+   subtriangle's face goes on its triangle's patch. A hull face goes on the box side whose plane
+   holds all three of its points exactly, by coordinate equality. Box points are created on their
+   face's plane exactly (§116.13) and move only within it (116.21c), so every hull face has a side;
+   one without a side is refused (`tet/patches`). The patches are the six domain patches `xMin`,
+   `xMax`, `yMin`, `yMax`, `zMin`, `zMax` (the octree's names, type `patch`), then the surface's
+   patches in the surface's order (type `wall`), so a hex config's `patch_names` map applies
+   unchanged. The dihedral extremes are measured on the optimised tetrahedra, in f64.
+
+`ofgpu-automesher` writes `constant/polyMesh` and `<name>_summary.json` only after `run_tet`
+returned Ok, as §92.14.4 requires. `-check` needed no change: it reads any polyMesh and gates it
+(§92.14.5), tetrahedral meshes included.
+
+**The summary** (`tet_summary_json`), which TET-17 reads. It has (92.57)'s keys: `tool`,
+`config_path`, `name`, `case_dir`, `surface`, `stages`, `mesh`, `quality`, `total_seconds`,
+`config` and `identity`, with `stopped_after` and `layout` always `null`. It adds `"kind": "tet"`,
+seven `stages` rows named as above, each with `seconds` and its own counts, and a `tet` block:
+
+- `n_tets`, and `n_prisms`, which is 0 until TET-13b;
+- `min_dihedral_deg` and `max_dihedral_deg`;
+- `steiner`: `recover` (`ball`, `split`, `encroach_split`, `facet`, `facet_centroids`, `total`),
+  `refine` (`interior`, `segment_splits`, `facet_splits`, `facet_centroids`, `box_face_splits`,
+  `box_edge_splits`, `total`), and `total`, their sum;
+- `seconds`, the wall time of each stage.
+
+A hex summary carries no `kind` key, and a reader takes its absence as `hexDominant`.
+
 ### 116.17 Acceptance: Hagen-Poiseuille on tetrahedra and prisms
 
 **Implemented by TET-14.** A laminar pipe of radius `R` and length `L` is meshed with
@@ -37419,6 +37485,13 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-11 | the 30-degree wedge | **MISSED** upstream, as TET-10b's: refinement reaches its cap of 20 000 points after 187 passes, so there is no mesh to emit; `emit::tests::gate_passes_wedge` asserts the cause | the TET-11 commit |
 | TET-11 | the flat tetrahedron 1e4 m from the origin (base in `z = 10000`, apex `3 * 2^-13` m above it, legs `2^-7` m) | f64: accepted, (116.26) finds no cell, §92.3 PASS with tau 0.0663 and cond 230.0; `single`: refused, `emit/f32: rounding the points to f32 makes 1 of 1 tetrahedra flat or inverted by (116.26) of SPEC-LIT 116.16: cells 0; ...` | the TET-11 commit |
 | TET-11 | the sphere in a box under `single` | (116.26) finds no cell; §92.3 **MISSED**: G2 fails on 8 468 cells, max closure 4.533e-7 against 1e-10, because `quality::check` sums f32 area vectors; f64 passes | the TET-11 commit |
+| TET-12 | §116.3 and §116.16, changed by this unit | "The kind rules, as TET-12 builds them" with its tree note was added to §116.3; "The driver, as TET-12 builds it" and "The summary" to §116.16 | the TET-12 commit |
+| TET-12 | `box_sphere_tet.json`: the 1 m sphere of `make_box_sphere_stl.py --outward` (9 024 triangles) in `[0, 10]^3`, `H = 1`, `h = 0.25` on the sphere, `g = 1.2`, `curvature_cells = 0`, `keep_region = "largest"` | 426 remeshed triangles; 0 recovery Steiner points and 3 984 refinement points (2 668 interior, 357 segment splits, 875 box-face and 84 box-edge points) in 114 passes; 20 309 tetrahedra, 0 prisms; dihedral 29.1685 .. 152.3437 degrees: min >= 10 and max <= 165 PASS; §92.3 PASS: max closure 1.151e-15, max non-orthogonality 61.260 degrees (2 faces past 60), min tau 0.2882, max cond 47.978, 1 region; patches inlet 298, outlet 312, side_y0 328, side_y1 336, ground 318, top 338, sphere 1 140 faces. Time in release: 17.5 s in `driver::tests::tet_cases::tet_end_to_end` and 18.3 s wall for `ofgpu-automesher box_sphere_tet.json` (sizefield 1.1, remesh 0.4, refine 8.6, optimise 7.7, emit 0.1 s), on a machine running two other lanes' jobs: 30 s or less PASS. `-check` on the written case PASS | the TET-12 commit |
+| TET-12 | the hex goldens | `driver::tests::hex_goldens_unchanged`: `kind` absent and `"hexDominant"` written out parse to the same config, neither serialises `kind` or `tet`, and both runs emit the cube golden `3b257be8...d5e3`; the L1a goldens (`layers::tests::castellated_goldens`, six cases) and `the_cube_config_run_is_golden` pass unchanged | the TET-12 commit |
+| TET-12 | the refusals | `config_tests`: five unknown keys or kinds (`tet.size.gradatoin`, `tet.refine.radius_edges`, `tet.optimize`, `kind: "tetra"`, `knid`) and seven kind mismatches (a `tet` block on a hex config; with `kind: "tet"`, a non-default `snap`, `domain.grading`, `castellation.min_faces`, `castellation.bodies`, `layers.patches`, and a bad `tet.refine.radius_edge`), each by name; `tet_driver_refusals`: `driver::run` on a tet config, `driver::run_tet` on a hex one, a surface leaving the box (`tet/domain`, before any banner) and a surface patch named `xMin` (`tet/patches`) | the TET-12 commit |
+| TET-12 | the f32 arm | `rust/tests/automesher_tet.rs` (the same two tests) under `--features single`: the refusals pass; the end-to-end run reaches the emission and §92.3 is **MISSED** as §116.16 records: G2 (closure) fails on 18 828 of the 20 309 cells, because `quality::check` sums f32 area vectors; the test asserts that cause | the TET-12 commit |
+| TET-12 | box_sphere.json's wall size, 0.125 m, on the tet path | **not finished**: in `[3, 7]^3` with `H = 1`, bands of 0.5 m at 0.125 m and 2 m at 0.25 m, the refinement of §116.13 reached a cap of 40 000 inserted points after 570 passes (168 393 kept tetrahedra, the next pass needing 4 843 more) in 34 s, and in `[0, 10]^3` with `curvature_cells = 16` and no cap it had not finished after 10 min. 0.125 m at band distance 0 in `[3, 7]^3` finishes: 368 passes, 6 425 points, 33 000 tetrahedra, dihedral 28.84 .. 149.56 degrees, 28.7 s. The example therefore uses 0.25 m; the flat band is recorded for review with TET-09's termination note | the TET-12 commit |
+| TET-12 | `make_box_sphere_stl.py`'s winding | its default sphere is wound inward: §116.9 measures the shell's volume as -4.181 and refuses it (`surface/inward`). The default output is kept byte for byte, because the hex path accepts it and `tools/autonomy`'s probe fixtures record it; `--outward` reverses every triangle | the TET-12 commit |
 
 ### 116.19 References
 
