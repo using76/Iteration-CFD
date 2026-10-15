@@ -68,6 +68,7 @@ SNAP_G5_K = 1.10        # the convex-wall margin on a snapped wall's G5 edge (GL
 FT_HALF_H_F = 0.5       # R-FEAT's attraction radius tau = 0.5 h_f (SPEC-LIT §92.12 erratum)
 SNAP_TOL_DIV = 256      # R-SNAP: the (92.28) dead band eps = h_f / 256 (snap.tolerance = 2^-max_level / 256)
 SNAP_ITERATIONS = 60    # R-SNAP: the snap iteration cap (README: 60 measured as enough for the 1e-6 band)
+TE_TAU_H_F = 1.5        # R-TE (AUT-04): tau = 1.5 h_f once the feature bump is dropped
 T1_SIG = 4              # t1 floored to 4 significant digits, so the a priori y+ stays <= 1
 GROWTH_STEP_DIV = 1000  # growth steps are k / 1000
 BASE_FRAC = 0.5         # base_size = 0.5 L_ref (docs/15 §B's L4 recipe)
@@ -1150,6 +1151,75 @@ def r_snap_of(records) -> bool:
         rec = item.get("record", item) if isinstance(item, dict) else None
         if isinstance(rec, dict) and rec.get("rule_id") == "R-SNAP":
             return True
+    return False
+
+
+# --- R-TE (AUT-04): the trailing-edge feature level after an F3 failure ---------
+
+TE_CITE = ("docs/17 §12.6 AUT-04; SPEC-LIT §92.14.3 (92.75)-(92.76) the worst points; "
+           "§92.12 (92.37) the one-cell feature band, (92.38) tau = feature_tolerance * "
+           "base_size; §92.11 (92.28) the dead band; rules/R-TE.md")
+TE_FORMULA = ("feature_level' = wall_level on every entry above it; max_level' = the largest "
+              "level left; snap.feature_tolerance' = %g * 2**-max_level' (tau = %g h_f'); "
+              "snap.tolerance' = 2**-max_level' / %d where the config carries one "
+              "(R-SNAP's band at the new h_f')" % (TE_TAU_H_F, TE_TAU_H_F, SNAP_TOL_DIV))
+
+
+def te_config(config: dict):
+    """R-TE's edit, applied by remedies.py's RM-TE after an attempt fails F3a-F3c: the
+    feature bump is dropped to the wall level, the attraction radius becomes tau =
+    TE_TAU_H_F h_f at the new finest level, and R-SNAP's dead band follows it.  None
+    when there is no bump or the attraction is off (the R-PLANE path); else
+    (after, inputs).  AUT-03's worst points put the max residual of the tuning wings
+    1.7-3.8 h_f upstream of the trailing edge, in the wall cells just outside the
+    one-cell feature band (92.37), where the section is thinner than one wall cell."""
+    ref = config.get("refinement") or {}
+    levels = ref.get("levels") or []
+    wall = max([b["level"] for e in levels for b in e.get("bands") or []] + [0])
+    if not any(e.get("feature_level", 0) > wall for e in levels):
+        return None
+    snap = config.get("snap") or {}
+    ft = snap.get("feature_tolerance", preflight.MESHER_DEFAULTS["/snap/feature_tolerance"])
+    if ft == 0:
+        return None
+    after = copy.deepcopy(config)
+    lv = after["refinement"]["levels"]
+    fl0 = max(e.get("feature_level", 0) for e in lv)
+    for e in lv:
+        if e.get("feature_level", 0) > wall:
+            e["feature_level"] = wall
+    ml0 = ref.get("max_level", preflight.MESHER_DEFAULTS["/refinement/max_level"])
+    ml = max([wall] + [e.get("feature_level", 0) for e in lv])
+    after["refinement"]["max_level"] = ml
+    sn = after.setdefault("snap", {})
+    sn["feature_tolerance"] = TE_TAU_H_F * 2.0 ** -ml
+    if "tolerance" in sn:
+        sn["tolerance"] = 2.0 ** -ml / SNAP_TOL_DIV
+    inputs = [{"name": "wall_level", "value": wall, "unit": "1"},
+              {"name": "feature_level_before", "value": fl0, "unit": "1"},
+              {"name": "max_level_before", "value": ml0, "unit": "1"},
+              {"name": "max_level_after", "value": ml, "unit": "1"},
+              {"name": "tau_over_h_f_before", "value": ft * 2.0 ** ml0, "unit": "1"},
+              {"name": "tau_over_h_f_after", "value": TE_TAU_H_F, "unit": "1"}]
+    return after, inputs
+
+
+def r_te_of(records) -> bool:
+    """Which remedy table a recorded campaign ran under: True when one of its records
+    is an RM-TE record or lists RM-TE among its skipped remedies (AUT-04), False for
+    a campaign recorded before it.  A reader that re-proposes recorded remedies passes
+    remedies.propose(..., r_te=r_te_of(records))."""
+    for item in records:
+        rec = item.get("record", item) if isinstance(item, dict) else None
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("rule_id") == "RM-TE":
+            return True
+        for i in rec.get("inputs") or []:
+            if i.get("name") == "skipped" and any(
+                    isinstance(s, dict) and s.get("rule_id") == "RM-TE"
+                    for s in i.get("value") or []):
+                return True
     return False
 
 
@@ -2431,6 +2501,66 @@ def selftest() -> int:
                 "R-SNAP, the ninth record; r_snap=False is the same config without them; "
                 "the R-PLANE cube abstains byte-identical; max_level 1 passes; r_snap_of")
 
+    def g22():
+        # (a) a bump: feature_level 6 over wall 5 -> both 5, tau = 1.5 h_f, band h_f/256
+        bands = [{"distance": 0.1, "level": 5}, {"distance": 0.2, "level": 4}]
+        cfg = {"refinement": {"levels": [{"patch": "wing", "bands": copy.deepcopy(bands),
+                                          "feature_level": 6}], "max_level": 6},
+               "snap": {"feature_tolerance": 0.0078125, "iterations": 60,
+                        "tolerance": 2.0 ** -14}}
+        before = copy.deepcopy(cfg)
+        after, inputs = te_config(cfg)
+        assert cfg == before, "te_config edited its input"
+        assert diff_edits(cfg, after) == [
+            {"pointer": "/refinement/levels/0/feature_level", "from": 6, "to": 5},
+            {"pointer": "/refinement/max_level", "from": 6, "to": 5},
+            {"pointer": "/snap/feature_tolerance", "from": 0.0078125, "to": 0.046875},
+            {"pointer": "/snap/tolerance", "from": 2.0 ** -14, "to": 0.0001220703125}], (
+            diff_edits(cfg, after))
+        assert after["refinement"]["levels"][0]["bands"] == bands
+        got = {i["name"]: i["value"] for i in inputs}
+        assert got == {"wall_level": 5, "feature_level_before": 6, "max_level_before": 6,
+                       "max_level_after": 5, "tau_over_h_f_before": 0.5,
+                       "tau_over_h_f_after": 1.5}, got
+        # (b) no snap.tolerance in the config: none is added
+        c2 = copy.deepcopy(cfg)
+        del c2["snap"]["tolerance"]
+        assert "tolerance" not in te_config(c2)[0]["snap"]
+        # (c) no bump, the attraction off (R-PLANE) -> None
+        c3 = copy.deepcopy(cfg)
+        c3["refinement"]["levels"][0]["feature_level"] = 5
+        assert te_config(c3) is None
+        c4 = copy.deepcopy(cfg)
+        c4["snap"]["feature_tolerance"] = 0.0
+        assert te_config(c4) is None
+        # (d) the cube on R-PLANE gives None; r_te_of reads an RM-TE record or a skip
+        assert te_config(cube_setup()["config"]) is None
+        assert r_te_of([{"rule_id": "RM-TE"}]) is True
+        assert r_te_of([{"record": {"rule_id": "RM-SNAP-WALL", "inputs": [
+            {"name": "skipped", "value": [{"rule_id": "RM-TE", "why": "x"}]}]}}]) is True
+        assert r_te_of([{"rule_id": "RM-SNAP-WALL", "inputs": [
+            {"name": "skipped", "value": []}]}]) is False and r_te_of([]) is False
+        assert TE_TAU_H_F >= 0.125, "tau below h_f / 8 (remedies.TAU_FLOOR)"
+        # (e) the gate's arithmetic: F3-clean, the final attempt, the verdict
+        fl = {"F1": False, "F3a": False, "F3b": False, "F3c": False, "F3d": False,
+              "F3e": False}
+        assert te_clean({"flags": fl}) and not te_clean({"flags": dict(fl, F3e=True)})
+        assert not te_clean({"flags": dict(fl, F1=True)}) and not te_clean(None)
+        sd = te_side([{"attempt": 1, "outcome": {"flags": dict(fl, F3c=True)}},
+                      {"attempt": 2, "outcome": {"flags": fl, "seconds": 2.0}}],
+                     {"terminal": "CAPABILITY-LIMITED"})
+        assert sd["f3_clean"] and sd["f3_clean_any"] and sd["chain"] == [None, None]
+        idn = {"ok": True}
+        assert te_verdict(TE_TARGET, 0, idn, 0) == "PASS"
+        assert te_verdict(TE_TARGET - 1, 0, idn, 0) == "MISSED"
+        assert te_verdict(TE_TARGET, TE_TARGET, idn, 0) == "MISSED"
+        assert te_verdict(12, 0, {"ok": False}, 0) == "MISSED"
+        assert te_verdict(12, 0, idn, 1) == "MISSED"
+        return ("a level-6 bump over wall 5: feature_level and max_level 5, "
+                "feature_tolerance 0.046875 (tau 1.5 h_f), tolerance 2^-13, bands kept; "
+                "no tolerance added; no bump, tau 0 and the R-PLANE cube give None; r_te_of; "
+                "te_clean, te_side and te_verdict (target %d)" % TE_TARGET)
+
     failed = 0
     try:
         for name, fn in (("R-YP", g1), ("R-WIN", g2), ("window table", g3),
@@ -2440,7 +2570,8 @@ def selftest() -> int:
                          ("determinism", g13), ("cli", g14), ("FT-RADIUS rule", g15),
                          ("FT-RADIUS gate", g16), ("WIN-2TO1 rule", g17),
                          ("WIN-2TO1 gate", g18), ("WIN-2TO1 verdict", g19),
-                         ("GLB-CONFIG rule", g20), ("R-SNAP rule", g21)):
+                         ("GLB-CONFIG rule", g20), ("R-SNAP rule", g21),
+                         ("R-TE rule", g22)):
             failed += group(name, fn)
             if failed:
                 for l in lines:
@@ -3547,6 +3678,252 @@ def _cli_snap_gate(argv: list[str]) -> int:
 
 # --- the CLI (C9) ---------------------------------------------------------------
 
+# --- the R-TE gate (AUT-04): the quick set of 12 tuning wings at K = 4 ---------
+
+TE_SCHEMA = "autonomy-rte-gate/1"
+TE_FAMILY = "A"
+TE_N = 12
+TE_SALT = "r-te/1"
+TE_TARGET = 6          # fixed before the R-TE run from AUT-03's worst points and the probes
+TE_F3 = ("F3a", "F3b", "F3c", "F3d", "F3e")
+
+
+def te_quick_ids(rules_bundle: dict, rows: list) -> list:
+    """The quick set, pre-registered from the committed L5 bundle: the tuning A rows
+    setup classes sharp on their L5 fingerprint, strata round robin (easy, medium,
+    hard), each stratum in sha256(TE_SALT|id) order, TE_N of them."""
+    import hashlib
+    pop = ft_population(rules_bundle, rows, win_2to1=True, glb=True, r_snap=True)
+    by = {}
+    for p in pop:
+        if p["family"] == TE_FAMILY and p["class"] == "sharp":
+            by.setdefault(p["stratum"], []).append(p["geometry_id"])
+    for st in by:
+        by[st].sort(key=lambda g: hashlib.sha256(
+            ("%s|%s" % (TE_SALT, g)).encode("ascii")).hexdigest())
+    got, idx = [], {"easy": 0, "medium": 0, "hard": 0}
+    while len(got) < TE_N:
+        moved = False
+        for st in ("easy", "medium", "hard"):
+            if len(got) < TE_N and idx[st] < len(by.get(st, [])):
+                got.append(by[st][idx[st]])
+                idx[st] += 1
+                moved = True
+        if not moved:
+            raise RulesError("te_quick_ids: family %s holds %d sharp rows, not %d"
+                             % (TE_FAMILY, len(got), TE_N))
+    return got
+
+
+def te_identity(rules_bundle: dict, rows: list, gates=None, knobs=None) -> dict:
+    """Every tuning row with an L5 fingerprint: attempt 1 is setup's, which R-TE does
+    not touch; on the R-PLANE and smooth rows the remedy proposed for a synthetic F3c
+    outcome must be the same config, sha for sha, with RM-TE in the table and without."""
+    import remedies
+    gates = gates or schema.load_gates()
+    knobs = knobs or schema.load_knobs()
+    ends = {g["geometry_id"]: g for g in rules_bundle["geometries"]}
+    n = {"plane": 0, "smooth": 0, "sharp": 0, "sharp_rm_te": 0, "refused": 0}
+    bad = []
+    for row in rows:
+        gid = row["geometry_id"]
+        fp = (ends.get(gid) or {}).get("fingerprint")
+        if fp is None:
+            continue
+        res = setup(row, fp, "stl/%s.stl" % gid, "cases/%s" % gid, gid,
+                    gates=gates, knobs=knobs)
+        if res["verdict"] != "apply":
+            n["refused"] += 1
+            continue
+        cls = "plane" if res["summary"]["plane"] else \
+            ("smooth" if fp["sharp_edge_length_m"] == 0 else "sharp")
+        n[cls] += 1
+        cfg = res["config"]
+        ctx = {"geometry_id": gid, "fingerprint": fp, "flow": row["flow"],
+               "win_level": res["summary"]["win_level"], "config": cfg,
+               "outcome": remedies.synthetic_outcome("F3c", cfg, fp, row["flow"])}
+        hist = [{"attempt": 1, "config_sha256": res["config_sha256"], "rule_id": None}]
+        a = remedies.propose(ctx, hist, gates=gates, knobs=knobs, r_te=True)
+        b = remedies.propose(ctx, hist, gates=gates, knobs=knobs, r_te=False)
+        if cls == "sharp":
+            n["sharp_rm_te"] += a["rule_id"] == "RM-TE"
+        elif a["rule_id"] != b["rule_id"] or a["config_sha256"] != b["config_sha256"]:
+            bad.append(gid)
+    return {"counts": n, "changed": bad,
+            "ok": not bad and n["plane"] > 0 and n["smooth"] > 0}
+
+
+def te_read(cdir: str, ids: list) -> tuple:
+    """A finished campaign's header and, per id, its rows by attempt and end record."""
+    with open(os.path.join(cdir, "campaign.json"), encoding="utf-8") as fh:
+        head = json.load(fh)
+    rows, ends = {g: [] for g in ids}, {}
+    with open(os.path.join(cdir, "attempts.jsonl"), encoding="utf-8") as fh:
+        for ln in fh:
+            if ln.strip():
+                r = json.loads(ln)
+                if r["geometry_id"] in rows:
+                    rows[r["geometry_id"]].append(r)
+    with open(os.path.join(cdir, "geometries.jsonl"), encoding="utf-8") as fh:
+        for ln in fh:
+            if ln.strip():
+                g = json.loads(ln)
+                if g["geometry_id"] in rows:
+                    ends[g["geometry_id"]] = g
+    for g in rows:
+        rows[g].sort(key=lambda r: r["attempt"])
+    return head, rows, ends
+
+
+def te_clean(outcome) -> bool:
+    """F3-clean: a written mesh (F1 false) with none of F3a-F3e true."""
+    fl = (outcome or {}).get("flags") or {}
+    return fl.get("F1") is False and not any(fl.get(k) is True for k in TE_F3)
+
+
+def te_side(rows: list, end) -> dict:
+    """One body under one arm: the final attempt (the mesh the campaign delivers)."""
+    last = rows[-1]["outcome"] if rows else None
+    fl = (last or {}).get("flags") or {}
+    return {"terminal": (end or {}).get("terminal"), "attempts": len(rows),
+            "chain": [r.get("rule_id") for r in rows],
+            "f3_clean": te_clean(last),
+            "f3_clean_any": any(te_clean(r["outcome"]) for r in rows),
+            "flags": [k for k in ("F1",) + TE_F3 if fl.get(k) is True],
+            "max_over_hf": (last or {}).get("max_over_hf"),
+            "p99_over_hf": (last or {}).get("p99_over_hf"),
+            "pinned_frac": (last or {}).get("pinned_frac"),
+            "feature_capture": (last or {}).get("feature_capture"),
+            "failure_class": (last or {}).get("failure_class"),
+            "n_cells": (last or {}).get("n_cells"),
+            "seconds": sum(r["outcome"].get("seconds") or 0.0 for r in rows)}
+
+
+def te_verdict(n_new: int, n_ref: int, identity: dict, n_errors: int) -> str:
+    """PASS: the R-TE arm reaches TE_TARGET F3-clean bodies, more than the rules
+    before it, with the identity held and no body missing or in a harness error."""
+    ok = n_new >= TE_TARGET and n_new > n_ref and identity["ok"] and n_errors == 0
+    return "PASS" if ok else "MISSED"
+
+
+def te_gate(cdir: str, ref_dir: str, report_dir: str = REPORT_DIR) -> int:
+    """The AUT-04 quick set over two finished K = 4 campaigns on te_quick_ids: `cdir`
+    with RM-TE, `ref_dir` the rules before it; writes R-TE.json and R-TE.md."""
+    import split
+    rb = _read_gz(AML_BUNDLE)
+    rows_t = split.load("tuning", "rules")
+    ids = te_quick_ids(rb, rows_t)
+    identity = te_identity(rb, rows_t)
+    head, got, end = te_read(cdir, ids)
+    rhead, rgot, rend = te_read(ref_dir, ids)
+    rec = {}
+    for r in rb["attempts"]:
+        if r["geometry_id"] in got:
+            rec.setdefault(r["geometry_id"], []).append(r)
+    rec_end = {g["geometry_id"]: g for g in rb["geometries"] if g["geometry_id"] in got}
+    bodies, errors = [], []
+    strata = {r["geometry_id"]: r["stratum"] for r in rows_t}
+    for gid in ids:
+        new, ref = te_side(got[gid], end.get(gid)), te_side(rgot[gid], rend.get(gid))
+        l5 = te_side(sorted(rec.get(gid, []), key=lambda r: r["attempt"]), rec_end.get(gid))
+        for arm, side in (("r-te", new), ("rules", ref)):
+            if side["terminal"] in (None, "HARNESS-ERROR"):
+                errors.append({"geometry_id": gid, "arm": arm, "terminal": side["terminal"]})
+        bodies.append({"geometry_id": gid, "stratum": strata[gid], "r-te": new,
+                       "rules": ref, "l5_recorded": l5})
+    arms = ("r-te", "rules", "l5_recorded")
+    count = {arm: sum(1 for b in bodies if b[arm]["f3_clean"]) for arm in arms}
+    count_any = {arm: sum(1 for b in bodies if b[arm]["f3_clean_any"]) for arm in arms}
+    verdict = te_verdict(count["r-te"], count["rules"], identity, len(errors))
+    keys = ("campaign_id", "git_sha", "streams", "t_start", "binary_sha256")
+    rep = {"$comment": FT_HEADER, "schema": TE_SCHEMA, "date": schema._now_iso()[:10],
+           "te_tau_h_f": TE_TAU_H_F, "target": TE_TARGET, "ids": ids,
+           "campaign": {k: head.get(k) for k in keys},
+           "ref_campaign": {k: rhead.get(k) for k in keys},
+           "identity": identity, "f3_clean": count, "f3_clean_any": count_any,
+           "verdict": verdict, "errors": errors, "bodies": bodies}
+    os.makedirs(report_dir, exist_ok=True)
+    with open(os.path.join(report_dir, "R-TE.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        json.dump(rep, fh, indent=1, sort_keys=True, ensure_ascii=False)
+        fh.write("\n")
+    with open(os.path.join(report_dir, "R-TE.md"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(te_md(rep))
+    ic = identity["counts"]
+    print("R-TE %s: F3-clean at K = 4 %d of %d (target >= %d; the rules before it %d, "
+          "L5 recorded %d); identity plane %d, smooth %d, changed %d (%s); sharp rows "
+          "moved to RM-TE %d of %d; harness errors %d"
+          % (verdict, count["r-te"], len(ids), TE_TARGET, count["rules"],
+             count["l5_recorded"], ic["plane"], ic["smooth"], len(identity["changed"]),
+             "ok" if identity["ok"] else "FAIL", ic["sharp_rm_te"], ic["sharp"],
+             len(errors)))
+    return 0 if verdict == "PASS" else 1
+
+
+def _te_cell(side: dict) -> str:
+    return "%s (%s)" % ("F3-clean" if side["f3_clean"] else " ".join(side["flags"]),
+                        side["terminal"])
+
+
+def te_md(rep: dict) -> str:
+    L = []
+    a = L.append
+    a("<!-- %s -->" % FT_HEADER)
+    a("# R-TE - the quick set of tuning wings (AUT-04)")
+    a("")
+    c, r = rep["campaign"], rep["ref_campaign"]
+    a("- date %s; R-TE campaign %s (git %s, binary %s, %s streams); the rules before it %s "
+      "(git %s, binary %s)" % (rep["date"], c["campaign_id"], (c["git_sha"] or "")[:12],
+                               (c["binary_sha256"] or "")[:12], c["streams"],
+                               r["campaign_id"], (r["git_sha"] or "")[:12],
+                               (r["binary_sha256"] or "")[:12]))
+    a("- the rule: after an F3a-F3c attempt on a sharp body off R-PLANE with a feature bump, "
+      "RM-TE sets feature_level = wall level, max_level = the largest level left, "
+      "tau = %g h_f and R-SNAP's band h_f/256 at the new h_f" % rep["te_tau_h_f"])
+    a("- bodies (pre-registered, te_quick_ids): %s" % " ".join(rep["ids"]))
+    ic = rep["identity"]["counts"]
+    a("- identity over the tuning rows with an L5 fingerprint: %d R-PLANE and %d smooth rows "
+      "propose the same config for a synthetic F3c with and without RM-TE, %d changed (%s); "
+      "%d of %d sharp rows take RM-TE; %d refused" % (
+          ic["plane"], ic["smooth"], len(rep["identity"]["changed"]),
+          "ok" if rep["identity"]["ok"] else "FAIL", ic["sharp_rm_te"], ic["sharp"],
+          ic["refused"]))
+    f, fa = rep["f3_clean"], rep["f3_clean_any"]
+    a("- **F3-clean at K = 4 (final attempt): R-TE %d of %d** against the target >= %d; "
+      "the rules before it %d; L5 recorded %d. Any attempt clean: %d / %d / %d. "
+      "Verdict: **%s**; harness errors %d" % (
+          f["r-te"], len(rep["ids"]), rep["target"], f["rules"], f["l5_recorded"],
+          fa["r-te"], fa["rules"], fa["l5_recorded"], rep["verdict"], len(rep["errors"])))
+    a("")
+    a("| body | stratum | L5 recorded | rules before R-TE | R-TE | R-TE chain | max/h_f | "
+      "p99/h_f | pinned | capture | cells | s |")
+    a("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    for b in rep["bodies"]:
+        n = b["r-te"]
+        a("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %.0f |" % (
+            b["geometry_id"], b["stratum"], _te_cell(b["l5_recorded"]),
+            _te_cell(b["rules"]), _te_cell(n), " ".join(x or "-" for x in n["chain"]),
+            _ft4(n["max_over_hf"]), _ft4(n["p99_over_hf"]), _ft4(n["pinned_frac"]),
+            _ft4(n["feature_capture"]), n["n_cells"], n["seconds"]))
+    a("")
+    a("A quick set decides the rule; the full tuning effect is AUT-12's L-run.")
+    return "\n".join(L) + "\n"
+
+
+def _cli_te_gate(argv: list[str]) -> int:
+    ap = _ArgParser(prog="rules.py --te-gate")
+    ap.add_argument("--campaign", required=True)
+    ap.add_argument("--ref", required=True)
+    ap.add_argument("--report-dir", default=REPORT_DIR)
+    args = ap.parse_args(argv)
+    try:
+        return te_gate(args.campaign, args.ref, report_dir=args.report_dir)
+    except (RulesError, OSError, ValueError, schema.SchemaError) as e:
+        sys.stderr.write("rules: %s\n" % e)
+        return 2
+
+
 class _ArgParser(argparse.ArgumentParser):
     def error(self, message):
         sys.stderr.write("rules: %s\n" % message)
@@ -3715,6 +4092,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cli_glb_gate(argv[1:])
     if argv[0] == "--snap-gate":
         return _cli_snap_gate(argv[1:])
+    if argv[0] == "--te-gate":
+        return _cli_te_gate(argv[1:])
     ap = _ArgParser(prog="rules.py", description="the L1 setup rules (AM-9)")
     ap.add_argument("stl", nargs="?")
     ap.add_argument("--id")

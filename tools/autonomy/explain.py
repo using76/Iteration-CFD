@@ -196,6 +196,11 @@ TEMPLATES = {
                        "title": "refine the whole refinement ladder one level",
                        "because": "a missing wall patch or a split fluid region means the lattice is "
                                   "too coarse for the body's topology"},
+    "RM-TE": {"layer": "remedy",
+              "title": "drop the feature bump to the wall level and widen the attraction radius",
+              "because": "the worst snap residuals sit just outside the one-cell feature band, "
+                         "where the trailing wedge is thinner than one wall cell, and without "
+                         "the bump a radius of one and a half finest cells still holds the edges"},
     "RM-SNAP-WALL": {"layer": "remedy",
                      "title": "coarsen the whole refinement ladder one level, not below the y+ floor",
                      "because": "the pilot sweep found one level coarser the only snap-clean change "
@@ -959,7 +964,7 @@ def _st_binom_cdf(x: int, n: int, p: float) -> float:
 
 
 def _g1_templates():
-    assert len(TEMPLATES) == 54, len(TEMPLATES)
+    assert len(TEMPLATES) == 55, len(TEMPLATES)
     counts = {}
     for rid, tp in TEMPLATES.items():
         assert _DECISION_ID_RE.fullmatch(rid) and ID_RE.fullmatch(rid), rid
@@ -968,9 +973,9 @@ def _g1_templates():
         assert len(tp) == 3, rid
         assert re.search(r"\d", tp["title"] + tp["because"]) is None, rid
         counts[prefix] = counts.get(prefix, 0) + 1
-    assert counts == {"PF": 11, "WL": 7, "R": 9, "RM": 17, "PR": 6,
+    assert counts == {"PF": 11, "WL": 7, "R": 9, "RM": 18, "PR": 6,
                       "OPT": 4}, counts
-    print("[ok] templates: 54 rule ids (PF 11, WL 7, R 9, RM 17, PR 6, OPT 4), "
+    print("[ok] templates: 55 rule ids (PF 11, WL 7, R 9, RM 18, PR 6, OPT 4), "
           "each with its "
           "prefix's layer, no digit in any template")
 
@@ -999,7 +1004,7 @@ def _g2_static_scan():
 def _g3_records():
     fx = load_fixtures()
     recs = fx["records_by_id"]
-    assert len(recs) == 64, len(recs)
+    assert len(recs) == 65, len(recs)
     ids = set()
     for rec in recs:
         c = card(rec)
@@ -1010,7 +1015,7 @@ def _g3_records():
     assert ids == fx_ids, ids ^ fx_ids
     for v in [0.0, 1.0, 0.1334231805929919, 3, True, None, "a", [1.5, None], {"k": 1}]:
         assert fmt(v) == remedies._fmt(v), (v, fmt(v), remedies._fmt(v))
-    print("[ok] records: 64 fixture records of 44 ids render, every line starts with "
+    print("[ok] records: 65 fixture records of 45 ids render, every line starts with "
           "its rule id, 0 ungrounded; fmt == remedies._fmt on 9 values")
 
 

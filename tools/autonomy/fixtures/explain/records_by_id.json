@@ -3317,6 +3317,133 @@
    },
    "uncertainty": 0,
    "verdict": "refuse"
+  },
+  {
+   "cite": "docs/17 §12.6 AUT-04; SPEC-LIT §92.14.3 (92.75)-(92.76) the worst points; §92.12 (92.37) the one-cell feature band, (92.38) tau = feature_tolerance * base_size; §92.11 (92.28) the dead band; rules/R-TE.md",
+   "edits": [
+    {
+     "from": 6,
+     "pointer": "/refinement/levels/0/feature_level",
+     "to": 5
+    },
+    {
+     "from": 6,
+     "pointer": "/refinement/max_level",
+     "to": 5
+    },
+    {
+     "from": 0.0078125,
+     "pointer": "/snap/feature_tolerance",
+     "to": 0.046875
+    },
+    {
+     "from": 6.103515625e-05,
+     "pointer": "/snap/tolerance",
+     "to": 0.0001220703125
+    }
+   ],
+   "formula": "feature_level' = wall_level on every entry above it; max_level' = the largest level left; snap.feature_tolerance' = 1.5 * 2**-max_level' (tau = 1.5 h_f'); snap.tolerance' = 2**-max_level' / 256 where the config carries one (R-SNAP's band at the new h_f')",
+   "inputs": [
+    {
+     "name": "attempt",
+     "unit": "1",
+     "value": 1
+    },
+    {
+     "name": "k",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "key",
+     "unit": "1",
+     "value": "F3"
+    },
+    {
+     "name": "stage_focus",
+     "unit": "1",
+     "value": "snap"
+    },
+    {
+     "name": "fires_before",
+     "unit": "1",
+     "value": 0
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "floor_level",
+     "unit": "1",
+     "value": 4
+    },
+    {
+     "name": "on_plane",
+     "unit": "1",
+     "value": false
+    },
+    {
+     "name": "config_sha256_before",
+     "unit": "",
+     "value": "b1197091407d863aaeb8921f551365974364da5ddbb01374871efd778a9c854e"
+    },
+    {
+     "name": "config_sha256_after",
+     "unit": "",
+     "value": "6c55d4a415070c39ae8b0ec6eacca692ed1a1c8bd7de7bec4ec52203896986bb"
+    },
+    {
+     "name": "skipped",
+     "unit": "1",
+     "value": []
+    },
+    {
+     "name": "wall_level",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "feature_level_before",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "max_level_before",
+     "unit": "1",
+     "value": 6
+    },
+    {
+     "name": "max_level_after",
+     "unit": "1",
+     "value": 5
+    },
+    {
+     "name": "tau_over_h_f_before",
+     "unit": "1",
+     "value": 0.5
+    },
+    {
+     "name": "tau_over_h_f_after",
+     "unit": "1",
+     "value": 1.5
+    }
+   ],
+   "layer": "remedy",
+   "message": "RM-TE: F3 at stage snap (outcome.p99_over_hf = 0.217506 > 0.1; score.py stages[snap] p99_residual / h_f (docs/15 §D.1 F3b)) -> drop the feature bump to the wall level and set the attraction radius to 1.5 h_f at the new finest level (R-TE) (fire 1 of 2, attempt 2 of 4): /refinement/levels/0/feature_level 6 -> 5; /refinement/max_level 6 -> 5; /snap/feature_tolerance 0.0078125 -> 0.046875; /snap/tolerance 6.10352e-05 -> 0.00012207",
+   "rule_id": "RM-TE",
+   "schema": "autonomy-decision/1",
+   "t": "2026-10-15T00:02:07Z",
+   "trigger": {
+    "observable": "outcome.p99_over_hf",
+    "op": ">",
+    "source": "score.py stages[snap] p99_residual / h_f (docs/15 §D.1 F3b)",
+    "threshold": 0.1,
+    "value": 0.21750617873447461
+   },
+   "uncertainty": 0,
+   "verdict": "apply"
   }
  ],
  "schema": "autonomy-explain-records-by-id/1"

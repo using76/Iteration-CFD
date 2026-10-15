@@ -11,8 +11,9 @@ at `57a2b4d`, not by explain.py.
 - `records.json`: every DecisionRecord of those runs, tagged with the attempt it decided (a remedy's record is
   tagged with the attempt its edit produced; a terminal record with the attempt it ended on).
 - `records_by_id.json`: one real record per (rule_id, verdict) emitted by schema.py, preflight.py, rules.py and
-  remedies.py, 64 records of 44 ids (WL-SHARP-FT0 added 2026-09-26; RM-SNAP-TAU added 2026-10-02; R-SNAP's
-  apply, abstain and pass added 2026-10-14 by AUT-05). A scratch
+  remedies.py, 65 records of 45 ids (WL-SHARP-FT0 added 2026-09-26; RM-SNAP-TAU added 2026-10-02; R-SNAP's
+  apply, abstain and pass added 2026-10-14 by AUT-05; RM-TE's apply added 2026-10-15 by AUT-04, proposed on
+  A-1-012's live attempt-1 outcome from the AUT-04 quick set). A scratch
   path is replaced by `<work>`.
 - `meta.json`: the family and stratum of the three geometries (the probes are family X, stratum probe).
 - `expect.json`: the supervisor's labels for the golden texts and the summary, and nine Clopper-Pearson

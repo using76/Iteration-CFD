@@ -647,7 +647,9 @@ later rule abstains. Every edit goes through the locked knob table (no `/quality
 (2026-09-27) R-FEAT writes `/snap/feature_tolerance = 0.5 · 2^−max_level`, so the attraction radius
 tau = feature_tolerance · base_size is h_f/2 (R-BUDGET re-derives it when it changes max_level); 0 still switches
 the feature attraction off and stays refused off the R-PLANE path (WL-SHARP-FT0, section D). Since AUT-05
-(2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE.
+(2026-10-14) R-SNAP writes `/snap/tolerance` and `/snap/iterations` off R-PLANE. R-TE (AUT-04, 2026-10-15) is
+not an attempt-1 rule: its edit `te_config` is applied by remedies.py's RM-TE after an F3 failure, so setup and
+every attempt-1 config are unchanged.
 
 - R-YP reads the flow, writes `/layers/*`: t1 = y+·ν/u_τ, floored to 4 significant digits (a priori y+ ≤ 1).
 - R-DOM reads the bbox, writes `/domain/*`: bbox + 3/6/2.5 L_ref, on multiples of base_size = 0.5 L_ref.
@@ -795,10 +797,50 @@ to the cap: 30 iterations at 45.1 s and p99/h_f 0.0686 before, 60 iterations at 
 R-PLANE identity: 37 of 37 plane configs byte-identical over the 372 tuning rows with an L5 fingerprint, no refusal
 moved. A quick set decides the rule, not G-FID: the full tuning effect is AUT-12's L-run.
 
+**R-TE (AUT-04, 2026-10-15): the trailing-edge feature level on the A-family wings.** AUT-03's `worst_points`
+((92.75)-(92.76)) located the wings' F3 failure before any R-TE code. On the 12 bodies below, at today's binary and
+rules, attempt 1 fails F3c (max/h_f 0.56-0.97) on the 11 with a feature bump. All 16 worst points of every body
+are classed "smooth". On the nine thick wings (tt 13-24) they sit at x/c 0.97-0.99, 1.7-3.8 h_f upstream of the
+trailing edge, where the section is 1.3-2.2 h_f thick. That is the wall-level cells (2 h_f) just outside the
+one-cell feature band of (92.37): the 2:1 transition of the bump lands in a wedge thinner than one wall cell, and
+the blunt TE base is itself only 0.46-0.66 h_f tall. On the two 6 % wings (A-1-098, A-1-099) they sit at
+x/c 0.04, the leading edge. Probes on attempt-1 configs: without the bump, A-1-012's max/h_f falls from 0.743 to
+0.0039 with nothing pinned, but the capture (92.62) is 0.283 at tau h_f/2 and 0.289 at h_f (F3e). At 1.5 h_f it
+is 0.503 with p99 0.068 and max 0.255 (F3-clean); at 2 h_f p99 rises to 0.239 (F3b). A-1-047 and A-1-118 are
+F3-clean at 1.5 h_f too (capture 0.846 and 0.856). The fingerprint carries no trailing-edge observable, so the
+rule acts on the attempt's own failure. RM-TE comes first among the F3 remedies (keys F3a-F3c, ahead of
+RM-SNAP-WALL), on a sharp body off R-PLANE whose `feature_level` exceeds its wall level. It sets
+`feature_level` to the wall level, `max_level` to the largest level left, `snap.feature_tolerance` to
+1.5·2^−max_level (tau = `TE_TAU_H_F` = 1.5 h_f, above RM-SNAP-TAU's floor h_f/8), and, where the config carries
+one, `snap.tolerance` to 2^−max_level/256 (R-SNAP's dead band at the new h_f). No band distance or band level
+moves. These are the plan row's whitelisted knobs: the trailing-edge feature level, the band and the attraction
+radius. `propose(..., r_te=False)` is the table before AUT-04, and `rules.r_te_of(records)` tells which table a
+campaign used (an RM-TE record, or RM-TE among a record's skipped remedies). `campaign.replay` and
+optimise.py's refine rounds pass it. The selftest oracles (prior.py `_run_oracle`, optimise.py `_oracle_run`)
+model G-PILOT's wall cure and run with r_te False. remedies.py's labelled fixtures still run the old table,
+and group 14 holds RM-TE's departures from them: 4 of 66 (S03, S04, S25, S34) move to RM-TE.
+
+G-R-TE 2026-10-15 (`rules.py --te-gate --campaign DIR --ref DIR`, `rules/R-TE.json` and `.md`; binary
+a6e15835…, git db2542c plus this unit's diff, two K = 4 campaigns at 3 streams with the audit off: the rules
+before R-TE 2394 s, R-TE 3307 s): PASS. The quick set was pre-registered from the committed L5 bundle
+(`te_quick_ids`): the tuning A rows that setup classes sharp, strata round robin, each in
+sha256("r-te/1|id") order: A-1-012, A-1-024, A-1-047, A-1-037, A-1-013, A-1-017, A-1-049, A-1-118, A-1-098,
+A-1-034, A-1-099, A-1-109. The target was fixed before the R-TE run: **F3-clean at the final attempt, K = 4:
+8 of 12 against the target ≥ 6**; the rules before it 0, and the L5 bundle as recorded 0. The eight are the
+thick bump wings, each F3-clean at attempt 2 (RM-TE): max/h_f 0.158-0.331, p99/h_f 0.0038-0.0677, pinned
+0.004-0.024, capture 0.50-0.91. The four that stay out are: A-1-024 (F3e, capture 0.357 after RM-TE, NO-REMEDY);
+A-1-049 (no bump, so RM-TE does not fire; F3e only, capture 0.284); and A-1-098 and A-1-099 (the 6 % wings).
+On the thin wings RM-TE brings max/h_f to 0.21-0.23 but pins 5.4-6.5 % (F3a, F3b). Attempt 3 (RM-SNAP-WALL,
+RM-SNAP-TAU) clears F3a-c, but F3d and F3e remain: the leading edge loses area and the capture is 0.03-0.13. All eight
+end CAPABILITY-LIMITED on `layer:retreat_snapped`: F3-clean is not a layer pass, and strict failure is
+unchanged. Identity: over the tuning rows with an L5 fingerprint, the 37 R-PLANE and the 44 smooth rows propose
+the same config for a synthetic F3c with and without RM-TE. 169 of 276 sharp rows would take RM-TE on an F3
+failure. That is measured on the wings only, so the other families' effect is AUT-12's L-run.
+
 ## remedies.py — L2 remedies
 
 AM-10's L2: after a failed attempt, `diagnose` names the key and the earliest failing stage from score.py's
-closed failure enum; `propose` walks a thirteen-row table in priority order. Keys and their stage: F1's
+closed failure enum; `propose` walks a fourteen-row table in priority order. Keys and their stage: F1's
 `surface_closed`/`config`/`io`/`crash`, `gate@octree|castellate|split|layers` and F2 end NO-REMEDY (stage
 None; the gate keys keep their stage); `timeout` and F5 → octree; F4 → castellate; F3a/F3b/F3c, F3d and
 `gate@snap` → snap; `layer_t1_G5`, `layer:min_thickness`, `layer:retreat_snapped`, `layer:no_full_stack` →
@@ -809,6 +851,9 @@ Since 2026-09-26 RM-SNAP-FT never applies on a body with sharp edges (skipped by
 - RM-BUDGET-FEAT (F5, timeout; octree) — drops the feature bump to the wall level.
 - RM-BUDGET-WALL (F5, timeout; octree) — the whole ladder one level coarser, never below the y⁺ floor.
 - RM-TOPO-REFINE (F4; castellate) — the ladder one level finer, predicted cells ≤ 0.7·cell_budget.
+- RM-TE (F3; snap, since 2026-10-15, AUT-04) — R-TE's `rules.te_config`: the feature bump dropped to the wall
+  level, tau = 1.5 h_f at the new finest level, R-SNAP's band re-derived; skipped with no sharp edge, on the
+  R-PLANE path, with no bump or with the attraction off. `propose(r_te=False)` leaves it out (the table before).
 - RM-SNAP-WALL (F3, gate@snap; snap) — the ladder one level coarser, never on the R-PLANE path (G-PILOT's only F3-clean knob with the attraction on).
 - RM-SNAP-FT (F3, gate@snap; snap) — `snap.feature_tolerance = 0`; caution 1 applies and G-FID guards it.
 - RM-SNAP-TAU (F3, gate@snap; snap, since 2026-10-02) — `snap.feature_tolerance = feature_tolerance / 2`

@@ -1494,9 +1494,11 @@ _pass_oracle = _oracle_attempt(lambda config, gctx: "pass")
 
 
 def _run_oracle(out, attempt_fn, ids=IDS8):
+    # r_te False: the oracles model G-PILOT's cure (one wall level coarser), the remedy
+    # table before AUT-04's RM-TE that the bank and gate counts were written against
     return campaign.run_campaign(
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": "rules",
-         "streams": 2, "quiet": True},
+         "streams": 2, "quiet": True, "r_te": False},
         attempt_fn=attempt_fn, probe_fn=campaign._fake_probe(1000),
         snap_fn=campaign._fake_snap)
 
@@ -1520,7 +1522,7 @@ def _g1_constants(H):
                          "why": "its G-PRIOR pass was vacuous: real equals rules "
                                 "on every tuning geometry"}, USER_SHIP
     assert TRANSFER == ("RM-BUDGET-FAR", "RM-BUDGET-FEAT", "RM-BUDGET-WALL",
-                        "RM-TOPO-REFINE", "RM-SNAP-WALL", "RM-SNAP-FT",
+                        "RM-TOPO-REFINE", "RM-TE", "RM-SNAP-WALL", "RM-SNAP-FT",
                         "RM-SNAP-TAU", "RM-SNAP-REFINE"), TRANSFER
     for rid in PR_IDS:
         assert rid in explain.TEMPLATES and \

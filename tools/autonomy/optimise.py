@@ -1228,7 +1228,8 @@ def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
                 {"manifest": "tuning", "mode": "rules+opt", "ids": R, "out": out,
                  "run_id": "opt-refine-r%d" % j, "streams": streams,
                  "audit_mod": AUDIT_OFF,
-                 "binary": binary or campaign.BINARY_DEFAULT, "quiet": quiet},
+                 "binary": binary or campaign.BINARY_DEFAULT, "quiet": quiet,
+                 "r_te": rules.r_te_of(rules_bundle["records"])},
                 attempt_fn=A, probe_fn=P, snap_fn=S,
                 hooks={"optimiser": make_hook(
                     lambda gid: (folds[fold_of(gid)], fold_of(gid)),
@@ -2262,9 +2263,11 @@ IDS16 = prior.IDS8 + ("D-1-001", "D-1-027", "E-1-003", "E-1-011", "F-1-025",
 
 
 def _oracle_run(out, ids, mode, attempt_fn):
+    # r_te False: the wall oracle models G-PILOT's cure (one wall level coarser), the
+    # remedy table before AUT-04's RM-TE that these selftest counts were written against
     return campaign.run_campaign(
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": mode,
-         "streams": 2, "quiet": True}, attempt_fn=attempt_fn,
+         "streams": 2, "quiet": True, "r_te": False}, attempt_fn=attempt_fn,
         probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap)
 
 
@@ -2787,7 +2790,8 @@ def _g10_live(H):
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
              "mode": "rules+opt", "streams": 2, "audit_mod": AUDIT_OFF,
-             "quiet": True}, attempt_fn=A, probe_fn=P, snap_fn=S,
+             "quiet": True, "r_te": rules.r_te_of(H["rb"]["records"])},
+            attempt_fn=A, probe_fn=P, snap_fn=S,
             hooks={"optimiser": make_hook(lambda gid: (H["folds"][4], 4),
                                           model_sha256="selftest")})
         rows = [r for r in campaign.load_rows(live)
