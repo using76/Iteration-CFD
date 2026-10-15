@@ -49191,7 +49191,8 @@ aggregation multigrid: §141.1 says how a matrix is coarsened; the Galerkin oper
 the smoothers, the coarsest solve and the cycles are later subsections (AMG-02 to
 AMG-04a). Since AMG-04a `solver::solve` runs the cycle (§141.5), since AMG-04b a case asks
 for it and its settings (§141.7), and since AMG-05 it is a pressure backend the selector measures
-(§141.8).
+(§141.8). AMX-01 opens AMGX at run time (§141.20), and since AMX-02 AMGX keeps its hierarchy structure
+in the time loop and is compared with PBiCGStab and GAMG (§141.21).
 
 Sources: **Notay, Y. (2010), "An aggregation-based algebraic multigrid method",
 *Electron. Trans. Numer. Anal.* 37, 123-146** (open full text at
@@ -50268,6 +50269,125 @@ Measured on 2026-10-11 (RTX 5070 Ti, the DLL above, deterministic over five runs
 `rel = 1.643e-14` with dDDI (22 iterations, converged) and `rel = 8.640e-6` with dFFI (13 iterations, AMGX reports
 converged), so both rows pass; the dFFI row passes with a margin of 1.16x.
 
+### 141.21 AMGX in the time loop: the kept structure, and the three-way comparison (AMX-02)
+
+`No GPL-licensed source was consulted.` This is the subsection after §141.20, and AMX-02 is the second AMGX unit.
+§141.20 left the backend calling `AMGX_solver_setup` on every solve. That call rebuilds the whole classical-AMG
+hierarchy from the new matrix. Before this unit it was most of AMGX's time on the plume matrix, and nobody had
+measured it inside a time loop. Now the backend keeps the hierarchy's structure from one solve to the next and
+re-sets up only what depends on the coefficients. `ofgpu-buoyant` runs AMGX in the time loop and prints what the
+set-ups cost. The comparison below puts AMGX beside PBiCGStab and the native GAMG of §141.8.
+
+Sources: **Naumov, M. et al. (2015), "AmgX: a library for GPU accelerated algebraic multigrid and preconditioned
+iterative methods", *SIAM J. Sci. Comput.* 37(5) S602-S626, doi:10.1137/140980260** (title, journal, volume, issue
+and pages checked against Crossref on 2026-10-15). It gives the split of AMGX into a set-up phase and a solve
+phase. **NVIDIA AMGX 2.5.0** (BSD-3-Clause, <https://github.com/NVIDIA/AMGX>). Its reference manual
+(`doc/AMGX_Reference.pdf`, `AMGX_solver_setup`) says "anytime the matrix changes AMGX solver setup must be called
+again". The manual does not document the two things this unit uses, so the following files were read to learn what
+they mean: `include/amgx_c.h` declares `AMGX_solver_resetup(AMGX_solver_handle, AMGX_matrix_handle)`, in its
+"C-API deprecated" block; `src/core.cu` registers `structure_reuse_levels` as "controls reuse of AMG hierarchy,
+0 - everything rebuilds, 1 - reuse coloring on the finest level, 2 - reuse coloring on the next level, etc.",
+default 0; `src/amg_solver.cu` (`setup`, `resetup`) and `src/amg.cu` (the level loop) say what the parameter does in
+each call. These files were read for meaning only. No AMGX code is reproduced here.
+
+**The hierarchy, solve by solve.** The matrix `A_0` of one session (one `setup` of the backend) changes from solve
+to solve. Its pattern is the CSR of §48.2, and it does not change:
+
+```
+first solve of a session:      full set-up; the levels {A_l}, prolongations P_l and restrictions R_l      (141.21a)
+                               are built from A_0, as AMGX_solver_setup does
+later solve, reuse on:         P_l and R_l kept;  A_{l+1} = R_l A_l P_l,  l = 0 .. L-2, from the new A_0;  (141.21b)
+                               the smoothers and the coarsest solve redone from the new A_l
+later solve, reuse off:        full set-up again, as (141.21a)                                          (141.21c)
+```
+
+(141.21b) is a Galerkin coarse operator on a kept coarsening, which is what §141.8's re-gather does for the native
+GAMG. Each level's operator is the Galerkin product of the new matrix, so the cycle preconditions the new `A_0` and
+not the old one, and PCG is still run to AMGX's own tolerance (`1e-12` relative to the initial residual, §141.20's
+configuration). What can change is the iteration count, because the kept coarsening was built for the first
+matrix's strength of connection. Measured here, it did not change: 20 iterations with and without reuse (below).
+
+**The calls** (*DESIGN*). With reuse on, the session's configuration is `DEFAULT_CONFIG` plus
+`amg:structure_reuse_levels=-1` (`REUSE_KEY`, in the AMG preconditioner's scope `amg`). Every solve after the
+session's first then calls `AMGX_solver_resetup`, and in that call `-1` keeps every level's structure. With reuse
+off, the key is absent (AMGX's default 0) and every solve calls `AMGX_solver_setup`, which is §141.20's
+behaviour. The key is never paired with `AMGX_solver_setup`. With `-1`, that call returns at once on a matrix it
+has set up before (`amg_solver.cu`), so the hierarchy, values included, would stay the first matrix's for the
+whole run. That would be a frozen preconditioner, not a re-set-up. `AMGX_solver_resetup` is the 23rd bound entry
+point. A library that lacks it is refused by §141.20's rule, and the 2.5.0 DLL exports it.
+
+**The switch** (*DESIGN*). Reuse is on by default. `OFGPU_AMGX_REUSE=0`, and only the value `0`, turns it off
+(`reuse_from`, the rule of §141.20's `OFGPU_REQUIRE_AMGX` turned around). `AmgxBackend::with_reuse` sets it in
+code. It exists so that the saving can be measured against the full set-up. It is not a tuning knob.
+
+**The timing.** A solve's set-up time runs from the matrix upload (`AMGX_matrix_upload_all` on the first solve,
+`AMGX_matrix_replace_coefficients` after it) to the end of the set-up call. The CUDA context is synchronised on
+each side, because AMGX works on the legacy default stream (§141.20). `setup_secs` reports it for the decision
+table's set-up column (§141.8), and `run_summary` gives `ofgpu-buoyant`'s end-of-run line: the full set-ups and
+the re-set-ups, with the mean of each. The vector uploads, the solve and the copy back come after the set-up, so
+the order of the calls changed, but AMGX's answer does not depend on it.
+
+#### 141.21.1 The gates
+
+| test or run | gate | class (docs/17 §5.1.4) |
+|---|---|---|
+| `pressure::amgx::tests::reuse_is_on_unless_the_value_is_0` | `reuse_from`: unset, `1`, the empty string and `no` give reuse; `0` turns it off; `with_reuse` overrides; `setup_counts` is `(0, 0)` before a solve | D |
+| `pressure::amgx::tests::the_reuse_key_is_appended_only_when_reuse_is_on` | `config_for("a=1", true) == "a=1,amg:structure_reuse_levels=-1"`, `config_for("a=1", false) == "a=1"`, and `DEFAULT_CONFIG` has no `structure_reuse_levels` | D |
+| `tests/amgx.rs` `a_resetup_on_the_kept_structure_agrees_with_pbicgstab` (both builds, feature on, `OFGPU_REQUIRE_AMGX=1`) | the plume matrix `A1` of §141.20.1, then `A2` with internal face `i`'s `Γ` times `1 + 0.5 ((7919 i) mod 1000) / 1000`, through one backend: reuse on is `(1, 1)` (full set-ups, re-set-ups) and reuse off is `(2, 0)`; both converge (f64), and `A2`'s answer agrees with the PBiCGStab reference to `1e-8` (dDDI) / `1e-5` (dFFI) | D (counts), R (agreement), `tol32` per D-F32-1 |
+| `ofgpu-buoyant` plume, 20 iterations, `-backend amgx` against `-backend pbicgstab` | every field within `1e-8` relative | R |
+| the same run, reuse on against `OFGPU_AMGX_REUSE=0` | the mean re-set-up `<=` half the mean full set-up (measured, reported) | measured |
+
+**Measured** (supervisor's runs, 2026-10-15, RTX 5070 Ti, the 2.5.0 DLL of §141.20, f64 build with
+`--features amgx`; one card is shared with two other lanes, so the times move between runs).
+
+*The re-set-up test.* f64: 22 iterations on `A1` and 20 on `A2`, with reuse on and with it off. With reuse on, the
+set-up on `A2` took 7.28 ms against 20.18 ms for the full set-up. `A2`'s answer agrees to 2.8e-14 (reuse on) and
+2.3e-14 (reuse off). `single` (dFFI): 13 iterations on `A1` and 10 on `A2`, with reuse on and with it off;
+the set-up on `A2` took 5.51 ms against 14.96 ms for the full set-up; `A2`'s answer agrees to 1.7e-6 (reuse on) and
+2.2e-6 (reuse off), inside the `1e-5` band, and §141.20.1's plume row still gives 8.640e-6.
+
+*The 20-iteration comparison.* The case is `plume` (`cases/plumeB`, 98 × 42 × 20, 82,320 cells), `-iters 20`, with
+the `p` entry tightened to `tolerance 1e-12; relTol 0; maxIter 5000` (an input, the same in every run, as in
+§141.8). The states are compared through `-restartWrite 20`, and the measure is the largest
+`max|diff| / max|field|` over `U`, `p`, `k`, `epsilon`, `nut`, `T` and `phi`:
+
+| run | worst field difference from PBiCGStab | p iterations per solve | set-ups, ms each | time loop |
+|---|---|---|---|---|
+| PBiCGStab + DIC | (reference) | 202-217 | - | 2.445 s |
+| GAMG (§141.8) | 8.4e-12 (`U`) | 46-48 | 1 build 266.12, 39 re-gathers 44.32 | 4.728 s |
+| AMGX, reuse on | **8.5e-12** (`U`; `p` 1.1e-12, `T` 8.9e-13) | 20 | 1 full 84.27 / 90.41, 39 re-set-ups **7.70 / 7.40** | 1.303 / 1.237 s |
+| AMGX, `OFGPU_AMGX_REUSE=0` | 8.6e-12 | 20 | 40 full **20.62 / 21.46** | 1.695 / 1.790 s |
+
+The `1e-8` gate passes for AMGX with reuse on. Where a cell shows two values, they are two runs. The re-set-up
+takes 0.37 and 0.34 of the full set-up, inside the "half" gate. The first full set-up of a run also pays for
+AMGX's warm-up, so the ratio uses the 40 full set-ups of the reuse-off run.
+
+*The decision tables* (`-iters 1 -backend auto`, the case's own `p` entry: PBiCGStab with DIC, `relTol 0.01`; two
+runs each). In the selector, AMGX's set-up column is the backend's `setup` call plus the timed solve's re-set-up.
+The `setup` call creates the AMGX session (initialisation, configuration, resources and the CSR pattern), so most
+of the figure is that call. AMGX solves to its own `1e-12` relative, while PBiCGStab stops at the case's
+`relTol 0.01`.
+
+| case | cells | PBiCGStab set-up / solve, ms | GAMG set-up / solve, ms | AMGX set-up / solve, ms | GAMG, AMGX agree to | `auto` picks |
+|---|---|---|---|---|---|---|
+| `plume` | 82,320 | 5.23 / 12.16; 6.53 / 12.35 | 323.41 / 60.16; 324.38 / 60.14 | 169.71 / 21.53; 169.31 / 20.27 | 8.0e-15, 1.2e-14 | PBiCGStab |
+| `gb_800000` (`ofgpu-generate-mesh big` 500 × 400 × 4) | 800,000 | 38.30 / 492.48; 47.95 / 485.26 | 2362.14 / 504.20; 2432.22 / 531.77 | 267.37 / 52.54; 238.54 / 49.72 | 2.8e-14, 2.1e-14 | AMGX, 9.4x and 9.8x |
+
+*The time loop on `gb_800000`* (reduced to `-iters 5` under the 10-minute rule, as in §141.8, with the case's own
+`p` entry):
+
+| backend | p iterations per solve | set-ups, ms each | time loop |
+|---|---|---|---|
+| PBiCGStab + DIC | 233-482 | - | 5.584 s |
+| GAMG | 19-20 | 1 build 2216.80, 9 re-gathers 433.95 | 7.181 s |
+| AMGX, reuse on | 20 | 1 full 113.01, 9 re-set-ups **12.35** | 0.872 s |
+| AMGX, `OFGPU_AMGX_REUSE=0` | 20 | 10 full **51.86** | 1.186 s |
+
+On `gb_800000` the re-set-up takes 0.24 of the full set-up. AMGX's p residuals are reported in AMGX's own `L2`
+norm (`main:norm=L2`). That is not OpenFOAM's normalised residual that the other two rows print, so the p residual
+columns of the logs cannot be compared across backends, and they are not tabulated. The drivers ran in the f64
+build only. Under `single` the library builds with `--features "amgx single"`, and the two integration tests run
+there (dFFI).
 
 ---
 

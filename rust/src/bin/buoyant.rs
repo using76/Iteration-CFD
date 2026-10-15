@@ -24,8 +24,8 @@
 //!   -outletPatch NAME patch it leaves through (default: outlet)
 //!
 //!   -nCorrectors N    PIMPLE outer correctors per unit of work (default 2)
-//!   -backend NAME     auto | pbicgstab | fft | amgx (default auto, which runs
-//!                     the selector and prints its table)
+//!   -backend NAME     auto | pbicgstab | fft | amgx | gamg (default auto,
+//!                     which runs the selector and prints its table)
 //!   -probe            print the mass-weighted mean T of the upper and the
 //!                     lower third of the domain at every write - the
 //!                     stratification a working buoyancy MUST produce
@@ -104,6 +104,13 @@
 //! printed. `-backend NAME` skips the measurement and takes the named one -
 //! and still refuses it if the probe says it cannot represent this system,
 //! because applicability is a hard constraint and not a preference.
+//!
+//! GAMG and AMGX re-use their set-up from one solve to the next and print
+//! what it cost at the end of the run. AMGX keeps its hierarchy structure
+//! and re-sets up only the coarse operators (SPEC-LIT 141.21); the
+//! environment variable `OFGPU_AMGX_REUSE=0` makes it rebuild the whole
+//! hierarchy every solve instead, which is what that saving is measured
+//! against.
 //!
 //! Provenance: ORIGINAL driver code over LITERATURE numerics. The equations it
 //! assembles live in the library modules it calls, each cited there and in
