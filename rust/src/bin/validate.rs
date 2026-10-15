@@ -23667,10 +23667,15 @@ const CANTILEVER_STUDY_LEVELS: usize = 3;
 /// mesh's tip deflection is within 5 % of the closed form; §94's study of
 /// the tip deflection on the `CANTILEVER_STUDY_LEVELS` finest is a miss's
 /// uncertainty. A ratio whose rows all pass registers nothing.
+///
+/// The gate is printed per loop (SPEC-LIT §142.2): first §109.6's Anderson
+/// loop, whose rows keep their names and digits, then GMRES(50) on the
+/// block map's state, the same twelve meshes, controls and bars, its rows
+/// tagged `GMRES(50)`.
 fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::solid::coupled;
     use ofgpu::solid::fixtures;
-    use ofgpu::solid::outer::{ANDERSON_DEPTH, OuterControls, Relaxation};
+    use ofgpu::solid::outer::{ANDERSON_DEPTH, GMRES_RESTART, OuterControls, Relaxation};
     use ofgpu::solid::stress::StressFields;
     use ofgpu::solid::displacement::Displacement;
 
@@ -23685,176 +23690,185 @@ fn check_cantilever(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         fixed_iters: false,
         report_residuals: true,
     };
-    let outer_controls = || OuterControls {
-        relaxation: Relaxation::Anderson(ANDERSON_DEPTH),
+    let outer_controls = |relaxation| OuterControls {
+        relaxation,
         decades: 8.0,
         max_outer: 1000,
         boundary_passes: 3,
     };
 
-    for (l, label) in [(0.5 as Scalar, "2.5:1"), (1.0 as Scalar, "5:1"), (2.0 as Scalar, "10:1")] {
-        let exact = fixtures::CantileverExact::new(
-            fixtures::CANTILEVER_E,
-            fixtures::CANTILEVER_NU,
-            l,
-            fixtures::CANTILEVER_C,
-            fixtures::CANTILEVER_P,
-        );
-        let tip = exact.tip();
-        const M: usize = CANTILEVER_NY.len();
-        let fine = M - 1;
-        let mut e_us = [0.0 as Scalar; M];
-        let mut e_xxs = [0.0 as Scalar; M];
-        let mut e_xys = [0.0 as Scalar; M];
-        let mut e_tips = [0.0 as Scalar; M];
-        let mut v_hs = [0.0 as Scalar; M];
-        let mut converged = [false; M];
-        let mut outer_its = [0usize; M];
-        let mut obs = [0.0 as Scalar; M];
-        let mut lins = [0usize; M];
-        let mut levels: Vec<vv::Level> = Vec::new();
-        let mut detail: Vec<String> = Vec::new();
+    // (relaxation, the row tag, the note prefix). Both loops report under
+    // the one gate scope the section entered (S69.4); the headline carries
+    // the tag.
+    let loops = [
+        (Relaxation::Anderson(ANDERSON_DEPTH), "", ""),
+        (Relaxation::Gmres(GMRES_RESTART), " GMRES(50)", "GMRES(50) "),
+    ];
+    for (relaxation, tag, pre) in loops {
+        for (l, label) in [(0.5 as Scalar, "2.5:1"), (1.0 as Scalar, "5:1"), (2.0 as Scalar, "10:1")] {
+            let exact = fixtures::CantileverExact::new(
+                fixtures::CANTILEVER_E,
+                fixtures::CANTILEVER_NU,
+                l,
+                fixtures::CANTILEVER_C,
+                fixtures::CANTILEVER_P,
+            );
+            let tip = exact.tip();
+            const M: usize = CANTILEVER_NY.len();
+            let fine = M - 1;
+            let mut e_us = [0.0 as Scalar; M];
+            let mut e_xxs = [0.0 as Scalar; M];
+            let mut e_xys = [0.0 as Scalar; M];
+            let mut e_tips = [0.0 as Scalar; M];
+            let mut v_hs = [0.0 as Scalar; M];
+            let mut converged = [false; M];
+            let mut outer_its = [0usize; M];
+            let mut obs = [0.0 as Scalar; M];
+            let mut lins = [0usize; M];
+            let mut levels: Vec<vv::Level> = Vec::new();
+            let mut detail: Vec<String> = Vec::new();
 
-        for (idx, n_y) in CANTILEVER_NY.into_iter().enumerate() {
-            let n_x = (l * n_y as Scalar / 0.2).round() as usize;
-            let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C)?;
-            let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
-            let gm = GpuMesh::upload(gpu, &hm)?;
-            let n = hm.n_cells;
-            let nbf = hm.n_boundary_faces;
-            let mut d = Displacement::new(
-                gpu,
-                &gm,
-                &hm,
-                fixtures::cantilever_material(),
-                &fixtures::cantilever_bcs(),
-                solve_controls(),
-            )?;
-            d.set_temperature(gpu, &vec![300.0 as Scalar; n], &vec![300.0 as Scalar; nbf], 300.0)?;
-            d.bcs.set_traction_values(gpu, &tr)?;
-            d.bcs.set_fixed_values(gpu, &fv)?;
-            match coupled::solve(gpu, &mut d, &outer_controls()) {
-                Ok(rep) => {
-                    converged[idx] = rep.converged;
-                    outer_its[idx] = rep.iterations;
-                    obs[idx] = rep.observed_contraction;
-                    lins[idx] = rep.linear_iterations;
+            for (idx, n_y) in CANTILEVER_NY.into_iter().enumerate() {
+                let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+                let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C)?;
+                let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
+                let gm = GpuMesh::upload(gpu, &hm)?;
+                let n = hm.n_cells;
+                let nbf = hm.n_boundary_faces;
+                let mut d = Displacement::new(
+                    gpu,
+                    &gm,
+                    &hm,
+                    fixtures::cantilever_material(),
+                    &fixtures::cantilever_bcs(),
+                    solve_controls(),
+                )?;
+                d.set_temperature(gpu, &vec![300.0 as Scalar; n], &vec![300.0 as Scalar; nbf], 300.0)?;
+                d.bcs.set_traction_values(gpu, &tr)?;
+                d.bcs.set_fixed_values(gpu, &fv)?;
+                match coupled::solve(gpu, &mut d, &outer_controls(relaxation)) {
+                    Ok(rep) => {
+                        converged[idx] = rep.converged;
+                        outer_its[idx] = rep.iterations;
+                        obs[idx] = rep.observed_contraction;
+                        lins[idx] = rep.linear_iterations;
+                    }
+                    Err(e) => {
+                        converged[idx] = false;
+                        c.note(&format!("  {label}{tag} n_y={n_y}: {e}"));
+                    }
                 }
-                Err(e) => {
-                    converged[idx] = false;
-                    c.note(&format!("  {label} n_y={n_y}: {e}"));
+                c.require(
+                    &format!("Gate 95-A {label}{tag}: block-coupled loop converged, n_y = {n_y}"),
+                    converged[idx],
+                );
+
+                // coupled::solve ends in the boundary correction, so the
+                // gradient it left belongs to the accepted u; the readout
+                // derives nothing anew.
+                let ub = gpu.download(&d.u.bf)?;
+                let u = gpu.download(&d.u.f)?;
+                let mut sf = StressFields::new(gpu, n)?;
+                sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
+                let h = sf.download(gpu)?;
+                let errs = fixtures::cantilever_errors(&hm, &u, &h.sigma, &exact);
+                e_us[idx] = errs.e_u;
+                e_xxs[idx] = errs.e_xx;
+                e_xys[idx] = errs.e_xy;
+                v_hs[idx] = fixtures::cantilever_tip_deflection(&hm, &ub);
+                e_tips[idx] = (v_hs[idx] - tip).abs() / tip.abs();
+                levels.push(vv::Level { h: 2.0 * 0.1 / n_y as Scalar, value: v_hs[idx] });
+                let line = format!(
+                    "{label}{tag} n_y={n_y} cells={n} outer={} converged={} observed={:.4} linear={} \
+                     e_tip={:.3e} e_u={:.3e} e_xx={:.3e} e_xy={:.3e} v_h={:.6e}",
+                    outer_its[idx], converged[idx], obs[idx], lins[idx],
+                    e_tips[idx], e_us[idx], e_xxs[idx], e_xys[idx], v_hs[idx]
+                );
+                c.note(&format!("  {line}"));
+                detail.push(line);
+            }
+
+            let ln2 = (2.0 as Scalar).ln();
+            // Every pair's orders are printed; the bars read the finest pair.
+            let pair = |k: usize| {
+                let p_u = (e_us[k - 1] / e_us[k]).ln() / ln2;
+                let p_s = ((e_xxs[k - 1] / e_xxs[k]).ln().min((e_xys[k - 1] / e_xys[k]).ln())) / ln2;
+                (p_u, p_s)
+            };
+            for k in 1..M {
+                let (a, b) = (CANTILEVER_NY[k - 1], CANTILEVER_NY[k]);
+                if converged[k - 1] && converged[k] {
+                    let (pu, ps) = pair(k);
+                    c.note(&format!("  {pre}n_y {a} -> {b}: p_u = {pu:.3}, p_sigma = {ps:.3}"));
+                } else {
+                    c.note(&format!("  {pre}n_y {a} -> {b}: no order, a mesh of the pair is not a converged solve"));
                 }
             }
-            c.require(
-                &format!("Gate 95-A {label}: block-coupled loop converged, n_y = {n_y}"),
-                converged[idx],
+            let (p_u, p_sigma) = pair(fine);
+            let (ny_c, ny_f) = (CANTILEVER_NY[fine - 1], CANTILEVER_NY[fine]);
+            c.check(
+                &format!("Gate 95-A {label}{tag}: displacement order, n_y {ny_c} -> {ny_f}, 1.9 - p_u"),
+                1.9 - p_u,
+                0.0,
             );
-
-            // coupled::solve ends in the boundary correction, so the
-            // gradient it left belongs to the accepted u; the readout
-            // derives nothing anew.
-            let ub = gpu.download(&d.u.bf)?;
-            let u = gpu.download(&d.u.f)?;
-            let mut sf = StressFields::new(gpu, n)?;
-            sf.compute(gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref)?;
-            let h = sf.download(gpu)?;
-            let errs = fixtures::cantilever_errors(&hm, &u, &h.sigma, &exact);
-            e_us[idx] = errs.e_u;
-            e_xxs[idx] = errs.e_xx;
-            e_xys[idx] = errs.e_xy;
-            v_hs[idx] = fixtures::cantilever_tip_deflection(&hm, &ub);
-            e_tips[idx] = (v_hs[idx] - tip).abs() / tip.abs();
-            levels.push(vv::Level { h: 2.0 * 0.1 / n_y as Scalar, value: v_hs[idx] });
-            let line = format!(
-                "{label} n_y={n_y} cells={n} outer={} converged={} observed={:.4} linear={} \
-                 e_tip={:.3e} e_u={:.3e} e_xx={:.3e} e_xy={:.3e} v_h={:.6e}",
-                outer_its[idx], converged[idx], obs[idx], lins[idx],
-                e_tips[idx], e_us[idx], e_xxs[idx], e_xys[idx], v_hs[idx]
+            c.check(
+                &format!("Gate 95-A {label}{tag}: stress order, n_y {ny_c} -> {ny_f}, 0.9 - p_sigma"),
+                0.9 - p_sigma,
+                0.0,
             );
-            c.note(&format!("  {line}"));
-            detail.push(line);
-        }
+            c.check(
+                &format!("Gate 95-A {label}{tag}: tip deflection on the finest mesh (n_y = {ny_f}), rel"),
+                e_tips[fine],
+                0.05,
+            );
+            c.note(&format!(
+                "  {pre}finest pair: displacement error order p_u = {p_u:.3}, stress error order p_sigma = {p_sigma:.3}"
+            ));
+            // The study takes the finest CANTILEVER_STUDY_LEVELS and reads the
+            // FINEST level first; the coarser meshes are run and printed above.
+            let mut tail = levels.split_off(levels.len() - CANTILEVER_STUDY_LEVELS);
+            tail.reverse();
+            c.note(&format!(
+                "  {label}{tag}: the tip study takes n_y = {}; n_y = {} is run and printed",
+                CANTILEVER_NY[M - CANTILEVER_STUDY_LEVELS..]
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                CANTILEVER_NY[..M - CANTILEVER_STUDY_LEVELS]
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            let study = vv::grid_study(&tail)?;
+            c.note(&format!("  {pre}tip deflection: {}", study.one_line()));
+            let val = vv::validation(v_hs[fine], tip, study.u_fine, 0.0, 0.0);
+            c.note(&format!("  {pre}{}", val.one_line("tip deflection, finest mesh")));
 
-        let ln2 = (2.0 as Scalar).ln();
-        // Every pair's orders are printed; the bars read the finest pair.
-        let pair = |k: usize| {
-            let p_u = (e_us[k - 1] / e_us[k]).ln() / ln2;
-            let p_s = ((e_xxs[k - 1] / e_xxs[k]).ln().min((e_xys[k - 1] / e_xys[k]).ln())) / ln2;
-            (p_u, p_s)
-        };
-        for k in 1..M {
-            let (a, b) = (CANTILEVER_NY[k - 1], CANTILEVER_NY[k]);
-            if converged[k - 1] && converged[k] {
-                let (pu, ps) = pair(k);
-                c.note(&format!("  n_y {a} -> {b}: p_u = {pu:.3}, p_sigma = {ps:.3}"));
-            } else {
-                c.note(&format!("  n_y {a} -> {b}: no order, a mesh of the pair is not a converged solve"));
+            let ok = converged.iter().all(|&cv| cv)
+                && (1.9 - p_u) <= 0.0
+                && (1.9 - p_u).is_finite()
+                && (0.9 - p_sigma) <= 0.0
+                && (0.9 - p_sigma).is_finite()
+                && e_tips[fine] <= 0.05
+                && e_tips[fine].is_finite();
+            if !ok {
+                c.report(GateReport {
+                    verdict: Verdict::Misses,
+                    how: How::Live,
+                    gate: "Gate 95-A cantilever",
+                    against: "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, \
+                              orders on the finest pair, the tip study on the finest three",
+                    headline: format!(
+                        "{label}{tag}: converged {}/{M}, p_u {p_u:.2}, p_sigma {p_sigma:.2} (n_y {ny_c} -> {ny_f}), finest tip {:.2e}",
+                        converged.iter().filter(|&&cv| cv).count(),
+                        e_tips[fine]
+                    ),
+                    detail,
+                    uncertainty: Some(Uncertainty::Study(study)),
+                });
             }
-        }
-        let (p_u, p_sigma) = pair(fine);
-        let (ny_c, ny_f) = (CANTILEVER_NY[fine - 1], CANTILEVER_NY[fine]);
-        c.check(
-            &format!("Gate 95-A {label}: displacement order, n_y {ny_c} -> {ny_f}, 1.9 - p_u"),
-            1.9 - p_u,
-            0.0,
-        );
-        c.check(
-            &format!("Gate 95-A {label}: stress order, n_y {ny_c} -> {ny_f}, 0.9 - p_sigma"),
-            0.9 - p_sigma,
-            0.0,
-        );
-        c.check(
-            &format!("Gate 95-A {label}: tip deflection on the finest mesh (n_y = {ny_f}), rel"),
-            e_tips[fine],
-            0.05,
-        );
-        c.note(&format!(
-            "  finest pair: displacement error order p_u = {p_u:.3}, stress error order p_sigma = {p_sigma:.3}"
-        ));
-        // The study takes the finest CANTILEVER_STUDY_LEVELS and reads the
-        // FINEST level first; the coarser meshes are run and printed above.
-        let mut tail = levels.split_off(levels.len() - CANTILEVER_STUDY_LEVELS);
-        tail.reverse();
-        c.note(&format!(
-            "  {label}: the tip study takes n_y = {}; n_y = {} is run and printed",
-            CANTILEVER_NY[M - CANTILEVER_STUDY_LEVELS..]
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
-            CANTILEVER_NY[..M - CANTILEVER_STUDY_LEVELS]
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        let study = vv::grid_study(&tail)?;
-        c.note(&format!("  tip deflection: {}", study.one_line()));
-        let val = vv::validation(v_hs[fine], tip, study.u_fine, 0.0, 0.0);
-        c.note(&format!("  {}", val.one_line("tip deflection, finest mesh")));
-
-        let ok = converged.iter().all(|&cv| cv)
-            && (1.9 - p_u) <= 0.0
-            && (1.9 - p_u).is_finite()
-            && (0.9 - p_sigma) <= 0.0
-            && (0.9 - p_sigma).is_finite()
-            && e_tips[fine] <= 0.05
-            && e_tips[fine].is_finite();
-        if !ok {
-            c.report(GateReport {
-                verdict: Verdict::Misses,
-                how: How::Live,
-                gate: "Gate 95-A cantilever",
-                against: "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, \
-                          orders on the finest pair, the tip study on the finest three",
-                headline: format!(
-                    "{label}: converged {}/{M}, p_u {p_u:.2}, p_sigma {p_sigma:.2} (n_y {ny_c} -> {ny_f}), finest tip {:.2e}",
-                    converged.iter().filter(|&&cv| cv).count(),
-                    e_tips[fine]
-                ),
-                detail,
-                uncertainty: Some(Uncertainty::Study(study)),
-            });
         }
     }
     Ok(())

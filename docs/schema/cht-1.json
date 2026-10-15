@@ -758,6 +758,7 @@
           "default": {
             "coupled": false,
             "maxOuter": 500,
+            "outer": "anderson",
             "tolerance": 1e-6
           }
         }
@@ -1344,6 +1345,11 @@
           "format": "uint32",
           "default": 500,
           "minimum": 0
+        },
+        "outer": {
+          "description": "The outer iteration around the map: `\"anderson\"` (the default) is\n§95.3's Anderson of depth five; `\"gmres\"` is §142.2's restarted\nGMRES(50) on the block map's state, only with `coupled: true`\n(§96.3 row 23). Any other name is refused listing both.",
+          "type": "string",
+          "default": "anderson"
         },
         "relaxation": {
           "description": "ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared\non the increment and its first omega is 1 - a static relaxation\nfactor is not offered.",

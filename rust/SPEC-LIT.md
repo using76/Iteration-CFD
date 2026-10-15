@@ -30231,7 +30231,7 @@ on `run`, and §44.1's `output` block on the case:
         { "match": "loaded", "u": { "type": "traction", "value": [1.0e6, 0.0, 0.0] } },
         { "match": "mid",    "u": { "type": "symmetry" } },
         { "match": "top",    "u": { "type": "free" } } ],
-      "solver": { "tolerance": 1e-6, "maxOuter": 500, "coupled": false }   // all optional, these are the defaults
+      "solver": { "tolerance": 1e-6, "maxOuter": 500, "coupled": false, "outer": "anderson" }   // all optional, these are the defaults
     } } ],
 "run":    { "steady": true, "mode": "stress" },      // "thermal" (default) | "stress"
 "output": { "exact": { "format": "vtu" } }           // §44.1's block, unchanged
@@ -30249,6 +30249,7 @@ on `run`, and §44.1's `output` block on the case:
 | `free` | traction `(0, 0, 0)` |
 | `solver` | `tolerance` (default `1e-6`) is the outer loop's stop, `maxOuter` (default `500`) its iteration cap |
 | `solver.coupled` | `false` (the default): §95's segregated outer loop; `true`: §109's block-coupled solve inside the same loop and its controls (§109.8). Only with a single `material` (96.3 row 22) |
+| `solver.outer` | `"anderson"` (the default): §95.3's Anderson of depth five; `"gmres"`: §142.2's GMRES(50) on the block map's state `(u, ub)`, only with `coupled: true` (96.3 row 23). Any other name is refused listing both |
 | `run.mode` | `"thermal"` (the default, §47.14's conduction) or `"stress"` |
 | `output` | §44.1's block; on this run only `exact.format: "vtu"`, written once, is accepted |
 
@@ -30340,7 +30341,7 @@ every region of a thermal-mode run that names `output` — writes `T` only.
 ### 96.3 The refusal list
 
 Every message names the setting's JSON path (`regions/<name>/mechanics/...`,
-`run/mode`, `output/...`) and what to do instead. Rows 1-19 and 22 are refused in
+`run/mode`, `output/...`) and what to do instead. Rows 1-19, 22 and 23 are refused in
 the lowering and proved by host tests in `io::case_cht::tests`; rows 20-21
 are runtime refusals, proved with the driver.
 
@@ -30366,6 +30367,7 @@ are runtime refusals, proved with the driver.
 | 18 | `output` on a case with a fluid region - the flow path's VTU is a follow-up, not in this unit |
 | 19 | `mode` that is neither `thermal` nor `stress`, refused listing both |
 | 22 | `mechanics.solver.coupled: true` with `materials` - §109's block operator carries one material per region; the bond face as a 3x3 block is not built |
+| 23 | `mechanics.solver.outer` naming neither `"anderson"` nor `"gmres"`, refused listing both; `"gmres"` without `coupled: true` - §142.2's GMRES iterates the block map's state only |
 
 An `output` field the run did not compute is UNREACHABLE in this format: the
 only field list the block can name is `visualisation.fields`, and row 17
@@ -30375,8 +30377,8 @@ refuses that block whole.
 
 §13.4.1, as §91.4 states it: two case documents identical in every byte but
 one, REQUIRED to produce different output, failing by name if they do not.
-All eleven run on the 160-cell bar of the shared fixtures, in seconds, and all
-ten start by asserting the two documents actually differ. The measured
+All twelve run on the 160-cell bar of the shared fixtures, in seconds, and all
+twelve start by asserting the two documents actually differ. The measured
 numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 
 | # | the one entry turned (`a` → `b`) | what must differ | measured |
@@ -30392,6 +30394,7 @@ numbers are from the run that wrote this section (RTX 5070 Ti, f64).
 | 9 | `solver.maxOuter` 500 → 2 | `a` converges; `b`'s `run_stress` is refused naming the region and the knob (96.3 row 21) | refusal at 2 iterations |
 | 10 | `bond` series → `linear` | `max|du| > 1e-6 max|u_a|` — the same pair Gate 95-E runs as its second leg | du 1.375e-6, |u_a| 6.099e-5 |
 | 11 | `solver.coupled` false → true | both converged, `max|du| > 0`, and `max|du| <= 0.1 max|u_a|` - two discretisations of one problem (109.7) | 17 → 18, du 6.568e-8, |u_a| 5.484e-5 |
+| 12 | `solver.outer` `"anderson"` → `"gmres"`, both with `coupled: true` | both converged, the outer iteration counts differ, and `max|du| <= 1e-6 max|u_a|` - two iterations to one fixed point (142.2) | 18 → 16, du 3.824e-13, |u_a| 5.480e-5 |
 
 Row 2 is the interesting shape: a pair test whose knob CANNOT move `u` and
 what it does about it. The failure message of every row says "the case said
@@ -34250,9 +34253,15 @@ bounds row and the planar monotonicity rows are asserted as MISSED in a recorded
 diagonal lets a diffusion-dominated burned plateau drift above 1, by up to 1.5e−4 (§155.9). The
 same cases run as the lib tests `dust::progress::tests` and carry no ignore attribute, so they
 move neither bold count.
+§142.2 adds three library tests that carry the attribute, because each holds a bound below f32 round-off:
+`solid::outer::tests::gmres_finds_the_fixed_point_of_an_affine_map_picard_cannot` (1e-9 on a 12-decade solve),
+`solid::coupled::tests::gmres_reaches_eight_decades_on_the_free_expansion_block_in_twenty` (eight decades, 1e-8)
+and `io::case_cht::tests::pair_outer_changes_the_iteration_and_keeps_the_fixed_point` (1e-6 between two
+eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from_the_fixed_point` is
+`#[cfg(not(feature = "single"))]` and a plain `#[ignore]` measurement, and moves neither count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **486** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **489** library
 tests and **16** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -51655,6 +51664,150 @@ What this subsection does not do: it changes no gate, no tolerance and no defaul
 budget; that row is §109.7's converged loop. It is not an f32 measurement. In the single build the probe does not
 exist. The two dense-algebra tests sit in the library test crate, which does not compile in the single build at
 present (pre-existing f32 errors in other modules' tests); they use no `Scalar` and would hold there unchanged.
+
+
+### 142.2 GMRES on the block map's state, and Gate 95-A per loop
+
+**Sources.** Y. Saad and M. H. Schultz, "GMRES: a generalized minimal residual algorithm for solving
+nonsymmetric linear systems", *SIAM J. Sci. Stat. Comput.* 7 (1986) 856-869, DOI `10.1137/0907058`: the
+Arnoldi basis by modified Gram-Schmidt, the least-squares problem by Givens rotations, the restart. H. F. Walker
+and P. Ni, *SIAM J. Numer. Anal.* 49 (2011) 1715-1735, DOI `10.1137/10078356X`: on a linear map, Anderson
+acceleration that drops no column is essentially GMRES, so §109.6's Anderson of depth five is a truncated
+relative of what this subsection runs. No GPL-licensed source was consulted. No solver numerics change: the
+block map, its kernels, the block solve and every default are §109's.
+
+**The state and the map.** §142.1 found that the loop carries two things from one application to the next:
+the cell displacement `u` and the boundary values `ub` its three boundary passes start from. GMRES iterates
+both. With `n_c` cells and `n_bf` boundary faces the state is the `3 (n_c + n_bf)` numbers
+
+```text
+  x = (u, ub),    Phi(x) = (F(u; ub), ub'(u; ub))                                            (142.5)
+```
+
+where one application writes `x` into `d.u.f` and `d.u.bf`, runs `apply_block` (three boundary passes, the
+assembly, one block solve from `x = u`) and reads back the solve's answer and the boundary values the passes
+left. In linear elasticity `Phi` is affine, `Phi(x) = J x + c`, and its fixed point is §142.1's `u*` with its
+closed boundary. The fixed-point residual `r(x) = Phi(x) - x = c - (I - J) x` is the residual of the linear
+system `(I - J) x = c`, and GMRES solves that system with no operator except `Phi`:
+
+```text
+  (I - J) v = v - (Phi(x0 + s v) - Phi(x0)) / s,     s = max(||x0||_2, ||r(x0)||_2)          (142.6)
+```
+
+for a unit vector `v`. `Phi` is affine, so (142.6) holds for any `s`; `s` the size of the state keeps the block
+solve's own relative error relative in every difference. One cycle of GMRES(`m`) from `x0`:
+
+```text
+  g0 = Phi(x0);  r0 = g0 - x0;  beta = ||r0||;  v_1 = r0 / beta;  g = (beta, 0, ..., 0)
+  for j = 1..m:  w = (I - J) v_j by (142.6)                      one application of Phi
+                 h_ij = w . v_i,  w -= h_ij v_i   (i = 1..j, modified Gram-Schmidt)
+                 h_(j+1)j = ||w||;  the earlier rotations on column j, then its own:
+                 (c_j, s_j) = (h_jj, h_(j+1)j) / hypot(h_jj, h_(j+1)j);  g_(j+1) = -s_j g_j;  g_j = c_j g_j
+                 stop the cycle if |g_(j+1)| <= target or h_(j+1)j <= eps beta;  v_(j+1) = w / h_(j+1)j
+  x = x0 + V y,  H y = g on the j columns (back substitution)                              (142.7)
+```
+
+The dot products, `H`, `g` and `y` are `f64` whatever the crate's `Scalar` is; the state vectors are `Vec3`
+in `Scalar`. The code is `solid::outer::gmres_fixed_point` (host) and `solid::coupled::solve` with
+`Relaxation::Gmres(m)` (the device application). The segregated loop refuses `Gmres` by name.
+
+**What is counted, what stops it, what is accepted.** One outer iteration is one application of `Phi`: a
+cycle's opening application and each Arnoldi step count alike, and `maxOuter` caps their sum. The stop reads only
+the TRUE residual `||r(x)||_2` over the whole state, at a cycle's opening application: converged when it is at
+most `10^-decades` of the first one. The least-squares estimate `|g_(j+1)|` only ends a cycle early. Convergence
+accepts `Phi(x)`, as the Anderson loop accepts `F(u)`, and the loop ends with the same closing boundary
+correction. A true residual that is not finite or grows a million-fold over the first is `Error::Diverged`, named.
+`norms` holds the true norm at each opening application and the estimate at each Arnoldi step, so (109.13)'s
+`q_obs` is read over both. `omegas` stays empty. The stop is therefore not Anderson's: Anderson reads the `u` part
+of the residual of the lagged map, and GMRES reads the whole state's, which is never smaller.
+
+**The case knob.** `mechanics.solver.outer` is `"anderson"` (the default, §95.3's Anderson of depth five) or
+`"gmres"` (GMRES(50), `solid::outer::GMRES_RESTART`). Any other name is refused listing both, and `"gmres"`
+without `coupled: true` is refused (96.3 row 23). The banner and the summary name the loop. Pair 12 of §96.4 turns
+it.
+
+**Measured** (2026-10-15, RTX 5070 Ti, f64; the GPU shared with two other lanes).
+
+- On the host, an affine map on six unknowns whose Picard iteration diverges (eigenvalues 2, -1.5, 0.5, 3, 0.9,
+  -0.2): GMRES(50) takes 8 applications (one to open, six Arnoldi steps, one to check) and lands on
+  `(I - M)^-1 c` to 2.9e-16 (`gmres_finds_the_fixed_point_of_an_affine_map_picard_cannot`).
+- **The gate.** From rest on the `6^3` free-expansion block, with the block solve at (109.11) `1e-12`, GMRES(50)
+  reaches eight decades (8.06) in **16** outer iterations and 283 BiCGStab iterations, within 3.5e-9 of
+  `alpha dT x`. The bar is 20. Anderson(5) on the same problem takes 15 and 223
+  (`gmres_reaches_eight_decades_on_the_free_expansion_block_in_twenty`).
+- Two GMRES runs capped at six applications leave `u`, `ub` and the norm history equal bit for bit
+  (`gmres_runs_of_a_fixed_count_are_bitwise_identical`). The device work of one outer iteration, one
+  `apply_block` with a fixed-iteration block solve (4 iterations), captures into a CUDA graph of 128 nodes
+  (121 kernels, 7 memsets) and replays bitwise three times over 4 buffers and 2592 values, per §81.7
+  (`the_gmres_matvec_replays_bitwise`).
+- Pair 12 on the bar of §96.4: Anderson 18 outer iterations, GMRES 16, `max|du|` 3.824e-13 against
+  `max|u_a|` 5.480e-5.
+
+**Gate 95-A per loop.** `ofgpu-validate` section 43 now runs §109.6's twelve meshes twice with the same block
+solve, eight decades and cap of 1000: first the Anderson loop, whose rows keep their names and printed every digit
+of §109.7 again (diffed against a run of the binary built before this unit), then GMRES(50), whose rows carry the
+tag `GMRES(50)`. Both report under the one gate scope. The section took 89 s and 181 s in two runs, against 72 s
+for the Anderson loop alone. The GMRES rows:
+
+| ratio | `n_y` | outer | cycles | `q_obs` | BiCGStab | `e_tip` | `e_u` | `e_xx` | `e_xy` | Anderson (§109.7) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2.5:1 | 4 | 19 | 1 | 0.231 | 448 | 2.708e-2 | 2.750e-2 | 1.435e-2 | 1.337e-2 | 93 |
+| 2.5:1 | 8 | 22 | 1 | 0.307 | 1081 | 4.019e-3 | 4.052e-3 | 3.905e-3 | 4.879e-3 | 33 |
+| 2.5:1 | 16 | 23 | 1 | 0.356 | 2381 | 6.734e-4 | 6.974e-4 | 1.350e-3 | 1.743e-3 | 31 |
+| 2.5:1 | 32 | 24 | 1 | 0.384 | 4973 | 1.245e-4 | 1.370e-4 | 4.888e-4 | 6.194e-4 | 33 |
+| 5:1 | 4 | **26** | 1 | 0.291 | 1068 | 8.190e-3 | 8.323e-3 | 1.274e-2 | 9.526e-3 | **diverged at 673** |
+| 5:1 | 8 | 28 | 1 | 0.346 | 2459 | 1.963e-5 | 5.784e-4 | 3.755e-3 | 3.442e-3 | 200 |
+| 5:1 | 16 | 30 | 1 | 0.384 | 5244 | 2.597e-4 | 2.634e-4 | 1.334e-3 | 1.226e-3 | 52 |
+| 5:1 | 32 | 43 | 2 | 0.799 | 14767 | 9.827e-5 | 9.873e-5 | 4.858e-4 | 4.348e-4 | 65 |
+| 10:1 | 4 | **38** | 1 | 0.373 | 2789 | 1.161e-3 | 1.432e-3 | 1.169e-2 | 6.760e-3 | **1000, not converged** |
+| 10:1 | 8 | 52 | 2 | 0.645 | 8080 | 1.402e-3 | 1.401e-3 | 3.656e-3 | 2.431e-3 | 730 |
+| 10:1 | 16 | 64 | 2 | 0.873 | 20162 | 5.622e-4 | 5.619e-4 | 1.325e-3 | 8.641e-4 | 200 |
+| 10:1 | 32 | 43 | 1 | 0.433 | 28361 | 1.667e-4 | 1.666e-4 | 4.848e-4 | 3.063e-4 | 518 |
+
+GMRES converges on all twelve meshes, the two coarse slender ones included, and lands there on §142.1's `u*` to
+its printed digits (`e_u` 8.323e-3 at 5:1 and 1.432e-3 at 10:1). On the 10:1 beams it takes 38-64 outer
+iterations where Anderson takes 200-1000, and on the finest 10:1 beam a fifth of Anderson's BiCGStab iterations.
+
+| ratio | `p_u` 8→16 | `p_u` 16→32 | `p_sigma` 16→32 | tip study (8, 16, 32) | `U_fine` / tip | finest tip | Gate 95-A, GMRES(50) |
+|---|---|---|---|---|---|---|---|
+| 2.5:1 | 2.539 | 2.348 | 1.466 | monotone, `p = 2.608` | 0.11 % | 0.012 % | **holds** |
+| 5:1 | 1.135 | **1.415** | 1.458 | oscillatory | 0.079 % | 0.010 % | **MISSED**: `p_u` 1.415 < 1.9 |
+| 10:1 | 1.318 | **1.754** | 1.450 | monotone, `p = 1.086` | 0.044 % | 0.017 % | **MISSED**: `p_u` 1.754 < 1.9 |
+
+**How far eight decades lands from the fixed point.** The two loops' answers on the converged fine slender beams
+differ in the third digit of `e_u` (10:1 `n_y = 32`: 1.520e-4 Anderson, 1.666e-4 GMRES), so the ignored probe
+`solid::coupled::tests::gate_95a_probe_how_far_eight_decades_lands_from_the_fixed_point` (f64 only, 63 s) solves
+each of the four beams a third time, with GMRES(50) to twelve decades and the block solve at `1e-14`, and reads
+both eight-decade answers against it (`max|u - u_ref| / max|u_ref|`):
+
+| beam | Anderson, 8 decades | GMRES(50), 8 decades | `e_u` Anderson / GMRES / reference |
+|---|---|---|---|
+| 5:1, `n_y = 16` | 2.2e-7 | 1.9e-8 | 2.6311e-4 / 2.6335e-4 / 2.6333e-4 |
+| 5:1, `n_y = 32` | 5.5e-7 | 7.2e-8 | 9.8107e-5 / 9.8726e-5 / 9.8654e-5 |
+| 10:1, `n_y = 16` | 4.2e-6 | 1.5e-7 | 5.6595e-4 / 5.6193e-4 / 5.6178e-4 |
+| 10:1, `n_y = 32` | 1.6e-5 | 9.8e-7 | 1.5203e-4 / 1.6659e-4 / 1.6757e-4 |
+
+At the reference, `p_u` on 16 -> 32 is **1.416** at 5:1 and **1.745** at 10:1. Anderson's eight decades of the
+lagged `u` residual leave up to 1.6e-5 of iteration error on the 10:1 beams, which is ten per cent of `e_u` there,
+and that error is what put §109.7's 10:1 order at 1.896, 0.004 short of the bar. The fixed point's own order is
+1.745. GMRES's eight decades of the whole state's residual stay within 1e-6.
+
+**The attribution, after GMRES.** §142.1 split Gate 95-A's shortfall in two. The loop's half is closed: GMRES(50)
+converges on every mesh of both slender beams, and "converges on every mesh" holds at 5:1 and 10:1 on this loop.
+The discretisation's half is not: at the fixed point the displacement order on the finest pair is 1.416 at 5:1
+and 1.745 at 10:1, both short of 1.9, and no outer iteration can move either. Gate 95-A on the GMRES loop is
+therefore **MISSED** at 5:1 and 10:1 on `p_u` alone, asserted and printed as such by `ofgpu-validate`; the
+stress order (1.45-1.47) and the finest tip (within 0.017 %) hold on every beam. Both orders still rise with
+refinement (5:1 from 1.135 to 1.416, 10:1 from 1.318 to 1.745), so the D-VAL-7 trigger still does not fire.
+Whether they settle near 2 past `n_y = 32` is the open question; it is the D-VAL-7 question of §109.7 asked again
+with the iteration error removed, and the measurement that answers it is a fifth mesh (`n_y = 64`, 40 960 cells
+at 10:1) or §109.4's implicit tangential stencil (VAL-13), neither of which this unit builds.
+
+What this subsection does not do: no bar, tolerance, mesh or default moved. `outer: "anderson"` and every
+caller that does not ask for GMRES run the code they ran, and Gate 95-A's Anderson rows print the same digits.
+The single build compiles the GMRES path; it is not measured there. Three of the new tests (the host affine
+map, the gate, pair 12) hold bounds below f32 round-off and carry §112.3's attribute; the fixed-count and replay
+tests are bitwise in either build, and the probe is f64 only.
 
 
 ---
