@@ -172,10 +172,10 @@ impl Blasius {
 
 /// One plate face: its centre `x`, `Re_x` there, and its `C_f`.
 #[derive(Clone, Copy, Debug)]
-struct WallFace {
-    x: f64,
-    re_x: f64,
-    cf: f64,
+pub(crate) struct WallFace {
+    pub(crate) x: f64,
+    pub(crate) re_x: f64,
+    pub(crate) cf: f64,
 }
 
 struct PlateRun {
@@ -229,7 +229,7 @@ fn patch_rule(name: &str, u_inf: f64) -> Option<(BcKind, Vec3, BcKind)> {
     })
 }
 
-fn set_bcs(gpu: &Gpu, sim: &mut Simple<'_>, hm: &HostMesh, u_inf: f64) -> Result<()> {
+pub(crate) fn set_bcs(gpu: &Gpu, sim: &mut Simple<'_>, hm: &HostMesh, u_inf: f64) -> Result<()> {
     let nbf = hm.n_boundary_faces;
     let mut u_kind = vec![BcKind::ZeroGradient as Label; nbf];
     let mut u_fr = vec![0.0 as Scalar; nbf];
@@ -269,7 +269,7 @@ fn set_bcs(gpu: &Gpu, sim: &mut Simple<'_>, hm: &HostMesh, u_inf: f64) -> Result
 
 /// Steady SIMPLE, `alpha_U = 0.7` and `alpha_p = 0.3` (§5.2), linearUpwind
 /// on `div(phi,U)` as `cases/flatPlateLaminar.jsonc` names it.
-fn controls(nu: f64) -> SimpleControls {
+pub(crate) fn controls(nu: f64) -> SimpleControls {
     SimpleControls {
         momentum: MomentumControls {
             nu: s(nu),
@@ -311,7 +311,7 @@ fn controls(nu: f64) -> SimpleControls {
 /// `tau_w = nu u_P,x / d`, `d = (c_P - c_f) . n_hat`, `C_f = 2 tau_w / U^2`
 /// (144.2d) - the wall cell's one-sided gradient, the one the momentum
 /// equation's own wall flux uses.
-fn wall_faces(hm: &HostMesh, plate: usize, u: &[Vec3], u_inf: f64, nu: f64) -> Vec<WallFace> {
+pub(crate) fn wall_faces(hm: &HostMesh, plate: usize, u: &[Vec3], u_inf: f64, nu: f64) -> Vec<WallFace> {
     let g = hm.geom64();
     let p = &hm.patches[plate];
     (p.start..p.start + p.size)
@@ -352,6 +352,27 @@ fn cf_change(a: &[WallFace], b: &[WallFace], re_l: f64) -> f64 {
         .fold(0.0f64, |m, d| if m.is_nan() || d.is_nan() { f64::NAN } else { m.max(d) })
 }
 
+/// Seed: the free stream in every cell, its flux through every face whose
+/// velocity condition lets flow through (the inlet, outlet and top; the wall,
+/// the symmetry plane and the empties carry none), and a level pressure.
+pub(crate) fn seed_free_stream(gpu: &Gpu, sim: &mut Simple<'_>, hm: &HostMesh, u_inf: f64) -> Result<()> {
+    let free = Vec3::new(s(u_inf), 0.0, 0.0);
+    gpu.write(&mut sim.u_mut().f, &vec![free; hm.n_cells])?;
+    gpu.write(&mut sim.p_mut().f, &vec![0.0 as Scalar; hm.n_cells])?;
+    let phi_f: Vec<Scalar> = hm.sf.iter().map(|sf| free.dot(*sf)).collect();
+    gpu.write(&mut sim.phi_mut().f, &phi_f)?;
+    let mut phi_b = vec![0.0 as Scalar; hm.n_boundary_faces];
+    for p in &hm.patches {
+        if matches!(p.name.as_str(), "inlet" | "outlet" | "top") {
+            for i in p.start..p.start + p.size {
+                phi_b[i] = free.dot(hm.b_sf[i]);
+            }
+        }
+    }
+    gpu.write(&mut sim.phi_mut().bf, &phi_b)?;
+    Ok(())
+}
+
 fn run_level(gpu: &Gpu, n: (usize, usize, usize)) -> Result<PlateRun> {
     let started = Instant::now();
     let spec = level_spec(n);
@@ -370,24 +391,7 @@ fn run_level(gpu: &Gpu, n: (usize, usize, usize)) -> Result<PlateRun> {
     )?;
     set_bcs(gpu, &mut sim, &hm, u_inf)?;
 
-    // Seed: the free stream in every cell, its flux through every face
-    // whose velocity condition lets flow through (the inlet, outlet and
-    // top; the wall, the symmetry plane and the empties carry none), and
-    // a level pressure.
-    let free = Vec3::new(s(u_inf), 0.0, 0.0);
-    gpu.write(&mut sim.u_mut().f, &vec![free; hm.n_cells])?;
-    gpu.write(&mut sim.p_mut().f, &vec![0.0 as Scalar; hm.n_cells])?;
-    let phi_f: Vec<Scalar> = hm.sf.iter().map(|sf| free.dot(*sf)).collect();
-    gpu.write(&mut sim.phi_mut().f, &phi_f)?;
-    let mut phi_b = vec![0.0 as Scalar; hm.n_boundary_faces];
-    for p in &hm.patches {
-        if matches!(p.name.as_str(), "inlet" | "outlet" | "top") {
-            for i in p.start..p.start + p.size {
-                phi_b[i] = free.dot(hm.b_sf[i]);
-            }
-        }
-    }
-    gpu.write(&mut sim.phi_mut().bf, &phi_b)?;
+    seed_free_stream(gpu, &mut sim, &hm, u_inf)?;
     sim.initialise(gpu)?;
 
     // Laminar: zero eddy viscosity with `calculated` boundary values, and

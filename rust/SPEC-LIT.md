@@ -34334,7 +34334,7 @@ eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from
 
 Every other test in the failed and did-not-finish columns now carries
 `#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **489** library
-tests and **16** binary tests. So the second invocation of the house command reports
+tests and **17** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
@@ -34345,8 +34345,9 @@ and holds them to the two bold numbers in this paragraph (it is itself one more 
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
 where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
-105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's) and §105.18 one (the `backward`
-stroke's regression test).
+105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's), §105.18 one (the `backward`
+stroke's regression test) and §144.3 one (`ofgpu-validate`'s 10:1 cantilever mesh test, which first compiled under
+the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`).
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -52149,9 +52150,9 @@ only in the oracle: there is no device kernel, case keyword or registry row (VAL
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
 VAL-30 to VAL-34. §144.1 is the flat-plate mesh (VAL-30), and it claims nothing about a
-solution. §144.2 is the Blasius gate (VAL-31). §144.3 (the T3A case, VAL-32), §144.4 (leg 4,
-VAL-33) and §144.5 (the ZPG plate, VAL-34) are the plan's numbers and are not yet written;
-they go between §144.2 and §144.6. §144.6 is the T3A key (VAL-04). The plan's row gives it
+solution. §144.2 is the Blasius gate (VAL-31). §144.3 is the T3A case on the harness and leg 1 in 2-D
+(VAL-32). §144.4 (leg 4, VAL-33) and §144.5 (the ZPG plate, VAL-34) are the plan's numbers and
+are not yet written; they go between §144.3 and §144.6. §144.6 is the T3A key (VAL-04). The plan's row gives it
 §144.1, and it was written as §144.1 in its own lane, but VAL-30 had taken §144.1, so it was
 renumbered when the lanes merged and the plan's numbers for VAL-32 to VAL-34 were kept.
 §88.10, §40.7 and §56.11 each record that this tree had no flat-plate harness, and §88.10 and
@@ -52315,6 +52316,176 @@ cell touches the zero-gradient outlet. It is 1.3 % low there, and that end effec
 `laminar()` mesh (`30 + 120 x 80`) is not one of the three levels, because halving its 30 and 120 twice is not whole.
 The levels keep its box and ratios instead. Nothing here holds a transition model or a turbulent plate; those are
 the later subsections of §144, by the plan's allocation.
+
+### 144.3 The T3A plate on the harness, and leg 1 measured in 2-D
+
+`No GPL-licensed source was consulted.` Docs/17's row VAL-32 reads "The T3A case runs on the harness, and leg 1 is
+measured in 2-D". §88.10's leg 1 is the 1-D closed form of SST's free-stream decay. From the NASA/TMBWG T3A inflow it
+gives `Tu = 3.3530 %` at the leading edge, against the TMR's stated `3.300 %`, and §90.10 re-runs it for the 2015
+model. This subsection solves the rig in two dimensions with both transition models, on VAL-31's harness (§144.2),
+and reads the solver's own `Tu` at the leading edge. It changes no solver, model, kernel or driver. The new code is
+`src/bin/validate_gates/t3a.rs` and one section of `ofgpu-validate`.
+
+**The plan's case files are not shipped, because no driver can run them.** The row names
+`cases/t3aPlate{LM,Gamma}.jsonc`. Neither `ofgpu-lowmach` nor `ofgpu-buoyant` uploads a `gamma` or a `ReThetat` field.
+After `build_coupled`, both copy only `k` and the dissipation field from the start time onto the model's fields. The
+transition fields therefore keep the zeros that `LangtryMenter::new` and `MenterGamma::new` allocate, and the JSONC
+reader has no entry that could state them. On 2026-10-15 a `kOmegaSSTLM` copy of `cases/flatPlateLaminar.jsonc` was
+run for two iterations of `ofgpu-lowmach`, with inlet `k` and `omega` added. It runs, and its banner reads
+`initial gamma in [0, 0]`. That is §90.5's absorbing laminar state, not the `gamma = 1` start of §89.1 and §91.1.
+The same banner line also names `kOmegaSSTGamma` for an LM run. A case file that runs the transition model locked
+laminar would claim what it does not do. The case therefore lives where it can be stated whole: on the harness, in
+memory, with the boundary conditions below. Teaching the drivers and the JSONC reader the two fields is a driver
+change, and it is left to the drivers' owner.
+
+**The rig, scaled.** The TMR inflow (§88.10) is `U = 69.44 m/s`, `Re/m = 2.00e5`, `Tu_0 = 5.855 %`,
+`mu_t/mu = r = 11.90`, with the leading edge `0.250 m` downstream. The harness runs it at `U = 1 m/s` and
+`nu = 5e-6 m^2/s`, which is the same `Re/m` (`FlatPlateSpec::laminar()`'s free stream). With `k_0 = 3/2 (Tu_0 U)^2`
+and `omega_0 = k_0/(r nu)`,
+
+```text
+beta_2 omega_0 x/U = (3/2) beta_2 Tu_0^2 (U x/nu) / r                                        (144.3a)
+```
+
+So the closed form's `tau`, and every `Tu(x)` with it, depends on `x` only through `Re_x`. The two inflows give the
+same `Tu` at the edge, `3.353046 %`, to `2.2e-16` relative. The harness inflow is `k_0 = 5.14215375e-3 m^2/s^2` and
+`omega_0 = 86.42275 1/s`. `ReThetat`'s inflow value is `re_thetat_inlet(5.855)` (§89.2).
+
+**The meshes.** The plate is `FlatPlateSpec` (§144.1) with `x_up = 0.25 m` (the rig's), `L = 3 m`, `H = 0.5 m` and
+`depth = 0.01 m`. `L = 3 m` makes `Re_L = 6e5`, past the last of Roach & Brierley's stations (§144.6). The end-cell
+ratios are `r_up = 3`, `r_plate = 10` and `r_y = 1000`. The levels are `48 + 256 x 128` (38 912 cells),
+`24 + 128 x 64` (9 728) and `12 + 64 x 32` (2 432), and each halves every count of the one before, so (94.1)'s `h` is
+`6.4623e-3`, `1.2925e-2` and `2.5849e-2` m. On the finest level the two cells at the edge are `2.855e-3` and
+`2.993e-3 m` (4.6 % apart), the inlet cell is `8.565e-3 m` and the trailing-edge cell `2.993e-2 m`. The wall cell is
+`2.649e-5`, `5.197e-5` and `9.996e-5 m` on the three levels. (144.1c)'s laminar estimate puts it at `y+ = 0.37` at
+the finest level's first plate face. At a turbulent `C_f = 4.5e-3` the same wall cells sit at `y+ = 0.13`, `0.25` and
+`0.47`.
+
+**Boundary conditions.** They are written as a driver would read them from `0/`: each field is built in memory as a
+`RawScalarField` and set by `setup_scalar_field`. `U` and `p` are §144.2's.
+
+| patch | `k` | `omega` | `nut` | `gamma` | `ReThetat` |
+|---|---|---|---|---|---|
+| `inlet` | `fixedValue k_0` | `fixedValue omega_0` | `calculated` | `fixedValue 1` | `fixedValue re_thetat_inlet(5.855)` |
+| `outlet`, `top` | `zeroGradient` | `zeroGradient` | `calculated` | `zeroGradient` | `zeroGradient` |
+| `symmetry` | `symmetryPlane` | `symmetryPlane` | `symmetryPlane` | `symmetryPlane` | `symmetryPlane` |
+| `plate` | `fixedValue 0` | `omegaWallFunction` | `nutLowReWallFunction` | `zeroGradient` | `zeroGradient` |
+| `back`, `front` | `empty` | `empty` | `empty` | `empty` | `empty` |
+
+The plate's `omega` pins the wall cell to (143.8)'s blend, and at these `y+` that blend is
+`omega_vis = 6 nu/(beta_1 delta_w^2)` to round-off. `nut` takes no wall function (§15.5). Every cell starts at the
+inflow state: `k_0`, `omega_0`, `gamma = 1` and the inflow `ReThetat`. `U`, `p` and the flux are seeded as in §144.2.
+The wall distance is §6.6's.
+
+**Numerics.** The momentum and pressure settings are §144.2's SIMPLE: `alpha_U = 0.7`, `alpha_p = 0.3` and bounded
+`linearUpwind` on `div(phi,U)`. `div(phi,k)` and `div(phi,omega)` are bounded `linearUpwind`, relaxed by 0.7.
+`div(phi,gamma)` and `div(phi,ReThetat)` are bounded upwind, the `LmControls` and `GammaControls` defaults. The
+second-order `k` and `omega` schemes are an input chosen for this measurement. On the free-stream decay
+`U dk/dx = -beta* k omega`, an upwind cell of width `dx` errs by about `(beta* omega dx/U)^2/2`. Summed over the
+finest level's 48 cells ahead of the edge, that is about 2 % in `k`, which is more than the bar.
+
+**The measurement.**
+
+```text
+Tu_LE = 100 sqrt(2 k(0, y)/3) / U,     k(0, y) = k_a + (0 - x_a)(k_b - k_a)/(x_b - x_a)            (144.3b)
+```
+
+Here `a` and `b` are the two cell columns whose centroids straddle the edge (`x_a < 0 < x_b`), taken row by row. The
+gate reads the row whose centroid is nearest `y = H/2`, and it prints the least and greatest `Tu_LE` over the rows
+with `0.1 H <= y <= 0.9 H`. `U` is the free stream, as it is in the closed form.
+
+**The stopping rule** is §144.2's at a slower cadence. Every 100 iterations after the first 1000, the run takes the
+largest relative change of `C_f` ((144.2d)) over the plate faces with `2e4 <= Re_x <= Re_L`. It stops when that change
+is `1e-6` or less, with a cap of 40 000 iterations.
+
+**How the runs are made.** Each (model, level) pair is an ignored test of the validate binary:
+`record_t3a_{lm,gamma}_{fine,medium,coarse}`, run with
+`cargo test --release --bin ofgpu-validate record_t3a -- --ignored --nocapture`. It prints a progress line every 100
+iterations and then its record, as the Rust literal that the replay slot `t3a::RECORDS` (or `RECORDS_SINGLE`) holds.
+Besides `Tu_LE`, a record carries `C_f` at `Re_x = 2.5e4 (i + 1)` for `i < 23`, linear in `x` between the two
+bracketing faces, and the face of least `C_f`. Those are for leg 4 (VAL-33), and nothing here reads them as a
+verdict. `ofgpu-validate` never runs the harness. It replays the records, which is §110.1's split of recipe and
+verdict. The validate bin's test crate did not compile under `--features single` (an `f32`/`f64` mismatch in the
+Gate 95-A mesh test, `h` against `HostMesh::check()`'s f64 volume). That line now widens `h` once, which is what made
+the single-build runs possible. The f64 build is unchanged by it, because `f64::from` of an `f64` is the identity.
+Under the feature, that test then misses its `1e-6` relative bar on the cell volume by the f32 rounding of the
+points (`1.6e-5`), so it carries §112.3's attribute, which makes 17 binary tests. Under single the validate binary
+now passes 97 tests and ignores 10.
+
+**Pricing (docs/17 VAL-50's way).** Before any run was recorded, the fine LM level ran 500 iterations at 92 ms per
+iteration. The coarse and medium LM levels ran to their stopping rule: 1000 iterations in 35 s, and 3100 in 2.7 min.
+At the cap, the price of each fine level was therefore at most 61 min, which put the six f64 runs at no more than
+2.2 h. They took 59 min of card time, because the fine levels ran at 42 and 37 ms per iteration once their first
+iterations were past. That made the price of the six single runs about 1 h, and the twelve together fit the unit's
+3 h of card time, so every level was run. The single runs took 38 min, so the unit used 97 min of card time.
+While they ran, the card also served the other two lanes; it was at 35-87 % utilisation before this unit's jobs
+started.
+
+**The records.** All of them are on the one RTX 5070 Ti of record, on 2026-10-15, from `f1f8567` with this unit's
+`t3a.rs`:
+
+| model | level | build | iterations | rule met (last change) | `Tu_LE` % | rows 0.1H-0.9H % | least `C_f` at `Re_x` | wall time |
+|---|---|---|---|---|---|---|---|---|
+| `kOmegaSSTLM` | 48 + 256 x 128 | f64 | 40 000 | no (9.37e-6) | 3.353320 | 3.35217-3.35332 | `2.7426e-3` at `8.8932e4` | 27.8 min |
+| `kOmegaSSTLM` | 24 + 128 x 64 | f64 | 3 100 | yes (4.70e-7) | 3.352550 | 3.35142-3.35255 | `2.7440e-3` at `8.6481e4` | 164 s |
+| `kOmegaSSTLM` | 12 + 64 x 32 | f64 | 1 000 | yes (2.40e-7) | 3.349395 | 3.34842-3.34939 | `2.7975e-3` at `8.7127e4` | 34 s |
+| `kOmegaSSTGamma` | 48 + 256 x 128 | f64 | 40 000 | no (1.88e-5) | 3.353318 | 3.35211-3.35332 | `2.0787e-3` at `1.5633e5` | 24.9 min |
+| `kOmegaSSTGamma` | 24 + 128 x 64 | f64 | 2 000 | yes (4.44e-7) | 3.352549 | 3.35136-3.35255 | `2.1767e-3` at `1.4507e5` | 123 s |
+| `kOmegaSSTGamma` | 12 + 64 x 32 | f64 | 1 000 | yes (1.57e-10) | 3.349395 | 3.34838-3.34939 | `2.4752e-3` at `1.1743e5` | 42 s |
+| `kOmegaSSTLM` | 48 + 256 x 128 | single | 40 000 | no (1.48e-5) | 3.353319 | 3.35217-3.35332 | `2.7313e-3` at `8.8932e4` | 16.9 min |
+| `kOmegaSSTLM` | 24 + 128 x 64 | single | 4 600 | yes (9.85e-7) | 3.352550 | 3.35142-3.35255 | `2.7473e-3` at `8.6481e4` | 137 s |
+| `kOmegaSSTLM` | 12 + 64 x 32 | single | 1 000 | yes (6.95e-7) | 3.349395 | 3.34842-3.34939 | `2.7975e-3` at `8.7127e4` | 28 s |
+| `kOmegaSSTGamma` | 48 + 256 x 128 | single | 40 000 | no (3.82e-5) | 3.353319 | 3.35211-3.35332 | `2.0793e-3` at `1.5633e5` | 14.1 min |
+| `kOmegaSSTGamma` | 24 + 128 x 64 | single | 9 400 | yes (9.93e-7) | 3.352549 | 3.35136-3.35255 | `2.1619e-3` at `1.4507e5` | 218 s |
+| `kOmegaSSTGamma` | 12 + 64 x 32 | single | 1 400 | yes (9.71e-7) | 3.349395 | 3.34838-3.34939 | `2.4752e-3` at `1.1743e5` | 32 s |
+
+**The study.** For `kOmegaSSTLM`, `Tu_LE` falls 3.35332, 3.35255, 3.34939 % from fine to coarse: monotone,
+`p = 2.035`, `phi_ext = 3.353589 %`, `U_fine = 8.05e-4` percentage points (Fs 3, second order). `kOmegaSSTGamma` reads
+the same three values to the sixth digit (`p = 2.036`, `phi_ext = 3.353587 %`). This is as it should be: in the free
+stream `gamma = 1`, and both models leave SST's `k` and `omega` equations untouched there ((88.13), §90.6). The
+extrapolated 2-D value is `0.016 %` above the closed form. That is the part of the free stream the 1-D form leaves
+out (diffusion, the cross-diffusion term, and the plate's small displacement of the stream), and it is well inside
+the bar.
+
+**The gate rows** (`ofgpu-validate`'s section "T3A leg 1 in 2-D", all replayed):
+
+1. The closed form, recomputed from the TMR inflow with the crate's SST constants, is 88.10's `3.3530 %` to `5e-5`
+   (`3.353046 %`, `4.6e-5`). Precision class A: host f64 in both builds.
+2. The scaled inflow keeps it to `1e-12` relative ((144.3a), measured `2.2e-16`). Class A.
+3. For each model, `|Tu_LE/3.3530 - 1| <= 0.005` on the finest f64 record: `9.54e-5` (LM) and `9.48e-5` (gamma).
+   Both hold.
+4. For each model, the same bar on the finest single record. Class R: a solved field against an exact statement of
+   the model, with the same bar in both builds: `9.51e-5` for both models (`3.353319 %`). The single build's
+   `Tu_LE` agrees with the f64 build's to `1e-6`. Both hold.
+5. Against the TMR's stated `3.300 %`, with the bar of 0.5 % that the plan's row gives both comparisons, the finest
+   records read `1.616 %` for both models. The closed form itself is `1.607 %` from that number, so no solution of
+   this model from this inflow can meet the bar. The datum is a stated property of the setup, not a measurement and
+   not an exact solution. It is registered `OPEN` for each model (two gates, with the study above as the
+   uncertainty), never as a pass.
+
+A miss of row 3 or 4 would register the closed-form gate `MISSES`, with the study.
+
+**Decisions taken here, by recommendation.**
+
+- The plan's "to 0.5 %" is read as the bar on both comparisons. The TMR row is therefore not met, by construction,
+  and it is reported `OPEN` with its cause. The alternative reading would hold the TMR row to §88.10's 5 %, and this
+  subsection does not adopt it.
+- The two case files are not shipped (see above).
+- The box (`L = 3 m`, `H = 0.5 m`), the ratios and the three levels are this unit's inputs, chosen for `y+ < 1` and
+  for edge cells within 5 % of each other.
+
+**Not claimed.** This subsection holds no `C_f` against a measurement or a correlation. The `C_f` rise and the
+least-`C_f` points in the records are what VAL-33's leg 4 will hold against Roach & Brierley (§144.6), with the bands
+fixed in its brief. The two fine f64 runs do not meet the stopping rule within 40 000 iterations. From iteration
+10 000 to 40 000 their largest `C_f` change per 100 iterations stays between `1.0e-6` and `2.8e-5` (LM) and between
+`4.7e-6` and `7.0e-5` (gamma). Over the same span the largest initial residual wanders between `8e-6` and `3.3e-4`.
+`Tu_LE` reads `3.35332 %` at every check from iteration 300 on. Leg 1 reads the free stream, which is
+converged. The two fine single runs end the same way (last changes `1.5e-5` and `3.8e-5`), and under single the
+medium levels need more iterations to meet the rule (4 600 against 3 100 for LM, 9 400 against 2 000 for gamma), as
+does the coarse gamma level (1 400 against 1 000). Where the fine runs stop, the least `C_f` of the two builds
+differs by `0.4 %` (LM) and `0.03 %` (gamma). That is the size of the wander, and leg 4 should carry it as part of
+its uncertainty. Whether the wander is a property of the transition region on these meshes or of the iteration is not
+diagnosed here. No solver setting was changed to quiet it.
 
 ### 144.6 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
 

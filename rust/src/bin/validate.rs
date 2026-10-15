@@ -3694,6 +3694,13 @@ fn run(c: &mut Checks) -> Result<()> {
     validate_gates::blasius_plate::check_blasius_plate(c, &gpu)?;
     c.leave_gate();
     }
+    // SPEC-LIT 144.3 - the T3A plate on the same harness: the solver's own
+    // leading-edge Tu in 2-D against 88.10's closed form and the TMR's
+    // stated value, replayed from the recorded runs of
+    // src/bin/validate_gates/t3a.rs (each model opens its own gate scopes).
+    if c.section("T3A leg 1 in 2-D: the leading-edge Tu of kOmegaSSTLM and kOmegaSSTGamma on the flat-plate harness, three meshes, replayed (SPEC-LIT 144.3)") {
+    validate_gates::t3a::check_t3a_leg1(c)?;
+    }
 
     Ok(())
 }
@@ -24054,6 +24061,7 @@ mod cantilever_refine {
     /// tip study takes the finest three, and the finest 10:1 beam - the
     /// largest mesh the gate runs - builds with cubic cells.
     #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn cantilever_gate_runs_four_meshes_per_ratio() {
         assert_eq!(CANTILEVER_NY, [4, 8, 16, 32], "four meshes, n_y = 32 the fourth");
         assert_eq!(&CANTILEVER_NY[..3], &[4, 8, 16], "the first three are §109.7's");
@@ -24067,7 +24075,8 @@ mod cantilever_refine {
         let hm = ofgpu::solid::fixtures::cantilever_mesh(n_x, n_y, l, ofgpu::solid::fixtures::CANTILEVER_C)
             .expect("the finest 10:1 beam builds");
         assert_eq!(hm.n_cells, 10_240);
-        let h = 2.0 * ofgpu::solid::fixtures::CANTILEVER_C / n_y as Scalar;
+        // `check()` measures in f64 whatever `Scalar` is (SPEC-LIT 118.2).
+        let h = f64::from(2.0 * ofgpu::solid::fixtures::CANTILEVER_C / n_y as Scalar);
         let r = hm.check();
         assert!(r.min_volume > 0.0, "positive volumes");
         assert!((r.min_volume - h * h * h).abs() <= 1e-6 * h * h * h, "cubic cells: {} vs h^3 {}", r.min_volume, h * h * h);

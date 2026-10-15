@@ -24,3 +24,7 @@ pub(crate) mod splash;
 
 /// SPEC-LIT §144.2, Gate 132-L: the laminar flat plate against Blasius.
 pub(crate) mod blasius_plate;
+
+/// SPEC-LIT §144.3: the T3A plate on the flat-plate harness, leg 1 in 2-D
+/// (recorded runs, replayed).
+pub(crate) mod t3a;
