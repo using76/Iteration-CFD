@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::sizefield::point_box_distance;
+use super::sizefield::{par_map, point_box_distance};
 use super::surfprep::{PreparedSurface, TetSurface};
 use super::Point;
 use crate::error::{Error, Result};
@@ -407,15 +407,21 @@ fn items_box(items: &[BvhItem]) -> (Point, Point) {
 // ==========================================================================
 
 /// The remesh's knobs (§116.10): how many split/collapse/flip/relax/
-/// project iterations to run.
+/// project iterations to run, and on how many workers the relaxation and
+/// the projection run, `0` meaning every core (TET-15). The result is the
+/// same for every worker count, bit for bit.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RemeshOptions {
     pub iterations: u32,
+    pub threads: usize,
 }
 
 impl Default for RemeshOptions {
     fn default() -> Self {
-        RemeshOptions { iterations: 10 }
+        RemeshOptions {
+            iterations: 10,
+            threads: 0,
+        }
     }
 }
 
@@ -1153,94 +1159,98 @@ impl Mesh {
     /// of its two feature neighbours' old positions, staying on its
     /// polyline. A free vertex follows (116.14): `x <- x + (I - n n^T)
     /// (c - x)` with `n` the normalised sum of the one-ring's triangle
-    /// normals and `c` the area-weighted centroid.
-    fn relax(&mut self) {
-        let old = self.pts.clone();
-        let mut new_pts = old.clone();
-        for v in 0..self.pts.len() {
-            if !self.live_v[v] {
-                continue;
-            }
-            if self.corner[v] {
-                continue; // a corner never moves.
-            }
-            if self.feat_v[v] {
-                let fnbrs: Vec<u32> =
-                    self.feat_at(v as u32).into_iter().map(|(w, _)| w).collect();
-                if fnbrs.len() == 2 {
-                    new_pts[v] = mid(old[fnbrs[0] as usize], old[fnbrs[1] as usize]);
-                }
-                continue;
-            }
-            let mut ring: BTreeSet<u32> = BTreeSet::new();
-            for &w in &self.nbrs[v] {
-                if let Some(ts) = self.edges.get(&edge_key(v as u32, w)) {
-                    ring.extend(ts.iter().copied());
-                }
-            }
-            if ring.is_empty() {
-                continue;
-            }
-            let mut n_sum = [0.0; 3];
-            let mut a_sum = 0.0;
-            let mut c_sum = [0.0; 3];
-            for t in &ring {
-                let tri = self.tris[*t as usize];
-                let p = [
-                    old[tri[0] as usize],
-                    old[tri[1] as usize],
-                    old[tri[2] as usize],
-                ];
-                let cr = cross(sub(p[1], p[0]), sub(p[2], p[0]));
-                n_sum = add(n_sum, cr);
-                let a = norm(cr) * 0.5;
-                a_sum += a;
-                let g = [
-                    (p[0][0] + p[1][0] + p[2][0]) / 3.0,
-                    (p[0][1] + p[1][1] + p[2][1]) / 3.0,
-                    (p[0][2] + p[1][2] + p[2][2]) / 3.0,
-                ];
-                c_sum = [
-                    c_sum[0] + a * g[0],
-                    c_sum[1] + a * g[1],
-                    c_sum[2] + a * g[2],
-                ];
-            }
-            if !(a_sum > 0.0) {
-                continue;
-            }
-            let nn = norm(n_sum);
-            if nn == 0.0 {
-                continue;
-            }
-            let n = scale(n_sum, 1.0 / nn);
-            let c = scale(c_sum, 1.0 / a_sum);
-            let d0 = sub(c, old[v]);
-            new_pts[v] = add(old[v], sub(d0, scale(n, dot(n, d0))));
-        }
+    /// normals and `c` the area-weighted centroid. Each vertex reads only
+    /// the old positions, so the vertices run on `threads` workers through
+    /// [`par_map`] (TET-15) with the sequential result.
+    fn relax(&mut self, threads: usize) {
+        let me = &*self;
+        let new_pts = par_map(me.pts.len(), threads, |v| me.relaxed(v));
         self.pts = new_pts;
+    }
+
+    /// One vertex of [`Mesh::relax`]: its new position from the old ones.
+    fn relaxed(&self, v: usize) -> Point {
+        let old = &self.pts;
+        if !self.live_v[v] {
+            return old[v];
+        }
+        if self.corner[v] {
+            return old[v]; // a corner never moves.
+        }
+        if self.feat_v[v] {
+            let fnbrs: Vec<u32> = self.feat_at(v as u32).into_iter().map(|(w, _)| w).collect();
+            if fnbrs.len() == 2 {
+                return mid(old[fnbrs[0] as usize], old[fnbrs[1] as usize]);
+            }
+            return old[v];
+        }
+        let mut ring: BTreeSet<u32> = BTreeSet::new();
+        for &w in &self.nbrs[v] {
+            if let Some(ts) = self.edges.get(&edge_key(v as u32, w)) {
+                ring.extend(ts.iter().copied());
+            }
+        }
+        if ring.is_empty() {
+            return old[v];
+        }
+        let mut n_sum = [0.0; 3];
+        let mut a_sum = 0.0;
+        let mut c_sum = [0.0; 3];
+        for t in &ring {
+            let tri = self.tris[*t as usize];
+            let p = [
+                old[tri[0] as usize],
+                old[tri[1] as usize],
+                old[tri[2] as usize],
+            ];
+            let cr = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+            n_sum = add(n_sum, cr);
+            let a = norm(cr) * 0.5;
+            a_sum += a;
+            let g = [
+                (p[0][0] + p[1][0] + p[2][0]) / 3.0,
+                (p[0][1] + p[1][1] + p[2][1]) / 3.0,
+                (p[0][2] + p[1][2] + p[2][2]) / 3.0,
+            ];
+            c_sum = [
+                c_sum[0] + a * g[0],
+                c_sum[1] + a * g[1],
+                c_sum[2] + a * g[2],
+            ];
+        }
+        if !(a_sum > 0.0) {
+            return old[v];
+        }
+        let nn = norm(n_sum);
+        if nn == 0.0 {
+            return old[v];
+        }
+        let n = scale(n_sum, 1.0 / nn);
+        let c = scale(c_sum, 1.0 / a_sum);
+        let d0 = sub(c, old[v]);
+        add(old[v], sub(d0, scale(n, dot(n, d0))))
     }
 
     /// (116.14d)/(116.14j): every live vertex projected - a corner
     /// stays, a feature vertex of polyline `L_k` onto `L_k`'s input
     /// segments (the first strict minimum over them), a free vertex onto
     /// the input surface through the one `Projector` built on it; among
-    /// equally close triangles the smallest index wins.
-    fn project(&mut self, proj: &Projector, polys: &[Vec<(Point, Point)>]) {
-        for v in 0..self.pts.len() {
-            if !self.live_v[v] {
-                continue;
+    /// equally close triangles the smallest index wins. Each vertex moves
+    /// alone, so the vertices run on `threads` workers through
+    /// [`par_map`] (TET-15) with the sequential result.
+    fn project(&mut self, proj: &Projector, polys: &[Vec<(Point, Point)>], threads: usize) {
+        let me = &*self;
+        let new_pts = par_map(me.pts.len(), threads, |v| {
+            let x = me.pts[v];
+            if !me.live_v[v] || me.corner[v] {
+                x
+            } else if me.feat_v[v] {
+                closest_on_polyline(x, &polys[me.fpoly[v] as usize])
+            } else {
+                proj.closest(x).0
             }
-            if self.corner[v] {
-                continue;
-            }
-            if self.feat_v[v] {
-                let k = self.fpoly[v] as usize;
-                self.pts[v] = closest_on_polyline(self.pts[v], &polys[k]);
-                continue;
-            }
-            self.pts[v] = proj.closest(self.pts[v]).0;
-        }
+        });
+        self.pts = new_pts;
     }
 
     /// Compacts: no unused vertices, vertices renumbered in increasing
@@ -1400,8 +1410,8 @@ pub fn remesh(
         }
         stats.collapses += mesh.collapse_pass(h)?;
         stats.flips += mesh.flip_pass();
-        mesh.relax();
-        mesh.project(&proj, &polys);
+        mesh.relax(opts.threads);
+        mesh.project(&proj, &polys, opts.threads);
         mesh.compact();
     }
     let surface = mesh.to_surface(input.surface.patch_names.clone());
@@ -1846,7 +1856,7 @@ mod tests {
         let out = remesh(
             &prep,
             &|_: Point| 0.25,
-            &RemeshOptions { iterations: 3 },
+            &RemeshOptions { iterations: 3, threads: 0 },
         )
         .unwrap();
         let rep = check_manifold(&out.surface).unwrap();
@@ -2008,7 +2018,7 @@ mod tests {
         let err = remesh(
             sphere_prepared(),
             &|_: Point| 0.05,
-            &RemeshOptions { iterations: 0 },
+            &RemeshOptions { iterations: 0, threads: 0 },
         )
         .unwrap_err();
         assert!(
@@ -2786,7 +2796,7 @@ mod tests {
         let tag = format!("{name} h {h} n {n}");
         let prep = prepare(input, 60.0)
             .unwrap_or_else(|e| panic!("{tag}: input refused: {e}"));
-        let out = remesh(&prep, &|_: Point| h, &RemeshOptions { iterations: n })
+        let out = remesh(&prep, &|_: Point| h, &RemeshOptions { iterations: n, threads: 0 })
             .unwrap_or_else(|e| panic!("{tag}: remesh refused: {e}"));
         let rep = check_manifold(&out.surface)
             .unwrap_or_else(|e| panic!("{tag}: manifold: {e}"));

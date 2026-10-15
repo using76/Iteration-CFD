@@ -294,3 +294,57 @@ fn optimise_dihedral_bounds() {
     assert_eq!((l2 * deg, h2 * deg), (lo, hi));
     assert!(pass, "min {lo:.4} deg, max {hi:.4} deg against 10 and 165");
 }
+
+/// TET-11's emission of the optimised sphere in a box, in both builds
+/// (SPEC-LIT §116.16): from `Optimised.points`, the sphere's faces on
+/// patch 0 and the hull's on patch 1. The f32 rounding check (116.26)
+/// finds no flipped cell in either build, and the line reports §92.3's
+/// gate, which `automesher::quality::check` evaluates in `Scalar`.
+#[test]
+fn optimise_then_emit() {
+    use ofgpu::automesher::quality::{measure, QualityThresholds};
+    use ofgpu::tetmesh::emit::{carved_boundary, emit, rounding_flips, to_poly_mesh, EmitPatch};
+    let c = case();
+    let r = &c.refined;
+    let (pts, tets) = (&r.recovery.points, &r.carved.tets);
+    let tri_patch = vec![0; r.recovery.tris.len()];
+    let free = freedoms(&r.recovery, &tri_patch, tets);
+    let o = optimise(pts, tets, &r.recovery.subtris, &free, &TetOptimiseSpec::default()).unwrap();
+    let bnd = carved_boundary(&r.carved, &r.recovery, &tri_patch, 1).unwrap();
+    let ps = vec![
+        EmitPatch { name: "sphere".to_string(), type_name: "wall".to_string() },
+        EmitPatch { name: "domain".to_string(), type_name: "patch".to_string() },
+    ];
+    let flips = rounding_flips(&o.points, &o.tets);
+    let single = std::mem::size_of::<ofgpu::Scalar>() == 4;
+    match emit(&o.points, &o.tets, &bnd, &ps, &QualityThresholds::default()) {
+        Ok((e, q)) => {
+            println!(
+                "emit sphere in a box: {} cells, {} faces, rounding flips {}; 92.3: PASS, max closure {:.3e}, \
+                 max non-orthogonality {:.3} deg, min tau {:.4}, max cond {:.3}",
+                o.tets.len(),
+                e.raw.faces.len(),
+                flips.len(),
+                q.max_closure,
+                q.max_non_orth_deg,
+                q.min_thickness_ratio,
+                q.max_cond
+            );
+        }
+        Err(err) => {
+            // The miss under `single` (SPEC-LIT 116.18): G2 sums the f32
+            // area vectors, whose rounding exceeds 1e-10 of V^(2/3).
+            let e = to_poly_mesh(&o.points, &o.tets, &bnd, &ps).unwrap();
+            let q = measure(&e.raw, &QualityThresholds::default()).unwrap();
+            println!(
+                "emit sphere in a box: rounding flips {}; 92.3: MISSED - max closure {:.3e} against 1e-10 (cell {}); {err}",
+                flips.len(),
+                q.max_closure,
+                q.max_closure_cell
+            );
+            assert!(single, "{err}");
+            assert!(err.to_string().contains("G2 (closure)"), "{err}");
+        }
+    }
+    assert!(flips.is_empty());
+}

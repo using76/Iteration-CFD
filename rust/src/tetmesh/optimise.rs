@@ -1060,7 +1060,7 @@ pub fn optimise(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::tetmesh) mod tests {
     use super::super::carve::CarveStart;
     use super::super::refine::tests::{case, small};
     use super::super::refine::refine;
@@ -1297,7 +1297,7 @@ mod tests {
     /// The prism over the isosceles triangle with a 30-degree apex at
     /// `(-0.5, 0)` and its base at `x = 0.5`, for `z` in `[-0.5, 0.5]`, one
     /// patch, wound outward.
-    fn wedge() -> TetSurface {
+    pub(in crate::tetmesh) fn wedge() -> TetSurface {
         let w = 15f64.to_radians().tan();
         let tri = [[-0.5, 0.0], [0.5, -w], [0.5, w]];
         let mut points: Vec<Point> = Vec::new();
@@ -1321,12 +1321,12 @@ mod tests {
     /// `g = 1.2`, in the box `[-1.25, 1.25]^3`, recovered and refined from
     /// the hull (the flow outside, through the hole). With the remeshed
     /// surface's patches.
-    struct Solid {
-        refined: Refined,
-        tri_patch: Vec<u32>,
+    pub(in crate::tetmesh) struct Solid {
+        pub(in crate::tetmesh) refined: Refined,
+        pub(in crate::tetmesh) tri_patch: Vec<u32>,
     }
 
-    fn solid(surf: &TetSurface, h: f64, cap: u64) -> Result<Solid> {
+    pub(in crate::tetmesh) fn solid(surf: &TetSurface, h: f64, cap: u64) -> Result<Solid> {
         let tris: Vec<[Point; 3]> = surf.tris.iter().map(|t| t.map(|v| surf.points[v as usize])).collect();
         let name = surf.patch_names[0].clone();
         let field = SizeField::build(
@@ -1348,7 +1348,7 @@ mod tests {
         Ok(Solid { refined, tri_patch: s.tri_patch.clone() })
     }
 
-    fn holed() -> &'static Solid {
+    pub(in crate::tetmesh) fn holed() -> &'static Solid {
         static S: OnceLock<Solid> = OnceLock::new();
         S.get_or_init(|| {
             let cap = TetRefineSpec::default().max_inserted_points;
@@ -1356,16 +1356,16 @@ mod tests {
         })
     }
 
-    struct Run {
+    pub(in crate::tetmesh) struct Run {
         free: Vec<Freedom>,
-        out: Optimised,
+        pub(in crate::tetmesh) out: Optimised,
     }
 
     /// Optimises a TET-09 output at the default `tet.optimise` and checks
     /// (116.21b) with the points moved: the smallest dihedral never
     /// decreases, every tetrahedron valid, the boundary faces and the
     /// volume kept. Prints the gate of §116.18: min >= 10, max <= 165.
-    fn run(name: &str, r: &Refined, tri_patch: &[u32]) -> Run {
+    pub(in crate::tetmesh) fn run(name: &str, r: &Refined, tri_patch: &[u32]) -> Run {
         let (pts, tets) = (&r.recovery.points, &r.carved.tets);
         let free = freedoms(&r.recovery, tri_patch, tets);
         let count = |f: fn(&Freedom) -> bool| free.iter().filter(|x| f(x)).count();

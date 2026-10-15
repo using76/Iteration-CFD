@@ -709,6 +709,111 @@ pub fn ercoftac_t3a_from(manifest: &Manifest, dir: &Path) -> Result<T3a> {
     })
 }
 
+/// The NASA TMR zero-pressure-gradient plate's Karman-Schoenherr file,
+/// `(Re_theta, c_f)` (SPEC-LIT §144.5, Gate 132-Z).
+pub const TMR_KS_ID: &str = "tmr-ks-cf";
+/// The same case's Coles profile at `Re_theta = 1e4`, `(y+, u+)`.
+pub const TMR_COLES_ID: &str = "tmr-coles-uplus";
+/// The `variables=` line each file carries, exactly.
+pub const TMR_KS_VARIABLES: &str = "variables=\"retheta\",\"cf\"";
+pub const TMR_COLES_VARIABLES: &str = "variables=\"y+\",\"u+\"";
+
+/// One TMR curve: its points in file order and the key's digest line.
+#[derive(Debug)]
+pub struct TmrCurve {
+    pub points: Vec<(f64, f64)>,
+    pub digest_line: String,
+}
+
+/// Parse a TMR two-column `.dat` file (SPEC-LIT §144.5): `#` lines are the
+/// file's title and are skipped, one line is exactly `variables`, and every
+/// other non-empty line is a point, two finite numbers. Refuses by name
+/// (`Error::Parse`, `msg` naming `id`): no `variables` line, or another one;
+/// a point line before it; a line with another field count, or a cell that is
+/// not a finite number (line number); a first column that does not strictly
+/// increase (line number); fewer than two points.
+pub fn parse_tmr_dat(path: &str, id: &str, variables: &str, text: &str) -> Result<Vec<(f64, f64)>> {
+    let refuse = |msg: String| Error::Parse {
+        path: path.to_string(),
+        msg: format!("answer key \"{id}\": {msg}"),
+    };
+    let mut header = false;
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let n = i + 1;
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.to_ascii_lowercase().starts_with("variables") {
+            if header || t != variables {
+                return Err(refuse(format!("line {n}: \"{t}\" is not the one line {variables}")));
+            }
+            header = true;
+            continue;
+        }
+        if !header {
+            return Err(refuse(format!("line {n}: a point before the line {variables}")));
+        }
+        let cells: Vec<&str> = t.split_whitespace().collect();
+        if cells.len() != 2 {
+            return Err(refuse(format!("line {n} has {} fields, expected 2", cells.len())));
+        }
+        let mut v = [0.0f64; 2];
+        for (k, cell) in cells.iter().enumerate() {
+            v[k] = cell
+                .parse::<f64>()
+                .ok()
+                .filter(|x| x.is_finite())
+                .ok_or_else(|| refuse(format!("line {n}: the cell \"{cell}\" is not a finite number")))?;
+        }
+        if points.last().is_some_and(|p| !(v[0] > p.0)) {
+            return Err(refuse(format!("line {n}: the first column does not increase")));
+        }
+        points.push((v[0], v[1]));
+    }
+    if !header {
+        return Err(refuse(format!("no line {variables}")));
+    }
+    if points.len() < 2 {
+        return Err(refuse("fewer than two points".to_string()));
+    }
+    Ok(points)
+}
+
+fn tmr_curve_from(manifest: &Manifest, dir: &Path, id: &str, variables: &str) -> Result<TmrCurve> {
+    let (digest_line, text) = load_text_from(manifest, dir, id)?;
+    let file = manifest.row(id).map(|r| r.file.clone()).unwrap_or_default();
+    let points = parse_tmr_dat(&display_path(&dir.join(file)), id, variables, &text)?;
+    Ok(TmrCurve {
+        points,
+        digest_line,
+    })
+}
+
+/// `tmr_ks_cf_from(&Manifest::load()?, &reference_dir())`.
+pub fn tmr_ks_cf() -> Result<TmrCurve> {
+    tmr_ks_cf_from(&Manifest::load()?, &reference_dir())
+}
+
+/// The K-S key through `manifest`: [`load_text_from`]'s refusals, then
+/// [`parse_tmr_dat`]'s.
+pub fn tmr_ks_cf_from(manifest: &Manifest, dir: &Path) -> Result<TmrCurve> {
+    // answer-key: tmr-ks-cf
+    tmr_curve_from(manifest, dir, TMR_KS_ID, TMR_KS_VARIABLES)
+}
+
+/// `tmr_coles_uplus_from(&Manifest::load()?, &reference_dir())`.
+pub fn tmr_coles_uplus() -> Result<TmrCurve> {
+    tmr_coles_uplus_from(&Manifest::load()?, &reference_dir())
+}
+
+/// The Coles key through `manifest`, as [`tmr_ks_cf_from`].
+pub fn tmr_coles_uplus_from(manifest: &Manifest, dir: &Path) -> Result<TmrCurve> {
+    // answer-key: tmr-coles-uplus
+    tmr_curve_from(manifest, dir, TMR_COLES_ID, TMR_COLES_VARIABLES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,7 +1049,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 43, "forty-three markers, found {markers:?}");
+        assert_eq!(markers.len(), 45, "forty-five markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -982,6 +1087,8 @@ mod tests {
                 "huang2022-rembe-p-closed",
                 "huang2022-rembe-p-vented",
                 "huang2022-corn-starch-table1",
+                "tmr-ks-cf",
+                "tmr-coles-uplus",
             ]
         );
         let fetched_ids: Vec<&str> = m

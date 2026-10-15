@@ -653,7 +653,7 @@ fn remesh_both_builds_no_flat_no_cut() {
     for (name, input, h, n) in &rows {
         let tag = format!("{name} h {h} n {n}");
         let prep = prepare(input, 60.0).unwrap();
-        let out = remesh(&prep, &|_: Point| *h, &RemeshOptions { iterations: *n })
+        let out = remesh(&prep, &|_: Point| *h, &RemeshOptions { iterations: *n, threads: 0 })
             .unwrap();
         let rep = check_manifold(&out.surface).unwrap();
         assert_eq!(rep.euler, 2, "{tag}: euler");

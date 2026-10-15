@@ -3657,6 +3657,91 @@ fn pair_coupled_changes_the_solve_and_keeps_the_answer() {
 }
 
 // ==========================================================================
+//  SPEC-LIT 96.3 row 23 and 142.2 - `mechanics.solver.outer`
+// ==========================================================================
+
+/// The `coupled: true` document of pair 11 with `outer` added.
+fn coupled_stress_with_outer(outer: &str) -> String {
+    default_stress().replace(
+        r#""maxOuter": 500 }"#,
+        &format!(r#""maxOuter": 500, "coupled": true, "outer": "{outer}" }}"#),
+    )
+}
+
+/// 96.1: `outer` absent lowers to Anderson of depth five, `"anderson"`
+/// to the same, and `"gmres"` with `coupled: true` to GMRES(50).
+#[test]
+fn the_outer_knob_lowers_to_its_relaxation() {
+    use crate::solid::outer::{Relaxation, ANDERSON_DEPTH, GMRES_RESTART};
+    let lowered = |text: &str| {
+        let low = read(text).expect("parse").lower().expect("lower");
+        low.mechanics[0].as_ref().expect("mechanics").solver.outer
+    };
+    assert_eq!(lowered(&default_stress()), Relaxation::Anderson(ANDERSON_DEPTH));
+    assert_eq!(
+        lowered(&coupled_stress_with_outer("anderson")),
+        Relaxation::Anderson(ANDERSON_DEPTH)
+    );
+    assert_eq!(lowered(&coupled_stress_with_outer("gmres")), Relaxation::Gmres(GMRES_RESTART));
+}
+
+/// Row 23 and the name check: an unknown `outer` is refused listing both
+/// names, and `"gmres"` without `coupled: true` is refused naming the knob
+/// that admits it.
+#[test]
+fn an_unknown_or_segregated_outer_is_refused_by_name() {
+    let text = coupled_stress_with_outer("newton");
+    let msg = read(&text).expect("parse").lower().expect_err("must refuse").to_string();
+    assert!(msg.contains("solver/outer"), "{msg}");
+    assert!(msg.contains("newton"), "{msg}");
+    assert!(msg.contains("\"anderson\"") && msg.contains("\"gmres\""), "{msg}");
+
+    let text = default_stress()
+        .replace(r#""maxOuter": 500 }"#, r#""maxOuter": 500, "outer": "gmres" }"#);
+    assert_ne!(text, default_stress(), "the substitution must change the text");
+    let msg = read(&text).expect("parse").lower().expect_err("must refuse").to_string();
+    assert!(msg.contains("solver/outer"), "{msg}");
+    assert!(msg.contains("coupled: true"), "{msg}");
+    assert!(msg.contains("row 23"), "{msg}");
+}
+
+/// Pair 12 (96.4 row 12): `solver.outer` `"anderson"` -> `"gmres"` on the
+/// block-coupled bar. The two iterations solve for ONE fixed point (142.2),
+/// so what must differ is the iteration count, and the answers must agree
+/// to the outer tolerance.
+#[test]
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+fn pair_outer_changes_the_iteration_and_keeps_the_fixed_point() {
+    let Some(gpu) = gpu() else { return };
+    let a = coupled_stress_with_outer("anderson");
+    let b = coupled_stress_with_outer("gmres");
+    assert_ne!(a, b, "the two documents must actually differ");
+    let (_, _, sa) = run_stress_doc(&gpu, &a);
+    let (low_b, _, sb) = run_stress_doc(&gpu, &b);
+    let banner = case::banner_lines(&low_b).join("\n");
+    assert!(banner.contains("GMRES(50)"), "{banner}");
+    let (na, nb) = (sa[0].report.iterations, sb[0].report.iterations);
+    let d = du(&sa[0].u, &sb[0].u);
+    let ua = umax(&sa[0].u);
+    println!("pair outer: iterations(a) = {na}, iterations(b) = {nb}");
+    println!("pair outer: max|du| = {d:.3e}, max|u_a| = {ua:.3e}");
+    assert!(
+        sa[0].report.converged && sb[0].report.converged,
+        "both outer loops must converge"
+    );
+    assert_ne!(
+        na, nb,
+        "the case said solver.outer and the solver ignored it (SPEC-LIT 13.4.1)"
+    );
+    assert!(
+        d <= 1e-6 * ua,
+        "Anderson and GMRES on one block map land on two states: max|du| = {d:.3e}, \
+         1e-6 max|u_a| = {:.3e}",
+        1e-6 * ua
+    );
+}
+
+// ==========================================================================
 //  SPEC-LIT §98 - the face that exchanges heat with something not meshed
 // ==========================================================================
 
