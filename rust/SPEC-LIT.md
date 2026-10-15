@@ -40528,8 +40528,8 @@ row, row for row.
 | radiation | `MarshakRadiationFixedTemperature` | owned | CHR-23 | — | — |
 | radiation | `greyDiffusiveRadiation` | owned | CHR-23 | — | — |
 | radiation | `wideBandDiffusiveRadiation` | owned | CHR-23 | — | — |
-| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | — |
-| species | `specieTransfer` | owned | CHR-29 | — | — |
+| species | `semiPermeableBaffleMassFraction` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
+| species | `specieTransfer` | owned | CHR-29 | — | lowered on a solved species member only, by the species set (§120.15); `from_name` refuses it by name |
 | refused | `coded*` | refused | — | — | compiles C++ written into the case, at run time |
 | refused | `#codeStream` | refused | — | — | runs code at parse time; the directive form is skipped by the reader |
 | refused | `cyclicACMI` | refused | — | — | couples partly overlapping patches through AMI weights |
@@ -42936,6 +42936,123 @@ run writes.
   at High Phase Fractions*, PhD thesis, Imperial College London (2002) -
   the modified pressure `p - rho (g . x)` the hydrostatic level is written
   in, as in §120.7.
+
+No GPL-licensed source was consulted.
+
+### 120.15 The species family - a film mass-transfer coefficient through a baffle and to a reservoir (CHR-29)
+
+*DESIGN, with the film law from the literature.* `semiPermeableBaffleMassFraction`
+and `specieTransfer` are two §4 triple rewrites on the solved members of a
+species set (§19, §86). Their names are taken by name only (§120's rule); the
+law they apply is the defining relation of a mass-transfer coefficient (Bird,
+Stewart & Lightfoot, §22.1): a flux proportional to a concentration
+difference, the coefficient carrying everything between the two values. The
+entries are ours: `c`, the film coefficient in m/s (required, finite, `>= 0`;
+`c = 0` holds the species back), `neighbourPatch` on a baffle, and `Yinf` on
+`specieTransfer` (default 0).
+
+The outward flux of the transported quantity through a face `f` of the patch
+is taken between the two cell values adjacent to the baffle, or between the
+cell and the reservoir:
+
+```
+semiPermeableBaffleMassFraction:  n_f = c (Y_P - Y_N)                      (120.15a)
+specieTransfer:                   n_f = c (Y_P - Y_inf)                    (120.15b)
+```
+
+per unit area on the constant-density equation of §19. On the mass-weighted
+equation of §86 they are `rho_m c (...)`: at a `specieTransfer` face `rho_m =
+rho_b`, the face density the assembly already multiplies the diffusivity by;
+at a baffle face `rho_m = (rho_b + rho_b,partner)/2`, the same number on the
+two sides, so the two sides' film laws are one law. `Y_N` is the value of the
+cell behind face `j` of the partner patch: a baffle's two patches pair face
+`j` with face `j`, as a cyclic's do, and must have the same size, coincident
+face centres (within `1e-6 sqrt(|S_f|)`), the same condition naming each
+other, and the same `c` bit for bit, or the flux leaving one side is not the
+flux entering the other. Because the driving difference is taken between the
+two CELL values, `1/c` is the whole resistance between the two cell centres:
+the two half-cells beside the baffle are inside it, not in series with it. A
+case that knows a membrane's own coefficient `k_m` and wants the half-cells
+in series gives `c = 1/(1/k_m + d_P/D + d_N/D)` itself, `d_P` and `d_N` the two
+cell-centre-to-face distances.
+
+The triple that makes the laplacian apply exactly that flux follows from
+§4's `snGrad_b = fr Delta_b (psi_ref - psi_P) + (1 - fr) g_ref`:
+
+```
+fr = c (rho_m/rho_b) / (Gamma_b Delta_b),   psi_ref = Y_N (or Y_inf),   g_ref = 0   (120.15c)
+Gamma_b = nu/Pr + nu_t,b/Pr_t
+```
+
+with `rho_m/rho_b = 1` on the constant-density equation and at a
+`specieTransfer` face (the factor is then not formed),
+
+and `Gamma_b` formed as `turbGammaBoundary` forms it from the species'
+`Pr = nu/D` and `Pr_t = Sc_t`, so `rho_b Gamma_b |S_f| snGrad_b = rho_m c
+|S_f| (Y_N - Y_P)` (and without the densities on the constant-density
+equation) to round-off. `fr` may exceed 1 when `c > Gamma_b Delta_b`; the matrix
+coefficient stays `c |S_f| > 0` and the face value is then the linear
+extrapolation that carries that gradient. `c = 0` gives `fr = 0` and `g_ref =
+0` exactly: a zero-gradient face whose matrix contribution is exactly zero.
+A species with `D = 0` is refused a positive `c` (its half-cell has no
+laminar conductance to carry it). Only a plain patch or a wall carries one;
+an empty, symmetry or coupled patch is refused by name.
+
+`Species::setup_member` lowers a member's raw field: a field without either
+name goes to `setup_scalar_field` unchanged, so a member set up that way is
+set up exactly as before; each carrying patch is set up as `zeroGradient`,
+its faces are marked `Mixed`, and a rule (patch, face range, partner range,
+`c`, `Y_inf`) is kept. `Species::correct_with_density` rewrites every rule's
+triple by (120.15c) in one `spcTransferTriple` launch per patch, from the
+fields as they stand and the call's `nu_t`, before that species' own solve:
+`Y_P` is implicit, `Y_N` is the partner cell's value at the rewrite, the
+explicit half of §4's rewrite. The two sides of a baffle therefore carry
+equal and opposite fluxes at a steady state and differ by `c |S_f|` (`rho_m c
+|S_f|`) times the sum of the two cells' changes over the step in a transient - exact transient
+conservation across the baffle would need the baffle as an implicit coupled
+entry (§47.3's interface), which this unit does not build. A set without a
+rule launches nothing, and the arithmetic of every other species path is the
+one it was. `ofgpu-lowmach`'s reacting set (§133.11) sets its members up
+through `setup_member`, and writes a baffle's `neighbourPatch` back out.
+
+**The generic reader refuses both names by name.** `BcKind::from_name` has
+one arm for the pair, whose note says the condition is lowered only on a
+solved member of a species set: on a case without species, or on a field
+outside the set (`T`, `U`, the inert remainder), the case is refused naming
+the condition, the field and the patch, and `-permissive` substitutes
+`zeroGradient`, an impermeable wall. That is why the two rows stay **owned**
+by CHR-29 in the table, as CMP-16/17/18's and BC-20's kinds stay owned or
+planned while their own lowering path accepts them: `from_name` refuses them
+and the species set lowers them.
+
+For the 1-D slab of the gate - `N = 16` cells of `h = 1/16` m, the baffle
+between cells 7 and 8, `Y = 1` and `Y = 0` held at the two ends - the profile
+is linear in each half, which the finite-volume discretisation reproduces
+exactly, and the series resistances from the two end faces to the cell
+centres beside the baffle give
+
+```
+J = (Y_left - Y_right) / (15 h / D + 1/c)                                  (120.15d)
+```
+
+**Gates** (`tests/species_bc.rs`, both builds; class R tolerances are
+D-F32-1's `max(t, min(t 2^29, 1e-5))` under `single`):
+
+| test | class | what it holds | measured |
+|---|---|---|---|
+| `species_semipermeable_baffle_flux` | R | species A (`c = 1e-4`, `D = 2e-5`) marched to steady state at `dt = 1e7` s: `c (Y_7 - Y_8)`, every interior face's `D (Y_i - Y_i+1)/h` and both end faces' fluxes equal (120.15d)'s `J = 1.758242e-5` to 1e-12 relative; species B (`c = 0`) has `fr = +0` and `g_ref = +0` bit for bit on both baffle faces and relaxes to uniform on each side | 1.657e-14 (f64), 7.653e-6 (f32, tol 1e-5) |
+| `species_transfer_budget_closes` | R | mass-weighted, `rho` varying in space, the baffle plus a `specieTransfer` sink (`c = 5e-5`, `Y_inf = 0`): per step and species `abs(Δ Σ rho Y V - dt Σ_b rho_m c S_b (Y_ref - Y_P) - Δclip) <= 1e-12` of the mass (86.5), the transfer above 1e-6 of it; species C (`c = 0` on both) keeps its mass on each side to 1e-12 of it | 1.472e-16 with the transfer at 8.280e-6, side masses 3.163e-16 (f64); 7.252e-9 and 4.489e-8 (f32, tol 1e-5) |
+| `species_bc_refused_without_species` | D | `from_name` refuses both names on `T` naming them and this section; `setup_scalar_field` refuses `specieTransfer` on `T`; `setup_member` refuses a missing `c`, `c < 0`, a missing or unknown `neighbourPatch`, a partner with another `c` or another condition, `Yinf = 1.5`, an empty patch, and a positive `c` with `D = 0`; a raw field without either name gets no rule | all refused by name |
+
+The species set's existing pins (`tests/chem_species.rs`
+`species_without_chemistry_is_bitwise`, §132.11) hold unchanged: a set
+without a rule runs the arithmetic it ran before.
+
+* **Bird, R. B., Stewart, W. E. & Lightfoot, E. N.** *Transport Phenomena*,
+  2nd ed., Wiley (2002), §22.1 (the definition of mass-transfer coefficients
+  in one phase) - the film law (120.15a)-(120.15b): a flux proportional to a
+  concentration difference through a coefficient that carries everything
+  between the two values.
 
 No GPL-licensed source was consulted.
 

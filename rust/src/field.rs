@@ -1454,6 +1454,27 @@ impl BcKind {
                 );
             }
 
+            // SPEC-LIT 120.15 (CHR-29): the two species conditions are
+            // lowered by the species set itself, `Species::setup_member`,
+            // which rewrites them out of a member's raw field before this
+            // reader sees it. Reaching here means the field is not a solved
+            // member of a species set - a case without species, or a field
+            // outside the set.
+            "semiPermeableBaffleMassFraction" | "specieTransfer" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[],
+                    &format!(
+                        "{name} is a species boundary condition (SPEC-LIT 120.15): it is lowered \
+                         only on a solved member of a species set, and \"{field}\" is not one - \
+                         a case without species, or a field outside the set"
+                    ),
+                    "zeroGradient (an impermeable wall)",
+                    Self::ZeroGradient,
+                );
+            }
+
             "activeBaffleVelocity" => {
                 return unsupported_note(
                     &format!("{field}: boundaryField/{patch}/type"),

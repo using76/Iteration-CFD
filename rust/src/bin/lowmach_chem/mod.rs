@@ -29,12 +29,12 @@ use ofgpu::device::DevBuf;
 use ofgpu::energy::{Energy, GasMixture, GasState};
 use ofgpu::field::{GpuScalarField, GpuSurfaceScalarField};
 use ofgpu::field_ops::{self, update_inlet_outlet_scalar, FieldKernels};
-use ofgpu::field_setup::{harvest_scalar_field, setup_scalar_field};
+use ofgpu::field_setup::harvest_scalar_field;
 use ofgpu::fv::{self, FvKernels};
 use ofgpu::io::case_chem::{LoweredChem, LoweredCombustion, Splitting};
 use ofgpu::io::fields::RawScalarField;
 use ofgpu::io::DivEntry;
-use ofgpu::species::{Species, SpeciesCoeffs};
+use ofgpu::species::{Species, SpeciesCoeffs, SPECIES_BC_NAMES};
 use ofgpu::timescheme::DdtScheme;
 use ofgpu::turbulence::{FlowState, TurbulenceControls};
 use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar};
@@ -163,7 +163,14 @@ fn calculated_seed(raw: &RawScalarField) -> RawScalarField {
     for spec in out.boundary.values_mut() {
         if matches!(
             spec.type_name.as_str(),
-            "fixedValue" | "zeroGradient" | "inletOutlet" | "fixedGradient" | "mixed" | "calculated"
+            "fixedValue"
+                | "zeroGradient"
+                | "inletOutlet"
+                | "fixedGradient"
+                | "mixed"
+                | "calculated"
+                | "semiPermeableBaffleMassFraction"
+                | "specieTransfer"
         ) {
             spec.type_name = "calculated".to_string();
             spec.extra.clear();
@@ -209,9 +216,10 @@ impl<'m> Reacting<'m> {
                 raws.len()
             )));
         }
+        // SPEC-LIT 120.15: a member's species boundary conditions are
+        // lowered by the set; without one this is setup_scalar_field.
         for (i, raw) in raws.iter().enumerate() {
-            let st = species.get_mut(i).expect("i < n_solved");
-            setup_scalar_field(gpu, st.field_mut(), raw, hm)?;
+            species.setup_member(gpu, hm, i, raw)?;
         }
         species.initialise(gpu)?;
         let fk = FieldKernels::new(gpu)?;
@@ -397,6 +405,15 @@ impl<'m> Reacting<'m> {
         let mut out = Vec::with_capacity(self.seeds.len() + 2);
         for (i, seed) in self.seeds.iter().enumerate() {
             let mut r = seed.types_only();
+            // SPEC-LIT 120.15: a baffle's partner is part of its entry, and
+            // types_only keeps the type and the extra entries only.
+            for (key, spec) in &seed.boundary {
+                if let Some(dst) = r.boundary.get_mut(key) {
+                    if SPECIES_BC_NAMES.contains(&spec.type_name.as_str()) {
+                        dst.neighbour_patch.clone_from(&spec.neighbour_patch);
+                    }
+                }
+            }
             harvest_scalar_field(gpu, &mut r, self.species.get(i).expect("i < n_solved").field(), hm)?;
             r.dimensions = NONE.to_string();
             out.push((self.species.names()[i].clone(), r));
