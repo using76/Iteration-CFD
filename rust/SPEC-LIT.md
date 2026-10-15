@@ -3362,6 +3362,61 @@ measurement is the failure mode this rule exists to prevent. §32.5 specifies
 the measurement; the body-force balance is retained as an independent
 cross-check on it and is never a substitute for it.
 
+#### 32.4.1 The three verdicts re-recorded, and their Kays–Crawford siblings (VAL-40)
+
+The three verdicts of this section that do not close at the shipped default
+are the three channel rows §69.5 names: verdict 2 (Reynolds analogy) on the
+wall-function leg, and verdicts 1 (absolute prediction) and 2 on the resolved
+leg. VAL-40 re-ran the four records they are replayed from on the binary of
+commit dd3861a (2026-10-15): `cases/channelPeriodicFluxWF.jsonc` and
+`cases/channelPeriodicFluxLowRe.jsonc` as shipped, and scratchpad copies of
+each with `"PrtModel": "KaysCrawford"` added to `physics.fluid` and nothing
+else (§37.4). Each run was `ofgpu-lowmach -iters 40000 -check 5000`. Priced first
+at 200 iterations, about 1.5 s per leg; recorded in 312, 222, 391 and 725 s on
+the card the three lanes share, 27.5 minutes in all.
+
+**Every printed digit of the §26.1 record came back**, on all four runs: `Nu`
+64.4894 / 63.5527 / 71.683 / 66.8107, ΔT 24.2454 / 24.6019 / 21.7767 /
+23.3605 K, `U_b` 5.39407 / 5.39426 / 4.93682 / 4.93761 m/s, the measured
+`τ_w`, the kinematic drag balance and the `Pr_t` ranges. There is one
+exception. The resolved `constant` run's energy-balance difference printed
+−2.84006e-06 W, against the −2.83972e-06 W of the record. That is the fourth
+digit of a round-off gap, and it rides the residual limit cycle §26.1 records
+(`|U|` residual 1.5e-7 here, 1.6e-7 at Kays–Crawford, 2.4e-8 on both
+wall-function runs).
+
+| Verdict (the `f` named) | default `PrtModel constant` | sibling `at PrtModel KaysCrawford (opt-in, S37)` |
+|---|---|---|
+| wall-function leg, verdict 2, at the MEASURED `f` | **+34.3 %** at `f` = 0.017140, `OPEN` | **+34.0 %** at `f` = 0.016944, `OPEN` |
+| resolved leg, verdict 1, at the Petukhov PIPE `f` | **+11.9 %** at `f` = 0.0244066, `OPEN` | **+4.3 %** at `f` = 0.0244056, passes |
+| resolved leg, verdict 2, at the MEASURED `f` | **+14.9 %** at `f` = 0.023832, `OPEN` | **+7.7 %** at `f` = 0.023705, passes |
+| energy-balance gap carried on `Nu` | ±0.0174 % (WF), ±0.000089 % (resolved) | ±0.0185 % (WF), ±0.000094 % (resolved) |
+
+The percentages are `ofgpu-lowmach`'s own prints. The replay recomputes them
+from the recorded digits and can differ in the last place: it prints +34.4 % for
+the first row. The bands are Gnielinski's ±10 % (§32.3). No sibling sits within its leg's
+energy-balance gap of a band edge, so the UNDECIDED clause above does not apply
+to any of them.
+
+**The rule for the siblings.** D-VAL-8, whether Kays–Crawford becomes the
+default, was put to the user and not decided (`docs/17-completion-plan.md`,
+section 11, item 3). The default rows therefore keep their definitions, their bands
+and their words. Each sibling is a gate of its own in `ofgpu-validate`, opened
+with its own `enter_gate` scope and named with the default gate's name plus
+`, at PrtModel KaysCrawford (opt-in, S37)`. Inside the band, and not within its
+leg's energy-balance gap of the edge, a sibling is a check row that passes;
+otherwise it is a registered `OPEN` (§69.5) with its number and its `f` in the
+headline. **A pass of a sibling never changes the default row's word.** It
+says that the opt-in model closes the band; it does not say that the shipped
+default does. The wall-function sibling stays outside because that miss is a
+FRICTION finding (§32.5.5), and §37 is a thermal model.
+
+The records live in `validate.rs` as `wall_function_leg`, `resolved_leg` and
+`PRT_EXPERIMENT` (refreshed), plus `wall_function_leg_kays_crawford` and
+`resolved_leg_kays_crawford` (new). They are held like the defaults: the
+printed outputs, with `T_b = T_w − ΔT` and `k = ρ(T_b) c_p ν / Pr` from the
+printed `ρ(T_b)`.
+
 ### 32.5 The friction factor the run realises, measured
 
 **R. C. Jones Jr., *ASME J. Fluids Eng.* 98 (1976) 173–180** — why a
@@ -14473,7 +14528,12 @@ shipped default**. §32.4's three channel verdicts are all of this kind:
 Gnielinski (1976) and Dittus–Boelter (1930) are correlations fitted to other
 people's pipes, the resolved leg sits `+11.9 %` against a `±10 %` band, and
 §37's Kays–Crawford `Pr_t` — one token, opt-in, nothing tuned — moves the same
-leg to `+4.3 %` and inside. A miss against a measurement and a
+leg to `+4.3 %` and inside. Re-recorded on the binary of dd3861a (§32.4.1,
+VAL-40), every one of these digits stands, and the Kays–Crawford numbers are
+printed as three sibling rows of their own, named `at PrtModel KaysCrawford
+(opt-in, S37)`: two pass and one is `OPEN`, and none of them changes a default
+row's word, because the default stays `constant` until the user decides D-VAL-8
+(`docs/17-completion-plan.md`, section 11, item 3). A miss against a measurement and a
 band-not-met against a correlation with a named opt-in that meets it are
 different findings, and collapsing them into one count would make the honest
 number six into a dishonest nine.

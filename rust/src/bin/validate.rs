@@ -11767,7 +11767,11 @@ fn channel_leg_verdict(
 
 /// Print one leg's two verdicts, in the form SPEC-LIT §32.4 now requires:
 /// every band statement names the `f` it was judged at.
-fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
+///
+/// `history` prints the line about the superseded body-force inference, which
+/// is the default record's own history; a record that never had a verdict
+/// quoted at that inference (the §32.4.1 siblings) passes `false`.
+fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict, history: bool) {
     c.note(&format!(
         "{leg}: D_h = {} m, Re = {}, Nu_measured = {}, T_mean (from the thermostat's own law) \
          = {} K, rho_b = {} kg/m3, rho_bar = {} kg/m3",
@@ -11788,14 +11792,16 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
         sci(f64::from(v.f_pipe), 4),
         (v.f_measured / v.f_pipe - 1.0) * 100.0,
     ));
-    c.note(&format!(
-        "{leg}: the SUPERSEDED body-force inference was f = {} (tau_w = {} Pa) - {:+.1}% of the \
-         measurement. Every Reynolds-analogy verdict once quoted at it was too generous \
-         (SPEC-LIT 32.5.3)",
-        sci(f64::from(v.f_inferred), 4),
-        sci(f64::from(v.tau_w_inferred), 4),
-        (v.f_inferred / v.f_measured - 1.0) * 100.0,
-    ));
+    if history {
+        c.note(&format!(
+            "{leg}: the SUPERSEDED body-force inference was f = {} (tau_w = {} Pa) - {:+.1}% of \
+             the measurement. Every Reynolds-analogy verdict once quoted at it was too generous \
+             (SPEC-LIT 32.5.3)",
+            sci(f64::from(v.f_inferred), 4),
+            sci(f64::from(v.tau_w_inferred), 4),
+            (v.f_inferred / v.f_measured - 1.0) * 100.0,
+        ));
+    }
     c.note(&format!(
         "{leg}: kinematic force balance (S32.5.2's correction): wall sink {} m4/s2 against \
          (g.e_hat) V = {} m4/s2 - {:+.3}%",
@@ -11825,6 +11831,10 @@ fn note_leg_verdict(c: &mut Checks, leg: &str, v: &LegVerdict) {
 /// unchanged in every printed digit from iteration 5 000 on. Every number here
 /// is a printed output of that run; nothing is derived.
 ///
+/// **Re-recorded by VAL-40 (SPEC-LIT §32.4.1)** on the binary of dd3861a,
+/// 2026-10-15, 40 000 iterations: every number below was printed again in every
+/// digit, `|U|` residual 2.4e-8 at the last iteration.
+///
 /// **These numbers changed twice.** With SPEC-LIT §13.4.1/§32.5.5, because the
 /// run that produced the set before them was made by a driver that ignored
 /// this case's own `div(phi,U)` entry and ran `bounded Gauss upwind` in place
@@ -11852,7 +11862,13 @@ fn wall_function_leg() -> LegVerdict {
 
 /// The RESOLVED leg's recorded measurement -
 /// `cases/channelPeriodicFluxLowRe.jsonc`, `docs/07-lowmach-solver.md` §1.1's
-/// LAST subsection, a 40 000-iteration run to `|U|` residual 4.1e-12.
+/// LAST subsection, a 40 000-iteration run. Its `|U|` residual plateaus at about
+/// 1e-7 since §26.1 (4.1e-12 before it), a limit cycle in the residual and not in
+/// the state, as that subsection records.
+///
+/// **Re-recorded by VAL-40 (SPEC-LIT §32.4.1)** on the binary of dd3861a,
+/// 2026-10-15, 40 000 iterations: every number below was printed again in every
+/// digit, `|U|` residual 1.5e-7 at the last iteration.
 ///
 /// **These numbers changed with SPEC-LIT §13.4.1/§32.5.5**, for the same
 /// reason [`wall_function_leg`]'s did, and by much more: restoring the
@@ -11881,6 +11897,7 @@ fn resolved_leg() -> LegVerdict {
         0.025_624_308,  // k_thermal = rho(T_b) cp nu/Pr
         -3.200_00,      // thermostat power, W - S26.1 closed this to the
                         // wall heat: the printed gap is -2.83972e-06 W
+                        // (-2.84006e-06 W at VAL-40's re-record)
         0.087_534_9,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
         0.087_534_9,    // ... which IS the viscous form, so the two coincide
         // The driver reported this as `0.0004992 m4/s2, disagreement -0.000 %`
@@ -11891,6 +11908,101 @@ fn resolved_leg() -> LegVerdict {
         // supplying, was 4.80296e-4 - a -3.787 % gap (SPEC-LIT §32.5.5).
         4.992_00e-4,    // kinematic wall sink, m4/s2 (S32.5.2)
     )
+}
+
+/// The WALL-FUNCTION leg at `PrtModel KaysCrawford` - a scratchpad copy of
+/// `cases/channelPeriodicFluxWF.jsonc` with `"PrtModel": "KaysCrawford"` added to
+/// `physics.fluid` and nothing else, 40 000 iterations on the binary of dd3861a
+/// (VAL-40, SPEC-LIT §32.4.1). Recorded the way [`wall_function_leg`] is: the
+/// printed outputs, `T_b = T_w - dT`, `k_thermal` from the printed `rho(T_b)`.
+/// It is the run [`PRT_EXPERIMENT`]'s second row quotes, re-run.
+fn wall_function_leg_kays_crawford() -> LegVerdict {
+    channel_leg_verdict(
+        500.0,          // q_w, W/m2
+        317.842,        // T_w, K
+        293.240_1,      // T_b, K (T_w - the printed dT 24.6019)
+        5.394_26,       // U_b, m/s
+        0.025_583_501,  // k_thermal = rho(T_b) cp nu/Pr, rho(T_b) = 1.20373 kg/m3
+        -3.200_592_194, // thermostat power, W: 3.2 W of wall heat plus the printed
+                        // difference -5.92194e-4 W
+        0.074_185_2,    // tau_w MEASURED, Pa - S32.5.1's wall-function form
+        0.085_620_7,    // the viscous form on the same faces, Pa
+        4.991_75e-4,    // kinematic wall sink, m4/s2 (S32.5.2), -0.005 %
+    )
+}
+
+/// The RESOLVED leg at `PrtModel KaysCrawford` - a scratchpad copy of
+/// `cases/channelPeriodicFluxLowRe.jsonc` with the same one token added, 40 000
+/// iterations on the binary of dd3861a (VAL-40, SPEC-LIT §32.4.1), `|U|`
+/// residual 1.6e-7 at the last iteration. It is [`PRT_EXPERIMENT`]'s fourth
+/// row, re-run.
+fn resolved_leg_kays_crawford() -> LegVerdict {
+    channel_leg_verdict(
+        500.0,          // q_w, W/m2
+        316.079,        // T_w, K
+        292.718_5,      // T_b, K (T_w - the printed dT 23.3605)
+        4.937_61,       // U_b, m/s
+        0.025_628_984,  // k_thermal = rho(T_b) cp nu/Pr, rho(T_b) = 1.20587 kg/m3
+        -3.200_003_011, // thermostat power, W: 3.2 W of wall heat plus the printed
+                        // difference -3.01099e-6 W
+        0.087_111_6,    // tau_w MEASURED, Pa - the viscous form on a lowRe wall
+        0.087_111_6,    // ... which IS the viscous form
+        4.992_00e-4,    // kinematic wall sink, m4/s2: printed `+0.000 %` of the body force
+    )
+}
+
+/// One sibling row of SPEC-LIT §32.4.1: the same verdict as a default row, on
+/// the same leg, judged on the `PrtModel KaysCrawford` record. It opens its OWN
+/// gate scope, so whatever it says is a row of its own and never the default
+/// row's word (D-VAL-8 was not decided; the default stays `constant`).
+///
+/// Inside the +-10 % band and not within the leg's own energy-balance gap of
+/// its edge (§32.4's UNDECIDED clause): a check row that passes. Otherwise a
+/// registered `Verdict::Open`, with the number and the `f` in its headline.
+fn kays_crawford_sibling(
+    c: &mut Checks,
+    gate: &'static str,
+    against: &'static str,
+    leg: &str,
+    f_named: &str,
+    rel: Scalar,
+    energy_gap: Scalar,
+) {
+    c.enter_gate(gate);
+    let undecided = (0.10 - rel.abs()).abs() <= energy_gap.abs();
+    if rel.abs() < 0.10 && !undecided {
+        c.check(
+            &format!(
+                "{leg} Nu in Gnielinski's +-10% band at the {f_named}, at PrtModel \
+                 KaysCrawford (opt-in, S37)"
+            ),
+            rel.abs(),
+            0.10,
+        );
+    } else {
+        c.report(GateReport {
+            verdict: Verdict::Open,
+            how: How::Replayed,
+            gate,
+            uncertainty: Some(Uncertainty::SingleMesh(ONE_MESH_AS_RUN)),
+            against,
+            headline: format!(
+                "{leg} Nu is {:+.1}% of Gnielinski at the {f_named}, at PrtModel KaysCrawford \
+                 (opt-in, S37){}",
+                rel * 100.0,
+                if undecided {
+                    " - UNDECIDED, within the leg's own energy-balance gap of the band edge"
+                } else {
+                    " - outside the band"
+                },
+            ),
+            detail: vec![format!(
+                "  the opt-in PrtModel KaysCrawford (S37) on one token; the default row above \
+                 keeps its own word (D-VAL-8 was not decided). Energy-balance gap +-{:.4}%",
+                energy_gap.abs() * 100.0,
+            )],
+        });
+    }
 }
 
 /// The DECISIVE EXPERIMENT of SPEC-LIT §35.3.2, replayed: the same two cases,
@@ -11993,7 +12105,7 @@ const BOUNDED_EXPERIMENT: [BoundedRun; 7] = [
 /// not only on the next multi-second re-run someone remembers to do by hand.
 fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
     let v = wall_function_leg();
-    note_leg_verdict(c, "wall-function leg", &v);
+    note_leg_verdict(c, "wall-function leg", &v, true);
 
     // SPEC-LIT §35.2's energy balance for this leg: the thermostat's power IS
     // the wall heat. The shipped `massFlux` configuration leaves 0.106 %,
@@ -12075,6 +12187,23 @@ fn check_thermal_wall_function_gate_verdict_replay(c: &mut Checks) {
         "wall-function mesh's own y+ mean sits inside the 30-60 target (replayed measurement)",
         if (30.0..=60.0).contains(&y_plus_mean) { 0.0 } else { 1.0 },
         0.0,
+    );
+
+    // SPEC-LIT §32.4.1 (VAL-40): the same verdict 2 on the `PrtModel
+    // KaysCrawford` record, in its own gate scope beside the default one. It
+    // stays outside: this miss is a FRICTION finding and §37 is a thermal model.
+    let k = wall_function_leg_kays_crawford();
+    note_leg_verdict(c, "wall-function leg at PrtModel KaysCrawford (opt-in, S37)", &k, false);
+    kays_crawford_sibling(
+        c,
+        "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg, at PrtModel \
+         KaysCrawford (opt-in, S37)",
+        "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction factor, +-10 % \
+         band, on the PrtModel KaysCrawford record",
+        "WF",
+        "MEASURED f",
+        k.nu_measured / k.nu_gn_realised - 1.0,
+        k.energy_gap,
     );
 }
 
@@ -12328,7 +12457,7 @@ fn check_thermostat_sign_and_steady_offset(c: &mut Checks, gpu: &Gpu) -> Result<
 fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
     let v = resolved_leg();
     let w = wall_function_leg();
-    note_leg_verdict(c, "resolved leg", &v);
+    note_leg_verdict(c, "resolved leg", &v, true);
 
     // The derivation of `T_mean` from the thermostat's own steady law is
     // checked against the value `docs/07-lowmach-solver.md` §1.1 RECORDS for
@@ -12505,6 +12634,34 @@ fn check_resolved_leg_gate_verdict_replay(c: &mut Checks) {
         sci(f64::from(v.f_viscous), 4),
         sci(f64::from(w.f_viscous), 4),
     ));
+
+    // SPEC-LIT §32.4.1 (VAL-40): verdicts 1 and 2 on the `PrtModel
+    // KaysCrawford` record, each in its own gate scope beside the default
+    // rows above, whose words they never change (D-VAL-8 was not decided).
+    let k = resolved_leg_kays_crawford();
+    note_leg_verdict(c, "resolved leg at PrtModel KaysCrawford (opt-in, S37)", &k, false);
+    kays_crawford_sibling(
+        c,
+        "SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg, at PrtModel \
+         KaysCrawford (opt-in, S37)",
+        "Gnielinski (1976) evaluated at the Petukhov smooth-PIPE f, +-10 % band, on the \
+         PrtModel KaysCrawford record",
+        "resolved",
+        "PIPE f",
+        k.nu_measured / k.nu_gn_pipe - 1.0,
+        k.energy_gap,
+    );
+    kays_crawford_sibling(
+        c,
+        "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg, at PrtModel \
+         KaysCrawford (opt-in, S37)",
+        "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction factor, +-10 % \
+         band, on the PrtModel KaysCrawford record",
+        "resolved",
+        "MEASURED f",
+        k.nu_measured / k.nu_gn_realised - 1.0,
+        k.energy_gap,
+    );
 }
 
 /// SPEC-LIT §37's Kays-Crawford `Pr_t(Pe_t)`, checked LIVE (this is arithmetic,
@@ -12709,13 +12866,23 @@ struct PrtRun {
 /// longer need an error bar quoted beside them. The SUPERSEDED set, kept here
 /// because the verdicts taken at it were published: `Nu` 64.5257 / 63.5900 /
 /// 72.9988 / 68.0305, `energy_gap` 0.001062 / 0.001100 / 0.031134 / 0.033541.
+///
+/// **Re-recorded by VAL-40 (SPEC-LIT §32.4.1)**: all four runs again on the
+/// binary of dd3861a, 2026-10-15, 40 000 iterations each, and every number in
+/// these four rows was printed again in every digit but one: the resolved
+/// `constant` run's balance difference printed -2.84006e-6 W where the record
+/// had -2.83972e-6 W, the fourth digit of a round-off gap that rides §26.1's
+/// residual limit cycle, so its `energy_gap` reads 8.875e-7 (was 8.874e-7).
+/// The two `KaysCrawford` runs are also held whole, as
+/// [`wall_function_leg_kays_crawford`] and [`resolved_leg_kays_crawford`], for
+/// §32.4.1's sibling rows.
 const PRT_EXPERIMENT: [PrtRun; 4] = [
     PrtRun { leg: "wall function", model: "constant", nu_measured: 64.4894, d_t: 24.2454,
         u_b: 5.39407, energy_gap: 0.000_174_1, prt_min: 0.85, prt_max: 0.85 },
     PrtRun { leg: "wall function", model: "KaysCrawford", nu_measured: 63.5527, d_t: 24.6019,
         u_b: 5.39426, energy_gap: 0.000_185_1, prt_min: 0.874934, prt_max: 0.891895 },
     PrtRun { leg: "resolved", model: "constant", nu_measured: 71.6830, d_t: 21.7767,
-        u_b: 4.93682, energy_gap: 0.000_000_887_4, prt_min: 0.85, prt_max: 0.85 },
+        u_b: 4.93682, energy_gap: 0.000_000_887_5, prt_min: 0.85, prt_max: 0.85 },
     PrtRun { leg: "resolved", model: "KaysCrawford", nu_measured: 66.8107, d_t: 23.3605,
         u_b: 4.93761, energy_gap: 0.000_000_940_9, prt_min: 0.871299, prt_max: 1.7 },
 ];
