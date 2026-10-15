@@ -32,7 +32,9 @@ export default defineConfig({
       url: `http://127.0.0.1:${API_PORT}/api/health`,
       reuseExistingServer: false,
       timeout: 60_000,
-      env: { CFD_DEMO: '1', CFD_PORT: String(API_PORT), CFD_ALLOW_NO_API_KEY: '1' },
+      // CFD_LLM pins the scripted mock: a provider saved in config/llm.json from the
+      // settings popover outranks demo mode's default (llmSettings.ts), not this.
+      env: { CFD_DEMO: '1', CFD_PORT: String(API_PORT), CFD_ALLOW_NO_API_KEY: '1', CFD_LLM: 'mock' },
     },
     {
       command: 'npm run dev -w web',
