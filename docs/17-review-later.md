@@ -39,6 +39,8 @@
 | A19 | BC-19 | cyclic 결합면을 가로지르는 device leastSquares 기울기 (선형장) | 3:2 imprint 계면에서 5.1e-2 오차. 커널(`cuda/fv.cu` boundarySeparation)이 d = Sf/(\|Sf\| Δ) = n(n·d)를 써서 d의 접선 성분 −k/Δ를 버린다. device = host twin(2.4e-16)으로 원인을 단언한다. 한 줄 해결책(bNonOrthCorr로 d = Sf·sc − k/Δ)은 비직교 cyclic의 기존 결과를 모두 바꾼다 | SPEC-LIT 120.13, `afa6ab1` |
 | A20 | BC-19 | 3:2 cyclicAMI 계면을 가로지르는 층류 채널이 단일 블록과 peak의 6.7 %, 7.5 % 차이 (기준 0.5 %) | bulk 0.959/0.963 대 1.014/1.031. 같은 reader·imprint·결합을 쓰는 conformal AMI 쌍은 단일 블록과 3e-16으로 같으므로, 기울어진 결합면의 이산화가 원인이다 (면 값에 skewness 보정이 없다). 0.5 % 띠는 단일 블록 자신의 Poiseuille 오차(0.69 %, 1.56 %)보다 작다 | SPEC-LIT 120.13, `afa6ab1` |
 | A21 | (기존, CMP-14/CHR-10a가 발견) | single 빌드가 `cases/channelThermalWF.jsonc`에서 11스텝째 발산 (Mach 거부, 셀 3199에서 M 1.8e9) | f64는 정상. f32 SIMPLE floor 계열(A4)로 보인다. CHR-10a의 해시 고정은 channelPeriodicFluxWF를 쓴다 | `5a79bf0` |
+| A22 | AUT-04 | quick set 날개 12개 중 4개가 RM-TE 뒤에도 F3를 통과하지 못한다 (게이트 목표 6/12는 8/12로 통과) | A-1-024: F3e, capture 0.357. A-1-049: bump 없음, F3e만, capture 0.284, NO-REMEDY. 둘 다 뭉툭한 뒷전 밑면이 0.46-0.66 h_f로, 한 셀보다 가까운 두 feature 사슬을 (92.62)가 예산 안의 어떤 level에서도 함께 잡지 못한다. A-1-098/099(6 % 날개): RM-TE로 max/h_f 0.21-0.23이지만 pin이 5.4-6.5 % (F3a, F3b). automesher snap 쪽 항목이며 수치 변경은 만들지 않았다 | `9a6862b` |
+| A23 | AUT-07 | R-ECON 뒤에도 G-COST 미달 | quick set 중앙값 B0-template의 6.18배 (기준 1.5배). layer 셀과 R-WIN/R-CURV 벽 level이 남는다. AUT-06이 이미 layer 8개로는 1.5배가 불가능함을 보였다. D-8은 사용자 결정으로 남는다 | `9e5d05e` |
 
 ## B. 측정·검증을 미룬 것 (10분 규칙 또는 하드웨어)
 
@@ -57,6 +59,8 @@
 | B11 | AUT-05 이후 autonomy selftest | AUT-02a/b/c의 stl_repair 변경 이후 campaign.py, prior.py, baseline.py selftest가 실패한다 (G-1-026이 non-manifold edge 12개로 SURFACE-OPEN이라고 가정). 그 뒤 그룹(replay, hooks, live)은 실행되지 않는다 | 오늘의 repair 결과로 기준을 다시 잡는 작은 fixture 단위 |
 | B12 | VIO-06 드론 레그 (VIO-11도 같은 해 필요) | t = 0.5 s 드론 해가 디스크에 없다. 지시대로 다시 풀지 않았다 | `tools/drone/solve.py`로 해를 다시 만든 뒤 `ofgpu-sample volume`으로 1회 |
 | B13 | single 빌드의 드라이버 비교 (AMG-05, AMX-02) | single에서는 라이브러리와 통합 테스트만 돌았다. `ofgpu-buoyant -backend gamg/amgx` 20회 비교는 f64에서만 했다 ('amgx single' bin 빌드 약 20분) | B1과 함께 |
+| B14 | STU-18 | GLM 주간 할당량이 2026-10-16까지 막혀 건너뛰었다 (live GLM-5.3-Flash studio 호출 필요) | 할당량이 돌아오면 G 레인에 다시 넣는다 |
+| B15 | AUT-04, AUT-07 효과의 family별 측정 | RM-TE는 bump가 있는 모든 sharp body에서 F3 remedy 중 먼저 걸린다 (가상 F3c에서 sharp 276행 중 169행). R-ECON quick set에는 sharp body가 없어 A, D, F family와 K = 4 remedy 캠페인 효과를 재지 않았다 | AUT-12의 L-run에서 family별 실패, BLC_8, F3를 L5 규칙과 비교 |
 
 ## C. 모델·설계 선택 (권고대로 진행, 검토 대기)
 
@@ -76,6 +80,7 @@
 | C12 | BC-21 | 부력 압력 이름 4개(prghPressure 등)의 rho_f를 스텝마다 갱신하지 않았다. 갱신하면 face alpha가 움직이는 기존 prghPressure 계산이 바뀐다. 원하면 `Vof::refresh_vof_family`에 짧게 추가 | SPEC-LIT 120.7, 120.14 |
 | C13 | BC-16 | DFSEM 와류 모양 F(q) = (1−q)², 상수 G = 512π/45045, 강도 규칙 A = (tr R/2 I − R)/G는 자체 설계다 (Poletto et al. 2013은 유료라 식을 보지 못했다) | SPEC-LIT 120.12 |
 | C14 | AMG-05, AMX-02 | `-backend auto`가 이제 GAMG와 AMGX도 잰다. 큰 메시(gb_800000)에서는 auto가 GAMG나 AMGX를 골라 결과가 PBiCGStab와 solver 허용오차만큼 달라진다. AMGX 구조 재사용은 기본 켜짐 (`OFGPU_AMGX_REUSE=0`으로 끔) | SPEC-LIT 141.8, 141.21 |
+| C15 | AUT-10 | D-6 비공허 기준을 권고로 정했다: real − rules ≥ 1, real − shuffled 평균 ≥ 1.0 (기하 개수). 이 기준으로는 AM-L 2026-10-02 통과(241/241/240.667)가 FAIL, AM-13과 oracle은 통과(oracle은 margin 1.000으로 경계). 계획 §11 item 5에 따라 **사용자 승인이 필요**하다 | `c71a9e8` |
 
 ## D. 연결·기능이 남은 것 (API만 있거나 후속 작업 필요)
 
@@ -107,6 +112,11 @@
 - BC-16: 어떤 드라이버도 `BcInputs::turbulent_inlet`을 넘기지 않아 turbulentInlet, turbulentDigitalFilterInlet, turbulentDFSEMInlet이 모두 이름으로 거부된다. transient 경로를 여는 드라이버 단위가 필요하다.
 - BC-16, BC-21: gui pick-list(registry)에 새 BC 이름 6개가 없다 (BC-22 몫).
 - CHR-25: 모든 드라이버가 parcel 케이스를 거부한다. CHR-26이 lowmach 경로에서 이 거부를 풀어야 한다.
+- AUT-07: optimise.py의 L4 상자가 R-ECON 이전 L1(`l1_of(r_econ=False)`)을 중심으로 한다. optimiser를 켜면 제안이 §B의 세 band 모양(×0.5..2)과 그 셀을 되살린다. R-ECON 캠페인(AUT-12 L-run, 그다음 AUT-09/10/11)으로 surrogate를 다시 맞춰야 한다. optimiser는 꺼진 채로 배포된다.
+- AUT-11: AM-14 기록 `optimise/`(PASS, AUC 0.986)는 AUT-11 이전에 gate돼 gate 파일 sha가 없어서 꺼져 있다. sha를 나중에 채우면 켜질 수 있으므로 커밋된 모델에는 절대 채우지 않는다. 새 gate 디렉터리로 옮기려면 `prior.REPORT_DIR`/`optimise.SHIP_DIR`을 바꿔야 한다 (AUT-12 L-run 다음 단계).
+- F32-19: studio의 single 빌드 실행은 F32-18 전까지 preview다 (`SINGLE_PRECISION_PREVIEW = true`, `gui/shared/src/protocol.ts`). F32-18이 들어오면 한 줄을 false로 바꾸고 dispatch.test의 header 기대값 두 개에서 접미사를 지운다. G 트리 `rust/target/single/release`의 single exe 21개는 오래됐을 수 있다 (단위 검증은 `--lib`만 빌드).
+- STU-15: tet 100 000개 넘게 지나거나 부피 0인 tet(중심에 대해 star-shaped가 아닌 셀)을 만나면 그 유선은 'lost'로 끝난다. 볼록하지 않은 영역에서 나갔다 들어오는 선은 첫 출구에서 끝난다.
+- gui registry: `MESH_KINDS`에 VAL-30의 `plate`가 없어 studio에서 평판 preset을 고를 수 없다 (플래그는 오케스트레이터가 `b17d194`에서 맞췄다).
 
 ## E. 기존 gui 실패 (이번 트랜치가 원인 아님)
 
