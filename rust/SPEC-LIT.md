@@ -33652,7 +33652,8 @@ Government data, and their files are the fenced blocks of §110.3 and §110.4 by
 byte, written by the same script's `write` and checked by its `--check`. So a clean
 clone reports Gate 110-A not closed with three `answer key <id> missing` lines, and
 Gates 110-B and 110-C load their keys, print the digest lines and run the keys' own
-rows before they report that no driver run is recorded. With no key file present at
+rows; 110-B then reports that no driver run is recorded, and 110-C replays its record
+(docs/17 VAL-53, §110.5). With no key file present at
 all, the three gates print five `answer key <id> missing` lines between them. That is
 the designed behaviour, not a failure; §110.5's *Placing a key* says what a user who
 wants the channel gate closed runs.
@@ -34058,7 +34059,7 @@ has been made, and no verdict in this table is a claim.
 | Gate 110-A Re_tau 392.24 | MKM99 `chan395`: U_b+ = 17.5448 (129 rows) | U_b+ = 18.5775 at N_y 128, E = +5.89 % of D; B2 = 1.2729 (at y+ 162.5); B3 = 6.34e-3 | 16.9912 / 18.0618 / 18.5775, monotone, p = 1.054, u_num = 0.5989 (3.41 % of D), u_input = 9.4e-7 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-B reattachment | not yet run | not yet run | not yet run | not yet run |
-| Gate 110-C plume centreline | not yet run | not yet run | not yet run | not yet run |
+| Gate 110-C plume centreline | McCaffrey Table 1, plume region, at the declared Q = 57.5 kW: dT_c(2.00 m) = 101.356 K, w_c(2.00 m) = 3.4311 m/s | dT_c(2.00 m) = 265.214 K, w_c = 5.9370 m/s at 0.025 m; P1 worst +212.6 % (z = 1.25 m), P2 worst +76.1 % (z = 1.75 m); P3 slope -2.130; P4 chi_c = 0.224 | 231.556 / 224.483 / 265.214 K, oscillatory diverging, p n/a, u_num = 144.1 K (142 % of D), u_input = 0 (Q declared) | P1 OPEN (outside); P2 OPEN (undecided at u_val/D = 1.422); P3 OPEN (outside -5/3 +- 0.25); class R holds |
 
 **The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
 stands, with nothing edited but `cells`: `cases/channelDns{180,395,590}.jsonc` (LaunderSharmaKE,
@@ -34110,6 +34111,68 @@ inside it". Since VAL-51 `band_of` is inside when `|E| + u_val <= band` and outs
 `|E| - u_val > band`, as §144.3's `band_110` already was. Under the old rule `Re_tau = 587.19`'s B1
 would have passed at 4.51 %; under the rule as written it is undecided. Gates 110-B and 110-C have
 no record yet, so nothing they print changed.
+
+**The record of Gate 110-C (docs/17 VAL-53).** The three runs are §110.5's plume recipe as it
+stands, with nothing edited but `cells`: `cases/plumeMcCaffrey.jsonc` (kEpsilon, the hot-gas inlet
+of §110.4 at 2.3985 m/s, so `Q = 57.5 kW` declared) on scratch copies at `[33,33,40] / [66,66,80] /
+[132,132,160]`, each `ofgpu-lowmach -iters 4000 -check 500` in the f64 release build at `f49a16c`,
+and each set of stations from `ofgpu-sample column <copy> 4000 z 0 0 -at 1.25,1.5,1.75,2.0,2.25,2.5`.
+The single build ran the finest copy the same way. The records are constants in
+`src/bin/validate_gates/plume.rs`, printed from the runs' own outputs by its ignored test
+`record_plume`, and the gate replays them; `dT_c` is the sampler's station `T` less the case's
+293.15 K, and `w_c` its station `U_z`. Every run reached its 4 000 iterations. The iterations are
+converged in the quantities the gate reads: run to 2 000 iterations, the medium copy gives
+`dT_c(2.00 m)` = 224.482 K against 224.483 at 4 000 (4e-6 relative), and the finest gives 265.135
+against 265.214 K (3.0e-4), its worst station 691.37 against 693.55 K (3.1e-3) and its P3 slope
+-2.1249 against -2.1297. The last printed `|U| res` is 1.2e-2, 6.6e-3 and 3.8e-3 on the three levels
+and does not fall further; it is recorded, not read as convergence. The runs took 121 s, 189 s and
+1 485 s, the single build's 1 269 s, and the two 2 000-iteration checks 83 s and 1 011 s, about
+69 min of card time in all, beside another project's job on the same card.
+
+| level | dT_c at z = 1.25 / 1.50 / 1.75 / 2.00 / 2.25 / 2.50 m (K) | w_c at the same stations (m/s) | P3 slope |
+|---|---|---|---|
+| 0.10 m | 410.91 / 340.26 / 280.42 / 231.56 / 191.66 / 159.97 | 4.8935 / 5.1333 / 5.2658 / 5.2800 / 5.1960 / 5.0312 | -1.3638 |
+| 0.05 m | 473.23 / 367.89 / 285.40 / 224.48 / 180.29 / 148.02 | 5.2137 / 5.4700 / 5.4820 / 5.3082 / 5.0468 / 4.7718 | -1.6911 |
+| 0.025 m | 693.55 / 511.25 / 361.31 / 265.21 / 204.15 / 163.25 | 5.4024 / 6.2163 / 6.3188 / 5.9370 / 5.4886 / 5.0914 | -2.1297 |
+| 0.025 m, single | 691.86 / 509.38 / 359.89 / 264.17 / 203.34 / 162.58 | 5.4058 / 6.2155 / 6.3127 / 5.9277 / 5.4781 / 5.0800 | -2.1317 |
+| McCaffrey at Q = 57.5 kW | 221.84 / 163.71 / 126.62 / 101.36 / 83.29 / 69.88 | 4.0130 / 3.7764 / 3.5872 / 3.4311 / 3.2990 / 3.1851 | -5/3 |
+
+What the record says. **P1, P2 and P3 are all OPEN**; the datum is a correlation, so none is a
+miss (§110.1). On the finest mesh `dT_c` lies +133.6 % to +212.6 % above the correlation (worst at
+`z = 1.25 m`) and `w_c` +34.6 % to +76.1 % (worst at 1.75 m). Both are on the high side §110.4
+predicted, but far beyond what it predicted: 20-40 % radiative loss accounts for +16 % to +41 % in
+`dT` and +8 % to +19 % in `w`, and P4's implied convective fraction is `chi_c` = 0.224 against the
+0.60-0.80 that McCaffrey's radiant fractions give. **Radiation alone does not explain this miss**,
+and the headline says so. P1 is outside its band. P2 is UNDECIDED, not outside: it is judged at
+the one study §110.4 names, `dT_c` at `z = 2.00 m`, as a relative `u_val`, and that study's
+`u_val/D` = 1.422 reaches past the 15 % edge from P2's 0.761. P3, the leg §110.4 called closable,
+does not close on the finest mesh: the slope is -2.130 against -5/3 ± 0.25. It is inside the band
+on the medium mesh (-1.691) and outside on the coarse one (-1.364).
+
+The study does not converge. `dT_c(2.00 m)` is 231.556, 224.483 and 265.214 K on the three levels,
+oscillatory and diverging, so `p` is not available and the fixed-exponent fit gives `u_num` =
+144.1 K (142 % of D); `E` = +163.9 K and `|E| > u_val`, so the disagreement is not the mesh's. The
+finest mesh is the hottest. Its centreline is still 693.6 K above ambient at `z = 1.25 m`, while
+McCaffrey's continuous flame holds 797 K only up to `z/Q^(2/5) = 0.0796`, that is `z = 0.40 m` here.
+The source's hot core survives far up the column. The reading, not measured further here, is
+that the near field mixes too little, so the stations sit in a core that has not reached plume
+similarity; that would also explain why the decay steepens past -5/3 as the mesh refines.
+This record does not establish the cause. The candidates, none measured here, are standard k-ε's
+known under-prediction of the spreading rate of round jets and plumes, the source's low inflow
+turbulence (`k = 0.015 m2/s2`), and the walled box, whose only open boundary is the top. Each
+cure changes the model or the case, so none was tried (docs/17 review-later).
+
+The single build lands in every band the f64 run lands in (class R holds): P1 +211.87 % and P2
++75.98 % against +212.6 % and +76.1 %, slope -2.1317 against -2.1297, and `dT_c(2.00 m)` = 264.172
+against 265.214 K (-0.39 %). That gap is the size of the finest run's own 2 000-to-4 000-iteration
+drift.
+
+What changed in the verdict code. Every row and verdict of Gate 110-C is now counted as replayed.
+A P3 outside its band used to be a failed check row; it is now an OPEN verdict, the §110.1 word for
+an outside-band result against a correlation. The P1/P2 headline names each leg's own band word,
+so a leg that is undecided is never reported as outside because the other one is. It also says
+whether a high miss lies inside what 20-40 % radiative loss accounts for. The class-R row follows
+Gate 110-A's (VAL-51). No band, tolerance or functional changed.
 
 ---
 

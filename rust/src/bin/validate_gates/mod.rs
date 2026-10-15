@@ -40,3 +40,7 @@ pub(crate) mod pipe;
 /// SPEC-LIT §110.2/§110.5, Gate 110-A: the plane channel's recorded runs at
 /// three `Re_tau` (data replayed by `validate.rs`'s channel gate).
 pub(crate) mod channel_dns;
+
+/// SPEC-LIT §110.4/§110.5, Gate 110-C: the hot-gas plume's recorded runs at
+/// three levels (data replayed by `validate.rs`'s plume gate).
+pub(crate) mod plume;

@@ -13381,7 +13381,8 @@ static CHANNEL_DNS_RECORDS: [Option<&ChannelDnsRecord>; 3] = [
     Some(&validate_gates::channel_dns::RECORDS[2]),
 ];
 const STEP_RECORD: Option<&StepRecord> = None;
-const PLUME_RECORD: Option<&PlumeRecord> = None;
+// the recorded runs of docs/17 VAL-53 (validate_gates/plume.rs)
+static PLUME_RECORD: Option<&PlumeRecord> = Some(&validate_gates::plume::RECORD);
 
 /// The three MKM answer keys the channel gate reads, id and expected file
 /// under `reference/` (SPEC-LIT 110.2). They are `fetched` rows: their host
@@ -14231,7 +14232,14 @@ fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
             None
         }
     };
-    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD)
+    // The single build's finest run of the same case (class R, docs/17
+    // section 5.1 rule 4): a record, or the reason the run left none.
+    let single = Some(
+        validate_gates::plume::SINGLE
+            .as_ref()
+            .ok_or(validate_gates::plume::SINGLE_NOT_RECORDED),
+    );
+    check_mccaffrey_plume_on(c, key.as_ref(), PLUME_RECORD, single)
 }
 
 /// The worker behind [`check_mccaffrey_plume`]: the parsed key and record
@@ -14245,6 +14253,7 @@ fn check_mccaffrey_plume_on(
     c: &mut Checks,
     key: Option<&McCaffreyKey>,
     rec: Option<&PlumeRecord>,
+    single: Option<std::result::Result<&validate_gates::plume::PlumeSingle, &'static str>>,
 ) -> Result<()> {
     if let Some(k) = key {
         c.check(
@@ -14300,19 +14309,28 @@ fn check_mccaffrey_plume_on(
     let w_mcc = |z: Scalar| k.plume_v * r.q_kw.powf(1.0 / 3.0) * z.powf(-1.0 / 3.0);
     // The worst station of each, kept SIGNED: the band reads its magnitude,
     // the headline its sign (high is the side S110.4 predicts; low is not).
-    let (mut s_t, mut s_w) = (0.0 as Scalar, 0.0 as Scalar);
-    for i in 0..6 {
-        let e_t = r.dt_c[2][i] / dt_mcc(r.stations_m[i]) - 1.0;
-        let e_w = r.w_c[2][i] / w_mcc(r.stations_m[i]) - 1.0;
-        if e_t.abs() > s_t.abs() {
-            s_t = e_t;
+    let worst = |dt: &[Scalar; 6], w: &[Scalar; 6]| -> (Scalar, Scalar) {
+        let (mut s_t, mut s_w) = (0.0 as Scalar, 0.0 as Scalar);
+        for i in 0..6 {
+            let e_t = dt[i] / dt_mcc(r.stations_m[i]) - 1.0;
+            let e_w = w[i] / w_mcc(r.stations_m[i]) - 1.0;
+            if e_t.abs() > s_t.abs() {
+                s_t = e_t;
+            }
+            if e_w.abs() > s_w.abs() {
+                s_w = e_w;
+            }
         }
-        if e_w.abs() > s_w.abs() {
-            s_w = e_w;
-        }
-    }
+        (s_t, s_w)
+    };
+    let (s_t, s_w) = worst(&r.dt_c[2], &r.w_c[2]);
     let (r_t, r_w) = (s_t.abs(), s_w.abs());
     let p3 = plume_exponent(&r.stations_m, &r.dt_c[2]);
+    // What 20-40 % radiative loss accounts for (S110.4): dT high by
+    // (1/(1-chi_r))^(2/3), w by (1/(1-chi_r))^(1/3), over that range.
+    let rad = |chi_r: Scalar, e: Scalar| (1.0 / (1.0 - chi_r)).powf(e) - 1.0;
+    let (t_lo, t_hi) = (rad(0.20, 2.0 / 3.0), rad(0.40, 2.0 / 3.0));
+    let (w_lo, w_hi) = (rad(0.20, 1.0 / 3.0), rad(0.40, 1.0 / 3.0));
     // P4, printed and asserted as nothing: the convective fraction the run
     // implies, BEFORE the numbers (S110.4).
     let chi: Scalar = (0..6)
@@ -14325,8 +14343,39 @@ fn check_mccaffrey_plume_on(
     );
     c.note(&format!(
         "P4 (a number, not a verdict): the implied convective fraction chi_c = {:.3} - \
-         what a participating medium would have to carry if one were ever built",
+         what a participating medium would have to carry if one were ever built; \
+         McCaffrey's 20-40 % radiative loss is chi_c = 0.60-0.80",
         chi
+    ));
+    let six = |v: &[Scalar; 6], f: &dyn Fn(Scalar) -> Scalar| -> String {
+        (0..6)
+            .map(|i| format!("{:+.1}%", 100.0 * (v[i] / f(r.stations_m[i]) - 1.0)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    c.note(&format!(
+        "110.5 plume: {} iterations per level, finest |U| res {}; dT_c(2.00 m) = {} / {} / {} K \
+         and w_c(2.00 m) = {} / {} / {} m/s at h = 0.10 / 0.05 / 0.025 m, against McCaffrey's {} K \
+         and {} m/s at the declared Q = {} kW; binaries built at {}",
+        r.iterations,
+        sci(f64::from(r.residual_u), 3),
+        sci(f64::from(r.dt_c[0][3]), 5),
+        sci(f64::from(r.dt_c[1][3]), 5),
+        sci(f64::from(r.dt_c[2][3]), 5),
+        sci(f64::from(r.w_c[0][3]), 5),
+        sci(f64::from(r.w_c[1][3]), 5),
+        sci(f64::from(r.w_c[2][3]), 5),
+        sci(f64::from(dt_mcc(2.0)), 5),
+        sci(f64::from(w_mcc(2.0)), 5),
+        r.q_kw,
+        validate_gates::plume::BUILT_AT,
+    ));
+    c.note(&format!(
+        "110.4 finest, z = 1.25 ... 2.50 m (the column dx/2 off the axis): dT_c {}; w_c {}; \
+         P3 slope {:.4}",
+        six(&r.dt_c[2], &dt_mcc),
+        six(&r.w_c[2], &w_mcc),
+        p3
     ));
     let levels: Vec<ofgpu::vv::Level> = (0..3)
         .rev()
@@ -14339,70 +14388,164 @@ fn check_mccaffrey_plume_on(
     let val = vv::validation(r.dt_c[2][3], dt_mcc(2.0), study.u_fine, 0.0, 0.0);
     c.note(&study.one_line());
     c.note(&val.one_line("dT_c at z = 2.00 m"));
-    c.check(
-        "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
-         (SPEC-LIT S110.4)",
-        (p3 + 5.0 / 3.0).abs(),
-        0.25,
-    );
+    // P3, the exponent a non-radiating solver CAN close. Its -5/3 is the
+    // correlation's, so outside its band the gate is left open (S110.1).
+    let p3_in = (p3 + 5.0 / 3.0).abs() <= 0.25;
+    if p3_in {
+        c.replaying(|c| {
+            c.check(
+                "Gate 110-C: centreline dT decays as z^(-5/3) within +-0.25 in the exponent \
+                 (SPEC-LIT S110.4)",
+                (p3 + 5.0 / 3.0).abs(),
+                0.25,
+            )
+        });
+    } else {
+        report_110c(
+            c,
+            Verdict::Open,
+            How::Replayed,
+            format!(
+                "P3: the finest centreline dT decays as z^({:.3}) over the six stations, outside \
+                 -5/3 +- 0.25 - the correlation's exponent, so the gate is left open (S110.1)",
+                p3
+            ),
+            Some(Uncertainty::SingleMesh("P3 is read on the finest mesh alone (SPEC-LIT 110.4)")),
+        );
+    }
     // P1 and P2 each: inside, undecided, or outside a correlation - and an
     // outside band is Verdict::Open, never the measurement word, because the
-    // datum is a correlation and the section expects this very miss.
-    let band1 = band_of(r_t, 0.15, val.u_val / dt_mcc(2.0));
-    let band2 = band_of(r_w, 0.15, val.u_val / dt_mcc(2.0));
-    let worst = if band1 == Band::Outside || band2 == Band::Outside {
+    // datum is a correlation and the section expects this very miss. Both
+    // are judged at the one study S110.4 names, dT_c at z = 2.00 m, as a
+    // relative u_val.
+    let rel_u = val.u_val / dt_mcc(2.0);
+    let band1 = band_of(r_t, 0.15, rel_u);
+    let band2 = band_of(r_w, 0.15, rel_u);
+    let worst_band = if band1 == Band::Outside || band2 == Band::Outside {
         Band::Outside
     } else if band1 == Band::Undecided || band2 == Band::Undecided {
         Band::Undecided
     } else {
         Band::Inside
     };
-    match worst {
-        Band::Inside => {
+    match worst_band {
+        Band::Inside => c.replaying(|c| {
             c.check(
                 "Gate 110-C: P1, centreline dT within 15% of the correlation at every \
-                 station (SPEC-LIT S110.4)",
-                r_t,
+                 station, |E| + u_val (SPEC-LIT S110.4)",
+                r_t + rel_u,
                 0.15,
             );
             c.check(
                 "Gate 110-C: P2, centreline w within 15% of the correlation at every \
-                 station (SPEC-LIT S110.4)",
-                r_w,
+                 station, |E| + u_val (SPEC-LIT S110.4)",
+                r_w + rel_u,
                 0.15,
             );
-        }
+        }),
         Band::Undecided => report_110c(
             c,
             Verdict::Open,
-            How::Live,
+            How::Replayed,
             format!(
                 "undecided: P1/P2 worst {:.3} is within u_val/D = {:.3} of the 15% edge \
                  (S32.4)",
                 r_t.max(r_w),
-                val.u_val / dt_mcc(2.0)
+                rel_u
             ),
             Some(Uncertainty::Study(study)),
         ),
-        Band::Outside => report_110c(
+        Band::Outside => {
+            // Each leg's own band word: one leg outside makes the gate's,
+            // but the other is never reported as outside when it is not.
+            let word = |b: Band| match b {
+                Band::Inside => "inside",
+                Band::Undecided => "undecided",
+                Band::Outside => "outside",
+            };
+            let high = s_t > 0.0 && s_w > 0.0;
+            let within_rad = high && s_t <= t_hi && s_w <= w_hi;
+            let why = if within_rad {
+                "on the high side a non-radiating solver was predicted to sit on and inside \
+                 what 20-40 % radiative loss accounts for: the correlation does not close \
+                 without radiative loss, which is the measurement this gate exists to take"
+                    .to_string()
+            } else if high {
+                format!(
+                    "on the predicted high side but BEYOND what 20-40 % radiative loss accounts \
+                     for (dT {:+.0}% to {:+.0}%, w {:+.0}% to {:+.0}%): radiation alone does not \
+                     explain this miss",
+                    100.0 * t_lo,
+                    100.0 * t_hi,
+                    100.0 * w_lo,
+                    100.0 * w_hi
+                )
+            } else {
+                "NOT the high side the section predicted for a non-radiating solver - a deficit \
+                 radiation cannot explain"
+                    .to_string()
+            };
+            report_110c(
+                c,
+                Verdict::Open,
+                How::Replayed,
+                format!(
+                    "P1 worst {:+.1}% {}, P2 worst {:+.1}% {} against the +-15% band at u_val/D \
+                     = {:.3} - {} (S110.4)",
+                    100.0 * s_t,
+                    word(band1),
+                    100.0 * s_w,
+                    word(band2),
+                    rel_u,
+                    why
+                ),
+                Some(Uncertainty::Study(study)),
+            )
+        }
+    }
+    // Class R (docs/17 section 5.1 rule 4): the single build's finest run
+    // lands in each band the f64 build's finest run landed in, P1 and P2 at
+    // the f64 study's u_val.
+    match single {
+        None => c.note("110.5 plume: no single-build run is recorded on the finest level"),
+        // A run that diverged or stopped is recorded as exactly that
+        // (SPEC-LIT 110.1), and the miss is registered by name.
+        Some(Err(why)) => report_110c(
             c,
-            Verdict::Open,
-            How::Live,
-            format!(
-                "P1 worst {:+.1}%, P2 worst {:+.1}% - outside the +-15% band, {} (S110.4)",
-                100.0 * s_t,
-                100.0 * s_w,
-                if s_t > 0.0 && s_w > 0.0 {
-                    "on the high side a non-radiating solver was predicted to sit on: the \
-                     correlation does not close without radiative loss, which is the \
-                     measurement this gate exists to take"
-                } else {
-                    "NOT the high side the section predicted for a non-radiating solver - \
-                     a deficit radiation cannot explain"
-                },
-            ),
-            Some(Uncertainty::Study(study)),
+            Verdict::Misses,
+            How::Replayed,
+            format!("class R: the single build's finest run left no record - {why}"),
+            Some(Uncertainty::SingleMesh(
+                "the single build's finest level alone (docs/17 section 5.1 rule 4)",
+            )),
         ),
+        Some(Ok(s)) => {
+            let (st_s, sw_s) = worst(&s.dt_c, &s.w_c);
+            let p3_s = plume_exponent(&r.stations_m, &s.dt_c);
+            let b1_s = band_of(st_s.abs(), 0.15, rel_u);
+            let b2_s = band_of(sw_s.abs(), 0.15, rel_u);
+            c.note(&format!(
+                "110.5 plume single build, {} cells: P1 worst {:+.2}%, P2 worst {:+.2}%, P3 \
+                 slope {:.4}, dT_c(2.00 m) {} K, {} iterations, |U| res {}",
+                s.n_cells,
+                100.0 * st_s,
+                100.0 * sw_s,
+                p3_s,
+                sci(f64::from(s.dt_c[3]), 5),
+                s.iterations,
+                sci(f64::from(s.residual_u), 3),
+            ));
+            let same = b1_s == band1
+                && b2_s == band2
+                && ((p3_s + 5.0 / 3.0).abs() <= 0.25) == p3_in;
+            c.replaying(|c| {
+                c.require(
+                    "Gate 110-C single build: P1, P2 and P3 land where the f64 build's do \
+                     (class R)",
+                    same,
+                )
+            });
+        }
     }
     Ok(())
 }
@@ -23850,31 +23993,23 @@ buoyancy_constant 0.935
         assert!((p + 5.0 / 3.0).abs() < 1e-9, "slope {p} against -5/3");
     }
 
-    /// (g) THIS TREE's own truth for 110-B and 110-C: the two tracked
-    /// transcriptions load and their key rows run, and no record exists - so
-    /// each registers exactly one open, live verdict, BY NAME, in C-GATES
-    /// order, and nothing a key alone could close has closed. (110-A has its
-    /// records since docs/17 VAL-51: test (g2).)
+    /// (g) THIS TREE's own truth for 110-B: the tracked transcription loads
+    /// and its key rows run, and no record exists - so it registers exactly
+    /// one open, live verdict, BY NAME, and nothing a key alone could close
+    /// has closed. (110-A has its records since docs/17 VAL-51: test (g2);
+    /// 110-C since docs/17 VAL-53: test (g3).)
     #[test]
     fn the_three_sections_report_not_closed_by_name_on_this_tree() {
         let mut c = Checks::new();
         check_backstep_reattachment(&mut c).expect("110-B runs");
-        check_mccaffrey_plume(&mut c).expect("110-C runs");
         assert_eq!(c.failures, 0, "nothing has run, so nothing has failed");
-        assert_eq!(c.gates.len(), 2, "one report per gate");
-        let gates: Vec<&str> = c.gates.iter().map(|g| g.gate).collect();
+        assert_eq!(c.gates.len(), 1, "one report");
         assert_eq!(
-            gates,
-            [
-                "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
-                "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
-            ],
-            "the two gate names, in order"
+            c.gates[0].gate,
+            "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
         );
-        for g in &c.gates {
-            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
-            assert_eq!(g.how, How::Live, "{}", g.headline);
-        }
+        assert_eq!(c.gates[0].verdict, Verdict::Open, "{}", c.gates[0].headline);
+        assert_eq!(c.gates[0].how, How::Live, "{}", c.gates[0].headline);
     }
 
     /// (g2) Gate 110-A on this tree (docs/17 VAL-51): its three legs are
@@ -23961,6 +24096,31 @@ buoyancy_constant 0.935
         assert!(matches!(c.gates[0].uncertainty, Some(Uncertainty::Study(_))));
     }
 
+    /// (g3) Gate 110-C on this tree (docs/17 VAL-53): its three levels and
+    /// the single build's finest are recorded, every row and verdict is
+    /// REPLAYED, nothing fails, and the verdicts are the ones SPEC-LIT
+    /// 110.5's results row states: P3 open (the finest slope lies outside
+    /// -5/3 +- 0.25), P1/P2 open on the high side and BEYOND what 20-40 %
+    /// radiative loss accounts for, and class R holds (a require row).
+    #[test]
+    fn gate_110c_replays_its_recorded_runs() {
+        let mut c = Checks::new();
+        check_mccaffrey_plume(&mut c).expect("110-C runs");
+        assert_eq!(c.failures, 0, "every row taken passes; a miss is a verdict, not a failed row");
+        assert_eq!(c.gates.len(), 2, "P3 and P1/P2, one report each");
+        for g in &c.gates {
+            assert_eq!(g.gate, "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)");
+            assert_eq!(g.verdict, Verdict::Open, "{}", g.headline);
+            assert_eq!(g.how, How::Replayed, "{}", g.headline);
+        }
+        let p3 = &c.gates[0].headline;
+        assert!(p3.starts_with("P3: the finest centreline dT decays as z^(-2.130)"), "{p3}");
+        let p12 = &c.gates[1].headline;
+        assert!(p12.starts_with("P1 worst +212.6% outside, P2 worst +76.1% undecided"), "{p12}");
+        assert!(p12.contains("BEYOND what 20-40 % radiative loss accounts for"), "{p12}");
+        assert!(matches!(c.gates[1].uncertainty, Some(Uncertainty::Study(_))));
+    }
+
     /// A recorded plume run that sits LOW, 30 % under the correlation at
     /// every station on the finest mesh: the exponent closes (P3 is a check
     /// row), P1/P2 fall outside the +-15 % band, the verdict is the
@@ -23984,7 +24144,7 @@ buoyancy_constant 0.935
             residual_u: 1.0e-5,
         };
         let mut c = Checks::new();
-        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec)).expect("the verdict runs");
+        check_mccaffrey_plume_on(&mut c, Some(&key), Some(&rec), None).expect("the verdict runs");
         assert_eq!(c.failures, 0, "the key rows and P3 hold");
         assert_eq!(c.gates.len(), 1, "exactly one report");
         assert_eq!(c.gates[0].verdict, Verdict::Open, "a correlation leaves the gate open");
