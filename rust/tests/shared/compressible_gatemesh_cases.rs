@@ -8,11 +8,14 @@
 // CMP-26's both-builds gate, written ONCE and included twice - by
 // `tests/compressible_gatemesh.rs`, which runs it as an integration test in
 // BOTH builds, and by the lib tests of `src/compressible/gatemesh.rs`,
-// where the same names sit beside the code. The ten tests are SPEC-LIT
-// §127.5.1's gate table, verbatim: volumes, per-cell closure, the 129
-// stations on the wall, the non-orthogonality bar, the topology counts,
-// the `y+` first interval, the one-sided distribution, the parser, the
-// spec refusals, and the two builds' identical points.
+// where the same names sit beside the code. The first ten tests are
+// SPEC-LIT §127.5.1's gate table, verbatim: volumes, per-cell closure, the
+// 129 stations on the wall, the non-orthogonality bar, the topology
+// counts, the `y+` first interval, the one-sided distribution, the parser,
+// the spec refusals, and the two builds' identical points. CMP-21 appends
+// §127.5.2's six duct tests: the area ratio, the topology counts, the face
+// areas, the trapezoid volumes, closure and the axis centres, and the
+// duct spec's refusals.
 //
 // An integration test's body cannot carry `//!` or `#![..]`, and neither
 // can this file - it is included, not compiled standalone. Every
@@ -28,8 +31,8 @@
 use std::sync::OnceLock;
 
 use ofgpu::compressible::gatemesh::{
-    airfoil_cmesh, first_cell_for_y_plus, one_sided_tanh, parse_stations, rae2822_stations,
-    CMesh, CMeshSpec,
+    airfoil_cmesh, duct_area_ratio, first_cell_for_y_plus, nozzle_duct, one_sided_tanh,
+    parse_stations, rae2822_stations, DuctSpec, CMesh, CMeshSpec,
 };
 use ofgpu::io::polymesh::build_host_mesh;
 use ofgpu::{DVec3, HostMesh, PatchKind, Scalar};
@@ -443,4 +446,199 @@ fn points_are_the_same_bits_in_both_builds() {
     println!("  default points hash {hd:016x}, coarse points hash {hc:016x}");
     assert_eq!(hd, 0xb5ca6cb8433c8b1du64, "the default mesh's point bits moved");
     assert_eq!(hc, 0x3f8d774e11d077a1u64, "the coarse mesh's point bits moved");
+}
+
+// ==========================================================================
+//  CMP-21's duct, SPEC-LIT §127.5.2
+// ==========================================================================
+
+/// The default duct and its host mesh, built once per process.
+fn duct_mesh() -> &'static (ofgpu::compressible::gatemesh::Duct, HostMesh) {
+    static M: OnceLock<(ofgpu::compressible::gatemesh::Duct, HostMesh)> = OnceLock::new();
+    M.get_or_init(|| {
+        let d = nozzle_duct(&DuctSpec::default()).expect("build the duct");
+        let h = build_host_mesh(&d.raw).expect("build the host mesh");
+        (d, h)
+    })
+}
+
+/// The area ratio of (127.22) holds its four key values bitwise: 2 at both
+/// ends, 1 at the throat, 1.25 a quarter way in.
+#[test]
+fn duct_area_ratio_values() {
+    assert_eq!(duct_area_ratio(0.0), 2.0);
+    assert_eq!(duct_area_ratio(1.0), 2.0);
+    assert_eq!(duct_area_ratio(0.5), 1.0);
+    assert_eq!(duct_area_ratio(0.25), 1.25);
+}
+
+/// The duct's topology: 804 points, 200 cells, 199 internal faces, 1001
+/// faces, and the four patches in order inlet/outlet/walls/frontAndBack.
+#[test]
+fn duct_topology_counts_and_patches() {
+    let (d, h) = duct_mesh();
+    let n = d.spec.n;
+    assert_eq!(d.raw.points.len(), 4 * (n + 1), "the point count");
+    assert_eq!(h.n_points, 4 * (n + 1), "the host point count");
+    assert_eq!(h.n_cells, n, "the cell count");
+    assert_eq!(h.n_internal_faces, n - 1, "the internal face count");
+    assert_eq!(d.raw.faces.len(), 1001, "the total face count");
+    assert_eq!(h.n_boundary_faces, 2 + 4 * n, "the boundary face count");
+    let names = ["inlet", "outlet", "walls", "frontAndBack"];
+    let types = ["patch", "patch", "symmetry", "symmetry"];
+    let kinds = [PatchKind::Generic, PatchKind::Generic, PatchKind::Symmetry, PatchKind::Symmetry];
+    let sizes = [1usize, 1, 2 * n, 2 * n];
+    let mut at = 0usize;
+    for (k, p) in h.patches.iter().enumerate() {
+        assert_eq!(p.name, names[k], "patch {k} name");
+        assert_eq!(p.type_name, types[k], "patch {k} type");
+        assert_eq!(p.kind, kinds[k], "patch {k} kind");
+        assert_eq!(p.start, at, "patch {k} start");
+        assert_eq!(p.size, sizes[k], "patch {k} size");
+        assert_eq!(p.nbr_patch, None, "patch {k} couple");
+        at += p.size;
+    }
+    assert_eq!(at, h.n_boundary_faces, "the boundary face count");
+    for f in 0..h.n_internal_faces {
+        assert_eq!(h.owner[f] as usize, f, "face {f} owner");
+        assert_eq!(h.neighbour[f] as usize, f + 1, "face {f} neighbour");
+    }
+    println!("  duct: {} points, {} cells, {} internal faces", h.n_points, h.n_cells, h.n_internal_faces);
+}
+
+/// Every internal face's area is `H_j D` along x, the inlet and outlet
+/// faces' areas are `2 H_t D`, and the end faces' normals point the way
+/// the flow needs: `Sf_x < 0` in, `Sf_x > 0` out.
+#[test]
+fn duct_face_areas_follow_the_area_ratio() {
+    let (d, h) = duct_mesh();
+    let spec = &d.spec;
+    let tol = tol_r(1.0e-13);
+    for j in 1..spec.n {
+        let sf = [w64(h.sf[j - 1].x), w64(h.sf[j - 1].y), w64(h.sf[j - 1].z)];
+        let mag = (sf[0] * sf[0] + sf[1] * sf[1] + sf[2] * sf[2]).sqrt();
+        let want = d.height(j) * spec.depth;
+        assert!(
+            (mag - want).abs() <= tol * want,
+            "internal face {j}: |Sf| {mag} is not H_j D = {want}"
+        );
+        assert!(sf[0] > 0.0, "internal face {j}: Sf_x {} is not positive", sf[0]);
+        assert!(
+            sf[1].abs() <= tol * mag && sf[2].abs() <= tol * mag,
+            "internal face {j}: Sf_y, Sf_z = ({}, {}) are not round-off",
+            sf[1], sf[2]
+        );
+    }
+    let inlet = |sf: [f64; 3]| (sf[0] * sf[0] + sf[1] * sf[1] + sf[2] * sf[2]).sqrt();
+    let end = 2.0 * spec.throat_height * spec.depth;
+    let fi = [w64(h.b_sf[0].x), w64(h.b_sf[0].y), w64(h.b_sf[0].z)];
+    let fo = [w64(h.b_sf[1].x), w64(h.b_sf[1].y), w64(h.b_sf[1].z)];
+    assert!((inlet(fi) - end).abs() <= tol * end, "inlet |Sf| {}", inlet(fi));
+    assert!(fi[0] < 0.0, "inlet Sf_x {} is not negative", fi[0]);
+    assert!((inlet(fo) - end).abs() <= tol * end, "outlet |Sf| {}", inlet(fo));
+    assert!(fo[0] > 0.0, "outlet Sf_x {} is not positive", fo[0]);
+    println!("  duct: inlet |Sf| {:.6e}, outlet |Sf| {:.6e}", inlet(fi), inlet(fo));
+}
+
+/// Every cell is a trapezoid prism: its volume is
+/// `(x_{i+1} - x_i) D (H_i + H_{i+1})/2`.
+#[test]
+fn duct_volumes_are_trapezoids() {
+    let (d, h) = duct_mesh();
+    let spec = &d.spec;
+    let tol = tol_r(1.0e-12);
+    let mut worst = 0.0f64;
+    for i in 0..spec.n {
+        let dx = d.node_x(i + 1) - d.node_x(i);
+        let want = dx * spec.depth * 0.5 * (d.height(i) + d.height(i + 1));
+        let got = w64(h.v[i]);
+        let e = (got - want).abs() / want;
+        worst = worst.max(e);
+        assert!(e <= tol, "cell {i}: volume {got} is not the trapezoid's {want}");
+    }
+    println!("  duct: worst trapezoid-volume error {worst:.3e}");
+}
+
+/// Every cell closes to round-off, its centre lies on the axis at mid
+/// depth, and the centres march strictly with `i`.
+#[test]
+fn duct_cells_close_and_centres_lie_on_the_axis() {
+    let (d, h) = duct_mesh();
+    let spec = &d.spec;
+    let tol = tol_r(1.0e-13);
+    let tol_c = tol_r(1.0e-12) * spec.throat_height;
+    let mut acc = vec![[0.0f64; 3]; h.n_cells];
+    let mut mag = vec![0.0f64; h.n_cells];
+    let mut add = |c: usize, v: [f64; 3], s: f64| {
+        acc[c][0] += s * v[0];
+        acc[c][1] += s * v[1];
+        acc[c][2] += s * v[2];
+        mag[c] += s;
+    };
+    for f in 0..h.n_internal_faces {
+        add(h.owner[f] as usize, [w64(h.sf[f].x), w64(h.sf[f].y), w64(h.sf[f].z)], 1.0);
+        add(h.neighbour[f] as usize, [w64(h.sf[f].x), w64(h.sf[f].y), w64(h.sf[f].z)], -1.0);
+    }
+    for bf in 0..h.n_boundary_faces {
+        add(h.b_face_cells[bf] as usize, [w64(h.b_sf[bf].x), w64(h.b_sf[bf].y), w64(h.b_sf[bf].z)], 1.0);
+    }
+    let mut worst = 0.0f64;
+    let mut last_x = f64::NEG_INFINITY;
+    for c in 0..h.n_cells {
+        let sum = (acc[c][0] * acc[c][0] + acc[c][1] * acc[c][1] + acc[c][2] * acc[c][2]).sqrt();
+        worst = worst.max(if mag[c] > 0.0 { sum / mag[c] } else { 0.0 });
+        assert!(
+            sum <= tol * mag[c],
+            "cell {c}: the outward area vectors sum to {sum:.3e}, above {:.3e}",
+            tol * mag[c]
+        );
+        let cy = w64(h.c[c].y);
+        let cz = w64(h.c[c].z);
+        assert!(cy.abs() <= tol_c, "cell {c}: centre y {cy} is not on the axis");
+        assert!(
+            (cz - 0.5 * spec.depth).abs() <= tol_c,
+            "cell {c}: centre z {cz} is not mid depth"
+        );
+        let cx = w64(h.c[c].x);
+        assert!(cx > last_x, "cell {c}: centre x {cx} does not advance from {last_x}");
+        last_x = cx;
+    }
+    println!("  duct: worst closure ratio {worst:.3e}, last centre x {last_x:.6}");
+}
+
+/// Out-of-bounds duct specs are refused, every message naming the module
+/// and the offending field.
+#[test]
+fn duct_spec_refusals() {
+    let refused = |spec: &DuctSpec, why: &str, field: &str| {
+        let e = nozzle_duct(spec).expect_err(why);
+        let msg = match &e {
+            ofgpu::Error::Mesh(m) => m.clone(),
+            other => panic!("{why}: not a mesh error: {other:?}"),
+        };
+        assert!(
+            msg.contains("gatemesh: nozzle_duct"),
+            "{why}: the refusal \"{msg}\" does not name the module"
+        );
+        assert!(msg.contains(field), "{why}: the refusal \"{msg}\" does not name {field}");
+        println!("  {why}: \"{msg}\"");
+    };
+    let mut spec = DuctSpec::default();
+    spec.n = 1;
+    refused(&spec, "n 1", "n");
+    let mut spec = DuctSpec::default();
+    spec.length = 0.0;
+    refused(&spec, "length 0", "length");
+    let mut spec = DuctSpec::default();
+    spec.length = -1.0;
+    refused(&spec, "length -1", "length");
+    let mut spec = DuctSpec::default();
+    spec.length = f64::NAN;
+    refused(&spec, "length NaN", "length");
+    let mut spec = DuctSpec::default();
+    spec.throat_height = 0.0;
+    refused(&spec, "throat_height 0", "throat_height");
+    let mut spec = DuctSpec::default();
+    spec.depth = f64::INFINITY;
+    refused(&spec, "depth +inf", "depth");
 }

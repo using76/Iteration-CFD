@@ -3932,6 +3932,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_couette", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-NOZ: the quasi-1-D nozzle, subsonic,
+    // supersonic started and shocked, on the 200-cell duct of
+    // src/compressible/gatemesh.rs (SPEC-LIT 127.5.2), live, in
+    // src/bin/validate_gates/nozzle.rs (CMP-21).
+    if c.section("Gate CMP-NOZ: the quasi-1-D nozzle, subsonic, supersonic started and shocked, 200 cells (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::nozzle::GATE);
+    let r = validate_gates::nozzle::check_nozzle(c, &gpu);
+    c.ran("check_nozzle", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

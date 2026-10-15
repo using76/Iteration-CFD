@@ -23,10 +23,21 @@
 //! block (127.18); and the arc-length redistribution that sets every line's
 //! first cell from the `y+` target (127.19) finishes the grid.
 //!
+//! The quasi-1-D nozzle duct of SPEC-LIT section 127.5.2 (CMP-21) lives
+//! beside it: [`nozzle_duct`] lays `n` cells along a planar duct whose
+//! height follows the exit-to-throat-2 area ratio [`duct_area_ratio`]
+//! (127.22), ONE cell across in `y` and in `z`, the inclined slip walls
+//! `symmetry` - with one cell across the finite-volume form IS the
+//! quasi-1-D scheme, the inclined slip walls carrying the `p dA/dx` force
+//! (§127.5). Like the C-mesh it is host-only and `f64` in BOTH builds: the
+//! [`PolyMeshRaw`] points are [`DVec3`], so the two builds' ducts are the
+//! same bits.
+//!
 //! Provenance: LITERATURE - Thompson, Warsi & Mastin (1985), Chapters VI
 //! and VIII, read from the Internet Archive's page images of the
 //! Mississippi State HPC² copy (rust/PROVENANCE.md names the equations and
-//! the captures' sha256). No GPL-licensed source was consulted.
+//! the captures' sha256). The duct is ORIGINAL (rust/PROVENANCE.md,
+//! §127.5.2). No GPL-licensed source was consulted.
 
 use std::f64::consts::PI;
 
@@ -730,6 +741,186 @@ pub fn airfoil_cmesh(stations: &AirfoilStations, spec: &CMeshSpec) -> Result<CMe
         nodes,
         sweeps,
         last_move,
+    })
+}
+
+// ==========================================================================
+//  The quasi-1-D nozzle duct, SPEC-LIT §127.5.2 (CMP-21)
+// ==========================================================================
+
+/// The duct's area ratio (127.22), `a(xi) = 1 + 4 (xi - 1/2)^2` on `xi` in
+/// `[0, 1]`: `a(0) = a(1) = 2` at the ends and `a(1/2) = 1` at the throat,
+/// so a duct of this height profile is the nozzle `A_e/A_t = 2` of §127.2's
+/// oracle. ORIGINAL, this tree's choice. Checks nothing: NaN in, NaN out.
+pub fn duct_area_ratio(xi: f64) -> f64 {
+    let t = xi - 0.5;
+    1.0 + 4.0 * t * t
+}
+
+/// The duct's controls: `n` cells along the axis, the length `L`, the
+/// throat height `H_t` and the depth `D`. The defaults are the gate duct:
+/// 200 cells on `L = 1` m, `H_t = D = 0.05` m.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DuctSpec {
+    pub n: usize,
+    pub length: f64,
+    pub throat_height: f64,
+    pub depth: f64,
+}
+
+impl Default for DuctSpec {
+    fn default() -> Self {
+        Self {
+            n: 200,
+            length: 1.0,
+            throat_height: 0.05,
+            depth: 0.05,
+        }
+    }
+}
+
+/// The built duct: the raw polyMesh and the spec it was built from.
+#[derive(Debug, Clone)]
+pub struct Duct {
+    pub raw: PolyMeshRaw,
+    pub spec: DuctSpec,
+}
+
+impl Duct {
+    /// Node `i`'s station, `x_i = L (i / n)` (§127.5.2).
+    pub fn node_x(&self, i: usize) -> f64 {
+        self.spec.length * (i as f64) / (self.spec.n as f64)
+    }
+
+    /// Node `i`'s full height, `H_i = H_t a(i / n)` (§127.5.2); the walls
+    /// sit at `y = +-H_i/2`.
+    pub fn height(&self, i: usize) -> f64 {
+        self.spec.throat_height * duct_area_ratio(i as f64 / self.spec.n as f64)
+    }
+}
+
+/// Build the quasi-1-D duct of §127.5.2: `n` cells along the axis, ONE cell
+/// across in `y` and in `z`. Node `i` (of `n + 1`) sits at `x_i` with the
+/// four points `4i + k`, `k = 0..4`: `(x_i, -H_i/2, 0)`, `(x_i, +H_i/2,
+/// 0)`, `(x_i, +H_i/2, D)`, `(x_i, -H_i/2, D)`; cell `i` spans `[x_i,
+/// x_{i+1}]`, its walls the straight lines between the nodes. The `n - 1`
+/// internal faces stand at nodes `1..n`, owner `j - 1`, neighbour `j`;
+/// the boundary faces follow in patch order `inlet`, `outlet`, `walls`
+/// (the two inclined slip walls, `2n` faces) and `frontAndBack` (`z = 0`
+/// then `z = D`, `2n` faces), every face's vertices ordered so its
+/// right-hand normal points out of its owner.
+///
+/// Refusals, every message starting `gatemesh: nozzle_duct: `: `n` under 2;
+/// `length`, `throat_height` or `depth` not finite or not positive.
+pub fn nozzle_duct(spec: &DuctSpec) -> Result<Duct> {
+    if spec.n < 2 {
+        return Err(Error::Mesh(format!(
+            "gatemesh: nozzle_duct: n {} is not at least 2",
+            spec.n
+        )));
+    }
+    for (name, v) in [
+        ("length", spec.length),
+        ("throat_height", spec.throat_height),
+        ("depth", spec.depth),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(Error::Mesh(format!(
+                "gatemesh: nozzle_duct: {name} {v} is not finite and positive"
+            )));
+        }
+    }
+    let n = spec.n;
+    let vid = |i: usize, k: usize| (4 * i + k) as Label;
+    let mut points = Vec::with_capacity(4 * (n + 1));
+    for i in 0..=n {
+        let x = spec.length * (i as f64) / (n as f64);
+        let h = 0.5 * spec.throat_height * duct_area_ratio(i as f64 / n as f64);
+        points.push(DVec3::new(x, -h, 0.0));
+        points.push(DVec3::new(x, h, 0.0));
+        points.push(DVec3::new(x, h, spec.depth));
+        points.push(DVec3::new(x, -h, spec.depth));
+    }
+
+    // Internal faces at nodes 1..n: the vertex order 0,1,2,3 about the node
+    // gives the right-hand normal `+x`, from owner `j-1` to neighbour `j`.
+    let mut faces: Vec<Vec<Label>> = Vec::with_capacity(n - 1);
+    let mut owner: Vec<Label> = Vec::with_capacity(n - 1);
+    let mut neighbour: Vec<Label> = Vec::with_capacity(n - 1);
+    for j in 1..n {
+        faces.push(vec![vid(j, 0), vid(j, 1), vid(j, 2), vid(j, 3)]);
+        owner.push((j - 1) as Label);
+        neighbour.push(j as Label);
+    }
+
+    // Boundary faces, owner first: inlet (-x), outlet (+x), the two
+    // inclined walls (-y then +y), front and back (-z then +z).
+    let mut bnd: Vec<(Label, Vec<Label>)> = Vec::with_capacity(4 * n);
+    bnd.push((0, vec![vid(0, 3), vid(0, 2), vid(0, 1), vid(0, 0)]));
+    bnd.push(((n - 1) as Label, vec![vid(n, 0), vid(n, 1), vid(n, 2), vid(n, 3)]));
+    for i in 0..n {
+        bnd.push((i as Label, vec![vid(i, 0), vid(i + 1, 0), vid(i + 1, 3), vid(i, 3)]));
+    }
+    for i in 0..n {
+        bnd.push((i as Label, vec![vid(i, 1), vid(i, 2), vid(i + 1, 2), vid(i + 1, 1)]));
+    }
+    for i in 0..n {
+        bnd.push((i as Label, vec![vid(i, 0), vid(i, 1), vid(i + 1, 1), vid(i + 1, 0)]));
+    }
+    for i in 0..n {
+        bnd.push((i as Label, vec![vid(i, 3), vid(i + 1, 3), vid(i + 1, 2), vid(i, 2)]));
+    }
+    let patches = vec![
+        PatchInfo {
+            name: "inlet".to_string(),
+            type_name: "patch".to_string(),
+            kind: PatchKind::Generic,
+            start: 0,
+            size: 1,
+            nbr_patch: None,
+        },
+        PatchInfo {
+            name: "outlet".to_string(),
+            type_name: "patch".to_string(),
+            kind: PatchKind::Generic,
+            start: 1,
+            size: 1,
+            nbr_patch: None,
+        },
+        PatchInfo {
+            name: "walls".to_string(),
+            type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry,
+            start: 2,
+            size: 2 * n,
+            nbr_patch: None,
+        },
+        PatchInfo {
+            name: "frontAndBack".to_string(),
+            type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry,
+            start: 2 + 2 * n,
+            size: 2 * n,
+            nbr_patch: None,
+        },
+    ];
+    let mut faces_all: Vec<Vec<Label>> = faces;
+    let mut owner_all: Vec<Label> = owner;
+    for (c, verts) in &bnd {
+        faces_all.push(verts.clone());
+        owner_all.push(*c);
+    }
+    debug_assert_eq!(faces_all.len(), owner_all.len());
+    debug_assert_eq!(neighbour.len() + bnd.len(), owner_all.len());
+    Ok(Duct {
+        raw: PolyMeshRaw {
+            points,
+            faces: faces_all,
+            owner: owner_all,
+            neighbour,
+            patches,
+        },
+        spec: spec.clone(),
     })
 }
 

@@ -46509,6 +46509,55 @@ point bits are `b5ca6cb8433c8b1d` and `3f8d774e11d077a1` in both builds. The wal
 256 (default) and 128 (coarse) distinct points, not the brief's 257 and 129: the two
 trailing-edge ends of the surface walk are one node through the cut.
 
+#### 127.5.2 The quasi-1-D duct (CMP-21)
+
+`src/compressible/gatemesh.rs`'s `nozzle_duct` builds the quasi-1-D nozzle of Gate
+CMP-NOZ in memory, as a one-cell-across `PolyMeshRaw` (`f64` points in both builds,
+§118.2) for `build_host_mesh`: `n` cells along the axis, `xi = x/L` in `[0, 1]`, ONE
+cell across in `y` and in `z`. §127.5's sentence is the whole point: "with one cell
+across the finite-volume form IS the quasi-1-D scheme: the inclined slip walls carry
+the `p dA/dx` force" — the walls are `y = -H(x)/2` and `y = +H(x)/2`, straight
+between nodes, `symmetry` on both, and the `x`-component of their `p dS` is exactly
+the quasi-1-D momentum's area force. The depth is `z` in `[0, D]`, also one cell,
+`symmetry` front and back.
+
+The area ratio, (127.22), ORIGINAL — this tree's choice: exit-to-throat ratio 2, so
+the duct is §127.2's oracle nozzle `A_e/A_* = 2`:
+
+```
+a(xi) = 1 + 4 (xi - 1/2)^2 ,   xi = x/L ,   a(0) = a(1) = 2 ,   a(1/2) = 1        (127.22)
+x_i = L (i/n) ,   H_i = H_t a(i/n) ,   i = 0..n        nodes; cell i spans [x_i, x_{i+1}]
+```
+
+Node `i` of `n + 1` sits at `x_i` with the full height `H_i` and carries four points
+`4i + k`: `k = 0` `(x_i, -H_i/2, 0)`, `k = 1` `(x_i, +H_i/2, 0)`, `k = 2` `(x_i,
++H_i/2, D)`, `k = 3` `(x_i, -H_i/2, D)`. Cell `i` is a trapezoid prism, volume
+`(x_{i+1} - x_i) D (H_i + H_{i+1})/2` (derived). The `n - 1` internal faces stand at
+nodes `1..n`, owner `j - 1`, neighbour `j`, normal `+x`; the boundary faces follow in
+patch order `inlet` (`patch`, 1 face at node 0, normal `-x`), `outlet` (`patch`, 1
+face at node `n`, `+x`), `walls` (`symmetry`, `2n` faces: the `y = -H/2` wall of
+every cell, then the `y = +H/2` wall) and `frontAndBack` (`symmetry`, `2n` faces:
+`z = 0`, then `z = D`), every face's vertices ordered so its right-hand normal points
+OUT of its owner. `DuctSpec` defaults: `n = 200`, `L = 1` m, `H_t = D = 0.05` m.
+Refusals name the module and the field: `n` under 2; `length`, `throat_height` or
+`depth` not finite or not positive.
+
+**Landed (CMP-21).** The gate's six tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (16 = 10 of §127.5.1 + 6). The
+default duct is 804 points, 200 cells, 199 internal faces, 1001 faces; the patches
+run inlet/outlet/walls/frontAndBack, sizes 1, 1, 400, 400, starts 0, 1, 2, 402.
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `duct_area_ratio_values` | D | `a` at 0, 1, 1/2, 1/4 is 2, 2, 1, 1.25 bitwise | both builds bitwise |
+| `duct_topology_counts_and_patches` | D | the counts and the four patches above | both builds |
+| `duct_face_areas_follow_the_area_ratio` | R | internal `|Sf| = H_j D` within `tol_r(1e-13)`, ends `2 H_t D`, `Sf_x` signed | inlet/outlet `|Sf|` 5.000000e-3 = `2 H_t D`, both builds |
+| `duct_volumes_are_trapezoids` | R | worst relative error, `tol_r(1e-12)` | f64 1.501e-14, f32 5.271e-8 |
+| `duct_cells_close_and_centres_lie_on_the_axis` | R | worst closure ratio, `tol_r(1e-13)`; centres on the axis at mid depth, `x` increasing | f64 1.750e-19, f32 1.064e-10 |
+| `duct_spec_refusals` | D | `n = 1`, `length` 0/-1/NaN, `throat_height` 0, `depth` +inf refused by field name | both builds |
+
+No GPL-licensed source was consulted.
+
 ### 127.6 The gates
 
 The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
@@ -46552,6 +46601,13 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(v/U - Ghia)` over Table II (bar 0.02) | f64 7.255e-3, f32 7.257e-3 | CMP-20 |
 | CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: adiabatic-wall `T_w - T_top`, error over `Pr U^2/(2 c_p)` (bar 0.5 %) | f64 1.103e-4, f32 5.842e-4 | CMP-22 |
 | CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: `T` profile L-infinity over the rise (bar 0.5 %) | f64 1.541e-4, f32 4.935e-4 | CMP-22 |
+| CMP-21 | CMP-NOZ subsonic `M(x)`, 200 cells, LTS CFL 1 (bar 0.5 %) | f64 6.001e-3, f32 6.002e-3: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ subsonic exit `p`, the last cell (bar 0.5 %) | f64 8.366e-5, f32 8.365e-5 | CMP-21 |
+| CMP-21 | CMP-NOZ supersonic `M(x)`, 200 cells (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5; the march stops on a bound) | CMP-21 |
+| CMP-21 | CMP-NOZ supersonic exit `p`, the last cell (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked shock position (bar 1 % of the length) | f64 NaN, f32 NaN: **MISSED** (§127.6.5; the march stops on a bound) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked `p_t2/p_t1`, the last cell (bar 1 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked exit `p`, the last cell (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -46761,6 +46817,141 @@ never reads it. The last outer line's mass imbalance is `6.5e-16` (f64). The cyc
 runs in `ofgpu::compressible` as `build_mesh` declares it, with no solver change. One
 `-sections` run of the gate took 346 s (f64) and 199 s (f32) while another program shared
 this machine's GPU. The coder's runs of the first stop took 47 s and 48 s on an idle GPU.
+
+#### 127.6.5 Gate CMP-NOZ as built (CMP-21)
+
+`src/bin/validate_gates/nozzle.rs`, one `ofgpu-validate` section after Gate CMP-COU,
+live in both builds. **The keys**, host `f64` in both builds, every root and ratio
+evaluated live by `compressible::exact` (CMP-06) with `gamma = 1.4` (`PerfectGas::air`)
+and `A_e/A_t = 2` by (127.22):
+
+```
+subsonic    p_b/p_t1 = 0.95 (above the choked limit 0.9371625024322055):
+            M_e = sqrt( 2/(gamma-1) ((p_t1/p_b)^((gamma-1)/gamma) - 1) )     NACA (44) inverted   (127.23)
+            A_*/A_t = a(1)/(A/A_*)(M_e) = 0.89857446310320031 ;  M(xi) the subsonic root
+            of (A/A_*) = a(xi)/(A_*/A_t) ;  p/p_t1 = (p/p_t)(M)
+            (oracle M: 0.27169046111338039 at xi = 1, 0.67603052349157071 at 1/2,
+            0.47486927485876826 at 1/4)
+supersonic  p_b/p_t1 = 0.05 (below the design exit 0.09393264573284488): A_* = A_t ;
+            M(xi) the subsonic root of a(xi) for xi <= 1/2, the supersonic root for
+            xi > 1/2                                                                          (127.24)
+            (oracle M: 0.30590383418910821 at xi = 0, exactly 1 at 1/2, 1.5997084401485519
+            at 3/4, 2.1971981216521865 at 1)
+shocked     the shock at A_s/A_t = 1.5 fixes the back pressure (the forward map, §127.2):
+            p_b/p_t1 = 0.70445197792232862 ;  xi_s = 1/2 + sqrt(0.125) = 0.85355339059327376
+            (a(xi_s) = 1.5, diverging side), M_1 = 1.8541235267373254 (the supersonic root
+            of (A/A_*) = 1.5), p_t2/p_t1 = 0.78835942907796554 = NACA (99) at M_1 ;
+            xi < xi_s reads (127.24)'s branch about A_*1 = A_t ;  xi >= xi_s reads
+            A/A_*2 = a(xi) (p_t2/p_t1), A_*2 = A_*1 p_t1/p_t2 (derived) ;
+            p/p_t1 = (p_t2/p_t1) (p/p_t)(M)                                                   (127.25)
+            (oracle behind the shock: M(xi_s) = 0.60484304654839300, M(0.9) =
+            0.52613022109693165, p(0.9)/p_t1 = 0.65285737593055416, M_e = 0.40419695203975395)
+```
+
+`total_over_static(gamma, M) = (1 + (gamma-1)/2 M^2)^(gamma/(gamma-1))` is NACA (44)
+inverted (derived; 7.8244490668672641 at M 2). Five bin tests hold these values to
+`1e-12` relative from a 40-digit mpmath oracle (`1e-10` at `M(xi_s)`, and `1e-6`
+absolute against `M_1` at `xi_s - 1e-9`, just ahead of the branch switch), and `locate_shock(xi, p,
+p_mid, after)` — the first upward crossing of `p_mid` whose BOTH entries sit after
+`after`, linear in `xi` (derived) — is held on hand-made profiles.
+
+**The run**, the three regimes in order subsonic, supersonic, shocked: the default
+duct, air inviscid (`mu = 0`), `p_op = p_t1 = 1e5` Pa, `T_0 = 300` K. `inlet`:
+`totalPressure` with `p0 "uniform 0"` (gauge, so `p_t1 = P_OP` absolute) and
+`totalTemperature` with `T0 "uniform 300"`, `U` `zeroGradient`; `outlet`: `p`
+`fixedValue` at the gauge `(p_b/p_t1 - 1) p_op`, `T` and `U` `zeroGradient`;
+`walls` and `frontAndBack`: `symmetry` on all three fields. Started NOT from the
+key: `u = 0`, `T = T_0`, gauge `p_i = (p_b/p_t1 - 1) p_op xi_i`. SIMPLE with
+§125.4's local time step at LTS CFL 1, `u_relax = t_relax = 0.7`, `p_relax = 0.3`,
+`n_outer 1`, no residual control; `vanLeer`-limited on momentum and `T`, the
+retarded face `p` `vanLeer`-limited (§124.3); PBiCGStab + DILU, `U` and `T` at
+`1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000. `set_boundary_rules`
+AND `set_outlet_rules` — the latter attaches §126.4's supersonic switch to the
+fixed-`p` outlet; without it a supersonic exit cannot work. March in chunks of 200
+iterations until no cell's `M_i = |u_i|/sqrt(gamma R_s T_i)` moves by more than
+`1e-5` across a chunk, capped at 20000. An `Error::Refused` from `run` (a bound,
+§122.3) is that regime's miss: its rows are NaN and a note carries the solver's
+message. **The CFL** (decision TAKEN, inputs only): the coder's first build tried
+CFL 5, then 2, then 1 on a bound. In f64 the subsonic regime stopped on the
+`p_abs <= 0` bound at step 103 (CFL 5) and step 1568 (CFL 2), and only CFL 1 reached
+its fixed point; in f32 CFL 5 stopped at step 48 and CFL 2 ran. The gate takes CFL 1
+in both builds, with no fallback, so that both builds measure the same inputs.
+
+**The rows**, class P (the same bar in both builds), every measure computed in `f64`
+from the downloaded fields:
+
+| row | measure | bar |
+|---|---|---|
+| subsonic `M(x)` | `max_i |M_i/M(xi_i) - 1|`, all 200 cells | 0.005 |
+| subsonic exit `p` | `|(p_last + p_op)/(p_t1 (p/p_t1)(xi_last)) - 1|`, the last cell, against the key at its centre `xi_last` | 0.005 |
+| supersonic `M(x)` | as subsonic | 0.005 |
+| supersonic exit `p` | as subsonic | 0.005 |
+| shocked shock position | `|xi_num - xi_s|` over the length, `xi_num` the `p/p_t1` profile's first upward crossing of `(p_1 + p_2)/(2 p_t1)` after the throat, `p_1/p_t1 = (p/p_t)(M_1)` and `p_2 = p_1 (p_2/p_1)(M_1)`; None reads NaN | 0.01 |
+| shocked `p_t2/p_t1` | `|p_t,last/p_t1/(p_t2/p_t1) - 1|`, `p_t,last = (p_last + p_op) total_over_static(gamma, M_last)` | 0.01 |
+| shocked exit `p` | as subsonic | 0.005 |
+
+Exit `p` is read at the last cell CENTRE, not the outlet face (decision TAKEN): at
+the supersonic exit the zero-gradient face value sits half a cell from the centre,
+which is 0.89 % in `p` at the exit (derived from (127.24): the key's `p` falls 0.89 %
+over the last half cell) — larger than the bar — and the centre is where the solver's
+value and the key's `xi` agree.
+
+**Measured: the gate misses in both builds.** Only the subsonic regime reaches a fixed
+point, and one of its two rows misses. One `-sections` run of the gate took 264 s (f64)
+and 296 s (f32) while the other lanes shared this machine's GPU; the subsonic march
+alone took 82 s in the coder's f64 run.
+
+*Subsonic.* f64: 14800 iterations, field stop met, `M_max` 0.6736 against the key's
+0.67603 at the throat. `M(x)` reads **6.0014e-3, MISSED** against 0.005. Exit `p` reads
+8.366e-5, inside the bar. Printed only: the outlet face `p` over the key's exit value
+is 1.000000, and the first cell's `p_t/p_t1` is 1.000300. f32: 14800 iterations, field
+stop met, `M(x)` **6.002e-3, MISSED**, exit `p` 8.365e-5, the same printed values.
+**Where the miss sits** (measured once by the supervisor, f64, with a temporary
+per-cell print): every cell's `M` is LOW. The interior error grows from `-2.2e-3` near
+the ends to `-3.6e-3` at the throat, and the static `p` sits above the key by the
+matching amount, so the discrete mass flow is about 0.3 % below the isentropic one.
+On top of that, the two cells next to the boundaries carry a wiggle: cell 1 reads
+`-6.00e-3` between `-2.04e-3` (cell 0) and `-3.36e-3` (cell 2), and cell 199 reads
+`-5.73e-3` after `-0.48e-3` (cell 198). Those two cells are the row's maximum; every
+other cell is inside the bar. The same probe with first-order `upwind` on `U`, `T` and
+the retarded density gives a 5.4e-2 error and the same wiggle in smaller form (cell 1
+`-3.47e-2` between `-3.27e-2` and `-3.32e-2`). `linearUpwind` on `U` (with `T` still
+van Leer, because (125.1) refuses a deferred-correction scheme on `T`) stops on a bound
+(`T <= 0` at cell 167, step 8756). The cause of the wiggle is not measured. It appears
+with every scheme tried, so it is in the boundary-adjacent discretisation, not in the
+limiter alone.
+
+*Supersonic started and shocked.* Both stop on a bound in both builds, so their five
+rows have no field and read NaN: **MISSED**. At CFL 1 the supersonic march stops at
+step 76 in f64 (`T = -313.7` K at cell 195) and at step 292 in f32 (`p_abs = -6424.6`
+Pa at cell 195). The shocked march stops at step 866 in f64 (`T = -183.1` K at cell
+164) and at step 1883 in f32 (`p_abs = -60022` Pa at cell 168). Nothing is clipped
+(§122.3). **What the supervisor's probes measured** (f64, each once, inputs only, the
+gate's code unchanged otherwise):
+
+* Not the CFL: the coder's run stopped the supersonic regime at steps 8, 52 and 76 (CFL
+  5, 2, 1) and the shocked regime at steps 38, 113 and 866. CFL 0.3 with `p_relax 0.1`
+  and `u_relax = t_relax = 0.3` also stops (step 193 supersonic, step 363 shocked).
+  `nOuterCorrectors 3` stops the shocked march sooner, at step 353.
+* Not the rest start: started FROM THE KEY ((127.24)-(127.25) in `u`, `p` and `T`, a
+  probe only), the supersonic march stops at step 251 (`T <= 0` at cell 197, where the
+  key's `M` is about 2.19) and the shocked march at step 262 (`T <= 0` at cell 171,
+  just behind the shock).
+* Not the outlet value: the supersonic key start with the outlet held at the design
+  pressure 0.0939326 instead of 0.05 stops at the same step on the same bits, so the
+  supersonic switch takes the face, as §126.9 says.
+* A weaker shock holds. Continuing from the subsonic field while lowering `p_b/p_t1`
+  (0.95, 0.93, 0.90, 0.85, 3000 iterations each) reaches a shocked field at 0.85 whose
+  chunk change is 5.4e-5 (`M_max` 1.48), but the next stage, 0.80, stops on `T <= 0`
+  at cell 144 at its step 778.
+
+So the solver holds this duct's flow up to about `M` 1.5 and loses `T` above it. The
+bound sits in the supersonic part or just behind the shock in every probe but one (CFL
+0.3, shocked: cell 79, on the converging side). The mechanism is not
+measured. §127.6.1's finding is the nearest one measured: in a one-outer step, (125.1)
+reads `dp/dt` and `K` from the previous iterate. Possible cures change numerics (the
+energy equation's form or ordering, or a positivity treatment of `T`), so they are the
+user's and none was built. The gate's verdict carries all seven rows' values.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 

@@ -65,3 +65,7 @@ pub(crate) mod cavity_lm;
 /// SPEC-LIT §127.6, Gate CMP-COU: compressible Couette with viscous
 /// heating against (127.12) (CMP-22).
 pub(crate) mod couette;
+
+/// SPEC-LIT §127.6, Gate CMP-NOZ: the quasi-1-D nozzle, subsonic,
+/// supersonic started and shocked, against (127.23)-(127.25) (CMP-21).
+pub(crate) mod nozzle;
