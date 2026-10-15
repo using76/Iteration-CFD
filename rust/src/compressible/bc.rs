@@ -69,6 +69,28 @@
 //! host twin. A far-field entry is built as a `fixedValue` placeholder at
 //! its stated free stream.
 //!
+//! The free-stream family of SPEC-LIT §126.11 (docs/17 BC-20):
+//! `inletOutletTotalTemperature` on `T` is (126.1) with its inflow switch,
+//! the `totalTemperature` rule itself; `freestreamPressure` on `p` blends
+//! its fixed value with zero gradient by the face direction, reversed by
+//! its `supersonic` switch; `supersonicFreestream` on `U` turns the stated
+//! supersonic stream by the Prandtl-Meyer angle of the face pressure and
+//! vents an outflow face; `fixedPressureCompressibleDensity` on `rho` is
+//! the gas law (122.10) every boundary face already takes ([`check_rho`]):
+//!
+//! ```text
+//! fr = 1/2 + cos/2 (subsonic),  1/2 - cos/2 (supersonic),
+//!   cos = u_b . Sf / (|u_b| |Sf|)                                         (126.13)
+//! M_b^2 = max(1, 2/(gamma-1) expm1( (gamma-1)/gamma log(p_0/p_abs,b) ))    (126.14)
+//! nu(M) = sqrt((gamma+1)/(gamma-1)) atan sqrt((gamma-1)/(gamma+1) (M^2-1))
+//!         - atan sqrt(M^2-1)                                              (126.15)
+//! u_b = M_b sqrt(gamma R_s T_b) (cos delta e - sin delta t),
+//!   delta = nu(M_b) - nu(M_inf),  T_b = T_0/(1 + (gamma-1)/2 M_b^2)        (126.16)
+//! ```
+//!
+//! [`CompressibleFreestreams`] runs the two kernels; [`supersonic_freestream_face`]
+//! and [`freestream_fraction`] are their f64 host twins.
+//!
 //! Written from:
 //!   ofgpu `SPEC-LIT.md` §126 intro, §126.1, §126.3 - the equations and
 //!     the inflow convention; §126.8 - this file as built, its contract;
@@ -84,6 +106,9 @@
 //!   Carlson, "Inflow/Outflow Boundary Conditions with Application to
 //!     FUN3D", NASA/TM-2011-217181 (2011), eq. (48) and Table 1 - the
 //!     adiabatic inflow statement and the sign of an inflow face
+//!   NACA Report 1135 (Ames Research Staff, 1953), eq. (171): the
+//!     Prandtl-Meyer function (126.15) restates; ofgpu `SPEC-LIT.md`
+//!     §126.11 - the free-stream family as built, its contract
 //! Boundary-condition and dictionary NAMES follow the public user guides by
 //! name only; no OpenFOAM source was opened.
 //! No GPL-licensed source was consulted.
@@ -156,6 +181,9 @@ pub struct Lowered {
     /// SPEC-LIT §126.10: the far-fields, one per mesh patch whose `U`, `p`
     /// and `T` all carry `characteristicFarfield` (or `farfield`).
     pub farfields: Vec<FarfieldRule>,
+    /// SPEC-LIT §126.11: `supersonicFreestream` on `U` and
+    /// `freestreamPressure` on `p`, one per mesh patch and field.
+    pub freestreams: Vec<FreestreamRule>,
 }
 
 /// A refusal naming the field and the patch key.
@@ -231,26 +259,37 @@ fn scalar_kind(field: &str, key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) 
             }
             Ok(Some((RuleKind::TotalPressure, p0)))
         }
-        ("T", "totalTemperature") => {
-            check_gamma(spec, field, key, "totalTemperature", gas)?;
-            let t0 = required64(spec, field, key, "T0", "totalTemperature")?;
+        // §126.11: inletOutletTotalTemperature IS (126.1) with its inflow
+        // switch, which totalTemperature already carries (§126.8).
+        ("T", kind @ ("totalTemperature" | "inletOutletTotalTemperature")) => {
+            check_gamma(spec, field, key, kind, gas)?;
+            let t0 = required64(spec, field, key, "T0", kind)?;
             if !(t0 > 0.0) {
-                return Err(refuse(field, key, format!("totalTemperature T0 {t0} is not above 0 K (SPEC-LIT §122.3)")));
+                return Err(refuse(field, key, format!("{kind} T0 {t0} is not above 0 K (SPEC-LIT §122.3)")));
             }
             Ok(Some((RuleKind::TotalTemperature, t0)))
         }
-        (_, "totalPressure" | "totalTemperature" | "flowRateInletVelocity") => Err(refuse(
+        (
+            _,
+            "totalPressure" | "totalTemperature" | "inletOutletTotalTemperature" | "flowRateInletVelocity"
+            | "supersonicFreestream",
+        ) => Err(refuse(
             field,
             key,
             format!(
-                "{} is a condition on {}, not on {field} (SPEC-LIT §126.8)",
+                "{} is a condition on {}, not on {field} (SPEC-LIT §126.8, §126.11)",
                 spec.type_name,
                 match spec.type_name.as_str() {
                     "totalPressure" => "p",
-                    "totalTemperature" => "T",
+                    "totalTemperature" | "inletOutletTotalTemperature" => "T",
                     _ => "U",
                 }
             ),
+        )),
+        ("T", "freestreamPressure") => Err(refuse(
+            field,
+            key,
+            "freestreamPressure is a condition on p, not on T (SPEC-LIT §126.11)".into(),
         )),
         _ => Ok(None),
     }
@@ -279,11 +318,11 @@ fn vector_kind(key: &str, spec: &PatchFieldSpec) -> Result<Option<f64>> {
             }
             Ok(Some(m))
         }
-        "totalPressure" | "totalTemperature" => Err(refuse(
+        "totalPressure" | "totalTemperature" | "inletOutletTotalTemperature" | "freestreamPressure" => Err(refuse(
             "U",
             key,
-            format!("{} is a condition on {}, not on U (SPEC-LIT §126.8)", spec.type_name,
-                if spec.type_name == "totalPressure" { "p" } else { "T" }),
+            format!("{} is a condition on {}, not on U (SPEC-LIT §126.8, §126.11)", spec.type_name,
+                if matches!(spec.type_name.as_str(), "totalPressure" | "freestreamPressure") { "p" } else { "T" }),
         )),
         _ => Ok(None),
     }
@@ -506,12 +545,196 @@ pub fn farfield_face(
     FarfieldFace { u, p: pab - pop, t: pab / (rhob * rs), branch }
 }
 
+/// Which free-stream condition a [`FreestreamRule`] is (SPEC-LIT §126.11).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FreestreamKind {
+    /// (126.14)-(126.16) on `U`: `supersonicFreestream`, with its stated
+    /// free stream `UInf` (m/s), `pInf` (Pa, in the gauge of `p`) and
+    /// `TInf` (K), widened to f64.
+    SupersonicFreestream { u: [f64; 3], p: f64, t: f64 },
+    /// (126.13) on `p`: `freestreamPressure` at `freestreamValue` (gauge),
+    /// with its `supersonic` switch.
+    FreestreamPressure { value: f64, supersonic: bool },
+}
+
+/// One patch's free-stream condition: the faces `[start, start + size)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FreestreamRule {
+    pub kind: FreestreamKind,
+    pub patch: String,
+    pub start: usize,
+    pub size: usize,
+}
+
+/// A vector entry `(x y z)`, optionally `uniform (x y z)`, in f64.
+fn vector64(spec: &PatchFieldSpec, field: &str, key: &str, entry: &str, kind: &str) -> Result<[f64; 3]> {
+    let raw = spec.extra.get(entry).ok_or_else(|| {
+        refuse(field, key, format!("{kind} needs a `{entry}` entry and the patch has none (SPEC-LIT §126.11)"))
+    })?;
+    let inner = raw.trim().trim_start_matches("uniform").trim();
+    let v: Vec<f64> = inner
+        .strip_prefix('(')
+        .and_then(|r| r.strip_suffix(')'))
+        .map(|r| r.split_whitespace().filter_map(|t| t.parse::<f64>().ok()).collect())
+        .unwrap_or_default();
+    match v.as_slice() {
+        [x, y, z] if x.is_finite() && y.is_finite() && z.is_finite() => Ok([*x, *y, *z]),
+        _ => Err(refuse(field, key, format!("{entry}: \"{raw}\" is not a uniform vector (x y z)"))),
+    }
+}
+
+/// `supersonic` of `freestreamPressure`: absent is `false`.
+fn switch64(spec: &PatchFieldSpec, key: &str) -> Result<bool> {
+    match spec.extra.get("supersonic").map(|s| s.trim()) {
+        None => Ok(false),
+        Some("true" | "yes" | "on") => Ok(true),
+        Some("false" | "no" | "off") => Ok(false),
+        Some(other) => Err(refuse(
+            "p",
+            key,
+            format!("freestreamPressure supersonic \"{other}\" is not a switch (true/false, yes/no, on/off)"),
+        )),
+    }
+}
+
+/// The free-stream kind of one entry of `field`, validated, `None` for any
+/// other type (a kind on the wrong field is refused by [`scalar_kind`] and
+/// [`vector_kind`]).
+fn freestream_kind(field: &str, key: &str, spec: &PatchFieldSpec, gas: &PerfectGas) -> Result<Option<FreestreamKind>> {
+    match (field, spec.type_name.as_str()) {
+        ("p", "freestreamPressure") => {
+            let value = required64(spec, field, key, "freestreamValue", "freestreamPressure")?;
+            if !(value + gas.p_op > 0.0) {
+                return Err(refuse(
+                    field,
+                    key,
+                    format!(
+                        "freestreamPressure freestreamValue {value} + pOperating {} is not above 0 Pa (SPEC-LIT §122.3)",
+                        gas.p_op
+                    ),
+                ));
+            }
+            Ok(Some(FreestreamKind::FreestreamPressure { value, supersonic: switch64(spec, key)? }))
+        }
+        ("U", "supersonicFreestream") => {
+            let kind = "supersonicFreestream";
+            check_gamma(spec, field, key, kind, gas)?;
+            let u = vector64(spec, field, key, "UInf", kind)?;
+            let p = required64(spec, field, key, "pInf", kind)?;
+            let t = required64(spec, field, key, "TInf", kind)?;
+            if !(t > 0.0) {
+                return Err(refuse(field, key, format!("{kind} TInf {t} is not above 0 K (SPEC-LIT §122.3)")));
+            }
+            if !(p + gas.p_op > 0.0) {
+                return Err(refuse(
+                    field,
+                    key,
+                    format!("{kind} pInf {p} + pOperating {} is not above 0 Pa (SPEC-LIT §122.3)", gas.p_op),
+                ));
+            }
+            let m = (dot3(u, u) / (gas.gamma * gas.r_s() * t)).sqrt();
+            if !(m >= 1.0) {
+                return Err(refuse(
+                    field,
+                    key,
+                    format!(
+                        "the {kind} free stream is at Mach {m}: (126.14)-(126.16) turn a SUPERSONIC \
+                         stream by its Prandtl-Meyer angle; a subsonic free stream takes \
+                         characteristicFarfield (SPEC-LIT §126.10, §126.11)"
+                    ),
+                ));
+            }
+            Ok(Some(FreestreamKind::SupersonicFreestream { u, p, t }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// (126.15) of SPEC-LIT 126.11, NACA Report 1135 eq. (171): the
+/// Prandtl-Meyer angle of the Mach number `sqrt(m2)`, `m2 >= 1`, in radians.
+pub fn prandtl_meyer(gamma: f64, m2: f64) -> f64 {
+    let a = ((gamma + 1.0) / (gamma - 1.0)).sqrt();
+    let b = (gamma - 1.0) / (gamma + 1.0);
+    a * (b * (m2 - 1.0)).sqrt().atan() - (m2 - 1.0).sqrt().atan()
+}
+
+/// The host twin of `cmpBcFreestreamPressure`, in f64: (126.13)'s `fr` for
+/// the face velocity `u_b` and the face area vector `sf`.
+pub fn freestream_fraction(u_b: [f64; 3], sf: [f64; 3], supersonic: bool) -> f64 {
+    let (um, mag) = (dot3(u_b, u_b).sqrt(), dot3(sf, sf).sqrt());
+    let c = if um > 0.0 { (dot3(u_b, sf) / (um * mag)).clamp(-1.0, 1.0) } else { 0.0 };
+    let sgn = if supersonic { -1.0 } else { 1.0 };
+    0.5 + 0.5 * sgn * c
+}
+
+/// The per-rule constants of `cmpBcSupersonicFreestream`, in f64:
+/// `e = U_inf/|U_inf|`, `T_0`, the absolute `p_0` and `nu(M_inf)`, by NACA
+/// Report 1135 (43)-(44) and (126.15).
+fn supersonic_constants(gas: &PerfectGas, u: [f64; 3], p: f64, t: f64) -> ([f64; 3], f64, f64, f64) {
+    let gamma = gas.gamma;
+    let um = dot3(u, u).sqrt();
+    let m2 = dot3(u, u) / (gamma * gas.r_s() * t);
+    let ratio = 1.0 + 0.5 * (gamma - 1.0) * m2;
+    let t0 = t * ratio;
+    let p0 = (p + gas.p_op) * ratio.powf(gamma / (gamma - 1.0));
+    (u.map(|v| v / um), t0, p0, prandtl_meyer(gamma, m2))
+}
+
+/// The smallest `|n - (n . e) e|` that defines a turning plane in
+/// (126.16): a stream within about 1e-6 rad of the face normal is not
+/// turned (SPEC-LIT §126.11).
+const TURN_PLANE_MIN: f64 = 1.0e-6;
+
+/// The host twin of `cmpBcSupersonicFreestream`, in f64 and in the kernel's
+/// operation order: (126.14)-(126.16) for the unit outward normal `n`, the
+/// owner's velocity `u_p`, the gauge face pressure `p_b` and the rule's free
+/// stream. `None` on a vented face (`u_p . n >= 0`, zero gradient).
+#[allow(clippy::too_many_arguments)]
+pub fn supersonic_freestream_face(
+    gas: &PerfectGas,
+    n: [f64; 3],
+    u_p: [f64; 3],
+    p_b: f64,
+    u_inf: [f64; 3],
+    p_inf: f64,
+    t_inf: f64,
+) -> Option<[f64; 3]> {
+    if dot3(u_p, n) >= 0.0 {
+        return None;
+    }
+    let gamma = gas.gamma;
+    let (e, t0, p0, nu_inf) = supersonic_constants(gas, u_inf, p_inf, t_inf);
+    let (tg, gmg, hg, grs) = (2.0 / (gamma - 1.0), (gamma - 1.0) / gamma, 0.5 * (gamma - 1.0), gamma * gas.r_s());
+    let (a, b) = (((gamma + 1.0) / (gamma - 1.0)).sqrt(), (gamma - 1.0) / (gamma + 1.0));
+    let pa = p_b + gas.p_op;
+    let mut m2 = tg * (gmg * (p0 / pa).ln()).exp_m1();
+    if m2 < 1.0 {
+        m2 = 1.0;
+    }
+    let nu = a * (b * (m2 - 1.0)).sqrt().atan() - (m2 - 1.0).sqrt().atan();
+    let d = nu - nu_inf;
+    let tb = t0 / (1.0 + hg * m2);
+    let speed = (m2 * grs * tb).sqrt();
+    let en = dot3(e, n);
+    let t = [n[0] - en * e[0], n[1] - en * e[1], n[2] - en * e[2]];
+    let tm = dot3(t, t).sqrt();
+    let dir = if tm > TURN_PLANE_MIN {
+        let (cd, sd) = (d.cos(), d.sin());
+        [0, 1, 2].map(|k| cd * e[k] - sd * (t[k] / tm))
+    } else {
+        e
+    };
+    Some(dir.map(|v| speed * v))
+}
+
 /// SPEC-LIT §126.8: the three field files as read, with every compressible
 /// kind replaced by its placeholder, and one [`BcRule`] per mesh patch that
 /// carries one. Refused by name: `totalPressure` without `gamma`, a stated
 /// `gamma` that is not the gas's, a missing `p0`/`T0`/`massFlowRate`,
 /// `volumetricFlowRate`, a kind on the wrong field, and a mass-flow inlet
-/// whose `p` is not `zeroGradient` (§126.3).
+/// whose `p` is not `zeroGradient` (§126.3). §126.11 adds
+/// `inletOutletTotalTemperature` (a `totalTemperature` rule), and the
+/// [`FreestreamRule`]s of `supersonicFreestream` and `freestreamPressure`.
 pub fn lower(
     u: &RawVectorField,
     p: &RawScalarField,
@@ -519,13 +742,16 @@ pub fn lower(
     hm: &HostMesh,
     gas: &PerfectGas,
 ) -> Result<Lowered> {
-    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new(), outlets: Vec::new(), farfields: Vec::new() };
+    let mut out = Lowered { u: u.clone(), p: p.clone(), t: t.clone(), rules: Vec::new(), outlets: Vec::new(), farfields: Vec::new(), freestreams: Vec::new() };
 
     // Every entry, by its own key (patterns too): validate and replace.
     let lower_scalar = |field: &str, b: &mut BTreeMap<String, PatchFieldSpec>| -> Result<()> {
         for (key, spec) in b.iter_mut() {
             if let Some((_, v)) = scalar_kind(field, key, spec, gas)? {
                 *spec = placeholder_scalar(v);
+            } else if let Some(FreestreamKind::FreestreamPressure { value, .. }) = freestream_kind(field, key, spec, gas)? {
+                // §126.11: fixed at the free stream until the first rewrite.
+                *spec = placeholder_scalar(value);
             } else if is_farfield(&spec.type_name) {
                 // §126.10: fixed at the free stream until the first rewrite.
                 *spec = placeholder_scalar(farfield_scalar(field, key, spec, gas)?);
@@ -550,6 +776,15 @@ pub fn lower(
         }
         if is_farfield(&spec.type_name) {
             let v = farfield_vector(key, spec, gas)?;
+            *spec = PatchFieldSpec {
+                type_name: "fixedValue".into(),
+                value_v: vec![Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)],
+                ..PatchFieldSpec::default()
+            };
+            continue;
+        }
+        if let Some(FreestreamKind::SupersonicFreestream { u: v, .. }) = freestream_kind("U", key, spec, gas)? {
+            // §126.11: the free stream until the first rewrite.
             *spec = PatchFieldSpec {
                 type_name: "fixedValue".into(),
                 value_v: vec![Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)],
@@ -598,6 +833,13 @@ pub fn lower(
             if let Some((kind, p0)) = scalar_kind("p", name, spec, gas)? {
                 let t0 = t_rule.map_or(0.0, |(_, t0)| t0);
                 out.rules.push(BcRule { kind, patch: name.into(), start, size, value: p0, t0 });
+            }
+        }
+        // §126.11: the free-stream family, U's before p's (the order the
+        // rewrite runs in).
+        for (field, spec) in [("U", u.spec(name)?), ("p", p.spec(name)?)] {
+            if let Some(kind) = spec.map(|s| freestream_kind(field, name, s, gas)).transpose()?.flatten() {
+                out.freestreams.push(FreestreamRule { kind, patch: name.into(), start, size });
             }
         }
         // §126.10: the far-field decides U, p and T together, from one
@@ -1138,6 +1380,189 @@ impl CompressibleFarfields {
             field_ops::correct_boundary_conditions_vector(gpu, fldk, &mut s.u, m)?;
             field_ops::correct_boundary_conditions(gpu, fldk, &mut s.p, m)?;
             field_ops::correct_boundary_conditions(gpu, fldk, &mut s.t, m)?;
+        }
+        Ok(())
+    }
+}
+
+/// SPEC-LIT §126.11: `fixedPressureCompressibleDensity` is (122.10) at the
+/// face, `rho_b = (p_b + p_op)/(R_s T_b)`, which the solver forms on EVERY
+/// boundary face from `p`'s and `T`'s face values: `rho` is not solved. A
+/// `rho` file is accepted when each patch is that name, `calculated` or a
+/// constraint type; any other type would state a second density and is
+/// refused by name.
+pub fn check_rho(rho: &RawScalarField) -> Result<()> {
+    for (key, spec) in &rho.boundary {
+        let t = spec.type_name.as_str();
+        if matches!(
+            t,
+            "fixedPressureCompressibleDensity"
+                | "calculated"
+                | "empty"
+                | "symmetry"
+                | "symmetryPlane"
+                | "wedge"
+                | "cyclic"
+                | "cyclicAMI"
+        ) {
+            continue;
+        }
+        return Err(refuse(
+            "rho",
+            key,
+            format!(
+                "{t}: rho is not solved; ofgpu-compressible forms it on every boundary face from \
+                 the gas law at the face's p and T, rho_b = (p_b + p_op)/(R_s T_b) (SPEC-LIT \
+                 (122.10) of §122.5), which is what fixedPressureCompressibleDensity states. \
+                 Accepted on rho: fixedPressureCompressibleDensity, calculated and the \
+                 constraint types (SPEC-LIT §126.11)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The free-stream kernels and the run's free-stream rules (SPEC-LIT §126.11).
+pub struct CompressibleFreestreams {
+    rules: Vec<FreestreamRule>,
+    supersonic: CudaFunction,
+    pressure: CudaFunction,
+    /// Per `supersonicFreestream` rule (indexed like `rules`; zeros on the
+    /// others): `fl(e)`, `fl(T_0)`, `fl(p_0)` and `fl(nu(M_inf))`.
+    free: Vec<([Scalar; 3], Scalar, Scalar, Scalar)>,
+    /// `fl(2/(gamma-1))`, `fl((gamma-1)/gamma)`, `fl((gamma-1)/2)`,
+    /// `fl(gamma R_s)`, `fl(sqrt((gamma+1)/(gamma-1)))`,
+    /// `fl((gamma-1)/(gamma+1))`, `fl(p_op)`, `fl(TURN_PLANE_MIN)`.
+    gas: [Scalar; 8],
+}
+
+impl CompressibleFreestreams {
+    /// Load the kernels for `rules` on `m`; a rule whose faces leave the
+    /// boundary arrays is refused.
+    pub fn new(gpu: &Gpu, m: &GpuMesh, gas: &PerfectGas, rules: Vec<FreestreamRule>) -> Result<Self> {
+        let nbf = m.n_boundary_faces;
+        for r in &rules {
+            if r.start + r.size > nbf {
+                return Err(Error::Refused(format!(
+                    "compressible::bc: free-stream patch {} faces {}..{} leave the {nbf} boundary faces",
+                    r.patch,
+                    r.start,
+                    r.start + r.size
+                )));
+            }
+        }
+        let free = rules
+            .iter()
+            .map(|r| match r.kind {
+                FreestreamKind::SupersonicFreestream { u, p, t } => {
+                    let (e, t0, p0, nu) = supersonic_constants(gas, u, p, t);
+                    (e.map(|v| v as Scalar), t0 as Scalar, p0 as Scalar, nu as Scalar)
+                }
+                FreestreamKind::FreestreamPressure { .. } => ([0.0 as Scalar; 3], 0.0, 0.0, 0.0),
+            })
+            .collect();
+        let g = gas.gamma;
+        let k = KernelSet::new(gpu, crate::kernels::COMPRESSIBLE)?;
+        Ok(Self {
+            supersonic: k.func("cmpBcSupersonicFreestream")?,
+            pressure: k.func("cmpBcFreestreamPressure")?,
+            free,
+            gas: [
+                2.0 / (g - 1.0),
+                (g - 1.0) / g,
+                0.5 * (g - 1.0),
+                g * gas.r_s(),
+                ((g + 1.0) / (g - 1.0)).sqrt(),
+                (g - 1.0) / (g + 1.0),
+                gas.p_op,
+                TURN_PLANE_MIN,
+            ]
+            .map(|v| v as Scalar),
+            rules,
+        })
+    }
+
+    pub fn rules(&self) -> &[FreestreamRule] {
+        &self.rules
+    }
+
+    /// One rewrite of every free-stream rule: the `supersonicFreestream`
+    /// faces of `U` (from the owner cells' `u` and `p`'s face values), then
+    /// `U`'s face values; the `freestreamPressure` faces of `p` (from those
+    /// new `u_b`), then `p`'s face values. The caller re-forms the boundary
+    /// gas state.
+    pub fn apply(&self, gpu: &Gpu, fldk: &FieldKernels, s: &mut CompressibleState, m: &GpuMesh) -> Result<()> {
+        let [tg, gmg, hg, grs, a, b, pop, tmin] = self.gas;
+        let mut any_u = false;
+        for (r, (e, t0, p0, nu)) in self.rules.iter().zip(&self.free) {
+            if r.size == 0 || !matches!(r.kind, FreestreamKind::SupersonicFreestream { .. }) {
+                continue;
+            }
+            let (start, n) = (r.start as Label, r.size as Label);
+            let f = self.supersonic.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut s.u.fr)
+                    .arg(&mut s.u.ref_value)
+                    .arg(&mut s.u.ref_grad)
+                    .arg(&s.u.f)
+                    .arg(&s.p.bf)
+                    .arg(&m.b_face_cells)
+                    .arg(&m.b_sf)
+                    .arg(&m.b_mag_sf)
+                    .arg(&start)
+                    .arg(&n)
+                    .arg(&e[0])
+                    .arg(&e[1])
+                    .arg(&e[2])
+                    .arg(t0)
+                    .arg(p0)
+                    .arg(nu)
+                    .arg(&tg)
+                    .arg(&gmg)
+                    .arg(&hg)
+                    .arg(&grs)
+                    .arg(&a)
+                    .arg(&b)
+                    .arg(&pop)
+                    .arg(&tmin)
+                    .launch(cfg_for(r.size))?;
+            }
+            any_u = true;
+        }
+        if any_u {
+            field_ops::correct_boundary_conditions_vector(gpu, fldk, &mut s.u, m)?;
+        }
+        let mut any_p = false;
+        for r in &self.rules {
+            let FreestreamKind::FreestreamPressure { value, supersonic } = r.kind else { continue };
+            if r.size == 0 {
+                continue;
+            }
+            let (start, n) = (r.start as Label, r.size as Label);
+            let value = value as Scalar;
+            let sgn: Scalar = if supersonic { -1.0 } else { 1.0 };
+            let f = self.pressure.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut s.p.fr)
+                    .arg(&mut s.p.ref_value)
+                    .arg(&mut s.p.ref_grad)
+                    .arg(&s.u.bf)
+                    .arg(&m.b_sf)
+                    .arg(&m.b_mag_sf)
+                    .arg(&start)
+                    .arg(&n)
+                    .arg(&value)
+                    .arg(&sgn)
+                    .launch(cfg_for(r.size))?;
+            }
+            any_p = true;
+        }
+        if any_p {
+            field_ops::correct_boundary_conditions(gpu, fldk, &mut s.p, m)?;
         }
         Ok(())
     }

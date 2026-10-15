@@ -359,6 +359,8 @@ pub struct Compressible<'m> {
     /// SPEC-LIT §126.10: the characteristic far-fields; `None` (no rule)
     /// rewrites nothing.
     farfields: Option<bc::CompressibleFarfields>,
+    /// SPEC-LIT §126.11: the free-stream family, if any.
+    freestreams: Option<bc::CompressibleFreestreams>,
 }
 
 impl<'m> Compressible<'m> {
@@ -488,6 +490,7 @@ impl<'m> Compressible<'m> {
             bcs: None,
             outlets: None,
             farfields: None,
+            freestreams: None,
         })
     }
 
@@ -565,15 +568,42 @@ impl<'m> Compressible<'m> {
         self.farfields.as_ref().map_or(&[], |f| f.rules())
     }
 
-    /// §126.8, §126.10 and §126.9: rewrite the inlets', the far-fields'
-    /// and then the outlets' triples from the current state, evaluate their faces, and re-form
+    /// SPEC-LIT §126.11: attach the `supersonicFreestream` and
+    /// `freestreamPressure` rules `bc::lower` found; an empty list attaches
+    /// nothing. Call before [`Self::initialise`].
+    pub fn set_freestream_rules(&mut self, gpu: &Gpu, rules: Vec<bc::FreestreamRule>) -> Result<()> {
+        self.freestreams = if rules.is_empty() {
+            None
+        } else {
+            Some(bc::CompressibleFreestreams::new(gpu, self.m, &self.ctrl.gas, rules)?)
+        };
+        Ok(())
+    }
+
+    /// The attached free-stream rules (empty when none).
+    pub fn freestream_rules(&self) -> &[bc::FreestreamRule] {
+        self.freestreams.as_ref().map_or(&[], |f| f.rules())
+    }
+
+    /// Whether any boundary rule of §126.8-§126.11 is attached.
+    fn has_boundary_rules(&self) -> bool {
+        self.bcs.is_some() || self.outlets.is_some() || self.farfields.is_some() || self.freestreams.is_some()
+    }
+
+    /// §126.11, §126.8, §126.10 and §126.9: rewrite the free streams', the
+    /// inlets', the far-fields' and then the outlets' triples from the
+    /// current state (the free streams first, so an inlet `T` on the same
+    /// patch reads the new `u_b`), evaluate their faces, and re-form
     /// `psi` and `rho` on the boundary faces (the cells are not touched).
     /// `wave` is false at the start of a run, which has no step yet: the
     /// `waveTransmissive` faces then keep their set-up value. Nothing
     /// without a rule.
     fn apply_boundary_rules(&mut self, gpu: &Gpu, s: &mut CompressibleState, wave: bool) -> Result<()> {
-        if self.bcs.is_none() && self.outlets.is_none() && self.farfields.is_none() {
+        if !self.has_boundary_rules() {
             return Ok(());
+        }
+        if let Some(f) = &self.freestreams {
+            f.apply(gpu, &self.fldk, s, self.m)?;
         }
         if let Some(b) = &self.bcs {
             b.apply(gpu, &self.fldk, s, self.m)?;
@@ -680,7 +710,8 @@ impl<'m> Compressible<'m> {
     /// `rho_f` linear; every old level seeded from the current field. The
     /// inlets of [`Self::set_boundary_rules`] and the far-fields of
     /// [`Self::set_farfield_rules`], if any, are applied once after the
-    /// first gas state (SPEC-LIT §126.8, §126.10).
+    /// first gas state (SPEC-LIT §126.8, §126.10), and so are the free
+    /// streams of [`Self::set_freestream_rules`] (§126.11).
     pub fn initialise(&mut self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
         let m = self.m;
         field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut s.u, m)?;
@@ -693,7 +724,7 @@ impl<'m> Compressible<'m> {
         if let Some(o) = &mut self.outlets {
             o.store_initial(gpu, &self.fldk, s)?;
         }
-        if self.bcs.is_some() || self.outlets.is_some() || self.farfields.is_some() {
+        if self.has_boundary_rules() {
             self.apply_boundary_rules(gpu, s, false)?;
             self.transport(gpu, s)?;
         }
@@ -749,8 +780,8 @@ impl<'m> Compressible<'m> {
         for outer in 1..=n_outer {
             let is_final = !steady && outer == n_outer;
 
-            // 0. §126.8, §126.10, §126.9: the compressible inlets,
-            // far-fields and outlets from the latest state.
+            // 0. §126.11, §126.8, §126.10, §126.9: the compressible free
+            // streams, inlets, far-fields and outlets from the latest state.
             self.apply_boundary_rules(gpu, s, true)?;
 
             // 1. mu and kappa from T (psi follows at step 4).

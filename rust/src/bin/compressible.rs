@@ -41,7 +41,8 @@
 //!   ofgpu SPEC-LIT.md §125.3, §125.6, §125.7 - the outer loop this runs
 //!   ofgpu SPEC-LIT.md §126, §126.7 - which boundary conditions carry no
 //!     compressible algebra; §126.8-§126.10 - the ones CMP-16 to CMP-18
-//!     rewrite each outer iteration
+//!     rewrite each outer iteration; §126.11 - BC-20's free-stream family
+//!     and the `rho` file it accepts
 //!   ofgpu SPEC-LIT.md §13.4, §13.4.1, §44 - refusals, the standing pair
 //!     test, the output block
 //!
@@ -360,12 +361,14 @@ const STATIC_TYPES: &[&str] = &[
     "empty",
 ];
 
-/// SPEC-LIT §126.8's inlets, §126.9's outlet and §126.10's far-field, for
-/// the refusal's list of what is accepted. `compressible::bc::lower` turns
-/// each into a placeholder and a rule before this check sees the fields.
+/// SPEC-LIT §126.8's inlets, §126.9's outlet, §126.10's far-field and
+/// §126.11's free-stream family, for the refusal's list of what is
+/// accepted. `compressible::bc::lower` turns each into a placeholder and a
+/// rule before this check sees the fields.
 const CMP16_KINDS: &str =
     "totalPressure (with gamma), totalTemperature, flowRateInletVelocity (with massFlowRate), \
-     waveTransmissive (on p or T), characteristicFarfield or farfield (on U, p and T)";
+     waveTransmissive (on p or T), characteristicFarfield or farfield (on U, p and T), \
+     inletOutletTotalTemperature (on T), supersonicFreestream (on U), freestreamPressure (on p)";
 
 /// The case-file name of a §126.8 inlet, for the run's report.
 fn rule_name(k: ofgpu::compressible::bc::RuleKind) -> &'static str {
@@ -660,6 +663,12 @@ fn load_fields_and_gas(
                     )));
                 }
             }
+            // SPEC-LIT §126.11: a `rho` file is read only to check that its
+            // patches state the gas law the solver forms on every face.
+            if dir.join("rho").exists() {
+                let rho = read_scalar_field(&dir.join("rho"), hm.n_cells)?;
+                ofgpu::compressible::bc::check_rho(&rho).map_err(|e| refuse("boundaryField", &e.to_string()))?;
+            }
             let f = InitialFields {
                 u: read_vector_field(&dir.join("U"), hm.n_cells)?,
                 p: read_scalar_field(&dir.join("p"), hm.n_cells)?,
@@ -807,6 +816,19 @@ fn run(o: &Options) -> Result<RunEnd> {
     for r in &inlets.rules {
         println!("inlet: {} on patch {} ({} faces), SPEC-LIT §126.8", rule_name(r.kind), r.patch, r.size);
     }
+    for r in &inlets.freestreams {
+        use ofgpu::compressible::bc::FreestreamKind;
+        match r.kind {
+            FreestreamKind::SupersonicFreestream { u, p, t } => println!(
+                "free stream: U supersonicFreestream on patch {} ({} faces), UInf ({}, {}, {}) pInf {} TInf {}, SPEC-LIT §126.11",
+                r.patch, r.size, g(u[0]), g(u[1]), g(u[2]), g(p), g(t)
+            ),
+            FreestreamKind::FreestreamPressure { value, supersonic } => println!(
+                "free stream: p freestreamPressure on patch {} ({} faces), freestreamValue {} supersonic {supersonic}, SPEC-LIT §126.11",
+                r.patch, r.size, g(value)
+            ),
+        }
+    }
     for r in &inlets.farfields {
         println!(
             "far-field: characteristicFarfield on patch {} ({} faces), free stream U ({}, {}, {}) p {} T {}, SPEC-LIT §126.10",
@@ -948,6 +970,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     solver.set_boundary_rules(&gpu, inlets.rules)?;
     solver.set_outlet_rules(&gpu, inlets.outlets)?;
     solver.set_farfield_rules(&gpu, inlets.farfields)?;
+    solver.set_freestream_rules(&gpu, inlets.freestreams)?;
     solver.initialise(&gpu, &mut s)?;
 
     let dt = f64::from(dc.ctrl.momentum.delta_t);

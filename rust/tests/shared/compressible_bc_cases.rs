@@ -18,6 +18,10 @@
 // rows for the characteristic far-field (126.8)-(126.12): the free stream
 // preserved, the branch selection bit for bit, the host twin and the
 // invariants, a short tube and the refusals.
+// BC-20 adds §126.11's rows for the free-stream family: inletOutletTotal-
+// Temperature as totalTemperature, freestreamPressure's blend (126.13),
+// supersonicFreestream against NACA 1135 (44) and (171), fixedPressure-
+// CompressibleDensity as (122.10), a supersonic tube and the refusals.
 //
 // An integration test's body cannot carry `//!` or `#![..]`, and neither can
 // this file - it is included, not compiled standalone. Every comparison is
@@ -27,7 +31,7 @@
 //
 // Provenance: ORIGINAL - the meshes, the fields and the answer keys below
 // are this tree's own construction; the relations they check are NACA
-// Report 1135's (43)-(44) and SPEC-LIT (126.4)-(126.12). No GPL-licensed
+// Report 1135's (43)-(44) and (171) and SPEC-LIT (126.4)-(126.16). No GPL-licensed
 // source was consulted.
 
 use ofgpu::blockgen::{self, BlockSpec, GradedAxis};
@@ -1197,5 +1201,400 @@ fn farfield_refusals_name_the_setting() -> Result<()> {
     for (field, spec) in [("p", &low.p.boundary["xMax"]), ("T", &low.t.boundary["xMax"])] {
         assert_eq!(spec.type_name, "fixedValue", "{field}: the placeholder");
     }
+    Ok(())
+}
+
+// ==========================================================================
+//  BC-20: the free-stream family of SPEC-LIT §126.11 - inletOutletTotal-
+//  Temperature against (126.1), freestreamPressure's blend (126.13) and its
+//  supersonic switch, supersonicFreestream against NACA 1135 (44) and (171)
+//  as (126.14)-(126.16) use them, fixedPressureCompressibleDensity as the
+//  gas law (122.10), a supersonic tube, and the refusals.
+// ==========================================================================
+
+use ofgpu::compressible::bc::{FreestreamKind, FreestreamRule};
+
+/// Lower, set up, attach every rule `lower` found and initialise.
+fn start_all<'m>(
+    g: &Gpu,
+    gm: &'m GpuMesh,
+    hm: &HostMesh,
+    gas: PerfectGas,
+    raw: (&RawVectorField, &RawScalarField, &RawScalarField),
+) -> Result<(Compressible<'m>, CompressibleState, cbc::Lowered)> {
+    let low = cbc::lower(raw.0, raw.1, raw.2, hm, &gas)?;
+    let mut u = GpuVectorField::zeros(g, gm, "U")?;
+    let mut p = GpuScalarField::zeros(g, gm, "p")?;
+    let mut t = GpuScalarField::zeros(g, gm, "T")?;
+    setup_vector_field(g, &mut u, &low.u, hm)?;
+    setup_scalar_field(g, &mut p, &low.p, hm)?;
+    setup_scalar_field(g, &mut t, &low.t, hm)?;
+    let mut s = CompressibleState::new(g, gm, u, p, t)?;
+    let mut solver = Compressible::new(g, gm, controls(gas))?;
+    solver.set_boundary_rules(g, low.rules.clone())?;
+    solver.set_outlet_rules(g, low.outlets.clone())?;
+    solver.set_farfield_rules(g, low.farfields.clone())?;
+    solver.set_freestream_rules(g, low.freestreams.clone())?;
+    assert_eq!(solver.freestream_rules(), &low.freestreams[..]);
+    solver.initialise(g, &mut s)?;
+    Ok((solver, s, low))
+}
+
+/// The row (0..4) of cell `i` on a `[_, 4, _]` tube.
+fn row(hm: &HostMesh, i: usize) -> usize {
+    ((w64(hm.c[i].y) / 0.075) as usize).min(3)
+}
+
+/// The Prandtl-Meyer angle, NACA Report 1135 eq. (171), written here from
+/// the report and not from the library.
+fn nu_naca(gamma: f64, m: f64) -> f64 {
+    let r = (gamma + 1.0) / (gamma - 1.0);
+    r.sqrt() * ((m * m - 1.0) / r).sqrt().atan() - (m * m - 1.0).sqrt().atan()
+}
+
+/// **SPEC-LIT §126.11, classes D and R.** `inletOutletTotalTemperature` is
+/// the `totalTemperature` rule: on rows entering at M 0.3, 0.8 and 0.5 (with
+/// a tangential part) and one leaving, `T`'s `fr`, `refValue`, `refGrad` and
+/// face values equal those of `totalTemperature` bit for bit; an inflow face
+/// holds NACA 1135 (43) to `tol_r(1e-12)`, an outflow face is the cell's.
+#[test]
+fn inlet_outlet_total_temperature_is_total_temperature() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([2, 4, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let (gamma, rs) = (gas.gamma, gas.r_s());
+    let c = (gamma * rs * 280.0).sqrt();
+    let vel = |i: usize| match row(&hm, i) {
+        0 => Vec3::new((0.3 * c) as Scalar, 0.0, 0.0),
+        1 => Vec3::new((0.8 * c) as Scalar, 0.0, 0.0),
+        2 => Vec3::new(-40.0, 0.0, 0.0),
+        _ => Vec3::new((0.5 * c) as Scalar, 20.0, 0.0),
+    };
+    let mut seen = Vec::new();
+    for kind in ["inletOutletTotalTemperature", "totalTemperature"] {
+        let u = raw_vector(&hm, vel, entry("zeroGradient"), entry("zeroGradient"));
+        let p = raw_scalar(&hm, "p", |i| 50.0 * i as f64, entry("zeroGradient"), fixed(0.0));
+        let t_in = with(entry(kind), &[("T0", "uniform 300"), ("gamma", "1.4")]);
+        let t = raw_scalar(&hm, "T", |i| 280.0 + row(&hm, i) as f64, t_in, entry("zeroGradient"));
+        let (_solver, s, low) = start_all(&g, &gm, &hm, gas, (&u, &p, &t))?;
+        assert_eq!(low.rules.iter().map(|r| (r.kind, r.value)).collect::<Vec<_>>(), vec![(RuleKind::TotalTemperature, T0)], "{kind}");
+        assert_eq!(low.t.boundary["xMin"].type_name, "fixedValue", "{kind}: the placeholder");
+        seen.push((g.download(&s.t.fr)?, g.download(&s.t.ref_value)?, g.download(&s.t.ref_grad)?, g.download(&s.t.bf)?, g.download(&s.t.f)?, g.download(&s.u.bf)?));
+    }
+    let (a, b) = (&seen[0], &seen[1]);
+    let bits = |v: &[Scalar]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&a.0), bits(&b.0), "fr");
+    assert_eq!(bits(&a.1), bits(&b.1), "refValue");
+    assert_eq!(bits(&a.2), bits(&b.2), "refGrad");
+    assert_eq!(bits(&a.3), bits(&b.3), "face values");
+    let (fr, tb, cell, ub) = (&a.0, &a.3, &a.4, &a.5);
+    let (tol, mut worst, mut n_in, mut n_out) = (tol_r(1.0e-12), 0.0f64, 0, 0);
+    for f in faces(&hm, "xMin") {
+        let own = hm.b_face_cells[f] as usize;
+        if row(&hm, own) == 2 {
+            assert_eq!(fr[f].to_bits(), (0.0 as Scalar).to_bits(), "face {f}: an outflow face is zero-gradient");
+            assert_eq!(tb[f].to_bits(), cell[own].to_bits(), "face {f}: the face value is the cell's");
+            n_out += 1;
+            continue;
+        }
+        assert_eq!(w64(fr[f]), 1.0, "face {f}: an inflow face is fixed");
+        let u2 = [ub[f].x, ub[f].y, ub[f].z].iter().map(|v| w64(*v) * w64(*v)).sum::<f64>();
+        let t_b = w64(tb[f]);
+        let ratio = 1.0 + 0.5 * (gamma - 1.0) * u2 / (gamma * rs * t_b); // NACA 1135 (43): T_0/T
+        let e = (t_b * ratio - T0).abs() / T0;
+        worst = worst.max(e);
+        n_in += 1;
+        println!("  [§126.11] inletOutletTotalTemperature face {f}: T_b {t_b:.9} K, e_T {e:.2e}");
+    }
+    assert_eq!((n_in, n_out), (3, 1));
+    println!("  [§126.11] inletOutletTotalTemperature: worst e_T {worst:.2e} (tol {tol:.1e}); bitwise = totalTemperature");
+    assert!(worst <= tol, "inletOutletTotalTemperature misses (126.1): {worst:.3e} > {tol:.1e}");
+    Ok(())
+}
+
+/// **SPEC-LIT §126.11, classes D and R.** `freestreamPressure`'s (126.13)
+/// on rows whose face velocity points out (`cos = 1`), in (`-1`), at 60
+/// degrees (`0.5`) and is zero (`0`): `fr = 1/2 + cos/2`, reversed by
+/// `supersonic`, bitwise on the aligned and zero rows and `tol_r(1e-14)` on
+/// the oblique one; `refValue` is `freestreamValue` and `refGrad` 0 bitwise;
+/// the face value is the blend; the host twin agrees.
+#[test]
+fn freestream_pressure_blends_by_direction() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([2, 4, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let cosines = [1.0, -1.0, 0.5, 0.0];
+    let vel = |i: usize| match row(&hm, i) {
+        0 => Vec3::new(100.0, 0.0, 0.0),
+        1 => Vec3::new(-100.0, 0.0, 0.0),
+        2 => Vec3::new(50.0, (50.0 * 3f64.sqrt()) as Scalar, 0.0),
+        _ => Vec3::new(0.0, 0.0, 0.0),
+    };
+    let tol = tol_r(1.0e-14);
+    for supersonic in [false, true] {
+        let sw = if supersonic { "true" } else { "false" };
+        let u = raw_vector(&hm, vel, entry("zeroGradient"), entry("zeroGradient"));
+        let fp = with(entry("freestreamPressure"), &[("freestreamValue", "uniform 500"), ("supersonic", sw)]);
+        let p = raw_scalar(&hm, "p", |i| 100.0 + 7.0 * i as f64, entry("zeroGradient"), fp);
+        let t = raw_scalar(&hm, "T", |_| T0, entry("zeroGradient"), entry("zeroGradient"));
+        let (_solver, s, low) = start_all(&g, &gm, &hm, gas, (&u, &p, &t))?;
+        let xmax = faces(&hm, "xMax");
+        assert_eq!(
+            low.freestreams,
+            vec![FreestreamRule {
+                kind: FreestreamKind::FreestreamPressure { value: 500.0, supersonic },
+                patch: "xMax".into(),
+                start: xmax.start,
+                size: xmax.len()
+            }]
+        );
+        assert!(low.outlets.is_empty(), "freestreamPressure is not a fixed-p outlet");
+        let (fr, rv, rg, bf, cell, ub) =
+            (g.download(&s.p.fr)?, g.download(&s.p.ref_value)?, g.download(&s.p.ref_grad)?, g.download(&s.p.bf)?, g.download(&s.p.f)?, g.download(&s.u.bf)?);
+        let sgn = if supersonic { -1.0 } else { 1.0 };
+        let mut worst = 0.0f64;
+        for f in xmax {
+            let own = hm.b_face_cells[f] as usize;
+            let j = row(&hm, own);
+            let want = 0.5 + 0.5 * sgn * cosines[j];
+            let got = w64(fr[f]);
+            if j == 2 {
+                worst = worst.max((got - want).abs());
+            } else {
+                assert_eq!(fr[f].to_bits(), (want as Scalar).to_bits(), "supersonic {sw}, row {j}: fr bitwise");
+            }
+            let sf = [w64(hm.b_sf[f].x), w64(hm.b_sf[f].y), w64(hm.b_sf[f].z)];
+            let twin = cbc::freestream_fraction([w64(ub[f].x), w64(ub[f].y), w64(ub[f].z)], sf, supersonic);
+            worst = worst.max((got - twin).abs());
+            assert_eq!(rv[f].to_bits(), (500.0 as Scalar).to_bits(), "refValue is freestreamValue");
+            assert_eq!(rg[f].to_bits(), (0.0 as Scalar).to_bits(), "refGrad");
+            let blend = got * 500.0 + (1.0 - got) * w64(cell[own]);
+            worst = worst.max((w64(bf[f]) - blend).abs() / 500.0);
+            println!("  [§126.11] freestreamPressure supersonic {sw} row {j}: fr {got:.17}, p_b {:.9}", w64(bf[f]));
+        }
+        println!("  [§126.11] freestreamPressure supersonic {sw}: worst {worst:.2e} (tol {tol:.1e})");
+        assert!(worst <= tol, "supersonic {sw}: (126.13) misses by {worst:.3e} > {tol:.1e}");
+    }
+    Ok(())
+}
+
+/// **SPEC-LIT §126.11, classes R and D.** `supersonicFreestream` with a
+/// M 2 stream at 10 degrees, on rows whose face pressure is `p_inf`, an
+/// expansion to 0.8 `p_abs,inf`, a compression to 1.15 `p_abs,inf`, and one
+/// leaving row. The first face is the free stream; on the next two the face
+/// Mach number from `|u_b|` and the energy (126.1) gives the face pressure by
+/// NACA 1135 (44), and the turn from the free stream is `nu(M_b) - nu(M_inf)`
+/// by NACA (171), toward `-n` on the expansion, in the stream's plane; all
+/// to `tol_r(1e-12)`, and the host twin to `tol_r(1e-13)`. The leaving face
+/// is vented (zero gradient) bit for bit.
+#[test]
+fn supersonic_freestream_matches_prandtl_meyer() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([2, 4, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let (gamma, rs, cp) = (gas.gamma, gas.r_s(), gas.cp());
+    let t_inf = 300.0;
+    let (m_inf, alpha) = (2.0f64, 10f64.to_radians());
+    let a_inf = m_inf * (gamma * rs * t_inf).sqrt();
+    let u_inf = [a_inf * alpha.cos(), a_inf * alpha.sin(), 0.0];
+    let held_inf = u_inf.map(|v| w64(v as Scalar));
+    let p_rows = [0.0, -0.2 * P_OP, 0.15 * P_OP, 0.0];
+    let vel = |i: usize| match row(&hm, i) {
+        3 => Vec3::new(-50.0, 0.0, 0.0),
+        _ => Vec3::new(u_inf[0] as Scalar, u_inf[1] as Scalar, 0.0),
+    };
+    let ssf = with(
+        entry("supersonicFreestream"),
+        &[("UInf", &format!("uniform ({} {} 0)", u_inf[0], u_inf[1])), ("pInf", "0"), ("TInf", "300"), ("gamma", "1.4")],
+    );
+    let u = raw_vector(&hm, vel, ssf, entry("zeroGradient"));
+    let p = raw_scalar(&hm, "p", |i| p_rows[row(&hm, i)], entry("zeroGradient"), fixed(0.0));
+    let t = raw_scalar(&hm, "T", |_| t_inf, fixed(t_inf), entry("zeroGradient"));
+    let (_solver, s, low) = start_all(&g, &gm, &hm, gas, (&u, &p, &t))?;
+    assert_eq!(low.freestreams.len(), 1);
+    let FreestreamKind::SupersonicFreestream { u: lu, p: lp, t: lt } = low.freestreams[0].kind else {
+        panic!("the rule is supersonicFreestream: {:?}", low.freestreams[0]);
+    };
+    assert!(lp == 0.0 && lt == t_inf && (0..3).all(|k| (lu[k] - u_inf[k]).abs() <= 1e-9 * a_inf));
+    let (fr, rg, ub, ucell, pb) =
+        (g.download(&s.u.fr)?, g.download(&s.u.ref_grad)?, g.download(&s.u.bf)?, g.download(&s.u.f)?, g.download(&s.p.bf)?);
+    let t0 = t_inf * (1.0 + 0.5 * (gamma - 1.0) * m_inf * m_inf);
+    let p0 = P_OP * (t0 / t_inf).powf(gamma / (gamma - 1.0));
+    let nu_inf = nu_naca(gamma, m_inf);
+    let (tol, tol_twin) = (tol_r(1.0e-12), tol_r(1.0e-13));
+    let (mut worst, mut worst_twin) = (0.0f64, 0.0f64);
+    for f in faces(&hm, "xMin") {
+        let own = hm.b_face_cells[f] as usize;
+        let j = row(&hm, own);
+        let zero = (0.0 as Scalar).to_bits();
+        assert!([rg[f].x, rg[f].y, rg[f].z].iter().all(|x| x.to_bits() == zero), "face {f}: refGrad = 0");
+        let uc = [w64(ucell[own].x), w64(ucell[own].y), w64(ucell[own].z)];
+        let twin = cbc::supersonic_freestream_face(&gas, normal(&hm, f), uc, w64(pb[f]), lu, lp, lt);
+        if j == 3 {
+            assert_eq!(fr[f].to_bits(), zero, "face {f}: a leaving face is vented");
+            assert_eq!([ub[f].x, ub[f].y, ub[f].z].map(|x| x.to_bits()), [ucell[own].x, ucell[own].y, ucell[own].z].map(|x| x.to_bits()), "face {f}: vented is the cell's");
+            assert!(twin.is_none(), "the twin vents the face too");
+            continue;
+        }
+        assert_eq!(w64(fr[f]), 1.0, "face {f}: an entering face is fixed");
+        let v = [w64(ub[f].x), w64(ub[f].y), w64(ub[f].z)];
+        assert_eq!(ub[f].z, 0.0, "face {f}: the turn stays in the plane of the stream and n");
+        let tw = twin.expect("an entering face");
+        let e_twin = (0..3).map(|k| (v[k] - tw[k]).abs()).fold(0.0, f64::max) / a_inf;
+        worst_twin = worst_twin.max(e_twin);
+        let q = v[0] * v[0] + v[1] * v[1];
+        let t_b = t0 - q / (2.0 * cp); // (126.1)
+        let m_b = (q / (gamma * rs * t_b)).sqrt();
+        let p_abs = w64(pb[f]) + P_OP;
+        let e_p = (p0 * (1.0 + 0.5 * (gamma - 1.0) * m_b * m_b).powf(-gamma / (gamma - 1.0)) - p_abs).abs() / p_abs; // NACA (44)
+        let turn = alpha - v[1].atan2(v[0]);
+        let e_nu = (turn - (nu_naca(gamma, m_b) - nu_inf)).abs();
+        let e_inf = if j == 0 { (0..3).map(|k| (v[k] - held_inf[k]).abs()).fold(0.0, f64::max) / a_inf } else { 0.0 };
+        worst = worst.max(e_p).max(e_nu).max(e_inf);
+        println!(
+            "  [§126.11] supersonicFreestream row {j}: p_b/p_inf {:.3}, M_b {m_b:.12}, turn {:.9} deg, e_p {e_p:.2e}, e_nu {e_nu:.2e}, e_inf {e_inf:.2e}, twin {e_twin:.2e}",
+            p_abs / P_OP,
+            turn.to_degrees()
+        );
+        match j {
+            1 => assert!(turn > 0.01, "an expansion turns the stream toward -n: {turn}"),
+            2 => assert!(turn < -0.01, "a compression turns it away from -n: {turn}"),
+            _ => {}
+        }
+    }
+    println!("  [§126.11] supersonicFreestream: worst {worst:.2e} (tol {tol:.1e}), twin {worst_twin:.2e} (tol {tol_twin:.1e})");
+    assert!(worst <= tol, "(126.14)-(126.16) miss NACA (44)/(171): {worst:.3e} > {tol:.1e}");
+    assert!(worst_twin <= tol_twin, "the device misses its twin: {worst_twin:.3e} > {tol_twin:.1e}");
+    Ok(())
+}
+
+/// **SPEC-LIT §126.11, class R.** `fixedPressureCompressibleDensity` is
+/// (122.10) at the face: on every boundary face after `initialise`, `rho_b =
+/// (p_b + p_op)/(R_s T_b)` to `tol_r(1e-12)`, with a fixed `p` and `T` on one
+/// end; and a `rho` file naming it (or `calculated`, or a constraint type)
+/// is accepted.
+#[test]
+fn fixed_pressure_compressible_density_is_the_gas_law() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([3, 2, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let u = raw_vector(&hm, |_| Vec3::new(5.0, 0.0, 0.0), entry("zeroGradient"), entry("zeroGradient"));
+    let p = raw_scalar(&hm, "p", |i| 100.0 * i as f64, entry("zeroGradient"), fixed(3000.0));
+    let t = raw_scalar(&hm, "T", |i| 300.0 + i as f64, entry("zeroGradient"), fixed(320.0));
+    let (_solver, s, _low) = start_all(&g, &gm, &hm, gas, (&u, &p, &t))?;
+    let (rho, pb, tb) = (g.download(&s.rho.bf)?, g.download(&s.p.bf)?, g.download(&s.t.bf)?);
+    let tol = tol_r(1.0e-12);
+    let mut worst = 0.0f64;
+    for f in 0..hm.b_face_cells.len() {
+        let want = (w64(pb[f]) + P_OP) / (gas.r_s() * w64(tb[f]));
+        worst = worst.max((w64(rho[f]) - want).abs() / want);
+    }
+    let x1 = faces(&hm, "xMax").start;
+    println!("  [§126.11] fixedPressureCompressibleDensity: rho_b {:.12} at p_b {} T_b {}, worst {worst:.2e} (tol {tol:.1e})", w64(rho[x1]), w64(pb[x1]), w64(tb[x1]));
+    assert!(worst <= tol, "rho_b misses (122.10): {worst:.3e} > {tol:.1e}");
+    let mut r = raw_scalar(&hm, "rho", |_| 1.2, entry("fixedPressureCompressibleDensity"), entry("calculated"));
+    cbc::check_rho(&r)?;
+    r.boundary.insert("xMax".into(), entry("empty"));
+    cbc::check_rho(&r)?;
+    Ok(())
+}
+
+/// **SPEC-LIT §126.11, class P.** A 50-cell tube carrying a M 2 stream:
+/// `supersonicFreestream`, `freestreamPressure` (supersonic) and
+/// `inletOutletTotalTemperature` on both ends. Ten Euler steps, finite, no
+/// bounds violation.
+#[test]
+fn a_supersonic_freestream_tube_runs() -> Result<()> {
+    let Some(g) = gpu() else { return Ok(()) };
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([50, 1, 1], 1.0)?;
+    let gm = GpuMesh::upload(&g, &hm)?;
+    let a = 2.0 * (gas.gamma * gas.r_s() * 300.0).sqrt();
+    let t0 = format!("{}", 300.0 * (1.0 + 0.2 * 4.0));
+    let ssf = with(entry("supersonicFreestream"), &[("UInf", &format!("({a} 0 0)")), ("pInf", "0"), ("TInf", "300")]);
+    let fp = || with(entry("freestreamPressure"), &[("freestreamValue", "0"), ("supersonic", "true")]);
+    let tt = || with(entry("inletOutletTotalTemperature"), &[("T0", t0.as_str())]);
+    let u = raw_vector(&hm, |_| Vec3::new(a as Scalar, 0.0, 0.0), ssf, entry("zeroGradient"));
+    let p = raw_scalar(&hm, "p", |_| 0.0, fp(), fp());
+    let t = raw_scalar(&hm, "T", |_| 300.0, tt(), tt());
+    let (mut solver, mut s, low) = start_all(&g, &gm, &hm, gas, (&u, &p, &t))?;
+    assert_eq!((low.freestreams.len(), low.rules.len()), (3, 2));
+    let r = solver.run(&g, &mut s, 10)?;
+    assert_eq!(r.steps, 10);
+    let last = r.last.expect("a step report");
+    let outer = last.outers.last().expect("an outer report");
+    for (name, v) in [("p", g.download(&s.p.f)?), ("T", g.download(&s.t.f)?), ("rho", g.download(&s.rho.f)?)] {
+        assert!(v.iter().all(|x| x.is_finite()), "{name} is not finite");
+    }
+    let (ub, pb, tb) = (g.download(&s.u.bf)?, g.download(&s.p.bf)?, g.download(&s.t.bf)?);
+    let (i0, i1) = (faces(&hm, "xMin").start, faces(&hm, "xMax").start);
+    println!(
+        "  [§126.11] supersonic tube: inflow u_b {:.4} p_b {:.3} T_b {:.4}, outflow u_b {:.4} p_b {:.3} T_b {:.4}, M_max {:.4}, bounds {}",
+        w64(ub[i0].x), w64(pb[i0]), w64(tb[i0]), w64(ub[i1].x), w64(pb[i1]), w64(tb[i1]), outer.mach_max, outer.bounds.total()
+    );
+    assert_eq!(outer.bounds.total(), 0);
+    Ok(())
+}
+
+/// §126.11's refusals, each naming the field, the patch and the entry; and
+/// a `rho` file stating another density.
+#[test]
+fn bc20_refusals_name_the_setting() -> Result<()> {
+    let gas = PerfectGas::air(P_OP);
+    let hm = tube_mesh([2, 1, 1], 1.0)?;
+    let zg = || entry("zeroGradient");
+    let u0 = raw_vector(&hm, |_| Vec3::ZERO, zg(), zg());
+    let p0 = raw_scalar(&hm, "p", |_| 0.0, zg(), fixed(0.0));
+    let t0 = raw_scalar(&hm, "T", |_| T0, zg(), zg());
+    let ssf = |kv: &[(&str, &str)]| with(entry("supersonicFreestream"), kv);
+    let full = [("UInf", "(800 0 0)"), ("pInf", "0"), ("TInf", "300")];
+    let su = |kv: &[(&str, &str)]| raw_vector(&hm, |_| Vec3::ZERO, ssf(kv), zg());
+    let fp = |kv: &[(&str, &str)]| raw_scalar(&hm, "p", |_| 0.0, zg(), with(entry("freestreamPressure"), kv));
+    let cases: Vec<(&str, RawVectorField, RawScalarField, RawScalarField, &[&str])> = vec![
+        ("no UInf", su(&full[1..]), p0.clone(), t0.clone(), &["U patch xMin", "UInf"]),
+        ("bad UInf", su(&[("UInf", "(800 0)"), full[1], full[2]]), p0.clone(), t0.clone(), &["U patch xMin", "uniform vector"]),
+        ("no pInf", su(&[full[0], full[2]]), p0.clone(), t0.clone(), &["U patch xMin", "pInf"]),
+        ("no TInf", su(&full[..2]), p0.clone(), t0.clone(), &["U patch xMin", "TInf"]),
+        ("TInf <= 0", su(&[full[0], full[1], ("TInf", "-5")]), p0.clone(), t0.clone(), &["TInf -5", "not above 0 K"]),
+        ("pInf abs <= 0", su(&[full[0], ("pInf", "-2e5"), full[2]]), p0.clone(), t0.clone(), &["pInf", "not above 0 Pa"]),
+        ("subsonic", su(&[("UInf", "(100 0 0)"), full[1], full[2]]), p0.clone(), t0.clone(), &["U patch xMin", "Mach", "characteristicFarfield"]),
+        ("gamma", su(&[full[0], full[1], full[2], ("gamma", "1.3")]), p0.clone(), t0.clone(), &["U patch xMin", "gamma 1.3"]),
+        ("ssf on p", u0.clone(), raw_scalar(&hm, "p", |_| 0.0, ssf(&full), fixed(0.0)), t0.clone(), &["p patch xMin", "not on p"]),
+        ("ssf on T", u0.clone(), p0.clone(), raw_scalar(&hm, "T", |_| T0, ssf(&full), zg()), &["T patch xMin", "not on T"]),
+        ("no freestreamValue", u0.clone(), fp(&[]), t0.clone(), &["p patch xMax", "freestreamValue"]),
+        ("freestreamValue abs <= 0", u0.clone(), fp(&[("freestreamValue", "-2e5")]), t0.clone(), &["p patch xMax", "not above 0 Pa"]),
+        ("bad switch", u0.clone(), fp(&[("freestreamValue", "0"), ("supersonic", "maybe")]), t0.clone(), &["p patch xMax", "not a switch"]),
+        ("fp on U", raw_vector(&hm, |_| Vec3::ZERO, zg(), with(entry("freestreamPressure"), &[("freestreamValue", "0")])), p0.clone(), t0.clone(),
+            &["U patch xMax", "not on U"]),
+        ("fp on T", u0.clone(), p0.clone(), raw_scalar(&hm, "T", |_| T0, zg(), with(entry("freestreamPressure"), &[("freestreamValue", "0")])),
+            &["T patch xMax", "not on T"]),
+        ("ioTT no T0", u0.clone(), p0.clone(), raw_scalar(&hm, "T", |_| T0, entry("inletOutletTotalTemperature"), zg()), &["T patch xMin", "T0"]),
+        ("ioTT on p", u0.clone(), raw_scalar(&hm, "p", |_| 0.0, with(entry("inletOutletTotalTemperature"), &[("T0", "300")]), fixed(0.0)), t0.clone(),
+            &["p patch xMin", "not on p"]),
+        ("ioTT on U", raw_vector(&hm, |_| Vec3::ZERO, with(entry("inletOutletTotalTemperature"), &[("T0", "300")]), zg()), p0.clone(), t0.clone(),
+            &["U patch xMin", "not on U"]),
+    ];
+    for (tag, u, p, t, wanted) in cases {
+        let e = cbc::lower(&u, &p, &t, &hm, &gas).err().unwrap_or_else(|| panic!("{tag}: lower must refuse")).to_string();
+        for w in wanted {
+            assert!(e.contains(w), "{tag}: {w:?} not in {e}");
+        }
+    }
+    let rho = raw_scalar(&hm, "rho", |_| 1.2, entry("calculated"), fixed(1.2));
+    let e = cbc::check_rho(&rho).err().expect("a fixed rho must be refused").to_string();
+    for w in ["rho patch xMax", "fixedValue", "fixedPressureCompressibleDensity", "122.10"] {
+        assert!(e.contains(w), "rho: {w:?} not in {e}");
+    }
+    // The placeholders the shared setup builds.
+    let low = cbc::lower(&su(&full), &fp(&[("freestreamValue", "250")]), &t0, &hm, &gas)?;
+    assert_eq!(low.u.boundary["xMin"].type_name, "fixedValue");
+    assert_eq!(low.u.boundary["xMin"].value_v, vec![Vec3::new(800.0, 0.0, 0.0)]);
+    assert_eq!(low.p.boundary["xMax"].type_name, "fixedValue");
+    assert_eq!(low.p.boundary["xMax"].value, vec![250.0 as Scalar]);
+    assert_eq!(low.freestreams.iter().map(|r| r.patch.as_str()).collect::<Vec<_>>(), ["xMin", "xMax"]);
     Ok(())
 }

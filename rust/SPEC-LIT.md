@@ -44719,7 +44719,7 @@ test row).
 ## 126. The compressible boundary conditions — each a §4 triple rewrite
 
 `No GPL-licensed source was consulted.` CMP-16 implements §126.1-§126.3 (as built in
-§126.8), CMP-17 §126.4-§126.5 (as built in §126.9) and CMP-18 §126.6 (as built in §126.10), in `src/compressible/bc.rs` and `cuda/compressible.cu`.
+§126.8), CMP-17 §126.4-§126.5 (as built in §126.9) and CMP-18 §126.6 (as built in §126.10), in `src/compressible/bc.rs` and `cuda/compressible.cu`; BC-20 adds the free-stream family there (§126.11).
 docs/17 §5.2.3 gives COMP these kinds. Each registers its name in §120's catalogue when
 it lands. Every one is a kernel that rewrites the §4 triple
 `psi_b = fr psi_ref + (1 - fr)(psi_P + g_ref/Delta_b)` on its faces once per outer
@@ -45114,6 +45114,110 @@ The f32 rows of the first and third tests are R-class rows under D-F32-1: `tol_r
 and `tol_r(1e-13)` are both `1e-5` in f32, the plan's figure for the first. The driver adds
 `a_jsonc_farfield_tube_runs`: the JSONC route lowers `farfield` with its `freestream`, runs
 the tube with no bounds violation, and writes `p` with the type `characteristicFarfield`.
+
+### 126.11 The free-stream family as built (BC-20)
+
+`No GPL-licensed source was consulted.` docs/17 BC-20, reduced by docs/17 §5.2.3 item 3:
+`inletOutletTotalTemperature`, `supersonicFreestream`, `freestreamPressure` with its
+supersonic switch, and `fixedPressureCompressibleDensity`, built on `src/compressible/bc.rs`
+(`FreestreamRule`, `CompressibleFreestreams`, `check_rho` and the host twins
+`supersonic_freestream_face`, `freestream_fraction`, `prandtl_meyer`) and two kernels appended
+to `cuda/compressible.cu` (`cmpBcSupersonicFreestream`, `cmpBcFreestreamPressure`). BC-20's
+acoustic-pulse row is dropped as a duplicate of Gate CMP-NR (§126.9); each remaining name has
+a closed-form gate. `field.rs` is not edited and no `BcKind` is added: §120's catalogue keeps
+the three new names as planned by BC-20 and `freestreamPressure` as implemented and extended
+by BC-20, for the reason §126.8 gives for `totalTemperature` (the catalogue describes
+`BcKind::from_name`, and the shared setup is unchanged). Only `ofgpu-compressible` lowers
+them. The names follow the public user guides by name only; the equations below are NACA
+Report 1135's and this tree's DESIGN.
+
+**`inletOutletTotalTemperature`** on `T`, with `T0` (and an optional `gamma`, held to the
+gas's): (126.1) on an inflow face, zero gradient on an outflow face. That is exactly what
+§126.8's `totalTemperature` rule already does, so `bc::lower` returns the same
+`RuleKind::TotalTemperature` rule and `cmpBcTotalTemperature` runs it; the two names give
+bitwise the same triples.
+
+**`freestreamPressure`** on `p`, with `freestreamValue` (gauge, in the datum of `p`) and an
+optional `supersonic` switch (`true`/`false`, `yes`/`no`, `on`/`off`; absent is `false`).
+The public description of the name (docs/01-model-catalog.md) is a blend "between zero
+gradient for normal inlet and fixed value for normal outlet flow" by the velocity
+orientation. *DESIGN* - the blend is linear in the direction cosine of the face velocity:
+
+```
+cos = (u_b . Sf) / (|u_b| |Sf|), clamped to [-1, 1];  cos = 0 when |u_b| = 0
+fr  = 1/2 + cos/2   (subsonic, the default)
+fr  = 1/2 - cos/2   (supersonic true)                                                      (126.13)
+refValue = freestreamValue,  refGrad = 0
+```
+
+with `u_b` the face value of `U` (its own condition). The subsonic form fixes `p` where the
+flow leaves and extrapolates it where the flow enters, the one outgoing characteristic of a
+subsonic inflow; the supersonic form is the reverse, Carlson (2011) Table 1's "all"
+specified at a supersonic inflow and none at a supersonic outflow. The generic
+`freestreamPressure` of the other drivers (an `inletOutlet`, §120's table) is unchanged.
+
+**`supersonicFreestream`** on `U`, with `UInf` (a uniform vector), `pInf` (gauge, in the
+datum of `p`), `TInf` and an optional `gamma` (held to the gas's). *DESIGN* on NACA Report
+1135's isentropic relations (43)-(44) and its Prandtl-Meyer function (171): the stated
+stream is turned through the simple wave that takes it from `pInf` to the face pressure.
+With `M_inf^2 = |u_inf|^2/(gamma R_s T_inf)`, `T_0 = T_inf (1 + (gamma-1)/2 M_inf^2)` (43)
+and `p_0 = (p_inf + p_op)(T_0/T_inf)^(gamma/(gamma-1))` (44), on a face whose OWNER velocity
+enters (`u_P . n < 0`):
+
+```
+M_b^2 = 2/(gamma-1) expm1( (gamma-1)/gamma log( p_0 / (p_b + p_op) ) ),  raised to 1 below 1   (126.14)
+nu(M) = sqrt((gamma+1)/(gamma-1)) atan sqrt( (gamma-1)/(gamma+1) (M^2-1) ) - atan sqrt(M^2-1)  (126.15)
+delta = nu(M_b) - nu(M_inf),  T_b = T_0/(1 + (gamma-1)/2 M_b^2),  |u_b| = M_b sqrt(gamma R_s T_b)
+e = u_inf/|u_inf|,  t = n - (n . e) e
+u_b = |u_b| (cos delta  e - sin delta  t/|t|)   if |t| > 1e-6,   u_b = |u_b| e   otherwise      (126.16)
+```
+
+`fr = 1`, `refValue = u_b`, `refGrad = 0`. (126.14) is (44) solved for `M` and written with
+`expm1` so that `p_b = p_inf` returns `M_inf` without cancellation; (126.15) is NACA (171).
+`p_b` is `p`'s face value (its own condition, normally zero gradient or `freestreamPressure`
+with `supersonic`). An expansion (`p_b < p_inf`, `delta > 0`) turns the entering stream
+toward `-n`, into the domain, and a compression away from it: the sense of a simple wave
+whose lower pressure lies inside. A face whose owner velocity leaves (`u_P . n >= 0`) is
+vented: zero gradient. The limits, recorded: `M_b` is raised to 1 when `p_b` is at or above
+the free stream's total pressure (no Prandtl-Meyer wave is subsonic); a stream within about
+1e-6 rad of the face normal has no turning plane and keeps its direction; `delta` is not
+limited, so a turn past the face plane is written as the formulas give it; a non-positive
+`p_b + p_op` gives a NaN that §122.3's counter sees. A free stream below Mach 1 is refused by
+name (it takes `characteristicFarfield`, §126.10).
+
+**`fixedPressureCompressibleDensity`** on `rho`: the density at the patch from the equation
+of state at the patch pressure, which is (122.10) at the face, `rho_b = (p_b + p_op)/(R_s
+T_b)`. `ofgpu-compressible` does not solve `rho`; it forms it on EVERY boundary face from
+`p`'s and `T`'s face values at each gas-state update, so the condition is what every face
+already does. The driver reads a `rho` file when the OpenFOAM case has one, and
+`bc::check_rho` accepts `fixedPressureCompressibleDensity`, `calculated` and the constraint
+types (`empty`, `symmetry`, `symmetryPlane`, `wedge`, `cyclic`, `cyclicAMI`); any other type
+would state a second density and is refused by name. The written `rho` keeps §44's
+`calculated` types.
+
+**When.** `Compressible::set_freestream_rules` attaches the rules. The rewrite runs once in
+`Compressible::initialise` and at the top of every outer iteration, FIRST (before §126.8's
+inlets, so an inlet `T` on the same patch reads the new `u_b`): the `supersonicFreestream`
+faces, then `U`'s face values, then the `freestreamPressure` faces from those `u_b`, then
+`p`'s face values; `psi` and `rho` on the boundary faces follow with the other rules. A
+`supersonicFreestream` reads `p`'s face value of the previous evaluation. All host constants
+(`e`, `T_0`, `p_0`, `nu(M_inf)`, `2/(gamma-1)`, `(gamma-1)/gamma`, `(gamma-1)/2`,
+`gamma R_s`, `sqrt((gamma+1)/(gamma-1))`, `(gamma-1)/(gamma+1)`, `p_op`, `1e-6`) are formed
+in f64 and rounded once. No time step is needed, so steady runs take them.
+
+**The gate** (`tests/shared/compressible_bc_cases.rs`, both builds as in §126.8):
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `inlet_outlet_total_temperature_is_total_temperature` | D, R `tol_r(1e-12)` | rows entering at M 0.3, 0.8 and 0.5 (tangential part) and one leaving: `T`'s `fr`, `refValue`, `refGrad` and face values bitwise those of `totalTemperature`; an inflow face against NACA (43); the leaving face the cell's | bitwise; `e_T` 1.9e-16; 2.9e-8 |
+| `freestream_pressure_blends_by_direction` | D, R `tol_r(1e-14)` | face velocity out, in, at 60 degrees and zero, both switch positions: `fr` of (126.13) (bitwise on the aligned and zero rows), `refValue` = `freestreamValue` bitwise, the face value the blend, the host twin | 0; 2.9e-9 |
+| `supersonic_freestream_matches_prandtl_meyer` | R `tol_r(1e-12)`, twin `tol_r(1e-13)`, D | M 2 at 10 degrees, face pressure 1.0, 0.8 and 1.15 of `p_inf` and one leaving row: the free stream returned at `p_inf`; `M_b` from `\|u_b\|` and (126.1) gives the face pressure by NACA (44); the turn is `nu(M_b) - nu(M_inf)` by NACA (171) (3.861 and -2.514 degrees), toward `-n` on the expansion, in the stream's plane; the leaving face vented bitwise | worst 2.8e-15, twin 2.3e-16; 4.3e-7, 1.3e-7 |
+| `fixed_pressure_compressible_density_is_the_gas_law` | R `tol_r(1e-12)` | every boundary face after `initialise`, a fixed `p` (3000 Pa) and `T` (320 K) at one end: `rho_b` against (122.10); `check_rho` accepts the name, `calculated` and `empty` | 1.9e-16; 4.5e-8 |
+| `a_supersonic_freestream_tube_runs` | P | 50-cell tube carrying M 2: `supersonicFreestream`, `freestreamPressure` (supersonic) and `inletOutletTotalTemperature` on both ends, 10 Euler steps: finite, no bounds violation | `M_max` 2.0000 in both |
+| `bc20_refusals_name_the_setting` | D | a missing or malformed `UInf`, `pInf`, `TInf`, `freestreamValue`, `T0`; `TInf <= 0`; an absolute `pInf` or `freestreamValue <= 0`; a subsonic `UInf`; another `gamma`; a `supersonic` that is not a switch; each name on the wrong field; a `fixedValue` `rho` | - |
+
+The f32 rows are R-class rows under D-F32-1: `tol_r(1e-12)`, `tol_r(1e-13)` and
+`tol_r(1e-14)` are `1e-5`, `1e-5` and `5.4e-6` in f32.
 
 ---
 
