@@ -47673,9 +47673,9 @@ in temperature form, with `cp = Σ_m Y_m dh_m/dT` as §133.2 writes it, puts
 the mixture's own `cp` in front of `DT/Dt`. CHR-10a makes `Energy` carry
 that `cp` as a field: one value per cell and one per boundary face, set by the
 caller (`Energy::set_cp_field`). The producer of the field (NASA-7 (128.7)
-through the mixture rule, from `T` and `Y`) is CHR-10b's and CHR-12a's; this
-unit builds the slot and the two rows that read it. Without a field nothing
-changes.
+through the mixture rule, from `T` and `Y`) is CHR-10b's (§133.9, (133.18))
+and CHR-12a wires it from the case; this unit builds the slot and the two rows
+that read it. Without a field nothing changes.
 
 **The two rows.** §26's ddt and convection carry the same weight, so the
 field enters both:
@@ -47715,6 +47715,105 @@ The two exact zeros are not a promise: the uniform mesh's `w_f = 1/2` makes
 differ from `c` in its last bit, which the R tolerance allows.
 
 Labels: (133.13)-(133.14).
+
+### 133.9 Heat release and species-enthalpy diffusion in the temperature equation (CHR-10b, `src/energy.rs`, `src/chem/source.rs`, `cuda/energy.cu`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's
+eqs. (1)-(6) as (133.1)-(133.2) of §133.1 write them, and the split of
+(132.10) of §132.5; nothing is added to them.
+
+**The temperature form.** Subtract `Σ_m h_m` times (133.1) from (133.2), use
+continuity, and write `h = Σ_m Y_m h_m(T)` with `grad h_m = cp_m grad T`:
+
+```
+rho cp DT/Dt = div(λ grad T) - Σ_m Γ_m . grad h_m - Σ_m h_m W_m omega_m + dp0/dt              (133.15)
+```
+
+The first line of (133.4) is this equation divided by `rho cp T`, term for
+term. §26 already carries `rho cp DT/Dt` (with CHR-10a's `cp` field,
+§133.8), `div(λ grad T)` and `dp0/dt`. CHR-10b adds the other two terms, both
+as explicit sources on §18's `EnergySources`, so they also enter §25.1's `Q`
+and with it the target divergence and the sealed-box `p0`, as §26.1 requires
+of every heat source.
+
+**The heat release.** `-Σ_m h_m W_m omega_m` is the split step's: the reactor
+(132.7)-(132.8) has already integrated it over `Δt` into `T* - T°`, and
+(132.10) hands it to the transport step as `Q_chem = rho cp (T* - T°)/Δt`.
+The `rho cp` is the energy equation's own:
+
+```
+Q_chem,c = w_c (T*_c - T°_c) / Δt,    w_c = the ddt row's current-level weight                 (133.16)
+```
+
+`w` is `rho_c cp_c` (or `rho_c cp` on the constant path), and (133.13)'s
+`rho* cp` under backward, refreshed from the gas state exactly as
+`Energy::correct` refreshes it (`Energy::heat_release_weight`). *DESIGN.*
+With this weight a cell with no flux under Euler, at the first outer
+iteration of a step (`rho^n = rho^(n-1)`, `ofgpu-lowmach`'s order: open the
+step, then `update_density`), solves `w (T^(n+1) - T°)/Δt = Q_chem` and lands
+on `T*` to round-off: the 0-D box is the reactor. Under backward the row is
+`w (3/2 T - 2 T° + 1/2 T^(n-1))/Δt` and lands near, not on, `T*`; Lie
+splitting is first order in `Δt` either way (§132.5). `T* - T°` is formed
+from the two Scalar values (`ChemSource::start_temperature` keeps `T°`),
+exact whenever the step changed `T` by less than a factor of two.
+
+**The species-enthalpy diffusion.** §19's inert remainder `N` closes the
+fluxes as it closes the mass fractions, `Γ_N = -Σ_k Γ_k` over the solved
+species (§133.3's (133.5) is not built, §132.11), so with
+`Γ_k = -rho D_k grad Y_k`
+
+```
+- Σ_m Γ_m . grad h_m = Σ_{k solved} rho_c D_k (cp_k(T_c) - cp_N(T_c)) (grad Y_k)_c . (grad T)_c   (133.17)
+```
+
+per cell, from Gauss gradients of `T` and of each solved `Y_k`. `D_k` is
+the species' molecular diffusivity (`SpeciesCoeffs::d`), the laminar flux
+of Day & Bell's equations. *DESIGN, decided by recommendation:* the
+turbulent part `nu_t/Sc_t` of the species flux is not added, because §26's
+turbulent heat flux `rho cp nu_t/Pr_t grad T` is the model of the turbulent
+enthalpy transport and adding a second turbulent enthalpy flux would count
+it twice. `rho` is the cell density of §25. (133.17) is not a divergence, so
+its domain integral is not zero: it moves sensible heat between species of
+different `cp`, which the temperature equation sees as a source.
+
+**The mixture `cp`**, the producer §133.8 left open:
+
+```
+cp_c = Σ_m Y_m,c cp_m(T_c),   cp_m = (R/W_m)(a1 + a2 T + a3 T^2 + a4 T^3 + a5 T^4)            (133.18)
+```
+
+(128.7) with (128.1), the lower set at or below `t_mid` (128.5), on every
+cell and every boundary face from that face's `T` and `Y`, into the two
+buffers `Energy::set_cp_field` takes. A member with `Y_m = 0` adds exactly
+nothing, as `ThermoSet::cp_mass` skips it. The polynomial ranges are not
+checked here; a cell outside them is the reactor's refusal (§132.4).
+
+**As built.** `cuda/energy.cu` gains `energyMixtureCpAdd` (one member per
+launch), `energyEnthalpyDiffusionAdd` (one solved species per launch) and
+`energyRoundAcc`: every sum is formed in `ofacc` (double in both builds,
+§118.1) and rounded once to the build's scalar. `chem::source::SpeciesEnthalpy`
+holds one 12-value row per member (`R/W`, `t_mid`, the two sets'
+`a1..a5`), built by name from the `ThermoSet` and refused by name for a member
+it does not carry; `mixture_cp` and `diffusion_source` allocate nothing and
+read nothing back. `ChemSource::heat_release(weight, out)` forms (133.16)
+and is refused by name before the first step. `EnergySources::use_meters`
+gives the registry two opt-in meters, and `register_heat_release` and
+`register_enthalpy_diffusion` add into `q` and into their meter;
+`EnergyBudget` gains `heat_release_w` and `enthalpy_diffusion_w`, each
+`-Σ_c q_meter,c V_c`, two sub-entries of `sources_w` in the same sign. A
+registry without meters runs the launches it ran before, and the six
+existing kernels of `energy.cubin` keep their SASS (the cubin's three new
+functions are its only change).
+
+**Gates, measured 2026-10-15 (both builds, `tests/energy_chem.rs`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `energy_box_matches_reactor` | §132.11's 0-D box (2^3 cyclic, uniform, no flow, open, `p0` 1 atm, H2-air 1400 K, CHR-06's fixture), Lie split at `dt = 1e-6` s over 200 steps, `T` from the energy equation (Euler) with (133.16) and (133.17) registered and the (133.18) field set every step, both species equations, against CHR-06's host `ConstPressureReactor::advance` chained over the same steps | `max abs dT <= 0.5 K`; the host must heat by more than 10 K | P | host 1400 -> 1456.270 K. f64 `1.43e-9` K (constant density), `7.71e-10` K (mass-weighted); f32 `3.33e-2` K and `3.51e-2` K |
+| `energy_budget_meters_heat_release` | a closed 4^3 box (adiabatic walls, no flow), `T` 1700 ± 60 K and `Y_H2`, `Y_OH` varying per cell, nine distinct `D_k`, three steps at `dt = 1e-5` s: (a) `abs(residual_w)`, (c) `abs(sources_w - heat_release_w - enthalpy_diffusion_w)`, both over the gross `Σ w T° V/dt`; (b) `heat_release_w` against the host's `-Σ w (T* - T°)/dt V` from the downloaded `w`, `T°`, `T*`, relative; the heat release above `1e-4` of the gross and the enthalpy diffusion nonzero | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 (a) `1.39e-16`, (b) `1.29e-16`, (c) `3.69e-18`; f32 (a) `1.41e-8`, (b) `8.28e-9`, (c) `9.65e-10`; heat release `2.28e-4` of the gross (0.863 W), enthalpy diffusion `1.09e-4` W |
+| `energy_species_enthalpy_matches_host` | 4^3 walled box, `T` 900-1845 K, every `Y` varying: (133.18) on every cell and boundary face against `ThermoSet::cp_mass`, relative; (133.17) against an f64 host evaluation from the device's own Gauss gradients, over the largest value; refusals named (a member without thermo, a heat release before any step, a metered registration without meters) | `1e-12` (D-F32-1: `1e-5` in f32) | R | f64 `2.92e-16` and `5.60e-16` of `1.04e5` W/m3; f32 `3.98e-8` and `3.70e-8` |
+
+Labels: (133.15)-(133.18).
 
 ---
 

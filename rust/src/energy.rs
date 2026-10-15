@@ -1014,10 +1014,29 @@ pub struct EnergySources {
     /// crate that does not already own a [`crate::solver::SolverWorkspace`].
     partials: DevBuf<Acc>,
 
+    /// **SPEC-LIT 133.9.** The two meters CHR-10b's chemistry terms are
+    /// registered through, `[n_cells]` W/m3 each: the split step's heat
+    /// release (133.16) and the species-enthalpy diffusion (133.17). Each
+    /// registration adds into `q` AND into its meter, so the solver sees one
+    /// `Q` (S25.1's) and [`Energy::assembly_budget`] can say how much of it
+    /// was which. `None` until [`EnergySources::use_meters`] is called; a
+    /// registry without meters runs exactly the launches it ran before.
+    meters: Option<[DevBuf<Scalar>; 2]>,
+
     n: usize,
 }
 
 const REDUCE_PARTIALS: usize = 1024;
+
+/// Which of [`EnergySources`]'s meters a registration goes to (SPEC-LIT
+/// 133.9), and its index in `meters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Meter {
+    /// (133.16), the split step's `Q_chem`.
+    HeatRelease = 0,
+    /// (133.17), `-Σ_m Γ_m . grad h_m`.
+    EnthalpyDiffusion = 1,
+}
 
 impl EnergySources {
     pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
@@ -1031,16 +1050,76 @@ impl EnergySources {
             solk: SolverKernels::new(gpu)?,
             dot_out: gpu.zeros(1)?,
             partials: gpu.zeros(REDUCE_PARTIALS)?,
+            meters: None,
             n,
         })
     }
 
-    /// Zero both accumulators. Call once at the top of every outer iteration,
-    /// before the sources and radiation register - otherwise a source from
-    /// two iterations ago is still being added in.
+    /// Zero both accumulators, and the meters when there are any. Call once
+    /// at the top of every outer iteration, before the sources and radiation
+    /// register - otherwise a source from two iterations ago is still being
+    /// added in.
     pub fn clear(&mut self, gpu: &Gpu) -> Result<()> {
         field_ops::set_field(gpu, &self.fldk, &mut self.q, 0.0, self.n)?;
-        field_ops::set_field(gpu, &self.fldk, &mut self.sp, 0.0, self.n)
+        field_ops::set_field(gpu, &self.fldk, &mut self.sp, 0.0, self.n)?;
+        if let Some(meters) = &mut self.meters {
+            for m in meters.iter_mut() {
+                field_ops::set_field(gpu, &self.fldk, m, 0.0, self.n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **SPEC-LIT 133.9.** Give the registry its two meters, zeroed: the
+    /// heat release and the species-enthalpy diffusion. Allocates once
+    /// (SPEC-LIT §81); a second call keeps the meters it has.
+    pub fn use_meters(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.meters.is_none() {
+            let one = self.n.max(1);
+            self.meters = Some([gpu.zeros(one)?, gpu.zeros(one)?]);
+        }
+        Ok(())
+    }
+
+    fn register_metered(&mut self, gpu: &Gpu, which: Meter, contribution: &DevBuf<Scalar>) -> Result<()> {
+        let who = match which {
+            Meter::HeatRelease => "register_heat_release",
+            Meter::EnthalpyDiffusion => "register_enthalpy_diffusion",
+        };
+        self.check_len(contribution, who)?;
+        let Some(meters) = &mut self.meters else {
+            return Err(Error::Config(format!(
+                "EnergySources::{who}: the registry has no meters; call use_meters once \
+                 before the loop (SPEC-LIT 133.9)"
+            )));
+        };
+        self.ek.accumulate(gpu, &mut meters[which as usize], contribution, self.n)?;
+        self.ek.accumulate(gpu, &mut self.q, contribution, self.n)
+    }
+
+    /// `q += contribution` and the heat-release meter `+= contribution`,
+    /// W/m3: the split chemistry step's (133.16), SPEC-LIT 133.9. Refused
+    /// by name without [`Self::use_meters`].
+    pub fn register_heat_release(&mut self, gpu: &Gpu, contribution: &DevBuf<Scalar>) -> Result<()> {
+        self.register_metered(gpu, Meter::HeatRelease, contribution)
+    }
+
+    /// `q += contribution` and the enthalpy-diffusion meter `+=
+    /// contribution`, W/m3: (133.17), SPEC-LIT 133.9. Refused by name
+    /// without [`Self::use_meters`].
+    pub fn register_enthalpy_diffusion(&mut self, gpu: &Gpu, contribution: &DevBuf<Scalar>) -> Result<()> {
+        self.register_metered(gpu, Meter::EnthalpyDiffusion, contribution)
+    }
+
+    /// The heat-release meter (SPEC-LIT 133.9), or `None` without meters.
+    pub fn heat_release(&self) -> Option<&DevBuf<Scalar>> {
+        self.meters.as_ref().map(|m| &m[Meter::HeatRelease as usize])
+    }
+
+    /// The species-enthalpy-diffusion meter (SPEC-LIT 133.9), or `None`
+    /// without meters.
+    pub fn enthalpy_diffusion(&self) -> Option<&DevBuf<Scalar>> {
+        self.meters.as_ref().map(|m| &m[Meter::EnthalpyDiffusion as usize])
     }
 
     fn check_len(&self, contribution: &DevBuf<Scalar>, who: &str) -> Result<()> {
@@ -1442,6 +1521,17 @@ pub struct EnergyBudget {
     /// [`Self::bounded_correction_prescribed_w`] is what the pinned
     /// (singular) pressure equation's compatibility fix-up absorbed.
     pub target_divergence_w: f64,
+
+    /// **SPEC-LIT 133.9**, the heat-release meter: `-Sum_c Q_chem,c V_c`,
+    /// the part of [`Self::sources_w`] the split chemistry step registered
+    /// through [`EnergySources::register_heat_release`] (133.16). Zero on a
+    /// registry without meters.
+    pub heat_release_w: f64,
+    /// **SPEC-LIT 133.9**, the enthalpy-diffusion meter: `-Sum_c Q_hd,c
+    /// V_c`, the part of [`Self::sources_w`] registered through
+    /// [`EnergySources::register_enthalpy_diffusion`] (133.17). Zero on a
+    /// registry without meters.
+    pub enthalpy_diffusion_w: f64,
 }
 
 /// SPEC-LIT 120.8's device half: the thermal faces' parameters, uploaded ONCE
@@ -1788,6 +1878,22 @@ impl<'m> Energy<'m> {
     /// path.
     pub fn cp_field(&self) -> Option<&GpuScalarField> {
         self.cp_field.as_ref().map(|f| &f.cp)
+    }
+
+    /// **SPEC-LIT 133.9**: the weight `w_c` of (133.16), `[n_cells]` J/(m3
+    /// K) - the ddt row's current-level `rho cp`, refreshed from `gas` and
+    /// the `cp` this equation holds exactly as [`Self::correct`] refreshes
+    /// it: `rho_c cp_c` (or `rho_c props.cp`), and (133.13)'s `rho* cp`
+    /// under backward. A heat release `w (T* - T°)/dt` on this weight makes
+    /// the Euler row of a cell with no flux and `rho^n = rho^(n-1)` land on
+    /// `T*`, which is (132.10)'s `Q_chem` in the equation's own currency.
+    ///
+    /// Call after the step is opened (time levels advanced) and after any
+    /// [`Self::set_cp_field`] of this step, before [`Self::correct`]; the
+    /// refresh `correct` runs then rewrites the same values.
+    pub fn heat_release_weight(&mut self, gpu: &Gpu, gas: &GasState) -> Result<&DevBuf<Scalar>> {
+        self.refresh_rho_cp(gpu, gas)?;
+        Ok(&self.rho_cp)
     }
 
     /// SPEC-LIT §100.10: the molecular conductivity becomes the curve `p`,
@@ -3085,6 +3191,14 @@ impl<'m> Energy<'m> {
             })
             .sum::<f64>();
 
+        // SPEC-LIT 133.9: a meter's `-Sum_c q_c V_c`, in the sign of the
+        // assembled left-hand side, as `sources_w` carries the whole `q`.
+        let metered = |meter: Option<&DevBuf<Scalar>>| -> Result<f64> {
+            let Some(q) = meter else { return Ok(0.0) };
+            let q = gpu.download(q)?;
+            Ok(-(0..n).map(|i| f64::from(q[i]) * f64::from(vol[i])).sum::<f64>())
+        };
+
         let (net_mass, l1_mass, max_mass) = match &self.cp_field {
             None => {
                 let inv_cp = 1.0 / f64::from(self.props.cp);
@@ -3129,6 +3243,8 @@ impl<'m> Energy<'m> {
             bounded_correction_prescribed_w: prescribed,
             bounded_correction_residual_w: direct - prescribed,
             target_divergence_w: target_w,
+            heat_release_w: metered(self.sources.heat_release())?,
+            enthalpy_diffusion_w: metered(self.sources.enthalpy_diffusion())?,
         })
     }
 

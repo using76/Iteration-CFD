@@ -17,6 +17,9 @@
     ofgpu SPEC-LIT.md S26 - k_eff = k + rho*cp*nu_t/Pr_t, kernel energyKEff
     ofgpu SPEC-LIT.md S18 - the source registry an explicit contribution is
       summed into, kernel energyAccumulate
+    M. S. Day, J. B. Bell, Combust. Theory Model. 4 (2000) 535-556, eqs.
+      (1)-(6) - the species' enthalpy flux in the temperature equation,
+      SPEC-LIT 133.9, kernels energyMixtureCpAdd, energyEnthalpyDiffusionAdd
   No GPL-licensed source was consulted.
 
   Every other piece of the energy equation - the ideal-gas density, the
@@ -335,4 +338,78 @@ extern "C" __global__ void energyThermalWall
     fr[bf] = (ofscalar)(hh/(hh + c));
     refValue[bf] = (ofscalar)tRef;
     refGrad[bf] = (ofscalar)(qIn[s]/keff);
+}
+
+// --------------------------------------------------------------------------
+//  SPEC-LIT 133.9 (CHR-10b): the species' enthalpies in the temperature
+//  equation. Each species is one row of 12 ofacc in the table
+//  chem::source::SpeciesEnthalpy uploads: R/W (J/(kg K)), t_mid, the lower
+//  set a1..a5, the upper set a1..a5 (128.1)/(128.5). Every sum is formed in
+//  ofacc (double in both builds, SPEC-LIT 118.1) and rounded once by
+//  energyRoundAcc.
+// --------------------------------------------------------------------------
+
+//- cp_m(T) per unit mass, (128.1) times R/W_m, the lower set at or below
+//  t_mid (128.5), in thermo.rs nasa7_cp_r's operation order -
+OFGPU_DEV ofacc energySpeciesCp(const ofacc* row, ofacc t)
+{
+    const ofacc* a = (t <= row[1]) ? row + 2 : row + 7;
+    return row[0] * (a[0] + t * (a[1] + t * (a[2] + t * (a[3] + t * a[4]))));
+}
+
+//- (133.18), one member of the set: acc[i] += Y_m[i] cp_m(T[i]). A member
+//  with Y_m == 0 adds exactly nothing, as ThermoSet::cp_mass skips it -
+extern "C" __global__ void energyMixtureCpAdd
+(
+    ofacc* __restrict__ acc,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ y,
+    const ofacc* __restrict__ row,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc yv = (ofacc)y[i];
+    if (yv == (ofacc)0) return;
+    acc[i] += yv * energySpeciesCp(row, (ofacc)t[i]);
+}
+
+//- (133.17), one solved species k against the inert N:
+//  acc[c] += rho_c D_k (cp_k(T_c) - cp_N(T_c)) (grad Y_k)_c . (grad T)_c -
+extern "C" __global__ void energyEnthalpyDiffusionAdd
+(
+    ofacc* __restrict__ acc,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ rho,
+    const ofvec3* __restrict__ gradY,
+    const ofvec3* __restrict__ gradT,
+    const ofacc* __restrict__ rowK,
+    const ofacc* __restrict__ rowN,
+    const ofacc dK,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    const ofacc tc = (ofacc)t[c];
+    const ofvec3 gy = gradY[c];
+    const ofvec3 gt = gradT[c];
+    const ofacc dot = (ofacc)gy.x * (ofacc)gt.x + (ofacc)gy.y * (ofacc)gt.y
+        + (ofacc)gy.z * (ofacc)gt.z;
+    const ofacc dcp = energySpeciesCp(rowK, tc) - energySpeciesCp(rowN, tc);
+    acc[c] += (ofacc)rho[c] * dK * dcp * dot;
+}
+
+//- out[i] = acc[i], the one rounding to the build's scalar -
+extern "C" __global__ void energyRoundAcc
+(
+    ofscalar* __restrict__ out,
+    const ofacc* __restrict__ acc,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    out[i] = (ofscalar)acc[i];
 }

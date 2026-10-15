@@ -175,6 +175,9 @@ pub struct Species<'m> {
     /// The `N-1` solved species, in the order the case named them.
     solved: Vec<ScalarTransport<'m>>,
     names: Vec<String>,
+    /// The solved species' molecular diffusivities `D`, m2/s, as the case
+    /// gave them - what SPEC-LIT 133.9's enthalpy flux reads.
+    d: Vec<Scalar>,
 
     /// `Y_N = 1 - Σ_{i<N} Y_i`. A field like any other so it can be written
     /// out and read back, but it is never solved for.
@@ -270,6 +273,7 @@ impl<'m> Species<'m> {
 
         let mut solved = Vec::new();
         let mut solved_names = Vec::new();
+        let mut d = Vec::new();
         for (name, c) in names.iter().zip(coeffs) {
             if name == inert {
                 continue;
@@ -278,6 +282,7 @@ impl<'m> Species<'m> {
             let st = ScalarTransport::new(gpu, hm, m, name, c.as_transport(nu, name)?, ctrl)?;
             solved.push(st);
             solved_names.push(name.clone());
+            d.push(c.d);
         }
 
         let nc = m.n_cells.max(1);
@@ -285,6 +290,7 @@ impl<'m> Species<'m> {
             m,
             solved,
             names: solved_names,
+            d,
             inert: GpuScalarField::zeros(gpu, m, inert)?,
             inert_name: inert.to_string(),
             sum: gpu.zeros(nc)?,
@@ -350,6 +356,12 @@ impl<'m> Species<'m> {
 
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    /// The `i`-th solved species' molecular diffusivity `D`, m2/s (the
+    /// `SpeciesCoeffs::d` it was built with), or `None` past the set.
+    pub fn diffusivity(&self, i: usize) -> Option<Scalar> {
+        self.d.get(i).copied()
     }
 
     pub fn inert_name(&self) -> &str {
