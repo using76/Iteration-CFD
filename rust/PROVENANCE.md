@@ -560,9 +560,26 @@ the `src/automesher/mod.rs` row below). ANSYS Fluent's *User's Guide* — the
 documentation licensed to its users — is read the same way and reproduced the
 same amount: nothing.
 
-Gmsh (GPL-2.0-or-later) is **run as an external process** by
-`tools/mesh/step_mesh.py`, by `tools/geom/geom_tool.py` (docs/10 §I M1) and, in tranche 2, by §92.4; it is never linked and
-its source is never read.
+Gmsh (GPL-2.0-or-later, with its Netgen/METIS/OpenCASCADE/ParaView exception)
+is **imported in-process, as the PyPI `gmsh` package's Python API**, by the
+optional STEP route's Python scripts: `tools/mesh/step_mesh.py`,
+`tools/geom/geom_tool.py` and `tools/geom/geom_edit.py` (docs/10 §I M1), their
+selftests and `tools/mesh/diag/`, and several CAD-loop scripts under
+`tools/cad/` (the `../tools/cad/wedge_mesh.py` row below, among others). `import gmsh` loads
+the gmsh library into that script's own Python process; pip installs it and
+nothing of it is vendored here. Nothing under `rust/` and nothing under `gui/`
+links or imports gmsh: no Cargo or npm package is gmsh
+(`python tools/deps_licences.py --check`), and the studio server runs those
+scripts only as separate child processes (`gui/server/src/tools/geomTool.ts`).
+The gmsh source is never read. This paragraph used to say that gmsh is "run as
+an external process" by these scripts and "never linked"; that is true of the
+studio's spawn and not of the scripts, and docs/17 TET-16 (§11 item 6)
+corrected it. The tranche-2 tetrahedral path that §92.4 specified around an
+external generator was never built: tetrahedra come from SPEC-LIT §116's
+native mesher, `src/tetmesh/` (its rows below), which contains, calls and
+links no gmsh, TetGen, Netgen or other GPL, LGPL or AGPL code. A closed STL
+reaches a tetrahedral polyMesh through `ofgpu-automesher` with `"kind": "tet"`
+with no GPL-family code on the path; only a STEP input needs the gmsh route.
 
 | File | SPEC-LIT | Primary sources |
 |---|---|---|

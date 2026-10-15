@@ -15,8 +15,16 @@ with tetrahedra by `ofgpu-automesher` with `"kind": "tet"`, the native mesher of
 other GPL, LGPL or AGPL code anywhere on the path; see
 [`tools/automesher/README.md`](../automesher/README.md) and
 [`tools/automesher/examples/box_sphere_tet.json`](../automesher/examples/box_sphere_tet.json).
-This directory is the STEP route, which goes through gmsh and its OCC kernel,
-and is a separate program outside that path.
+
+**This directory is the optional external STEP route, and only that.**
+`step_mesh.py` is needed only when the input is a STEP file. It is a Python
+script outside the product: no Rust binary and no studio code links it or
+gmsh, and the studio runs it, when asked, as a separate program. The script
+itself does `import gmsh`. That loads gmsh (PyPI `gmsh`, GPL-2.0-or-later with
+its Netgen/METIS/OpenCASCADE/ParaView exception) and its OCC kernel into the
+script's own Python process, so this route is not GPL-free. Install gmsh with
+pip only if you use it. See `NOTICE` ("Not on crates.io"), `LICENSING.md` §2
+and the gmsh paragraph of `rust/PROVENANCE.md`.
 
 ```
 python tools/mesh/step_mesh.py <config.json> [--from-checkpoint] [--stop-after-checkpoint]
