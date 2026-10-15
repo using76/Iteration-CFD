@@ -3701,6 +3701,12 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("T3A leg 1 in 2-D: the leading-edge Tu of kOmegaSSTLM and kOmegaSSTGamma on the flat-plate harness, three meshes, replayed (SPEC-LIT 144.3)") {
     validate_gates::t3a::check_t3a_leg1(c)?;
     }
+    // SPEC-LIT 144.4 - Gates 88-T and 90-T leg 4: the same records' C_f(Re_x)
+    // against Roach & Brierley's measurement (the ERCOFTAC T3A key, 144.6)
+    // and the laminar part against Blasius; t3a.rs opens each gate's scope.
+    if c.section("Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) of kOmegaSSTLM and kOmegaSSTGamma against Roach & Brierley's T3A measurement, replayed (SPEC-LIT 144.4)") {
+    validate_gates::t3a::check_t3a_leg4(c)?;
+    }
 
     Ok(())
 }

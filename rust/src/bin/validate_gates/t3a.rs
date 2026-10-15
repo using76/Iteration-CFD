@@ -17,8 +17,10 @@
 //! The runs are long, so they are not made by `ofgpu-validate`: each is an
 //! ignored test of this binary (`record_t3a_*`) that prints a [`T3aRecord`]
 //! literal, and the records below are what the validate section replays
-//! (§110.1's split of recipe and verdict). VAL-33 adds leg 4 (the measured
-//! `C_f(Re_x)`) to this file and reads the `C_f` the same records carry.
+//! (§110.1's split of recipe and verdict). Leg 4 (§144.4, docs/17 VAL-33)
+//! reads the `C_f` the same records carry against Roach & Brierley's
+//! measured `C_f(Re_x)` (the ERCOFTAC T3A key, §144.6) and the laminar part
+//! against Blasius.
 //!
 //! Every reduction is f64 whatever `Scalar` is: fields are widened on download
 //! and the geometry is `geom64()` (§118.2).
@@ -26,15 +28,18 @@
 //! Written from:
 //!   ofgpu `SPEC-LIT.md` §88.10 (the rig and the closed form), §88/§89 and
 //!     §90/§91 (the two models and their boundary conditions), §144.1-§144.3,
-//!     §94 (the mesh study) and §69 (the gate registry)
+//!     §94 (the mesh study), §69 (the gate registry), §110.1 (the replay
+//!     shape), §32.4 (the band rule), §144.4 (leg 4) and §144.6 (the key)
 //!   the NASA/TMBWG T3A page's inflow, as §88.10 quotes it
+//!   P. E. Roach and D. H. Brierley's T3A measurement, read from the fetched
+//!     ERCOFTAC key at run time; no number of it is in this file
 //! No GPL-licensed source was consulted.
 
 use ofgpu::models::KOmegaSstCoeffs;
 use ofgpu::vv::{self, GridStudy, Level};
 use ofgpu::{Result, Scalar};
 
-use crate::{Checks, GateReport, How, Uncertainty, Verdict};
+use crate::{Band, Checks, GateReport, How, Uncertainty, Verdict};
 
 // ---------------------------------------------------------------------------
 //  The rig
@@ -60,8 +65,9 @@ pub(crate) const TU_TOL: f64 = 0.005;
 pub(crate) const U_INF: f64 = 1.0;
 pub(crate) const NU: f64 = 5.0e-6;
 
-/// `C_f` is recorded at `Re_x = 2.5e4 (i + 1)`, `i < N_CF`, for leg 4.
+/// `C_f` is recorded at `Re_x = RE_GRID_STEP (i + 1)`, `i < N_CF`, for leg 4.
 pub(crate) const N_CF: usize = 23;
+pub(crate) const RE_GRID_STEP: f64 = 2.5e4;
 
 fn w(x: Scalar) -> f64 {
     f64::from(x)
@@ -158,13 +164,12 @@ pub(crate) mod runner {
     use ofgpu::{Error, Gpu, GpuMesh, Label, Result, Scalar, Vec3};
 
     use super::super::blasius_plate::{controls, seed_free_stream, set_bcs, wall_faces, WallFace};
-    use super::{inflow, w, T3aModel, T3aRecord, N_CF, NU, TU_IN, U_INF, X_LE};
+    use super::{inflow, w, T3aModel, T3aRecord, N_CF, NU, RE_GRID_STEP, TU_IN, U_INF, X_LE};
 
     /// The three meshes, finest first: `(n_upstream, n_plate, n_y)`; each
     /// coarser level halves every count.
     pub(crate) const LEVELS: [(usize, usize, usize); 3] = [(48, 256, 128), (24, 128, 64), (12, 64, 32)];
 
-    pub(crate) const RE_GRID_STEP: f64 = 2.5e4;
     /// The band the stopping rule reads (§144.2's lower end).
     const RE_X_LO: f64 = 2e4;
 
@@ -761,6 +766,385 @@ pub(crate) fn check_t3a_leg1_on(
 }
 
 // ---------------------------------------------------------------------------
+//  Leg 4: C_f(Re_x) against Roach & Brierley (SPEC-LIT 144.4)
+// ---------------------------------------------------------------------------
+
+/// docs/17 VAL-33's bands, fixed in its brief: onset within 15 % in `Re_x`,
+/// turbulent `C_f` within 10 % (with `u_D`), the laminar part within 10 % of
+/// Blasius.
+pub(crate) const ONSET_BAND: f64 = 0.15;
+pub(crate) const TURB_BAND: f64 = 0.10;
+pub(crate) const LAM_BAND: f64 = 0.10;
+/// `u_D` of a turbulent `C_f`: the case page's 2 % agreement of its three
+/// methods in turbulent layers (§144.6).
+pub(crate) const U_D_TURB: f64 = 0.02;
+/// The laminar part starts where §144.2's band does.
+pub(crate) const RE_X_LAM_LO: f64 = 2.0e4;
+/// Blasius' `C_f sqrt(Re_x)` (§88.7).
+pub(crate) const BLASIUS_CF: f64 = 0.664;
+
+/// The three leg-4 gates of each model (Gate 88-T for LM, 90-T for gamma).
+const GATE_ONSET: [&str; 2] = [
+    "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, transition onset Re_x against Roach & Brierley",
+    "SPEC-LIT 144.4 Gate 90-T leg 4, kOmegaSSTGamma, transition onset Re_x against Roach & Brierley",
+];
+const GATE_TURB: [&str; 2] = [
+    "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, turbulent C_f against Roach & Brierley",
+    "SPEC-LIT 144.4 Gate 90-T leg 4, kOmegaSSTGamma, turbulent C_f against Roach & Brierley",
+];
+const GATE_LAM: [&str; 2] = [
+    "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, laminar C_f against Blasius",
+    "SPEC-LIT 144.4 Gate 90-T leg 4, kOmegaSSTGamma, laminar C_f against Blasius",
+];
+const AGAINST_KEY: &str = "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (SPEC-LIT 144.6)";
+const AGAINST_BLASIUS: &str =
+    "Blasius' 0.664/sqrt(Re_x) (SPEC-LIT 88.7) over the part of the plate the key measures laminar";
+
+/// What leg 4 reads from the key's stations `(Re_x, C_f)`, file order.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Leg4Key {
+    /// (144.4a): the vertex of the parabola through the least-`C_f` station
+    /// and its two neighbours.
+    pub(crate) onset_re_x: f64,
+    /// The least-`C_f` station (first on a tie) and the greatest-`C_f`
+    /// station downstream of it.
+    pub(crate) least: usize,
+    pub(crate) peak: usize,
+    /// The turbulent stations: `peak` to the last.
+    pub(crate) turbulent: Vec<(f64, f64)>,
+    /// The laminar part ends at the station before `least`.
+    pub(crate) laminar_hi: f64,
+}
+
+/// The key's reading for leg 4, refused when the least `C_f` is not at an
+/// interior station (there would be no rise to call transition).
+pub(crate) fn read_key(st: &[(f64, f64)]) -> std::result::Result<Leg4Key, String> {
+    let least = (0..st.len())
+        .reduce(|m, i| if st[i].1 < st[m].1 { i } else { m })
+        .ok_or_else(|| "the key has no station".to_string())?;
+    if least == 0 || least + 1 >= st.len() {
+        return Err(format!(
+            "the least C_f is at station {} of {}, not an interior one, so the key shows no transition",
+            least + 1,
+            st.len()
+        ));
+    }
+    let peak = (least + 1..st.len()).reduce(|m, i| if st[i].1 > st[m].1 { i } else { m }).unwrap_or(least + 1);
+    let ((x0, y0), (x1, y1), (x2, y2)) = (st[least - 1], st[least], st[least + 1]);
+    let num = (x1 - x0) * (x1 - x0) * (y1 - y2) - (x1 - x2) * (x1 - x2) * (y1 - y0);
+    let den = (x1 - x0) * (y1 - y2) - (x1 - x2) * (y1 - y0);
+    Ok(Leg4Key {
+        onset_re_x: x1 - 0.5 * num / den,
+        least,
+        peak,
+        turbulent: st[peak..].to_vec(),
+        laminar_hi: st[least - 1].0,
+    })
+}
+
+/// (144.4b): a record's `C_f` at `re_x`, interpolated as a power law between
+/// the two recorded points that bracket it. NaN outside the recorded span.
+pub(crate) fn cf_at(r: &T3aRecord, re_x: f64) -> f64 {
+    for k in 0..N_CF - 1 {
+        let (g0, g1) = (RE_GRID_STEP * (k + 1) as f64, RE_GRID_STEP * (k + 2) as f64);
+        if re_x >= g0 && re_x <= g1 {
+            let t = (re_x / g0).ln() / (g1 / g0).ln();
+            return (r.cf[k].ln() + t * (r.cf[k + 1].ln() - r.cf[k].ln())).exp();
+        }
+    }
+    f64::NAN
+}
+
+/// (144.4c) at the record's own point `k`: `C_f sqrt(Re_x)/0.664 - 1`.
+fn blasius_excess(r: &T3aRecord, k: usize) -> f64 {
+    let g = RE_GRID_STEP * (k + 1) as f64;
+    r.cf[k] * g.sqrt() / BLASIUS_CF - 1.0
+}
+
+/// The record's points in the laminar part: from 2e4 to the key's
+/// `laminar_hi`, and upstream of the record's own least `C_f`.
+fn laminar_points(r: &T3aRecord, k: &Leg4Key) -> Vec<usize> {
+    (0..N_CF)
+        .filter(|&i| {
+            let g = RE_GRID_STEP * (i + 1) as f64;
+            g >= RE_X_LAM_LO && g <= k.laminar_hi && g < r.cf_min_re_x
+        })
+        .collect()
+}
+
+/// The worst `(where, signed error)` of a list, by magnitude; a NaN wins, so
+/// it reaches the check as a failure. An empty list is NaN.
+fn worst(v: impl Iterator<Item = (f64, f64)>) -> (f64, f64) {
+    v.fold((f64::NAN, f64::NAN), |m, x| {
+        if m.1.is_nan() && !m.0.is_nan() {
+            m
+        } else if m.0.is_nan() || x.1.is_nan() || x.1.abs() > m.1.abs() {
+            x
+        } else {
+            m
+        }
+    })
+}
+
+/// One record's three leg-4 numbers: each a `(Re_x, signed relative error)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Leg4Rows {
+    /// The record's least-`C_f` face against (144.4a).
+    pub(crate) onset: (f64, f64),
+    /// The worst turbulent station, against its measured `C_f`.
+    pub(crate) turbulent: (f64, f64),
+    /// The worst laminar point, (144.4c).
+    pub(crate) laminar: (f64, f64),
+}
+
+pub(crate) fn leg4_rows(r: &T3aRecord, k: &Leg4Key) -> Leg4Rows {
+    Leg4Rows {
+        onset: (r.cf_min_re_x, r.cf_min_re_x / k.onset_re_x - 1.0),
+        turbulent: worst(k.turbulent.iter().map(|&(re, cf)| (re, cf_at(r, re) / cf - 1.0))),
+        laminar: worst(laminar_points(r, k).into_iter().map(|i| (RE_GRID_STEP * (i + 1) as f64, blasius_excess(r, i)))),
+    }
+}
+
+/// §94's study of one quantity over a model's three levels.
+fn study_of(
+    recs: &[Option<&T3aRecord>; 3],
+    f: impl Fn(&T3aRecord) -> f64,
+) -> std::result::Result<GridStudy, String> {
+    if !recs.iter().all(Option::is_some) {
+        return Err("fewer than three levels are recorded".to_string());
+    }
+    let levels: Vec<Level> = recs.iter().flatten().map(|r| Level { h: r.h as Scalar, value: f(r) as Scalar }).collect();
+    vv::grid_study(&levels).map_err(|e| e.to_string())
+}
+
+/// §110.1's band rule as its text states it (§32.4): a result within its
+/// `u_val` of the band edge, on either side, is undecided - not a pass and
+/// not a miss. Inside is `|E| + u_val <= band`, outside `|E| - u_val > band`.
+/// (`crate::band_of`, which 110-A/B/C use, makes only the outside half
+/// undecided.) A NaN is outside.
+pub(crate) fn band_110(e_abs: f64, band: f64, u_val: f64) -> Band {
+    if e_abs + u_val <= band {
+        Band::Inside
+    } else if e_abs - u_val <= band {
+        Band::Undecided
+    } else {
+        Band::Outside
+    }
+}
+
+/// Report every leg-4 gate not closed, for `why`.
+fn leg4_all_open(c: &mut Checks, why: &str) {
+    for mi in 0..2 {
+        for gate in [GATE_ONSET[mi], GATE_TURB[mi], GATE_LAM[mi]] {
+            c.enter_gate(gate);
+            c.report(GateReport {
+                verdict: Verdict::Open,
+                how: How::Replayed,
+                gate,
+                against: if gate == GATE_LAM[mi] { AGAINST_BLASIUS } else { AGAINST_KEY },
+                headline: format!("leg 4 is not closed: {why}"),
+                detail: vec![],
+                uncertainty: Some(Uncertainty::SingleMesh("no comparison was made (SPEC-LIT 144.4)")),
+            });
+        }
+    }
+    c.leave_gate();
+}
+
+/// The section: the key (its digest line or the missing line, §110.1), then
+/// [`check_t3a_leg4_on`] on the recorded runs.
+pub(crate) fn check_t3a_leg4(c: &mut Checks) -> Result<()> {
+    let key = match crate::key::ercoftac_t3a() {
+        Ok(k) => {
+            c.note(&k.digest_line);
+            Some(k.stations.iter().map(|s| (s.re_x, s.cf)).collect::<Vec<_>>())
+        }
+        Err(e) => {
+            c.note(&crate::answer_key_missing_line(crate::key::T3A_ID, "ercoftac_t3a/t3ay.dat", &e));
+            None
+        }
+    };
+    check_t3a_leg4_on(c, key.as_deref(), RECORDS, RECORDS_SINGLE)
+}
+
+pub(crate) fn check_t3a_leg4_on(
+    c: &mut Checks,
+    key: Option<&[(f64, f64)]>,
+    records: [[Option<&T3aRecord>; 3]; 2],
+    single: [[Option<&T3aRecord>; 3]; 2],
+) -> Result<()> {
+    let Some(stations) = key else {
+        leg4_all_open(c, "answer key ercoftac-t3a missing (SPEC-LIT 144.6 says how to place it)");
+        return Ok(());
+    };
+    // The key's own row (§110.1): leg 4's reading needs a transition in it.
+    let k = read_key(stations);
+    c.require("144.4: the key's least C_f lies at an interior station (144.4a has a vertex)", k.is_ok());
+    let k = match k {
+        Ok(k) => k,
+        Err(why) => {
+            c.note(&format!("144.4: {why}"));
+            leg4_all_open(c, "the key shows no transition to hold a run against");
+            return Ok(());
+        }
+    };
+    c.note(&format!(
+        "144.4: {} stations; measured onset (144.4a) Re_x {:.5e} about the least-C_f station {}; turbulent \
+         stations {}..{} (from Re_x {:.4e}, the greatest C_f past the onset); laminar part Re_x {:.0e}..{:.4e}",
+        stations.len(),
+        k.onset_re_x,
+        k.least + 1,
+        k.peak + 1,
+        stations.len(),
+        k.turbulent[0].0,
+        RE_X_LAM_LO,
+        k.laminar_hi
+    ));
+
+    for (mi, model) in [T3aModel::Lm, T3aModel::Gamma].into_iter().enumerate() {
+        let recs = records[mi];
+        let Some(fine) = recs[0] else {
+            for gate in [GATE_ONSET[mi], GATE_TURB[mi], GATE_LAM[mi]] {
+                c.enter_gate(gate);
+                c.report(GateReport {
+                    verdict: Verdict::Open,
+                    how: How::Replayed,
+                    gate,
+                    against: if gate == GATE_LAM[mi] { AGAINST_BLASIUS } else { AGAINST_KEY },
+                    headline: format!(
+                        "no {} run recorded yet - run the record_t3a_* tests of SPEC-LIT 144.3 and record them",
+                        model.name()
+                    ),
+                    detail: vec![],
+                    uncertainty: Some(Uncertainty::SingleMesh(
+                        "no run recorded yet; the three-mesh study is taken when the runs are (SPEC-LIT 144.3)",
+                    )),
+                });
+            }
+            c.leave_gate();
+            continue;
+        };
+        for r in recs.iter().chain(single[mi].iter()).flatten() {
+            let v = leg4_rows(r, &k);
+            c.note(&format!(
+                "144.4 {} {}+{} x {} ({}): onset Re_x {:.4e} ({:+.2} %), worst turbulent C_f {:+.2} % at Re_x \
+                 {:.4e}, worst laminar C_f {:+.2} % of Blasius at Re_x {:.3e}",
+                r.model.name(),
+                r.cells.0,
+                r.cells.1,
+                r.cells.2,
+                r.build,
+                v.onset.0,
+                100.0 * v.onset.1,
+                100.0 * v.turbulent.1,
+                v.turbulent.0,
+                100.0 * v.laminar.1,
+                v.laminar.0
+            ));
+        }
+        let rows = leg4_rows(fine, &k);
+        let turb_cf = k.turbulent.iter().find(|s| s.0 == rows.turbulent.0).map_or(f64::NAN, |s| s.1);
+        let lam_k = ((rows.laminar.0 / RE_GRID_STEP).round() as usize).saturating_sub(1).min(N_CF - 1);
+        // The row's number, its band, u_D, its study (of the same quantity
+        // on the three levels) and the scale that makes u_num relative.
+        let judged = [
+            (
+                GATE_ONSET[mi],
+                AGAINST_KEY,
+                "onset Re_x (least C_f) against (144.4a)",
+                rows.onset,
+                ONSET_BAND,
+                0.0,
+                study_of(&recs, |r| r.cf_min_re_x),
+                k.onset_re_x,
+            ),
+            (
+                GATE_TURB[mi],
+                AGAINST_KEY,
+                "worst turbulent C_f against the station's (144.4b)",
+                rows.turbulent,
+                TURB_BAND,
+                U_D_TURB,
+                study_of(&recs, |r| cf_at(r, rows.turbulent.0)),
+                turb_cf,
+            ),
+            (
+                GATE_LAM[mi],
+                AGAINST_BLASIUS,
+                "worst laminar C_f against Blasius (144.4c)",
+                rows.laminar,
+                LAM_BAND,
+                0.0,
+                study_of(&recs, |r| blasius_excess(r, lam_k)),
+                1.0,
+            ),
+        ];
+        let mut bands = Vec::new();
+        for (gate, against, what, (at, e), band, u_d, study, scale) in judged {
+            c.enter_gate(gate);
+            match &study {
+                Ok(st) => c.note(&format!("144.4 {} {what}, study: {}", model.name(), st.one_line())),
+                Err(why) => c.note(&format!("144.4 {} {what}, study refused: {why}", model.name())),
+            }
+            let u_num = study.as_ref().map_or(0.0, |st| w(st.u_fine) / scale);
+            let u_val = (u_num * u_num + u_d * u_d).sqrt();
+            let label =
+                format!("144.4 {}: |E| + u_val of the {what}, finest mesh ({:.0} %)", model.name(), 100.0 * band);
+            let b = band_110(e.abs(), band, u_val);
+            bands.push((b, band, u_val));
+            if !e.is_finite() || b == Band::Inside {
+                c.replaying(|c| c.check(&label, (e.abs() + u_val) as Scalar, band as Scalar));
+                continue;
+            }
+            let uncertainty = match study {
+                Ok(st) => Uncertainty::Study(st),
+                Err(_) => Uncertainty::SingleMesh("the 94 study refused the three levels; the finest mesh alone"),
+            };
+            let headline = format!(
+                "{} {what}: E = {:+.2} % at Re_x {:.4e} on the finest mesh, band {:.0} %, u_val {:.2} % \
+                 (u_num {:.2} %, u_D {:.0} %)",
+                model.name(),
+                100.0 * e,
+                at,
+                100.0 * band,
+                100.0 * u_val,
+                100.0 * u_num,
+                100.0 * u_d
+            );
+            c.report(GateReport {
+                verdict: if b == Band::Undecided { Verdict::Open } else { Verdict::Misses },
+                how: How::Replayed,
+                gate,
+                against,
+                headline: if b == Band::Undecided {
+                    format!("undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): {headline}")
+                } else {
+                    headline
+                },
+                detail: vec![],
+                uncertainty: Some(uncertainty),
+            });
+        }
+        // Class R: the single build's finest record lands in the same band.
+        if let Some(s) = single[mi][0] {
+            let v = leg4_rows(s, &k);
+            let same = [v.onset.1, v.turbulent.1, v.laminar.1]
+                .iter()
+                .zip(&bands)
+                .all(|(e, &(b, band, u_val))| band_110(e.abs(), band, u_val) == b);
+            c.replaying(|c| {
+                c.require(
+                    &format!("144.4 {} single build: each leg-4 row lands in the f64 build's band", model.name()),
+                    same,
+                )
+            });
+        }
+        c.leave_gate();
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 //  Tests and the recorders
 // ---------------------------------------------------------------------------
 
@@ -846,6 +1230,136 @@ mod tests {
                 assert!(r.iter().all(|r| r.model == [T3aModel::Lm, T3aModel::Gamma][mi]));
                 assert!(r.windows(2).all(|p| p[0].h < p[1].h), "finest first");
             }
+        }
+    }
+
+    // ---- leg 4 (SPEC-LIT 144.4); every key here is invented --------------
+
+    #[test]
+    fn leg4_reads_a_synthetic_key_exactly() {
+        let st = [(1e4, 5e-3), (3e4, 3e-3), (5e4, 2e-3), (7e4, 4e-3), (9e4, 6e-3), (11e4, 5e-3)];
+        let k = read_key(&st).expect("an interior least C_f");
+        // (144.4a) through (3e4, 3e-3), (5e4, 2e-3), (7e4, 4e-3): 140000/3.
+        assert!((k.onset_re_x / (140000.0 / 3.0) - 1.0).abs() <= 1e-12, "{}", k.onset_re_x);
+        assert_eq!((k.least, k.peak, k.laminar_hi), (2, 4, 3e4));
+        assert_eq!(k.turbulent, vec![(9e4, 6e-3), (11e4, 5e-3)]);
+        let falling = [(1e4, 5e-3), (2e4, 4e-3), (3e4, 3e-3)];
+        assert!(read_key(&falling).unwrap_err().contains("station 3 of 3"));
+        let rising = [(1e4, 1e-3), (2e4, 4e-3), (3e4, 5e-3)];
+        assert!(read_key(&rising).unwrap_err().contains("station 1 of 3"));
+        assert!(read_key(&[]).is_err());
+    }
+
+    #[test]
+    fn band_110_is_undecided_within_u_val_of_either_side_of_the_edge() {
+        assert_eq!(band_110(0.07, 0.10, 0.02), Band::Inside);
+        assert_eq!(band_110(0.09, 0.10, 0.02), Band::Undecided);
+        assert_eq!(band_110(0.11, 0.10, 0.02), Band::Undecided);
+        assert_eq!(band_110(0.13, 0.10, 0.02), Band::Outside);
+        assert_eq!(band_110(f64::NAN, 0.10, 0.02), Band::Outside);
+    }
+
+    /// An invented key: laminar to 1.1e5, least C_f at 1.5e5, the greatest
+    /// past it at 3e5. Its turbulent C_f is `TURB_A Re_x^-0.2`.
+    const TURB_A: f64 = 0.06;
+    fn synthetic_key() -> Vec<(f64, f64)> {
+        let mut st = vec![(3e4, 4e-3), (6e4, 2.8e-3), (1.1e5, 2.2e-3), (1.5e5, 2.0e-3), (2e5, 3e-3)];
+        st.extend([3e5, 4e5, 5e5].map(|re: f64| (re, TURB_A * re.powf(-0.2))));
+        st
+    }
+
+    /// A record whose onset is `1.39e5 (1 + onset)` (the key's is 1.39e5), whose laminar points sit
+    /// `lam` above Blasius and whose turbulent C_f is `(1 + turb)` times the
+    /// key's; level `l` scales all of it by `1 + 1e-4 4^l` (second order).
+    fn synthetic_leg4(model: T3aModel, level: usize, onset: f64, turb: f64, lam: f64) -> T3aRecord {
+        let f = 1.0 + 1e-4 * 4f64.powi(level as i32);
+        let mut r = synthetic(model, level, TU_LE_CLOSED);
+        for (i, v) in r.cf.iter_mut().enumerate() {
+            let g = RE_GRID_STEP * (i + 1) as f64;
+            *v = f * if g < 1.5e5 { (1.0 + lam) * BLASIUS_CF / g.sqrt() } else { (1.0 + turb) * TURB_A * g.powf(-0.2) };
+        }
+        r.cf_min_re_x = 1.39e5 * (1.0 + onset) * f;
+        r
+    }
+
+    #[test]
+    fn leg4_replay_passes_misses_and_reports_on_synthetic_records() {
+        let key = synthetic_key();
+        let k = read_key(&key).expect("key");
+        // (144.4a) through (1.1e5, 2.2e-3), (1.5e5, 2.0e-3), (2e5, 3e-3).
+        assert!((k.onset_re_x / 1.39e5 - 1.0).abs() <= 1e-12, "{}", k.onset_re_x);
+        let lm = [0, 1, 2].map(|l| synthetic_leg4(T3aModel::Lm, l, 0.05, 0.05, 0.05));
+        let ga = [0, 1, 2].map(|l| synthetic_leg4(T3aModel::Gamma, l, 0.05, 0.05, 0.05));
+        let recs = [[Some(&lm[0]), Some(&lm[1]), Some(&lm[2])], [Some(&ga[0]), Some(&ga[1]), Some(&ga[2])]];
+        let mut c = Checks::new();
+        check_t3a_leg4_on(&mut c, Some(&key), recs, [[None; 3]; 2]).expect("replay");
+        assert_eq!((c.failures, c.total, c.replayed), (0, 7, 6), "the key row, then three rows per model");
+        assert!(c.gates.is_empty());
+        let v = leg4_rows(&lm[0], &k);
+        assert!((v.turbulent.1 - (1.05 * 1.0001 - 1.0)).abs() <= 1e-12, "{v:?}");
+        assert!((v.laminar.1 - (1.05 * 1.0001 - 1.0)).abs() <= 1e-12, "{v:?}");
+        assert_eq!(laminar_points(&lm[0], &k), vec![0, 1, 2, 3], "2.5e4..1e5: from 2e4 to 1.1e5");
+
+        // LM misses its onset and its laminar part; gamma's turbulent C_f is
+        // 11 % off, inside 10 % + u_val, so undecided.
+        let lm = [0, 1, 2].map(|l| synthetic_leg4(T3aModel::Lm, l, 0.30, 0.05, 0.20));
+        let ga = [0, 1, 2].map(|l| synthetic_leg4(T3aModel::Gamma, l, 0.05, 0.11, 0.05));
+        let recs = [[Some(&lm[0]), Some(&lm[1]), Some(&lm[2])], [Some(&ga[0]), Some(&ga[1]), Some(&ga[2])]];
+        let single = [[Some(&lm[0]), None, None], [Some(&ga[0]), None, None]];
+        let mut c = Checks::new();
+        check_t3a_leg4_on(&mut c, Some(&key), recs, single).expect("replay");
+        assert_eq!((c.failures, c.total, c.replayed), (0, 6, 5), "key row, three in-band rows, two single rows");
+        let got: Vec<(&str, Verdict)> = c.gates.iter().map(|g| (g.gate, g.verdict)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (GATE_ONSET[0], Verdict::Misses),
+                (GATE_LAM[0], Verdict::Misses),
+                (GATE_TURB[1], Verdict::Open),
+            ]
+        );
+    }
+
+    #[test]
+    fn leg4_reports_every_gate_open_when_the_key_is_missing_or_shows_no_transition() {
+        let mut c = Checks::new();
+        check_t3a_leg4_on(&mut c, None, RECORDS, RECORDS_SINGLE).expect("replay");
+        assert_eq!((c.total, c.gates.len()), (0, 6));
+        assert!(c.gates.iter().all(|g| g.verdict == Verdict::Open));
+        let mut c = Checks::new();
+        check_t3a_leg4_on(&mut c, Some(&[(1e4, 5e-3), (2e4, 4e-3)]), RECORDS, RECORDS_SINGLE).expect("replay");
+        assert_eq!((c.total, c.failures, c.gates.len()), (1, 1, 6), "the key row fails, six gates open");
+    }
+
+    /// The recorded runs of 144.3 against the tree's key. With the key
+    /// placed, LM's onset and both laminar parts are MISSED, LM's turbulent
+    /// C_f and gamma's onset are undecided, and gamma's turbulent C_f holds
+    /// (SPEC-LIT 144.4 records them); without it, the six gates are open.
+    #[test]
+    fn the_recorded_runs_against_the_t3a_key() {
+        let mut c = Checks::new();
+        check_t3a_leg4(&mut c).expect("replay");
+        let got: Vec<(&str, Verdict)> = c.gates.iter().map(|g| (g.gate, g.verdict)).collect();
+        if c.total == 0 {
+            assert_eq!(got.len(), 6, "key absent: six gates open");
+            println!("  [answer-key] ercoftac-t3a absent: leg 4's six gates are open by name");
+            return;
+        }
+        assert_eq!(c.failures, 0);
+        assert_eq!((c.total, c.replayed), (4, 3), "key row, gamma's turbulent C_f, two single rows");
+        assert_eq!(
+            got,
+            vec![
+                (GATE_ONSET[0], Verdict::Misses),
+                (GATE_TURB[0], Verdict::Open),
+                (GATE_LAM[0], Verdict::Misses),
+                (GATE_ONSET[1], Verdict::Open),
+                (GATE_LAM[1], Verdict::Misses),
+            ]
+        );
+        for g in &c.gates {
+            let word = if g.verdict == Verdict::Misses { "MISSED" } else { "UNDECIDED" };
+            println!("  {word} {}: {}", g.gate, g.headline);
         }
     }
 

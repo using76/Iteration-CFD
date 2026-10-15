@@ -24177,6 +24177,18 @@ a per-case inflow `omega`, which the TMR publishes for T3A and not for T3A- or
 T3B. **So the T3A-/T3B legs are NOT claimed**, and the measurement above is
 recorded as the reason rather than the trend being reported as a result.
 
+**Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). §144.3 runs
+the T3A rig in 2-D on the flat-plate harness, and §144.6 places Roach & Brierley's measured `C_f(Re_x)` (the ERCOFTAC
+key, fetched and local). Leg 4 holds the first against the second on three rows, with the plan's bands: the onset
+(the least `C_f`, (144.4a)) within 15 % in `Re_x`; the turbulent `C_f` within 10 %, with `u_D = 2 %`; and the
+laminar part within 10 % of Blasius. A result within its uncertainty of a band edge is undecided (§110.1). For this
+model, on the finest of three meshes, **the onset `MISSES`**: the least `C_f` lies at `Re_x = 8.89e4`, `35.9 %`
+upstream of the measured `1.387e5`, which is `4 %` downstream of leg 2's 1-D root. **The turbulent `C_f` is
+`OPEN`, undecided**: it is `-7.1 %` at worst, but its study diverges (`u_val 5.2 %`). **The laminar part
+`MISSES`** at `+16.3 %` above Blasius, where the measurement itself sits within `8.5 %`. §144.4 gives the
+definitions, the studies and what the misses are. Leg 2's verdict stays `OPEN` as written: it is a statement about
+the 1-D correlations, and leg 4 is the measured verdict on the 2-D solution.
+
 ### 88.11 What must hold
 
 | Check | Expected |
@@ -24204,6 +24216,7 @@ recorded as the reason rather than the trend being reported as a result.
 | **Gate 88-T leg 1** | `Tu` at the T3A leading edge `3.3530 %` against the published `3.300 %` — **1.61 %** |
 | **Gate 88-T leg 2** | onset at `Re_x = 8.525e4` — **OPEN**, no published digit to close it against |
 | **Gate 88-T leg 3** | monotone in `Tu`, and the `51.9×` spread that says a single-rig trend gate measures the decay |
+| **Gate 88-T leg 4** (§144.4) | 2-D `C_f(Re_x)` against Roach & Brierley: onset `-35.9 %` **MISSES** (15 %); turbulent `C_f` `-7.1 %` **OPEN**, undecided (10 %, `u_val 5.2 %`); laminar part `+16.3 %` of Blasius **MISSES** (10 %) |
 | the CUDA graph | a transitional `correct` captures and replays bitwise (§81) |
 
 ### 88.12 Validation — what is run, and what is NOT
@@ -24227,6 +24240,8 @@ each other in a real layer.
 **NOT claimed: the `C_f` distribution through transition.** That is what the
 ERCOFTAC T3 experiments measure and what a transition model is finally judged
 on. Reproducing it needs the run above, and this section does not have it.
+*Amended (docs/17 VAL-33):* §144.3 now has the run, and §88.10's leg 4 (§144.4)
+holds its `C_f(Re_x)` against the measurement. Two of its three rows miss.
 
 **NOT claimed: T3A- or T3B.** §88.10 leg 3 says why, and the 51.9×
 measurement is the evidence.
@@ -25097,6 +25112,13 @@ the free-stream decay is as strong a lever on onset as `Tu` itself, and
 its 51.9x spread is the evidence. This gate does not repeat the
 construction with a new correlation on top of it.
 
+**Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). This is §88.10's
+leg 4, with the same records (§144.3), key (§144.6), definitions and bands, read for `kOmegaSSTGamma`. On the
+finest of three meshes, **the onset is `OPEN`, undecided**: the least `C_f` lies at `Re_x = 1.563e5`, `+12.7 %`
+from the measured `1.387e5` and inside the 15 % band, but the §94 study extrapolates to `+18.3 %`
+(`u_val 7.0 %`). **The turbulent `C_f` holds**: `-7.6 %` at worst, `|E| + u_val = 9.98 %` against 10 %. **The
+laminar part `MISSES`** at `+15.8 %` above Blasius. Leg 2's verdict stays `OPEN` as written.
+
 ### 90.11 What must hold
 
 | Check | Expected |
@@ -25123,6 +25145,7 @@ construction with a new correlation on top of it.
 | **Gate 90-T leg 1** | `3.3530 %` against the published `3.300 %` — `1.61 %`, **HOLDS**, inherited from §88.10 |
 | `lambda_B` on the Blasius profile | `-7.57e-3 eta*^3 f''(eta*)/2 + 0.0128 = -0.00343` at `eta* = 2.951`, from §88.7's own solution — pinned to `1e-4` absolute |
 | **Gate 90-T leg 2** | root printed with `eta*`, `lambda_B` and `F_PG(lambda_B)`; the one assumption stated — **OPEN**; the printed `Tu_L` is the assumption's (§90.10) |
+| **Gate 90-T leg 4** (§144.4) | 2-D `C_f(Re_x)` against Roach & Brierley: onset `+12.7 %` **OPEN**, undecided (15 %, `u_val 7.0 %`); turbulent `C_f` `-7.6 %` holds (`|E| + u_val = 9.98 %` against 10 %); laminar part `+15.8 %` of Blasius **MISSES** (10 %) |
 | two identical runs | identical bits in `k`, `omega`, `nut`, `gamma` |
 | attaching the model | `named_fields` grows from 3 names to 4 |
 | a hybrid and this model together | refused by name, message naming both and the buffer |
@@ -25148,6 +25171,9 @@ equations do to each other in a real layer.
 **NOT claimed: the `C_f` distribution through transition.** What the T3
 experiments measure and what a transition model is finally judged on; it
 needs the run above, and the run above does not exist.
+*Amended (docs/17 VAL-33):* §144.3 now has the run, and §90.10's leg 4 (§144.4)
+holds its `C_f(Re_x)` against the measurement. The laminar row misses, and the
+onset row is undecided.
 
 **NOT claimed: T3A- or T3B.** §88.10 leg 3's measured reason — the 51.9x
 spread — and Gate 90-T declines to re-run the trend on one rig with a
@@ -52151,8 +52177,9 @@ only in the oracle: there is no device kernel, case keyword or registry row (VAL
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §144 to the flat-plate units
 VAL-30 to VAL-34. §144.1 is the flat-plate mesh (VAL-30), and it claims nothing about a
 solution. §144.2 is the Blasius gate (VAL-31). §144.3 is the T3A case on the harness and leg 1 in 2-D
-(VAL-32). §144.4 (leg 4, VAL-33) and §144.5 (the ZPG plate, VAL-34) are the plan's numbers and
-are not yet written; they go between §144.3 and §144.6. §144.6 is the T3A key (VAL-04). The plan's row gives it
+(VAL-32). §144.4 is leg 4 of Gates 88-T and 90-T, the 2-D `C_f(Re_x)` against the key (VAL-33). §144.5 (the ZPG
+plate, VAL-34) is the plan's number and is not yet written; it goes between §144.4 and §144.6. §144.6 is the T3A key
+(VAL-04). The plan's row gives it
 §144.1, and it was written as §144.1 in its own lane, but VAL-30 had taken §144.1, so it was
 renumbered when the lanes merged and the plan's numbers for VAL-32 to VAL-34 were kept.
 §88.10, §40.7 and §56.11 each record that this tree had no flat-plate harness, and §88.10 and
@@ -52475,8 +52502,8 @@ A miss of row 3 or 4 would register the closed-form gate `MISSES`, with the stud
   for edge cells within 5 % of each other.
 
 **Not claimed.** This subsection holds no `C_f` against a measurement or a correlation. The `C_f` rise and the
-least-`C_f` points in the records are what VAL-33's leg 4 will hold against Roach & Brierley (§144.6), with the bands
-fixed in its brief. The two fine f64 runs do not meet the stopping rule within 40 000 iterations. From iteration
+least-`C_f` points in the records are what leg 4 holds against Roach & Brierley (§144.6) in §144.4, with the bands
+fixed in VAL-33's brief. The two fine f64 runs do not meet the stopping rule within 40 000 iterations. From iteration
 10 000 to 40 000 their largest `C_f` change per 100 iterations stays between `1.0e-6` and `2.8e-5` (LM) and between
 `4.7e-6` and `7.0e-5` (gamma). Over the same span the largest initial residual wanders between `8e-6` and `3.3e-4`.
 `Tu_LE` reads `3.35332 %` at every check from iteration 300 on. Leg 1 reads the free stream, which is
@@ -52486,6 +52513,154 @@ does the coarse gamma level (1 400 against 1 000). Where the fine runs stop, the
 differs by `0.4 %` (LM) and `0.03 %` (gamma). That is the size of the wander, and leg 4 should carry it as part of
 its uncertainty. Whether the wander is a property of the transition region on these meshes or of the iteration is not
 diagnosed here. No solver setting was changed to quiet it.
+
+### 144.4 Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) against Roach & Brierley
+
+`No GPL-licensed source was consulted.` Docs/17's row VAL-33 reads "Gates 88-T and 90-T gain leg 4: the 2-D
+`Cf(Re_x)` against Roach & Brierley's measurement". It gives the bands, "onset ±15 % in `Re_x`; turbulent `Cf` ±10 %
+(+ `u_D`); laminar part within 10 % of Blasius", and the verdict word `MISSES` (measurement). Before this unit,
+§88.10 and §90.10 had neither a measured `C_f` to hold a transition model against nor a two-dimensional run. §144.3
+supplies the runs and §144.6 the measurement, and this subsection holds the one against the other. It makes no new
+run, and it changes no solver, model, kernel, driver or record. The code is leg 4 of
+`src/bin/validate_gates/t3a.rs` and one section of `ofgpu-validate`, "Gates 88-T and 90-T leg 4".
+
+**What is replayed.** The replay reads the twelve records of §144.3's table (`t3a::RECORDS`, f64, and
+`t3a::RECORDS_SINGLE`), as §110.1 splits recipe and verdict. Each record carries `C_f` at `Re_x = 2.5e4 (k + 1)` for
+`k < 23` and the plate face of least `C_f`. Both are on the harness's scale, and (144.3a) makes `Re_x` the same number
+on the rig and on the harness. The key is `reference/ercoftac_t3a/t3ay.dat`, read through `key::ercoftac_t3a()`. The
+section prints the key's digest line. If the key is absent it prints §110.1's `answer key ercoftac-t3a missing`
+line instead, the six gates report open by name, and nothing is compared. No number of the key is copied into this
+section, a test or a source file (§144.6). Every number below that comes from the key is derived from it: an onset,
+an error or a ratio.
+
+**What leg 4 reads from the key.** Let the stations be `(Re_x,i, C_f,i)` in file order, and let `i*` be the station
+of least `C_f` (the first one on a tie). The key's own row requires `i*` to be interior. The measured onset is the
+vertex of the parabola through stations `i* - 1`, `i*` and `i* + 1`, written `(x_0, y_0)`, `(x_1, y_1)` and
+`(x_2, y_2)`:
+
+```text
+Re_on = x_1 - (1/2) [(x_1 - x_0)^2 (y_1 - y_2) - (x_1 - x_2)^2 (y_1 - y_0)]
+                  / [(x_1 - x_0)(y_1 - y_2) - (x_1 - x_2)(y_1 - y_0)]                       (144.4a)
+```
+
+This is the stationary point of the interpolating quadratic: Lagrange's form, differentiated and set to zero. With
+`y_0 > y_1 <= y_2` the denominator is negative, so the vertex is a minimum and lies between `x_0` and `x_2`. The
+turbulent stations run from `j*` to the last one, where `j*` is the station of greatest `C_f` downstream of `i*`. The
+laminar part is `2e4 <= Re_x <= Re_x,(i* - 1)`. Its lower end is §144.2's, and its upper end is the last station
+upstream of the least `C_f`. On the tree's key, `i*` is station 5 of 16 and `Re_on = 1.38689e5`. The turbulent
+stations are 10 to 16, from `Re_x = 3.093e5`, and the laminar part ends at `Re_x = 1.006e5`.
+
+**What leg 4 reads from a record.** A record's onset is its least-`C_f` face (`cf_min_re_x`, §144.3), so the 2-D
+onset and the measured one are the same functional. Its `C_f` at a station `R` between two recorded points
+`g_k <= R <= g_(k+1)` is the power law through those two points:
+
+```text
+ln C_f(R) = ln C_f,k + [ln(R/g_k) / ln(g_(k+1)/g_k)] (ln C_f,(k+1) - ln C_f,k)                (144.4b)
+```
+
+(144.4b) is NaN outside `[2.5e4, 5.75e5]`, and a NaN fails its row. A turbulent `C_f` follows a power of `Re_x`
+closely, and a linear interpolant over a `2.5e4` step does not. A record's laminar points are its own `g_k` in the
+laminar part that also lie upstream of its own least `C_f`. Each is read, without interpolation, against Blasius
+(§88.7's `0.664`):
+
+```text
+E_lam(g_k) = C_f,k sqrt(g_k) / 0.664 - 1                                                     (144.4c)
+```
+
+So a laminar point is never one where the solution has already begun to transition, and an early onset is charged to
+the onset row alone.
+
+**The rows, the bands and the rule.** The finest f64 record of each model carries the verdict. For each model:
+
+| row | `E` | band | `u_D` | `u_num` from §94's study of |
+|---|---|---|---|---|
+| onset | `Re_on,sim / Re_on - 1` | 0.15 | 0: the key states no onset uncertainty | `cf_min_re_x` on the three levels, divided by `Re_on` |
+| turbulent | the worst `C_f,sim/C_f - 1` over the turbulent stations, with (144.4b) | 0.10 | 0.02: the case page's three methods agree within 2 % in turbulent layers (§144.6) | (144.4b) at that station, divided by its `C_f` |
+| laminar | the worst (144.4c) | 0.10 | 0: Blasius is exact for a laminar layer | (144.4c) at that point |
+
+`u_val = sqrt(u_num^2 + u_D^2)`. The band rule is §110.1's as written, after §32.4: "a result that lands within the
+uncertainty of a band edge is reported UNDECIDED, not as inside it." A row is inside when `|E| + u_val <= band`, and
+it is then a check row whose error is `|E| + u_val`. A row is outside when `|E| - u_val > band`, and the gate then
+reports `MISSES` against the measurement. Any other row is undecided, and the gate reports `OPEN` with the word
+"undecided" in its headline. `ofgpu-validate`'s `band_of`, which Gates 110-A to 110-C use, makes only the outside
+half undecided. Leg 4 uses `t3a::band_110`, which follows the text, and nothing changes for those three gates. Under
+single, one class-R row per model requires that the finest single record's three rows land in the f64 build's
+bands.
+
+**When the bands were fixed.** The bands are the plan's, unchanged. The definitions above were fixed in this unit's
+brief before the replay was written. But §144.3's records were already in the tree when the brief was written, so this
+gate, unlike §110.2's, was not blind to its numbers. The definitions are the plainest ones available: the least
+`C_f`, the stations past the `C_f` peak, and the stations upstream of the least `C_f`.
+
+**The replay** (the tree's key and records, 2026-10-15):
+
+| model | build, level | onset `Re_x` (`E`) | worst turbulent `C_f` | worst laminar `C_f` against Blasius |
+|---|---|---|---|---|
+| `kOmegaSSTLM` | f64, 48 + 256 x 128 | `8.8932e4` (`-35.88 %`) | `-7.07 %` at `Re_x = 3.093e5` | `+16.29 %` at `7.5e4` |
+| `kOmegaSSTLM` | f64, 24 + 128 x 64 | `8.6481e4` (`-37.64 %`) | `-9.20 %` | `+16.66 %` |
+| `kOmegaSSTLM` | f64, 12 + 64 x 32 | `8.7127e4` (`-37.18 %`) | `-10.80 %` | `+18.68 %` |
+| `kOmegaSSTLM` | single, finest | `8.8932e4` (`-35.88 %`) | `-7.07 %` | `+16.13 %` |
+| `kOmegaSSTGamma` | f64, 48 + 256 x 128 | `1.5633e5` (`+12.72 %`) | `-7.63 %` at `Re_x = 3.093e5` | `+15.78 %` at `1.0e5` |
+| `kOmegaSSTGamma` | f64, 24 + 128 x 64 | `1.4507e5` (`+4.60 %`) | `-8.84 %` | `+16.68 %` |
+| `kOmegaSSTGamma` | f64, 12 + 64 x 32 | `1.1743e5` (`-15.33 %`) | `-11.52 %` | `+21.48 %` |
+| `kOmegaSSTGamma` | single, finest | `1.5633e5` (`+12.72 %`) | `-7.63 %` | `+15.78 %` |
+
+The studies:
+
+- LM's onset is oscillatory (`u_num = 6.53 %` of `Re_on`).
+- LM's turbulent `C_f` is monotone but diverging, first order with `Fs = 3` (`u_num = 4.82 %`, `u_val = 5.22 %`).
+- LM's laminar row converges at `p = 2.44` (`u_num = 0.62 %`).
+- Gamma's onset is monotone at `p = 1.30` and extrapolates to `1.6409e5` (`+18.3 %`), with `u_num = 6.99 %`.
+- Gamma's turbulent `C_f` converges at `p = 1.15` (`u_num = 1.23 %`, `u_val = 2.35 %`).
+- Gamma's laminar row converges at `p = 2.42` (`u_num = 1.46 %`).
+
+**The verdicts.**
+
+| gate | verdict |
+|---|---|
+| 88-T leg 4, `kOmegaSSTLM`, onset | **`MISSES`**: `-35.88 %`, `u_val 6.53 %`, outside 15 % |
+| 88-T leg 4, `kOmegaSSTLM`, turbulent `C_f` | **`OPEN`, undecided**: `-7.07 %`, and its `u_val` of `5.22 %` reaches the 10 % edge |
+| 88-T leg 4, `kOmegaSSTLM`, laminar `C_f` | **`MISSES`**: `+16.29 %`, `u_val 0.62 %`, outside 10 % |
+| 90-T leg 4, `kOmegaSSTGamma`, onset | **`OPEN`, undecided**: `+12.72 %`, and its `u_val` of `6.99 %` reaches the 15 % edge |
+| 90-T leg 4, `kOmegaSSTGamma`, turbulent `C_f` | holds: `|E| + u_val = 9.98 %` against 10 % |
+| 90-T leg 4, `kOmegaSSTGamma`, laminar `C_f` | **`MISSES`**: `+15.78 %`, `u_val 1.46 %`, outside 10 % |
+
+On all six rows the single build lands in the f64 build's band. §144.3's iteration wander is printed beside each row
+in both builds; for LM, the least `C_f` of the two builds differs by 0.4 %. The wander is smaller than every row's
+`u_num` and moves no band. It is not folded into `u_val`.
+
+**What the misses are, as far as this unit measured.**
+
+- **LM's onset is early by 36 %.** The cause is not the mesh, because the three levels read `8.7e4` to `8.9e4`. Nor
+  is it the free stream. §144.3's 2-D runs reproduce §88.10's closed form at the edge to `0.016 %`. At each of the
+  key's stations that closed form, from the TMR inflow, gives a `Tu` within `0.03 %` of the key's measured free-stream
+  `Tu` at the first station and up to `5.2 %` BELOW it further on, and lower turbulence delays transition. The 2-D least `C_f` lies `4 %` downstream of
+  §88.10 leg 2's 1-D onset root (`8.525e4`), which fits a 2-D run that onsets where the shipped LM2009 correlations
+  put it. This unit does not decide whether the cause is those correlations or the harness inflow (whose `Tu` was not
+  fitted to the measured decay; that is VAL-35's subject).
+- **Both laminar parts sit about 16 % above Blasius.** The key's own laminar stations in the same range sit between
+  `+0.9 %` and `+8.5 %` above it, so the band is one the measurement meets. On every level the excess rises from
+  about 11 % at `Re_x = 2.5e4` to the worst point. It converges at `p = 2.4` in both models, so it belongs to the
+  models' pre-transitional layer and not to the mesh. Its cause is not diagnosed here.
+- **Gamma's onset** lies inside the band on the finest mesh, but its study extrapolates outside the band, and the rule
+  makes it undecided. **LM's turbulent `C_f`** also lies inside the band, but its study diverges, which makes it
+  undecided.
+
+All three misses are recorded for later review in docs/17-review-later.md (the orchestrator's copy). No numerics were
+changed to close them, and none will be changed without the user.
+
+**Tests** (`t3a::tests`, in the validate binary):
+
+- `leg4_reads_a_synthetic_key_exactly`: (144.4a) on invented stations, to `1e-12`, and the two refusals.
+- `band_110_is_undecided_within_u_val_of_either_side_of_the_edge`.
+- `leg4_replay_passes_misses_and_reports_on_synthetic_records`: an invented key with every row inside, then one onset
+  miss, one laminar miss and one undecided turbulent row, checked by gate name and verdict.
+- `leg4_reports_every_gate_open_when_the_key_is_missing_or_shows_no_transition`.
+- `the_recorded_runs_against_the_t3a_key`: with the key placed, it asserts and prints the three `MISSED` rows and the
+  two undecided rows above. Without the key, it asserts the six open gates.
+
+**Not claimed.** T3A- and T3B (§88.10 leg 3, VAL-35), or a fitted inflow. Nor the key's shape factor, `Re_theta` or
+profiles. Nor any reading of the measurement beyond §144.6's.
 
 ### 144.6 The T3A key: Roach & Brierley's measured Cf(Re_x) and Tu(x), fetched and local
 
@@ -52556,8 +52731,9 @@ increasing and every `Cf` and `Tu` positive and finite. Absent, it must be `NotF
 missing line must name the id and the file. The census test counts 43 markers and four
 `fetched` rows.
 
-**Not claimed.** No gate reads the key yet: leg 4 is VAL-33's, and its verdict word against a
-measurement is `MISSES` (measurement), as VAL-33's row states. Nothing here judges the
+**Not claimed.** This subsection reads the key and judges nothing with it. Leg 4 (§144.4, VAL-33)
+is the gate that reads it, and its verdict word against the measurement is `MISSES`, as VAL-33's
+row states. Nothing here judges the
 quality of the measurement beyond what the host page states.
 
 ## 145. Martin & Moyce's collapsing column — the surge-front key
