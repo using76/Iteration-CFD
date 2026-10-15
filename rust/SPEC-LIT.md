@@ -22948,7 +22948,8 @@ energy-balance gap. Here neither half is annihilated, because `Y` is not `T`
 and there is no ideal-gas identity to kill anything.
 
 `S` is `sum_c S_i,P V_P`, the §18 volumetric source term summed over the
-domain, and is zero unless a case names one. `sum_c Y_P R_P` is available to
+domain, and is zero unless a case names one or the split chemistry step of
+§132.11 fills the species' `su` (132.10). `sum_c Y_P R_P` is available to
 every mass-weighted run beside the budget it explains, with `R_P`'s L1 norm and
 worst cell. The record's first open candidate — *"the `d(rho)/dt` half of the
 difference above, which `bounded` does not touch"* — is that first term of
@@ -47264,6 +47265,80 @@ paths are set (§129.6). JL4 is not in the tree (§129.6).
 
 No new equation labels.
 
+### 132.11 The split step as built (CHR-09, `src/chem/source.rs`, `src/species.rs`)
+
+`No GPL-licensed source was consulted.` The equations are §132.4's reactor and
+§132.5's split, (132.7)-(132.10); nothing is added to them.
+
+**The species set carries a source.** `Species::use_reaction_sources` gives
+each solved species one `[n_cells]` buffer `su`, allocated once (§81), and
+`Species::correct_with_density` hands species `i` its own buffer as the
+`su` of `ScalarTransport::correct_with_density`, which adds it as
+`fvm_su(su, +1)`: `source[P] += V_P su_P`, after the equation's own terms and
+before relaxation, where every other source of the solver goes (§18). A set
+without reaction sources hands every equation `None`, which is the call it
+made before CHR-09, so that path is the same arithmetic by construction and
+is held to a hash pinned before the change.
+
+**The split step fills it.** `chem::source::ChemSource::new` maps every
+mechanism species by name to a solved index or to the inert remainder of
+§19 and refuses, by name, a mechanism species that is not in the set and a
+member of the set that is not in the mechanism: the reactor needs the whole
+composition. `ChemSource::step(species, T, p, rho, dt)` then, for one flow
+step `dt`:
+
+1. packs `Y°` in mechanism order (the inert remainder included) and copies
+   `T°`, by device-to-device copies;
+2. runs CHR-07b's `integrate_fields` (§132.10) in place, every cell's reactor
+   at its `p` and in `double` in both builds (§132.6), with each cell's step
+   memory `h` seeded with `opts.h0` and carried from flow step to flow step
+   (`RosStats::h_next` out, the next step's first trial step in);
+3. writes, per solved species, (132.10) in the currency of the equation it
+   enters: `su_k = (Y*_k - Y°_k)/dt` on §19's constant-density equation
+   (`d(Y)/dt`), and `su_k = rho (Y*_k - Y°_k)/dt` on §86's mass-weighted one
+   (`d(rho Y)/dt`), with `rho` the density `correct_with_density` is handed.
+   `Y* - Y°` is formed from the two Scalar values, so it is exact
+   (Sterbenz) whenever the step changed `Y_k` by less than a factor of two.
+
+`T*` is kept (`ChemSource::temperature`) for (132.10)'s `Q_chem`, which is
+CHR-10b's; CHR-09 does not touch `T`. Refused by name: `dt` not finite or not
+above 0; a density on the constant-density set or none on the mass-weighted
+one (as §86.5 row 6); a set without reaction sources; `T` or `p` shorter than
+the cell count. A cell the reactor refuses carries NaN into its sources and
+its status into `ChemSource::refused_cells`, one read-back and so a
+diagnostic, not a loop step. The step allocates nothing and reads nothing
+back, and it captures (§81.7).
+
+**(133.5) is not built.** §133.5 lists `species_fluxes_sum_to_zero` under
+CHR-09, while the plan's CHR-09 row (docs/17 §12.2) names neither the
+correction nor its files or test. The correction is a new explicit face flux
+in every species equation. That is a numerics addition to species diffusion,
+and the diffusivity it corrects is not there yet: §133.4's route (b) is
+refused by name (§133.7), and on the Lewis route with one Lewis number for
+every species the correction is identically zero. This was decided by
+recommendation, and the row moves to the unit that brings species-specific
+mixture-averaged diffusivities into the species equation.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `species_box_matches_reactor` | a closed adiabatic box with no flow, 2^3 cells cyclic on all three axes and uniform (the plan's one-cell-wide periodic box is the same 0-D problem), stoichiometric H2-air with H, O, OH at 1e-4 moles each, `T0` 1400 K, 1 atm, on §132.8's 15-reaction fixture (placeholder rates); Lie split at `dt = 1e-6` s over 200 steps, `T` fed back from `T*`; every species of the set, solved and inert, against the host `ConstPressureReactor::advance` chained over the same 200 `dt` (each chunk's first trial step the last one's `h_next`), on both species equations | `max abs dY <= 1e-6`; the host must move `max abs dY > 1e-3` | P | host: `T` 1400 -> 1456.270 K, `max abs dY` `2.33e-2`. f64 build: `3.12e-13` (constant density) and `4.59e-13` (mass-weighted), `T*` within `1.7e-9` K. f32 build: solved species `7.04e-7` on both equations; **the inert N2 MISSED**, `1.086e-6` (constant density) and `1.026e-6` (mass-weighted), at step 196 |
+| `species_budget_closes_with_chemistry` | (86.5) with the source metered: a closed 4^3 box (walls, a non-solenoidal internal flux, conservative upwind, `rho` varying in space and held in time, non-uniform `T` and `Y`), the mass-weighted set with the split step's sources; per step and per solved species `abs(Δ Σ rho Y V - dt Σ su V - Δ clip) / Σ rho V`, three steps | `1e-12`, tol32 `1e-5` (D-F32-1); the chemistry term above `1e-6` of the mass | R | f64 build `1.23e-16`; f32 build `3.27e-9`; the chemistry term `2.52e-4` of the mass |
+| `species_without_chemistry_is_bitwise` | three steps of each species equation with no reaction sources, FNV-1a over every solved field and the inert remainder, against the hash pinned at afd0f30 before `src/species.rs` changed | bitwise | D | f64 `0x1bc5208b67b6041e`, f32 `0x018e7024cfdec719`: both unchanged |
+| `chem_source_replays_under_capture` | `ChemSource::step`, `T*` copied back into `T`, then `Species::correct` on a 3^3 box with a flux, captured and replayed | bitwise | D | 1027 nodes (896 kernel, 100 memset, 31 memcpy), 3 replays bitwise over 6 buffers / 162 values (f64 lib test) |
+
+**The f32 miss.** The inert remainder is `1 - Σ` over nine f32 fields, and
+each of them is rounded once per step, so the remainder carries their
+summed round-off. The test measures that cause: N2's error minus the
+negated sum of the solved species' errors is `8.1e-8` on both equations,
+while every solved species stays within `7.0e-7`. The miss is the f32
+storage of the mass fractions, which §19's construction sends to the inert
+species. A cure (f64 mass fractions, or a renormalised set) changes the
+species numerics and is the user's decision (docs/17 §5.3.4). Under the
+user's rule of 2026-10-14 the test asserts the miss as MISSED, prints its
+value and cause, and the unit lands.
+
+No new equation labels.
+
 ---
 
 ## 133. Mixture-averaged transport, and the reacting low-Mach constraint
@@ -47388,7 +47463,8 @@ form already does.
 
 **On the mesh**, (133.5) is evaluated per face with face-interpolated `Y_m`,
 and its sum over `m` is zero per face up to round-off. §86's species budget
-then closes with the correction metered, not hidden. CHR-09 proves it.
+then closes with the correction metered, not hidden. CHR-09 was to prove it;
+it did not build (133.5), and §132.11 says why.
 
 ### 133.4 Mixture-averaged coefficients
 
@@ -47458,7 +47534,7 @@ constant.
 | `transport_air_viscosity_vs_kadoya` | (133.8) on N2/O2 0.79/0.21 with route (a), 300-1500 K, against `reference/kadoya1985` | 2 % | P |
 | `transport_air_conductivity_vs_kadoya` | (133.9) and (133.11), same | 5 % | P |
 | `transport_route_b_named` | `D_kj` refused by name until Neufeld is read | — | D |
-| `species_fluxes_sum_to_zero` (CHR-09) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
+| `species_fluxes_sum_to_zero` (CHR-09; not built, §132.11) | `abs(Σ_m Γ_m)` per face from (133.5) | 1e-14 relative to `Σ abs(Γ_m)` | A |
 | `gas_wmix_sealed_box_p0_closed_form` (CHR-11) | `dp0/dt` from (133.4) against the analytic sealed box | 1e-12 relative | A |
 | `gas_constant_w_default_bitwise` (CHR-11) | one species, constant W: (133.4) reduces to §25.1 bitwise | bitwise | D |
 

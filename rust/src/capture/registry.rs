@@ -139,6 +139,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         ),
     ),
     (
+        "src/chem/source.rs",
+        Stance::Gate("chem_source_replays_under_capture"),
+    ),
+    (
         "src/compressible/energy.rs",
         Stance::Gate("the_compressible_energy_equation_replays_bitwise"),
     ),
