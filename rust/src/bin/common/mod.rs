@@ -86,13 +86,28 @@ pub fn json_case_output_dir(path: &Path) -> PathBuf {
 /// mesh straight into memory with `blockgen::build_mesh` - no disk polyMesh
 /// at any point, which is `docs/05-io-redesign.md`'s whole point 4.
 pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    load_case_with(case_path, false)
+}
+
+/// [`load_case`], with a JSONC case's `species`, `chemistry` and `combustion`
+/// blocks let through when `allow_chemistry` is set - SPEC-LIT §133.11:
+/// `ofgpu-lowmach` is the one driver that runs them (CHR-12b), and every
+/// other driver keeps §137.7's refusal through [`load_case`]. The dictionary
+/// route is refused on both, by `read_case_controls`.
+pub fn load_case_with(
+    case_path: &Path,
+    allow_chemistry: bool,
+) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
         // SPEC-LIT §137.6: a case's parcels are refused until CHR-26.
         lowered.refuse_parcels()?;
-        // SPEC-LIT §137.7: a case's chemistry is refused until CHR-12b.
-        lowered.refuse_chemistry()?;
+        // SPEC-LIT §137.7: a case's chemistry is refused by every driver but
+        // the one that asks for it (§133.11).
+        if !allow_chemistry {
+            lowered.refuse_chemistry()?;
+        }
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below
         // always built) and the 119.0 wedge mesh - with the case's own

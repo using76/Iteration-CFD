@@ -47894,8 +47894,8 @@ by name. Under backward, `rho* cp` of (133.13) becomes `(p0/R) cp / ((1/W) T*)`
 with the current level's `1/W`, as it takes the `cp` field as last set.
 
 **What is not built, stated.** The `- div Γ_k` half of `S_k` is the caller's:
-`set_molar_change` takes the net source, and CHR-12b forms it from the species
-equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
+`set_molar_change` takes the net source, and CHR-12b forms it, (133.24) of
+§133.11, from the species equations it solves (the reaction half is CHR-09's (132.10) source, times `rho`
 on the constant-density equation). The Mach number of §93.5 and `GasState::rho_at`
 still read the constant `R_s`. Day & Bell's damping eq. (8) is not adopted: the
 measured drift below is first order in `Δt`.
@@ -47919,6 +47919,110 @@ energy solve, as on the constant-`W` path. The numbers above are for that
 order. CHR-12b keeps it.
 
 Labels: (133.19)-(133.23).
+
+### 133.11 The reacting driver as built (CHR-12b, `src/bin/lowmach.rs`, `src/bin/lowmach_chem/`)
+
+`No GPL-licensed source was consulted.` The equations are Day & Bell's as
+§133.1-§133.10 write them and §132's split step; this section adds the
+discrete diffusion half of (133.21)'s net source, (133.24), and the order in
+which `ofgpu-lowmach` runs them. It is this project's own contract (ORIGINAL).
+
+**What runs.** A JSONC case whose `species`, `chemistry` and `combustion`
+blocks lower (§137.7) with `combustion.model laminar` runs as laminar
+finite-rate chemistry, Lie split (§132.5): chemistry first, then transport.
+`common::load_case_with(path, true)` lets the blocks past §137.7's seam for
+this driver only; every other driver keeps the refusal through
+`common::load_case`.
+
+**The species set.** Every solved member gets §86's mass-weighted equation,
+`d(rho Y)/dt`, with the density of the step. Its diffusivity is the Lewis
+route of §133.4, `D_k = lambda/(rho cp Le_k) = nu/(Pr Le_k)`, with this
+driver's constant `nu` and `Pr` and `Le_k` from the case (1 by default), and
+`Sc_t` the case's. The controls are read by the species' own entry names
+(§13.4.1): `solvers` and `relaxation` under `Yi` (relaxation 1 when the case
+names none), `grad(Yi)`, and the convection `div(phi,Yi_h)` or `div(phi,Yi)`
+when the case names one (two different entries are refused), otherwise §19's
+bounded Gauss upwind. The case's `div` `default` is never taken.
+
+**One step, in this order.** `o` marks the step's opening state.
+
+1. Open the step (from the second on): `Simple::begin_time_step`, `T`'s
+   levels, `p0`'s levels, and then every solved `Y_k`'s levels
+   (`Y^(n-2) <- Y^(n-1) <- Y`). The last rotation is what makes (133.20)'s
+   `rho^(n-1)` the opening state's, so `rho^n = rho^(n-1)` at the energy
+   solve, as §133.10 requires of the order.
+2. `T`'s and every `Y_k`'s `inletOutlet` faces switch on the last flux.
+3. `rho` by (133.19)-(133.20) from `T`, `Y_k` and `p0`.
+4. `EnergySources::clear`; the mixture `cp` (133.18) into the energy
+   equation's `cp` field; the split step (132.10) with every cell's reactor
+   at `p0`; the heat release (133.16) and the enthalpy diffusion (133.17)
+   registered, ahead of `-heaterPower`, the thermostat and the case's sources.
+5. The molar change of (133.21), with each solved member's net source
+
+```
+S_k,P = rho_P (Y*_k,P - Y°_k,P)/dt + (1/V_P) Σ_f rho_f D_k |S_f| snGrad(Y°_k)_f          (133.24)
+```
+
+   The first term is the split step's own source on the mass-weighted
+   equation (§132.11). The second is `-div Gamma_k` with
+   `Gamma_k = -rho D_k grad Y_k`: `rho_f` interpolated linearly, the
+   uncorrected `snGrad` and `fvc::div` of the face flux (`fv::sn_grad_flux`,
+   `fv::fvc_div_surface`). *DESIGN, decided by recommendation:* it carries
+   the laminar `D_k` only, as (133.17) does and for the same reason (§133.9).
+6. `Energy::update_target_divergence` ((133.21)), `Simple::correct_outer_low_mach`
+   and `Energy::correct`.
+7. The species equations, on the flux the pressure solve made.
+8. Transient: `GasState::advance_p0_mixture` from
+   `Energy::constraint_integrals`, (133.22); an open gas keeps `p0`.
+
+A case without the blocks makes the calls it made before CHR-12b, in the same
+order: `outer_iteration`'s `None` arm is the old sequence.
+
+**Written.** Every solved `Y_k` with its own boundary types, the inert member
+and `HRR` (133.16)'s `Q_chem` in W/m3, both with `calculated` in place of the
+value rules and the constraint patches kept. The final cell values of `T`,
+`rho`, `HRR` and every member are also held at full precision in the driver's
+`RunEnd`, because the written fields carry six digits.
+
+**Refused by name, before a field is set up** (`lowmach_chem::refuse_settings`):
+a steady run (the split step integrates over a physical `dt`); EDM, EDC and
+PaSR, which lower (§137.7) and are CHR-14's and CHR-15's; Strang splitting;
+a `ddt` other than Euler (the box lands on the reactor under Euler, §133.9,
+and the species keep one old level); a checkpoint, `-restartFrom`,
+`-restartWrite` or an output restart series (the `.mcr` format carries no
+mass fractions); a motion block; and a species named like another field the
+run writes. The dictionary route keeps §137.7's refusal: a case directory
+with chemistry is refused by every driver.
+
+**What is not built, stated.** The dictionary route, Strang, `backward`, a
+restart of the mass fractions, the closures of §134, the turbulent part of
+(133.24), and §93.5's Mach number with the mixture's own `R_s` (it still
+reads the constant one, §133.10).
+
+**Tree against plan.** The plan's row names "a reduced 1-D JL flame".
+`cases/mech/jl4.ck` does not exist: its paper is unread and no rate is
+written from memory (`cases/mech/README.md`). The tube below runs CHR-06's
+fifteen-reaction fixture with its placeholder rates instead. The plan's 0-D
+box is CHR-09's 2^3 box, cyclic on all three axes. Through the driver that box
+does not stay at rest. Its domain is open, so the target divergence (133.21)
+is uniform and nonzero, and with no open boundary the pressure equation has
+no solution. The mean is removed, the round-off left over is solved, and the
+flow it makes grows to about 2 m/s in 200 steps (measured). The pair below
+therefore runs the box as two cells with adiabatic walls. There the pressure
+source cancels to an exact zero, the written `U` is exactly zero, and the box
+is the same 0-D problem.
+
+**Gates, measured 2026-10-16 (both builds, `lowmach_chem::tests`, bin tests
+of `ofgpu-lowmach`).** The chemistry is CHR-06's fixture over TM-4513's ten
+records, with the reactor at `rtol` 1e-6.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `lowmach_reacting_case_equals_library` | the 0-D box (2 cells, 1 cm, adiabatic walls, open, `p0` 1 atm, stoichiometric H2-air with H, O and OH at 1e-4 moles, 1400 K) through a case for 200 Lie steps at dt = 1e-6 s, against steps 1-8 made by hand from the library on the same lowered case without the flow solve: `T`, `rho`, `HRR` and every member, cell by cell; the written `U` exactly zero; the box heats by more than 10 K | bitwise | D | every member, `T`, `rho` and `HRR` equal in both cells in both builds (0 of 2 differ); `T` 1400 -> 1456.270 K (f64) and 1456.269 K (f32). Diagnostic: the box's H and O content moved by `1.4e-12` and `6.1e-13` (f64), `3.7e-6` and `2.7e-6` (f32) |
+| `lowmach_reacting_elements_conserved` | a 1-D tube (40 x 1 x 1 cells over 1 cm; premixed H2-air entering at 1 m/s and 1400 K into gas at 1000 K, an open outlet, symmetric sides), 200 steps at dt = 1e-5 s without a NaN; every cell's element content `n_e = Σ_k a_ek Y_k/W_k` of H, O and N against the premixed value, relative, and C (absent) staying absent. Equal diffusivities, the reactor's element balance and the bounded convection keep a uniform composition uniform | `1e-10` (D-F32-1: `1e-5` in f32) | R | f64: H `6.43e-13`, O `5.01e-13`, N `1.71e-13`, C `2.1e-20` mol/kg; f32: `6.10e-6`, `5.68e-6`, `1.90e-6`, `3.0e-20`; no NaN, `T` 2152-2738 K, max `HRR` `1.39e9` W/m3 |
+| `lowmach_reacting_refusals_name_the_setting` | a steady run, Strang, `-restartWrite` and `backward`, each refused naming its key and §133.11 | refused | D | all four, both builds |
+
+Labels: (133.24).
 
 ---
 
@@ -50025,7 +50129,8 @@ from a running model's `mixing_rate()`, for the driver. Then:
   that use it, so a driver that never read the file does not start failing
   on it.
 
-CHR-12b replaces the refusal on `ofgpu-lowmach`'s path. A case without the
+CHR-12b replaces the refusal on `ofgpu-lowmach`'s path for a JSONC case
+(§133.11); the dictionary route stays refused. A case without the
 three blocks lowers, serialises and runs exactly as before.
 `docs/schema/case-1.json` is regenerated (§137.2).
 

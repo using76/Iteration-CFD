@@ -1680,8 +1680,8 @@ pub struct LoweredCase {
 
 impl LoweredCase {
     /// SPEC-LIT §137.7: a driver's refusal of a case that states species,
-    /// chemistry or combustion. No driver carries a reacting case before
-    /// CHR-12b, so a run would ignore them; `Ok` for every case without them.
+    /// chemistry or combustion. Every driver but `ofgpu-lowmach` (§133.11)
+    /// would ignore them; `Ok` for every case without them.
     pub fn refuse_chemistry(&self) -> Result<()> {
         match self.chem {
             Some(_) => Err(crate::io::case_chem::refuse_chemistry_case("species")),

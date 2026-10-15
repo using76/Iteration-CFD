@@ -1787,7 +1787,7 @@ pub fn read_case_controls(case_dir: &Path) -> Result<CaseControls> {
         ));
     }
     // SPEC-LIT §137.7: likewise a case that states species, chemistry or
-    // combustion, until CHR-12b.
+    // combustion: no driver runs one from a case directory yet (§133.11).
     if let Some(f) = crate::io::case_chem::dict_route_states_chemistry(case_dir)? {
         return Err(crate::io::case_chem::refuse_chemistry_case(f));
     }

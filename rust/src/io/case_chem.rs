@@ -19,8 +19,10 @@
 //! set against the mechanism, EDM's global-mechanism rule, and §129's own
 //! refusals naming the line) is [`LoweredChem::load`], which reads them.
 //!
-//! No driver runs a chemistry case before CHR-12b: every driver refuses one
-//! by name ([`refuse_chemistry_case`]), the CHR-25 parcels seam's shape.
+//! Only `ofgpu-lowmach` runs a chemistry case (CHR-12b, SPEC-LIT §133.11),
+//! and only from a JSONC case: every other driver, and every driver on the
+//! dictionary route, refuses one by name ([`refuse_chemistry_case`]), the
+//! CHR-25 parcels seam's shape.
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §137.2 - the three tables and their refusals
@@ -328,14 +330,16 @@ impl MixingKind {
 //  Refusals
 // ==========================================================================
 
-/// The refusal every driver gives a case that states species, chemistry or
-/// combustion before CHR-12b (SPEC-LIT §137.7). `source` names where.
+/// The refusal a driver gives a case that states species, chemistry or
+/// combustion when it does not run them (SPEC-LIT §137.7, §133.11). `source`
+/// names where.
 #[must_use]
 pub fn refuse_chemistry_case(source: &str) -> Error {
     Error::Refused(format!(
-        "{source}: this case states species, chemistry or combustion. ofgpu-lowmach drives a \
-         reacting case from CHR-12b on; until then every driver refuses one rather than run it \
-         without its chemistry {TAG}"
+        "{source}: this case states species, chemistry or combustion, which this driver does \
+         not run; ofgpu-lowmach runs a reacting JSONC case (CHR-12b, SPEC-LIT §133.11), and no driver runs \
+         one from a case directory yet, so it is refused rather than run without its chemistry \
+         {TAG}"
     ))
 }
 

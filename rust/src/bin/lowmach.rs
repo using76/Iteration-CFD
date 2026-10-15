@@ -120,9 +120,14 @@
 //!   `crate::energy`'s first module-level *DESIGN* note for why that is
 //!   exact, not approximate, at the buoyancy term, and a leading-order
 //!   simplification everywhere else.
-//! * **It transports no scalars of its own.** §19's species equation is a
-//!   library capability this driver does not reach for, so a case that
-//!   carries species fields has them read by nothing here.
+//! * **It transports no passive scalars.** §19's species equation is run
+//!   only for a JSONC case that states `species`, `chemistry` and
+//!   `combustion` (laminar finite rate, SPEC-LIT §133.11, `lowmach_chem`):
+//!   the split chemistry step, the mass-weighted species set, the heat
+//!   release and the mixture `rho`, with `Y_i` and `HRR` written. Steady
+//!   runs, Strang splitting, a ddt other than Euler, checkpoints, a motion
+//!   block and the EDM/EDC/PaSR closures are refused with one by name, and
+//!   the dictionary route keeps §137.7's refusal.
 //!
 //! # Field output and restart (SPEC-LIT §31.2)
 //!
@@ -200,9 +205,13 @@ use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar};
 #[path = "common/mod.rs"]
 mod common;
 
+#[path = "lowmach_chem/mod.rs"]
+mod lowmach_chem;
+use lowmach_chem::Reacting;
+
 use common::{
     atoi, device_banner, find_restart_field, from_restart_scalars,
-    from_restart_vectors, g, load_case, next_arg, output_root, parse_output_formats,
+    from_restart_vectors, g, load_case_with, next_arg, output_root, parse_output_formats,
     restart_scalar, restart_shell, restart_surface, restart_vector, sci, CaseNumerics,
     OutputFormat,
 };
@@ -450,6 +459,10 @@ pub struct IterReport {
 /// this order, `T`'s own rotation among them and ahead of the unit of work's
 /// `GasState::update_density`, which builds `rho^{n-1}` from `T^{n-1}` only if
 /// the rotation has happened.
+///
+/// A reacting run (SPEC-LIT §133.11) also rotates every solved mass
+/// fraction's levels here, after `p0`'s, so the step's `rho` of (133.20)
+/// reads the opening `Y` on its current and previous levels.
 fn open_time_step(
     gpu: &Gpu,
     s: &mut Simple,
@@ -457,6 +470,7 @@ fn open_time_step(
     gas: &mut GasState,
     dt: Scalar,
     step: usize,
+    chem: Option<&mut Reacting<'_>>,
 ) -> Result<()> {
     if step == 0 {
         return Ok(());
@@ -465,6 +479,9 @@ fn open_time_step(
     energy.advance_time_levels(gpu)?;
     energy.advance_time_step(dt);
     gas.advance_time_levels();
+    if let Some(r) = chem {
+        r.open_step(gpu)?;
+    }
     Ok(())
 }
 
@@ -494,6 +511,13 @@ fn open_time_step(
 /// pressure by a "time step" that is really an iteration count has no
 /// meaning - a steady sealed-box run holds `p0` at whatever it was
 /// constructed with.
+///
+/// `chem` is SPEC-LIT §133.11's reacting step (CHR-12b): `None` is the call
+/// sequence this function made before it, unchanged. `Some` puts the
+/// mixture density (133.20) in place of `update_density`, runs the split
+/// step and registers its heat release (133.16) and the enthalpy diffusion
+/// (133.17) ahead of every other source, sets the molar change of (133.21),
+/// solves the species after `T`, and advances `p0` by (133.22).
 #[allow(clippy::too_many_arguments)]
 pub fn outer_iteration(
     gpu: &Gpu,
@@ -509,6 +533,7 @@ pub fn outer_iteration(
     thermostat: Option<&mut ofgpu::sources::Thermostat>,
     is_final: bool,
     dt_for_p0: Option<Scalar>,
+    mut chem: Option<&mut Reacting<'_>>,
 ) -> Result<IterReport> {
     let fk = FieldKernels::new(gpu)?;
 
@@ -520,9 +545,18 @@ pub fn outer_iteration(
     // wherever the case gave `T` a plain fixedValue/zeroGradient instead.
     update_inlet_outlet_scalar(gpu, &fk, energy.field_mut(), s.convective_flux())?;
 
-    gas.update_density(gpu, energy.field())?;
+    match chem.as_deref_mut() {
+        Some(r) => {
+            r.update_inlet_outlet(gpu, s.convective_flux())?;
+            r.update_density(gpu, gas, energy.field())?;
+        }
+        None => gas.update_density(gpu, energy.field())?,
+    }
 
     energy.sources_mut().clear(gpu)?;
+    if let Some(r) = chem.as_deref_mut() {
+        r.before_flow(gpu, m, energy, gas)?;
+    }
     if let Some(h) = heater {
         energy.sources_mut().register_explicit(gpu, h)?;
     }
@@ -554,7 +588,16 @@ pub fn outer_iteration(
 
     energy.correct(gpu, s.convective_flux(), nut, k, nu, gas)?;
 
-    if let Some(dt) = dt_for_p0 {
+    if let Some(r) = chem.as_deref_mut() {
+        let flow = FlowState::new(s.u(), s.convective_flux(), nu);
+        r.correct_species(gpu, &flow, nut, gas)?;
+        if let Some(dt) = dt_for_p0 {
+            // (133.22): the sealed p0 from the constraint's own integrals;
+            // an open gas returns 0 and keeps p0.
+            let c = energy.constraint_integrals(gpu)?;
+            gas.advance_p0_mixture(c, dt)?;
+        }
+    } else if let Some(dt) = dt_for_p0 {
         // SPEC-LIT §25.2 integrates the SAME `Q` §25.1's constraint uses, and
         // since §26.1 that `Q` is the §18 registry PLUS the conduction
         // divergence `div(k_eff grad T)` - which telescopes to the net heat
@@ -584,7 +627,11 @@ pub fn outer_iteration(
     let finite = t.iter().all(|v| v.is_finite())
         && rho.iter().all(|v| v.is_finite())
         && u.iter().all(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite())
-        && p.iter().all(|v| v.is_finite());
+        && p.iter().all(|v| v.is_finite())
+        && match chem.as_deref() {
+            Some(r) => r.finite(gpu)?,
+            None => true,
+        };
 
     let (mut t_min, mut t_max) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
     let (mut rho_min, mut rho_max) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
@@ -693,6 +740,8 @@ fn write_time(
     // SPEC-LIT 117.6: the lattice the volume writers sample onto, laid once
     // in `run`; `None` when no vdb/nvdb is written or the box is Cartesian.
     volume: Option<&ofgpu::io::VolumeTarget>,
+    // SPEC-LIT §133.11: a reacting run's mass fractions and heat release.
+    chem: Option<&Reacting<'_>>,
 ) -> Result<()> {
     let out_root = output_root(case_path);
     let name = format_time_name(t);
@@ -730,6 +779,13 @@ fn write_time(
     for (fname, out) in &out_turb {
         foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
     }
+    let out_chem = match chem {
+        Some(r) => r.output(gpu, hm)?,
+        None => Vec::new(),
+    };
+    for (fname, out) in &out_chem {
+        foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
+    }
 
     let mut vis_fields: Vec<ofgpu::io::OutputField> = vec![
         ofgpu::io::OutputField::vector("U", &out_u.internal),
@@ -738,6 +794,9 @@ fn write_time(
         ofgpu::io::OutputField::scalar("rho", &out_rho.internal),
     ];
     for (fname, out) in &out_turb {
+        vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
+    }
+    for (fname, out) in &out_chem {
         vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
     }
 
@@ -780,13 +839,55 @@ fn write_time(
 /// the first write rather than as a silently wrong file - and
 /// `lowmach_tests::the_early_field_list_is_what_the_run_actually_writes` pins
 /// them together.
-fn output_field_names(turb: &dyn CoupledTurbulence) -> Vec<String> {
+fn output_field_names(turb: &dyn CoupledTurbulence, chem: Option<&Reacting<'_>>) -> Vec<String> {
     let mut names: Vec<String> =
         ["U", "p", "T", "rho"].iter().map(|s| (*s).to_string()).collect();
     for (fname, _) in turb.output_fields() {
         names.push(fname.to_string());
     }
+    if let Some(r) = chem {
+        names.extend(r.field_names());
+    }
     names
+}
+
+/// Every field name a run of this driver may write besides a reacting
+/// case's own (SPEC-LIT §133.11 refuses a species named like one of them):
+/// `output_field_names`' fixed four and every turbulence model's fields.
+const RESERVED_OUTPUT_NAMES: [&str; 12] = [
+    "U", "p", "T", "rho", "k", "epsilon", "omega", "nut", "nuTilda", "gammaInt", "ReThetat", "kl",
+];
+
+/// SPEC-LIT §133.11: the species equations' controls, each by its own entry
+/// name (§13.4.1) on a copy of the turbulence controls `ScalarTransport`
+/// reads (`ofgpu-plume`'s `read_t_controls` is the pattern): `solvers` "Yi",
+/// `relaxation` "Yi" (1 where the case names none, since a reacting run is
+/// transient), `grad(Yi)`, and the convection `div(phi,Yi_h)` or
+/// `div(phi,Yi)` where the case names one, otherwise §19's bounded Gauss
+/// upwind - never the case's `default`, which `CaseNumerics::div_named`'s
+/// own doc explains.
+fn species_controls(
+    num: &CaseNumerics<'_>,
+    base: &ofgpu::turbulence::TurbulenceControls,
+) -> Result<(ofgpu::turbulence::TurbulenceControls, ofgpu::io::DivEntry)> {
+    let conv = match (num.div_named("div(phi,Yi_h)")?, num.div_named("div(phi,Yi)")?) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(Error::Refused(
+                "numerics.div: div(phi,Yi_h) and div(phi,Yi) name two different schemes for the species equations; name one (SPEC-LIT §133.11)"
+                    .to_string(),
+            ))
+        }
+        (Some(a), _) | (None, Some(a)) => a,
+        (None, None) => ofgpu::io::DivEntry { scheme: ofgpu::fv::DivScheme::Upwind, bounded: true },
+    };
+    let mut c = *base;
+    c.k_solver = num.solver("Yi", base.k_solver)?;
+    c.k_relax = num.relax("Yi", 1.0)?;
+    c.grad_scheme = num.grad("grad(Yi)")?;
+    c.sn_grad = num.sn_grad("default")?;
+    c.div_scheme = conv.scheme;
+    c.bounded_convection = conv.bounded;
+    Ok((c, conv))
 }
 
 /// SPEC-LIT §44.5's route: one checkpoint of a RETAINED SERIES, named after
@@ -1635,8 +1736,11 @@ fn run(o: &Options) -> Result<RunEnd> {
     // Before the mesh, before the first field.
     let mut mem = MemWatch::new(&gpu)?;
 
+    // SPEC-LIT §133.11: this driver runs a JSONC case's species, chemistry
+    // and combustion blocks (CHR-12b), so it is the one that lets them past
+    // §137.7's seam; the dictionary route is still refused there.
     let (hm, mut cc, _lowered_for_controls): (HostMesh, CaseControls, _) =
-        load_case(&o.case_path)?;
+        load_case_with(&o.case_path, true)?;
     // SPEC-LIT 121.7: this formulation carries the full variable density
     // `rho = p0/(R_s T)` (SPEC-LIT 25) in its mass and energy balances, so a
     // linearised body force would be a second density law contradicting the
@@ -1868,6 +1972,26 @@ fn run(o: &Options) -> Result<RunEnd> {
             ofgpu::io::output_plan::drop_volume_formats_without_a_lattice(&o.output, no_lattice.as_deref())?
         }
     };
+
+    // SPEC-LIT §133.11 (CHR-12b): a reacting case, refused by name where
+    // this driver cannot honour it, before a field is set up.
+    let chem_case: Option<ofgpu::io::case_chem::LoweredChem> =
+        lowered.as_ref().and_then(|l| l.chem.clone());
+    if let Some(ch) = &chem_case {
+        let reserved: Vec<String> = RESERVED_OUTPUT_NAMES.iter().map(|s| (*s).to_string()).collect();
+        lowmach_chem::refuse_settings(
+            ch,
+            &lowmach_chem::RunShape {
+                transient,
+                ddt: ctrls.energy.ddt,
+                restart: o.restart_from.is_some()
+                    || o.restart_write.is_some()
+                    || output_plan.as_ref().is_some_and(|p| p.restart.is_some()),
+                motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()),
+                reserved: &reserved,
+            },
+        )?;
+    }
 
     // SPEC-LIT 117.6 / 117.3: what the volume writers sample onto, laid
     // ONCE, before the time loop, and only when vdb/nvdb are written.
@@ -2159,7 +2283,29 @@ fn run(o: &Options) -> Result<RunEnd> {
         // `T` both restored bit-exact. See `GasState::set_dp0dt`'s doc.
         gas.set_dp0dt(rd.dp0dt as Scalar);
     }
-    gas.update_density(&gpu, energy.field())?;
+    // SPEC-LIT §133.11: a reacting case's species set, split step and
+    // mixture; its density is (133.20) from here on. Without one, the
+    // constant-W density as before.
+    let mut reacting: Option<Reacting<'_>> = match &chem_case {
+        Some(ch) => {
+            let num = CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?;
+            let (y_ctrl, y_conv) = species_controls(&num, &cc.turb)?;
+            let raws = ch.species.fields.iter().map(|f| f.to_raw(hm.n_cells)).collect();
+            let base = o.case_path.parent().unwrap_or_else(|| Path::new("."));
+            let r = Reacting::new(
+                &gpu, &hm, &mesh, ch, base, raws, cc.nu, gas_props.pr, y_ctrl, y_conv, f64::from(dt),
+            )?;
+            gas.use_mixture(&gpu, r.mixture.clone())?;
+            energy.sources_mut().use_meters(&gpu)?;
+            r.update_density(&gpu, &mut gas, energy.field())?;
+            println!("{}", r.describe());
+            Some(r)
+        }
+        None => {
+            gas.update_density(&gpu, energy.field())?;
+            None
+        }
+    };
 
     // The heater, SPEC-LIT §18: a uniform W/m3 over the whole domain summing
     // to `-heaterPower`. Built once - it is a CONSTANT registration, applied
@@ -2431,7 +2577,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     // it again there - two statements of one set, and the second is what
     // makes the first safe to trust.
     if let Some(plan) = &output_plan {
-        let available = output_field_names(&*turb);
+        let available = output_field_names(&*turb, reacting.as_ref());
         let refs: Vec<&str> = available.iter().map(String::as_str).collect();
         plan.check_fields(&refs)?;
     }
@@ -2522,7 +2668,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             // `U`'s and `p`'s old level the starting field. From the second
             // step on, opening one rotates `T`'s levels too, ahead of the
             // unit of work's `update_density`.
-            open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step)?;
+            open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step, reacting.as_mut())?;
             // SPEC-LIT 120.8: the one host round trip per time step - the
             // lump's (120.8g) level, its two rotated f64 levels, and the
             // step's area-shared H and T_ref - before the step's first
@@ -2592,6 +2738,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             thermostat.as_mut(),
             is_final,
             if transient { Some(dt) } else { None },
+            reacting.as_mut(),
         )?;
 
         if !report.finite {
@@ -2640,6 +2787,7 @@ fn run(o: &Options) -> Result<RunEnd> {
                 &raw_rho_seed,
                 last_mach,
                 volume.as_ref(),
+                reacting.as_ref(),
             )?;
         }
 
@@ -2678,12 +2826,17 @@ fn run(o: &Options) -> Result<RunEnd> {
         t.iter().map(|v| f64::from(*v)).sum::<f64>() / t.len().max(1) as f64
     };
     // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
+    let final_state = match reacting.as_ref() {
+        Some(r) => r.snapshot(&gpu, energy.field(), &gas)?,
+        None => Vec::new(),
+    };
     let run_end = RunEnd {
         steps: n_steps,
         transient,
         t_end: t_phys,
         ux_mean,
         t_mean,
+        final_state,
     };
 
     mem.sample(&gpu)?;
@@ -2709,6 +2862,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         &raw_rho_seed,
         last_mach,
         volume.as_ref(),
+        reacting.as_ref(),
     )?;
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.
@@ -3485,6 +3639,12 @@ struct RunEnd {
     /// 105-E's readout (SPEC-LIT 105.17). It feeds no output.
     #[cfg_attr(not(test), allow(dead_code))]
     t_mean: f64,
+    /// A reacting run's final cell values at full precision - `T`, `rho`,
+    /// `HRR` and every mass fraction (SPEC-LIT §133.11's readout, since the
+    /// written fields carry six digits); empty without chemistry. It feeds
+    /// no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    final_state: Vec<(String, Vec<Scalar>)>,
 }
 
 /// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
@@ -3884,6 +4044,7 @@ mod lowmach_tests {
                 None,
                 false,
                 None,
+                None,
             )?;
             assert!(
                 last.finite,
@@ -4136,7 +4297,7 @@ mod lowmach_tests {
         k_zeros: &DevBuf<Scalar>,
         step: usize,
     ) -> Result<IterReport> {
-        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step)?;
+        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step, None)?;
 
         let flow = FlowState::new(stack.s.u(), stack.s.phi(), nu);
         stack.turb.correct(gpu, &flow, None)?;
@@ -4155,6 +4316,7 @@ mod lowmach_tests {
             None,
             true,
             Some(dt),
+            None,
         )
     }
 
@@ -5449,7 +5611,7 @@ mod lowmach_tests {
             run_knobs_at(&d, "r1c", &["-iters", "200", "-restartWrite", "200", "-check", "100"]);
 
         // The steady clock: the checkpoint's time IS the count, and B continues it.
-        let hash = restart::mesh_hash(&load_case(&b_root.with_file_name("case.jsonc")).expect("load").0);
+        let hash = restart::mesh_hash(&common::load_case(&b_root.with_file_name("case.jsonc")).expect("load").0);
         let a_data = restart::read_restart(&a_mcr, hash).expect("read A's checkpoint");
         assert_eq!(a_data.time, 100.0, "a steady checkpoint's time is its iteration count");
         let names_b = written_names(&b);
@@ -5508,8 +5670,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5529,8 +5691,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0 });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0 });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
