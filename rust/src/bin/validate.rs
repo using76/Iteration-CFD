@@ -3889,6 +3889,15 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)") {
     validate_gates::zpg::check_zpg(c)?;
     }
+    // SPEC-LIT 127.6 - Gate CMP-SOD: Sod's shock tube on 200, 400 and 800
+    // cells against the exact Riemann solution of (127.5)-(127.7b), live, in
+    // src/bin/validate_gates/sod.rs (CMP-19).
+    if c.section("Gate CMP-SOD: Sod's shock tube against the exact Riemann solution, three meshes (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::sod::GATE);
+    let r = validate_gates::sod::check_sod(c, &gpu);
+    c.ran("check_sod", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

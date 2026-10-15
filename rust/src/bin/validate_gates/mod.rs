@@ -32,3 +32,7 @@ pub(crate) mod t3a;
 /// SPEC-LIT §144.5, Gate 132-Z: the TMR zero-pressure-gradient plate with SA
 /// and SST against Karman-Schoenherr and Coles (recorded runs, replayed).
 pub(crate) mod zpg;
+
+/// SPEC-LIT §127.6, Gate CMP-SOD: Sod's shock tube on three meshes against the
+/// exact Riemann solution (CMP-19).
+pub(crate) mod sod;

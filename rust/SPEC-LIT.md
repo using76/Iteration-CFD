@@ -46231,6 +46231,59 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-17 | CMP-NR reflection, fixed `p` (bar >= 0.9) | f64 0.9776, f32 0.9778 | CMP-17 |
 | CMP-17 | CMP-NR long-time outlet mean / `A` (bar <= 1e-3) | f64 2.57e-4; f32 1.102e-3 **MISSED** (f32 floor, §126.9) | CMP-17 |
 | CMP-17 | the pulse's speed in the solver (cause of the miss) | 1.186 `c_0`, about `sqrt(gamma) c_0`, both builds | CMP-17 |
+| CMP-19 | CMP-SOD PISO, 800 cells: worst plateau error (bar <= 1 %) | `rho*_L` f64 45.98 %, f32 45.95 % (`rho*_R` 16.08 / 16.09 %, `u*` 22.80 / 22.82 %, `p*` 19.94 / 19.94 %): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO, 800 cells: shock position (bar <= 0.5 % of the length) | not found inside the tube, both builds: the front has reached the right wall by `t = 0.2` (exact `x = 0.850431`): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO: observed L1(`rho`) order, 200/400/800 cells (bar >= 0.6) | f64 0.015, f32 0.015 (L1 5.17e-2 / 5.21e-2 / 5.28e-2): **MISSED** (§127.6.1) | CMP-19 |
+| CMP-19 | CMP-SOD PISO: total-energy drift at `t = 0.2` (exact 0; printed, the cause) | f64 +4.90e-2, f32 +4.90e-2 on 800 cells | CMP-19 |
+| CMP-19 | CMP-SOD PIMPLE (5 outer, `alpha_p` 1; printed only), 800 cells | worst plateau f64 0.31 %, f32 0.30 % (`rho*_R`); shock f64 0.132 %, f32 0.131 %; order f64 0.696, f32 0.700; energy drift f64 +1.7e-4, f32 +1.5e-4 | CMP-19 |
+
+#### 127.6.1 Gate CMP-SOD as built (CMP-19)
+
+`src/bin/validate_gates/sod.rs`, one `ofgpu-validate` section after Gate 132-Z, live in
+both builds. **The problem** (Sod 1978, doi:10.1016/0021-9991(78)90023-2):
+`(rho, u, p) = (1, 0, 1 | 0.125, 0, 0.1)`, `gamma = 1.4`, the diaphragm at `x_0 = 0.5` of a
+unit tube, `t = 0.2`. It is run dimensional in air (`PerfectGas::air`, inviscid:
+`Viscosity::Constant { mu: 0 }`) with `p_L = 1e5` Pa, `rho_L = 1` kg/m^3, `T = p/(rho R_s)`
+(122.1), the gauge datum `p_op = p_L`, the velocity unit `sqrt(p_L/rho_L)` and the time unit
+`L/sqrt(p_L/rho_L)`; the fields are compared non-dimensional, so the key is (127.5)-(127.7b)
+with the oracle values of §127.2, evaluated live by `compressible::exact::riemann`. The tube
+has one cell across, the four sides `symmetry`, the ends walls (`U` fixed 0, `p` and `T`
+zero-gradient): by `t = 0.2` the fan head is at `x = 0.263` and the shock at `0.850`, so no
+wave reaches an end. Schemes: `div(phi,U)`, `div(phi,T)` and the retarded density (124.3)
+limited with van Leer; transient Euler; PBiCGStab with DILU. **The step**: the largest
+`|u| + c` of the exact solution is `u* + c*_R = 2.191566`; `n` steps is the fewest with an
+acoustic CFL `<= 0.5`, and `dt = 0.2/n`, so every run ends at `t = 0.2` (702, 351 and 176
+steps). **The row's coupling is PISO**: `nOuterCorrectors 1`, `nCorrectors 2` (§125.3).
+
+**The measures** (derived; class P, the same bar in both builds). A plateau's error is the
+largest `|v_i - v*|/|v*|` over the cells whose centre is in the middle half of its star
+region: `rho*_L` on `[x_tail, x_contact]`, `rho*_R` on `[x_contact, x_shock]`, `u*` and `p*`
+on both. The shock is the right-most pair of cells across which `rho` rises through
+`(rho*_R + rho_R)/2`, located by linear interpolation; its error is `|x_s - 0.850431|` over
+the unit length. `L1(rho) = sum_i |rho_i - rho(x_i, 0.2)| dx`, and the observed order is the
+least-squares slope of `ln L1` on `ln h` over the three meshes (the two pair orders and
+§94's `grid_study` of the three `L1` values are printed). Printed with each leg: the total
+energy `sum_i (p_i/(gamma - 1) + rho_i u_i^2/2) dx` over its initial value, minus one, which
+is exactly 0 in the closed, adiabatic, inviscid tube.
+
+**Measured: the PISO row misses every bar, in both builds** (table above). The cause is
+the energy equation's place in the outer loop, not the mesh: in a one-outer step (125.1) is
+solved (§125.3 step 3) before the correctors (step 5), so its explicit `dp/dt = (p - p^o)/dt`
+reads the `p` that step 1 left, which is `p^o` (zero), and its `K` terms read the predicted,
+uncorrected `u`. The discrete total energy then grows by 4.9 % by `t = 0.2` on every mesh,
+the star state and the wave speeds are wrong, and `L1(rho)` does not fall with `h` (order
+0.015). **The cause leg** (printed only, never checked, run when the row misses): the same
+three meshes with PIMPLE, `nOuterCorrectors 5` and `alpha_p = 1` on the non-final outer
+iterations, so the last outer iteration's energy equation sees that step's `dp/dt` and `K`.
+That changes inputs only, and it meets every bar in both builds (worst plateau 0.31 %, shock
+0.13 % of the length, order 0.70, energy drift 1.7e-4). With the default `alpha_p = 0.3`
+the outer loop converges slowly: worst plateau 30 % at 5 outer iterations (`nCorrectors 3`),
+103 % at 10, 0.94 % at 20 (f64, 800 cells, measured once each). The row stays PISO, as
+docs/17 wrote it. Two cures are left for review, and neither is built: restating the row's
+coupling as PIMPLE (a gate definition, the user's), or an energy equation whose `dp/dt` and
+`K` are taken from the previous step's corrected fields when the step has one outer
+iteration (a numerics change). A full `-sections` run of the gate takes 34 s
+(f64) and 75 s (f32) on this machine, PIMPLE leg included.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
