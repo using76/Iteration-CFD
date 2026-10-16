@@ -1,0 +1,799 @@
+// meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.)
+// Source-available, not Open Source. Teaching and academic research are
+// free; commercial and non-academic research require a licence.
+// Enquiries: simul@msimul.com
+// See LICENSE at the repository root.
+// Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
+
+//! The LIBRARY one dust step is made of (docs/17 DST-06 part 2, SPEC-LIT
+//! §157.4): [`DustSetup`], every constant of the model formed once from the
+//! lowered case, and [`DustSource`], the c~ equation, its closures and its
+//! thermo resident on the device. One call,
+//!
+//! ```text
+//! before_flow: (133.18) cp, the closures, the ignition bracket, Gamma,
+//!              the face fluxes, one solve of (155.3), the heat release
+//!              (152.12), the enthalpy diffusion (133.17) and the molar
+//!              change (133.24)
+//! ```
+//!
+//! leaves the fields the low-Mach driver's flow solve reads: the c~ of
+//! (155.3), the heat release and the (133.24) molar source on the
+//! [`crate::energy::GasState`], and the mixture `cp` on
+//! [`crate::energy::Energy`]. The gas is the two pseudo-species of §152.4
+//! (Y_B = c~, the inert U), so the mixture density is (133.20) and Le = 1
+//! makes Gamma = kappa + D_t the SAME scalar both c~ and T diffuse with.
+
+//! The step's order is SPEC-LIT §157.4's: cp field, closures, ignition,
+//! Gamma, fluxes, the c~ solve, wdot_c = S_U - S_P' c~, the heat release,
+//! the enthalpy diffusion, the molar change. The three thermo kernels of
+//! `cuda/dust.cu` are launched through [`crate::dust::device::SourceKernels`];
+//! the closures and the ignition through the DST-03/DST-04 ones. Nothing
+//! here reads a case file: the driver (DST-06 part 3) lowers, builds the
+//! [`crate::energy::GasState`] on [`DustSource::mixture`], and drives.
+//!
+//! Written from:
+//!   SPEC-LIT §157.4 - the step and its order
+//!   SPEC-LIT (152.12), §152.5 - the heat release and the states
+//!   SPEC-LIT §153.2 - the reaction time (153.2) with Psi at n = 1
+//!   SPEC-LIT §154, §155 - the closures, the ignition and (155.3)
+//!   SPEC-LIT (133.17), (133.18), (133.21), (133.24) - the enthalpy
+//!     diffusion, the mixture cp, the molar sum and S_B
+//!   SPEC-LIT (155.2), (155.9), (155.10) - the net rate, the flame-Courant
+//!     number and rho_u(p)
+//!   C. Huang, A. N. Lipatnikov & K. Nessvi, J. Loss Prev. Process Ind. 67
+//!     (2020) 104237, DOI 10.1016/j.jlp.2020.104237
+//!   C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
+//!     (2022) 104707, DOI 10.1016/j.jlp.2021.104707
+//! The specification was informed by a review of FSCDustFoam (Huang &
+//! Lipatnikov, GPL) and no code was copied.
+//! No GPL-licensed source was consulted.
+
+use crate::chem::thermo::R_GAS;
+use crate::device::{DevBuf, Gpu};
+use crate::dust::device::{
+    self as dev, FscFields, FscInputsDev, ProgressKernels, SourceKernels,
+};
+use crate::dust::fsc::{development_time, FscConstants, FscInputs, THETA};
+use crate::dust::ignition::IgnitionSource;
+use crate::dust::progress::{
+    unburned_density, unburned_temperature, ProgressCoupling, ProgressEquation, ProgressSolve,
+};
+use crate::dust::psi::{reaction_time, AdiabaticCurve, PsiOptions, PsiProblem};
+use crate::dust::thermo::EquivalentGas;
+use crate::error::{Error, Result};
+use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
+use crate::field_ops;
+use crate::field_setup::setup_scalar_field;
+use crate::fv::{self, FvKernels};
+use crate::io::case::TurbulenceControls;
+use crate::io::case_dust::LoweredDust;
+use crate::io::fields::RawScalarField;
+use crate::mesh::{GpuMesh, HostMesh};
+use crate::{Acc, Scalar, Vec3};
+
+/// Everything of the dust model that is formed ONCE, on the host in f64,
+/// from the lowered blocks at the initial pressure `p_init` and the energy
+/// equation's molecular conductivity `k_mol` (W/(m K)) - SPEC-LIT §157.4's
+/// stated inputs and the derived state of (152.10), (153.2), (155.10).
+pub struct DustSetup {
+    /// The equivalent gas at the lowered thermo (§152.4, §152.9).
+    pub gas: EquivalentGas,
+    /// The closures' constants (§154.7).
+    pub fsc: FscConstants,
+    /// The ignition source of (155.4); `None` when the case named none.
+    pub ignition: Option<IgnitionSource>,
+    /// The ignition's t0 (§151.5): the origin of the flame development time.
+    /// 0.0 without an ignition, so t_fd is the clock itself.
+    pub t_fd_origin: f64,
+    /// K, the unburned temperature (the case's `initial.T`).
+    pub t_u: f64,
+    /// Pa, the initial thermodynamic pressure.
+    pub p_init: f64,
+    /// kg/m3, rho_u at `p_init` (152.9) - the (155.10) datum.
+    pub rho_u0: f64,
+    /// gamma_u = cp_U(T_u)/(cp_U(T_u) - R0/W_U).
+    pub gamma_u: f64,
+    /// K, the isobaric burned temperature (152.10).
+    pub t_b: f64,
+    /// rho_u/rho_b of (152.10).
+    pub sigma: f64,
+    /// kg/m3, the burned density at `p_init`, T_b.
+    pub rho_b0: f64,
+    /// W/(m K), the molecular conductivity the energy equation runs with.
+    pub k_mol: f64,
+    /// m2/s, kappa_u = k_mol/(rho_u0 cp_u0).
+    pub kappa_u: f64,
+    /// m2/s, kappa_b = k_mol/(rho_b0 cp_B(T_b)).
+    pub kappa_b: f64,
+    /// m/s, the laminar burning velocity (152.13).
+    pub s_l: f64,
+    /// The eigen-solution's Psi (§153.2, n = 1).
+    pub psi: f64,
+    /// s, the reaction time (153.2).
+    pub t_r: f64,
+    /// The flame-Courant bound of (155.9).
+    pub max_flame_courant: f64,
+}
+
+impl DustSetup {
+    /// From the lowered blocks at the initial `p_init` and the energy
+    /// equation's `k_mol` (SPEC-LIT §157.4): the gas of §152.4/§152.9, the
+    /// state of (152.9)-(152.10), gamma_u, the two molecular heat
+    /// diffusivities, Psi at n = 1 (rho kappa constant, §153.2), the
+    /// reaction time (153.2) and the closures' constants - each ignition
+    /// validated. Refuses, by name, anything the pieces refuse.
+    pub fn new(d: &LoweredDust, p_init: f64, k_mol: f64) -> Result<Self> {
+        const W: &str = "dust::source::DustSetup::new";
+        let bad = |name: &str, v: f64| {
+            Error::Refused(format!("{W}: {name} = {v} is not a finite positive value"))
+        };
+        for (name, v) in [("p_init", p_init), ("k_mol", k_mol)] {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(bad(name, v));
+            }
+        }
+        let gas = d.gas()?;
+        let cp_u0 = gas.cp_u(d.t_u)?;
+        let rho_u0 = gas.rho(p_init, d.t_u, 0.0)?;
+        let gamma_u = cp_u0 / (cp_u0 - R_GAS / gas.w_u());
+        let b = gas.isobaric_burned(d.t_u)?;
+        let (t_b, sigma) = (b.t_b, b.sigma);
+        let rho_b0 = gas.rho(p_init, t_b, 1.0)?;
+        let kappa_u = k_mol / (rho_u0 * cp_u0);
+        let kappa_b = k_mol / (rho_b0 * gas.cp_b(t_b)?);
+        let s_l = d.s_l;
+        let curve = AdiabaticCurve::new(&gas, d.t_u)?;
+        let problem = PsiProblem { curve: &curve, theta_u: THETA / d.t_u, n: 1.0 };
+        let psi = problem.eigen(&PsiOptions::default())?.psi;
+        let t_r = reaction_time(psi, kappa_u, s_l)?;
+        let fsc = FscConstants::new(&FscInputs {
+            model: d.model,
+            a: d.a,
+            s_l,
+            kappa_u,
+            pr_t: d.pr_t,
+            t_r,
+            t_b,
+            kappa_b,
+            t_flacc: d.t_flacc,
+        })?;
+        let ignition = match &d.ignition {
+            None => None,
+            Some(src) => {
+                src.validate()?;
+                Some(*src)
+            }
+        };
+        let t_fd_origin = d.ignition.as_ref().map(|src| src.t0).unwrap_or(0.0);
+        Ok(Self {
+            gas,
+            fsc,
+            ignition,
+            t_fd_origin,
+            t_u: d.t_u,
+            p_init,
+            rho_u0,
+            gamma_u,
+            t_b,
+            sigma,
+            rho_b0,
+            k_mol,
+            kappa_u,
+            kappa_b,
+            s_l,
+            psi,
+            t_r,
+            max_flame_courant: d.max_flame_courant,
+        })
+    }
+
+    /// (155.10): the CURRENT unburned density `rho_u0 (p/p0)^{1/gamma_u}`
+    /// at the run's `p0`.
+    pub fn rho_u(&self, p: f64) -> f64 {
+        unburned_density(self.rho_u0, p, self.p_init, self.gamma_u)
+    }
+
+    /// (155.2)'s burned density: `rho_b(p) = p W_B/(R0 T_b(p))` with
+    /// `T_b(p)` the isobaric burned state of `T_u(p) = T_u
+    /// (p/p0)^{(gamma_u-1)/gamma_u}`.
+    pub fn rho_b(&self, p: f64) -> Result<f64> {
+        let t_up = unburned_temperature(self.t_u, p, self.p_init, self.gamma_u);
+        let t_bp = self.gas.isobaric_burned(t_up)?.t_b;
+        Ok(p * self.gas.w_b() / (R_GAS * t_bp))
+    }
+}
+
+/// The frozen turbulence one step's closures read (§154.4's k, omega and
+/// the SST's nu_t), all `n_cells` long.
+pub struct DustTurbulence<'a> {
+    pub k: &'a DevBuf<Scalar>,
+    pub omega: &'a DevBuf<Scalar>,
+    pub nu_t: &'a DevBuf<Scalar>,
+}
+
+/// One dust step's machinery, resident on the device (SPEC-LIT §157.4). The
+/// `'m` is the mesh's borrow, as every equation here holds.
+pub struct DustSource<'m> {
+    setup: DustSetup,
+    progress: ProgressEquation<'m>,
+    sk: SourceKernels,
+    fk: crate::dust::device::FscKernels,
+    pk: ProgressKernels,
+    fvk: FvKernels,
+    fldk: crate::field_ops::FieldKernels,
+    row_u: DevBuf<Acc>,
+    row_b: DevBuf<Acc>,
+    cp_cells: DevBuf<Scalar>,
+    cp_faces: DevBuf<Scalar>,
+    d_t: DevBuf<Scalar>,
+    u_t: DevBuf<Scalar>,
+    u_t_isp: DevBuf<Scalar>,
+    tau_l: DevBuf<Scalar>,
+    k_rate: DevBuf<Scalar>,
+    w_ign: DevBuf<Scalar>,
+    wdot: DevBuf<Scalar>,
+    n_zero: DevBuf<u64>,
+    /// The three frozen-turbulence buffers a laminar run's closures read:
+    /// k = omega = nu_t = 0 leaves the turbulent closure zero (decision D5).
+    zero: DevBuf<Scalar>,
+    /// The prediction's T input: u_t_isp reads no T, and a cell at T = 0 is
+    /// zero-rule (no K), so the one launch below is exact without a field.
+    t_pred: DevBuf<Scalar>,
+    tmp: DevBuf<Scalar>,
+    diff: GpuScalarField,
+    rho_face: GpuSurfaceScalarField,
+    phi_mass: GpuSurfaceScalarField,
+    gamma_face: GpuSurfaceScalarField,
+    flux: GpuSurfaceScalarField,
+    net: DevBuf<Scalar>,
+    q: DevBuf<Scalar>,
+    qhd: DevBuf<Scalar>,
+    grad_c: DevBuf<Vec3>,
+    grad_t: DevBuf<Vec3>,
+    co: DevBuf<Scalar>,
+    cbar: DevBuf<Scalar>,
+    p_local: Option<Vec3>,
+    raw_c: RawScalarField,
+    n: usize,
+    nf: usize,
+    nb: usize,
+}
+
+impl<'m> DustSource<'m> {
+    /// The step's machinery on one mesh: the c~ equation with the case's
+    /// `raw_c` seeded into it (then [`ProgressEquation::initialise`]), the
+    /// two NASA-7 rows of the pseudo-species, and the buffers §157.4's
+    /// order runs through. `diff`'s boundary faces are all zeroGradient, so
+    /// the Gamma a boundary Laplacian reads is the owner cell's.
+    pub fn new(
+        gpu: &Gpu,
+        hm: &HostMesh,
+        m: &'m GpuMesh,
+        setup: DustSetup,
+        raw_c: &RawScalarField,
+        ctrl: TurbulenceControls,
+    ) -> Result<Self> {
+        let (n, nf, nb) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
+        let cells = n.max(1);
+        let mut progress = ProgressEquation::new(gpu, hm, m, ctrl)?;
+        setup_scalar_field(gpu, progress.field_mut(), raw_c, hm)?;
+        progress.initialise(gpu)?;
+        let mut diff = GpuScalarField::zeros(gpu, m, "dustGamma")?;
+        gpu.write(&mut diff.bc_kind, &vec![BcKind::ZeroGradient as crate::Label; nb])?;
+        let p_local = setup.ignition.map(|src| src.local_point(hm));
+        Ok(Self {
+            sk: SourceKernels::new(gpu)?,
+            fk: crate::dust::device::FscKernels::new(gpu)?,
+            pk: ProgressKernels::new(gpu)?,
+            fvk: FvKernels::new(gpu)?,
+            fldk: field_ops::FieldKernels::new(gpu)?,
+            row_u: gpu.upload(&dev::thermo_row(&setup.gas.unburned))?,
+            row_b: gpu.upload(&dev::thermo_row(&setup.gas.burned))?,
+            cp_cells: gpu.zeros(cells)?,
+            cp_faces: gpu.zeros(nb.max(1))?,
+            d_t: gpu.zeros(cells)?,
+            u_t: gpu.zeros(cells)?,
+            u_t_isp: gpu.zeros(cells)?,
+            tau_l: gpu.zeros(cells)?,
+            k_rate: gpu.zeros(cells)?,
+            w_ign: gpu.zeros(cells)?,
+            wdot: gpu.zeros(cells)?,
+            n_zero: gpu.zeros(1)?,
+            zero: gpu.zeros(cells)?,
+            t_pred: gpu.zeros(cells)?,
+            tmp: gpu.zeros(cells)?,
+            diff,
+            rho_face: GpuSurfaceScalarField::zeros(gpu, m, "dustRhoF")?,
+            phi_mass: GpuSurfaceScalarField::zeros(gpu, m, "dustPhiM")?,
+            gamma_face: GpuSurfaceScalarField::zeros(gpu, m, "dustGamF")?,
+            flux: GpuSurfaceScalarField::zeros(gpu, m, "dustSnGrad")?,
+            net: gpu.zeros(cells)?,
+            q: gpu.zeros(cells)?,
+            qhd: gpu.zeros(cells)?,
+            grad_c: gpu.zeros(m.n_local())?,
+            grad_t: gpu.zeros(m.n_local())?,
+            co: gpu.zeros(cells)?,
+            cbar: gpu.zeros(cells)?,
+            progress,
+            setup,
+            p_local,
+            raw_c: raw_c.clone(),
+            n,
+            nf,
+            nb,
+        })
+    }
+
+    /// The constants the step runs with.
+    pub fn setup(&self) -> &DustSetup {
+        &self.setup
+    }
+
+    /// This field's own `div(phi,c)` entry (§11.7), the driver's
+    /// `c_controls` forwarding the case's named scheme.
+    pub fn set_convection(&mut self, conv: crate::io::DivEntry) {
+        self.progress.set_convection(conv);
+    }
+
+    /// The face density `form_mass_flux` last interpolated - the `rho_face`
+    /// a rho-weighted SST correction reads (§156.1).
+    pub fn rho_face(&self) -> &GpuSurfaceScalarField {
+        &self.rho_face
+    }
+
+    /// The MASS flux `form_mass_flux` last formed - the `FlowState::phi` a
+    /// rho-weighted SST correction runs on (§156.1's §86.3 contract).
+    pub fn phi_mass(&self) -> &GpuSurfaceScalarField {
+        &self.phi_mass
+    }
+
+    /// The two pseudo-species as the [`crate::energy::GasMixture`] the
+    /// driver's [`crate::energy::GasState::use_mixture`] takes: solved
+    /// DUST_B, inert DUST_U (§152.4, Y_B = c~).
+    pub fn mixture(&self) -> Result<crate::energy::GasMixture> {
+        crate::energy::GasMixture::new(
+            &[("DUST_B", self.setup.gas.w_b())],
+            ("DUST_U", self.setup.gas.w_u()),
+        )
+    }
+
+    /// The progress variable c~ (Y_B = c~).
+    pub fn c(&self) -> &GpuScalarField {
+        self.progress.field()
+    }
+
+    /// The ignition bracket W of (155.4) as `before_flow` last formed it;
+    /// zeros without an ignition.
+    pub fn w_ign(&self) -> &DevBuf<Scalar> {
+        &self.w_ign
+    }
+
+    /// K of (154.11) as `before_flow` last formed it (0 where the zero rule
+    /// wrote it, or under TFC).
+    pub fn k_rate(&self) -> &DevBuf<Scalar> {
+        &self.k_rate
+    }
+
+    /// The net rate `wdot_c = S_U - S_P' c~` (155.2) as `before_flow` last
+    /// formed it, kg/(m3 s).
+    pub fn wdot(&self) -> &DevBuf<Scalar> {
+        &self.wdot
+    }
+
+    /// The face `rho_face` and the MASS flux `phi_mass = rho_f phi` of the
+    /// flux `phi_volume` (m3/s) the flow solve holds - (155.3)'s convection
+    /// runs on the mass-weighted assembly, so it reads kg/s.
+    pub fn form_mass_flux(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        gas: &crate::energy::GasState<'_>,
+        phi_volume: &GpuSurfaceScalarField,
+    ) -> Result<()> {
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, gas.rho(), m)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.phi_mass.f, &self.rho_face.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_mass.f, &phi_volume.f, self.nf)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.phi_mass.bf, &self.rho_face.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.phi_mass.bf, &phi_volume.bf, self.nb)?;
+        Ok(())
+    }
+
+    /// Starts a time step: the c~ equation's old level and its step-long
+    /// `|grad c~|` (§155.2), then - as §157.4's step does - the closures'
+    /// U_t held over the step is NOT re-formed here: `before_flow` forms
+    /// everything, once per call, from the fields as they stand.
+    pub fn open_step(&mut self, gpu: &Gpu) -> Result<()> {
+        self.progress.begin_step(gpu)
+    }
+
+    /// Step 1 of the outer iteration: the `inletOutlet` faces of c~ switch
+    /// on the flux the flow solve last made (§155.3's convection follows).
+    pub fn update_inlet_outlet(&mut self, gpu: &Gpu, phi: &GpuSurfaceScalarField) -> Result<()> {
+        field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, self.progress.field_mut(), phi)
+    }
+
+    /// Step 2: (133.20) - the density of the two pseudo-species at the c~
+    /// of each time level, `Y_B = c~` the one solved member.
+    pub fn update_density(
+        &self,
+        gpu: &Gpu,
+        gas: &mut crate::energy::GasState<'_>,
+        t: &GpuScalarField,
+    ) -> Result<()> {
+        gas.update_density_mixture(gpu, t, &[self.c()])
+    }
+
+    /// One outer iteration of the dust model, in §157.4's order: the
+    /// mixture cp (133.18) onto the energy equation's field, the closures,
+    /// the ignition bracket (155.4), Gamma = k_mol/(rho cp) + D_t, the face
+    /// fluxes, one solve of (155.3), the net rate `wdot_c = S_U - S_P' c~`,
+    /// the heat release (152.12) and the enthalpy diffusion (133.17)
+    /// registered on the energy sources, and (133.24)'s S_B on the gas's
+    /// molar change. `t_new` is the run's time; the closures' t_fd runs
+    /// from [`DustSetup::t_fd_origin`]. `turb = None` is the laminar step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn before_flow(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        energy: &mut crate::energy::Energy<'_>,
+        gas: &mut crate::energy::GasState<'_>,
+        phi_volume: &GpuSurfaceScalarField,
+        u: &GpuVectorField,
+        turb: Option<DustTurbulence<'_>>,
+        t_new: f64,
+    ) -> Result<ProgressSolve> {
+        let n = self.n;
+        if n == 0 {
+            return Ok(ProgressSolve {
+                perf: Default::default(),
+                out_of_bounds: 0,
+            });
+        }
+        // 1. (133.18) on the cells and the boundary faces, onto the cp field.
+        dev::mixture_cp(
+            gpu,
+            &self.sk,
+            &mut self.cp_cells,
+            &energy.field().f,
+            &self.progress.field().f,
+            &self.row_u,
+            &self.row_b,
+            n,
+        )?;
+        dev::mixture_cp(
+            gpu,
+            &self.sk,
+            &mut self.cp_faces,
+            &energy.field().bf,
+            &self.progress.field().bf,
+            &self.row_u,
+            &self.row_b,
+            self.nb,
+        )?;
+        energy.set_cp_field(gpu, &self.cp_cells, &self.cp_faces)?;
+        // 2. The closures of §154 at this step's clock.
+        let (k_b, o_b, n_b) = match &turb {
+            Some(t) => (t.k, t.omega, t.nu_t),
+            None => (&self.zero, &self.zero, &self.zero),
+        };
+        dev::fsc(
+            gpu,
+            &self.fk,
+            &self.setup.fsc,
+            FscFields {
+                d_t: &mut self.d_t,
+                u_t: &mut self.u_t,
+                u_t_isp: &mut self.u_t_isp,
+                tau_l: &mut self.tau_l,
+                k_rate: &mut self.k_rate,
+            },
+            &mut self.n_zero,
+            FscInputsDev { t: &energy.field().f, k: k_b, omega: o_b, nu_t: n_b },
+            development_time(t_new, self.setup.t_fd_origin),
+            t_new,
+            n,
+        )?;
+        // 3. The ignition bracket (155.4), or nothing without a source.
+        if let (Some(src), Some(p)) = (&self.setup.ignition, self.p_local) {
+            dev::ignition(gpu, &self.pk, &mut self.w_ign, &m.c, src, p, t_new, n)?;
+        }
+        // 4. Gamma = k_mol/(rho cp(T, c~)) + D_t, Le = 1: the SAME scalar
+        //    c~ and T diffuse with. The boundary faces read the owner cell
+        //    through the zeroGradient kinds `new` wrote.
+        field_ops::copy_field(gpu, &self.fldk, &mut self.tmp, &gas.rho().f, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.tmp, &self.cp_cells, n)?;
+        field_ops::set_field(gpu, &self.fldk, &mut self.diff.f, self.setup.k_mol as Scalar, n)?;
+        field_ops::divide_field(gpu, &self.fldk, &mut self.diff.f, &self.tmp, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.diff.f, &self.d_t, n)?;
+        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.diff, m)?;
+        // 5. rho_f and the mass flux on the flow's volumetric flux.
+        self.form_mass_flux(gpu, m, gas, phi_volume)?;
+        // 6. One solve of (155.3), mass-weighted, rho_u(p) of (155.10).
+        let has_ign = self.setup.ignition.is_some();
+        let solve = self.progress.solve(
+            gpu,
+            &ProgressCoupling {
+                rho: gas.rho(),
+                rho_face: &self.rho_face,
+                phi_mass: &self.phi_mass,
+                u,
+                diffusivity: &self.diff,
+                u_t: &self.u_t,
+                k_rate: &self.k_rate,
+                w_ign: has_ign.then_some(&self.w_ign),
+                rho_u: self.setup.rho_u(f64::from(gas.p0())),
+            },
+        )?;
+        // 7. wdot_c = S_U - S_P' c~ (155.2), kg/(m3 s).
+        let (su, sp) = self.progress.source_terms();
+        field_ops::copy_field(gpu, &self.fldk, &mut self.wdot, sp, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.wdot, &self.progress.field().f, n)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut self.wdot, -1.0, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.wdot, su, n)?;
+        // 8. (152.12) registered as the temperature equation's heat release.
+        dev::heat_release(
+            gpu,
+            &self.sk,
+            &mut self.q,
+            &energy.field().f,
+            &self.wdot,
+            &self.row_u,
+            &self.row_b,
+            n,
+        )?;
+        energy.sources_mut().register_heat_release(gpu, &self.q)?;
+        // 9. (133.17) on the Gauss gradients of c~ and T, registered.
+        fv::fvc_grad_scalar(gpu, &self.fvk, &mut self.grad_c, self.progress.field(), m)?;
+        fv::fvc_grad_scalar(gpu, &self.fvk, &mut self.grad_t, energy.field(), m)?;
+        dev::enthalpy_diffusion(
+            gpu,
+            &self.sk,
+            &mut self.qhd,
+            &energy.field().f,
+            &gas.rho().f,
+            &self.diff.f,
+            &self.grad_c,
+            &self.grad_t,
+            &self.row_u,
+            &self.row_b,
+            n,
+        )?;
+        energy.sources_mut().register_enthalpy_diffusion(gpu, &self.qhd)?;
+        // 10. (133.24)'s diffusion half on the faces: rho_f Gamma_f |S_f|
+        //     snGrad(c~) summed over a cell's faces, plus the reaction half
+        //     wdot_c; handed over as the one solved member's S_B.
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.gamma_face, &self.diff, m)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.gamma_face.f, &self.rho_face.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.gamma_face.f, &m.mag_sf, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.gamma_face.bf, &self.rho_face.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.gamma_face.bf, &m.b_mag_sf, self.nb)?;
+        fv::sn_grad_flux(gpu, &self.fvk, &mut self.flux, self.progress.field(), &self.gamma_face.f, &self.gamma_face.bf, m)?;
+        fv::fvc_div_surface(gpu, &self.fvk, &mut self.net, &self.flux, m)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.net, &self.wdot, n)?;
+        gas.set_molar_change(gpu, &[&self.net])?;
+        Ok(solve)
+    }
+
+    /// The PREDICTED flame-Courant number of a fixed `dt` (155.9): the
+    /// closures run ONCE on the fields as they stand at t_fd = 1e30
+    /// (developed, so U_t <= U_t,ISP), `u_max` the largest |u| and dx_min
+    /// the smallest `V^{1/3}` on the host in f64, then
+    /// [`crate::dust::courant::check_fixed_step`] - which REFUSES, naming
+    /// `maxFlameCourant`, a step above the bound. Reads the counters back,
+    /// so it is not capturable; call it between steps.
+    pub fn predicted_courant(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        u: &GpuVectorField,
+        turb: Option<DustTurbulence<'_>>,
+        dt: f64,
+    ) -> Result<f64> {
+        let n = self.n;
+        let (k_b, o_b, n_b) = match &turb {
+            Some(t) => (t.k, t.omega, t.nu_t),
+            None => (&self.zero, &self.zero, &self.zero),
+        };
+        dev::fsc(
+            gpu,
+            &self.fk,
+            &self.setup.fsc,
+            FscFields {
+                d_t: &mut self.d_t,
+                u_t: &mut self.u_t,
+                u_t_isp: &mut self.u_t_isp,
+                tau_l: &mut self.tau_l,
+                k_rate: &mut self.k_rate,
+            },
+            &mut self.n_zero,
+            FscInputsDev { t: &self.t_pred, k: k_b, omega: o_b, nu_t: n_b },
+            1.0e30,
+            1.0e30,
+            n,
+        )?;
+        let isp_max = gpu
+            .download(&self.u_t_isp)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, &v| a.max(f64::from(v)));
+        let u_max = gpu
+            .download(&u.f)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, v| a.max((f64::from(v.x) * f64::from(v.x)
+                + f64::from(v.y) * f64::from(v.y)
+                + f64::from(v.z) * f64::from(v.z))
+                .sqrt()));
+        let dx_min = hm
+            .v
+            .iter()
+            .map(|v| f64::from(*v).cbrt())
+            .fold(f64::INFINITY, f64::min);
+        let predicted = crate::dust::courant::predicted(
+            dt,
+            dx_min,
+            u_max,
+            self.setup.sigma,
+            isp_max,
+        );
+        crate::dust::courant::check_fixed_step(dt, predicted, self.setup.max_flame_courant)
+    }
+
+    /// The MEASURED flame-Courant number (155.9) of the step just taken,
+    /// `dustFlameCourant` into the Co_f buffer, its max returned in f64.
+    pub fn measured_courant(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        u: &GpuVectorField,
+        gas: &crate::energy::GasState<'_>,
+        dt: f64,
+    ) -> Result<f64> {
+        let n = self.n;
+        dev::flame_courant(
+            gpu,
+            &self.pk,
+            &mut self.co,
+            &u.f,
+            &gas.rho().f,
+            &self.u_t,
+            &m.v,
+            self.setup.rho_u(f64::from(gas.p0())),
+            dt,
+            n,
+        )?;
+        Ok(gpu
+            .download(&self.co)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, &v| a.max(f64::from(v))))
+    }
+
+    /// The names [`Self::output`] writes, in order.
+    pub fn field_names() -> [&'static str; 6] {
+        ["c", "cbar", "Ut", "Cof", "HRR", "p0"]
+    }
+
+    /// A `calculated` copy of the c field's seed: every patch whose type
+    /// names a value rule is rewritten to `calculated`, and the constraint
+    /// patches (empty, symmetry, wedge) keep their type; the values are the
+    /// caller's.
+    fn calculated_seed(&self, name: &str, dims: &str) -> RawScalarField {
+        let mut raw = self.raw_c.types_only();
+        for spec in raw.boundary.values_mut() {
+            if matches!(
+                spec.type_name.as_str(),
+                "fixedValue" | "zeroGradient" | "inletOutlet" | "fixedGradient" | "mixed" | "calculated"
+            ) {
+                spec.type_name = "calculated".to_string();
+                spec.extra.clear();
+            }
+        }
+        raw.boundary_patterns.clear();
+        raw.name = name.to_string();
+        raw.dimensions = dims.to_string();
+        raw.internal.clear();
+        for spec in raw.boundary.values_mut() {
+            spec.value.clear();
+        }
+        raw
+    }
+
+    /// The step's six fields as the case format holds them: `c` with its
+    /// OWN patch types, the other five as `calculated` copies of that
+    /// seed's types - `cbar` (155.2) at rho_b(p0), `Ut`, `Cof` (155.9),
+    /// `HRR` (152.12) and the uniform `p0`. Dimensions: c, cbar and Cof are
+    /// dimensionless, Ut is m/s, HRR W/m3, p0 Pa.
+    pub fn output(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        gas: &crate::energy::GasState<'_>,
+    ) -> Result<Vec<(String, RawScalarField)>> {
+        let n = self.n;
+        let mut c_raw = self.raw_c.types_only();
+        crate::field_setup::harvest_scalar_field(gpu, &mut c_raw, self.c(), hm)?;
+        let bvals_of = |b: &DevBuf<Scalar>| -> Result<Vec<Scalar>> {
+            Ok(gpu.download(b)?.into_iter().take(self.nb).collect())
+        };
+        let owner = |cell: &[Scalar], f: usize| -> Scalar {
+            cell[hm.b_face_cells[f] as usize]
+        };
+        let fill_boundary = |raw: &mut RawScalarField, per_face: &[Scalar]| {
+            for p in &hm.patches {
+                if let Some(spec) = raw.boundary.get_mut(&p.name) {
+                    spec.value = per_face[p.start..p.start + p.size].to_vec();
+                }
+            }
+        };
+        // cbar (155.2) on the faces from the owners; cells on the device.
+        let rho_b = self.setup.rho_b(f64::from(gas.p0()))?;
+        dev::reynolds_mean(gpu, &self.pk, &mut self.cbar, &gas.rho().f, &self.progress.field().f, rho_b, n)?;
+        let (rho_bf, c_bf) = (bvals_of(&gas.rho().bf)?, bvals_of(&self.c().bf)?);
+        let cbar_b: Vec<Scalar> =
+            (0..self.nb).map(|f| ((f64::from(rho_bf[f]) * f64::from(c_bf[f])) / rho_b) as Scalar).collect();
+        let mut cbar_raw = self.calculated_seed("cbar", "[0 0 0 0 0 0 0]");
+        cbar_raw.internal = gpu.download(&self.cbar)?.into_iter().take(n).collect();
+        fill_boundary(&mut cbar_raw, &cbar_b);
+        // Ut: the closures' own U_t, boundary faces from their owners.
+        let ut_c: Vec<Scalar> = gpu.download(&self.u_t)?.into_iter().take(n).collect();
+        let ut_b: Vec<Scalar> = (0..self.nb).map(|f| owner(&ut_c, f)).collect();
+        let mut ut_raw = self.calculated_seed("Ut", "[0 1 -1 0 0 0 0]");
+        ut_raw.internal = ut_c.clone();
+        fill_boundary(&mut ut_raw, &ut_b);
+        // Cof: the measured number, if it was taken; zeros otherwise.
+        let co_c: Vec<Scalar> = gpu.download(&self.co)?.into_iter().take(n).collect();
+        let co_b: Vec<Scalar> = (0..self.nb).map(|f| owner(&co_c, f)).collect();
+        let mut co_raw = self.calculated_seed("Cof", "[0 0 0 0 0 0 0]");
+        co_raw.internal = co_c.clone();
+        fill_boundary(&mut co_raw, &co_b);
+        // HRR: (152.12)'s qdot, boundary faces from their owners.
+        let q_c: Vec<Scalar> = gpu.download(&self.q)?.into_iter().take(n).collect();
+        let q_b: Vec<Scalar> = (0..self.nb).map(|f| owner(&q_c, f)).collect();
+        let mut hrr_raw = self.calculated_seed("HRR", "[1 -1 -3 0 0 0 0]");
+        hrr_raw.internal = q_c;
+        fill_boundary(&mut hrr_raw, &q_b);
+        // p0: the uniform thermodynamic pressure.
+        let p0 = gas.p0();
+        let mut p0_raw = self.calculated_seed("p0", "[1 -1 -2 0 0 0 0]");
+        p0_raw.internal = vec![p0; n];
+        let p0_b: Vec<Scalar> = vec![p0; self.nb];
+        fill_boundary(&mut p0_raw, &p0_b);
+        Ok(vec![
+            ("c".to_string(), c_raw),
+            ("cbar".to_string(), cbar_raw),
+            ("Ut".to_string(), ut_raw),
+            ("Cof".to_string(), co_raw),
+            ("HRR".to_string(), hrr_raw),
+            ("p0".to_string(), p0_raw),
+        ])
+    }
+
+    /// `c`, `T`, `rho`, `HRR` and `Ut`, the CELL values at full precision,
+    /// for a restart or a probe.
+    pub fn snapshot(
+        &self,
+        gpu: &Gpu,
+        t: &GpuScalarField,
+        gas: &crate::energy::GasState<'_>,
+    ) -> Result<Vec<(String, Vec<Scalar>)>> {
+        Ok(vec![
+            ("c".to_string(), gpu.download(&self.c().f)?),
+            ("T".to_string(), gpu.download(&t.f)?),
+            ("rho".to_string(), gpu.download(&gas.rho().f)?),
+            ("HRR".to_string(), gpu.download(&self.q)?),
+            ("Ut".to_string(), gpu.download(&self.u_t)?),
+        ])
+    }
+
+    /// (152.12)'s heat release as `before_flow` last formed it, W/m3.
+    pub fn heat_release(&self) -> &DevBuf<Scalar> {
+        &self.q
+    }
+}
+
+#[cfg(test)]
+#[path = "tests_source.rs"]
+mod tests;

@@ -128,6 +128,17 @@
 //!   runs, Strang splitting, a ddt other than Euler, checkpoints, a motion
 //!   block and the EDM/EDC/PaSR closures are refused with one by name, and
 //!   the dictionary route keeps §137.7's refusal.
+//! * **It runs the dust model** for a JSONC case whose `combustion.model`
+//!   is `FSC`/`TFC` with a `dust` block (SPEC-LIT §157.4, `lowmach_dust`):
+//!   the FSC/TFC closures and the c~ equation (155.3) solve ahead of the
+//!   flow every step, the heat release (152.12) and the enthalpy diffusion
+//!   (133.17) register on the same source registry, the two pseudo-species
+//!   are the gas (`rho` of (133.20), `c~` of §152.4), the ρ-weighted SST of
+//!   §156 replaces the kinematic correction when the case asks for it, and
+//!   `c`, `cbar`, `Ut`, `Cof`, `HRR` and `p0` are written. Steady runs, a
+//!   ddt other than Euler, checkpoints, a motion block and `-heaterPower`
+//!   are refused by name (§157.4); turbulence is laminar or the
+//!   rho-weighted kOmegaSST (§156).
 //!
 //! # Field output and restart (SPEC-LIT §31.2)
 //!
@@ -208,6 +219,11 @@ mod common;
 #[path = "lowmach_chem/mod.rs"]
 mod lowmach_chem;
 use lowmach_chem::Reacting;
+
+#[path = "lowmach_dust/mod.rs"]
+mod lowmach_dust;
+use lowmach_dust::DustStep;
+use ofgpu::dust::source::DustSource;
 
 use common::{
     atoi, device_banner, find_restart_field, from_restart_scalars,
@@ -447,6 +463,9 @@ pub struct IterReport {
     /// unit of work - the number the banner printed at start-up and the one
     /// `refuse_above_low_mach` judges at the end of every iteration.
     pub mach: MachReport,
+    /// SPEC-LIT §155.2: cells the c~ solve left below -tol, above 1 + tol or
+    /// not a number - a dust run's own bound report, 0 without one.
+    pub c_out_of_bounds: u64,
     /// False the moment `T`, `rho`, `U` or `p` is caught holding a NaN or an
     /// infinity - the §25/§26 gate this driver exists to demonstrate.
     pub finite: bool,
@@ -471,6 +490,7 @@ fn open_time_step(
     dt: Scalar,
     step: usize,
     chem: Option<&mut Reacting<'_>>,
+    dust: Option<&mut DustSource<'_>>,
 ) -> Result<()> {
     if step == 0 {
         return Ok(());
@@ -481,6 +501,11 @@ fn open_time_step(
     gas.advance_time_levels();
     if let Some(r) = chem {
         r.open_step(gpu)?;
+    }
+    // SPEC-LIT §157.4: the c~ equation's old level and its step-long
+    // |grad c~|, opened after `p0`'s levels exactly as the species' are.
+    if let Some(ds) = dust {
+        ds.open_step(gpu)?;
     }
     Ok(())
 }
@@ -518,6 +543,15 @@ fn open_time_step(
 /// step and registers its heat release (133.16) and the enthalpy diffusion
 /// (133.17) ahead of every other source, sets the molar change of (133.21),
 /// solves the species after `T`, and advances `p0` by (133.22).
+///
+/// `dust` is SPEC-LIT §157.4's dust step (DST-06), never `Some` beside a
+/// `Some` `chem` - the lowering refuses the case's species beside the dust
+/// model. `Some` puts the mixture density (133.20) in place of
+/// `update_density`, runs `DustSource::before_flow` (§157.4's order: the
+/// mixture cp, the closures, the ignition bracket, Gamma, the fluxes, one
+/// c~ solve, the heat release, the enthalpy diffusion, the molar change)
+/// ahead of every other source, and advances `p0` by (133.22) like the
+/// reacting step does; `t_new` is the step's end time, the closures' clock.
 #[allow(clippy::too_many_arguments)]
 pub fn outer_iteration(
     gpu: &Gpu,
@@ -534,6 +568,7 @@ pub fn outer_iteration(
     is_final: bool,
     dt_for_p0: Option<Scalar>,
     mut chem: Option<&mut Reacting<'_>>,
+    mut dust: Option<DustStep<'_, '_>>,
 ) -> Result<IterReport> {
     let fk = FieldKernels::new(gpu)?;
 
@@ -550,12 +585,30 @@ pub fn outer_iteration(
             r.update_inlet_outlet(gpu, s.convective_flux())?;
             r.update_density(gpu, gas, energy.field())?;
         }
-        None => gas.update_density(gpu, energy.field())?,
+        None => match dust.as_mut() {
+            Some(st) => {
+                st.src.update_inlet_outlet(gpu, s.convective_flux())?;
+                st.src.update_density(gpu, gas, energy.field())?;
+            }
+            None => gas.update_density(gpu, energy.field())?,
+        },
     }
 
     energy.sources_mut().clear(gpu)?;
     if let Some(r) = chem.as_deref_mut() {
         r.before_flow(gpu, m, energy, gas)?;
+    }
+    // §157.4's order: the dust step's registrations land ahead of the
+    // heater's and the thermostat's, exactly as the reacting step's do.
+    let mut c_out_of_bounds: u64 = 0;
+    if let Some(st) = dust.as_mut() {
+        let turb_in = st.turb.as_ref().map(|t| ofgpu::dust::source::DustTurbulence {
+            k: t.k,
+            omega: t.omega,
+            nu_t: t.nu_t,
+        });
+        let ps = st.src.before_flow(gpu, m, energy, gas, s.convective_flux(), s.u(), turb_in, st.t_new)?;
+        c_out_of_bounds = ps.out_of_bounds;
     }
     if let Some(h) = heater {
         energy.sources_mut().register_explicit(gpu, h)?;
@@ -577,6 +630,29 @@ pub fn outer_iteration(
 
     energy.update_target_divergence(gpu, gas, nut, k, nu)?;
 
+    // §157.4: on the SEALED, the constraint's -dp0dt/(gamma p0) term and the
+    // p0 this step advances to must be the same step's. An ignition's
+    // dilatation doubles within a step, so last step's rate leaves the
+    // Poisson source a net uniform divergence no closed box can route - the
+    // solver returns the junk gradient of an inconsistent system and the
+    // field leaves the low-Mach regime in one step. The advance below reads
+    // the integrals of the launch just above, and the re-issued launch
+    // carries the fresh rate (and the fresh p0 in its 1/(gamma p0)) into the
+    // constraint; the registry is untouched between the two, so the
+    // dilatation integral is the same one. The chem and no-model paths keep
+    // the end-of-iteration advance they always had - their sources move on
+    // scales where the one-step lag never mattered (and the no-dust byte pin
+    // counts on the old call sequence).
+    let dust_sealed_p0 = match dust.as_ref() {
+        Some(_) if gas.domain() == DomainKind::Sealed => dt_for_p0,
+        _ => None,
+    };
+    if let Some(dt) = dust_sealed_p0 {
+        let c = energy.constraint_integrals(gpu)?;
+        gas.advance_p0_mixture(c, dt)?;
+        energy.update_target_divergence(gpu, gas, nut, k, nu)?;
+    }
+
     let perf = s.correct_outer_low_mach(
         gpu,
         backend,
@@ -596,6 +672,19 @@ pub fn outer_iteration(
             // an open gas returns 0 and keeps p0.
             let c = energy.constraint_integrals(gpu)?;
             gas.advance_p0_mixture(c, dt)?;
+        }
+    } else if dust.is_some() {
+        // §157.4: (133.22) again - the two pseudo-species' constraint is
+        // (133.21)'s, and the sealed p0 advances from its own integrals; an
+        // open gas returns 0 and keeps p0. On the sealed the advance already
+        // ran ahead of the pressure solve (the `dust_sealed_p0` block above),
+        // with this same integrals read-back, so running it again here would
+        // take the step twice.
+        if dust_sealed_p0.is_none() {
+            if let Some(dt) = dt_for_p0 {
+                let c = energy.constraint_integrals(gpu)?;
+                gas.advance_p0_mixture(c, dt)?;
+            }
         }
     } else if let Some(dt) = dt_for_p0 {
         // SPEC-LIT §25.2 integrates the SAME `Q` §25.1's constraint uses, and
@@ -631,6 +720,10 @@ pub fn outer_iteration(
         && match chem.as_deref() {
             Some(r) => r.finite(gpu)?,
             None => true,
+        }
+        && match &dust {
+            Some(st) => gpu.download(&st.src.c().f)?.iter().all(|v| v.is_finite()),
+            None => true,
         };
 
     let (mut t_min, mut t_max) = (Scalar::INFINITY, Scalar::NEG_INFINITY);
@@ -655,6 +748,7 @@ pub fn outer_iteration(
         p0: gas.p0(),
         dp0dt: gas.dp0dt(),
         mach,
+        c_out_of_bounds,
         finite,
     })
 }
@@ -742,6 +836,8 @@ fn write_time(
     volume: Option<&ofgpu::io::VolumeTarget>,
     // SPEC-LIT §133.11: a reacting run's mass fractions and heat release.
     chem: Option<&Reacting<'_>>,
+    // SPEC-LIT §157.4: a dust run's c~, cbar, Ut, Cof, HRR and p0.
+    dust: Option<&mut DustSource<'_>>,
 ) -> Result<()> {
     let out_root = output_root(case_path);
     let name = format_time_name(t);
@@ -786,6 +882,13 @@ fn write_time(
     for (fname, out) in &out_chem {
         foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
     }
+    let out_dust = match dust {
+        Some(ds) => ds.output(gpu, hm, gas)?,
+        None => Vec::new(),
+    };
+    for (fname, out) in &out_dust {
+        foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
+    }
 
     let mut vis_fields: Vec<ofgpu::io::OutputField> = vec![
         ofgpu::io::OutputField::vector("U", &out_u.internal),
@@ -797,6 +900,9 @@ fn write_time(
         vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
     }
     for (fname, out) in &out_chem {
+        vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
+    }
+    for (fname, out) in &out_dust {
         vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
     }
 
@@ -839,7 +945,11 @@ fn write_time(
 /// the first write rather than as a silently wrong file - and
 /// `lowmach_tests::the_early_field_list_is_what_the_run_actually_writes` pins
 /// them together.
-fn output_field_names(turb: &dyn CoupledTurbulence, chem: Option<&Reacting<'_>>) -> Vec<String> {
+fn output_field_names(
+    turb: &dyn CoupledTurbulence,
+    chem: Option<&Reacting<'_>>,
+    dust: Option<&DustSource<'_>>,
+) -> Vec<String> {
     let mut names: Vec<String> =
         ["U", "p", "T", "rho"].iter().map(|s| (*s).to_string()).collect();
     for (fname, _) in turb.output_fields() {
@@ -847,6 +957,9 @@ fn output_field_names(turb: &dyn CoupledTurbulence, chem: Option<&Reacting<'_>>)
     }
     if let Some(r) = chem {
         names.extend(r.field_names());
+    }
+    if dust.is_some() {
+        names.extend(DustSource::field_names().iter().copied().map(String::from));
     }
     names
 }
@@ -1993,6 +2106,25 @@ fn run(o: &Options) -> Result<RunEnd> {
         )?;
     }
 
+    // SPEC-LIT §157.4 (DST-06): a dust case, refused by name where this
+    // driver cannot honour it, before a field is set up - the same shape the
+    // chemistry refusal above reads. (`ofgpu-par` and `ofgpu-decompose` load
+    // through `common::load_case`, which refuses a dust case by name at its
+    // part-1 seam, so this is the only driver that ever gets here with one.)
+    let dust_case: Option<ofgpu::io::case_dust::LoweredDust> =
+        lowered.as_ref().and_then(|l| l.dust.clone());
+    if dust_case.is_some() {
+        lowmach_dust::refuse_settings(&lowmach_dust::DustShape {
+            transient,
+            ddt: ctrls.energy.ddt,
+            restart: o.restart_from.is_some()
+                || o.restart_write.is_some()
+                || output_plan.as_ref().is_some_and(|p| p.restart.is_some()),
+            motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()),
+            heater: o.heater_power != 0.0,
+        })?;
+    }
+
     // SPEC-LIT 117.6 / 117.3: what the volume writers sample onto, laid
     // ONCE, before the time loop, and only when vdb/nvdb are written.
     let (volume_formats, volume_spec) = match output_plan.as_ref().and_then(|p| p.vis.as_ref()) {
@@ -2301,9 +2433,54 @@ fn run(o: &Options) -> Result<RunEnd> {
             println!("{}", r.describe());
             Some(r)
         }
-        None => {
-            gas.update_density(&gpu, energy.field())?;
-            None
+        None => None,
+    };
+    if reacting.is_none() && dust_case.is_none() {
+        gas.update_density(&gpu, energy.field())?;
+    }
+
+    // SPEC-LIT §157.4: a dust case's constants, its c~ equation and its two
+    // pseudo-species gas; (133.20) is the density from here on. Dust and
+    // chemistry never both run - the lowering refuses `species`/`chemistry`
+    // beside the dust model, so `chem_case` is None whenever this arm runs.
+    let mut dust: Option<DustSource<'_>> = match &dust_case {
+        None => None,
+        Some(d) => {
+            let num = CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?;
+            let setup = ofgpu::dust::source::DustSetup::new(
+                d,
+                f64::from(p0_init),
+                f64::from(gas_props.k),
+            )?;
+            let (c_ctrl, c_conv) = lowmach_dust::c_controls(&num, &cc.turb, dt)?;
+            let raw_c = d.c_field.to_raw(hm.n_cells);
+            let mut ds =
+                ofgpu::dust::source::DustSource::new(&gpu, &hm, &mesh, setup, &raw_c, c_ctrl)?;
+            ds.set_convection(c_conv);
+            gas.use_mixture(&gpu, ds.mixture()?)?;
+            energy.sources_mut().use_meters(&gpu)?;
+            ds.update_density(&gpu, &mut gas, energy.field())?;
+            if let Some(sst) = &d.sst {
+                turb.set_rho_options(ofgpu::models::k_omega_sst::RhoSstOptions {
+                    limit_omega_production: sst.limit_omega_production,
+                    sust: sst.sust.map(|(k, w)| ofgpu::models::k_omega_sst::SstSust {
+                        k_amb: k as Scalar,
+                        omega_amb: w as Scalar,
+                    }),
+                })?;
+            }
+            // §155.6: the fixed step is checked ONCE, against the predicted
+            // number of the initial field, before the loop can waste itself.
+            let tfields = turb.output_fields();
+            let dust_turb = lowmach_dust::dust_turbulence_of(&tfields, turb.nut());
+            let co = ds.predicted_courant(&gpu, &hm, s.u(), dust_turb, f64::from(dt))?;
+            println!(
+                "flame Courant (155.9): predicted Co_f {} against max {} on the initial field",
+                g(co),
+                g(d.max_flame_courant)
+            );
+            println!("{}", lowmach_dust::describe(&ds));
+            Some(ds)
         }
     };
 
@@ -2577,7 +2754,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     // it again there - two statements of one set, and the second is what
     // makes the first safe to trust.
     if let Some(plan) = &output_plan {
-        let available = output_field_names(&*turb, reacting.as_ref());
+        let available = output_field_names(&*turb, reacting.as_ref(), dust.as_ref());
         let refs: Vec<&str> = available.iter().map(String::as_str).collect();
         plan.check_fields(&refs)?;
     }
@@ -2659,6 +2836,11 @@ fn run(o: &Options) -> Result<RunEnd> {
     );
     refuse_above_low_mach(&m0, "the initial field")?;
     let mut last_mach = m0;
+    // SPEC-LIT §156: a dust case's turbulence is laminar or the rho-weighted
+    // kOmegaSST - the lowering refuses every other model - so this one
+    // boolean is the whole question of which turbulence correction the loop
+    // below runs.
+    let dust_is_sst = dust_case.is_some() && selection.model == RasModel::KOmegaSST;
 
     for step in 0..n_steps {
         if transient {
@@ -2668,7 +2850,16 @@ fn run(o: &Options) -> Result<RunEnd> {
             // `U`'s and `p`'s old level the starting field. From the second
             // step on, opening one rotates `T`'s levels too, ahead of the
             // unit of work's `update_density`.
-            open_time_step(&gpu, &mut s, &mut energy, &mut gas, dt, step, reacting.as_mut())?;
+            open_time_step(
+                &gpu,
+                &mut s,
+                &mut energy,
+                &mut gas,
+                dt,
+                step,
+                reacting.as_mut(),
+                dust.as_mut(),
+            )?;
             // SPEC-LIT 120.8: the one host round trip per time step - the
             // lump's (120.8g) level, its two rotated f64 levels, and the
             // step's area-shared H and T_ref - before the step's first
@@ -2712,7 +2903,29 @@ fn run(o: &Options) -> Result<RunEnd> {
             prt: gas_props.pr_t,
             form: cc.buoyancy.form,
         };
-        turb.correct(&gpu, &flow, Some(&thermal))?;
+        // SPEC-LIT §156/§157.4: a dust case with the rho-weighted SST never
+        // runs the kinematic `correct` - before 2 t_0 (t_0 the ignition's
+        // t0, H20 §3.3, §155.3) the turbulence stays FROZEN at its initial
+        // values and the step skips the correction entirely; from 2 t_0 on
+        // it runs `correct_rho` on the mass flux the dust model just formed.
+        // Every other case (a laminar dust one included) corrects as before.
+        if let (Some(ds), true) = (dust.as_mut(), dust_is_sst) {
+            if t_phys >= 2.0 * ds.setup().t_fd_origin {
+                ds.form_mass_flux(&gpu, &mesh, &gas, s.convective_flux())?;
+                let dens = ofgpu::models::k_omega_sst::SstDensity {
+                    rho: &gas.rho().f,
+                    rho0: &gas.rho().f0,
+                    rho00: &gas.rho().f00,
+                    rho_face: ds.rho_face(),
+                    phi_volume: s.convective_flux(),
+                };
+                let rho_flow =
+                    FlowState::new(s.u(), ds.phi_mass(), cc.nu);
+                turb.correct_rho(&gpu, &rho_flow, &dens)?;
+            }
+        } else {
+            turb.correct(&gpu, &flow, Some(&thermal))?;
+        }
 
         // `k` for SPEC-LIT §29.3's thermal wall function - present for
         // k-epsilon/k-omega/SST, absent for laminar/LES (guarded against a
@@ -2724,6 +2937,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             find_field(&turb_fields, "k").unwrap_or_else(|| turb.nut());
 
         let is_final = transient; // one outer corrector - see the module doc
+        let tfields = turb.output_fields();
         let report = outer_iteration(
             &gpu,
             &mesh,
@@ -2739,6 +2953,15 @@ fn run(o: &Options) -> Result<RunEnd> {
             is_final,
             if transient { Some(dt) } else { None },
             reacting.as_mut(),
+            dust.as_mut().map(|ds| DustStep {
+                src: ds,
+                turb: if dust_is_sst {
+                    lowmach_dust::dust_turbulence_of(&tfields, turb.nut())
+                } else {
+                    None
+                },
+                t_new: t_phys,
+            }),
         )?;
 
         if !report.finite {
@@ -2758,6 +2981,17 @@ fn run(o: &Options) -> Result<RunEnd> {
 
         if step % o.check_every.max(1) as usize == 0 || step + 1 == n_steps {
             print_report(step, &report);
+            // §155.6: a dust run reports the MEASURED flame-Courant number of
+            // the step just taken beside the bound, and the c~ bounds count.
+            if let Some(ds) = dust.as_mut() {
+                let co = ds.measured_courant(&gpu, &mesh, s.u(), &gas, f64::from(dt))?;
+                println!(
+                    "           dust: Co_f measured {} against max {} | c~ out of bounds {}",
+                    g(co),
+                    g(ds.setup().max_flame_courant),
+                    report.c_out_of_bounds,
+                );
+            }
         }
 
         // The first step is where the linear solvers claim their workspaces
@@ -2788,6 +3022,7 @@ fn run(o: &Options) -> Result<RunEnd> {
                 last_mach,
                 volume.as_ref(),
                 reacting.as_ref(),
+                dust.as_mut(),
             )?;
         }
 
@@ -2828,14 +3063,19 @@ fn run(o: &Options) -> Result<RunEnd> {
     // How the run ended, for `main`'s last line (SPEC-LIT §31.4).
     let final_state = match reacting.as_ref() {
         Some(r) => r.snapshot(&gpu, energy.field(), &gas)?,
-        None => Vec::new(),
+        None => match &dust {
+            Some(ds) => ds.snapshot(&gpu, energy.field(), &gas)?,
+            None => Vec::new(),
+        },
     };
-    let run_end = RunEnd {
+    let mut run_end = RunEnd {
         steps: n_steps,
         transient,
         t_end: t_phys,
         ux_mean,
         t_mean,
+        p0_end: f64::from(gas.p0()),
+        budget: None,
         final_state,
     };
 
@@ -2863,6 +3103,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         last_mach,
         volume.as_ref(),
         reacting.as_ref(),
+        dust.as_mut(),
     )?;
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.
@@ -3249,7 +3490,10 @@ fn run(o: &Options) -> Result<RunEnd> {
         // a ratio against a number that is not a shortfall would be a
         // fabricated verdict. The budget itself prints either way.
         {
-            let budget = energy.assembly_budget(&gpu, &gas)?;
+            // The same budget `RunEnd` carries for the tests (§157.4's
+            // readout): computed once here, printed below.
+            run_end.budget = Some(energy.assembly_budget(&gpu, &gas)?);
+            let budget = run_end.budget.expect("just set above");
             println!("\n=== energy budget, domain integrals (SPEC-LIT §26/§32.5.5, DIAGNOSTIC) ===");
             println!(
                 "sign convention: an entry is what the assembled LEFT-HAND SIDE takes out of \n\
@@ -3639,10 +3883,21 @@ struct RunEnd {
     /// 105-E's readout (SPEC-LIT 105.17). It feeds no output.
     #[cfg_attr(not(test), allow(dead_code))]
     t_mean: f64,
+    /// `gas.p0()` at the end, every run (SPEC-LIT §25.2): the sealed box's
+    /// pressure ratio is the AICC gate's whole measurement. It feeds no
+    /// output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    p0_end: f64,
+    /// The §26/§32.5.5 energy budget the run already computes after the
+    /// loop; `None` never happens today (it is computed unconditionally),
+    /// the option says so to tests rather than pretending it cannot be.
+    #[cfg_attr(not(test), allow(dead_code))]
+    budget: Option<ofgpu::energy::EnergyBudget>,
     /// A reacting run's final cell values at full precision - `T`, `rho`,
     /// `HRR` and every mass fraction (SPEC-LIT §133.11's readout, since the
-    /// written fields carry six digits); empty without chemistry. It feeds
-    /// no output.
+    /// written fields carry six digits); a dust run's `c`, `T`, `rho`, `HRR`
+    /// and `Ut` (SPEC-LIT §157.4's readout); empty otherwise. It feeds no
+    /// output.
     #[cfg_attr(not(test), allow(dead_code))]
     final_state: Vec<(String, Vec<Scalar>)>,
 }
@@ -4045,6 +4300,7 @@ mod lowmach_tests {
                 false,
                 None,
                 None,
+                None,
             )?;
             assert!(
                 last.finite,
@@ -4297,7 +4553,7 @@ mod lowmach_tests {
         k_zeros: &DevBuf<Scalar>,
         step: usize,
     ) -> Result<IterReport> {
-        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step, None)?;
+        open_time_step(gpu, &mut stack.s, &mut stack.energy, &mut stack.gas, dt, step, None, None)?;
 
         let flow = FlowState::new(stack.s.u(), stack.s.phi(), nu);
         stack.turb.correct(gpu, &flow, None)?;
@@ -4316,6 +4572,7 @@ mod lowmach_tests {
             None,
             true,
             Some(dt),
+            None,
             None,
         )
     }
@@ -5670,8 +5927,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, p0_end: 101325.0, budget: None, final_state: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, p0_end: 101325.0, budget: None, final_state: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5691,8 +5948,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, p0_end: 101325.0, budget: None, final_state: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, p0_end: 101325.0, budget: None, final_state: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -6381,7 +6638,9 @@ mod lowmach_tests {
     /// Gate 105-E's case (SPEC-LIT 105.17): an open 16x1x1 duct, a wall at
     /// `xmin`, an open outlet at `xmax`, symmetry sides, laminar, `T = 300 K`
     /// and `U = 0` at the start. `ddt` names the case's ddt scheme.
-    fn heated_duct_case_text(ddt: &str) -> String {
+    /// `pub(crate)` so `lowmach_dust`'s no-dust hash gate runs this exact
+    /// text - the pin is on the case, not on a copy of it.
+    pub(crate) fn heated_duct_case_text(ddt: &str) -> String {
         r#"{
   "name": "heatedDuct",
   "mesh": { "kind": "cartesian", "bounds": { "min": [0,0,0], "max": [1.0,0.1,0.1] }, "cells": [16,1,1],

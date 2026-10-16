@@ -129,6 +129,13 @@ pub struct JsonCase {
     /// SPEC-LIT §137.2: the combustion closure (§134).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combustion: Option<crate::io::case_chem::JsonCombustion>,
+    /// SPEC-LIT §157.4: the `dust` block (`crate::io::case_dust`), the
+    /// DST-06 equivalent-gas charge beside a `combustion.model` FSC/TFC.
+    /// Absent (the default) is every case this reader has ever built;
+    /// present, it lowers to [`LoweredCase::dust`] and every driver but
+    /// `ofgpu-lowmach` refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dust: Option<crate::io::case_dust::JsonDust>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -1719,6 +1726,10 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `species`, `chemistry` and `combustion` blocks,
     /// lowered onto one config (§137.7). `None` for every case without them.
     pub chem: Option<crate::io::case_chem::LoweredChem>,
+    /// SPEC-LIT §157.4: the `dust` block beside a `combustion.model` FSC or
+    /// TFC, lowered onto the DST-06 config. `None` for every case that is
+    /// not a dust one - then [`Self::chem`] is exactly what it always was.
+    pub dust: Option<crate::io::case_dust::LoweredDust>,
 }
 
 impl LoweredCase {
@@ -1728,6 +1739,16 @@ impl LoweredCase {
     pub fn refuse_chemistry(&self) -> Result<()> {
         match self.chem {
             Some(_) => Err(crate::io::case_chem::refuse_chemistry_case("species")),
+            None => Ok(()),
+        }
+    }
+
+    /// SPEC-LIT §157.4: a driver's refusal of a case that states the dust
+    /// model (DST-06). Every driver but `ofgpu-lowmach` (part 3 of that
+    /// unit) would ignore it; `Ok` for every case without the block.
+    pub fn refuse_dust(&self) -> Result<()> {
+        match self.dust {
+            Some(_) => Err(crate::io::case_dust::refuse_dust_case("dust")),
             None => Ok(()),
         }
     }
@@ -3389,19 +3410,43 @@ impl JsonCase {
         }
 
         let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
+        // SPEC-LIT §157.4: the dust case lowers BEFORE the chemistry blocks
+        // and owns the case when it lowers at all - an FSC/TFC model's gas is
+        // its own two pseudo-species (§152.4), so a `Some` here means
+        // `lower_blocks` is not called: the case states neither species nor
+        // chemistry, and its combustion keys are the dust model's.
+        let dust = crate::io::case_dust::lower_dust(
+            self.combustion.as_ref(),
+            self.dust.as_ref(),
+            &crate::io::case_dust::DustContext {
+                species: self.species.is_some(),
+                chemistry: self.chemistry.is_some(),
+                turbulence_kind,
+                turbulence_model: turbulence_model.as_deref(),
+                compressible: compressible.is_some(),
+                gravity: self.physics.gravity,
+                initial_t: self.initial.t,
+                patch_names: &names,
+                rules: &self.patches,
+            },
+        )?;
         // SPEC-LIT §137.2 and §137.7: the three chemistry blocks, one
         // lowering; each solved species' field is built on the same patch
-        // names and rules as `T`'s.
-        let chem = crate::io::case_chem::lower_blocks(
-            crate::io::case_chem::ChemBlocks {
-                species: self.species.as_ref(),
-                chemistry: self.chemistry.as_ref(),
-                combustion: self.combustion.as_ref(),
-            },
-            crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
-            compressible.is_some(),
-            Some((&names, &self.patches)),
-        )?;
+        // names and rules as `T`'s. A dust case skips it entirely.
+        let chem = if dust.is_some() {
+            None
+        } else {
+            crate::io::case_chem::lower_blocks(
+                crate::io::case_chem::ChemBlocks {
+                    species: self.species.as_ref(),
+                    chemistry: self.chemistry.as_ref(),
+                    combustion: self.combustion.as_ref(),
+                },
+                crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
+                compressible.is_some(),
+                Some((&names, &self.patches)),
+            )?
+        };
         // SPEC-LIT §137.2: a mass coupling's vapour is checked against
         // `species.names` (refused without a species block); the parcels'
         // gravity, when the block states none, is the case's.
@@ -3454,6 +3499,7 @@ impl JsonCase {
             compressible,
             parcels,
             chem,
+            dust,
         })
     }
 }

@@ -108,6 +108,12 @@ pub fn load_case_with(
         if !allow_chemistry {
             lowered.refuse_chemistry()?;
         }
+        // SPEC-LIT §157.4: a case's dust model is refused the same way -
+        // DST-06's part 3 wires it into ofgpu-lowmach, and until then no
+        // driver runs it.
+        if !allow_chemistry {
+            lowered.refuse_dust()?;
+        }
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below
         // always built) and the 119.0 wedge mesh - with the case's own

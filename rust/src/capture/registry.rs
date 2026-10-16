@@ -182,6 +182,17 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              there by dust_progress_kernels_replay_under_capture",
         ),
     ),
+    (
+        "src/dust/source.rs",
+        Stance::Refused(
+            "one dust step calls ProgressEquation::solve, which reads the bounds \
+             counter back after every solve (SPEC-LIT 155.2 reports each cell \
+             outside [0, 1] and clips none, so the count must reach the host), \
+             and its predicted_courant downloads the closures' U_t,ISP. Its \
+             three thermo kernels are gated in src/dust/device.rs by \
+             dust_source_kernels_replay_under_capture",
+        ),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",
@@ -536,8 +547,12 @@ pub const UNGATED_CEILING: usize = 0;
 /// does not match the source code of the predicate.
 const NOT_PHYSICS: &[&str] = &["src/capture.rs", "src/capture/registry.rs"];
 
-/// Method names that mean "advance this module by one iteration".
-const ITERATION_ENTRIES: &[&str] = &["correct", "step", "update", "solve", "advance"];
+/// Method names that mean "advance this module by one iteration". The dust
+/// step's entry is `before_flow` (SPEC-LIT 157.4): it drives other modules'
+/// kernels and has none of its own, and the population must see it for the
+/// same reason the four turbulence names are here.
+const ITERATION_ENTRIES: &[&str] =
+    &["before_flow", "correct", "step", "update", "solve", "advance"];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()

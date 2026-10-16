@@ -15,7 +15,11 @@
 //! [`crate::dust::ignition`] and [`crate::dust::courant`]. DST-12 adds the
 //! reacting-parcel step of `cuda/dustparticle.cu` (SPEC-LIT §159), whose
 //! host twin is [`crate::dust::particle::step`]; DST-13 adds its char
-//! stage (SPEC-LIT §159.8, [`crate::dust::char`]). A launcher only
+//! stage (SPEC-LIT §159.8, [`crate::dust::char`]). DST-06 part 2 adds the
+//! three thermo kernels of one dust step (SPEC-LIT (152.12), (133.17),
+//! (133.18)): the mixture `cp` on the two pseudo-species' NASA-7 rows, the
+//! heat release and the enthalpy diffusion - each with its host twin in
+//! [`crate::dust::thermo`] and [`crate::dust::source`]. A launcher only
 //! launches - no sync, no download, no allocation - so a captured region
 //! can hold it; a counter is a one-element `u64` buffer the caller zeroes,
 //! and the kernels add to it.
@@ -404,6 +408,166 @@ pub fn count_out_of_bounds(
     Ok(())
 }
 
+
+/// The three thermo kernels of DST-06 part 2 (SPEC-LIT (152.12), (133.17),
+/// (133.18) with Y_B = c~), loaded from the `DUST` module. Their host twins
+/// are [`crate::dust::thermo::EquivalentGas`]'s `cp`, `heat_release` and
+/// the (133.17) formula.
+pub struct SourceKernels {
+    mixture_cp: CudaFunction,
+    heat_release: CudaFunction,
+    enthalpy_diffusion: CudaFunction,
+}
+
+impl SourceKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::DUST)?;
+        Ok(Self {
+            mixture_cp: k.func("dustMixtureCp")?,
+            heat_release: k.func("dustHeatRelease")?,
+            enthalpy_diffusion: k.func("dustEnthalpyDiffusion")?,
+        })
+    }
+}
+
+/// One pseudo-species' row for the three kernels (SPEC-LIT (128.1), (128.2),
+/// (128.5)): `[R0/W, t_mid, lower a1..a5, lower a6, upper a1..a5, upper a6]`.
+/// `R0` is [`crate::chem::thermo::R_GAS`], so `row[0]` is J/(kg K) per unit
+/// cp/R and `a[5]` of either interval IS its a6.
+pub fn thermo_row(sp: &crate::chem::thermo::SpeciesThermo) -> [Acc; 14] {
+    let mut row = [0.0; 14];
+    row[0] = crate::chem::thermo::R_GAS / sp.molar_mass;
+    row[1] = sp.t_mid;
+    row[2..7].copy_from_slice(&sp.lower[..5]);
+    row[7] = sp.lower[5];
+    row[8..13].copy_from_slice(&sp.upper[..5]);
+    row[13] = sp.upper[5];
+    row
+}
+
+/// `dustMixtureCp`: (133.18)'s `cp = (1 - c) cp_U(T) + c cp_B(T)` per kg,
+/// J/(kg K), over `n` values.
+#[allow(clippy::too_many_arguments)]
+pub fn mixture_cp(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    cp: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    c: &DevBuf<Scalar>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [("cp", cp.len()), ("t", t.len()), ("c", c.len())] {
+        check_len("mixture_cp", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("mixture_cp", "row_u", row_u.len(), 14)?;
+    check_len("mixture_cp", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.mixture_cp)
+            .arg(&mut *cp)
+            .arg(t)
+            .arg(c)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustHeatRelease`: (152.12)'s `qdot = (h_U(T) - h_B(T)) wdot_c`, W/m3,
+/// over `n` values.
+pub fn heat_release(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    q: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    wdot: &DevBuf<Scalar>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [("q", q.len()), ("t", t.len()), ("wdot", wdot.len())] {
+        check_len("heat_release", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("heat_release", "row_u", row_u.len(), 14)?;
+    check_len("heat_release", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.heat_release)
+            .arg(&mut *q)
+            .arg(t)
+            .arg(wdot)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustEnthalpyDiffusion`: (133.17)'s
+/// `Q_hd = rho Gamma (cp_B(T) - cp_U(T)) (grad c~ . grad T)`, W/m3, over
+/// `n` cells.
+#[allow(clippy::too_many_arguments)]
+pub fn enthalpy_diffusion(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    q: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    rho: &DevBuf<Scalar>,
+    gamma: &DevBuf<Scalar>,
+    grad_c: &DevBuf<Vec3>,
+    grad_t: &DevBuf<Vec3>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("q", q.len()),
+        ("t", t.len()),
+        ("rho", rho.len()),
+        ("gamma", gamma.len()),
+        ("grad_c", grad_c.len()),
+        ("grad_t", grad_t.len()),
+    ] {
+        check_len("enthalpy_diffusion", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("enthalpy_diffusion", "row_u", row_u.len(), 14)?;
+    check_len("enthalpy_diffusion", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.enthalpy_diffusion)
+            .arg(&mut *q)
+            .arg(t)
+            .arg(rho)
+            .arg(gamma)
+            .arg(grad_c)
+            .arg(grad_t)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
 
 /// The reacting-parcel kernel of `cuda/dustparticle.cu` (SPEC-LIT §159,
 /// docs/17 DST-12), loaded from the `DUSTPARTICLE` module. Its host twin is
@@ -857,5 +1021,80 @@ mod tests {
         )
         .expect("SPEC-LIT 159: the dust reacting-parcel step must capture and replay bitwise");
         println!("  dust reacting-parcel step: {report}");
+    }
+
+    /// DST-06 part 2's three thermo kernels (SPEC-LIT (152.12), (133.17),
+    /// (133.18)) under §81.6's protocol: T is fed back from the heat release
+    /// each iteration, so a replay that skipped a kernel cannot reproduce
+    /// the state. The rows are the prescribed Leeds pseudo-species'.
+    #[test]
+    fn dust_source_kernels_replay_under_capture() {
+        use crate::dust::thermo::{EquivalentGas, PrescribedInputs};
+        struct S {
+            sk: SourceKernels,
+            fl: FieldKernels,
+            row_u: DevBuf<Acc>,
+            row_b: DevBuf<Acc>,
+            t: DevBuf<Scalar>,
+            c: DevBuf<Scalar>,
+            rho: DevBuf<Scalar>,
+            gam: DevBuf<Scalar>,
+            gc: DevBuf<Vec3>,
+            gt: DevBuf<Vec3>,
+            wdot: DevBuf<Scalar>,
+            cp: DevBuf<Scalar>,
+            q: DevBuf<Scalar>,
+            qhd: DevBuf<Scalar>,
+        }
+        let Some(g) = gpu() else { return };
+        let n = 64;
+        let gas = EquivalentGas::prescribed(&PrescribedInputs {
+            cp: 1100.0,
+            w_u: 0.0328,
+            w_b: 0.0297,
+            t_u: 328.0,
+            t_b: 1500.0,
+        })
+        .expect("gas");
+        let col = |f: &dyn Fn(usize) -> f64| (0..n).map(|i| f(i) as Scalar).collect::<Vec<Scalar>>();
+        let report = capture_replays_bitwise(
+            &g,
+            "the dust source kernels (SPEC-LIT (152.12), 133.17, 133.18)",
+            || {
+                Ok(S {
+                    sk: SourceKernels::new(&g)?,
+                    fl: FieldKernels::new(&g)?,
+                    row_u: g.upload(&thermo_row(&gas.unburned))?,
+                    row_b: g.upload(&thermo_row(&gas.burned))?,
+                    t: g.upload(&col(&|i| 900.0 + 20.0 * i as f64))?,
+                    c: g.upload(&col(&|i| i as f64 / 63.0))?,
+                    rho: g.upload(&col(&|i| 1.0 + 0.01 * i as f64))?,
+                    gam: g.upload(&col(&|i| 2.0e-5 * (1.0 + 0.1 * i as f64)))?,
+                    gc: g.upload(&(0..n).map(|i| Vec3::new((10.0 + i as f64) as Scalar, 1.0, 0.0)).collect::<Vec<Vec3>>())?,
+                    gt: g.upload(&(0..n).map(|i| Vec3::new(1.0, (2.0 + i as f64) as Scalar, 0.0)).collect::<Vec<Vec3>>())?,
+                    wdot: g.upload(&col(&|i| 10.0 + i as f64))?,
+                    cp: g.zeros(n)?,
+                    q: g.zeros(n)?,
+                    qhd: g.zeros(n)?,
+                })
+            },
+            |s| {
+                mixture_cp(&g, &s.sk, &mut s.cp, &s.t, &s.c, &s.row_u, &s.row_b, n)?;
+                heat_release(&g, &s.sk, &mut s.q, &s.t, &s.wdot, &s.row_u, &s.row_b, n)?;
+                enthalpy_diffusion(&g, &s.sk, &mut s.qhd, &s.t, &s.rho, &s.gam, &s.gc, &s.gt, &s.row_u, &s.row_b, n)?;
+                crate::field_ops::scale_field(&g, &s.fl, &mut s.rho, 1.0e-3, n)?;
+                crate::field_ops::add_field(&g, &s.fl, &mut s.t, &s.rho, n)
+            },
+            |s| {
+                Ok(vec![
+                    ("t", g.download(&s.t)?),
+                    ("cp", g.download(&s.cp)?),
+                    ("q", g.download(&s.q)?),
+                    ("qhd", g.download(&s.qhd)?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT (152.12): the dust source kernels must capture and replay bitwise");
+        println!("  dust source kernels: {report}");
     }
 }

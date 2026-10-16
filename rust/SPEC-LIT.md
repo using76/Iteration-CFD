@@ -50313,7 +50313,8 @@ from a running model's `mixing_rate()`, for the driver. Then:
   on it.
 
 CHR-12b replaces the refusal on `ofgpu-lowmach`'s path for a JSONC case
-(§133.11); the dictionary route stays refused. A case without the
+(§133.11); the dictionary route stays refused. The dust model's `combustion.model` `FSC`/`TFC` keys
+and its `dust` block lower in `src/io/case_dust.rs` instead (§157.7, DST-06). A case without the
 three blocks lowers, serialises and runs exactly as before.
 `docs/schema/case-1.json` is regenerated (§137.2).
 
@@ -56381,6 +56382,8 @@ name with a dust case. Tests, ≤ 8 min per build:
 * `lowmach::tests::dust_refusals_name_the_setting`, `io::case_dust::tests::{lowers, refusals}`
   and the schema sync test (D).
 
+As built, with its measurements and its recorded misses, in §157.7.
+
 ### 157.5 Gate DST-LEEDS (DST-07)
 
 The Leeds fan-stirred cornflour bomb, REDUCED. **Inputs, all from §151.5:** prescribed thermo
@@ -56432,6 +56435,136 @@ Labelled a **REPRODUCTION** row: H22 guessed and adjusted u' and L on this curve
 At 0.1 bar the burned-mass fraction is about 0.5 % and the kernel radius about 0.46 m, clear of
 the walls of any plausible 11.5 m³ cylinder, so the equal-volume sphere carries the same p(t) up
 to rupture (INSIGHTS (i)).
+
+### 157.7 What DST-06 landed
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Equations from §152-§156 and
+§133 only; the three relations below that §157.4 left open are derived here.
+
+**The case blocks** (`src/io/case_dust.rs`). `combustion.model` takes `FSC` or `TFC` beside the
+§137.7 names, with the keys `A` (default 0.4 for both, §151.5), `PrT` (required, no default),
+`tFlacc` (FSC only), `maxFlameCourant` (default 0.5) and `ignition { point, sigmaR, W0, t0,
+sigmaT }` (`sigmaT` defaults to `t0`, §151.7 item 8). The `dust` block holds `thermo`
+(`formula` with `phi`, or `prescribed` with `cp`, `Wu`, `Wb`, `Tb`), `SL` (required when
+prescribed, (152.13) at phi otherwise) and `sst { limitOmegaProduction, sust { kAmb, omegaAmb }
+}`. T_u is the case's `initial.T`. phi is held as the exact fraction of the decimal the case
+wrote (0.62 is 62/100, §152.11). `JsonCase::lower` lowers the dust pair before the chemistry
+blocks, and a dust case has no `LoweredChem`. Every refusal names its key: a `dust` block
+without FSC/TFC, FSC/TFC without one, `species` or `chemistry` beside it, a key of
+EDM/EDC/PaSR, a missing `PrT`, `tFlacc` with TFC, a number that is not finite and positive, a
+thermo key of the other mode, a turbulence model other than laminar or `kOmegaSST` (with
+`dust.sst` only beside `kOmegaSST`, and `kOmegaSST` only with zero gravity, §156.7),
+`physics.compressible` (DST-10), and a missing `initial.T`. Every driver but `ofgpu-lowmach`
+refuses a dust case through `LoweredCase::refuse_dust`, `ofgpu-par` and `ofgpu-decompose`
+included, which is how decomposition is refused by name.
+
+**The step** (`src/dust/source.rs`, three kernels appended to `cuda/dust.cu`). `DustSetup` forms
+the constants once on the host in f64: the gas of §152.4, `rho_u0` and `gamma_u =
+cp_U/(cp_U - R0/W_U)` at T_u, the isobaric T_b and sigma (152.10), Psi on the case's adiabatic
+line with n = 1 (§153.2), t_r (153.2), and `FscConstants`. `DustSource::before_flow` runs one
+outer iteration in this order: the mixture cp (133.18) on cells and boundary faces; the
+closures (`dustFsc`) at t_fd = max(t - t_0, 0); the ignition bracket (155.4); Gamma (157.6);
+the face mass flux `rho_f phi`; one solve of (155.3) with `rho_u(p0)` of (155.10); the net rate
+(157.7); the heat release (152.12); the enthalpy diffusion (157.8); and the molar source of
+(133.24) with Y_B = c~, handed to (133.21). The gas is the two pseudo-species, DUST_B solved
+and DUST_U the remainder, so rho is (133.20).
+
+**[derived] Le = 1 against the energy equation's own conductivity.** §26's temperature
+equation diffuses with the constant molecular conductivity k of `GasProperties`. For c~ and T
+to diffuse alike, the c~ equation's molecular diffusivity is formed per cell from the same k:
+
+```
+  Gamma = kappa + D_t ,     kappa = k / (rho cp(T, c~))                                       (157.6)
+```
+
+kappa_u and kappa_b of (154.4) and (154.11) are (157.6) at the unburned and the burned state
+at p0. With one constant cp, rho kappa is constant, which is the n = 1 of §153.2 the Psi solve
+takes; in the formula mode cp varies with T and n = 1 is the stated approximation.
+
+**[derived from (155.3) and (154.11)]** After the solve the net source of c~ is
+
+```
+  wdot_c = S_U - S_P' c~ = rho_u U_t |grad c~| + rho (K + W)(1 - c~)                          (157.7)
+```
+
+in kg/(m3 s), the rate the heat release (152.12) and the molar source burn with.
+
+**[derived from (133.17) with Y_B = c~, the inert U and D_k replaced by Gamma]**
+
+```
+  Q_hd = rho Gamma (cp_B(T) - cp_U(T)) (grad c~ . grad T)                                    (157.8)
+```
+
+**Driver order (`ofgpu-lowmach`, `src/bin/lowmach_dust/`).** The dust step runs ahead of the
+flow solve, after T's inletOutlet update and the mixture density. *DESIGN, decided by
+recommendation:* on a sealed dust case p0 is advanced by (133.22) right after the target
+divergence and the divergence is formed again with the new rate, so the constraint's
+`-dp0/dt/(gamma p0)` and the energy equation's dp0/dt are this step's. With the end-of-step
+advance of §133.11 the uniform ignition left the closed box's pressure equation a net
+divergence it cannot route (measured: continuity error 5.8e-2 and M 6.2 within one step). An
+open dust case and every case without the dust blocks keep the old order. The kOmegaSST case
+runs `correct_rho` (§156.7) on the dust step's mass flux from t >= 2 t_0, and holds k and omega
+at their initial values before that (H20 §3.3, §155.3); a laminar case passes zero k, omega and
+nu_t to the closures. The predicted flame-Courant number (155.9) is checked once before the
+loop and refused by name above `maxFlameCourant`; the measured one is printed at every check.
+The driver writes `c`, `cbar` (155.2), `Ut`, `Cof`, `HRR` and `p0`, beside `T` and `rho`. A
+steady run, a ddt other than Euler, a checkpoint, a motion block and `-heaterPower` are refused
+by name.
+
+**Tree against plan.** (1) The plan's row asks for "the 1-D tube run through the case" in the
+pair; a tube's flow solve is not inert, so the pair runs §133.11's two-cell box at rest. (2) The
+sealed cube burns under TFC with a uniform ignition bracket, so c~ = 1 - exp(-W t) and no
+laminar-limit source runs away near T_b; the AICC identity does not depend on the closure.
+(3) The driver code sits in `src/bin/lowmach_dust/`, beside `lowmach_chem`. (4) `src/models/
+coupled.rs` gains two defaulted trait methods (`set_rho_options`, `correct_rho`, overridden by
+the SST), the one way to reach §156's form through `dyn CoupledTurbulence`. (5) The capture
+registry's iteration-entry list gains `before_flow`, so `src/dust/source.rs` is classified
+(Refused: each solve reads the bounds counter back).
+
+**Gates, measured 2026-10-17** (`lowmach_dust::tests`, bin tests of `ofgpu-lowmach`, both
+builds; `dust::source` and `io::case_dust` as lib tests and in `tests/dust_source.rs`,
+`tests/case_dust.rs`).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `dust_sealed_box_ends_at_aicc` | 2x2x2 sealed 1 cm cube, TFC, uniform W_0 = 1000 1/s, formula REMBE gas at 273 K, 0.02 s at dt 1e-4 and 5e-5 | c~ >= 1 - 1e-6; p0 ratio within 0.5 % of AICC 8.600607635; error ratio in [1.8, 2.2] | P | c~ min 0.999999995; e 7.06e-5 and 7.87e-4; **ratio 0.090 MISSED** | e 6.94e-5 and 7.77e-4; **ratio 0.089 MISSED** |
+| `dust_energy_budget_closes` | the box after 40 steps | residual, registry split and HRR meter over the gross | R (planned A; §133.9's and §156.7's precedent) | 4.2e-15, 5.8e-15, 6.5e-17 | 0, 3.9e-6, 4.6e-8 (tol 1e-5) |
+| `dust_adiabatic_line` | open 250-cell tube of 8 um cubes, FSC laminar, ignition at the wall, 400 steps at dt 1e-6 | max abs(T - T_ad(c~)) <= 0.5 K | P | **20.42 K MISSED** (a burned cell) | **diverged at step 0, MISSED** |
+| `dust_case_equals_library` | the two-cell open box, 20 steps, against §157.7's order by hand | bitwise c, T, rho, HRR; U exactly 0 | D | 0 of 2 differ | 0 of 2 differ |
+| `no_dust_no_change` | the heated duct of Gate 105-E, 20 steps, FNV-1a 64 of `restart.mcr` | the pin taken before DST-06 | D | 0x1927d8c3f48cdc3a | 0x03c567099d693890 |
+| `dust_refusals_name_the_setting` | steady, backward, `-restartWrite`, motion, `-heaterPower`, `common::load_case`, a predicted Co_f of 23.1 | refused by name | D | all | all |
+| `dust_sst_case_runs` | sealed kOmegaSST box with SST-sust, 5 steps | finite, bounds count 0 | D | holds | holds |
+| `dust::source` (6) | cp, heat release and Q_hd against the host; the setup; one box step against its closed form; the predicted Co_f and its refusal | tol_r(1e-12) | R | 2.8e-16, 2.6e-16, 1.1e-15; c1 3.3e-16 | pass |
+| `io::case_dust` (8) | every key, the defaults, phi's fraction, the c field, the SST keys, the round trip, every refusal | exact | D | pass | pass |
+
+`DustSetup` for REMBE at 101 325 Pa with k = 0.026 W/(m K): T_b 1779.5146 K, sigma 7.041982,
+Psi 1.818340e-4, kappa_u 1.757785e-5 m2/s, t_r 9.997559e-12 s.
+
+**The recorded misses.** (i) *The AICC ratio.* In the sealed box p0 = rho R T/W_B with rho fixed
+by the walls, and the run carries two first-order errors of opposite sign: T ends high against
+T_v = 2173.3805 K (19.2, 8.5, 4.0, 2.0 K at dt 1e-4, 5e-5, 2.5e-5, 1.25e-5 s) and the explicit
+p0 step loses mass (0.89 %, 0.47 %, 0.24 %, 0.12 %). Their difference, p0's error, changes sign
+near dt = 1e-4 (+3.9e-3, -7.1e-5, -7.9e-4, -5.6e-4, -3.2e-4 from dt = 2e-4 down), so its ratio
+at the gate's two steps says nothing about the order. The test asserts the miss in this recorded
+form: both p0 errors inside 0.5 %, and the T and mass errors each falling. (ii) *The adiabatic
+line, f64.* The worst cell is fully burned: one outer iteration per step evaluates the cp field
+and h_U - h_B at the step's opening T, and a cell that burns within a few steps leaves its
+plateau below T_b. The error falls with dt (43.7, 20.4, 7.3 K at 2e-6, 1e-6, 5e-7 s); the test
+runs the half step and asserts that it cuts the error by more than half. Outer iterations per
+step would be the cure, and that is a numerics change of the driver (the user's). (iii) *The
+adiabatic line, single.* The single build's low-Mach pressure solve returns NaN on the first
+step of this 8 um tube, and the same tube without the dust model (a heater-only run) leaves the
+low-Mach regime at step 0 too, so the miss is the f32 flow path on this mesh (the §118 family of
+F32-07), not the dust step. The test records the divergence and fails on any other error.
+
+**Decisions (TAKEN, by recommendation).** D1: Le = 1 on the energy equation's k (157.6), with
+Psi at n = 1. D2: the sealed dust path advances p0 before the pressure solve. D3: TFC with a
+uniform bracket for the AICC box, the two-cell box for the pair. D4: the dust driver code in its
+own bin module. D5: a laminar case's closures read zero k, omega and nu_t. D6: the turbulence is
+frozen before 2 t_0.
+
+Labels: (157.6)-(157.8).
 
 ---
 

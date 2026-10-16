@@ -313,6 +313,14 @@ impl<'m> ProgressEquation<'m> {
         &self.core.ctrl
     }
 
+    /// The `S_U` / `S_P'` pair of (155.3) as [`Self::solve`] last assembled
+    /// it, `[n_cells]` each: the net rate the solve leaves is
+    /// `S_U - S_P' c~`, the `wdot_c` (152.12)'s heat release burns with
+    /// (SPEC-LIT §155.2, (154.11)).
+    pub fn source_terms(&self) -> (&DevBuf<Scalar>, &DevBuf<Scalar>) {
+        (&self.su, &self.sp)
+    }
+
     /// Evaluates the boundary values and seeds both old levels from the
     /// initial field.
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {

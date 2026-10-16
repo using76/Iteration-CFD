@@ -27,6 +27,10 @@
       and eqs. (1)-(2), (14) for the progress-variable kernels
     C. Huang, M. Bloching & A. N. Lipatnikov, J. Loss Prev. Process Ind. 75
       (2022) 104707, DOI 10.1016/j.jlp.2021.104707 - eqs. (7)-(11)
+    ofgpu SPEC-LIT.md (152.12) - the heat release of the equivalent gas
+    ofgpu SPEC-LIT.md (133.17), (133.18) - the enthalpy diffusion and the
+      mixture c_p, with Y_B = c~ and the inert U, as DST-06 part 2 forms
+      them (the three dust thermo kernels at the end of this file)
   The specification was informed by a review of FSCDustFoam (Huang &
   Lipatnikov, GPL) and no code was copied.
   No GPL-licensed source was consulted.
@@ -341,4 +345,117 @@ extern "C" __global__ void dustCountOutOfBounds
     if (i >= n) return;
     const ofscalar v = c[i];
     if (!(v >= -tol && v <= (ofscalar)1 + tol)) atomicAdd(nout, 1ULL);
+}
+
+// ==========================================================================
+//  The equivalent-gas thermo of one dust step (SPEC-LIT (152.12) and the
+//  SPEC-LIT (133.17), (133.18) forms with Y_B = c~, docs/17 DST-06 part 2).
+//  Appended after the DST-03/DST-04 kernels, which are unchanged. The same
+//  rule holds: every intermediate is `ofacc` in both builds and each output
+//  is rounded once at its store. One `ofacc` row per pseudo-species holds
+//  [R0/W, t_mid, lower a1..a5, lower a6, upper a1..a5, upper a6] (128.5);
+//  `thermo_row` in src/dust/device.rs forms it from the record.
+// ==========================================================================
+
+//- (128.1) on one row, cp/R: the interval is the lower set when
+//  T <= the row's t_mid, else the upper set (SPEC-LIT 128.1). The Horner
+//  chain is written with __dmul_rn/__dadd_rn, which nvcc never contracts,
+//  so the host twin (SPEC-LIT 128.1's nasa7_cp_r) and this agree bit for
+//  bit in f64.
+OFGPU_DEV ofacc dustRowCpR(const ofacc* r, const ofacc T)
+{
+    const ofacc* a = (T <= r[1]) ? &r[2] : &r[8];
+    const ofacc p4 = __dmul_rn(T, a[4]);
+    const ofacc p3 = __dmul_rn(T, __dadd_rn(a[3], p4));
+    const ofacc p2 = __dmul_rn(T, __dadd_rn(a[2], p3));
+    const ofacc p1 = __dmul_rn(T, __dadd_rn(a[1], p2));
+    return __dadd_rn(a[0], p1);
+}
+
+//- (128.2) on one row, H/(RT): a1 + a2 T/2 + a3 T^2/3 + a4 T^3/4 +
+//  a5 T^4/5 + a6/T. The sum runs left to right and every quotient is a
+//  quotient, both as the host twin's nasa7_h_rt evaluates them, so the two
+//  agree bit for bit in f64. A row's a[5] IS its a6: the lower set starts
+//  at r[2] (a6 at r[7]) and the upper at r[8] (a6 at r[13]).
+OFGPU_DEV ofacc dustRowHrT(const ofacc* r, const ofacc T)
+{
+    const ofacc* a = (T <= r[1]) ? &r[2] : &r[8];
+    const ofacc t2 = __dmul_rn(T, T);
+    const ofacc s1 = __dadd_rn(a[0], __ddiv_rn(__dmul_rn(a[1], T), 2.0));
+    const ofacc s2 = __dadd_rn(s1, __ddiv_rn(__dmul_rn(a[2], t2), 3.0));
+    const ofacc s3 = __dadd_rn(s2, __ddiv_rn(__dmul_rn(__dmul_rn(a[3], t2), T), 4.0));
+    const ofacc s4 = __dadd_rn(s3, __ddiv_rn(__dmul_rn(__dmul_rn(a[4], t2), t2), 5.0));
+    return __dadd_rn(s4, __ddiv_rn(a[5], T));
+}
+
+//- (152.4)/(133.18): the mixture c_p per kg on every cell,
+//  cp = (1 - c) cp_U(T) + c cp_B(T), with cp_X = (R0/W_X) cp/R of (128.1) -
+//  row[0] IS R0/W_X, so a row's cp_X is row[0] * cp/R.
+extern "C" __global__ void dustMixtureCp
+(
+    ofscalar* __restrict__ cp,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ c,
+    const ofacc* __restrict__ rowu,
+    const ofacc* __restrict__ rowb,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc T = (ofacc)t[i];
+    const ofacc ci = (ofacc)c[i];
+    const ofacc cpu = __dmul_rn(rowu[0], dustRowCpR(rowu, T));
+    const ofacc cpb = __dmul_rn(rowb[0], dustRowCpR(rowb, T));
+    cp[i] = (ofscalar)__dadd_rn(__dmul_rn(1.0 - ci, cpu), __dmul_rn(ci, cpb));
+}
+
+//- (152.12): the heat release qdot = (h_U(T) - h_B(T)) wdot_c, W/m3, with
+//  h_X = (R0/W_X) T H/(RT) J/kg - row[0] T H/(RT), formed in that order.
+extern "C" __global__ void dustHeatRelease
+(
+    ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ wdot,
+    const ofacc* __restrict__ rowu,
+    const ofacc* __restrict__ rowb,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc T = (ofacc)t[i];
+    const ofacc hu = __dmul_rn(__dmul_rn(rowu[0], T), dustRowHrT(rowu, T));
+    const ofacc hb = __dmul_rn(__dmul_rn(rowb[0], T), dustRowHrT(rowb, T));
+    q[i] = (ofscalar)__dmul_rn(hu - hb, (ofacc)wdot[i]);
+}
+
+//- (133.17) with Y_B = c~ and the inert U: Q_hd = rho Gamma (cp_B(T) -
+//  cp_U(T)) (grad c~ . grad T), W/m3. Le = 1 makes Gamma the SAME scalar
+//  the c~ equation diffuses with, so c~ and T diffuse alike (DST-06's
+//  choice); kappa = k / (rho cp(T, c~)) is the molecular half of it.
+extern "C" __global__ void dustEnthalpyDiffusion
+(
+    ofscalar* __restrict__ q,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ gamma,
+    const ofvec3* __restrict__ gradc,
+    const ofvec3* __restrict__ gradt,
+    const ofacc* __restrict__ rowu,
+    const ofacc* __restrict__ rowb,
+    oflabel n
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc T = (ofacc)t[i];
+    const ofacc dcp = __dmul_rn(rowb[0], dustRowCpR(rowb, T))
+                    - __dmul_rn(rowu[0], dustRowCpR(rowu, T));
+    const ofacc gx = __dmul_rn((ofacc)gradc[i].x, (ofacc)gradt[i].x);
+    const ofacc gy = __dmul_rn((ofacc)gradc[i].y, (ofacc)gradt[i].y);
+    const ofacc gz = __dmul_rn((ofacc)gradc[i].z, (ofacc)gradt[i].z);
+    const ofacc dot = __dadd_rn(__dadd_rn(gx, gy), gz);
+    const ofacc rg = __dmul_rn((ofacc)rho[i], (ofacc)gamma[i]);
+    q[i] = (ofscalar)__dmul_rn(__dmul_rn(rg, dcp), dot);
 }

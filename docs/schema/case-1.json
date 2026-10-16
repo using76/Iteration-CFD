@@ -32,6 +32,17 @@
         }
       ]
     },
+    "dust": {
+      "description": "SPEC-LIT §157.4: the `dust` block (`crate::io::case_dust`), the\nDST-06 equivalent-gas charge beside a `combustion.model` FSC/TFC.\nAbsent (the default) is every case this reader has ever built;\npresent, it lowers to [`LoweredCase::dust`] and every driver but\n`ofgpu-lowmach` refuses the case by name.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonDust"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "initial": {
       "$ref": "#/$defs/JsonInitial"
     },
@@ -333,6 +344,14 @@
           ],
           "format": "double"
         },
+        "PrT": {
+          "description": "FSC/TFC's Pr_t (§151.5: each case its own - Leeds 0.4, REMBE 0.28).\nREQUIRED with `model` FSC or TFC; there is no default.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "gammaMax": {
           "type": [
             "number",
@@ -340,14 +359,41 @@
           ],
           "format": "double"
         },
+        "ignition": {
+          "description": "The ignition source of (155.4); absent is no ignition source.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonIgnition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxFlameCourant": {
+          "description": "The flame-Courant limit Co_f,max of (155.9); the default is\n`ofgpu::dust::courant::CO_F_MAX` = 0.5.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "model": {
-          "description": "`laminar` (the default) | `EDM` | `EDC` | `PaSR`.",
+          "description": "`laminar` (the default) | `EDM` | `EDC` | `PaSR` | `FSC` | `TFC`.\n`FSC` and `TFC` are the dust model's closures (§154); they lower in\n`crate::io::case_dust` and are refused here, as is every one of the\nfour keys below under any of the four species-closure names.",
           "type": [
             "string",
             "null"
           ]
         },
         "psrSpan": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tFlacc": {
+          "description": "The extended FSC's t_flacc (§154.7). FSC only - TFC has no clock\n(§154.6).",
           "type": [
             "number",
             "null"
@@ -536,6 +582,123 @@
             "period"
           ]
         }
+      ]
+    },
+    "JsonDust": {
+      "description": "The `dust` block (SPEC-LIT §157.4). `thermo` names one of §152.9's two\nmodes; the keys each mode reads are refused on the other.",
+      "type": "object",
+      "properties": {
+        "SL": {
+          "description": "m/s, the laminar burning velocity. REQUIRED in the prescribed mode;\nin the formula mode omitted is (152.13)'s S_L(phi).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Tb": {
+          "description": "K, the measured burned temperature (Leeds 1500); prescribed only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Wb": {
+          "description": "kg/mol, the burned molar mass (Leeds 0.0297); prescribed only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "Wu": {
+          "description": "kg/mol, the unburned molar mass (Leeds 0.0328); prescribed only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "cp": {
+          "description": "J/(kg K), the one c_p both pseudo-species carry; prescribed only.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "phi": {
+          "description": "The equivalence ratio (152.2); REQUIRED in the formula mode, refused\nin the prescribed one. Held as the exact fraction of the decimal the\ncase wrote.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sst": {
+          "description": "The ρ-weighted SST's settings (§156.3, §156.4); refused without\nturbulence.model kOmegaSST.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonDustSst"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thermo": {
+          "description": "`formula` (the pseudo-species of (152.1)-(152.8) at phi) |\n`prescribed` (one constant c_p, §152.9). Required, no default.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "thermo"
+      ]
+    },
+    "JsonDustSst": {
+      "description": "`dust.sst` (SPEC-LIT §156.3, §156.4).",
+      "type": "object",
+      "properties": {
+        "limitOmegaProduction": {
+          "description": "(156.8)'s limiter on the ω production; the default is false, the\ntree's kinematic behaviour (§156.3).",
+          "type": "boolean",
+          "default": false
+        },
+        "sust": {
+          "description": "SST-sust's ambient state (156.9); absent is off.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonDustSust"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonDustSust": {
+      "description": "`dust.sst.sust`, the (k_amb, omega_amb) of (156.9).",
+      "type": "object",
+      "properties": {
+        "kAmb": {
+          "description": "m²/s², the ambient turbulent kinetic energy.",
+          "type": "number",
+          "format": "double"
+        },
+        "omegaAmb": {
+          "description": "1/s, the ambient specific dissipation.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kAmb",
+        "omegaAmb"
       ]
     },
     "JsonEvaporation": {
@@ -816,6 +979,52 @@
       "additionalProperties": false,
       "required": [
         "expansion"
+      ]
+    },
+    "JsonIgnition": {
+      "description": "`combustion.ignition`, the source of (155.4) (SPEC-LIT §155.3). `sigmaT`\nomitted is t0 (§151.7 item 8).",
+      "type": "object",
+      "properties": {
+        "W0": {
+          "description": "W_0, 1/s (H20 §3.3's 1e13). Required, finite and above zero.",
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "The ignition point in world coordinates, m. Required.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "sigmaR": {
+          "description": "sigma_r, m (H20 §3.3's 0.25 mm). Required, finite and above zero.",
+          "type": "number",
+          "format": "double"
+        },
+        "sigmaT": {
+          "description": "sigma_t, s; omitted is t0 (§151.7 item 8).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "t0": {
+          "description": "t_0, s - the end of the ramp and the origin of t_fd. Required, finite\nand at or above zero.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "point",
+        "sigmaR",
+        "W0",
+        "t0"
       ]
     },
     "JsonImpact": {
