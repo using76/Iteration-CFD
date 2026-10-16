@@ -343,6 +343,13 @@ impl VoxelMap {
         Ok(out)
     }
 
+    /// The active mask of 117.6, as the Isaac density reads it (117.9,
+    /// 117.10): `true` where a cell owns the voxel, `false` where it holds
+    /// [`NONE`].
+    pub fn fluid_mask(&self) -> Vec<bool> {
+        self.cell.iter().map(|&c| c != NONE).collect()
+    }
+
     /// The same for the solver's own `Scalar` cell values, widened exactly
     /// to f64 first (`as f64`, no value rounded back - 117.2 item 2).
     pub fn sample(&self, phi: &[Scalar]) -> Result<Vec<f64>> {
@@ -356,6 +363,147 @@ impl VoxelMap {
         let wide: Vec<f64> = phi.iter().map(|&s| s as f64).collect();
         self.sample_f64(&wide)
     }
+}
+
+// ==========================================================================
+//  The Isaac density (SPEC-LIT 117.9, VIO-09)
+// ==========================================================================
+
+/// `K_m`, the specific extinction coefficient of flame-generated smoke,
+/// m^2/kg (117.14): 8.7 m^2/g from Mulholland & Croarkin (2000), *Fire
+/// Mater.* 24(5) 227-230. `isaac_export.py`'s `K = 8700 . smoke_density`.
+pub const SMOKE_SPECIFIC_EXTINCTION: f64 = 8700.0;
+
+/// (117.10)'s `f^_v`: `clamp((f_v - f_lo) / (f_hi - f_lo), 0, 1)`, and 0
+/// where `M[v] = NONE` (a voxel nothing owns renders nothing). A non-finite
+/// `f_v` fails both clamp tests and gives 0, never a NaN in the grid.
+/// `range[1] <= range[0]` (a constant field, or a bad explicit range) gives
+/// all zeros - the caller sees `D = 0` and writes an all-zero density grid.
+pub fn normalise_for_optical_depth(f: &[f64], fluid: Option<&[bool]>, range: [f64; 2]) -> Vec<f64> {
+    let [lo, hi] = range;
+    let span = hi - lo;
+    f.iter()
+        .enumerate()
+        .map(|(v, &x)| {
+            if span <= 0.0 || !span.is_finite() {
+                return 0.0;
+            }
+            if fluid.is_some_and(|m| !m[v]) {
+                return 0.0;
+            }
+            if !x.is_finite() {
+                return 0.0; // 117.10: a non-finite f_v gives 0
+            }
+            if x < lo {
+                return 0.0;
+            }
+            if x > hi {
+                return 1.0;
+            }
+            (x - lo) / span
+        })
+        .collect()
+}
+
+/// The default `range` of 117.9: `(min, max)` of `f` over the FLUID voxels
+/// with a finite value. `fluid: None` = every voxel is fluid. `None` when
+/// no voxel qualifies - the caller has no range to normalise with, and its
+/// write is the all-zero one.
+pub fn fluid_range(f: &[f64], fluid: Option<&[bool]>) -> Option<[f64; 2]> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for (v, &x) in f.iter().enumerate() {
+        if fluid.is_some_and(|m| !m[v]) || !x.is_finite() {
+            continue;
+        }
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    (lo <= hi).then_some([lo, hi])
+}
+
+/// (117.11): the largest optical depth of one voxel line parallel to an
+/// axis, `max over a and l of h_a sum_{v in l} f^_v`. `n` is `[n_x, n_y,
+/// n_z]`, the flat index `i + n0 (j + n1 k)`, and `h` the spacing per axis -
+/// one cubic `h` on a lattice, the axis's own `h_a` on a Cartesian box,
+/// where the cells' spacing differs per axis.
+pub fn max_column_optical_depth(n: [usize; 3], h: [f64; 3], s: &[f64]) -> f64 {
+    let at = |i: usize, j: usize, k: usize| i + n[0] * (j + n[1] * k);
+    let mut max = 0.0f64;
+    // x lines: n_y n_z of them, n_x voxels each.
+    for k in 0..n[2] {
+        for j in 0..n[1] {
+            let mut sum = 0.0f64;
+            for i in 0..n[0] {
+                sum += s[at(i, j, k)];
+            }
+            max = max.max(h[0] * sum);
+        }
+    }
+    // y lines.
+    for k in 0..n[2] {
+        for i in 0..n[0] {
+            let mut sum = 0.0f64;
+            for j in 0..n[1] {
+                sum += s[at(i, j, k)];
+            }
+            max = max.max(h[1] * sum);
+        }
+    }
+    // z lines.
+    for j in 0..n[1] {
+        for i in 0..n[0] {
+            let mut sum = 0.0f64;
+            for k in 0..n[2] {
+                sum += s[at(i, j, k)];
+            }
+            max = max.max(h[2] * sum);
+        }
+    }
+    max
+}
+
+/// (117.12): `sigma_v = tau f^_v / D`, in that order, so the densest
+/// column's optical depth is exactly `tau` before rounding. `d <= 0` or
+/// non-finite (the all-zero write, or the write before `D` is held) gives
+/// all zeros - the extinction Beer-Lambert integrates is 0 everywhere.
+pub fn optical_depth_sigma(f_hat: &[f64], tau: f64, d: f64) -> Vec<f64> {
+    if !(d > 0.0) || !d.is_finite() {
+        return vec![0.0; f_hat.len()];
+    }
+    f_hat.iter().map(|&x| tau * x / d).collect()
+}
+
+/// (117.11) + (117.12) together: `(sigma, D)`, with `D` from
+/// [`max_column_optical_depth`]. The 117.9 gate "the max column optical
+/// depth equals tau within 1 %" holds by construction here, up to the
+/// rounding of `sigma` to the voxel precision.
+pub fn optical_depth_target(n: [usize; 3], h: [f64; 3], f_hat: &[f64], tau: f64) -> (Vec<f64>, f64) {
+    let d = max_column_optical_depth(n, h, f_hat);
+    (optical_depth_sigma(f_hat, tau, d), d)
+}
+
+/// (117.14): `sigma_v = K_m rho_s,v`, in that order, for the fluid voxels;
+/// a negative `rho_s` (an undershoot of a transported mass fraction) is
+/// written as 0 and COUNTED - the second return value; [`NONE`] voxels get
+/// 0. `fluid: None` = every voxel is fluid.
+pub fn physical_extinction(rho_s: &[f64], fluid: Option<&[bool]>, km: f64) -> (Vec<f64>, usize) {
+    let mut negatives = 0usize;
+    let sigma = rho_s
+        .iter()
+        .enumerate()
+        .map(|(v, &r)| {
+            if fluid.is_some_and(|m| !m[v]) {
+                return 0.0;
+            }
+            if r < 0.0 {
+                negatives += 1;
+                return 0.0;
+            }
+            km * r
+        })
+        .collect();
+    (sigma, negatives)
 }
 
 // ==========================================================================
@@ -1123,5 +1271,177 @@ impl VoxelMap {
             spec: spec.clone(),
             report,
         })
+    }
+}
+
+// ==========================================================================
+//  Tests (SPEC-LIT 117.9, VIO-09)
+// ==========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::nvdb::lattice_fixture as lf;
+
+    /// The 2:1 mesh of `mesh/refined.rs`, a lattice of `h = 1/24` on its
+    /// DEFAULT box (the point bounding box, 24^3 voxels), cell sampling, and
+    /// the Gaussian plume `f_c = exp(-|C_c - centre|^2 / 0.05)` sampled onto
+    /// it (117.5), with the fluid mask.
+    fn plume_voxels() -> (VoxelMap, Vec<f64>, Vec<bool>) {
+        let (raw, hm) = lf::refined();
+        let spec = LatticeSpec { voxel: Some(1.0 / 24.0), ..Default::default() };
+        let vm = VoxelMap::build(&raw, &hm, &spec).expect("VoxelMap::build");
+        let g = hm.geom64();
+        let centre = DVec3::new(0.5, 0.5, 0.5);
+        let f: Vec<Scalar> = (0..hm.n_cells)
+            .map(|c| {
+                let d = g.c[c] - centre;
+                (-(d.dot(d)) / 0.05).exp()
+            })
+            .collect();
+        let vox = vm.sample(&f).expect("sample");
+        let mask = vm.fluid_mask();
+        (vm, vox, mask)
+    }
+
+    /// The test's OWN (117.11), deliberately not
+    /// [`max_column_optical_depth`]: the same max over the three axes'
+    /// lines, written out again here so the check is independent of the
+    /// function under test.
+    fn own_max_column(n: [usize; 3], h: [f64; 3], s: &[f64]) -> f64 {
+        let at = |i: usize, j: usize, k: usize| i + n[0] * (j + n[1] * k);
+        let mut best = 0.0f64;
+        for k in 0..n[2] {
+            for j in 0..n[1] {
+                let mut sum = 0.0f64;
+                for i in 0..n[0] {
+                    sum += s[at(i, j, k)];
+                }
+                best = best.max(h[0] * sum);
+            }
+        }
+        for k in 0..n[2] {
+            for i in 0..n[0] {
+                let mut sum = 0.0f64;
+                for j in 0..n[1] {
+                    sum += s[at(i, j, k)];
+                }
+                best = best.max(h[1] * sum);
+            }
+        }
+        for j in 0..n[1] {
+            for i in 0..n[0] {
+                let mut sum = 0.0f64;
+                for k in 0..n[2] {
+                    sum += s[at(i, j, k)];
+                }
+                best = best.max(h[2] * sum);
+            }
+        }
+        best
+    }
+
+    /// VIO-09's gate, in f64 before any rounding: the max column optical
+    /// depth of (117.12)'s sigma is exactly `tau` (within 1e-12 relative),
+    /// no column exceeds it, and the returned `D` is the test's own
+    /// (117.11) of `f^`. Checked at `tau = 2.0` (the visual default) and
+    /// `tau = 0.5`.
+    #[test]
+    fn optical_depth_target() {
+        let (vm, vox, mask) = plume_voxels();
+        let n = vm.n;
+        let h = [vm.voxel; 3];
+        let range = fluid_range(&vox, Some(&mask)).expect("the plume has fluid voxels");
+        let f_hat = normalise_for_optical_depth(&vox, Some(&mask), range);
+        for tau in [2.0, 0.5] {
+            // `super::` - this test's own name shadows the function's.
+            let (sigma, d) = super::optical_depth_target(n, h, &f_hat, tau);
+            assert_eq!(d, own_max_column(n, h, &f_hat), "D is the test's own (117.11)");
+            let got = own_max_column(n, h, &sigma);
+            let rel = ((got - tau) / tau).abs();
+            assert!(rel < 1e-12, "tau {tau}: densest column {got} vs tau, rel {rel}");
+            // No column may exceed tau (1 + 1e-12) - Beer-Lambert's bound;
+            // `own_max_column` IS the max over every column of every axis.
+            let ceil = tau * (1.0 + 1e-12);
+            assert!(got <= ceil, "tau {tau}: a column reaches {got} > {ceil}");
+            // The gate itself, AT the file's precision: sigma as f32.
+            let s32: Vec<f64> = sigma.iter().map(|&s| s as f32 as f64).collect();
+            let got32 = own_max_column(n, h, &s32);
+            let rel32 = ((got32 - tau) / tau).abs();
+            println!("optical_depth_target: tau {tau}, f32-rounded densest column {got32}, \
+                      relative error {rel32:.3e}");
+            assert!(rel32 < 1e-2, "tau {tau}: f32 relative error {rel32} >= 1 %");
+        }
+    }
+
+    /// (117.11) on a box whose spacing differs per axis: the deepest line
+    /// is the one whose AXIS spacing multiplies it, not the longest one.
+    #[test]
+    fn max_column_optical_depth_uses_the_axis_spacing() {
+        // Two voxels along x only: the y lines are single voxels at h_y = 2,
+        // the z lines single voxels at h_z = 4 - the z line of voxel 0 wins.
+        assert_eq!(max_column_optical_depth([2, 1, 1], [1.0, 2.0, 4.0], &[1.0, 1.0]), 4.0);
+        // Voxel 1 is not fluid: only voxel 0's z line survives, still 4.0.
+        assert_eq!(max_column_optical_depth([2, 1, 1], [1.0, 2.0, 4.0], &[1.0, 0.0]), 4.0);
+        // One voxel, all zero: no line has anything to integrate.
+        assert_eq!(max_column_optical_depth([1, 1, 1], [1.0, 1.0, 1.0], &[0.0]), 0.0);
+    }
+
+    /// A constant field has f_hi = f_lo: f^ is 0 everywhere, so the write
+    /// sees D = 0 and writes the all-zero density grid (117.9).
+    #[test]
+    fn optical_depth_zero_field() {
+        let f = [0.5f64, 0.5, 0.5, 0.5];
+        let range = fluid_range(&f, None).expect("all fluid");
+        assert_eq!(range, [0.5, 0.5]);
+        let f_hat = normalise_for_optical_depth(&f, None, range);
+        assert!(f_hat.iter().all(|&s| s == 0.0));
+        let (sigma, d) = super::optical_depth_target([2, 2, 1], [1.0, 1.0, 1.0], &f_hat, 2.0);
+        assert_eq!(d, 0.0);
+        assert!(sigma.iter().all(|&s| s == 0.0));
+    }
+
+    /// (117.10)'s clamp, the NaN rule and the NONE rule, and the default
+    /// range's own two rules.
+    #[test]
+    fn normalise_clamps() {
+        let f = [0.1, 0.5, 0.9, f64::NAN, 0.5];
+        let fluid = [true, true, true, true, false];
+        let f_hat = normalise_for_optical_depth(&f, Some(&fluid), [0.25, 0.75]);
+        assert_eq!(f_hat[0], 0.0);
+        assert_eq!(f_hat[1], 0.5, "(0.5 - 0.25) / 0.5 is exact");
+        assert_eq!(f_hat[2], 1.0);
+        assert_eq!(f_hat[3], 0.0, "a non-finite f_v gives 0");
+        assert_eq!(f_hat[4], 0.0, "a NONE voxel gives 0");
+
+        // fluid_range ignores NONE voxels and non-finite values alike.
+        let g = [0.1, f64::NAN, 0.9, 0.5];
+        assert_eq!(fluid_range(&g, Some(&[true, true, true, true])), Some([0.1, 0.9]));
+        assert_eq!(fluid_range(&g, Some(&[false, false, false, true])), Some([0.5, 0.5]));
+        assert_eq!(fluid_range(&g, Some(&[true, false, false, false])), Some([0.1, 0.1]));
+        assert_eq!(fluid_range(&[f64::NAN, f64::NAN], None), None, "no finite fluid voxel");
+        assert_eq!(fluid_range(&[0.5, 0.7], Some(&[false, false])), None);
+        // `fluid: None` = every voxel is fluid.
+        assert_eq!(fluid_range(&[0.25, 1.0], None), Some([0.25, 1.0]));
+    }
+
+    /// (117.14), exactly: `K_m = 8.7 m^2/g = 8700 m^2/kg`, and sigma is
+    /// `K_m * rho_s` bit for bit, with the negatives written 0 and counted.
+    #[test]
+    fn physical_extinction_is_km_rho() {
+        assert_eq!(SMOKE_SPECIFIC_EXTINCTION, 8.7 * 1000.0);
+        let rho_s = [0.0, 1e-3, 2.5e-4, -1e-5];
+        let (sigma, count) = physical_extinction(&rho_s, None, SMOKE_SPECIFIC_EXTINCTION);
+        let want = [0.0, SMOKE_SPECIFIC_EXTINCTION * 1e-3, SMOKE_SPECIFIC_EXTINCTION * 2.5e-4, 0.0];
+        for (s, w) in sigma.iter().zip(want) {
+            assert_eq!(*s, w, "sigma is km * rho_s bit for bit");
+        }
+        assert_eq!(count, 1, "exactly one negative rho_s, written 0 and counted");
+        // A NONE voxel is 0 and its negative rho_s is not counted.
+        let (sigma, count) =
+            physical_extinction(&rho_s, Some(&[true, true, false, true]), SMOKE_SPECIFIC_EXTINCTION);
+        assert_eq!(sigma[2], 0.0, "the NONE voxel is 0 even at a positive rho_s");
+        assert_eq!(sigma[3], 0.0, "the negative fluid voxel is 0");
+        assert_eq!(count, 1);
     }
 }

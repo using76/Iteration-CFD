@@ -1568,6 +1568,85 @@
         "expansion"
       ]
     },
+    "JsonIsaac": {
+      "description": "`output.visualisation.isaac` - SPEC-LIT 117.9's nine keys, `field`\nrequired, the rest optional. Resolved, and every 117.12 refusal raised,\nby [`crate::io::output_plan::OutputPlan::from_json`]; nothing here\nvalidates.",
+      "type": "object",
+      "properties": {
+        "Km": {
+          "description": "Specific extinction, m^2/kg (`physical`); absent is 8700 - 117.14's\n8.7 m^2/g of Mulholland & Croarkin 2000.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "field": {
+          "description": "The cell field the density is made from. Required.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`density` (the default) or `massFraction` - what `rho_s` is (117.14).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metersPerUnit": {
+          "description": "The stage's unit scale; absent is 1.0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "profile": {
+          "description": "`index` (the default) or `pathtrace` - 117.9's two profiles.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "range": {
+          "description": "`[f_lo, f_hi]` of the normalisation (`opticalDepth`); absent is the\nmin and max of the field over the fluid voxels.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "scaling": {
+          "description": "`opticalDepth` (the default) or `physical` - 117.9's two scalings.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tau": {
+          "description": "The target optical depth of the densest column (`opticalDepth`);\nabsent is 2.0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "upAxis": {
+          "description": "The stage's up axis; absent is `\"Z\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field"
+      ]
+    },
     "JsonLattice": {
       "description": "`output.visualisation.lattice` - SPEC-LIT 117.3's six keys, every one\noptional. Resolved, and every 117.12 refusal raised, by\n[`crate::io::output_plan::OutputPlan::from_json`]; nothing here\nvalidates.",
       "type": "object",
@@ -1720,6 +1799,17 @@
             "null"
           ],
           "format": "double"
+        },
+        "isaac": {
+          "description": "The Isaac Sim profile - SPEC-LIT 117.9: one `density` grid on the\n`.vdb` and the `.usda` scene. Absent writes exactly what this crate\nhas always written.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonIsaac"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "lattice": {
           "description": "The lattice a mesh that is not a uniform Cartesian box is sampled\nonto - SPEC-LIT 117.3. Absent is every default of that table. A\nuniform Cartesian box is written on its own cells and never reads it.",

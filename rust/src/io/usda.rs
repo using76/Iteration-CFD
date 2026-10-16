@@ -41,9 +41,9 @@
 
 use std::path::Path;
 
-use crate::error::{IoContext, Result};
+use crate::error::{Error, IoContext, Result};
 use crate::mesh::HostMesh;
-use crate::types::to_vec3;
+use crate::types::{to_vec3, DVec3};
 use crate::{Scalar, Vec3};
 
 // ==========================================================================
@@ -491,6 +491,265 @@ fn fmt_time(t: f64) -> String {
 }
 
 // ==========================================================================
+//  The Isaac scene (SPEC-LIT 117.9, VIO-09)
+// ==========================================================================
+
+/// Which renderer the Isaac scene addresses (117.9's table). `Index` is
+/// NVIDIA IndeX, the RTX volume path, on a `def Volume` + `OpenVDBAsset`;
+/// `Pathtrace` is the RTX path tracer, on a `Mesh` box carrying
+/// `primvars:isVolume` bound to an `OmniVolumeDensity` material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsaacProfile {
+    #[default]
+    Index,
+    Pathtrace,
+}
+
+impl IsaacProfile {
+    /// The case key's spelling (117.9's table), for refusals and banners.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::Pathtrace => "pathtrace",
+        }
+    }
+}
+
+/// The stage metadata a viewer needs before it reads any prim (117.9's
+/// table): the up axis and the unit scale, `"Z"` / `1.0` as `usda.rs` has
+/// always written them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageMeta {
+    pub up_axis: String,
+    pub meters_per_unit: f64,
+}
+
+impl Default for StageMeta {
+    fn default() -> Self {
+        Self { up_axis: "Z".to_string(), meters_per_unit: 1.0 }
+    }
+}
+
+/// Everything one Isaac scene names: the profile, the stage metadata, the
+/// `.vdb` the density lives in (a Single asset or a `timeSamples` Series),
+/// the extent box of the volume, and the boundary surface, if the run has
+/// one to show. Both profiles reference the `.vdb` only - `.nvdb` is never
+/// referenced, and [`isaac_scene_text`] refuses such a path by name.
+#[derive(Debug, Clone)]
+pub struct IsaacScene {
+    pub profile: IsaacProfile,
+    pub stage: StageMeta,
+    pub vdb: VdbSource,
+    /// `float3[] extent` - the box of the volume, in world metres.
+    pub extent: (DVec3, DVec3),
+    pub boundary: Option<SurfaceOut>,
+}
+
+/// `{:?}` on a plain `f64`, the Isaac scene's number style (`1.0`,
+/// `0.5`): a decimal point, so the value is unambiguously a float.
+fn fmt_f64(v: f64) -> String {
+    format!("{v:?}")
+}
+
+fn fmt_d3(v: DVec3) -> String {
+    format!("({}, {}, {})", fmt_f64(v.x), fmt_f64(v.y), fmt_f64(v.z))
+}
+
+/// One `asset <attr>` binding, single or `timeSamples`, at `indent` spaces.
+/// A Series frames' times go through the same [`fmt_time`] the plain scene
+/// uses; the frames are written in the order given.
+fn write_isaac_asset(s: &mut String, indent: usize, attr: &str, vdb: &VdbSource) {
+    let pad = " ".repeat(indent);
+    match vdb {
+        VdbSource::Single(p) => s.push_str(&format!("{pad}asset {attr} = @{p}@\n")),
+        VdbSource::Series(frames) => {
+            s.push_str(&format!("{pad}asset {attr}.timeSamples = {{\n"));
+            for f in frames {
+                s.push_str(&format!(
+                    "{pad}    {t}: @{p}@,\n",
+                    pad = pad,
+                    t = fmt_time(f.time),
+                    p = f.path
+                ));
+            }
+            s.push_str(&format!("{pad}}}\n"));
+        }
+    }
+}
+
+/// The `index` profile's volume prim (117.9's table): `def Volume
+/// "density"` with `rel field:density` to a child `def OpenVDBAsset
+/// "density"`, `token fieldName = "density"`, `asset filePath` = the
+/// `.vdb` - the shape `write_usda_scene` writes, under `World`.
+fn write_isaac_index_prim(s: &mut String, scene: &IsaacScene) {
+    s.push_str("    def Volume \"density\"\n");
+    s.push_str("    {\n");
+    s.push_str(&format!(
+        "        float3[] extent = [{}, {}]\n",
+        fmt_d3(scene.extent.0),
+        fmt_d3(scene.extent.1)
+    ));
+    s.push_str("        rel field:density = </World/density/density>\n");
+    s.push('\n');
+    s.push_str("        def OpenVDBAsset \"density\"\n");
+    s.push_str("        {\n");
+    write_isaac_asset(s, 12, "filePath", &scene.vdb);
+    s.push_str("            token fieldName = \"density\"\n");
+    s.push_str("        }\n");
+    s.push_str("    }\n");
+}
+
+/// The `pathtrace` profile's prims (117.9's table): `def Mesh "density"`,
+/// the box of the extent, with `primvars:isVolume` true and
+/// `MaterialBindingAPI` applied, bound to a Material whose Shader names
+/// `OmniVolumeDensity.mdl` (sub-identifier `OmniVolumeDensity`) with input
+/// `volume_density_texture` = the `.vdb`, and `volume_density_scale` 1.0 so
+/// sigma is used as written. The eight points are the extent box's corners
+/// in the fixed order the face indices below assume; the handoff's working
+/// path-traced scene is the topology's reference (117.9).
+fn write_isaac_pathtrace_prims(s: &mut String, scene: &IsaacScene) {
+    let (lo, hi) = (scene.extent.0, scene.extent.1);
+    let pts = [
+        (lo.x, lo.y, lo.z),
+        (hi.x, lo.y, lo.z),
+        (lo.x, lo.y, hi.z),
+        (hi.x, lo.y, hi.z),
+        (lo.x, hi.y, lo.z),
+        (hi.x, hi.y, lo.z),
+        (hi.x, hi.y, hi.z),
+        (lo.x, hi.y, hi.z),
+    ];
+    let points = pts
+        .iter()
+        .map(|(x, y, z)| format!("({}, {}, {})", fmt_f64(*x), fmt_f64(*y), fmt_f64(*z)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    s.push_str("    def Mesh \"density\" (\n");
+    s.push_str("        prepend apiSchemas = [\"MaterialBindingAPI\"]\n");
+    s.push_str("    )\n");
+    s.push_str("    {\n");
+    s.push_str(&format!(
+        "        float3[] extent = [{}, {}]\n",
+        fmt_d3(lo),
+        fmt_d3(hi)
+    ));
+    s.push_str("        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]\n");
+    s.push_str(
+        "        int[] faceVertexIndices = [0, 1, 3, 2, 0, 4, 5, 1, 1, 5, 6, 3, 2, 3, 6, 7, 0, 2, 7, 4, 4, 7, 6, 5]\n",
+    );
+    s.push_str(&format!("        point3f[] points = [{points}]\n"));
+    s.push_str("        bool primvars:isVolume = 1\n");
+    s.push_str("        uniform token subdivisionScheme = \"none\"\n");
+    s.push_str("        rel material:binding = </World/Looks/density_material>\n");
+    s.push_str("    }\n");
+    s.push('\n');
+    s.push_str("    def Scope \"Looks\"\n");
+    s.push_str("    {\n");
+    s.push_str("        def Material \"density_material\"\n");
+    s.push_str("        {\n");
+    s.push_str(
+        "            token outputs:mdl:displacement.connect = </World/Looks/density_material/Shader.outputs:out>\n",
+    );
+    s.push_str(
+        "            token outputs:mdl:surface.connect = </World/Looks/density_material/Shader.outputs:out>\n",
+    );
+    s.push_str(
+        "            token outputs:mdl:volume.connect = </World/Looks/density_material/Shader.outputs:out>\n",
+    );
+    s.push('\n');
+    s.push_str("            def Shader \"Shader\"\n");
+    s.push_str("            {\n");
+    s.push_str("                uniform token info:implementationSource = \"sourceAsset\"\n");
+    s.push_str("                uniform asset info:mdl:sourceAsset = @OmniVolumeDensity.mdl@\n");
+    s.push_str(
+        "                uniform token info:mdl:sourceAsset:subIdentifier = \"OmniVolumeDensity\"\n",
+    );
+    write_isaac_asset(s, 16, "inputs:volume_density_texture", &scene.vdb);
+    s.push_str("                float inputs:volume_density_scale = 1.0\n");
+    s.push_str("                token outputs:out\n");
+    s.push_str("            }\n");
+    s.push_str("        }\n");
+    s.push_str("    }\n");
+}
+
+/// The Isaac scene text (117.9): `#usda 1.0` with `defaultPrim = "World"`
+/// and the stage metadata of [`IsaacScene::stage`], one `def Xform
+/// "World"` holding the profile's density prim (plus the Looks material of
+/// the pathtrace profile) and, when present, the boundary surface -
+/// [`write_boundary_mesh`]'s output with every non-empty line indented by
+/// four spaces, after one empty line. Refused by name: a `.vdb` path that
+/// ends in `.nvdb` (an Isaac scene never references `.nvdb`, 117.9) and an
+/// empty Series.
+pub fn isaac_scene_text(scene: &IsaacScene) -> Result<String> {
+    let refuse_nvdb = |p: &str| {
+        if p.ends_with(".nvdb") {
+            return Err(Error::Config(format!(
+                "isaac scene: the volume source \"{p}\" ends in .nvdb - an Isaac scene never \
+                 references .nvdb (SPEC-LIT 117.9); name the .vdb the run writes"
+            )));
+        }
+        Ok(())
+    };
+    match &scene.vdb {
+        VdbSource::Single(p) => refuse_nvdb(p)?,
+        VdbSource::Series(frames) => {
+            if frames.is_empty() {
+                return Err(Error::Config(
+                    "isaac scene: a Series of frames is empty - one frame at least, or a Single"
+                        .into(),
+                ));
+            }
+            for f in frames {
+                refuse_nvdb(&f.path)?;
+            }
+        }
+    }
+
+    let mut s = String::new();
+    s.push_str("#usda 1.0\n");
+    s.push_str("(\n");
+    s.push_str("    defaultPrim = \"World\"\n");
+    s.push_str(&format!("    metersPerUnit = {}\n", fmt_f64(scene.stage.meters_per_unit)));
+    s.push_str(&format!("    upAxis = \"{}\"\n", scene.stage.up_axis));
+    s.push_str(")\n");
+    s.push('\n');
+    s.push_str("def Xform \"World\"\n");
+    s.push_str("{\n");
+    match scene.profile {
+        IsaacProfile::Index => write_isaac_index_prim(&mut s, scene),
+        IsaacProfile::Pathtrace => write_isaac_pathtrace_prims(&mut s, scene),
+    }
+    if let Some(surf) = &scene.boundary {
+        s.push('\n');
+        let mut b = String::new();
+        write_boundary_mesh(&mut b, surf);
+        for line in b.lines() {
+            if line.is_empty() {
+                s.push('\n');
+            } else {
+                s.push_str("    ");
+                s.push_str(line);
+                s.push('\n');
+            }
+        }
+    }
+    s.push_str("}\n");
+    Ok(s)
+}
+
+/// Write the Isaac scene of [`isaac_scene_text`] to `path`, creating the
+/// parent directory like [`write_usda_scene`].
+pub fn write_isaac_scene(path: &Path, scene: &IsaacScene) -> Result<()> {
+    let s = isaac_scene_text(scene)?;
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).path(dir)?;
+        }
+    }
+    std::fs::write(path, s.as_bytes()).path(path)
+}
+
+// ==========================================================================
 //  Tests
 // ==========================================================================
 
@@ -667,5 +926,180 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ---- the Isaac scenes (SPEC-LIT 117.9, VIO-09) -----------------------
+
+    /// The scene both profile tests compare against, byte for byte.
+    fn isaac(profile: IsaacProfile, vdb: VdbSource) -> IsaacScene {
+        IsaacScene {
+            profile,
+            stage: StageMeta::default(),
+            vdb,
+            extent: (DVec3::new(0.0, 0.0, 0.0), DVec3::new(1.0, 2.0, 3.0)),
+            boundary: None,
+        }
+    }
+
+    const INDEX_SCENE: &str = "\
+#usda 1.0
+(
+    defaultPrim = \"World\"
+    metersPerUnit = 1.0
+    upAxis = \"Z\"
+)
+
+def Xform \"World\"
+{
+    def Volume \"density\"
+    {
+        float3[] extent = [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0)]
+        rel field:density = </World/density/density>
+
+        def OpenVDBAsset \"density\"
+        {
+            asset filePath = @./VDB/s_000000.vdb@
+            token fieldName = \"density\"
+        }
+    }
+}
+";
+
+    const PATHTRACE_SCENE: &str = "\
+#usda 1.0
+(
+    defaultPrim = \"World\"
+    metersPerUnit = 1.0
+    upAxis = \"Z\"
+)
+
+def Xform \"World\"
+{
+    def Mesh \"density\" (
+        prepend apiSchemas = [\"MaterialBindingAPI\"]
+    )
+    {
+        float3[] extent = [(0.0, 0.0, 0.0), (1.0, 2.0, 3.0)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 0, 4, 5, 1, 1, 5, 6, 3, 2, 3, 6, 7, 0, 2, 7, 4, 4, 7, 6, 5]
+        point3f[] points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 3.0), (1.0, 0.0, 3.0), (0.0, 2.0, 0.0), (1.0, 2.0, 0.0), (1.0, 2.0, 3.0), (0.0, 2.0, 3.0)]
+        bool primvars:isVolume = 1
+        uniform token subdivisionScheme = \"none\"
+        rel material:binding = </World/Looks/density_material>
+    }
+
+    def Scope \"Looks\"
+    {
+        def Material \"density_material\"
+        {
+            token outputs:mdl:displacement.connect = </World/Looks/density_material/Shader.outputs:out>
+            token outputs:mdl:surface.connect = </World/Looks/density_material/Shader.outputs:out>
+            token outputs:mdl:volume.connect = </World/Looks/density_material/Shader.outputs:out>
+
+            def Shader \"Shader\"
+            {
+                uniform token info:implementationSource = \"sourceAsset\"
+                uniform asset info:mdl:sourceAsset = @OmniVolumeDensity.mdl@
+                uniform token info:mdl:sourceAsset:subIdentifier = \"OmniVolumeDensity\"
+                asset inputs:volume_density_texture = @./VDB/s_000000.vdb@
+                float inputs:volume_density_scale = 1.0
+                token outputs:out
+            }
+        }
+    }
+}
+";
+
+    #[test]
+    fn isaac_index_scene() {
+        let scene = isaac(IsaacProfile::Index, VdbSource::Single("./VDB/s_000000.vdb".into()));
+        assert_eq!(isaac_scene_text(&scene).unwrap(), INDEX_SCENE);
+
+        // A Series of two frames replaces the single asset line by the
+        // timeSamples block, same indent, frames in order.
+        let mut scene = scene;
+        scene.vdb = VdbSource::Series(vec![
+            VdbFrame { time: 0.0, path: "./VDB/s_000000.vdb".into() },
+            VdbFrame { time: 0.5, path: "./VDB/s_000001.vdb".into() },
+        ]);
+        let text = isaac_scene_text(&scene).unwrap();
+        assert_eq!(
+            text,
+            INDEX_SCENE.replace(
+                "            asset filePath = @./VDB/s_000000.vdb@\n",
+                "            asset filePath.timeSamples = {\n                0: @./VDB/s_000000.vdb@,\n                0.5: @./VDB/s_000001.vdb@,\n            }\n",
+            )
+        );
+
+        // With a boundary: after the last prim inside World, one empty
+        // line, then write_boundary_mesh's output indented by four, before
+        // World's `}`.
+        let mut scene = isaac(IsaacProfile::Index, VdbSource::Single("./VDB/s_000000.vdb".into()));
+        scene.boundary = Some(boundary_surface(&two_patch_mesh()));
+        let text = isaac_scene_text(&scene).unwrap();
+        let b = {
+            let mut b = String::new();
+            write_boundary_mesh(&mut b, &scene.boundary.clone().unwrap());
+            b
+        };
+        let indented: String = b
+            .lines()
+            .map(|l| if l.is_empty() { "\n".to_string() } else { format!("    {l}\n") })
+            .collect();
+        // World's closing `}` is the text's last line; the boundary goes
+        // before it, after one empty line.
+        let head = &INDEX_SCENE[..INDEX_SCENE.len() - "}\n".len()];
+        assert_eq!(text, format!("{head}\n{indented}}}\n"));
+        assert!(!text.contains("nvdb"));
+    }
+
+    #[test]
+    fn isaac_pathtrace_scene() {
+        let scene =
+            isaac(IsaacProfile::Pathtrace, VdbSource::Single("./VDB/s_000000.vdb".into()));
+        assert_eq!(isaac_scene_text(&scene).unwrap(), PATHTRACE_SCENE);
+
+        let mut scene = scene;
+        scene.vdb = VdbSource::Series(vec![
+            VdbFrame { time: 0.0, path: "./VDB/s_000000.vdb".into() },
+            VdbFrame { time: 0.5, path: "./VDB/s_000001.vdb".into() },
+        ]);
+        let text = isaac_scene_text(&scene).unwrap();
+        assert_eq!(
+            text,
+            PATHTRACE_SCENE.replace(
+                "                asset inputs:volume_density_texture = @./VDB/s_000000.vdb@\n",
+                "                asset inputs:volume_density_texture.timeSamples = {\n                    0: @./VDB/s_000000.vdb@,\n                    0.5: @./VDB/s_000001.vdb@,\n                }\n",
+            )
+        );
+
+        let mut scene =
+            isaac(IsaacProfile::Pathtrace, VdbSource::Single("./VDB/s_000000.vdb".into()));
+        scene.boundary = Some(boundary_surface(&two_patch_mesh()));
+        let text = isaac_scene_text(&scene).unwrap();
+        assert!(text.contains("    def Mesh \"boundary\"\n"), "boundary indented into World");
+        assert!(!text.contains("nvdb"));
+
+        // upAxis / metersPerUnit come from StageMeta.
+        let mut scene = isaac(IsaacProfile::Index, VdbSource::Single("./VDB/s_000000.vdb".into()));
+        scene.stage = StageMeta { up_axis: "Y".to_string(), meters_per_unit: 0.01 };
+        let text = isaac_scene_text(&scene).unwrap();
+        assert!(text.contains("    metersPerUnit = 0.01\n"), "{text}");
+        assert!(text.contains("    upAxis = \"Y\"\n"), "{text}");
+    }
+
+    #[test]
+    fn isaac_scene_refuses_nvdb() {
+        let mut scene =
+            isaac(IsaacProfile::Index, VdbSource::Single("./VDB/s_000000.nvdb".into()));
+        let e = isaac_scene_text(&scene).unwrap_err().to_string();
+        assert!(e.contains(".nvdb") && e.contains("117.9"), "{e}");
+
+        scene.vdb = VdbSource::Series(vec![
+            VdbFrame { time: 0.0, path: "./VDB/s_000000.vdb".into() },
+            VdbFrame { time: 0.5, path: "./VDB/s_000001.nvdb".into() },
+        ]);
+        let e = isaac_scene_text(&scene).unwrap_err().to_string();
+        assert!(e.contains(".nvdb"), "{e}");
     }
 }

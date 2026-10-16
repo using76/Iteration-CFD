@@ -37851,6 +37851,47 @@ The handoff's working path-traced scene (2026-06-15) is VIO-09's reference for t
 `pathtrace` topology. VIO-09 checks the `.usda` text with its own tests, and with
 `pxr.Usd.Stage.Open` plus `UsdVol` validation in a tools selftest.
 
+**As built (VIO-09).** The code makes these choices where the text above leaves room.
+
+- **D1, the activation.** When the case's `lattice` block states no `activation`, the profile
+  sets it (`index` -> `fluid`, `pathtrace` -> `dense`). When it states one that contradicts the
+  profile it is refused by name (§117.12's row); `-permissive` substitutes the profile's
+  activation, which is the substitution the line prints. Under `-permissive` a **dropped** block
+  changes nothing: the `vdb` row (D2) is checked BEFORE D1, so a run that loses its `isaac`
+  block for lack of `vdb` keeps the activation the block would never have touched.
+- **D2, the formats.** An `isaac` block implies the `.usda` scene: `isaac_formats` returns the
+  run's formats with `Usda` appended when absent. A list without `vdb` is refused by name;
+  `-permissive` returns the run's own formats unchanged and DROPS the isaac block - the caller
+  (`from_json`, and `ofgpu-sample volume`) does the dropping, so the printed line is a fact.
+- **D3, the fields.** The density grid is made from the fields the visualisation write carries,
+  after §44.2's `fields` selection. A `Named` list that lacks `isaac.field` (or `rho`, under
+  `kind: massFraction`) is refused at `from_json` by name; `-permissive` drops the isaac block.
+- **D4, the scene.** The Isaac scene replaces the plain per-field scene: the density prim (and,
+  for `pathtrace`, the Looks material), plus the boundary `Mesh "boundary"` of §117.12 - no
+  other volume prim. Everything is under `def Xform "World"` with `defaultPrim = "World"`, and
+  `float inputs:volume_density_scale = 1.0` is written so `sigma` is used as is. The `pathtrace`
+  box's face order is the handoff's working scene's (its `faceVertexIndices`, its
+  `subdivisionScheme = "none"`).
+- **D5, the grid.** The density grid is the LAST grid of the `.vdb`, named `density`, background
+  0 - not the lattice background - with the same active set as the other grids, one value per
+  voxel, rounded once like them. `.nvdb` files are still written when asked for, are never
+  referenced, and never get a density grid.
+- **D6, CHT.** An `isaac` block in a multi-region case is refused by name next to the
+  `usdScene` refusal: the scene is one stage over one region.
+- **D7, the unchanged bytes.** Without an isaac block every byte is unchanged:
+  `build_writers(..)` is `build_writers_isaac(.., None)`, `vdb::write` and `vdb::write_lattice`
+  are the `*_with_grids` forms with no extra grid, and the SHA-256 pins of
+  `tests/volume_lattice.rs` and `writer::tests::cartesian_bytes_unchanged` stay green.
+- **The per-axis `h` of (117.11).** A lattice has one cubic `h`. On a Cartesian box the voxels
+  are the cells and the spacing differs per axis, so a line's sum is multiplied by its OWN
+  axis's `h_a` - `max_column_optical_depth` takes `h` per axis for that.
+- **The hold, printed.** At the first write at which `D > 0` the writer prints one line:
+  `output.visualisation.isaac: optical depth held from this write on: range [f_lo, f_hi], D = ...
+  m (tau = ...)`, with the time. A write at which `D = 0` prints its own note naming the time.
+- **The extent.** The scene's `float3[] extent` is the voxel box: `(vm.lo, vm.lo + n h)` on a
+  lattice, `(origin - spacing/2, origin + (n - 1/2) spacing)` per axis on a Cartesian box, f64.
+
+
 ### 117.10 The visibility probe
 
 **Implemented by VIO-10, and used by VIO-11.** `tools/isaac/probe.py` generalises
@@ -37907,11 +37948,14 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
 [-out DIR] [-stem NAME]`. The code makes these choices where the text above leaves room.
 
 - **The keys.** A JSONC case's `output.visualisation` is resolved by `OutputPlan::from_json`, as a
-  run resolves it: formats, `fields`, `precision` and `lattice`. Each flag replaces its key:
+  run resolves it: formats, `fields`, `precision`, `lattice` and `isaac`. Each flag replaces its key:
   `-vdb`/`-nvdb`/`-usda` the formats, in command-line order; `-lattice` the whole lattice block,
-  given as the block's own JSON; `-fields` the selection of §44.2; `-precision` the voxel
-  precision. `-lattice` and `-precision` go through `OutputPlan::from_json` too, so a flag is
-  refused for exactly what the same key is refused for in a case (§117.12). An OpenFOAM case has
+  given as the block's own JSON; `-isaac` the whole isaac block, likewise (VIO-09); `-fields` the
+  selection of §44.2; `-precision` the voxel
+  precision. `-lattice`, `-isaac` and `-precision` go through `OutputPlan::from_json` too, so a flag is
+  refused for exactly what the same key is refused for in a case (§117.12). With an isaac block
+  in force - the case's key or `-isaac` - the formats go through `isaac_formats` (D2) and the
+  writers through `build_writers_isaac`. An OpenFOAM case has
   no `output` block, so its keys are the flags and the defaults of §117.3.
 - **The fields.** Every file of `<output root>/<time>` whose `FoamFile` header names
   `volScalarField` or `volVectorField` is read, in byte order of file name (`U` before `p`).
@@ -37938,10 +37982,11 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
   plane is the box's last cell plane. This is `isaac_export.py`'s G-FREESTREAM. That tool's xMax
   plane is the last node of a node lattice (`lo + h i`), and this plane is the last voxel centre
   of (117.2)'s lattice.
-- **Refused by name.** No format; `-usda` with neither `-vdb` nor `-nvdb`; `-isaac`, because the
-  profile of §117.9 is VIO-09's and not in this tree; a missing time directory; a directory with
-  no `volScalarField` or `volVectorField`; `-freestream` that is zero or not finite, with no
-  `volVectorField U`, or with no fluid voxel on the plane; and an unknown argument.
+- **Refused by name.** No format; `-usda` with neither `-vdb` nor `-nvdb`; `-isaac` with no
+  `-vdb` (§117.9's D2, through `isaac_formats` - the same refusal a case's own isaac key gets);
+  a missing time directory; a directory with no `volScalarField` or `volVectorField`;
+  `-freestream` that is zero or not finite, with no `volVectorField U`, or with no fluid voxel
+  on the plane; and an unknown argument.
 
 ### 117.12 The boundary surface, and what is refused
 
@@ -38013,6 +38058,22 @@ VIO-05a's row wires `ofgpu-lowmach` and `ofgpu-k-omega`. The writers keep a late
 rewritten `nvdb_writer_refuses_a_non_cartesian_mesh_by_default` tests it for both writers, strict
 and `-permissive`; `output_plan::tests::lattice_parses` and `::lattice_refusals` test each text
 above.
+
+**Where the isaac refusals live (VIO-09).** `OutputPlan::from_json` parses
+`output.visualisation.isaac` into `VisSpec.isaac` and raises, in order, the per-key rows - an
+unknown `profile`, `scaling`, `kind` or `upAxis` (the menu listed), a `tau`, `range`, `Km` or
+`metersPerUnit` that is not finite or not positive (the default substituted), and then the
+crossing rows in their fixed order: **D2** first (an isaac block whose formats lack `vdb`),
+then **D1** (`lattice.activation` contradicting the profile), then **D3** (a `Named` fields
+selection without the isaac field, or without `rho` under `kind: massFraction`) - in that
+order, so a block `-permissive` drops leaves nothing else touched.
+`OutputPlan::check_fields(available)` holds the two rows that `-permissive` does NOT soften -
+there is nothing to substitute, so both modes get the same `Error::Refused`: the isaac field
+the run does not have (the run's fields listed, §44.2's rule), and `kind: massFraction` with no
+`rho` (117.14). `io::case_cht` refuses an `output.visualisation.isaac` in a multi-region case
+next to its `usdScene` refusal. The writers refuse, at the first write, a field name that is
+not a scalar of the write (`output.visualisation.isaac.field` named) and a scene with neither
+`ctx.cart` nor `ctx.vox`.
 
 **Where the lattice is laid (VIO-05a).** `output_plan::volume_target(raw, hm, cart, spec)` returns
 `VolumeTarget::Cartesian` when `cart` is given (the driver's `cartesian::detect` as a
@@ -38109,6 +38170,9 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-05a | the same mesh, `ofgpu-k-omega` (kOmega), 20 iterations, `-output vdb` | the same lattice and report; the 103 MB `.vdb`: 3 grids (`k`, `nut`, `omega`), each with 8 000 000 active voxels; whole run 1.0 s | VIO-05a |
 | VIO-05a | `tests/volume_drivers.rs` (GPU, `--ignored`): `ofgpu-generate-mesh channel 8 6 4 -grading x=2`, both drivers, 20 iterations | the printed lattice is (117.1)'s prediction from `min_c V_c`, 58 x 29 x 2 = 3 364 voxels, and one non-empty `.vdb` each. On this thin mesh (0.1 m deep) the default `h` = 0.0697 m is coarser than the depth allows: `n_z` = 2 covers 0.139 m, the excess lies on the `hi` side as (117.1) says, and the fluid fraction is 0.491 (`volume_error` -0.301). That is the default doing what §117.3 says, and a case on such a mesh should state `voxel` | VIO-05a |
 | VIO-05a | `tests/volume_lattice.rs`, both builds: the 2:1 mesh moved to (1000, -2000, 500), `h` = 1/24, through `volume_target` on `build_host_mesh_local` | the map equals the world mesh's map owner for owner on 13 824 voxels, with the same world origin; the `single` build shifts the mesh and the f64 build does not | VIO-05a |
+| VIO-09 | the gate (117.12) at the file's precision, in both builds: the plume on the 2:1 mesh at `h` = 1/24, default range, `tau` = 2.0 and 0.5, `sigma` rounded to f32 | f64 build: densest column 2.0000000149 (`tau` 2.0) and 0.5000000037 (`tau` 0.5), relative error 7.451e-9 each; `single` build (the plume's cell values in f32): 2.0000000224 and 0.5000000056, relative error 1.118e-8 each; bar 1 %; in f64, 1e-12 or less, and no column above `tau` | this unit |
+| VIO-09 | the round trip (`writer::tests::isaac_density_round_trip`): one write of the 2:1 lattice at `h` = 1/24, field `smoke`, read back and re-measured at the stored precision | `F32`: densest column 2.0000000149, relative error 7.451e-9; `F16`: densest column 1.9993286133, relative error 3.357e-4; both bars 1 %. The other grids keep `VdbWriter::new`'s values bit for bit | this unit |
+| VIO-09 | the fixtures (`tests/isaac_profile.rs`, both builds): `build_writers_isaac` on the 2:1 mesh, `h` = 1/8 on the default box (8 x 8 x 8), compared byte for byte with `tools/isaac/fixtures/<profile>/`; and `usda_check.py --selftest` (pxr `Usd.Stage.Open`, `UsdVol`, `UsdGeom`, `UsdShade`, `UsdValidation`) | `index` scene 12 860 B, `pathtrace` scene 14 055 B (the `.vdb` each references, 318 359 B, is not kept: the selftest stages each scene with an empty placeholder at that path); the same bytes in both builds; both fixtures pass every check, and the four mutants (a `.nvdb` reference, `fieldName` `rho`, the `upAxis` line gone, `primvars:isVolume` gone) each fail on their own check | this unit |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 

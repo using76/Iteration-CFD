@@ -1235,6 +1235,49 @@ pub struct JsonVisualisation {
     /// uniform Cartesian box is written on its own cells and never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lattice: Option<JsonLattice>,
+    /// The Isaac Sim profile - SPEC-LIT 117.9: one `density` grid on the
+    /// `.vdb` and the `.usda` scene. Absent writes exactly what this crate
+    /// has always written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isaac: Option<JsonIsaac>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// `output.visualisation.isaac` - SPEC-LIT 117.9's nine keys, `field`
+/// required, the rest optional. Resolved, and every 117.12 refusal raised,
+/// by [`crate::io::output_plan::OutputPlan::from_json`]; nothing here
+/// validates.
+pub struct JsonIsaac {
+    /// `index` (the default) or `pathtrace` - 117.9's two profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The cell field the density is made from. Required.
+    pub field: String,
+    /// `opticalDepth` (the default) or `physical` - 117.9's two scalings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<String>,
+    /// The target optical depth of the densest column (`opticalDepth`);
+    /// absent is 2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tau: Option<f64>,
+    /// `[f_lo, f_hi]` of the normalisation (`opticalDepth`); absent is the
+    /// min and max of the field over the fluid voxels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[f64; 2]>,
+    /// Specific extinction, m^2/kg (`physical`); absent is 8700 - 117.14's
+    /// 8.7 m^2/g of Mulholland & Croarkin 2000.
+    #[serde(rename = "Km", default, skip_serializing_if = "Option::is_none")]
+    pub km: Option<f64>,
+    /// `density` (the default) or `massFraction` - what `rho_s` is (117.14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The stage's up axis; absent is `"Z"`.
+    #[serde(rename = "upAxis", default, skip_serializing_if = "Option::is_none")]
+    pub up_axis: Option<String>,
+    /// The stage's unit scale; absent is 1.0.
+    #[serde(rename = "metersPerUnit", default, skip_serializing_if = "Option::is_none")]
+    pub meters_per_unit: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

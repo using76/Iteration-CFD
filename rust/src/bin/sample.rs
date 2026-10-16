@@ -22,7 +22,7 @@
 //! ofgpu-sample column <case> <time> <axis> <c1> <c2> [-at v1,v2,...] [-mean]
 //! ofgpu-sample wall   <case> <time> <patch> <axis>
 //! ofgpu-sample volume <case> <time|latest> [-vdb] [-nvdb] [-usda] [-lattice JSON] [-fields a,b,...]
-//!                     [-precision fp32|fp16] [-freestream Ux] [-out DIR] [-stem NAME]
+//!                     [-precision fp32|fp16] [-isaac JSON] [-freestream Ux] [-out DIR] [-stem NAME]
 //! ```
 //!
 //! No GPL-licensed source was consulted.
@@ -38,8 +38,8 @@ use ofgpu::io::nvdb::Precision;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
 use ofgpu::io::voxelmap::VoxelMap;
 use ofgpu::io::{
-    build_writers, cartesian_info, FieldSelection, OutputField, OutputFormat, OutputPlan, VisSpec,
-    WriteCtx,
+    build_writers_isaac, cartesian_info, isaac_formats, FieldSelection, OutputField, OutputFormat,
+    OutputPlan, VisSpec, WriteCtx,
 };
 use ofgpu::mesh::HostMesh;
 use ofgpu::{Error, Result, Scalar, Vec3};
@@ -66,18 +66,20 @@ fn usage() -> String {
            crossing linearly interpolated between the two face centres.
 
   ofgpu-sample volume <case> <time|latest> [-vdb] [-nvdb] [-usda] [-lattice JSON] [-fields a,b,...]
-                      [-precision fp32|fp16] [-freestream Ux] [-out DIR] [-stem NAME]
+                      [-precision fp32|fp16] [-isaac JSON] [-freestream Ux] [-out DIR] [-stem NAME]
   volume   the volume files a run would have written at <time>, without solving (SPEC-LIT 117.11):
            every volScalarField and volVectorField of the time directory, in byte order of name,
            through the run's own writers. A uniform Cartesian box is written on its cells (117.6);
            any other polyMesh on the lattice of 117.3-117.4, whose report (fluid fraction included)
            is printed. The keys are a JSONC case's output.visualisation (format, fields, precision,
-           lattice), each replaced by its flag when given: -vdb/-nvdb/-usda the formats, -lattice the
-           whole lattice block as JSON ('{\"voxel\": 0.01, \"box\": [...]}'), -fields the selection,
-           -precision the voxel precision. -freestream Ux prints the median U.x over the fluid voxels
-           of the lattice's xMax plane and |median - Ux| / |Ux|. Files go to -out (default
-           <output root>/volume_<time>) as VDB/<stem>_000000.vdb|.nvdb and <stem>.usda (-stem, default
-           volume). -isaac (117.9) is refused: this build has no Isaac profile."
+           lattice, isaac), each replaced by its flag when given: -vdb/-nvdb/-usda the formats,
+           -lattice the whole lattice block as JSON ('{\"voxel\": 0.01, \"box\": [...]}'), -fields
+           the selection, -precision the voxel precision, -isaac the whole isaac block as JSON
+           ('{\"field\": \"p\"}' - 117.9: the density grid and the Isaac scene resolve through
+           OutputPlan::from_json, the formats through isaac_formats). -freestream Ux prints the
+           median U.x over the fluid voxels of the lattice's xMax plane and |median - Ux| / |Ux|.
+           Files go to -out (default <output root>/volume_<time>) as VDB/<stem>_000000.vdb|.nvdb
+           and <stem>.usda (-stem, default volume; an isaac block implies the scene, 117.9)."
         .to_string()
 }
 
@@ -449,6 +451,7 @@ struct VolumeArgs {
     time: String,
     formats: Vec<OutputFormat>,
     lattice: Option<String>,
+    isaac: Option<String>,
     fields: Option<Vec<String>>,
     precision: Option<String>,
     freestream: Option<f64>,
@@ -468,7 +471,7 @@ fn parse_volume_args(args: &[String]) -> Result<VolumeArgs> {
     if args.len() < 3 {
         return Err(Error::Config(
             "volume needs: <case> <time|latest> [-vdb] [-nvdb] [-usda] [-lattice JSON] [-fields a,b,...] \
-             [-precision fp32|fp16] [-freestream Ux] [-out DIR] [-stem NAME]"
+             [-precision fp32|fp16] [-isaac JSON] [-freestream Ux] [-out DIR] [-stem NAME]"
                 .into(),
         ));
     }
@@ -493,6 +496,9 @@ fn parse_volume_args(args: &[String]) -> Result<VolumeArgs> {
             "-lattice" => {
                 v.lattice = Some(flag_value(args, &mut i, flag, "the lattice block as JSON")?.to_string())
             }
+            "-isaac" => {
+                v.isaac = Some(flag_value(args, &mut i, flag, "the isaac block as JSON")?.to_string())
+            }
             "-fields" => {
                 let list = flag_value(args, &mut i, flag, "a comma-separated list")?;
                 v.fields = Some(list.split(',').map(|s| s.trim().to_string()).collect());
@@ -512,13 +518,6 @@ fn parse_volume_args(args: &[String]) -> Result<VolumeArgs> {
             }
             "-out" => v.out = Some(PathBuf::from(flag_value(args, &mut i, flag, "a directory")?)),
             "-stem" => v.stem = Some(flag_value(args, &mut i, flag, "a file stem")?.to_string()),
-            "-isaac" => {
-                return Err(Error::Config(
-                    "-isaac: the Isaac Sim profile (output.visualisation.isaac, SPEC-LIT 117.9) is not \
-                     in this build; -vdb -usda writes the plain volume scene"
-                        .into(),
-                ))
-            }
             other => return Err(Error::Config(format!("unknown argument '{other}'"))),
         }
         i += 1;
@@ -526,15 +525,19 @@ fn parse_volume_args(args: &[String]) -> Result<VolumeArgs> {
     Ok(v)
 }
 
-/// `-lattice` and `-precision`, resolved by the case reader's own code:
-/// `OutputPlan::from_json` of `{"visualisation": {"format": "vdb", ...}}`,
-/// so a flag is refused for exactly what the same key in a case is refused
-/// for (SPEC-LIT 117.12).
-fn flag_vis(lattice: Option<&str>, precision: Option<&str>) -> Result<VisSpec> {
+/// `-lattice`, `-isaac` and `-precision`, resolved by the case reader's own
+/// code: `OutputPlan::from_json` of `{"visualisation": {"format": "vdb",
+/// ...}}`, so a flag is refused for exactly what the same key in a case is
+/// refused for (SPEC-LIT 117.12).
+fn flag_vis(lattice: Option<&str>, isaac: Option<&str>, precision: Option<&str>) -> Result<VisSpec> {
     let mut vis = serde_json::json!({ "format": "vdb" });
     if let Some(text) = lattice {
         vis["lattice"] = serde_json::from_str(text)
             .map_err(|e| Error::Config(format!("-lattice: '{text}' is not JSON: {e}")))?;
+    }
+    if let Some(text) = isaac {
+        vis["isaac"] = serde_json::from_str(text)
+            .map_err(|e| Error::Config(format!("-isaac: '{text}' is not JSON: {e}")))?;
     }
     if let Some(p) = precision {
         vis["precision"] = serde_json::Value::String(p.to_string());
@@ -647,16 +650,40 @@ fn volume_cmd(v: &VolumeArgs) -> Result<()> {
     let mut selection = case_vis.as_ref().map(|s| s.fields.clone()).unwrap_or_default();
     let mut precision = case_vis.as_ref().map_or(Precision::F32, |s| s.precision);
     let mut lattice = case_vis.as_ref().map(|s| s.lattice.clone()).unwrap_or_default();
+    let mut isaac = case_vis.as_ref().and_then(|s| s.isaac.clone());
     if !v.formats.is_empty() {
         formats = v.formats.clone();
     }
-    if v.lattice.is_some() || v.precision.is_some() {
-        let spec = flag_vis(v.lattice.as_deref(), v.precision.as_deref())?;
+    if v.lattice.is_some() || v.precision.is_some() || v.isaac.is_some() {
+        let spec = flag_vis(v.lattice.as_deref(), v.isaac.as_deref(), v.precision.as_deref())?;
+        let resolved_activation = spec.lattice.activation;
         if v.lattice.is_some() {
             lattice = spec.lattice;
         }
         if v.precision.is_some() {
             precision = spec.precision;
+        }
+        if v.isaac.is_some() {
+            isaac = spec.isaac;
+            // D1 of 117.9: with no -lattice the profile sets the activation
+            // (index -> fluid, pathtrace -> dense), which flag_vis resolved
+            // on the default block; with -lattice it is in spec.lattice.
+            if v.lattice.is_none() && isaac.is_some() {
+                lattice.activation = resolved_activation;
+            }
+        }
+    }
+    // An isaac block implies the scene and demands the `.vdb` (SPEC-LIT
+    // 117.9's D2): the same formats rule a case's own isaac key goes
+    // through, refused by name or - under -permissive - the block dropped.
+    // The caller does the dropping, which is the substitution the refusal
+    // printed: the formats stay the run's own, and nothing of the block
+    // (D1's activation included) is applied.
+    if isaac.is_some() {
+        let had_vdb = formats.contains(&OutputFormat::Vdb);
+        formats = isaac_formats(&formats)?;
+        if !had_vdb {
+            isaac = None;
         }
     }
     if let Some(f) = &v.fields {
@@ -702,6 +729,24 @@ fn volume_cmd(v: &VolumeArgs) -> Result<()> {
         .collect();
     let available: Vec<&str> = all.iter().map(|f| f.name).collect();
     selection.check(&available)?;
+    // The isaac rows of 117.12's check_fields, through the plan's own code:
+    // the isaac field must be one the time directory has, and kind
+    // massFraction needs rho. Both refuse in both modes.
+    if isaac.is_some() {
+        OutputPlan {
+            vis: Some(VisSpec {
+                formats: formats.clone(),
+                interval: 0.0,
+                fields: selection.clone(),
+                precision,
+                lattice: lattice.clone(),
+                isaac: isaac.clone(),
+            }),
+            exact: None,
+            restart: None,
+        }
+        .check_fields(&available)?;
+    }
     let selected = selection.apply(&all)?;
     println!(
         "volume of {} at time {}: {} cells; fields {} (of {})",
@@ -804,7 +849,7 @@ fn volume_cmd(v: &VolumeArgs) -> Result<()> {
     let out = v.out.clone().unwrap_or_else(|| root.join(format!("volume_{time}")));
     let stem = v.stem.clone().unwrap_or_else(|| "volume".to_string());
     std::fs::create_dir_all(&out).map_err(|e| Error::Config(format!("{}: {e}", display_path(&out))))?;
-    let mut writers = build_writers(&out, &stem, &formats, precision)?;
+    let mut writers = build_writers_isaac(&out, &stem, &formats, precision, isaac.as_ref())?;
     let ctx = WriteCtx {
         time: t_val as Scalar,
         step: 0,

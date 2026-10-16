@@ -7959,6 +7959,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
         precision: precision.map(str::to_string),
         usd_scene: false,
         lattice: None,
+        isaac: None,
     };
 
     // ---- the three columns, and the wrong-column refusals (44.1) ---------

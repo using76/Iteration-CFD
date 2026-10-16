@@ -235,7 +235,8 @@ fn volume_refuses_by_name() {
     let cases: [(&[&str], &str); 8] = [
         (&["volume", c, "0.5", "-out", o], "no format to write"),
         (&["volume", c, "0.5", "-usda", "-out", o], "-usda: a .usda scene points at .vdb or .nvdb files"),
-        (&["volume", c, "0.5", "-vdb", "-isaac", "index", "-out", o], "-isaac: the Isaac Sim profile"),
+        (&["volume", c, "0.5", "-nvdb", "-isaac", r#"{"field":"p"}"#, "-out", o],
+         "an Isaac scene references the .vdb grid alone"),
         (&["volume", c, "0.75", "-vdb", "-out", o], "does not exist"),
         (&["volume", c, "0.5", "-vdb", "-lattice", r#"{"voxels": 1}"#, "-out", o], "not an output.visualisation.lattice block"),
         (&["volume", c, "0.5", "-vdb", "-precision", "fp8", "-out", o], "output.visualisation.precision"),
@@ -246,6 +247,59 @@ fn volume_refuses_by_name() {
         let (code, stdout, stderr) = run(args);
         assert_eq!(code, 1, "{args:?} should be refused; stdout:\n{stdout}\nstderr:\n{stderr}");
         assert!(stderr.contains(phrase), "{args:?}: want '{phrase}' in:\n{stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `-isaac` (SPEC-LIT 117.9, VIO-09): the density grid is on the `.vdb`, the
+/// `.usda` is the Isaac scene - `defaultPrim "World"`, the profile's
+/// `def Volume "density"` - and never references `.nvdb`.
+#[test]
+fn isaac_flag_writes_the_density_and_scene() {
+    let dir = scratch("isaac");
+    let case = dir.join("case");
+    write_case(&case, &raw_of([4, 4, 4], Vec3::new(0.25, 0.25, 0.25), 1));
+    let c = case.to_str().unwrap();
+    let out = dir.join("out");
+    let o = out.to_str().unwrap();
+    let (code, stdout, stderr) = run(&[
+        "volume", c, "0.5", "-vdb", "-isaac", r#"{"field":"p"}"#, "-out", o,
+    ]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    let usda = std::fs::read_to_string(out.join("volume.usda")).expect("the scene");
+    assert!(usda.contains("defaultPrim = \"World\""), "the Isaac stage: {usda}");
+    assert!(usda.contains("def Volume \"density\""), "the index profile's prim: {usda}");
+    assert!(!usda.contains("nvdb"), "an Isaac scene never references .nvdb: {usda}");
+    let vdb = out.join("VDB").join("volume_000000.vdb");
+    assert!(vdb.is_file(), "the .vdb is written: {stdout}");
+
+    // The in-run writers on the same keys: the index profile lays the
+    // default lattice with activation fluid (D1 of 117.9, no -lattice
+    // given), and its .vdb and scene are the command's byte for byte.
+    let (raw, hm, u, p) = read_back(&case);
+    let spec = LatticeSpec { activation: LatticeActivation::Fluid, ..Default::default() };
+    let vm = VoxelMap::build(&raw, &hm, &spec).expect("VoxelMap::build");
+    let o: ofgpu::io::case_json::JsonOutput = serde_json::from_str(
+        r#"{"visualisation": {"format": "vdb", "isaac": {"field": "p"}}}"#,
+    )
+    .expect("the output block");
+    let plan = ofgpu::io::OutputPlan::from_json(&o).expect("from_json");
+    let vis = plan.vis.expect("the visualisation block");
+    let want = dir.join("want");
+    let fields = [OutputField::vector("U", &u), OutputField::scalar("p", &p)];
+    let mut writers = ofgpu::io::output_plan::build_writers_isaac(
+        &want, "volume", &vis.formats, Precision::F32, vis.isaac.as_ref(),
+    )
+    .expect("build_writers_isaac");
+    let ctx = WriteCtx { time: 0.5, step: 0, name: "0.5", mesh: &hm, cart: None, vox: Some(&vm), fields: &fields, foam: &[] };
+    for w in &mut writers {
+        w.write_step(&ctx).expect("write_step");
+    }
+    for rel in ["VDB/volume_000000.vdb", "volume.usda"] {
+        let a = std::fs::read(out.join(rel)).expect("the command's file");
+        let b = std::fs::read(want.join(rel)).expect("the writers' file");
+        assert!(a == b, "{rel}: the command's {} bytes differ from the in-run writers' {} bytes", a.len(), b.len());
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -869,6 +869,38 @@ error: solution diverged (NaN/Inf)
 `VDB/<영역>_000000.vdb`를 씁니다. 여러 영역을 담는 `.usda` 장면은 만들지 않으므로 이 형식에서는
 `usdScene`을 거절합니다.
 
+### Isaac Sim 장면 — `output.visualisation.isaac`
+
+`isaac` 블록은 볼륨 출력을 Isaac Sim이 그리는 형태로 바꿉니다. `.vdb` 위에 `density`
+격자 하나, 그것을 가리키는 `.usda` 장면 하나입니다. 이 블록은 장면을 함축합니다 — `usda`를
+적거나 붙게 두십시오. 다만 `vdb`는 요구합니다. Isaac 장면은 절대 `.nvdb`를 가리키지
+않기 때문입니다.
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "isaac": { "profile": "index", "field": "smoke", "scaling": "opticalDepth", "tau": 2.0 } } }
+```
+
+| 키 | 뜻 | 기본값 |
+|---|---|---|
+| `profile` | `index`(NVIDIA IndeX, `def Volume`) 또는 `pathtrace`(RTX 경로 추적기, 볼륨 `Mesh`) | `index` |
+| `field` | 밀도를 만들 셀 필드 | 필수 |
+| `scaling` | `opticalDepth` 또는 `physical`(`K_m rho_s`) | `opticalDepth` |
+| `tau` | 가장 짙은 열의 광학 두께 | `2.0` |
+| `range` | 정규화의 `[f_lo, f_hi]` | 유체 위에서 필드의 최소·최대 |
+| `Km` | 비소광계수, m^2/kg(`physical`) | `8700`(Mulholland & Croarkin 2000) |
+| `kind` | `density` 또는 `massFraction`(이때 `rho_v f_v`) | `density` |
+| `upAxis`, `metersPerUnit` | 스테이지 메타데이터 | `"Z"`, `1.0` |
+
+`opticalDepth`는 정규화된 필드에 배율을 맞춰 가장 짙은 복셀 열의 광학 두께가 정확히
+`tau`가 되게 합니다. 범위와 배율을 첫 쓰기에서 잡아 두므로 자라는 플룸은 자라는 것처럼
+보입니다.
+`physical`은 대신 실제 그을음 밀도의 소광을 씁니다. 격자 `activation`은 케이스가 적지
+않았다면 프로파일이 정합니다(`index` -> `fluid`, `pathtrace` -> `dense`), 어긋나는 값은
+이름을 대고 거절합니다. `-permissive`가 누그러뜨리지 않는 두 거절이 있습니다: 실행에 없는
+`isaac.field`, 그리고 `rho`가 없는 실행의 `massFraction` — 대신할 것이 없기 때문입니다.
+`ofgpu-sample volume`은 같은 블록을 `-isaac JSON`으로 받고, 같은 거절을 그대로 적용합니다.
+
 ### Studio 3D 뷰어
 
 절단면, 임의 평면, 등가면, 유선, 벡터 글리프를 그 자리에서 그립니다. WebGPU로
