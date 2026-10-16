@@ -51094,7 +51094,7 @@ contract (ORIGINAL). It has no external input.
 §71 cuts the mesh and §73 solves a linear system across the cut. §138 moves
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
-(PAR-10a), the Krylov routing (PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
+(§139.2, PAR-10a), the Krylov routing (PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
 
 This section defines no equation, so it carries no equation label.
 
@@ -51169,6 +51169,142 @@ decomposed SIMPLE. On a part, `gpu.download` of a field returns `n_local`
 values; trimming them to the owned cells for writers and drivers is PAR-14's
 job. A host write of `n_cells` values into an `n_local` buffer is refused by
 `Gpu::write`'s length check, which is loud and is not a read out of bounds.
+
+### 139.2 The exchange points (PAR-10a)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**What a rank holds.** `RankCtx` (`src/distflow.rs`) is what one rank of a
+parallel flow solve holds besides its part. A `&dyn Comm`: the transport of
+§138, which moves bytes and does no arithmetic on them, so a ghost cell holds
+its owner's value bit for bit. A `SpmdHalo`: the rank's half of §71.4's
+exchange plan plus §138.3's host round trip, built once, an exchange
+allocating nothing. A `SpmdReduction`: the exact cross-part reduction of
+§138.4, handed out mutable, because the global norms PAR-10b and PAR-10c
+take go through it. And the part number, which `new` pins to the rank
+number. `new` refuses BEFORE any collective and any device allocation, so
+the refusing rank sends nothing. A peer that did not refuse goes on into
+`SpmdReduction::new`'s allgather and waits there until the transport's
+timeout: after an `Err` the world is spent (§138.1, R10). The checks are
+local, and every rank of a correct program passes them alike:
+
+| call | refusal, `Error::Config`, starting `distflow: ` |
+|---|---|
+| `comm.rank() != part.part` | names `rank {r}` and `part {p}` |
+| `mesh.n_cells != part.mesh.n_cells` | names both counts |
+| `mesh.n_halo != part.n_halo` | names both counts and says to upload the part with `GpuMesh::upload_with_halo` |
+
+A fourth refusal is `SpmdHalo`'s own (§138.3): `exchange_field` on a field
+whose `f` is shorter than `n_cells + n_halo` is refused by name, before
+anything is launched or sent.
+
+**The four exchange calls.** `exchange_field` fills the ghost cells
+`n_cells .. n_cells + n_halo` of a scalar field - bit for bit the owning
+rank's values - and then runs `field_ops::correct_boundary_conditions`. A
+processor face is a `Cyclic` face whose `b_nbr_cell` names a halo cell
+(§139.1). Its evaluated value is `w psi_P + (1 - w) psi_ghost`, and the
+ghost is the neighbour rank's value: what the whole mesh's internal face
+read. `exchange_field_vector` is the same through
+`correct_boundary_conditions_vector`. `exchange_gradient` and
+`exchange_gradient_tensor` fill the halo of a CELL GRADIENT - of a scalar
+through `SpmdHalo::vector`, of a vector through `SpmdHalo::tensor`, nine
+components as one struct. The operators that read `grad` at the far cell of
+a face read it on ghost cells too, so a gradient is exchanged like a field.
+No boundary evaluation follows a gradient exchange: a gradient carries no
+boundary state, and the cells it fills are read only.
+
+Every exchange is a host round trip: pack, device-to-host, `Comm`,
+host-to-device, two synchronisations. So an exchange inside `Gpu::capture`
+is refused by name - `SpmdHalo`'s own row, starting `halo: ` (§81.3,
+§138.3). `distflow.rs` launches no kernel of its own. It calls `SpmdHalo`
+and `field_ops`, nothing else, and no existing numerics move.
+
+**The gate.** `tests/distflow.rs`, in BOTH builds, P = 2, 3, 4, Hilbert,
+Linear and round robin (`c % P`). Two meshes: A, the axis-aligned box
+`build_case(Big, 12, 10, 8)`; B, the skewed, non-orthogonal unit cube
+`solid::prototype::jittered_block(10, 0.25)`. Two smooth fields of the whole
+mesh's cell centres, with `xh = (x - xmin)/(xmax - xmin)` over those centres
+and `yh`, `zh` alike:
+
+```text
+psi = exp(3 xh + 2 yh + 2.5 zh)
+U   = (exp(3 xh + 2 yh + 2.5 zh), exp(-2 xh + 3 yh + 2 zh), exp(2 xh + 2 yh - 3 zh))
+```
+
+Each part writes its owned values only, with its halo zero, so an exchange
+that did not happen cannot pass. The boundary kinds are the ones the field
+constructors seed, on the whole mesh and on the parts alike.
+
+| test | what it holds |
+|---|---|
+| `a_halo_gradient_equals_the_whole_mesh_gradient` | grad of a smooth psi and U on P = 2..4 parts of an axis-aligned box and of a skewed cube, against the whole mesh: every GHOST cell bit for bit the value its owning rank computed, ghosts compared > 0; on every OWNED cell and component the 4-ulp line is MEASURED and reported (MISSED - see Measured), and the ASSERTED line is the conditioning check `\|a - b\| <= 4 eps S` with `S` below |
+| `a_processor_patch_reads_the_owner_value` | after `exchange_field`, every ghost is the whole-mesh value at its global cell bit for bit, and on every face of every processor patch the exchanged `bf` equals a same-mesh reference evaluation whose whole `f`, ghosts included, was written from the host with the whole-mesh values |
+| `a_rank_ctx_refuses_by_name` | the refusal table above, plus `SpmdHalo`'s refusal of a halo-less field |
+
+The conditioning check's `S` is the magnitude of that component's
+Green-Gauss sum on the WHOLE mesh, computed on the host in f64 from the
+whole mesh's geometry and its fields after their
+`correct_boundary_conditions`. For grad psi, component `k` of cell `c`:
+
+```text
+S = (1/V_c) * sum over the faces f of c of |Sf_k| * |psi_f|
+```
+
+For grad U, component `(i, j)` of cell `c` - `i` is the area-vector index,
+`j` the U component, and `Tensor.xy` is `i = x`, `j = y`:
+
+```text
+S = (1/V_c) * sum over the faces f of c of |Sf_i| * |U_f,j|
+```
+
+An internal face `f` counts for BOTH its cells, at
+`|psi_f| = max(|psi[owner]|, |psi[neighbour]|)` (each U component the same
+way) and `Sf = sf[f]`. A boundary face `b` counts for its one cell
+`b_face_cells[b]`, at `|psi_f| = |bf[b]|` of the whole mesh's field and
+`Sf = b_sf[b]`; a face whose `bc_kind` is `Empty` counts nothing.
+
+**Measured (2026-10-16, RTX 5070 Ti).** The ghost cells are bit for bit the
+owners' values everywhere they were compared: 29 694 ghost cell-payloads in
+the gradient gate and 14 847 ghosts and 20 892 processor faces in the
+processor-patch gate, f64 and single alike. **MISSED**: the owned-cell
+gradients are not within 4 ulp everywhere, in either build. The line is not
+loosened and is listed for review (docs/17-review-later.md). The measured
+maxima, in ulp (grad psi / grad U):
+
+| mesh, partitioner | P = 2 | P = 3 | P = 4 |
+|---|---|---|---|
+| A box, Hilbert | 6 / 13 (f64), 8 / 15 (single) | 10 / 13, 10 / 17 | 9 / 13, 10 / 15 |
+| A box, Linear | 5 / 7, 4 / 6 | 10 / 10, 9 / 9 | 7 / 7, 4 / 6 |
+| A box, round robin | 19 / 22, 17 / 26 | 19 / 22, 17 / 26 | 19 / 22, 17 / 26 |
+| B jittered, Hilbert | 22 / 26, 22 / 46 | 22 / 22, 22 / 25 | 14 / 26, 22 / 46 |
+| B jittered, Linear | 15 / 234, 13 / 135 | 19 / 51, 27 / 39 | 18 / 234, 21 / 135 |
+| B jittered, round robin | 43 / 131, 39 / 305 | 82 / 244, 52 / 177 | 43 / 151, 64 / 177 |
+
+The f64 global maxima are 82 ulp (grad psi) and 244 ulp (grad U); the single
+build's are 64 and 305. Of 211 680 owned-component comparisons per build,
+1 808 grad-psi and 7 325 grad-U components sit above 4 ulp in f64, and 2 339
+and 9 010 in single - all on cells touching a processor face, and most under
+the round robin, which cuts nearly every face. The asserted cause check
+holds everywhere, in both builds: the max normalised error
+`|a - b| / (eps S)` is 1.034 for grad psi and 1.034 for grad U in f64, and
+1.096 and 1.307 in single, against the check's bound of 4 - every owned
+component's difference is within 4 eps of the magnitude of its own
+Green-Gauss sum on the whole mesh.
+
+**What this does not establish.** The gradient is not bitwise, and the 4-ulp
+line does not hold. Two reasons, both structural. A processor face's
+contribution is summed in the boundary loop, after the internal faces; on
+the whole mesh the same face was internal and was summed in the face loop,
+so the order of addition differs. And on the non-owning side of a cut the
+face's weight is `weight_from_offsets(b, a)`, not `1 - w`, so the
+interpolated face value itself differs in the last bits. Where a cell's
+Green-Gauss sum nearly cancels - a smooth field's gradient is small next to
+its face fluxes - a few reordered additions show up as many ulps of the
+result. The conditioning check is what shows the miss is the order of
+rounding and not a wrong value. PAR-13a makes the gradients bitwise. A
+part's p and momentum solves do not go through the SPMD Krylov solvers yet:
+that is PAR-10b. No decomposed SIMPLE is gated here: that is PAR-10c.
 
 ---
 
