@@ -24,3 +24,8 @@ pub(crate) mod splash;
 
 /// SPEC-LIT §144.2, Gate 132-L: the laminar flat plate against Blasius.
 pub(crate) mod blasius_plate;
+
+/// SPEC-LIT §157.5, Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb,
+/// four live runs of `ofgpu-lowmach`, against Bradley, Chen & Swithenbank
+/// (1989) via Huang et al. (2020) Fig. 9.
+pub(crate) mod dst_leeds;

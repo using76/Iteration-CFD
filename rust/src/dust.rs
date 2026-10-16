@@ -49,6 +49,7 @@ pub mod char;
 pub mod courant;
 pub mod device;
 pub mod fsc;
+pub mod gatemesh;
 pub mod ignition;
 pub mod laminar;
 pub mod particle;

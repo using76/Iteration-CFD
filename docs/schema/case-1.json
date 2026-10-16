@@ -1534,6 +1534,17 @@
             "$ref": "#/$defs/JsonRegion"
           }
         },
+        "sector": {
+          "description": "SPEC-LIT 157.3: presence makes the case a 1-D SPHERICAL SECTOR - the\nREDUCED dust gates' mesh (DST-07). The x axis is the radius\n(`bounds.max[0]` = R, `cells[0]` the uniform cell count), `xmin`\nnames the APEX, which has no faces exactly like a wedge pipe's axis,\n`xmax` the outer square and ymin/ymax/zmin/zmax the four sides. The\nreader lowers the case onto `crate::dust::gatemesh::SectorSpec` and\nrefuses everything a sector mesh cannot say (each a §13.4 error\nnaming the JSON path and SPEC-LIT 157.3). Absent: the case lowers\nexactly as before.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonSector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "wedge": {
           "description": "SPEC-LIT 119.3: presence makes the case a WEDGE - the block is the\n(r, z) block of the 119.0 mesh (`x` the radius, `z` the axis through\n`x = 0, y = 0`, `y` the one-cell circumferential direction) and\n`angle` is the FULL wedge angle in degrees, stated once, here. The\nreader lowers the case onto `crate::blockgen::WedgeSpec` and refuses\neverything a wedge mesh cannot say (its refusal list, each a §13.4\nerror naming the JSON path and this section). Absent: the case\nlowers exactly as before, and no boundary may resolve to a `wedge`\nrule - a box has no wedge sides.",
           "anyOf": [
@@ -2310,6 +2321,30 @@
       "required": [
         "endTime",
         "deltaT"
+      ]
+    },
+    "JsonSector": {
+      "description": "[`JsonMesh::sector`]'s one entry - SPEC-LIT 157.3. `angle` is the FULL\nangle between opposite side faces in degrees (finite, in `(0, 90]`),\n`fineRadius` the uniform spacing's end `r_f` in m (`0 < r_f <\nbounds.max[0]`) and `growth` the ratio of successive radial spacings\nbeyond `r_f` (finite, in `[1, 1.2]`) - each checked with its JSON path\nnamed, in [`JsonCase::lower`].",
+      "type": "object",
+      "properties": {
+        "angle": {
+          "type": "number",
+          "format": "double"
+        },
+        "fineRadius": {
+          "type": "number",
+          "format": "double"
+        },
+        "growth": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "angle",
+        "fineRadius",
+        "growth"
       ]
     },
     "JsonShape": {

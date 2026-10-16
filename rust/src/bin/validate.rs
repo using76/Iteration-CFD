@@ -3694,6 +3694,13 @@ fn run(c: &mut Checks) -> Result<()> {
     validate_gates::blasius_plate::check_blasius_plate(c, &gpu)?;
     c.leave_gate();
     }
+    // SPEC-LIT 157.5 - Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb,
+    // four live runs of ofgpu-lowmach, in src/bin/validate_gates/dst_leeds.rs.
+    if c.section("Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb, S_t,b against Bradley, Chen & Swithenbank 1989 via Huang et al. 2020 Fig. 9 (SPEC-LIT 157.5)") {
+    c.enter_gate(validate_gates::dst_leeds::GATE);
+    validate_gates::dst_leeds::check_dst_leeds(c)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

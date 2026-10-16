@@ -733,10 +733,10 @@ mod tests {
         );
     }
 
-    // The dust stream's four keys (docs/17 DST-00, SPEC-LIT §151.6) are read only by
-    // the digest test below until DST-07, DST-08 and DST-11 read them in their gates
-    // (§157.5, §157.6, §158.7); each of those units moves its markers into its gate.
-    // answer-key: huang2020-leeds-st-b
+    // The dust stream's three remaining keys (docs/17 DST-00, SPEC-LIT §151.6)
+    // are read only by the digest test below until DST-08 and DST-11 read them in
+    // their gates (§157.6, §158.7); each of those units moves its marker into its
+    // gate, as DST-07 already moved its own into dst_leeds.rs.
     // answer-key: huang2022-rembe-p-closed
     // answer-key: huang2022-rembe-p-vented
     // answer-key: huang2022-corn-starch-table1
@@ -923,9 +923,10 @@ mod tests {
 
     #[test]
     fn every_answer_key_is_named_in_the_manifest_and_every_row_has_its_marker() {
-        const SCAN: [(&str, &str); 5] = [
+        const SCAN: [(&str, &str); 6] = [
             ("rust/src/bin/validate.rs", include_str!("../validate.rs")),
             ("rust/src/bin/validate_key/mod.rs", include_str!("mod.rs")),
+            ("rust/src/bin/validate_gates/dst_leeds.rs", include_str!("../validate_gates/dst_leeds.rs")),
             ("rust/src/simple.rs", include_str!("../../simple.rs")),
             ("rust/src/fan/tests.rs", include_str!("../../fan/tests.rs")),
             ("rust/src/cht/ambient.rs", include_str!("../../cht/ambient.rs")),

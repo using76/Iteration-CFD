@@ -54825,7 +54825,8 @@ The papers' own simulation curves are never a key (§10, §22).
 A gate that loads a key goes through `validate_key::load`, so a missing file or a digest that is
 not the manifest's reports the gate open by name (§10, §69). Until DST-07, DST-08 and DST-11
 read the keys in their gates, the four `// answer-key: ` markers sit beside the digest test in
-`rust/src/bin/validate_key/mod.rs`. Each of those units moves its markers into its gate.
+`rust/src/bin/validate_key/mod.rs`. Each of those units moves its markers into its gate;
+DST-07 has moved `huang2020-leeds-st-b`'s into `src/bin/validate_gates/dst_leeds.rs` (§157.8).
 
 ### 151.7 Inconsistencies found in the open papers
 
@@ -56401,7 +56402,8 @@ to t = 30 ms. **Reference:** key J.1 (`huang2020-leeds-st-b`).
 * The sector mesh rows of §157.3 (D).
 
 f64 and f32 rows, P class. Validate section DST-LEEDS (4 runs), ≤ 6 min per build.
-`src/bin/validate_gates/dst_leeds.rs`, the dispatch line in `validate.rs`, `cases/dust/leedsBomb.jsonc`.
+`src/bin/validate_gates/dst_leeds.rs`, the dispatch line in `validate.rs`, `cases/dust/leedsBomb.jsonc`;
+as built in §157.8.
 
 ### 157.6 Gate DST-VES (DST-08)
 
@@ -56565,6 +56567,95 @@ own bin module. D5: a laminar case's closures read zero k, omega and nu_t. D6: t
 frozen before 2 t_0.
 
 Labels: (157.6)-(157.8).
+
+### 157.8 What DST-07 landed
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied.
+
+**The sector as built** (`src/dust/gatemesh.rs`, `cases/dust/leedsBomb.jsonc`). The case's
+`mesh.sector` block carries `angle`, `fineRadius` and `growth` only — the radius is the case
+bounds' x extent and `n_fine` the mesh's x cell count (400 for Leeds, which with 80 graded
+cells beyond `fineRadius` makes 480 cells), each refusal of §157.3 named by
+JSON path: the bounds' min/max on the x axis with y and z extents 0, `fineRadius` inside
+(0, R), the cell count in y and z exactly 1, `growth` in [1, 1.2], the angle in (0, 90] deg,
+and `mesh.wedge`, `mesh.regions`, `mesh.cyclic`, `mesh.grading` and a motion block refused
+beside it. R = 176.4 mm is the equal-volume radius of §157.3's sector of H20's vessel
+(0.023 m³); 0.125 mm cells out to 50 mm and growth 1.05 beyond. **The angle is 90 deg, not
+the 60 deg of the first draft.** At 60 deg, u' = 3.31 m/s needs dt < 4.9e-6 s, where the
+ignition's first step leaves the low-Mach regime (Mach 0.30). 90 deg makes the apex
+pyramid's `V^{1/3}` = 1.10 dr, so (155.9)'s predicted flame-Courant step stays above the
+ignition's low-Mach limit at every one of the four series, and the four sides stay slip
+planes of the same aspect. §157.3's "thin pyramid" is therefore a 90 deg one in the tree; in
+this discretisation the angle changes nothing but the cell aspect and V^{1/3}, because every
+side face carries zero mass flux and the radial squares' areas are `4 a² x²` at any a, so the
+continuity and pressure terms are the 1-D spherical ones (area ∝ r²) for every angle. The
+sector mesh itself is exact to
+1e-12: the worst cell closure and the worst deviation of a radial square's area from
+`4 a² x²`, both measured by `check_sector` and gated at 1e-12 in the D rows below.
+
+**The gate procedure** (`src/bin/validate_gates/dst_leeds.rs`). Four live runs of the sibling
+`ofgpu-lowmach` executable, one per series of the key, each on the case re-raised from the
+shipped JSONC with that series' k_0 and omega_0 (H20 Table 4: k = 0.96, 3.94, 9.00, 16.43
+m²/s²; omega = eps_0/(0.09 k) = 544.33, 1101.33, 1667.70, 2252.74 1/s, §156.4) set in the
+initial field, the vessel patch's wall values and the SST-sust ambient, written into a fresh
+scratch directory and run sealed at p_0 = 110 000 Pa to t = 30 ms with Δt = 1.9e-5, 1.1e-5,
+8.0e-6, 6.5e-6 s — the predicted Co_f of (155.9) under 0.5 at every series. Fields are
+written every 0.5 ms (60 samples); `R_f` of (155.8) is the linear crossing of c‾ = 0.1
+scanned from the burned side outward, `S_t,b` at R* the difference quotient across the first
+bracketing sample pair, the slope the least squares of the four S_t,b at R* = 30 mm against
+the key's own 0.678, and the pressure rise `(p0 − p_0)/p_0` at the sample-time crossing of
+R_f = 35 mm. A run that exits non-zero fails its row, prints the log's last 15 lines, and
+the gate continues with the next u'.
+
+**The solver choice.** The case's pressure entry is PCG + DIC at 1e-10/1e-6, every other
+entry PBiCGStab + diagonal at 1e-12/1e-6. The first draft's PBiCGStab + DIC on the sector's
+pressure matrix (face areas 1e-8 to 1e-2 m²) diverged at step 0 (measured Mach 3.3e7);
+PCG + DIC converges.
+
+**Measured 2026-10-17. The four-run gate was NOT RUN in either build** (deferred, a review-later
+item): the GPU was shared with two other lanes' long runs, and on it the shipped case took
+0.41 s per step (200 steps in 82.1 s, f64), so the gate's 12 671 steps (1 579 + 2 727 + 3 750
++ 4 615 at the four Δt) price at about 87 min per build against §157.5's 6 min. The step cost
+on an idle card was not measured. What WAS measured:
+
+* *The sector rows (D)*, `check_sector` in `tests/dust_gatemesh.rs`, both builds: closure
+  1.0e-16 and area/r² 4.4e-16 on the 90 deg Leeds sector (480 cells), 2.6e-17 and 2.2e-16 on
+  a coarse one (9 cells), each against 1e-12; the host
+  mesh's volumes and centroids equal the exact frusta to 1e-12. **Pass.**
+* *The u' = 1.62 m/s series, f64, as a probe* (the shipped case at 90 deg and Δt = 1.1e-5 s,
+  2 727 steps in 1 635 s, with looser solver tolerances than the shipped ones: p PCG + DIC
+  1e-8/1e-4, the rest 1e-10/1e-6). Predicted Co_f 0.455, measured at most 0.40; c~ bounds
+  count 0; the first step's Mach number 0.145. The gate's own R_f, bracket and crossing rules
+  applied to its 60 samples give:
+
+| u' | R* | S_model f64 (probe) | S_model single | S_key | \|S/S_key − 1\| | verdict |
+|---|---|---|---|---|---|---|
+| 1.62 | 20 mm (not gated) | 1.3489 | not reached | 1.688 | 0.201 | reported |
+| 1.62 | 25 mm | 1.4004 | not reached | 1.708 | 0.180 | inside ± 20 % |
+| 1.62 | 30 mm | 1.4655 | not reached | 1.738 | 0.157 | inside ± 20 % |
+| 1.62 | 35 mm | 1.5390 | not reached | 1.757 | 0.124 | inside ± 20 % |
+| 0.80, 2.45, 3.31 | 20-35 mm | NOT RUN | NOT RUN | J.1 | — | NOT RUN |
+
+  The pressure rise at R_f = 35 mm (t = 23.01 ms) is 0.27 %, inside 1 %. The slope at 30 mm
+  needs all four series: NOT RUN. The model's flame runs 12-18 % slower than the key over
+  25-35 mm and accelerates through it (1.40 to 1.54 m/s, against the key's 1.71 to 1.76).
+* **Single: the run is refused at step 17.** The f32 build's first step heats the ignition
+  kernel to 1971.6 K against T_b = 1500 K (f64: 1478.8 K), and at step 17 the Mach number is
+  2.03, above §93.6's 0.3. *Cause (derived from the step, not isolated by a probe):* the first step's c~ solve takes W Δt ≈
+  4e7 in the kernel, so `1 − c~` is about 2.5e-8, below f32's unit round-off of 6e-8, and
+  (157.7)'s `ρ (K + W)(1 − c~)` multiplies that rounded difference by W ≈ 3.7e12 1/s: the heat
+  release of (152.12) is then set by the rounding of c~, not by the burn. This is the f32 flow
+  path's family of §157.7's item (iii) (the single tube diverged at step 0) and of §118's
+  F32-07; a cure (forming the burnt mass from the c~ change, or f64 for that product) changes
+  the numerics of DST-06's step and is the user's decision.
+
+The decisions taken here, by recommendation: the 90 deg sector; the PCG pressure entry and
+the 1e-6 relative tolerances in the case (inputs, not numerics); the per-series Δt table; the
+bracket quotient for S_t,b; the four runs as child processes of the validate binary, which
+needs `ofgpu-lowmach` built beside it (the gate reports itself open by name otherwise).
+
+Labels: none.
 
 ---
 

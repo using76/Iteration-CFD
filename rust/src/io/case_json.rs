@@ -375,6 +375,17 @@ pub struct JsonMesh {
     /// rule - a box has no wedge sides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedge: Option<JsonWedge>,
+    /// SPEC-LIT 157.3: presence makes the case a 1-D SPHERICAL SECTOR - the
+    /// REDUCED dust gates' mesh (DST-07). The x axis is the radius
+    /// (`bounds.max[0]` = R, `cells[0]` the uniform cell count), `xmin`
+    /// names the APEX, which has no faces exactly like a wedge pipe's axis,
+    /// `xmax` the outer square and ymin/ymax/zmin/zmax the four sides. The
+    /// reader lowers the case onto `crate::dust::gatemesh::SectorSpec` and
+    /// refuses everything a sector mesh cannot say (each a §13.4 error
+    /// naming the JSON path and SPEC-LIT 157.3). Absent: the case lowers
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector: Option<JsonSector>,
 }
 
 /// [`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL
@@ -384,6 +395,20 @@ pub struct JsonMesh {
 #[serde(deny_unknown_fields)]
 pub struct JsonWedge {
     pub angle: f64,
+}
+
+/// [`JsonMesh::sector`]'s one entry - SPEC-LIT 157.3. `angle` is the FULL
+/// angle between opposite side faces in degrees (finite, in `(0, 90]`),
+/// `fineRadius` the uniform spacing's end `r_f` in m (`0 < r_f <
+/// bounds.max[0]`) and `growth` the ratio of successive radial spacings
+/// beyond `r_f` (finite, in `[1, 1.2]`) - each checked with its JSON path
+/// named, in [`JsonCase::lower`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JsonSector {
+    pub angle: f64,
+    pub fine_radius: f64,
+    pub growth: f64,
 }
 
 /// One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six
@@ -1716,6 +1741,11 @@ pub struct LoweredCase {
     /// `mesh.wedge` - [`Self::build_host_mesh`] then builds exactly what
     /// `crate::blockgen::build_mesh(&self.block)` always built.
     pub wedge: Option<crate::blockgen::WedgeSpec>,
+    /// SPEC-LIT 157.3: `mesh.sector`, lowered onto the gatemesh
+    /// [`crate::dust::gatemesh::SectorSpec`]. `None` for every case without
+    /// `mesh.sector` - [`Self::build_host_mesh`] then builds exactly what it
+    /// always built.
+    pub sector: Option<crate::dust::gatemesh::SectorSpec>,
     /// SPEC-LIT §122.6: `physics.compressible`, lowered onto §122.1's gas and
     /// validated (the `cp` check included). `None` for every case without
     /// the block.
@@ -1768,9 +1798,10 @@ impl LoweredCase {
     /// are the builder's; the map reads the faces and points only, in the
     /// mesh's own face order.
     pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
-        match &self.wedge {
-            None => crate::blockgen::raw_mesh(&self.block),
-            Some(w) => crate::blockgen::raw_wedge_mesh(w),
+        match (&self.wedge, &self.sector) {
+            (None, None) => crate::blockgen::raw_mesh(&self.block),
+            (Some(w), _) => crate::blockgen::raw_wedge_mesh(w),
+            (None, Some(s)) => crate::dust::gatemesh::raw_sector_mesh(s),
         }
     }
 
@@ -1785,6 +1816,12 @@ impl LoweredCase {
     /// and no lowered field carries a boundary entry under it.
     pub fn build_host_mesh(&self) -> Result<crate::mesh::HostMesh> {
         let Some(w) = &self.wedge else {
+            if let Some(s) = &self.sector {
+                // SPEC-LIT 157.3: the sector mesh; the case's own patch
+                // names and classes are already on the spec the lowering
+                // built, so the geometry comes back under them untouched.
+                return crate::dust::gatemesh::build_sector_mesh(s);
+            }
             return crate::blockgen::build_mesh(&self.block);
         };
         let mut hm = crate::blockgen::build_wedge_mesh(w)?;
@@ -2410,6 +2447,140 @@ fn wedge_spec_of(
     }))
 }
 
+/// SPEC-LIT 157.3: `mesh.sector`, lowered onto the 157.3 `SectorSpec`
+/// (`None` for every case without it) - and the block's refusal list,
+/// checked BEFORE any mesh is built, every entry an `Error::Config` naming
+/// the JSON path and the section. A case without `mesh.sector` lowers
+/// exactly as before.
+fn sector_spec_of(
+    mesh: &JsonMesh,
+    patches: &[JsonPatchRule],
+) -> Result<Option<crate::dust::gatemesh::SectorSpec>> {
+    let Some(s) = &mesh.sector else { return Ok(None) };
+    let refused = |path: &str, detail: String| {
+        Error::Config(format!("{path}: {detail} (SPEC-LIT 157.3)"))
+    };
+    if mesh.bounds.min != [0.0, 0.0, 0.0] {
+        return Err(refused(
+            "mesh.bounds.min",
+            format!("must be [0, 0, 0] - the apex IS the origin, got {:?}", mesh.bounds.min),
+        ));
+    }
+    if mesh.bounds.max[1] != 0.0 || mesh.bounds.max[2] != 0.0 {
+        return Err(refused(
+            "mesh.bounds.max",
+            format!(
+                "max[1] = {} and max[2] = {} must both be 0 - the radius is the x axis \
+                 alone, and a second statement of the extent could only disagree",
+                mesh.bounds.max[1], mesh.bounds.max[2]
+            ),
+        ));
+    }
+    if !(s.fine_radius.is_finite() && s.fine_radius > 0.0) {
+        return Err(refused(
+            "mesh.sector.fineRadius",
+            format!("{} - must be finite and > 0", s.fine_radius),
+        ));
+    }
+    if !(mesh.bounds.max[0].is_finite() && mesh.bounds.max[0] > s.fine_radius) {
+        return Err(refused(
+            "mesh.bounds.max[0]",
+            format!(
+                "{} - must be finite and > mesh.sector.fineRadius = {}",
+                mesh.bounds.max[0], s.fine_radius
+            ),
+        ));
+    }
+    if mesh.cells[0] == 0 || mesh.cells[1] != 1 || mesh.cells[2] != 1 {
+        return Err(refused(
+            "mesh.cells",
+            format!(
+                "[{}, {}, {}] - a sector is one cell across y and z, and cells[0] is \
+                 the uniform radial count (>= 1)",
+                mesh.cells[0], mesh.cells[1], mesh.cells[2]
+            ),
+        ));
+    }
+    if !(s.growth.is_finite() && (1.0..=1.2).contains(&s.growth)) {
+        return Err(refused(
+            "mesh.sector.growth",
+            format!("{} - must be finite and in [1, 1.2]", s.growth),
+        ));
+    }
+    if !(s.angle.is_finite() && s.angle > 0.0 && s.angle <= 90.0) {
+        return Err(refused(
+            "mesh.sector.angle",
+            format!(
+                "{} - the FULL angle in degrees must be finite and in (0, 90]",
+                s.angle
+            ),
+        ));
+    }
+    if mesh.wedge.is_some() {
+        return Err(refused(
+            "mesh.wedge",
+            "stated beside mesh.sector - a case is one mesh, and these are two \
+             different meshes"
+                .to_string(),
+        ));
+    }
+    if !mesh.regions.is_empty() {
+        return Err(refused(
+            "mesh.regions",
+            format!(
+                "{} region(s) beside mesh.sector - a sector carries no region windows",
+                mesh.regions.len()
+            ),
+        ));
+    }
+    if !mesh.cyclic.is_empty() {
+        return Err(refused(
+            "mesh.cyclic",
+            format!(
+                "{} pair(s) beside mesh.sector - a sector carries no cyclic pair",
+                mesh.cyclic.len()
+            ),
+        ));
+    }
+    if mesh.grading.is_some() {
+        return Err(refused(
+            "mesh.grading",
+            "stated beside mesh.sector - the radial grading IS mesh.sector's \
+             fineRadius and growth, there is nothing else to state"
+                .to_string(),
+        ));
+    }
+    let names = [
+        mesh.boundaries.xmin.clone(),
+        mesh.boundaries.xmax.clone(),
+        mesh.boundaries.ymin.clone(),
+        mesh.boundaries.ymax.clone(),
+        mesh.boundaries.zmin.clone(),
+        mesh.boundaries.zmax.clone(),
+    ];
+    let class = |slot: usize| -> Result<String> {
+        Ok(patch_class(resolve_patch_rule(patches, &names[slot])?.kind).to_string())
+    };
+    Ok(Some(crate::dust::gatemesh::SectorSpec {
+        radius: mesh.bounds.max[0],
+        fine_radius: s.fine_radius,
+        n_fine: mesh.cells[0] as usize,
+        growth: s.growth,
+        angle_deg: s.angle,
+        // The sector's five patches are the case's OWN slots 1..5: xmax is
+        // the outer square, ymin/ymax/zmin/zmax the sides; `xmin` stands for
+        // the apex, which has no faces at all.
+        patch_name: [
+            names[1].clone(),
+            names[2].clone(),
+            names[3].clone(),
+            names[4].clone(),
+            names[5].clone(),
+        ],
+        patch_type: [class(1)?, class(2)?, class(3)?, class(4)?, class(5)?],
+    }))
+}
+
 // ------------------------------------------------------------ cyclic pairs
 
 /// Which axis (0=x, 1=y, 2=z) `pair` names, given the six `mesh.boundaries`
@@ -2987,6 +3158,18 @@ fn solver_for(solvers: &[JsonSolverRule], var: &str) -> Result<SolverControls> {
 impl JsonCase {
     /// Map the parsed tree onto the solver's own control types.
     pub fn lower(&self) -> Result<LoweredCase> {
+        // SPEC-LIT 157.3: `mesh.sector` lowers onto the gatemesh
+        // `SectorSpec` and owns the mesh when it is present. Its refusal
+        // list runs BEFORE any mesh is built, so a sector case answers for
+        // itself and not as a box (or a wedge) first.
+        let sector = sector_spec_of(&self.mesh, &self.patches)?;
+        if sector.is_some() && self.motion.is_some() {
+            return Err(Error::Config(
+                "motion: a moving mesh beside mesh.sector is refused - a sector \
+                 case has no motion path (SPEC-LIT 157.3)"
+                    .to_string(),
+            ));
+        }
         let (block, windows) = build_block(&self.mesh, &self.patches)?;
 
         // SPEC-LIT 119.3: `mesh.wedge` lowers onto the 119.0 `WedgeSpec`
@@ -3189,6 +3372,12 @@ impl JsonCase {
         // `mesh.regions` is refused on a wedge, so `names` is exactly the
         // six slot names in order here and `remove(0)` is the `xmin` one.
         if wedge.is_some() && self.mesh.bounds.min[0] == 0.0 {
+            names.remove(0);
+        }
+        // SPEC-LIT 157.3: on a sector mesh the `xmin` name stands for the
+        // APEX, which has no faces - exactly the wedge pipe's axis - so no
+        // lowered field may carry a boundary entry under it.
+        if sector.is_some() {
             names.remove(0);
         }
         let ambient_t = self.initial.t.map(|v| v as Scalar).unwrap_or(0.0);
@@ -3496,6 +3685,7 @@ impl JsonCase {
             sources,
             motion,
             wedge,
+            sector,
             compressible,
             parcels,
             chem,
