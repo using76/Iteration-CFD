@@ -15,7 +15,9 @@
 // the spec refusals, and the two builds' identical points. CMP-21 appends
 // §127.5.2's six duct tests: the area ratio, the topology counts, the face
 // areas, the trapezoid volumes, closure and the axis centres, and the
-// duct spec's refusals.
+// duct spec's refusals. CMP-23 appends §127.5.3's five ramp tests: the
+// topology counts and patches, the nodes on the wall, the wall normals
+// and areas, the volumes and closure, and the ramp spec's refusals.
 //
 // An integration test's body cannot carry `//!` or `#![..]`, and neither
 // can this file - it is included, not compiled standalone. Every
@@ -31,8 +33,8 @@
 use std::sync::OnceLock;
 
 use ofgpu::compressible::gatemesh::{
-    airfoil_cmesh, duct_area_ratio, first_cell_for_y_plus, nozzle_duct, one_sided_tanh,
-    parse_stations, rae2822_stations, DuctSpec, CMesh, CMeshSpec,
+    airfoil_cmesh, compression_ramp, duct_area_ratio, first_cell_for_y_plus, nozzle_duct,
+    one_sided_tanh, parse_stations, rae2822_stations, DuctSpec, CMesh, CMeshSpec, RampSpec,
 };
 use ofgpu::io::polymesh::build_host_mesh;
 use ofgpu::{DVec3, HostMesh, PatchKind, Scalar};
@@ -641,4 +643,271 @@ fn duct_spec_refusals() {
     let mut spec = DuctSpec::default();
     spec.depth = f64::INFINITY;
     refused(&spec, "depth +inf", "depth");
+}
+
+// ==========================================================================
+//  CMP-23's compression ramp, SPEC-LIT §127.5.3
+// ==========================================================================
+
+/// The default ramp and its host mesh, built once per process.
+fn ramp_mesh() -> &'static (ofgpu::compressible::gatemesh::Ramp, HostMesh) {
+    static M: OnceLock<(ofgpu::compressible::gatemesh::Ramp, HostMesh)> = OnceLock::new();
+    M.get_or_init(|| {
+        let r = compression_ramp(&RampSpec::default()).expect("build the ramp");
+        let h = build_host_mesh(&r.raw).expect("build the host mesh");
+        (r, h)
+    })
+}
+
+/// The ramp's topology: 11102 points, 5400 cells, 10650 internal faces,
+/// 21750 faces, and the five patches in order inlet/outlet/lowerWall/top/
+/// frontAndBack with their sizes, starts, kinds and type names.
+#[test]
+fn ramp_topology_counts_and_patches() {
+    let (r, h) = ramp_mesh();
+    let nx = r.nx();
+    let ny = r.spec.ny;
+    assert_eq!(nx, 90, "the column count");
+    assert_eq!(r.raw.points.len(), 2 * (nx + 1) * (ny + 1), "the point count");
+    assert_eq!(h.n_points, 2 * (nx + 1) * (ny + 1), "the host point count");
+    assert_eq!(h.n_cells, nx * ny, "the cell count");
+    assert_eq!(h.n_internal_faces, (nx - 1) * ny + nx * (ny - 1), "internal faces");
+    assert_eq!(r.raw.faces.len(), 21750, "the total face count");
+    let names = ["inlet", "outlet", "lowerWall", "top", "frontAndBack"];
+    let types = ["patch", "patch", "symmetry", "symmetry", "symmetry"];
+    let kinds = [
+        PatchKind::Generic,
+        PatchKind::Generic,
+        PatchKind::Symmetry,
+        PatchKind::Symmetry,
+        PatchKind::Symmetry,
+    ];
+    let sizes = [ny, ny, nx, nx, 2 * nx * ny];
+    let starts = [0usize, ny, 2 * ny, 2 * ny + nx, 2 * ny + 2 * nx];
+    let mut at = 0usize;
+    for (k, p) in h.patches.iter().enumerate() {
+        assert_eq!(p.name, names[k], "patch {k} name");
+        assert_eq!(p.type_name, types[k], "patch {k} type");
+        assert_eq!(p.kind, kinds[k], "patch {k} kind");
+        assert_eq!(p.start, starts[k], "patch {k} start");
+        assert_eq!(p.size, sizes[k], "patch {k} size");
+        assert_eq!(p.nbr_patch, None, "patch {k} couple");
+        at += p.size;
+    }
+    assert_eq!(at, h.n_boundary_faces, "the boundary face count");
+    for f in 0..h.n_internal_faces {
+        assert!(h.owner[f] < h.neighbour[f], "face {f} not upper-triangular");
+        if f > 0 {
+            assert!(
+                h.owner[f] >= h.owner[f - 1],
+                "face {f}: owners not non-decreasing"
+            );
+            if h.owner[f] == h.owner[f - 1] {
+                assert!(
+                    h.neighbour[f] > h.neighbour[f - 1],
+                    "face {f}: neighbours not increasing within owner {}",
+                    h.owner[f]
+                );
+            }
+        }
+    }
+    println!(
+        "  ramp: {} points, {} cells, {} internal faces, {} faces",
+        h.n_points,
+        h.n_cells,
+        h.n_internal_faces,
+        r.raw.faces.len()
+    );
+}
+
+/// The nodes follow the wall: the corner node is the corner bitwise, the
+/// last wall node sits at the ramp end's deflection, every top node is at
+/// `y = H`, the wall is flat ahead of the corner, and the accessors read
+/// the spec.
+#[test]
+fn ramp_nodes_follow_the_wall() {
+    let r = &ramp_mesh().0;
+    let n = r.nx();
+    assert_eq!(r.node(30, 0), [0.5, 0.0], "the corner node, bitwise");
+    let end = r.node(90, 0);
+    let (want_x, want_y) = (1.5, 0.17632698070846498);
+    assert!(
+        (end[0] - want_x).abs() <= 1.0e-15 * want_x.abs()
+            && (end[1] - want_y).abs() <= 1.0e-15 * want_y.abs(),
+        "node(90, 0) {:?} is not [{want_x}, {want_y}]",
+        end
+    );
+    for i in 0..=n {
+        let top = r.node(i, 60)[1];
+        assert!(
+            (top - 1.0).abs() <= 1.0e-15,
+            "node({i}, 60): y {top} is not the top H = 1"
+        );
+    }
+    assert_eq!(r.wall_y(0.25), 0.0, "the wall is flat ahead of the corner");
+    assert_eq!(r.nx(), 90, "nx");
+    assert_eq!(r.length(), 1.5, "the length");
+    println!("  ramp: node(90, 0) = {:?}, wall_y(1.0) = {}", end, r.wall_y(1.0));
+}
+
+/// The wall faces' normals and areas: the flat stretch is `(0, -1, 0)`
+/// with the square area, the deflected stretch `(sin 10, -cos 10, 0)` with
+/// the slanted area, and the inlet and outlet faces carry their column
+/// heights with the right x signs.
+#[test]
+fn ramp_wall_normals_and_areas() {
+    let (_, h) = ramp_mesh();
+    let tol = tol_r(1.0e-13);
+    let tol_a = tol_r(1.0e-12);
+    let flat_area = 2.7777777777777778e-4;
+    let ramp_area = 2.820629477460403e-4;
+    let wall = h.patches.iter().find(|p| p.name == "lowerWall").expect("lowerWall");
+    for i in 0..wall.size {
+        let bf = wall.start + i;
+        let sf = [w64(h.b_sf[bf].x), w64(h.b_sf[bf].y), w64(h.b_sf[bf].z)];
+        let mag = (sf[0] * sf[0] + sf[1] * sf[1] + sf[2] * sf[2]).sqrt();
+        let unit = [sf[0] / mag, sf[1] / mag, sf[2] / mag];
+        let (want_n, want_a) = if i < 30 {
+            ([0.0, -1.0, 0.0], flat_area)
+        } else {
+            ([0.17364817766693033, -0.984807753012208, 0.0], ramp_area)
+        };
+        for k in 0..3 {
+            assert!(
+                (unit[k] - want_n[k]).abs() <= tol,
+                "lowerWall face {i}: unit normal {unit:?} is not {want_n:?}"
+            );
+        }
+        assert!(
+            (mag - want_a).abs() <= tol_a * want_a,
+            "lowerWall face {i}: area {mag} is not {want_a}"
+        );
+        assert_eq!(h.b_face_cells[bf] as usize, i, "lowerWall face {i} owner");
+    }
+    let check = |patch: &str, want_area: f64, positive_x: bool| {
+        let p = h.patches.iter().find(|q| q.name == patch).expect(patch);
+        for k in 0..p.size {
+            let bf = p.start + k;
+            let sf = [w64(h.b_sf[bf].x), w64(h.b_sf[bf].y), w64(h.b_sf[bf].z)];
+            let mag = (sf[0] * sf[0] + sf[1] * sf[1] + sf[2] * sf[2]).sqrt();
+            assert!(
+                (mag - want_area).abs() <= tol_a * want_area,
+                "{patch} face {k}: area {mag} is not {want_area}"
+            );
+            assert!(
+                if positive_x { sf[0] > 0.0 } else { sf[0] < 0.0 },
+                "{patch} face {k}: Sf_x {} has the wrong sign",
+                sf[0]
+            );
+        }
+    };
+    check("inlet", flat_area, false);
+    check("outlet", 2.2879806091431529e-4, true);
+    println!("  ramp: wall areas {flat_area} flat, {ramp_area} deflected");
+}
+
+/// Every cell's volume is positive, every cell closes to round-off, and
+/// the volumes sum to `D (L H - l_r^2 tan(theta)/2)` (derived).
+#[test]
+fn ramp_volumes_close_and_sum() {
+    let (r, h) = ramp_mesh();
+    let spec = &r.spec;
+    let tol = tol_r(1.0e-13);
+    let mut acc = vec![[0.0f64; 3]; h.n_cells];
+    let mut mag = vec![0.0f64; h.n_cells];
+    let mut add = |c: usize, v: [f64; 3], s: f64| {
+        acc[c][0] += s * v[0];
+        acc[c][1] += s * v[1];
+        acc[c][2] += s * v[2];
+        mag[c] += s;
+    };
+    for f in 0..h.n_internal_faces {
+        add(h.owner[f] as usize, [w64(h.sf[f].x), w64(h.sf[f].y), w64(h.sf[f].z)], 1.0);
+        add(h.neighbour[f] as usize, [w64(h.sf[f].x), w64(h.sf[f].y), w64(h.sf[f].z)], -1.0);
+    }
+    for bf in 0..h.n_boundary_faces {
+        add(
+            h.b_face_cells[bf] as usize,
+            [w64(h.b_sf[bf].x), w64(h.b_sf[bf].y), w64(h.b_sf[bf].z)],
+            1.0,
+        );
+    }
+    let mut total = 0.0f64;
+    let mut worst = 0.0f64;
+    for c in 0..h.n_cells {
+        let v = w64(h.v[c]);
+        assert!(v > 0.0, "cell {c}: volume {v} is not positive");
+        total += v;
+        let sum = (acc[c][0] * acc[c][0] + acc[c][1] * acc[c][1] + acc[c][2] * acc[c][2])
+            .sqrt();
+        worst = worst.max(if mag[c] > 0.0 { sum / mag[c] } else { 0.0 });
+        assert!(
+            sum <= tol * mag[c],
+            "cell {c}: the outward area vectors sum to {sum:.3e}, above {:.3e}",
+            tol * mag[c]
+        );
+    }
+    let tan = spec.deflection_deg.to_radians().tan();
+    let want = spec.depth
+        * (r.length() * spec.height - spec.ramp_length * spec.ramp_length * tan / 2.0);
+    assert!(
+        (total - want).abs() <= tol_r(1.0e-12) * want,
+        "the volumes sum to {total}, not D (L H - l_r^2 tan(theta)/2) = {want}"
+    );
+    println!("  ramp: volumes sum {total:.15e} against {want:.15e}, worst closure {worst:.3e}");
+}
+
+/// Out-of-bounds ramp specs are refused, every message naming the module
+/// and the offending field.
+#[test]
+fn ramp_spec_refusals() {
+    let refused = |spec: &RampSpec, why: &str, field: &str| {
+        let e = compression_ramp(spec).expect_err(why);
+        let msg = match &e {
+            ofgpu::Error::Mesh(m) => m.clone(),
+            other => panic!("{why}: not a mesh error: {other:?}"),
+        };
+        assert!(
+            msg.contains("gatemesh: compression_ramp"),
+            "{why}: the refusal \"{msg}\" does not name the module"
+        );
+        assert!(msg.contains(field), "{why}: the refusal \"{msg}\" does not name {field}");
+        println!("  {why}: \"{msg}\"");
+    };
+    for (field, value) in [
+        ("n_up", 0usize),
+        ("n_ramp", 0),
+        ("ny", 0),
+    ] {
+        let mut spec = RampSpec::default();
+        match field {
+            "n_up" => spec.n_up = value,
+            "n_ramp" => spec.n_ramp = value,
+            _ => spec.ny = value,
+        }
+        refused(&spec, &format!("{field} 0"), field);
+    }
+    for (field, value) in [
+        ("x_corner", 0.0f64),
+        ("ramp_length", f64::NAN),
+        ("height", -1.0),
+        ("depth", 0.0),
+    ] {
+        let mut spec = RampSpec::default();
+        match field {
+            "x_corner" => spec.x_corner = value,
+            "ramp_length" => spec.ramp_length = value,
+            "height" => spec.height = value,
+            _ => spec.depth = value,
+        }
+        refused(&spec, &format!("{field} {value}"), field);
+    }
+    for value in [0.0f64, 45.0, f64::NAN] {
+        let mut spec = RampSpec::default();
+        spec.deflection_deg = value;
+        refused(&spec, &format!("deflection_deg {value}"), "deflection_deg");
+    }
+    let mut spec = RampSpec::default();
+    spec.height = 0.1;
+    refused(&spec, "height 0.1", "height");
 }

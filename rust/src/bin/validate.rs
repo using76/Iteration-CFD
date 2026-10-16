@@ -3942,6 +3942,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_nozzle", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-OBL: the oblique shock on the 2-D
+    // compression ramp of src/compressible/gatemesh.rs (SPEC-LIT
+    // 127.5.3) at M 2, 10 degrees, against NACA 1135's theta-beta-M
+    // (127.4), live, in src/bin/validate_gates/oblique.rs (CMP-23).
+    if c.section("Gate CMP-OBL: the oblique shock on a 10-degree ramp at M 2, 90 x 60 cells (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::oblique::GATE);
+    let r = validate_gates::oblique::check_oblique(c, &gpu);
+    c.ran("check_oblique", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

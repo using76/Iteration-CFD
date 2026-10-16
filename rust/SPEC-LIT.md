@@ -46558,6 +46558,57 @@ run inlet/outlet/walls/frontAndBack, sizes 1, 1, 400, 400, starts 0, 1, 2, 402.
 
 No GPL-licensed source was consulted.
 
+#### 127.5.3 The compression ramp (CMP-23)
+
+`src/compressible/gatemesh.rs`'s `compression_ramp` builds Gate CMP-OBL's mesh in
+memory, as a one-cell-deep `PolyMeshRaw` (`f64` points in both builds, §118.2) for
+`build_host_mesh`: `nx = n_up + n_ramp` columns of `ny` cells between the lower wall
+and the flat top `y = H`, ONE cell deep in `z`. The lower wall is the flat slip
+plate `y_w = 0` up to the corner `(x_c, 0)` and the straight ramp
+`(x - x_c) tan(theta)` from it; above it every `j` line is the algebraic mix of
+wall and top, (127.26) — ORIGINAL, this tree's choice: a flat slip plate ahead of a
+straight ramp of deflection theta starting at the corner, algebraic lines between
+the wall and the straight top, so the approach cells are square and the ramp
+columns tilt with the wall.
+
+```
+x_i = x_c i/n_up                        (i <= n_up)
+x_i = x_c + l_r (i - n_up)/n_ramp       (n_up < i <= nx),   nx = n_up + n_ramp ,  L = x_c + l_r
+y_w(x) = 0 (x <= x_c),  (x - x_c) tan(theta) (x > x_c)                 the lower slip wall
+y_ij = y_w(x_i) + (H - y_w(x_i)) j/ny,   j = 0..ny                     (127.26)
+```
+
+Two point layers, `z = 0` and `z = D`: point index `k (nx+1)(ny+1) + j (nx+1) + i`,
+`k = 0` at `z = 0` and `k = 1` at `z = D`; cell `(i, j)`, `i = 0..nx-1`,
+`j = 0..ny-1`, has index `j nx + i`. Every face is planar. The internal faces run in
+`(owner, neighbour)` order, each cell's `+x` face first, then its `+y` face; the
+boundary faces follow in patch order `inlet` (`patch`, `ny` faces at `x = 0`),
+`outlet` (`patch`, `ny` faces at `x = L`), `lowerWall` (`symmetry`, `nx` faces),
+`top` (`symmetry`, `nx` faces) and `frontAndBack` (`symmetry`, `2 nx ny` faces,
+`z = 0` then `z = D`), every face's vertices ordered so its right-hand normal
+points OUT of its owner. `RampSpec` defaults: `n_up = 30`, `n_ramp = 60`, `ny = 60`,
+`x_c = 0.5` m, `l_r = H = 1` m, `theta = 10` degrees, `D = 1/60` m - a 90 x 60 grid
+whose approach cells are square. Refusals name the module and the field:
+`n_up`, `n_ramp` or `ny` 0; `x_corner`, `ramp_length`, `height` or `depth` not
+finite or not positive; `deflection_deg` not finite or not in (0, 45); and
+`height` not above `ramp_length tan(theta)` (the ramp would reach the top).
+
+**Landed (CMP-23).** The gate's five tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (21 = 10 of §127.5.1 + 6 of
+§127.5.2 + 5). The default ramp is 11102 points, 5400 cells, 10650 internal faces,
+21750 faces; the patches run inlet/outlet/lowerWall/top/frontAndBack, sizes 60,
+60, 90, 90, 10800, starts 0, 60, 120, 210, 300.
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `ramp_topology_counts_and_patches` | D | the counts and the five patches above, owners non-decreasing and upper-triangular | both builds |
+| `ramp_nodes_follow_the_wall` | D | `node(30, 0) = [0.5, 0]` bitwise; `node(90, 0) = [1.5, 0.17632698070846498]` within `1e-15` relative; every top node at `y = H` within `1e-15`; `wall_y(0.25) = 0` bitwise | both builds |
+| `ramp_wall_normals_and_areas` | R | flat wall `(0, -1, 0)` with area `2.7777777777777778e-4`; deflected wall `(0.17364817766693033, -0.984807753012208, 0)` (sin 10, -cos 10) with area `2.820629477460403e-4`, `tol_r(1e-13)` per unit-normal component and `tol_r(1e-12)` relative on areas; inlet `2.7778e-4` with `Sf_x < 0`; outlet `2.2879806091431529e-4` with `Sf_x > 0` | f64 and f32 inside the tolerances, both builds |
+| `ramp_volumes_close_and_sum` | R | every volume positive; per-cell closure `<= tol_r(1e-13)` of the faces' magnitudes; the sum `D (L H - l_r^2 tan(theta)/2)` (derived) within `tol_r(1e-12)` | worst closure f64 5.851e-20, f32 1.273e-11; sum f64 2.353060849409612e-2, f32 2.353060834138887e-2 |
+| `ramp_spec_refusals` | D | `n_up`/`n_ramp`/`ny` 0, `x_corner` 0, `ramp_length` NaN, `height` -1, `depth` 0, `deflection_deg` 0/45/NaN, `height` 0.1 (below `l_r tan 10 deg`) refused by field name | both builds |
+
+No GPL-licensed source was consulted.
+
 ### 127.6 The gates
 
 The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
@@ -46608,6 +46659,10 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-21 | CMP-NOZ shocked shock position (bar 1 % of the length) | f64 NaN, f32 NaN: **MISSED** (§127.6.5; the march stops on a bound) | CMP-21 |
 | CMP-21 | CMP-NOZ shocked `p_t2/p_t1`, the last cell (bar 1 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
 | CMP-21 | CMP-NOZ shocked exit `p`, the last cell (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-23 | CMP-OBL post-shock `p_2/p_1`, mean over (127.27)'s region, 90 x 60, LTS CFL 1, 5 outer iterations (bar 1 %) | f64 1.036e-3, f32 9.957e-4 (field stop NOT met: the solve did not converge, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL shock angle, least-squares fit of the `p`-jump locus (bar 0.5 degrees) | f64 0.1441 (39.4580), f32 0.1414 (39.4554) (field stop NOT met, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL post-shock `M_2`, mean over (127.27)'s region (bar 1 %) | f64 3.694e-4, f32 3.582e-4 (field stop NOT met, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL with §127.6.5's one outer iteration (the inputs CMP-21 runs; printed by a supervisor probe, not a row) | f64: stops on a bound at step 23 (`T = -70.48` K at ramp-wall cell 47); f32: step 25 (`T = -1.71` K, cell 48): **MISSED** (§127.6.6) | CMP-23 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -46952,6 +47007,96 @@ measured. §127.6.1's finding is the nearest one measured: in a one-outer step, 
 reads `dp/dt` and `K` from the previous iterate. Possible cures change numerics (the
 energy equation's form or ordering, or a positivity treatment of `T`), so they are the
 user's and none was built. The gate's verdict carries all seven rows' values.
+
+#### 127.6.6 Gate CMP-OBL as built (CMP-23)
+
+`src/bin/validate_gates/oblique.rs`, one `ofgpu-validate` section after Gate
+CMP-NOZ, live in both builds. **The mesh** is §127.5.3's default: 90 x 60 cells,
+`x_c = 0.5` m, `l_r = H = 1` m, `D = 1/60` m, slip walls (`lowerWall`, `top`,
+`frontAndBack` all `symmetry`). **The key** (127.4) is evaluated live by
+`compressible::exact::oblique_shock_weak` in `f64` in BOTH builds at
+`M_1 = 2`, `theta = 10` degrees, `gamma = 1.4`: `beta = 39.31393184481887`
+degrees, `p_2/p_1 = 1.7065786040000334`, `M_2 = 1.6405222290010812`. A deflection
+of 30 degrees at `M_1 = 2` is refused as detached, which the bin test asserts.
+
+**The region and the fit** (127.27) — ORIGINAL, this gate's choice:
+
+```
+region R: cell centres with x' = x - x_c in [0.4 l_r, 0.9 l_r] and
+          phi = atan2(y, x') (degrees) in [theta + 5, beta - 5]            (127.27)
+```
+
+so neither the smeared shock nor the corner nor the outlet enters it. `p_2/p_1`
+and `M_2` are the means of `p_abs/p_1` and `M` over R. The shock locus reads each
+column's `p_abs/p_1` from the TOP cell down (columns whose bottom cell's centre
+`x'` is in `[0.2, 0.9] l_r`), takes the first upward crossing of
+`p_mid = (1 + p_2/p_1)/2`, interpolates `(x_s, y_s)` linearly between the two
+cell centres, and fits `y_s = a + b (x_s - x_c)` by least squares over every
+crossing column; `beta` measured is `atan(b)` in degrees, NaN under 10 crossings.
+
+**The run**: air (`PerfectGas::air`, inviscid, `p_op = 1e5` Pa), the uniform free
+stream in every cell (`U_1 = (2 sqrt(gamma R_s T_1), 0, 0)` at `T_1 = 300` K,
+gauge `p = 0`, so `p_1 = p_op`), `characteristicFarfield` on `U`, `p` and `T` of
+both `inlet` and `outlet` (§126.10: supersonic inflow takes the free stream,
+supersonic outflow takes the interior), `symmetry` on the three slip patches.
+Controls are §127.6.5's except one input: `LocalEuler` on momentum and energy, LTS
+CFL 1, `u_relax 0.7`, `t_relax 0.7`, `p_relax 0.3`, **`n_outer 5`**, `residualControl`
+off, Van Leer on `U`, `T` and the retarded density, PBiCGStab + DILU at the same
+tolerances. The march runs chunks of 200 iterations until no cell's `M_i` moves by
+more than `1e-5` across a chunk, capped at 10000.
+
+**The outer iterations** (decision TAKEN, inputs only, measured once each in f64 by
+the supervisor with a temporary probe): with §127.6.5's `n_outer 1` the march stops
+on a bound inside its first chunk in both builds - f64 at outer iteration 1 of step
+23 (`T <= 0` and `rho <= 0`, one cell each, the first ramp-wall cell 47 at
+`T = -70.48` K), f32 at step 25 (cell 48, `T = -1.71` K), both on the ramp wall
+about `0.29 l_r` behind the corner. Inputs that keep one outer iteration all stop
+too: CFL 0.3 with `u_relax = t_relax = 0.3` and `p_relax 0.1` (step 92, wall cell 37),
+first-order `upwind` on `U`, `T` and the retarded density (step 55, cell 64), and
+both together (step 117, cell 38). Three outer iterations hold for the 10000
+iterations, and so does five; with five the last chunk's cell-`M` change is about
+four times smaller and the outer residuals about twenty times smaller than with
+three, so the gate takes five. (CFL 0.5 with three also holds.) No scheme, bar or
+mesh was changed.
+
+**The measures** (class P, the same bar in both builds):
+
+| row | measure | bar |
+|---|---|---|
+| post-shock `p_2/p_1` | `|mean_R(p_abs/p_1) / key.p2_p1 - 1|` | 0.01 |
+| shock angle | `|beta_fit - key.beta_deg|` in degrees, NaN under 10 crossings | 0.5 |
+| post-shock `M_2` | `|mean_R(M) / key.m2 - 1|` | 0.01 |
+
+**Measured: all three rows pass in both builds, on a solve that does NOT converge.**
+The field stop is not met in 10000 iterations in either build: the per-chunk cell-`M`
+change falls from 0.44 to about 1e-2 by iteration 800 and then wanders between
+6e-3 and 3.4e-2 (f32; f64 ends at 1.67e-2, f32 at 1.90e-2), while the outer
+residuals sit near 1e-4 (f64: `Ux 9.0e-5`, `p 1.1e-4`, `h0 1.9e-4`). The largest
+changes sit inside the post-shock region, cells `(i, j)` from `(59, 19)` to
+`(67, 22)`, and near the shock's exit at the outlet (`(87, 43)`), measured once in
+f64 by the supervisor's probe. So the plateau carries an unsteady, non-uniform
+pattern - over R `p/p_1` spans 1.6247-1.7911 (f64; f32 1.6263-1.7918) and `M`
+1.6119-1.6705 - whose MEANS sit on the key. Its cause was not measured; possible
+cures change numerics, so they are the user's and none was built.
+
+| quantity | f64 | f32 |
+|---|---|---|
+| iterations; field stop | 10000; NOT met | 10000; NOT met |
+| seconds (GPU shared by three lanes) | 250.5 | 253.8 |
+| `p_2/p_1` row: mean over R / key - 1 | 1.036e-3 | 9.957e-4 |
+| shock angle row: fit `beta` (degrees), error | 39.458036, 0.1441 | 39.455380, 0.1414 |
+| `M_2` row: mean over R / key - 1 | 3.694e-4 | 3.582e-4 |
+| R: cells; `p/p_1` range; `M` range | 551; 1.624670-1.791055; 1.611944-1.670498 | 551; 1.626309-1.791803; 1.611850-1.670355 |
+| locus: crossings; fit intercept `a` | 42; -0.009946 | 42; -0.009902 |
+| printed only: mean flow angle over R (degrees, wall 10) | 9.9752 | 9.9746 |
+| printed only: lowerWall mean `p/p_1`, `[0.4, 0.9] l_r` | 1.708182 | 1.708276 |
+
+The gate prints a note saying the solve did not converge whenever the field stop
+is not met; with every row inside its bar it reports no verdict. One wording is
+deliberate: a missed row's note states the miss ("... against the bar ...")
+without printing a verdict word, because §69.2 fails any transcript line that
+prints one outside the registry - the verdict itself comes from the registry's
+one report, as CMP-21's does.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 

@@ -33,11 +33,21 @@
 //! [`PolyMeshRaw`] points are [`DVec3`], so the two builds' ducts are the
 //! same bits.
 //!
+//! The 2-D compression ramp of SPEC-LIT section 127.5.3 (CMP-23) lives
+//! beside them: [`compression_ramp`] lays `n_up + n_ramp` columns along a
+//! flat slip plate that turns through [`RampSpec::deflection_deg`] at the
+//! corner `(x_c, 0)` and runs on straight, `ny` cells between the wall and
+//! the flat top `y = H` (127.26), one cell deep in `z`, every slip face
+//! `symmetry`. Like the duct it is host-only and `f64` in BOTH builds: the
+//! [`PolyMeshRaw`] points are [`DVec3`], so the two builds' ramps are the
+//! same bits.
+//!
 //! Provenance: LITERATURE - Thompson, Warsi & Mastin (1985), Chapters VI
 //! and VIII, read from the Internet Archive's page images of the
 //! Mississippi State HPC² copy (rust/PROVENANCE.md names the equations and
-//! the captures' sha256). The duct is ORIGINAL (rust/PROVENANCE.md,
-//! §127.5.2). No GPL-licensed source was consulted.
+//! the captures' sha256). The duct and the ramp are ORIGINAL
+//! (rust/PROVENANCE.md, §127.5.2 and §127.5.3). No GPL-licensed source was
+//! consulted.
 
 use std::f64::consts::PI;
 
@@ -922,6 +932,290 @@ pub fn nozzle_duct(spec: &DuctSpec) -> Result<Duct> {
         },
         spec: spec.clone(),
     })
+}
+
+// ==========================================================================
+//  The 2-D compression ramp, SPEC-LIT §127.5.3 (CMP-23)
+// ==========================================================================
+
+/// The ramp's controls: `n_up` columns of supersonic approach, then
+/// `n_ramp` columns along the deflected wall, `ny` cells between the wall
+/// and the flat top, the corner at `x_corner`, the ramp of length
+/// `ramp_length` turning through `deflection_deg`, the top at `height`,
+/// and the depth `depth` in `z`. The defaults are the gate ramp: 30 + 60
+/// columns, 60 cells of height, `x_c = 0.5` m, `l_r = H = 1` m, 10
+/// degrees, `D = 1/60` m - a 90 x 60 grid, square ahead of the corner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RampSpec {
+    pub n_up: usize,
+    pub n_ramp: usize,
+    pub ny: usize,
+    pub x_corner: f64,
+    pub ramp_length: f64,
+    pub height: f64,
+    pub deflection_deg: f64,
+    pub depth: f64,
+}
+
+impl Default for RampSpec {
+    fn default() -> Self {
+        Self {
+            n_up: 30,
+            n_ramp: 60,
+            ny: 60,
+            x_corner: 0.5,
+            ramp_length: 1.0,
+            height: 1.0,
+            deflection_deg: 10.0,
+            depth: 1.0 / 60.0,
+        }
+    }
+}
+
+/// The built ramp: the raw polyMesh and the spec it was built from.
+#[derive(Debug, Clone)]
+pub struct Ramp {
+    pub raw: PolyMeshRaw,
+    pub spec: RampSpec,
+}
+
+impl Ramp {
+    /// The column count, `nx = n_up + n_ramp` (§127.5.3).
+    pub fn nx(&self) -> usize {
+        self.spec.n_up + self.spec.n_ramp
+    }
+
+    /// The mesh's length, `L = x_c + l_r` (§127.5.3).
+    pub fn length(&self) -> f64 {
+        self.spec.x_corner + self.spec.ramp_length
+    }
+
+    /// The lower wall `y_w(x)` of §127.5.3: the flat plate `0` up to the
+    /// corner, then the straight ramp `(x - x_c) tan(theta)`.
+    pub fn wall_y(&self, x: f64) -> f64 {
+        if x <= self.spec.x_corner {
+            0.0
+        } else {
+            (x - self.spec.x_corner) * self.spec.deflection_deg.to_radians().tan()
+        }
+    }
+
+    /// The grid node `(i, j)`: `(x_i, y_ij)` by (127.26), `y_ij = y_w(x_i)
+    /// + (H - y_w(x_i)) j/ny` - the algebraic line between the wall and
+    /// the straight top above it.
+    pub fn node(&self, i: usize, j: usize) -> [f64; 2] {
+        let x_i = if i <= self.spec.n_up {
+            self.spec.x_corner * (i as f64) / (self.spec.n_up as f64)
+        } else {
+            self.spec.x_corner
+                + self.spec.ramp_length * (i - self.spec.n_up) as f64
+                    / (self.spec.n_ramp as f64)
+        };
+        let y_w = self.wall_y(x_i);
+        [x_i, y_w + (self.spec.height - y_w) * (j as f64) / (self.spec.ny as f64)]
+    }
+}
+
+/// Build the compression ramp of §127.5.3: `n_up + n_ramp` columns of `ny`
+/// cells between the wall (127.26) and the flat top `y = H`, ONE cell deep
+/// in `z`, so an `nx x ny` grid of `nx ny` cells. Point `k (nx+1)(ny+1) +
+/// j (nx+1) + i` sits at `(x_i, y_ij, 0)` for `k = 0` and at `(x_i, y_ij,
+/// D)` for `k = 1`; cell `(i, j)` has index `c = j nx + i`. The internal
+/// faces are sorted by `(owner, neighbour)`: each cell names its `+x` face
+/// first, then its `+y` face. The boundary faces follow in patch order
+/// `inlet`, `outlet`, `lowerWall`, `top`, `frontAndBack` (front then
+/// back), every face's vertices ordered so its right-hand normal points
+/// OUT of its owner.
+///
+/// Refusals, every message starting `gatemesh: compression_ramp: ` and
+/// naming the field and its value: `n_up`, `n_ramp` or `ny` 0;
+/// `x_corner`, `ramp_length`, `height` or `depth` not finite or not
+/// positive; `deflection_deg` not finite or not in (0, 45); and `height`
+/// not above `ramp_length tan(theta)`, where the ramp would reach the top.
+pub fn compression_ramp(spec: &RampSpec) -> Result<Ramp> {
+    for (name, v) in [
+        ("n_up", spec.n_up as f64),
+        ("n_ramp", spec.n_ramp as f64),
+        ("ny", spec.ny as f64),
+    ] {
+        if v == 0.0 {
+            return Err(Error::Mesh(format!(
+                "gatemesh: compression_ramp: {name} 0 would carry no cells"
+            )));
+        }
+    }
+    for (name, v) in [
+        ("x_corner", spec.x_corner),
+        ("ramp_length", spec.ramp_length),
+        ("height", spec.height),
+        ("depth", spec.depth),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(Error::Mesh(format!(
+                "gatemesh: compression_ramp: {name} {v} is not finite and positive"
+            )));
+        }
+    }
+    if !spec.deflection_deg.is_finite()
+        || spec.deflection_deg <= 0.0
+        || spec.deflection_deg >= 45.0
+    {
+        return Err(Error::Mesh(format!(
+            "gatemesh: compression_ramp: deflection_deg {} is not in (0, 45)",
+            spec.deflection_deg
+        )));
+    }
+    let tan = spec.deflection_deg.to_radians().tan();
+    if spec.height <= spec.ramp_length * tan {
+        return Err(Error::Mesh(format!(
+            "gatemesh: compression_ramp: height {} is not above ramp_length * \
+             tan(deflection) = {}, so the ramp would reach the top",
+            spec.height,
+            spec.ramp_length * tan
+        )));
+    }
+    let nx = spec.n_up + spec.n_ramp;
+    let ny = spec.ny;
+    let stride = (nx + 1) * (ny + 1);
+    let pid = |i: usize, j: usize, k: usize| (k * stride + j * (nx + 1) + i) as Label;
+    let mut ramp = Ramp { raw: PolyMeshRaw::default(), spec: spec.clone() };
+    let mut points = Vec::with_capacity(2 * stride);
+    for k in 0..2 {
+        let z = if k == 0 { 0.0 } else { spec.depth };
+        for j in 0..=ny {
+            for i in 0..=nx {
+                let n2 = ramp.node(i, j);
+                points.push(DVec3::new(n2[0], n2[1], z));
+            }
+        }
+    }
+
+    // Internal faces in (owner, neighbour) order: each cell names its +x
+    // face first, then its +y. The vertex orders give the outward
+    // right-hand normals (+x and +y here).
+    let mut faces: Vec<Vec<Label>> = Vec::new();
+    let mut owner: Vec<Label> = Vec::new();
+    let mut neighbour: Vec<Label> = Vec::new();
+    for j in 0..ny {
+        for i in 0..nx {
+            if i < nx - 1 {
+                faces.push(vec![
+                    pid(i + 1, j, 0),
+                    pid(i + 1, j + 1, 0),
+                    pid(i + 1, j + 1, 1),
+                    pid(i + 1, j, 1),
+                ]);
+                owner.push((j * nx + i) as Label);
+                neighbour.push((j * nx + i + 1) as Label);
+            }
+            if j < ny - 1 {
+                faces.push(vec![
+                    pid(i, j + 1, 0),
+                    pid(i, j + 1, 1),
+                    pid(i + 1, j + 1, 1),
+                    pid(i + 1, j + 1, 0),
+                ]);
+                owner.push((j * nx + i) as Label);
+                neighbour.push(((j + 1) * nx + i) as Label);
+            }
+        }
+    }
+
+    // Boundary faces in patch order: inlet (-x), outlet (+x), lowerWall
+    // (the -y wall, flat then deflected), top (+y), frontAndBack (-z then
+    // +z). Each cell's face vertices are ordered so the right-hand normal
+    // points out of the owner.
+    let mut bnd: Vec<(Label, Vec<Label>)> = Vec::new();
+    for j in 0..ny {
+        bnd.push((
+            (j * nx) as Label,
+            vec![pid(0, j, 1), pid(0, j + 1, 1), pid(0, j + 1, 0), pid(0, j, 0)],
+        ));
+    }
+    for j in 0..ny {
+        bnd.push((
+            (nx - 1 + j * nx) as Label,
+            vec![
+                pid(nx, j, 0),
+                pid(nx, j + 1, 0),
+                pid(nx, j + 1, 1),
+                pid(nx, j, 1),
+            ],
+        ));
+    }
+    for i in 0..nx {
+        bnd.push((
+            i as Label,
+            vec![pid(i + 1, 0, 0), pid(i + 1, 0, 1), pid(i, 0, 1), pid(i, 0, 0)],
+        ));
+    }
+    for i in 0..nx {
+        bnd.push((
+            (i + nx * (ny - 1)) as Label,
+            vec![
+                pid(i, ny, 0),
+                pid(i, ny, 1),
+                pid(i + 1, ny, 1),
+                pid(i + 1, ny, 0),
+            ],
+        ));
+    }
+
+    for j in 0..ny {
+        for i in 0..nx {
+            bnd.push((
+                (j * nx + i) as Label,
+                vec![
+                    pid(i, j, 0),
+                    pid(i, j + 1, 0),
+                    pid(i + 1, j + 1, 0),
+                    pid(i + 1, j, 0),
+                ],
+            ));
+        }
+    }
+    for j in 0..ny {
+        for i in 0..nx {
+            bnd.push((
+                (j * nx + i) as Label,
+                vec![
+                    pid(i, j, 1),
+                    pid(i + 1, j, 1),
+                    pid(i + 1, j + 1, 1),
+                    pid(i, j + 1, 1),
+                ],
+            ));
+        }
+    }
+    let patches = vec![
+        PatchInfo { name: "inlet".to_string(), type_name: "patch".to_string(),
+            kind: PatchKind::Generic, start: 0, size: ny, nbr_patch: None },
+        PatchInfo { name: "outlet".to_string(), type_name: "patch".to_string(),
+            kind: PatchKind::Generic, start: ny, size: ny, nbr_patch: None },
+        PatchInfo { name: "lowerWall".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * ny, size: nx, nbr_patch: None },
+        PatchInfo { name: "top".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * ny + nx, size: nx, nbr_patch: None },
+        PatchInfo { name: "frontAndBack".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * ny + 2 * nx, size: 2 * nx * ny,
+            nbr_patch: None },
+    ];
+    let mut faces_all: Vec<Vec<Label>> = faces;
+    let mut owner_all: Vec<Label> = owner;
+    for (c, verts) in &bnd {
+        faces_all.push(verts.clone());
+        owner_all.push(*c);
+    }
+    debug_assert_eq!(faces_all.len(), owner_all.len());
+    debug_assert_eq!(neighbour.len() + bnd.len(), owner_all.len());
+    ramp.raw = PolyMeshRaw {
+        points,
+        faces: faces_all,
+        owner: owner_all,
+        neighbour,
+        patches,
+    };
+    Ok(ramp)
 }
 
 #[cfg(test)]

@@ -69,3 +69,7 @@ pub(crate) mod couette;
 /// SPEC-LIT §127.6, Gate CMP-NOZ: the quasi-1-D nozzle, subsonic,
 /// supersonic started and shocked, against (127.23)-(127.25) (CMP-21).
 pub(crate) mod nozzle;
+
+/// SPEC-LIT §127.6, Gate CMP-OBL: the oblique shock on a 2-D compression
+/// ramp at M 2, 10 degrees, against (127.4)'s theta-beta-M (CMP-23).
+pub(crate) mod oblique;
