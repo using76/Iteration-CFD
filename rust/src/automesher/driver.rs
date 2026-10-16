@@ -1013,7 +1013,7 @@ pub fn run_tet(
         sources_from_refinement, surface_sources, GapSide, OctreeOptions, PatchTris, SizeField,
         SizeParams,
     };
-    use crate::tetmesh::surfprep::{prepare, TetSurface};
+    use crate::tetmesh::surfprep::{prepare_with, Cavity, TetSurface};
     use crate::tetmesh::Point;
 
     if cfg.kind != MeshKind::Tet {
@@ -1077,9 +1077,15 @@ pub fn run_tet(
             .collect();
     }
 
-    // ---- stage 1: surface preparation (§116.9).
+    // ---- stage 1: surface preparation (§116.9). With a seed carve
+    // (TET-14) a cavity shell holds the fluid of an internal flow, so the
+    // order-5 refusal is lifted for `V_s < 0`; the hull start keeps it.
     let started = tet_begin(progress, 0);
-    let prep = prepare(&ts, feature)?;
+    let cavity = match cfg.castellation.keep_region {
+        KeepRegion::Seed => Cavity::Allow,
+        KeepRegion::Largest => Cavity::Refuse,
+    };
+    let prep = prepare_with(&ts, feature, cavity)?;
     let r = &prep.report;
     let counts = json!({
         "n_points": r.n_points, "n_tris": r.n_tris, "n_shells": r.n_shells,

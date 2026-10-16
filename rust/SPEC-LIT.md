@@ -36545,7 +36545,7 @@ index and its patch:
 | 2 | `surface/degenerate` | a triangle whose f64 cross product `(x_1 - x_0) x (x_2 - x_0)` is exactly zero, or whose apex (116.13e) lies on its own plane |
 | 3 | `surface/closed` | an edge with one triangle (open) or three or more (non-manifold) |
 | 4 | `surface/orientation` | a manifold edge traversed in the same direction by both its triangles, or a shell with no consistent orientation |
-| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive |
+| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive; with a seed (`castellation.keep_region = "seed"`, TET-14), a zero volume only |
 | 6 | `surface/self-intersection` | two triangles that share no point and meet, or a fold at a shared edge |
 
 1. **Not closed.** Every undirected edge must be shared by exactly two triangles. This is the
@@ -36578,7 +36578,13 @@ V_s = (1/6) sum_{t in s} (x_0(t) - o_s) . ( (x_1(t) - o_s) x (x_2(t) - o_s) ),
    (116.13a) is (116.13) for one shell, taken about a point of that shell. On a closed shell
    the sum does not depend on the origin, and the shifted form keeps the terms small far from
    the coordinate origin, which is the local-origin rule of docs/17 §5.1.7. A cavity shell,
-   whose normals point into the cavity, has `V_s < 0` and is refused in this unit.
+   whose normals point into the cavity, has `V_s < 0` and is refused in this unit. TET-14 lifts
+   the refusal when the carve starts from a seed (`castellation.keep_region = "seed"`,
+   `surfprep::prepare_with(.., Cavity::Allow)`): a cavity shell then holds the fluid of an
+   internal flow, which §116.12's carve keeps from the seed, and a seed on the solid side is
+   still refused there by name (`carve/seed`). A zero `V_s` is refused either way. The hull
+   start (`"largest"`) keeps the refusal, because §116.12 would find its hull region solid.
+   `tools/automesher/examples/pipe_tet.json` is the worked case.
 
 3. **Self-intersecting.** Two triangles that share no point must not meet. The sets are
    closed, so touching counts as meeting. For `T_1 = (a_1, b_1, c_1)` and `T_2`, the test
@@ -37925,6 +37931,49 @@ incompressible steady binary the §110 gates use, which the supervisor names in 
 TET-18 then runs the real drone surface (x500, about 251k triangles, BSD-3) through the whole
 pipeline. Its output stays outside the repository.
 
+**The recipe (TET-14).** The pipe is `tools/automesher/examples/make_pipe_stl.py`'s: R = 0.5 m,
+L = 12 m, 64 input facets round and 96 stations, wound inward, so `pipe_tet.json` keeps the fluid
+by the seed carve of §116.12. The size field runs at H = 0.1 with the radius-edge bound B = 2.5
+of (116.17): the default 2 does not finish on this surface - the §116.13 refinement keeps demanding
+insertions around the pipe's 90-degree rims, at x = 0 and x = 12, and more of them each pass (the
+L = 2 m pipe at H = 0.25: 59 133 points after 209 passes, the next pass asking 14 339 more) - and
+2.5 does. The wall prisms are n = 3 layers at t_1 = 0.002, growth 1.2: thicker stacks
+(n 5 / t1 0.005, n 3 / t1 0.0025-0.003) fail §92.3's G4 and G5 at those rims, where the inward
+corner bends the wall normals. The case is `cases/pipe_tet_L1`, solved by `ofgpu-lowmach`:
+laminar and steady, U_in = 1 m/s uniform at the inlet, nu = 0.01 m^2/s (Re = 100), leastSquares
+gradients, relaxation U 0.5 and p 0.2 (0.7 and 0.3 stall at a residual of 1e-2 on the thin prisms;
+two non-orthogonal correctors diverge), 1500 iterations. The measure is the volume-weighted
+least-squares dp/dx over the cells with x in [7, 11] m - past the entrance length, about 5.7
+diameters at Re 100 - against (116.27) per unit length with Q = U_in A_inlet. Gate 116-P of
+`ofgpu-validate` replays the record (`validate_gates/pipe_tet.rs`). The f32 leg is the same run in
+the single build, and a P-class gate holds the same 2 % there (docs/17 §5.1.4); §116.17's "within
+§112.1's floor" is read that way.
+
+**The record (TET-14, the supervisor's runs of 2026-10-17, on the RTX 5070 Ti shared with two
+other lanes and an outside job at 95-97 % load).** The f64 automesher writes the L1 mesh in 87.5 s
+(refine 58.8 s, 1 015 passes; optimise 26.3 s): 179 955 cells, 100 545 tetrahedra and 79 410
+prisms, dihedral 26.30-154.98 degrees, §92.3 passed with max non-orthogonality 66.23 degrees, min
+thickness ratio 0.0835, max cond 71.2. `ofgpu-lowmach` (f64) converges in 78.6 s for 1 500
+iterations (|U| residual 4.8e-10, |p| 9.7e-9 at the last check). The fit over the 59 781 window cells
+gives dp/dx = 0.366354 m/s^2 of kinematic p, against (116.27)'s 0.317210 at A_inlet = 0.778550 m^2:
+**MISSED, +15.49 %** against the 2 % bar. The solve bar (180 s) and the mesh gate pass. The cause is
+the discretisation on the tetrahedra, not the run: the profile is Poiseuille's (the volume-mean U_x
+over 8 <= x <= 10 m is 1.0022 m/s and its largest cell value 2.0002, against Q/A = 1 and 2), and
+the error moves with the gradient scheme alone. On the same mesh and inputs, measured once with an
+outside f64 oracle that reproduces the record's +15.4928 %: Gauss linear gradients give +27.14 %, the
+uncorrected Laplacian +31.71 %; with no prisms at all (100 545 tetrahedra) Gauss linear gives
++28.47 % and leastSquares +13.85 %; five layers of t_1 = 0.005 (a mesh §92.3 refuses at the rims,
+written for this probe only) give +9.98 %. The polygonal section adds a known +1.77 %: A_inlet is
+0.99128 pi R^2, and (116.27) is evaluated at the nominal R. A finer level (H = 0.07, 303 721 kept
+tetrahedra, refine 360.5 s) is refused by §92.3's G4 on 4 rim faces, so no mesh study exists. A cure
+would change the face-gradient (non-orthogonal) discretisation on tetrahedra or the mesher's rim
+treatment; both are the user's decisions, and neither was built. **The single build:** the
+single-build automesher refuses the L1 mesh at §92.3 G2 on 172 074 cells (E = 2.620e-8 against
+1e-10, the known A28 of docs/17-review-later), and the single-build `ofgpu-lowmach` on the f64-built
+mesh is quiet through step 19 and stops at step 20 on §93.6's guard (max Mach 33 821.6 at cell
+10020, an interior tetrahedron at x = 7.43 m, r = 0.36 m): both **MISSED**, recorded as text in the
+gate.
+
 ### 116.18 Gates, their precision classes, and what has been measured
 
 The bars below are fixed before measurement (docs/17 §10.1 A17). A missed bar is a finding,
@@ -37953,7 +38002,7 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13a | sphere normal radial within 1e-6 rad; cube-corner equal angles within 1e-9; a gap of `3T` limited to `gap/2` or less | A |
 | TET-13b | `t_1` within 1 % at 95 % or more of wall points; 0 negative volumes; §92.3 G2; wall non-orthogonality 5 degrees or less | A, D |
 | TET-13c | 0 inverted cells; §92.3 passes; coverage 90 % or more, reported | D |
-| TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor; the solve takes 3 min or less | P |
+| TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor, read as the same 2 % (class P); the solve takes 3 min or less; the L1 mesh passes §92.3; `tests/tetmesh_pipe.rs`: a cavity shell is taken with a seed and refused with the hull start, its volume to 1e-12 (class R, 1e-5 under single) | P, D, R |
 | TET-15 | a 1 M-tet sphere in a box end to end in 120 s or less; bit-identical across 1, 4 and 8 threads | measured, D |
 | TET-18 | the drone surface passes §92.3; dihedral bounds and wall time recorded | measured |
 
@@ -38102,6 +38151,10 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13c | `inflate::sharp_edges_taper`: 5 layers, `t_1 = 5e-3`, `r = 1.2`, `T = 3.7208e-2` | The 30-degree wedge: 394 wall points, 11 collapsed (the apex edge, points 0, 3, 11, 16, 21, 67, 81, 108, 125, 7616 and 7626), 10 tapered, coverage 383 / 394 = 97.2 %; one move, no cut, 3 920 prisms (5 x 784); 0 inverted cells; §92.3 passes (max closure 3.189e-15, non-orthogonality 68.1 degrees, thickness 0.0576, cond 107.0). The cube minus cylinder (with a concave 90-degree edge at the bore's floor): 780 wall points, none collapsed (`min_cos` 0.577 or more everywhere), coverage 1; two moves, 3 cut points, 7 780 prisms; §92.3 passes (3.100e-15, 65.3, 0.1021, 72.9). Both equal the supervisor's probe value for value | the TET-13c commit |
 | TET-13c | the design probe (the supervisor, outside the tree, the same fixtures) | On the wedge at `h = 0.1`, TET-13b alone fails §92.3's G4 on one face at 70.742 degrees next to the apex corner. The collapse with no taper fails G4 on 2 faces (72.5). The slope 0.3 fails G5 on 13 cells (0.0346), while the slopes 0.5 and 1 pass. A collapse angle of 50 degrees collapses 33 points and fails G4 or G5 at the slopes 0.3, 0.5 and 1. 60 and 70 degrees collapse the same 11. Dropping layers in place of scaling the stack fails G4 on 7 faces (75.4). **MISSED** beyond the gate's fixture: at `h = 0.08` G4 fails on 29 to 33 faces at 76.4 degrees (slope 0.5, 1 or none), and at `h = 0.06` on 26 faces at 82.7 (slope 0.5). Those faces are on tetrahedra that the move deforms; the tets-only maximum at `h = 0.06` is already 68.4. At `t_1` = 1e-3 and 2e-3 (`h = 0.1`) G5 fails on the wedge (thin layers against the bar 0.05), and G4 fails on 2 faces of the cube minus cylinder (74.0 and 72.0, a wall-adjacent tetrahedron against a thin prism). A 30-degree concave V-groove was probed too: its fixture fails §92.3 on the tetrahedra alone (74.4 degrees at `h = 0.12`), and at `h = 0.1` `recover_faces` refuses it (`delaunay/duplicate`) | docs/17-review-later |
 | TET-13c | the f32 arm | `rust/tests/tetmesh_inflate.rs` (15 tests) under `--features single` passes with the same f64 numbers. **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.234e-6 on the cube minus cylinder and 1.310e-6 on the wedge | the TET-13c commit |
+| TET-14 | §116.9, changed by this unit | order 5 takes a cavity shell (`V_s < 0`) when the carve starts from a seed (`surfprep::prepare_with(.., Cavity::Allow)`, `driver::run_tet`); the hull start and `prepare` refuse it as before. `surfprep::tests::cavity_allowed_with_seed`: the inward unit cube reports `V_s = -1` exactly | the TET-14 commit |
+| TET-14 | `tests/tetmesh_pipe.rs`, f64: the pipe R 0.5, L 2, 32 x 8 facets, wound inward | the shell volume against `-(32/2) R^2 sin(2 pi/32) L` within 1e-12; the hull start refused `surface/inward`; `pipe_tet.json` at H = 0.25 and t_1 = 0.005 (n 3, B 2.5): 1 967 tetrahedra and 2 676 prisms, dihedral 20.425-157.667 degrees, §92.3 passed, in 0.8 s; the inlet's points lie within 1.6e-3 m of x = 0 and the outlet's within 7.9e-4 m of x = 2 (the rim stacks' n* leans off the cap planes) | the TET-14 commit |
+| TET-14 | Gate 116-P, the L1 pipe (§116.17's record) | **MISSED**: dp/dx +15.49 % of (116.27) in f64 (0.366354 against 0.317210 m/s^2); the solve 78.6 s (bar 180 s) and §92.3 (max non-orthogonality 66.23 degrees) pass; the f64 recipe's mesh 87.5 s | the TET-14 commit |
+| TET-14 | the f32 arm | `tests/tetmesh_pipe.rs` under `--features single`: the volume within 1e-5 (class R) and the hull refusal pass; the H = 0.25 fixture is **MISSED** at §92.3 G2 on 4 457 cells (A28). The L1 legs: the single automesher **MISSED** at G2 on 172 074 cells (A28); the single `ofgpu-lowmach` on the f64 mesh **MISSED**, stopped at step 20 by §93.6's guard (max Mach 33 821.6) | the TET-14 commit |
 | TET-15 | `perf::thread_invariant`: the size field of the 9024-triangle sphere (18 048 curvature and proximity sources plus a band, a point and a box; 27 074 primitives, 164 431 leaves, depth 8), and the remesh of that sphere (3 417 points) and of the six-patch cube (459 points), on 1, 4 and 8 workers | identical: the sources, the stats, `h` at 20 000 probes and every 97th leaf box bit for bit, both remeshes point for point as bits; the field built in 3.10 s, 0.92 s and 0.60 s (4 CPUs, shared with two other lanes), the two remeshes in 0.13 s, 0.11 s and 0.12 s | the TET-15 commit |
 | TET-15 | `box_sphere_tet.json` end to end, release, before and after TET-15 | the same polyMesh byte for byte (points, faces, owner, neighbour, boundary); the size-field stage 0.8 s before, 0.1 s after; total 12.3 s and 11.8 s, of which refinement 6.2 s and optimisation 5.1 s | the TET-15 commit |
 | TET-15 | `perf::million_tets`: the example at `base_size` 0.25 m with the sphere at 0.125 m (about 1.3 M tetrahedra, the example's 20 309 times 4^3) | **MISSED**: stages 1-4 take 0.3 s; then the refinement of §116.13 refuses after 9.0 s with `refine/centre: kept tetrahedron [13317, 14196, 11265, 16918] has no finite circumcentre` | the TET-15 commit |

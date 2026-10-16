@@ -1,0 +1,95 @@
+// meteor-cfd - ofgpu-automesher example configuration, the tet path's
+// internal flow (SPEC-LIT §116.17, TET-14).
+//
+// A straight pipe, R 0.5 m and L 12 m along +x, meshed with tetrahedra and
+// wall prisms. The STL's shell is wound INWARD - normals into the fluid,
+// enclosed volume below zero - which SPEC-LIT §116.9's order 5 refuses,
+// EXCEPT when the carve keeps the fluid from a seed: `keep_region` "seed"
+// below selects surfprep::prepare_with(.., Cavity::Allow), TET-14's cavity
+// rule, and §116.12 keeps the pipe's fluid from the seed point. The hull
+// start ("largest") would keep the refusal, because §116.12 would find its
+// hull region solid.
+//
+// Make the geometry first (the repository carries no binary assets), then
+// run from tools/automesher/examples; the polyMesh lands in
+// cases/pipe_tet_L1:
+//
+//     cd tools/automesher/examples
+//     python make_pipe_stl.py
+//     ..\..\..\rust\target\release\ofgpu-automesher pipe_tet.json
+//     ..\..\..\rust\target\release\ofgpu-automesher pipe_tet.json -check
+//
+// JSONC: comments and trailing commas are allowed (io::case_json's reader).
+{
+  // SPEC-LIT §116.3: the tetrahedral path.
+  "kind": "tet",
+
+  "input": {
+    "surfaces": [
+      { "path": "pipe_tet.stl" }
+    ]
+  },
+
+  "domain": {
+    // The box is the mesh's outer boundary and the surface must lie
+    // strictly inside it; an internal flow's box faces carry no faces here,
+    // because the kept fluid is the pipe's.
+    "extent": [-0.5, 12.5, -1.0, 1.0, -1.0, 1.0],
+    // H of SPEC-LIT (116.7b): the largest edge the size field asks for.
+    "base_size": 0.1
+  },
+
+  "refinement": {
+    // No band refinement; the size field's surface sources do the work.
+    "levels": [],
+    // Also the surface preparation's feature angle (SPEC-LIT §116.9).
+    "feature_angle_deg": 30.0,
+    "max_level": 0
+  },
+
+  "castellation": {
+    // TET-14: the seed both lifts §116.9's cavity refusal and tells
+    // §116.12 which region is the fluid.
+    "keep_region": "seed",
+    "seed_point": [6.0, 0.1, 0.05]
+  },
+
+  // SPEC-LIT §116.15 (TET-13b): prisms on the pipe wall. The layers are
+  // deliberately thin: n 5 / t1 0.005 and n 3 / t1 0.0025-0.003 stacks fail
+  // §92.3's G4 and G5 at the rims (x ~ 0 and 12, r ~ 0.47), where the
+  // 90-degree rim corner bends the wall normals and the thicker stack
+  // follows them into non-orthogonality (SPEC-LIT §116.17, TET-14).
+  "layers": {
+    "patches": ["wall"],
+    "n": 3,
+    "first_thickness": 0.002,
+    "growth": 1.2
+  },
+
+  // SPEC-LIT §116.3: every key has a default; these are the ones this
+  // example means, written out. `curvature_cells` 0: H = 0.1 already puts
+  // about 31 edges round the 0.5 m radius, so the size field is uniform.
+  // `refine.radius_edge` 2.5, not the default 2: the default does not
+  // finish on this pipe - the §116.13 quality pass keeps demanding more
+  // insertions each pass around the 90-degree rims (SPEC-LIT §116.17,
+  // TET-14).
+  "tet": {
+    "size": { "gradation": 1.2, "curvature_cells": 0, "gap_cells": 3 },
+    "refine": { "radius_edge": 2.5 }
+  },
+
+  // SPEC-LIT §92.3's G1-G7, the same gate as the hex path.
+  "quality": {
+    "max_closure": 1e-10,
+    "max_non_orth_deg": 70.0,
+    "report_non_orth_deg": 60.0,
+    "min_thickness_ratio": 0.05,
+    "max_cond": 1e4
+  },
+
+  "output": {
+    "case_dir": "../../../cases/pipe_tet_L1",
+    "name": "pipe_tet"
+    // No `patch_names`: the wall, inlet and outlet keep their STL names.
+  }
+}

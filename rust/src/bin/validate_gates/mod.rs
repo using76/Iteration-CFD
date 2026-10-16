@@ -37,6 +37,10 @@ pub(crate) mod zpg;
 /// true wedge against its four bands (recorded ofgpu-lowmach runs, replayed).
 pub(crate) mod pipe;
 
+/// SPEC-LIT §116.17, Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms,
+/// the L1 pipe at Re 100 (recorded ofgpu-lowmach run, replayed).
+pub(crate) mod pipe_tet;
+
 /// SPEC-LIT §110.2/§110.5, Gate 110-A: the plane channel's recorded runs at
 /// three `Re_tau` (data replayed by `validate.rs`'s channel gate).
 pub(crate) mod channel_dns;

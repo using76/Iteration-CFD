@@ -3963,6 +3963,13 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_ringleb", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 116.17 - Gate 116-P: Hagen-Poiseuille on tetrahedra and
+    // prisms, the L1 pipe at Re 100 (TET-14), the fitted dp/dx of
+    // cases/pipe_tet_L1 against (116.27), replayed, in
+    // src/bin/validate_gates/pipe_tet.rs.
+    if c.section("Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17)") {
+    validate_gates::pipe_tet::check_pipe_tet(c)?;
+    }
 
     Ok(())
 }
