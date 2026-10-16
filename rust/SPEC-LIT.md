@@ -37571,8 +37571,8 @@ the last being the direction at equal angles from three. Each candidate's object
 `min_i n . n_i` is evaluated over all the normals and the largest wins; ties keep the first
 candidate in the order above. No tolerance decides whether a candidate is valid, because a
 candidate that is not the optimum simply scores lower. A point where no candidate scores above
-0 sees no side of every incident face. It gets no normal and no layers, and TET-13c's taper owns
-it. This exhaustive solution is cubic in the distinct normals at a point. It is this section's,
+0 sees no side of every incident face. It gets no normal and no layers, and TET-13c collapses
+it (below). This exhaustive solution is cubic in the distinct normals at a point. It is this section's,
 derived from the definition. Aubry & Löhner (2008) is the source of the definition, and its own
 iterative solver is not transcribed.
 
@@ -37635,8 +37635,8 @@ point of its tetrahedron: its right-hand normal points into the fluid, as (116.2
 require. These faces, on all the mesh's points and with their patches, are the surface of
 TET-13a's normals and thicknesses. The box sides and every unlayered patch are therefore
 obstacles to the gap (116.24d). A listed face that is not the face of exactly one tetrahedron is
-refused (`inflate/boundary`). A wall point with no normal, or with `T(p) = 0`, is refused
-(`inflate/taper`), naming the points: collapsing a stack is TET-13c's.
+refused (`inflate/boundary`). A wall point with no normal, or with `T(p) = 0`, collapses: it
+carries no layers (TET-13c, (116.25g) below).
 
 *The weight.* The paper's own text was not open to this unit. Its two-term weight is taken as
 §105.9 already reads it (exponents 3 and 5, `alpha = 5 max |s_i| / L`, a length from the
@@ -37703,13 +37703,14 @@ triangle (in its into-the-fluid winding) borders a boundary face of an unlayered
 quads `(a_{k-1}, b_{k-1}, b_k, a_k)`, `k = 1 .. N`, go on `q`, in wall-triangle, edge and layer
 order. An edge on other than two boundary faces is refused (`inflate/edges`). When the unlayered
 face meets the wall at a right angle and `n*` lies in its plane, the side quads lie in it too.
-Otherwise the side does not lie in the patch's plane, and TET-13c tapers it.
+Otherwise the side does not lie in the patch's plane. TET-13c leaves such a side as built (below).
 
 *The emission.* §116.16's emitter takes the tetrahedra and the prisms. Cells `0 .. n_tets - 1`
 are the tetrahedra, and the prisms follow in (116.25e)'s order. A face is a triangle or a
 quadrilateral, keyed by its sorted points. The rest of the layout is unchanged, and a mesh of
 tetrahedra only is emitted exactly as before. A prism that fails (116.25f) is refused like a
 tetrahedron (`emit/orient`), and (116.26)'s prism arm evaluates (116.25f) on the rounded points.
+A prism whose ids repeat (TET-13c's collapse, below) is a pyramid or a tetrahedron.
 
 *In the driver.* `run_tet` inflates inside stage 7 (`emit`), before the emission, when
 `layers.n > 0` and `layers.patches` is not empty. The stage list is unchanged. The layered
@@ -37723,14 +37724,82 @@ summary's `n_prisms` is the prism count, and the `emit` row adds `n_prisms`,
 
 *DESIGN.* These choices are this section's own. A cut halves `T(p)`, because the paper prescribes
 no cut. A cut point's stack is scaled rather than given fewer layers, so every wall triangle keeps
-`N` prisms. Thirty rounds bound the halving at `2^-30 T`. A point that cannot carry layers is
-refused rather than collapsed until TET-13c. The parameters of (116.25a) are §105.9's reading of
+`N` prisms. Thirty rounds bound the halving at `2^-30 T`. A point that cannot carry layers
+collapses (TET-13c). The parameters of (116.25a) are §105.9's reading of
 Luke, Collins & Blades (2012), the reading this tree already uses for ALE.
 
-**Sharp edges and corners** (TET-13c). Layers at sharp convex and concave edges and corners
-collapse or taper instead of inverting, and the report names each tapered point. Coverage is
-the fraction of wall points carrying the full `N` layers. It is reported, and its bar is in
-§116.18.
+**Sharp edges and corners, as TET-13c builds them** (`tetmesh/inflate.rs`'s `inflate`,
+`tetmesh/emit.rs`). Layers at sharp convex and concave edges and corners collapse or taper
+instead of inverting, and the report names each tapered point. Coverage is the fraction of wall
+points carrying the full `N` layers. It is reported, and its bar is in §116.18.
+
+*The collapse.* After TET-13a's thicknesses and before the first move, a wall point `p`
+collapses when
+
+```
+n*(p) does not exist,   or   T(p) = 0,   or   min_i n*(p) . n_i  <  cos 60 deg = 1/2        (116.25g)
+```
+
+with the minimum over the unit normals `n_i` of its incident wall triangles, as in (116.22)
+(`WallNormals::min_cos`). A collapsed point carries no layers. Its `T(p)` is 0 and its limit is
+`Collapsed`. As a boundary node it has `s_i = 0`, so it stays where it is. It gains no layer
+points, and its `x_k(p)` is `p` itself for every `k`. The third clause is the sharp edge or
+corner, where the stack would leave the wall along `n*` at more than 60 degrees to an incident
+face. On the 30-degree wedge's apex edge that angle is 75 degrees. A concave edge sharper than 60
+degrees meets the same clause, because its `n*` is the bisector too. The edges and corners of a
+cube (45 and 54.7 degrees) keep their layers.
+
+*The taper.* When a point has collapsed, every other wall point `q` is capped by its distance to
+the nearest collapsed point:
+
+```
+T(q) <= s_T  min_c | x(q) - x(c) |,      c over the collapsed points,      s_T = 1/2      (116.25h)
+```
+
+The distance is taken on the undeformed points, with the minimum over the collapsed points in
+ascending wall-point order, in f64. A point that the cap lowers is tapered: its limit becomes
+`Taper`, and the report names it. (116.24c)'s sweep then runs again. Collapsed points take no
+part in it, as no point with `T = 0` ever does. A tapered stack keeps its `N` layers, scaled by
+`T(q) / T` as a cut's are (116.25d). When no point collapses, none of this runs, and the result
+is TET-13b's bit for bit.
+
+*The cut* is TET-13b's, except that it never names a collapsed point. A failing tetrahedron's
+point follows a wall point with `T > 0`, as before, and a failing prism names only its
+uncollapsed wall points.
+
+*The prisms at a collapse.* A wall triangle whose three points have all collapsed gets no prisms.
+It stays the face of its tetrahedron, and its bottom, the same triangle, stays on its patch. Every
+other wall triangle gets its `N` prisms (116.25e), in which a collapsed point's ids repeat:
+`a_{k-1} = a_k = a`. Such a prism is a pyramid when one point has collapsed (the quad on the
+other two columns, with the collapsed point as apex) and a tetrahedron when two have. Its faces
+are (116.25e)'s with repeated consecutive points removed, cyclically, and a face left with fewer
+than three distinct points is no face. The side quads on unlayered patches are reduced the same
+way. The layer points are appended for the uncollapsed wall points only, in ascending wall-point
+order and per point in layer order. With no collapse this numbering is TET-13b's. A prism is
+valid when every tetrahedron of its split (116.25f) with four distinct ids has `orient3d > 0`,
+and at least one has four distinct ids. A split tetrahedron is skipped by its ids, never by its
+volume, so (116.26)'s rounded arm skips the same ones. On the right prism of (116.25f) with
+`v3 = v0`, the two remaining split tetrahedra have `orient3d = +1` each, a pyramid of volume
+`1/3`. With `v3 = v0` and `v4 = v1` as well, the one remaining tetrahedron has `+1` and volume `1/6`.
+
+*The report.* `Inflated` names the collapsed points (`collapsed`) and the tapered ones
+(`tapered`) by point id, ascending, and `coverage()` is
+
+```
+coverage = ( n_wall - n_collapsed ) / n_wall        (1 when there is no wall point)         (116.25i)
+```
+
+The driver's `emit` row adds `n_collapsed`, `n_tapered` and `coverage`. A side quad that leaves
+its unlayered patch's plane is left as built. No case in §116.18 has one, and docs/17-review-later
+lists it.
+
+*DESIGN.* The 60 degrees of (116.25g) and the slope `s_T = 1/2` of (116.25h) are this
+section's own. They were chosen on the supervisor's probe of the TET-13c fixture (§116.18). On the
+30-degree wedge, TET-13b alone fails §92.3's G4 on one face next to the apex corner. The collapse
+with no taper fails it on two faces, and the slope 0.3 fails G5 on thin tapered stacks. The
+slopes 0.5 and 1 pass. A taper that drops layers instead of scaling the stack was probed too. It
+failed G4 on seven faces, so the stack is scaled, as TET-13b's cut scales it. No paper prescribes
+these numbers.
 
 ### 116.16 Emission, the gate and the f32 rounding check
 
@@ -38029,6 +38098,10 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13b | `inflate::inversion_cut`: the unit box, 12 tetrahedra on an interior point at (0.5, 0.5, 0.005), the floor layered with 2 layers of 0.15 (`T` = 0.3) | 5 moves: the floor corners' `T` halved four times to 0.01875 = 0.3 x 2^-4, each `Inversion`; 4 cut points, 4 prisms, 16 cells; the boundary is 2 bottoms on the floor and 10 triangles plus 8 side quads on the sides; G2 max closure 6.074e-16 | the TET-13b commit |
 | TET-13b | `driver::tests::tet_cases::tet_layers_end_to_end`: `box_sphere_tet.json` with `layers` on the sphere, 3 layers of 0.02 m, `r = 1.2` | seven stages; 20 309 tetrahedra and 3 420 prisms (3 x 1 140 sphere faces); §92.3 passes (max closure 1.590e-15); the emit row: 1 716 layer points, one move, no cut | the TET-13b commit |
 | TET-13b | the f32 arm | `rust/tests/tetmesh_inflate.rs` (12 tests) and `rust/tests/automesher_tet.rs` (4) under `--features single` all pass with the same f64 numbers (`t_1` 489 of 489, 0 inverted cells, the conformal volume within 9.96e-15, the cut at 0.01875); **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.908e-6 on the sphere and 1.582e-7 on the box, and `run_tet` with layers refused on 21 929 cells; the wall non-orthogonality on the f32 host mesh 5.0006 degrees | the TET-13b commit |
+| TET-13c | the fixture, and why it skips `refine` | §116.13's refinement does not terminate on these bodies in the box `[-2, 2]^3` (`H = 0.5`, `g = 1.2`). A cube body `[-0.5, 0.5]^3` remeshed at `h = 0.25` had inserted 19 845 points after 202 passes against a cap of 20 000; at `h = 0.4` it ends with 6 162 tetrahedra. The cube minus cylinder at `h = 0.15` had 18 234 after 220 passes, and the 30-degree wedge at `h = 0.15` 2 648 after 145 passes (cap 3 000). Coarser, the cube minus cylinder is refused by `recover/protect` (a vertex ball of radius 0) at `h` = 0.3 to 0.5, and the wedge by `refine/centre` at `h = 0.3`. The fixture therefore skips `refine`. It takes the surface remeshed at `h = 0.1`, adds a BCC lattice of spacing 0.2 in `[-1.5, 1.5]^3` (the candidates in the fluid at least 0.14 from every surface point), then runs `recover_faces`, the carve from the hull and `optimise`. On the tetrahedra alone §92.3 passes for both: the wedge has 40 450 tetrahedra (non-orthogonality 60.4 degrees, thickness 0.2185, cond 40.3) and the cube minus cylinder 39 866 (56.7, 0.2536, 71.0) | the supervisor's probe, outside the tree |
+| TET-13c | `inflate::sharp_edges_taper`: 5 layers, `t_1 = 5e-3`, `r = 1.2`, `T = 3.7208e-2` | The 30-degree wedge: 394 wall points, 11 collapsed (the apex edge, points 0, 3, 11, 16, 21, 67, 81, 108, 125, 7616 and 7626), 10 tapered, coverage 383 / 394 = 97.2 %; one move, no cut, 3 920 prisms (5 x 784); 0 inverted cells; §92.3 passes (max closure 3.189e-15, non-orthogonality 68.1 degrees, thickness 0.0576, cond 107.0). The cube minus cylinder (with a concave 90-degree edge at the bore's floor): 780 wall points, none collapsed (`min_cos` 0.577 or more everywhere), coverage 1; two moves, 3 cut points, 7 780 prisms; §92.3 passes (3.100e-15, 65.3, 0.1021, 72.9). Both equal the supervisor's probe value for value | the TET-13c commit |
+| TET-13c | the design probe (the supervisor, outside the tree, the same fixtures) | On the wedge at `h = 0.1`, TET-13b alone fails §92.3's G4 on one face at 70.742 degrees next to the apex corner. The collapse with no taper fails G4 on 2 faces (72.5). The slope 0.3 fails G5 on 13 cells (0.0346), while the slopes 0.5 and 1 pass. A collapse angle of 50 degrees collapses 33 points and fails G4 or G5 at the slopes 0.3, 0.5 and 1. 60 and 70 degrees collapse the same 11. Dropping layers in place of scaling the stack fails G4 on 7 faces (75.4). **MISSED** beyond the gate's fixture: at `h = 0.08` G4 fails on 29 to 33 faces at 76.4 degrees (slope 0.5, 1 or none), and at `h = 0.06` on 26 faces at 82.7 (slope 0.5). Those faces are on tetrahedra that the move deforms; the tets-only maximum at `h = 0.06` is already 68.4. At `t_1` = 1e-3 and 2e-3 (`h = 0.1`) G5 fails on the wedge (thin layers against the bar 0.05), and G4 fails on 2 faces of the cube minus cylinder (74.0 and 72.0, a wall-adjacent tetrahedron against a thin prism). A 30-degree concave V-groove was probed too: its fixture fails §92.3 on the tetrahedra alone (74.4 degrees at `h = 0.12`), and at `h = 0.1` `recover_faces` refuses it (`delaunay/duplicate`) | docs/17-review-later |
+| TET-13c | the f32 arm | `rust/tests/tetmesh_inflate.rs` (15 tests) under `--features single` passes with the same f64 numbers. **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.234e-6 on the cube minus cylinder and 1.310e-6 on the wedge | the TET-13c commit |
 | TET-15 | `perf::thread_invariant`: the size field of the 9024-triangle sphere (18 048 curvature and proximity sources plus a band, a point and a box; 27 074 primitives, 164 431 leaves, depth 8), and the remesh of that sphere (3 417 points) and of the six-patch cube (459 points), on 1, 4 and 8 workers | identical: the sources, the stats, `h` at 20 000 probes and every 97th leaf box bit for bit, both remeshes point for point as bits; the field built in 3.10 s, 0.92 s and 0.60 s (4 CPUs, shared with two other lanes), the two remeshes in 0.13 s, 0.11 s and 0.12 s | the TET-15 commit |
 | TET-15 | `box_sphere_tet.json` end to end, release, before and after TET-15 | the same polyMesh byte for byte (points, faces, owner, neighbour, boundary); the size-field stage 0.8 s before, 0.1 s after; total 12.3 s and 11.8 s, of which refinement 6.2 s and optimisation 5.1 s | the TET-15 commit |
 | TET-15 | `perf::million_tets`: the example at `base_size` 0.25 m with the sphere at 0.125 m (about 1.3 M tetrahedra, the example's 20 309 times 4^3) | **MISSED**: stages 1-4 take 0.3 s; then the refinement of §116.13 refuses after 9.0 s with `refine/centre: kept tetrahedron [13317, 14196, 11265, 16918] has no finite circumcentre` | the TET-15 commit |

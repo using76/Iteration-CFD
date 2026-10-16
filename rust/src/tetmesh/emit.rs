@@ -11,7 +11,10 @@
 //! refused, naming the cells (116.26). TET-13b extends the same layout to
 //! the prisms of §116.15: cells `0..n_tets` are the tetrahedra and the
 //! prisms follow in (116.25e)'s order, a face being a triangle or a
-//! quadrilateral keyed by its sorted points.
+//! quadrilateral keyed by its sorted points. TET-13c's collapsed wall
+//! points repeat ids in a prism - a pyramid or a tetrahedron - whose faces
+//! drop their repeated consecutive points, and a face left with fewer than
+//! three ids is no face.
 //!
 //! The layout is OpenFOAM's polyMesh convention as §1 and §92.3's G7 state
 //! it:
@@ -60,31 +63,74 @@ const NAMED: usize = 20;
 
 /// The three tetrahedra of a prism's split (116.25f): `PRISM_SPLIT[k]` is
 /// `[v_i, v_j, v_k, v_l]` of `[v0..v5]`, and the prism is valid when every
-/// row's `orient3d` is positive. On the right prism over the unit corner
-/// triangle (`v0..v2` = `(0,0,0), (1,0,0), (0,1,0)`, the top `+z`) each is
-/// exactly `+1`.
+/// row with four distinct ids has `orient3d > 0` and at least one row does.
+/// On the right prism over the unit corner triangle (`v0..v2` =
+/// `(0,0,0), (1,0,0), (0,1,0)`, the top `+z`) each is exactly `+1`.
 pub const PRISM_SPLIT: [[usize; 4]; 3] = [[0, 2, 1, 3], [2, 1, 3, 4], [3, 2, 4, 5]];
 
-/// A prism `[v0..v5]` = `[a, b, c, a', b', c']` (116.25e) is valid when the
-/// three tetrahedra of [`PRISM_SPLIT`] all have `orient3d > 0` (116.2).
+/// (116.25f) with TET-13c's repeated ids: a split row whose four ids are
+/// not distinct is skipped, never by its volume; every other row needs
+/// `orient3d > 0` on `at`'s points, and at least one row must have four
+/// distinct ids. A prism whose ids repeat is a pyramid or a tetrahedron.
+fn prism_split_ok(p: &[u32; 6], at: impl Fn(u32) -> Point) -> bool {
+    let mut any = false;
+    for row in &PRISM_SPLIT {
+        let q = row.map(|i| p[i]);
+        let [a, b, c, d] = q;
+        if a == b || a == c || a == d || b == c || b == d || c == d {
+            continue;
+        }
+        any = true;
+        let (x0, x1, x2, x3) = (at(a), at(b), at(c), at(d));
+        if !(orient3d(&x0, &x1, &x2, &x3) > 0.0) {
+            return false;
+        }
+    }
+    any
+}
+
+/// A prism `[v0..v5]` = `[a, b, c, a', b', c']` (116.25e) is valid when
+/// every tetrahedron of its split ([`PRISM_SPLIT`]) with four distinct ids
+/// has `orient3d > 0` (116.2), and one does. Unchanged for a prism whose
+/// ids are all distinct.
 pub fn prism_valid(points: &[Point], p: &[u32; 6]) -> bool {
-    PRISM_SPLIT.iter().all(|row| {
-        let q = row.map(|i| points[p[i] as usize]);
-        orient3d(&q[0], &q[1], &q[2], &q[3]) > 0.0
-    })
+    prism_split_ok(p, |v| points[v as usize])
+}
+
+/// A face's repeated consecutive ids removed, cyclically: `a b b a` is
+/// `a b`, and a one- or two-id result is no face.
+pub(crate) fn reduce_cyclic(f: Vec<u32>) -> Vec<u32> {
+    let mut f = f;
+    loop {
+        let mut g: Vec<u32> = Vec::with_capacity(f.len());
+        for &x in &f {
+            if g.last() != Some(&x) {
+                g.push(x);
+            }
+        }
+        if g.len() > 1 && g[0] == g[g.len() - 1] {
+            g.pop();
+        }
+        if g.len() == f.len() {
+            return g;
+        }
+        f = g;
+    }
 }
 
 /// A prism's local face `l` in `0..5`, wound out of the prism (§116.4):
 /// the bottom `(v0, v2, v1)`, the top `(v3, v4, v5)`, and the three side
-/// quads `(v0, v1, v4, v3)`, `(v1, v2, v5, v4)`, `(v2, v0, v3, v5)`.
+/// quads `(v0, v1, v4, v3)`, `(v1, v2, v5, v4)`, `(v2, v0, v3, v5)` - with
+/// repeated consecutive ids removed cyclically (TET-13c's collapse).
 fn prism_face(p: &[u32; 6], l: usize) -> Vec<u32> {
-    match l {
+    let f = match l {
         0 => vec![p[0], p[2], p[1]],
         1 => vec![p[3], p[4], p[5]],
         2 => vec![p[0], p[1], p[4], p[3]],
         3 => vec![p[1], p[2], p[5], p[4]],
         _ => vec![p[2], p[0], p[3], p[5]],
-    }
+    };
+    reduce_cyclic(f)
 }
 
 fn keyv(mut f: Vec<u32>) -> Vec<u32> {
@@ -196,7 +242,9 @@ pub fn to_poly_mesh(
 /// triangle or a quadrilateral, keyed by its sorted points. The boundary
 /// faces are `(points, patch)` pairs, any rotation, either winding. The
 /// refusals are [`to_poly_mesh`]'s, with a prism that fails (116.25f)
-/// refused like a tetrahedron (`emit/orient`). No gate runs here;
+/// refused like a tetrahedron (`emit/orient`); TET-13c's repeated ids make
+/// a prism's faces drop their repeated consecutive points, and a face left
+/// with fewer than three ids is not emitted. No gate runs here;
 /// [`emit_mixed`] runs them.
 pub fn to_poly_mesh_mixed(
     points: &[Point],
@@ -264,7 +312,13 @@ pub fn to_poly_mesh_mixed(
     }
     for (j, p) in prisms.iter().enumerate() {
         for l in 0..5 {
-            let k = keyv(prism_face(p, l));
+            // A prism face reduced below three ids (TET-13c's collapse) is
+            // no face: not keyed, not emitted.
+            let f = prism_face(p, l);
+            if f.len() < 3 {
+                continue;
+            }
+            let k = keyv(f);
             let c = (tets.len() + j) as u32;
             match face.get_mut(&k) {
                 None => {
@@ -428,11 +482,10 @@ pub fn rounding_flips_mixed(
         })
         .collect();
     for (j, p) in prisms.iter().enumerate() {
-        let ok = PRISM_SPLIT.iter().all(|row| {
-            let q = row.map(|i| round(points[p[i] as usize]));
-            orient3d(&q[0], &q[1], &q[2], &q[3]) > 0.0
-        });
-        if !ok {
+        // The prism arm of [`prism_valid`] on the rounded points: a split
+        // row with repeated ids is skipped, never by its volume, so the
+        // same rows are skipped here.
+        if !prism_split_ok(p, |v| round(points[v as usize])) {
             out.push(tets.len() + j);
         }
     }

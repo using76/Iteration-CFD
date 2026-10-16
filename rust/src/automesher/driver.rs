@@ -1280,33 +1280,37 @@ pub fn run_tet(
     );
     // The inflation of §116.15 runs here, before the emission, when
     // layers.n > 0 and layers.patches is not empty.
-    let (mesh, quality, n_prisms, n_layer_points, inflate_rounds, n_cut) = if layers_on {
-        let mut layered = vec![false; domain_names.len()];
-        layered.extend(layered_surf.iter().copied());
-        let stack = LayerStack {
-            n: cfg.layers.n,
-            first_thickness: cfg.layers.first_thickness,
-            growth: cfg.layers.growth,
+    let (mesh, quality, n_prisms, n_layer_points, inflate_rounds, n_cut, n_collapsed, n_tapered, coverage) =
+        if layers_on {
+            let mut layered = vec![false; domain_names.len()];
+            layered.extend(layered_surf.iter().copied());
+            let stack = LayerStack {
+                n: cfg.layers.n,
+                first_thickness: cfg.layers.first_thickness,
+                growth: cfg.layers.growth,
+            };
+            let inf = inflate(&o.points, &o.tets, &bnd, &layered, &stack, &spec.layers, feature)?;
+            let (emitted, quality) =
+                emit_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (
+                mesh,
+                quality,
+                inf.prisms.len(),
+                inf.points.len() - o.points.len(),
+                inf.rounds,
+                inf.n_cut,
+                inf.collapsed.len(),
+                inf.tapered.len(),
+                inf.coverage(),
+            )
+        } else {
+            let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (mesh, quality, 0usize, 0usize, 1usize, 0usize, 0usize, 0usize, 1.0f64)
         };
-        let inf = inflate(&o.points, &o.tets, &bnd, &layered, &stack, &spec.layers, feature)?;
-        let (emitted, quality) =
-            emit_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &patches, &thr)?;
-        let mut mesh = emitted.raw;
-        rename_patches(&mut mesh, &cfg.output.patch_names)?;
-        (
-            mesh,
-            quality,
-            inf.prisms.len(),
-            inf.points.len() - o.points.len(),
-            inf.rounds,
-            inf.n_cut,
-        )
-    } else {
-        let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
-        let mut mesh = emitted.raw;
-        rename_patches(&mut mesh, &cfg.output.patch_names)?;
-        (mesh, quality, 0usize, 0usize, 1usize, 0usize)
-    };
     let line = quality.summary();
     let counts = json!({
         "n_cells": quality.n_cells, "n_points": mesh.points.len(),
@@ -1315,6 +1319,7 @@ pub fn run_tet(
         "gate_passed": quality.passed(),
         "n_prisms": n_prisms, "n_layer_points": n_layer_points,
         "inflate_rounds": inflate_rounds, "n_cut": n_cut,
+        "n_collapsed": n_collapsed, "n_tapered": n_tapered, "coverage": coverage,
     });
     tet_end(progress, &mut stages, 6, started, line, counts);
 

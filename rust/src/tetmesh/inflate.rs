@@ -7,7 +7,8 @@
 
 //! Prism layers by post-inflation, SPEC-LIT §116.15: the wall point
 //! normals and the per-point layer thicknesses (TET-13a), then the
-//! deformation, its inversion cuts and the prisms (TET-13b, [`inflate`]).
+//! deformation, its inversion cuts and the prisms (TET-13b, [`inflate`]),
+//! and the collapse and taper at sharp edges and corners (TET-13c).
 //!
 //! The wall is every triangle of the surface whose patch carries layers.
 //! At each wall point the inflation direction is the "most normal" normal
@@ -32,6 +33,13 @@
 //! filled with `N` prisms per wall triangle (116.25e), whose top layer is
 //! the wall triangle itself, so the prism-tet interface is conformal.
 //!
+//! At a sharp edge or corner (TET-13c) a wall point whose stack would
+//! leave the wall at more than 60 degrees to an incident face collapses
+//! (116.25g): it carries no layers, its neighbours are capped by half
+//! their distance to it (116.25h)'s taper, and a wall triangle whose three
+//! points have all collapsed gets no prisms. [`Inflated`] names the
+//! collapsed and tapered points, and [`Inflated::coverage`] is (116.25i).
+//!
 //! Provenance: ORIGINAL. Written from Aubry & Löhner (2008), "On the 'most
 //! normal' normal" (the definition (116.22) only; its solution by the
 //! support set is this module's), and SPEC-LIT §116.8's curvature (116.9b)
@@ -40,7 +48,7 @@
 //! fill from Kallinderis, Khawaja & McMorris (1996), the published
 //! descriptions only. No GPL-licensed source was consulted.
 
-use super::emit::prism_valid;
+use super::emit::{prism_valid, reduce_cyclic};
 use super::predicates::orient3d;
 use super::sizefield::GapScanner;
 use super::surfprep::TetSurface;
@@ -105,7 +113,7 @@ fn min_cos(n: Point, normals: &[Point]) -> f64 {
 /// optimum; ties keep the first candidate in that order. Normals equal
 /// bit for bit are taken once. None when there is no normal, or no
 /// direction has a positive cosine with every one (no visible side, which
-/// TET-13c's taper handles). The cost is cubic in the distinct normals.
+/// TET-13c's collapse handles). The cost is cubic in the distinct normals.
 pub fn most_normal(normals: &[Point]) -> Option<(Point, f64)> {
     let mut ns: Vec<Point> = Vec::with_capacity(normals.len());
     for &n in normals {
@@ -339,9 +347,25 @@ pub enum Limit {
     /// A cell the move inverted cut the point's thickness, §116.15's
     /// "The cut": its `T` was halved and the move redone.
     Inversion,
-    /// No normal (116.22): the point gets no layers and is TET-13c's.
+    /// The sharp edge or corner (116.25g), TET-13c's: the point collapses
+    /// and carries no layers.
+    Collapsed,
+    /// The taper cap (116.25h), TET-13c's: the distance to the nearest
+    /// collapsed point lowered the point's thickness.
+    Taper,
+    /// No normal (116.22), set by [`thicknesses`]; the collapse (116.25g)
+    /// then marks the point [`Limit::Collapsed`].
     NoNormal,
 }
+
+/// The cosine of 60 degrees, (116.25g)'s collapse bar: a wall point whose
+/// stack leaves the wall at more than 60 degrees to an incident face
+/// collapses.
+pub const COLLAPSE_MIN_COS: f64 = 0.5;
+
+/// (116.25h)'s taper slope `s_T`: a wall point's thickness is capped by
+/// `s_T` times its distance to the nearest collapsed point.
+pub const TAPER_SLOPE: f64 = 0.5;
 
 /// The per-point layer thicknesses of §116.15, in [`WallNormals`] order.
 #[derive(Debug, Clone, PartialEq)]
@@ -420,7 +444,7 @@ fn concave_curvature(surf: &TetSurface, crease_rad: f64) -> Vec<f64> {
 /// sweep, so each point ends at the smallest of its own limit and
 /// `ratio^k` times any point `k` edges away. `crease_deg` is the feature
 /// angle: an edge turning by at least it is a crease, which (116.24b) does
-/// not see (TET-13c's).
+/// not see; (116.25g)'s collapse handles it.
 pub fn thicknesses(
     surf: &TetSurface,
     layered: &[bool],
@@ -589,17 +613,19 @@ fn neighbour_sweep(
     }
 }
 
-/// What the post-inflation built (§116.15, TET-13b).
+/// What the post-inflation built (§116.15, TET-13b and TET-13c).
 #[derive(Debug, Clone)]
 pub struct Inflated {
     /// The input points moved by `s` (unused points unchanged), then the
-    /// new layer points `x_0(p) .. x_{N-1}(p)` of (116.25d), appended in
-    /// ascending wall-point order and, per point, in layer order.
+    /// new layer points `x_0(p) .. x_{N-1}(p)` of (116.25d) of the
+    /// uncollapsed wall points (116.25g), appended in ascending wall-point
+    /// order and, per point, in layer order.
     pub points: Vec<Point>,
     /// The input tetrahedra, same ids: they sit on the displaced wall.
     pub tets: Vec<[u32; 4]>,
     /// The prisms of (116.25e), triangle by triangle and in each from the
-    /// wall out.
+    /// wall out; a collapsed point's ids repeat in them, and a wall
+    /// triangle whose three points have all collapsed has none.
     pub prisms: Vec<[u32; 6]>,
     /// The boundary after the inflation, §116.15's order: each input face
     /// (a wall triangle replaced by its bottom, the rest unchanged), then
@@ -610,12 +636,34 @@ pub struct Inflated {
     /// The thicknesses over that surface, FINAL: after every cut.
     pub thickness: Thicknesses,
     /// Per wall point, in [`WallNormals::points`] order: the `N + 1` ids of
-    /// `x_0 .. x_N`, the last the wall point's own id.
+    /// `x_0 .. x_N`, the last the wall point's own id; a collapsed point's
+    /// row is `N + 1` copies of its own id.
     pub layers: Vec<Vec<u32>>,
     /// The moves made (1 when nothing was cut).
     pub rounds: usize,
     /// The wall points whose `T` a cut lowered.
     pub n_cut: usize,
+    /// The collapsed wall points (116.25g) by id, ascending: they carry no
+    /// layers, and a wall triangle whose three points have all collapsed
+    /// gets no prisms.
+    pub collapsed: Vec<u32>,
+    /// The tapered wall points (116.25h) by id, ascending: every point
+    /// whose `T` the cap lowered, even if the sweep lowered it further.
+    pub tapered: Vec<u32>,
+}
+
+impl Inflated {
+    /// (116.25i): the fraction of wall points carrying the full `N`
+    /// layers, `(n_wall - n_collapsed) / n_wall`; 1 when there is no wall
+    /// point.
+    pub fn coverage(&self) -> f64 {
+        let n_wall = self.normals.points.len();
+        if n_wall == 0 {
+            1.0
+        } else {
+            (n_wall - self.collapsed.len()) as f64 / n_wall as f64
+        }
+    }
 }
 
 /// Up to 20 items, then "and N more".
@@ -692,15 +740,18 @@ fn displacement(
     out
 }
 
-/// The prism layers by post-inflation (§116.15, TET-13b): the optimised
-/// tetrahedra, their boundary faces with patches, and the per-patch mask of
-/// the layered patches (one entry per patch; a boundary patch id past the
-/// mask is refused by name). The wall moves by `s_i = T(p_i) n*_i`, every
-/// other point a tetrahedron uses by (116.25), every tetrahedron keeps
-/// `orient3d > 0` and every prism (116.25f) - where one does not, the
-/// thickness is cut locally (`Limit::Inversion`) and the move is redone,
-/// 30 rounds at most - and the gap is filled with `N` prisms per wall
-/// triangle (116.25e), conformal by construction.
+/// The prism layers by post-inflation (§116.15, TET-13b and TET-13c): the
+/// optimised tetrahedra, their boundary faces with patches, and the
+/// per-patch mask of the layered patches (one entry per patch; a boundary
+/// patch id past the mask is refused by name). The wall moves by
+/// `s_i = T(p_i) n*_i`, every other point a tetrahedron uses by (116.25),
+/// every tetrahedron keeps `orient3d > 0` and every prism (116.25f) -
+/// where one does not, the thickness is cut locally (`Limit::Inversion`)
+/// and the move is redone, 30 rounds at most - and the gap is filled with
+/// `N` prisms per wall triangle (116.25e), conformal by construction. A
+/// wall point at a sharp edge or corner collapses (116.25g): no layers,
+/// its neighbours tapered by (116.25h), and a fully collapsed wall
+/// triangle gets no prisms.
 pub fn inflate(
     points: &[Point],
     tets: &[[u32; 4]],
@@ -738,6 +789,8 @@ pub fn inflate(
             layers: Vec::new(),
             rounds: 1,
             n_cut: 0,
+            collapsed: Vec::new(),
+            tapered: Vec::new(),
         });
     }
     build_inflated(points, tets, boundary, layered, stack, spec, crease_deg)
@@ -797,7 +850,8 @@ fn build_inflated(
     inflate_rest(points, tets, boundary, layered, stack, spec, crease_deg, surf)
 }
 
-/// The normals, the thicknesses, the move and its cuts, then the prisms.
+/// The normals, the thicknesses, the collapse and the taper, the move and
+/// its cuts, then the prisms.
 #[allow(clippy::too_many_arguments)]
 fn inflate_rest(
     points: &[Point],
@@ -812,18 +866,60 @@ fn inflate_rest(
     let n = points.len();
     let normals = wall_normals(&surf, layered)?;
     let mut th = thicknesses(&surf, layered, &normals, stack, spec, crease_deg)?;
-    let taper: Vec<u32> = (0..normals.points.len())
-        .filter(|&k| normals.normal[k].is_none() || !(th.total[k] > 0.0))
-        .map(|k| normals.points[k])
-        .collect();
-    if !taper.is_empty() {
-        return Err(Error::Mesh(format!(
-            "inflate/taper: {} wall points cannot carry the stack (no normal, or T = 0): points {}",
-            taper.len(),
-            named20(&taper)
-        )));
-    }
     let np = normals.points.len();
+    // (116.25g), TET-13c's collapse, after TET-13a's thicknesses and
+    // before the first move: a wall point collapses when it has no normal,
+    // or no thickness, or its stack would leave the wall at more than 60
+    // degrees to an incident face (`min_cos < COLLAPSE_MIN_COS`). A
+    // collapsed point carries no layers: its `T` is 0, its limit is
+    // [`Limit::Collapsed`], and it stays where it is.
+    let collapsed: Vec<bool> = (0..np)
+        .map(|k| {
+            normals.normal[k].is_none()
+                || !(th.total[k] > 0.0)
+                || normals.min_cos[k] < COLLAPSE_MIN_COS
+        })
+        .collect();
+    let collapsed_ids: Vec<u32> = {
+        let mut ids = Vec::new();
+        for (k, c) in collapsed.iter().enumerate() {
+            if *c {
+                th.total[k] = 0.0;
+                th.limit[k] = Limit::Collapsed;
+                ids.push(normals.points[k]);
+            }
+        }
+        ids
+    };
+    // (116.25h), only when a point has collapsed: every other wall point
+    // is capped by `TAPER_SLOPE` times its distance to the nearest
+    // collapsed point, on the undeformed points, the minimum over the
+    // collapsed points in ascending wall-point order. A point the cap
+    // lowers is tapered: its limit becomes [`Limit::Taper`] and the report
+    // names it. [`build_final`]'s (116.24c) sweep then runs again. With no
+    // collapse none of this runs, and TET-13b's numbers stand bit for bit.
+    let mut tapered_ids: Vec<u32> = Vec::new();
+    if !collapsed_ids.is_empty() {
+        for (k, &p) in normals.points.iter().enumerate() {
+            if collapsed[k] {
+                continue;
+            }
+            let x = points[p as usize];
+            let mut near = f64::INFINITY;
+            for &c in &collapsed_ids {
+                let d = norm(sub(x, points[c as usize]));
+                if d < near {
+                    near = d;
+                }
+            }
+            let cap = TAPER_SLOPE * near;
+            if cap < th.total[k] {
+                th.total[k] = cap;
+                th.limit[k] = Limit::Taper;
+                tapered_ids.push(p);
+            }
+        }
+    }
     // The boundary nodes, their (116.25c) areas, (116.25b)'s length, and
     // which points a tetrahedron uses.
     let mut is_node = vec![false; n];
@@ -878,6 +974,18 @@ fn inflate_rest(
             edge_faces.entry([a.min(b), a.max(b)]).or_default().push(bi);
         }
     }
+    // The layer-point offsets of (116.25e): only uncollapsed slots gain
+    // points, so slot `k`'s layer `j` sits at `n + off[k] + j`, with
+    // `off[k]` `N` times the uncollapsed slots before it (`k * N` with no
+    // collapse, TET-13b's numbering).
+    let mut off = vec![0usize; np];
+    let mut un = 0usize;
+    for k in 0..np {
+        off[k] = stack.n * un;
+        if !collapsed[k] {
+            un += 1;
+        }
+    }
     let up = Setup {
         points,
         tets,
@@ -898,6 +1006,10 @@ fn inflate_rest(
         tri_slots,
         wall_ix,
         edge_faces,
+        collapsed,
+        off,
+        collapsed_ids,
+        tapered_ids,
     };
     build_final(&up, &mut th)
 }
@@ -924,6 +1036,14 @@ struct Setup<'a> {
     tri_slots: Vec<[usize; 3]>,
     wall_ix: HashMap<usize, usize>,
     edge_faces: HashMap<[u32; 2], Vec<usize>>,
+    /// Whether wall slot `k` collapsed (116.25g).
+    collapsed: Vec<bool>,
+    /// Slot `k`'s layer-point offset: its layer `j` is `n + off[k] + j`.
+    off: Vec<usize>,
+    /// The collapsed points, ascending.
+    collapsed_ids: Vec<u32>,
+    /// The tapered points, ascending.
+    tapered_ids: Vec<u32>,
 }
 
 /// (116.25a)'s `alpha = 5 max_i |s_i| / L`, over the current thicknesses.
@@ -979,14 +1099,40 @@ fn follower(
 fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
     let (n, np, n_layers) = (up.n, up.np, up.stack.n);
     let mut adj = wall_adjacency(up.surf, up.layered, &up.slot, np);
-    // The id of layer `j` of wall slot `k`; `j == N` is the wall point.
+    // (116.25h)'s follow-up: (116.24c)'s sweep runs again over the capped
+    // thicknesses. A collapsed point, with `T = 0`, takes no part in it,
+    // as no point with `T = 0` ever does. With no collapse the
+    // thicknesses are TET-13a's and TET-13b's bit for bit, and the sweep
+    // is skipped.
+    if !up.collapsed_ids.is_empty() {
+        neighbour_sweep(
+            &mut adj,
+            up.spec.max_neighbour_ratio,
+            &up.normals.normal,
+            &mut th.total,
+            &mut th.limit,
+        );
+    }
+    // The id of layer `j` of wall slot `k`; `j == N` is the wall point. A
+    // collapsed slot has no layer points: every `j` names the wall point
+    // itself (116.25g).
     let id_of = |k: usize, j: usize| -> u32 {
-        if j >= n_layers {
+        if up.collapsed[k] || j >= n_layers {
             up.normals.points[k]
         } else {
-            (n + k * n_layers + j) as u32
+            (n + up.off[k] + j) as u32
         }
     };
+    // The prism index of wall triangle `pi`'s first prism, in (116.25e)'s
+    // order: a fully collapsed wall triangle gets none.
+    let mut prism_base: Vec<usize> = Vec::with_capacity(up.tri_slots.len());
+    let mut nb = 0usize;
+    for slots in &up.tri_slots {
+        prism_base.push(nb);
+        if !(up.collapsed[slots[0]] && up.collapsed[slots[1]] && up.collapsed[slots[2]]) {
+            nb += n_layers;
+        }
+    }
     let t_total = up.stack.total();
     let mut rounds = 0usize;
     let mut cut = vec![false; np];
@@ -1000,9 +1146,15 @@ fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
             .map(|i| if s[i] == [0.0; 3] { up.points[i] } else { add(up.points[i], s[i]) })
             .collect();
         // (116.25d), on the undeformed points; x_0 is the undeformed wall.
+        // The layer points are built for the uncollapsed slots only: a
+        // collapsed point's `x_k` is the point itself for every `k`
+        // (116.25g).
         let mut layer_pts: Vec<Point> = Vec::with_capacity(np * n_layers);
         for (k, &p) in up.normals.points.iter().enumerate() {
-            let m = up.normals.normal[k].unwrap();
+            let Some(m) = up.normals.normal[k] else { continue };
+            if up.collapsed[k] {
+                continue;
+            }
             for j in 0..n_layers {
                 if j == 0 {
                     layer_pts.push(up.points[p as usize]);
@@ -1028,15 +1180,21 @@ fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
                 orient3d(&q[0], &q[1], &q[2], &q[3]) <= 0.0
             })
             .collect();
-        let mut bad_prisms: Vec<usize> = Vec::new();
+        let mut bad_prisms: Vec<(usize, usize)> = Vec::new();
         for (pi, slots) in up.tri_slots.iter().enumerate() {
+            // A wall triangle whose three points have all collapsed gets
+            // no prisms (116.25e); the others keep their `N`, with a
+            // collapsed point's ids repeating.
+            if up.collapsed[slots[0]] && up.collapsed[slots[1]] && up.collapsed[slots[2]] {
+                continue;
+            }
             for k in 1..=n_layers {
                 let p = [
                     id_of(slots[0], k - 1), id_of(slots[1], k - 1), id_of(slots[2], k - 1),
                     id_of(slots[0], k), id_of(slots[1], k), id_of(slots[2], k),
                 ];
                 if !prism_valid(&all, &p) {
-                    bad_prisms.push(pi * n_layers + k - 1);
+                    bad_prisms.push((pi, k - 1));
                 }
             }
         }
@@ -1046,7 +1204,9 @@ fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
         if rounds >= 30 {
             let mut names: Vec<String> =
                 bad_tets.iter().map(|c| format!("tet {c}")).collect();
-            names.extend(bad_prisms.iter().map(|j| format!("prism {j}")));
+            names.extend(
+                bad_prisms.iter().map(|&(pi, k)| format!("prism {}", prism_base[pi] + k)),
+            );
             return Err(Error::Mesh(format!(
                 "inflate/invert: the move still fails {} cells after 30 rounds: {}",
                 bad_tets.len() + bad_prisms.len(),
@@ -1055,7 +1215,9 @@ fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
         }
         // The cut: each named point's T is halved, once per round, its
         // limit becomes Inversion, the sweep runs again, the move is
-        // redone from the undeformed points.
+        // redone from the undeformed points. The cut never names a
+        // collapsed point: a failing prism names only its uncollapsed wall
+        // points, and a collapsed point is never halved (116.25g).
         let mut hits: Vec<usize> = Vec::new();
         for &c in &bad_tets {
             for &v in &up.tets[c] {
@@ -1064,12 +1226,19 @@ fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
                 }
             }
         }
-        for &j in &bad_prisms {
-            hits.extend_from_slice(&up.tri_slots[j / n_layers]);
+        for &(pi, _) in &bad_prisms {
+            for &s in &up.tri_slots[pi] {
+                if !up.collapsed[s] {
+                    hits.push(s);
+                }
+            }
         }
         hits.sort_unstable();
         hits.dedup();
         for &k in &hits {
+            if up.collapsed[k] {
+                continue;
+            }
             th.total[k] *= 0.5;
             th.limit[k] = Limit::Inversion;
             cut[k] = true;
@@ -1097,11 +1266,13 @@ fn assemble(
     cut: &[bool],
 ) -> Result<Inflated> {
     let (n, np, n_layers) = (up.n, up.np, up.stack.n);
+    // The id of layer `j` of wall slot `k`, [`build_final`]'s: a collapsed
+    // slot names the wall point itself for every `j` (116.25g).
     let id_of = |k: usize, j: usize| -> u32 {
-        if j >= n_layers {
+        if up.collapsed[k] || j >= n_layers {
             up.normals.points[k]
         } else {
-            (n + k * n_layers + j) as u32
+            (n + up.off[k] + j) as u32
         }
     };
     let mut points_out: Vec<Point> = moved.to_vec();
@@ -1123,11 +1294,18 @@ fn assemble(
         }
         let wi = up.wall_ix[&bi];
         let slots = up.tri_slots[wi];
-        for k in 1..=n_layers {
-            prisms_out.push([
-                id_of(slots[0], k - 1), id_of(slots[1], k - 1), id_of(slots[2], k - 1),
-                id_of(slots[0], k), id_of(slots[1], k), id_of(slots[2], k),
-            ]);
+        // A wall triangle whose three points have all collapsed gets no
+        // prisms: it stays the face of its tetrahedron, and its bottom,
+        // the same triangle, stays on its patch. Every other one gets its
+        // `N` prisms, a collapsed point's ids repeating (116.25e).
+        let full = up.collapsed[slots[0]] && up.collapsed[slots[1]] && up.collapsed[slots[2]];
+        if !full {
+            for k in 1..=n_layers {
+                prisms_out.push([
+                    id_of(slots[0], k - 1), id_of(slots[1], k - 1), id_of(slots[2], k - 1),
+                    id_of(slots[0], k), id_of(slots[1], k), id_of(slots[2], k),
+                ]);
+            }
         }
         boundary_out
             .push((vec![id_of(slots[0], 0), id_of(slots[2], 0), id_of(slots[1], 0)], p));
@@ -1150,12 +1328,16 @@ fn assemble(
             }
             let (ia, ib) = (up.slot[&a], up.slot[&b]);
             for k in 1..=n_layers {
-                boundary_out.push((
-                    vec![
-                        id_of(ia, k - 1), id_of(ib, k - 1), id_of(ib, k), id_of(ia, k),
-                    ],
-                    q,
-                ));
+                // A collapsed point's repeated ids drop out of the side
+                // quad (116.25e): the face is reduced by its repeated
+                // consecutive ids, cyclically, and a face left with fewer
+                // than three ids is no face.
+                let f = reduce_cyclic(vec![
+                    id_of(ia, k - 1), id_of(ib, k - 1), id_of(ib, k), id_of(ia, k),
+                ]);
+                if f.len() >= 3 {
+                    boundary_out.push((f, q));
+                }
             }
         }
     }
@@ -1169,6 +1351,8 @@ fn assemble(
         layers: layers_out,
         rounds,
         n_cut: cut.iter().filter(|&&c| c).count(),
+        collapsed: up.collapsed_ids.clone(),
+        tapered: up.tapered_ids.clone(),
     })
 }
 
