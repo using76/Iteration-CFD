@@ -207,3 +207,97 @@ fn tet_driver_refusals() {
     let err = run_tet(&renamed, &named, &mut sink).unwrap_err().to_string();
     assert!(err.contains("tet/patches: the surface patch \"xMin\""), "{err}");
 }
+
+/// TET-13b's prism layers end to end (SPEC-LIT §116.15, §116.16): the same
+/// example with `layers.patches = ["sphere"]`, 3 layers at 0.02 m, growth
+/// 1.2. Seven banners still; in f64 §92.3 passes and `n_prisms` is three
+/// per sphere-patch face; the summary's `tet` block and the emit row carry
+/// the prism counts. Under `single` the G2 miss of §116.16 refuses the run
+/// and the test prints MISSED, as `tet_end_to_end` does.
+#[test]
+fn tet_layers_end_to_end() {
+    let (mut cfg, surf) = example();
+    assert_eq!(cfg.kind, MeshKind::Tet);
+    cfg.layers.patches = vec!["sphere".to_string()];
+    cfg.layers.n = 3;
+    cfg.layers.first_thickness = 0.02;
+    cfg.layers.growth = 1.2;
+    cfg.validate().expect("the layered config validates");
+    let single = std::mem::size_of::<ofgpu::Scalar>() == 4;
+    let mut lines: Vec<String> = Vec::new();
+    let t0 = std::time::Instant::now();
+    let res = run_tet(&cfg, &surf, &mut |l: &str| lines.push(l.to_string()));
+    let seconds = t0.elapsed().as_secs_f64();
+    let banners: Vec<&String> = lines.iter().filter(|l| l.starts_with("=== stage ")).collect();
+    for (i, b) in banners.iter().enumerate() {
+        assert_eq!(**b, format!("=== stage {}/7  {} ===", i + 1, TET_STAGES[i]));
+    }
+    let out = match res {
+        Ok(out) => out,
+        Err(err) => {
+            let text = err.to_string();
+            let head: String = text.chars().take(240).collect();
+            println!("tet layers end to end: 92.3 MISSED under single after {seconds:.1} s - {head}");
+            assert!(single, "{err}");
+            assert_eq!(banners.len(), 7, "{err}");
+            assert!(text.contains("G2 (closure)"), "{err}");
+            return;
+        }
+    };
+    let q = &out.quality;
+    let n_sphere = out
+        .mesh
+        .patches
+        .iter()
+        .find(|p| p.name == "sphere")
+        .map(|p| p.size as usize)
+        .unwrap_or(0);
+    println!(
+        "tet layers end to end: {} tetrahedra, {} prisms = 3 x {n_sphere} sphere faces, \
+         92.3 PASS (max closure {:.3e}), {:.1} s",
+        out.n_tets, out.n_prisms, q.max_closure, seconds
+    );
+    assert_eq!(banners.len(), 7);
+    assert!(q.passed());
+    assert_eq!(out.n_prisms, 3 * n_sphere);
+    assert!(out.n_prisms > 0);
+
+    // The summary of §116.16 with the prism counts.
+    let case = std::env::temp_dir().join(format!("ofgpu_tet13b_{}", std::process::id()));
+    let ident = MeshIdentity::new("ofgpu-automesher", &case, &cfg.output.name, None);
+    let s = tet_summary_json(&cfg, "box_sphere_tet.json", &surf, &out, &ident);
+    assert_eq!(s["tet"]["n_prisms"], out.n_prisms);
+    let emit_row = s["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["stage"] == "emit")
+        .expect("the emit row")
+        .clone();
+    assert_eq!(emit_row["n_prisms"], out.n_prisms);
+    assert!(emit_row.get("n_layer_points").is_some());
+    assert!(emit_row.get("inflate_rounds").is_some());
+    assert!(emit_row.get("n_cut").is_some());
+    println!(
+        "tet layers end to end: emit row n_prisms {}, n_layer_points {}, inflate_rounds {}, n_cut {}",
+        emit_row["n_prisms"], emit_row["n_layer_points"], emit_row["inflate_rounds"],
+        emit_row["n_cut"]
+    );
+    let _ = std::fs::remove_dir_all(&case);
+}
+
+/// TET-13b's driver refusal: a `layers.patches` name that is no surface
+/// patch is refused with `tet/layers` (SPEC-LIT §116.15, "In the driver").
+#[test]
+fn tet_layers_refusal() {
+    let (mut cfg, surf) = example();
+    cfg.layers.patches = vec!["nope".to_string()];
+    cfg.layers.n = 2;
+    cfg.validate().expect("the config still validates: the tet path reads layers.patches");
+    let mut lines: Vec<String> = Vec::new();
+    let err =
+        run_tet(&cfg, &surf, &mut |l: &str| lines.push(l.to_string())).unwrap_err().to_string();
+    assert!(err.contains("tet/layers"), "{err}");
+    assert!(lines.is_empty(), "{lines:?}");
+    println!("tet layers refusal: {err}");
+}

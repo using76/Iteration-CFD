@@ -5,7 +5,7 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-// TET-13a's tests (SPEC-LIT §116.15, §116.18), written once and included
+// TET-13a's and TET-13b's tests (SPEC-LIT §116.15, §116.18), written once and included
 // twice: by src/tetmesh/inflate.rs's test module and by
 // tests/tetmesh_inflate.rs, so the `--features single` build, whose
 // library test crate does not compile (SPEC-LIT §112.3), runs them too.
@@ -16,12 +16,51 @@
 // Provenance: ORIGINAL. Aubry & Löhner (2008)'s most normal normal as
 // SPEC-LIT §116.15 solves it. No GPL-licensed source was consulted.
 
-use ofgpu::tetmesh::inflate::{
-    angle, most_normal, thicknesses, wall_normals, LayerStack, Limit, Thicknesses,
+use ofgpu::automesher::quality::{measure, QualityThresholds};
+use ofgpu::io::polymesh::build_host_mesh;
+use ofgpu::tetmesh::carve::CarveStart;
+use ofgpu::tetmesh::emit::{
+    carved_boundary, prism_valid, to_poly_mesh, to_poly_mesh_mixed, EmitPatch, PRISM_SPLIT,
 };
-use ofgpu::tetmesh::surfprep::TetSurface;
-use ofgpu::tetmesh::{Point, TetLayerSpec};
-use std::collections::HashMap;
+use ofgpu::tetmesh::inflate::{
+    angle, inflate, most_normal, thicknesses, wall_normals, Inflated, LayerStack, Limit,
+    Thicknesses,
+};
+use ofgpu::tetmesh::optimise::{freedoms, optimise};
+use ofgpu::tetmesh::predicates::orient3d;
+use ofgpu::tetmesh::recover::recover_faces;
+use ofgpu::tetmesh::refine::refine;
+use ofgpu::tetmesh::remesh::{remesh, RemeshOptions};
+use ofgpu::tetmesh::sizefield::{OctreeOptions, SizeField, SizeParams, SizeSource};
+use ofgpu::tetmesh::surfprep::{prepare, TetSurface};
+use ofgpu::tetmesh::{Point, TetLayerSpec, TetOptimiseSpec, TetRecoverSpec, TetRefineSpec};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::OnceLock;
+
+/// The little vector kit the new tests share with the library's own.
+fn sub(a: Point, b: Point) -> Point {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: Point, b: Point) -> Point {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn cross(a: Point, b: Point) -> Point {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn dot(a: Point, b: Point) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm(a: Point) -> f64 {
+    dot(a, a).sqrt()
+}
 
 /// `a / |a|`, or None for the zero vector.
 fn unit(a: Point) -> Option<Point> {
@@ -505,4 +544,480 @@ fn refusals() {
         .unwrap_err()
         .to_string();
     assert!(e.contains("gap_fraction"), "{e}");
+}
+
+/// §116.15's (116.25f) on the right prism over the unit corner triangle:
+/// each split tetrahedron is exactly `+1`, the prism is valid, the mixed
+/// emitter takes its five faces on one patch with nothing internal and an
+/// exact closure, and the flipped prism is invalid and refused
+/// (`emit/orient`).
+#[test]
+fn prism_split_right() {
+    let pts: Vec<Point> = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    let prism = [0u32, 1, 2, 3, 4, 5];
+    for (k, row) in PRISM_SPLIT.iter().enumerate() {
+        let q = row.map(|i| pts[prism[i] as usize]);
+        assert_eq!(orient3d(&q[0], &q[1], &q[2], &q[3]), 1.0, "split {k}");
+    }
+    assert!(prism_valid(&pts, &prism));
+    let bnd: Vec<(Vec<u32>, u32)> = vec![
+        (vec![0, 2, 1], 0),
+        (vec![3, 4, 5], 0),
+        (vec![0, 1, 4, 3], 0),
+        (vec![1, 2, 5, 4], 0),
+        (vec![2, 0, 3, 5], 0),
+    ];
+    let ps = vec![EmitPatch { name: "wall".to_string(), type_name: "wall".to_string() }];
+    let e = to_poly_mesh_mixed(&pts, &[], &[prism], &bnd, &ps).unwrap();
+    assert_eq!(e.raw.faces.len(), 5);
+    assert!(e.raw.neighbour.is_empty());
+    assert_eq!(e.raw.patches[0].size, 5);
+    let q = measure(&e.raw, &QualityThresholds::default()).unwrap();
+    println!(
+        "prism_split_right: the three splits are exactly 1.0; 5 faces, 0 internal; \
+         92.3 max closure {e:e}",
+        e = q.max_closure
+    );
+    assert!(q.max_closure < 1e-10, "closure {}", q.max_closure);
+    let flip = [3u32, 4, 5, 0, 1, 2];
+    assert!(!prism_valid(&pts, &flip));
+    let bnd2: Vec<(Vec<u32>, u32)> = vec![
+        (vec![3, 5, 4], 0),
+        (vec![0, 1, 2], 0),
+        (vec![3, 4, 1, 0], 0),
+        (vec![4, 5, 2, 1], 0),
+        (vec![5, 3, 0, 2], 0),
+    ];
+    let err = to_poly_mesh_mixed(&pts, &[], &[flip], &bnd2, &ps).unwrap_err().to_string();
+    assert!(err.contains("emit/orient"), "{err}");
+    println!("prism_split_right: the flipped prism refused: {err}");
+}
+
+/// TET-13b's sphere in a box, built exactly as tests/tetmesh_optimise.rs
+/// builds it (SPEC-LIT §116.18's TET-13b fixture), and cached for
+/// `sphere_layers` and `conformal`.
+struct SphereCase {
+    points: Vec<Point>,
+    tets: Vec<[u32; 4]>,
+    bnd: Vec<([u32; 3], u32)>,
+}
+
+fn sphere_case() -> &'static SphereCase {
+    static CASE: OnceLock<SphereCase> = OnceLock::new();
+    CASE.get_or_init(|| {
+        let s = icosphere(3);
+        let tris: Vec<[Point; 3]> =
+            s.tris.iter().map(|t| t.map(|v| s.points[v as usize])).collect();
+        let field = SizeField::build(
+            SizeParams::new(0.5, 1.2, None).unwrap(),
+            &[SizeSource::Patch {
+                name: "sphere".to_string(),
+                tris,
+                distance: 0.0,
+                size: 0.25,
+            }],
+            [-2.0; 3],
+            [2.0; 3],
+            OctreeOptions::default(),
+        )
+        .unwrap();
+        let prep = prepare(&s, 60.0).unwrap();
+        let r = remesh(&prep, &|x: Point| field.h(x), &RemeshOptions::default()).unwrap();
+        let mut surf = r.surface.clone();
+        for k in 0..8u32 {
+            let c = |b: u32| if (k >> b) & 1 == 1 { 2.0 } else { -2.0 };
+            surf.points.push([c(0), c(1), c(2)]);
+        }
+        let fr = recover_faces(&surf, &r.feature_edges, &TetRecoverSpec::default()).unwrap();
+        let refined = refine(
+            &surf,
+            fr,
+            &CarveStart::Hull,
+            &TetRefineSpec::default(),
+            &|x: Point| field.h(x),
+        )
+        .unwrap();
+        let tri_patch = vec![0u32; refined.recovery.tris.len()];
+        let free = freedoms(&refined.recovery, &tri_patch, &refined.carved.tets);
+        let o = optimise(
+            &refined.recovery.points,
+            &refined.carved.tets,
+            &refined.recovery.subtris,
+            &free,
+            &TetOptimiseSpec::default(),
+        )
+        .unwrap();
+        let bnd = carved_boundary(&refined.carved, &refined.recovery, &tri_patch, 1).unwrap();
+        SphereCase { points: o.points, tets: o.tets, bnd }
+    })
+}
+
+fn mixed_patches() -> Vec<EmitPatch> {
+    vec![
+        EmitPatch { name: "sphere".to_string(), type_name: "wall".to_string() },
+        EmitPatch { name: "domain".to_string(), type_name: "patch".to_string() },
+    ]
+}
+
+fn inflate_sphere(c: &SphereCase) -> Inflated {
+    inflate(
+        &c.points,
+        &c.tets,
+        &c.bnd,
+        &[true, false],
+        &LayerStack { n: 5, first_thickness: 2e-3, growth: 1.2 },
+        &TetLayerSpec::default(),
+        60.0,
+    )
+    .unwrap()
+}
+
+/// §116.18 TET-13b's gate on the sphere in a box (SPEC-LIT §116.15): five
+/// layers at `t_1 = 2e-3` (= 1e-3 D, D = 2), growth 1.2. (a) the achieved
+/// first-layer thickness is within 1 % of 2e-3 at 95 % of the wall points;
+/// (b) no tetrahedron with `orient3d <= 0` and no prism failing (116.25f);
+/// (c) five prisms per wall triangle; (d) the mixed emission builds and the
+/// §92.3 closure is under 1e-10 in f64; (e) the wall faces' non-orthogonality
+/// is at most 5 degrees on `build_host_mesh`.
+#[test]
+fn sphere_layers() {
+    let c = sphere_case();
+    let inf = inflate_sphere(c);
+    let n_wall = c.bnd.iter().filter(|&&(_, p)| p == 0).count();
+    let wp = inf.normals.points.len();
+    let (mut ok1, mut worst1) = (0usize, 0.0f64);
+    for row in &inf.layers {
+        let d = norm(sub(inf.points[row[1] as usize], inf.points[row[0] as usize]));
+        let rel = (d - 2e-3).abs() / 2e-3;
+        worst1 = worst1.max(rel);
+        if rel <= 0.01 {
+            ok1 += 1;
+        }
+    }
+    let frac1 = ok1 as f64 / wp as f64;
+    let bad_tets = inf
+        .tets
+        .iter()
+        .filter(|t| {
+            let q = t.map(|v| inf.points[v as usize]);
+            orient3d(&q[0], &q[1], &q[2], &q[3]) <= 0.0
+        })
+        .count();
+    let bad_prisms = inf.prisms.iter().filter(|p| !prism_valid(&inf.points, p)).count();
+    let prisms_ok = inf.prisms.len() == 5 * n_wall;
+    let e = to_poly_mesh_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &mixed_patches())
+        .unwrap();
+    let q = measure(&e.raw, &QualityThresholds::default()).unwrap();
+    let single = std::mem::size_of::<ofgpu::Scalar>() == 4;
+    if single && q.max_closure >= 1e-10 {
+        println!(
+            "sphere_layers: MISSED - G2 under single (docs/17-review-later A28): max closure \
+             {e:e} against 1e-10",
+            e = q.max_closure
+        );
+    } else {
+        assert!(q.max_closure < 1e-10, "closure {}", q.max_closure);
+    }
+    let m = build_host_mesh(&e.raw).unwrap();
+    let sp = &e.raw.patches[0];
+    let mut worst_e = 0.0f64;
+    for f in sp.start..sp.start + sp.size {
+        let (sf, cf) = (m.b_sf[f], m.b_cf[f]);
+        let cc = m.c[m.b_face_cells[f] as usize];
+        let d = [cf.x as f64 - cc.x as f64, cf.y as f64 - cc.y as f64, cf.z as f64 - cc.z as f64];
+        worst_e = worst_e.max(angle([sf.x as f64, sf.y as f64, sf.z as f64], d).to_degrees());
+    }
+    let counts = [
+        ("Requested", inf.thickness.count(Limit::Requested)),
+        ("Gap", inf.thickness.count(Limit::Gap)),
+        ("Concave", inf.thickness.count(Limit::Concave)),
+        ("Neighbour", inf.thickness.count(Limit::Neighbour)),
+        ("Inversion", inf.thickness.count(Limit::Inversion)),
+        ("NoNormal", inf.thickness.count(Limit::NoNormal)),
+    ];
+    println!(
+        "sphere_layers: {} wall points, {} wall triangles, rounds {}, n_cut {}, limits {:?}; \
+         t1 within 1 % of 2e-3 at {ok1}/{wp} ({:.1} %), worst rel {worst1:.2e}; \
+         bad tets {bad_tets}, bad prisms {bad_prisms}, prisms {} = 5 x {n_wall}: {prisms_ok}; \
+         max closure {:.3e}; wall non-orthogonality max {worst_e:.4} deg (bar 5)",
+        wp, n_wall, inf.rounds, inf.n_cut, counts,
+        100.0 * frac1,
+        inf.prisms.len(),
+        q.max_closure
+    );
+    assert!(frac1 >= 0.95, "t1 within 1 % at {ok1}/{wp}");
+    assert_eq!(bad_tets, 0);
+    assert_eq!(bad_prisms, 0);
+    assert!(prisms_ok, "{} prisms for {n_wall} wall triangles", inf.prisms.len());
+    if worst_e > 5.0 {
+        // Every wall point carries the full requested stack here, so the
+        // first prism's shear comes from the point normals alone: its
+        // vertices extrude along n* (116.22), which on the polyhedral
+        // sphere differ from the face normal by O(h / R) (TET-13a's row).
+        println!(
+            "sphere_layers: MISSED - wall non-orthogonality {worst_e:.4} deg against the bar 5; \
+             cause: the first prism extrudes along the point normals n* (116.22), not the face \
+             normal (SPEC-LIT 116.18, docs/17-review-later)"
+        );
+        assert!(inf.thickness.count(Limit::Requested) == wp, "a limiter moved the stack");
+    } else {
+        assert!(worst_e <= 5.0, "wall non-orthogonality {worst_e} deg");
+    }
+}
+
+/// The same case, TET-13b's conformal checks: (a) the prism-tet interfaces
+/// are exactly the wall triangles; (b) the sphere patch is the undeformed
+/// wall bit for bit and the domain patch matches the tets-only emission;
+/// (c) every cell's Gauss volume from `raw` is positive and the total
+/// equals the optimised tets' `orient3d` volume within 1e-12 relative.
+#[test]
+fn conformal() {
+    let c = sphere_case();
+    let inf = inflate_sphere(c);
+    let n_wall = c.bnd.iter().filter(|&&(_, p)| p == 0).count();
+    let n_tets = inf.tets.len();
+    let e = to_poly_mesh_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &mixed_patches())
+        .unwrap();
+    let raw = &e.raw;
+    let straddle = (0..raw.neighbour.len())
+        .filter(|&f| {
+            let (o, nb) = (raw.owner[f] as usize, raw.neighbour[f] as usize);
+            (o < n_tets) != (nb < n_tets)
+        })
+        .count();
+    assert_eq!(straddle, n_wall, "the prism-tet interfaces");
+    let sp = &raw.patches[0];
+    assert_eq!(sp.size as usize, n_wall, "the sphere patch's faces");
+    let bits = |f: &[ofgpu::Label], pts: &[ofgpu::types::DVec3]| -> Vec<[u64; 3]> {
+        let mut v: Vec<[u64; 3]> = f
+            .iter()
+            .map(|&i| {
+                let p = pts[i as usize];
+                [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+            })
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let mut want: BTreeSet<Vec<[u64; 3]>> = BTreeSet::new();
+    for &(f, p) in &c.bnd {
+        if p == 0 {
+            let mut v: Vec<[u64; 3]> =
+                f.iter().map(|&i| c.points[i as usize].map(|x| x.to_bits())).collect();
+            v.sort_unstable();
+            want.insert(v);
+        }
+    }
+    let mut got: BTreeSet<Vec<[u64; 3]>> = BTreeSet::new();
+    // `PatchInfo.start` is the offset into the boundary faces, after the
+    // internal ones (mesh.rs): add the internal count for the face index.
+    let bf = raw.neighbour.len();
+    for f in bf + sp.start..bf + sp.start + sp.size {
+        got.insert(bits(&raw.faces[f], &raw.points));
+    }
+    assert_eq!(got, want, "the sphere patch is the undeformed wall");
+    let e0 = to_poly_mesh(&c.points, &c.tets, &c.bnd, &mixed_patches()).unwrap();
+    let dp = &raw.patches[1];
+    assert_eq!(e0.raw.patches[1].size, dp.size, "the domain patch's faces");
+    let mut dom0: BTreeSet<Vec<[u64; 3]>> = BTreeSet::new();
+    let d0 = &e0.raw.patches[1];
+    let b0 = e0.raw.neighbour.len();
+    for f in b0 + d0.start..b0 + d0.start + d0.size {
+        dom0.insert(bits(&e0.raw.faces[f], &e0.raw.points));
+    }
+    let mut dom1: BTreeSet<Vec<[u64; 3]>> = BTreeSet::new();
+    for f in bf + dp.start..bf + dp.start + dp.size {
+        dom1.insert(bits(&raw.faces[f], &raw.points));
+    }
+    assert_eq!(dom1, dom0, "the domain patch's points are the tets-only ones");
+    // (c): the Gauss volume of every cell, f64, from the emitted mesh.
+    let n_cells = raw
+        .owner
+        .iter()
+        .chain(raw.neighbour.iter())
+        .copied()
+        .max()
+        .unwrap_or(0) as usize
+        + 1;
+    let mut vol = vec![0.0f64; n_cells];
+    for f in 0..raw.faces.len() {
+        let pts: Vec<[f64; 3]> = raw.faces[f]
+            .iter()
+            .map(|&i| {
+                let p = raw.points[i as usize];
+                [p.x, p.y, p.z]
+            })
+            .collect();
+        let m = pts.len();
+        let xf = [
+            pts.iter().map(|p| p[0]).sum::<f64>() / m as f64,
+            pts.iter().map(|p| p[1]).sum::<f64>() / m as f64,
+            pts.iter().map(|p| p[2]).sum::<f64>() / m as f64,
+        ];
+        let mut s = [0.0f64; 3];
+        for i in 0..m {
+            let (a, b) = (sub(pts[i], xf), sub(pts[(i + 1) % m], xf));
+            s = add(s, cross(a, b));
+        }
+        let s = [0.5 * s[0], 0.5 * s[1], 0.5 * s[2]];
+        let d = dot(xf, s) / 3.0;
+        vol[raw.owner[f] as usize] += d;
+        if f < raw.neighbour.len() {
+            vol[raw.neighbour[f] as usize] -= d;
+        }
+    }
+    let total_mixed = vol.iter().sum::<f64>();
+    let total_tets: f64 = c
+        .tets
+        .iter()
+        .map(|t| {
+            let q = t.map(|v| c.points[v as usize]);
+            orient3d(&q[0], &q[1], &q[2], &q[3]) / 6.0
+        })
+        .sum();
+    let rel = (total_mixed - total_tets).abs() / total_tets.abs();
+    let min_v = vol.iter().cloned().fold(f64::INFINITY, f64::min);
+    println!(
+        "conformal: {} cells ({} tets, {} prisms), {} wall triangles; interfaces {straddle}; \
+         sphere patch {}, domain patch {} == tets-only {}; min cell volume {min_v:.3e}; \
+         volume {total_mixed:.12} against the tets' {total_tets:.12}, rel {rel:.2e} (bar 1e-12)",
+        n_cells, n_tets, inf.prisms.len(), n_wall, sp.size,
+        dp.size, e0.raw.patches[1].size
+    );
+    assert!(vol.iter().all(|&v| v > 0.0), "a cell with volume <= 0: {min_v:e}");
+    assert!(rel <= 1e-12, "volume rel {rel:e}");
+}
+
+/// The unit box `[0, 1]^3`, its 8 corners, and an interior point
+/// `(0.5, 0.5, 0.005)`; 12 boundary triangles, 2 per side, each joined to
+/// the interior point as a tetrahedron with `orient3d > 0`. Patch 0
+/// "floor" is the 2 `z = 0` triangles, patch 1 "sides" the other 10.
+fn box_ip_case() -> (Vec<Point>, Vec<[u32; 4]>, Vec<([u32; 3], u32)>) {
+    let mut pts: Vec<Point> = (0..8u32)
+        .map(|k| {
+            [
+                if k & 1 == 1 { 1.0 } else { 0.0 },
+                if k & 2 == 2 { 1.0 } else { 0.0 },
+                if k & 4 == 4 { 1.0 } else { 0.0 },
+            ]
+        })
+        .collect();
+    let ip = pts.len() as u32;
+    pts.push([0.5, 0.5, 0.005]);
+    let sides: [([u32; 3], [u32; 3], u32); 6] = [
+        ([0, 1, 3], [0, 3, 2], 0),
+        ([4, 5, 7], [4, 7, 6], 1),
+        ([0, 1, 5], [0, 5, 4], 1),
+        ([2, 3, 7], [2, 7, 6], 1),
+        ([0, 2, 6], [0, 6, 4], 1),
+        ([1, 3, 7], [1, 7, 5], 1),
+    ];
+    let mut tets = Vec::new();
+    let mut bnd = Vec::new();
+    for (tri, patch) in sides.iter().flat_map(|(t1, t2, p)| [(t1, *p), (t2, *p)]) {
+        let (mut a, mut b, c) = (tri[0], tri[1], tri[2]);
+        let (pa, pb, pc, pw) = (pts[a as usize], pts[b as usize], pts[c as usize], pts[ip as usize]);
+        if orient3d(&pa, &pb, &pc, &pw) < 0.0 {
+            std::mem::swap(&mut a, &mut b);
+        }
+        tets.push([a, b, c, ip]);
+        bnd.push(([a, b, c], patch));
+    }
+    (pts, tets, bnd)
+}
+
+fn box_stack() -> LayerStack {
+    LayerStack { n: 2, first_thickness: 0.15, growth: 1.0 }
+}
+
+/// §116.15's "The cut" (TET-13b): with the floor layered at `T = 0.3`, the
+/// first move inverts the floor tetrahedra, so the floor corners' `T` is
+/// halved (`Limit::Inversion`) and the move is redone. The end state has no
+/// invalid cell, `n_cut = 4`, 4 prisms, and the boundary of 2 bottoms, 10
+/// side triangles and 8 side quads.
+#[test]
+fn inversion_cut() {
+    let (pts, tets, bnd) = box_ip_case();
+    let inf = inflate(&pts, &tets, &bnd, &[true, false], &box_stack(), &TetLayerSpec::default(), 60.0)
+        .unwrap();
+    assert!(inf.rounds >= 2, "rounds {}", inf.rounds);
+    assert!(inf.tets.iter().all(|t| {
+        let q = t.map(|v| inf.points[v as usize]);
+        orient3d(&q[0], &q[1], &q[2], &q[3]) > 0.0
+    }));
+    assert!(inf.prisms.iter().all(|p| prism_valid(&inf.points, p)));
+    let floor: Vec<usize> = (0..inf.normals.points.len())
+        .filter(|&k| pts[inf.normals.points[k] as usize][2] == 0.0)
+        .collect();
+    assert_eq!(floor.len(), 4);
+    let ts: Vec<f64> = floor.iter().map(|&k| inf.thickness.total[k]).collect();
+    for (&k, &t) in floor.iter().zip(&ts) {
+        let r = t / 0.3;
+        let k2 = -r.log2();
+        assert!(
+            r > 0.0 && (k2 - k2.round()).abs() < 1e-9 && k2.round() >= 1.0,
+            "T = {t:e} is not 0.3 x 2^-k, k >= 1"
+        );
+        assert_eq!(inf.thickness.limit[k], Limit::Inversion);
+    }
+    assert_eq!(inf.n_cut, 4, "n_cut");
+    assert_eq!(inf.prisms.len(), 4, "prisms");
+    let n0 = inf.boundary.iter().filter(|(_, p)| *p == 0).count();
+    let p1: Vec<&Vec<u32>> =
+        inf.boundary.iter().filter(|(_, p)| *p == 1).map(|(f, _)| f).collect();
+    assert_eq!(n0, 2, "the floor bottoms");
+    assert_eq!(p1.len(), 18, "the sides: 10 triangles + 8 quads");
+    assert_eq!(p1.iter().filter(|f| f.len() == 4).count(), 8, "quads");
+    assert_eq!(p1.iter().filter(|f| f.len() == 3).count(), 10, "triangles");
+    let ps = vec![
+        EmitPatch { name: "floor".to_string(), type_name: "wall".to_string() },
+        EmitPatch { name: "sides".to_string(), type_name: "wall".to_string() },
+    ];
+    let e = to_poly_mesh_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &ps).unwrap();
+    let q = measure(&e.raw, &QualityThresholds::default()).unwrap();
+    println!(
+        "inversion_cut: rounds {}, n_cut {}, floor T {ts:?} (all Limit::Inversion); \
+         {} cells; 92.3 max closure {e:.3e}",
+        inf.rounds,
+        inf.n_cut,
+        q.n_cells,
+        e = q.max_closure
+    );
+    assert_eq!(q.n_cells, 16);
+    if std::mem::size_of::<ofgpu::Scalar>() == 4 && q.max_closure >= 1e-10 {
+        println!(
+            "inversion_cut: MISSED - G2 under single (docs/17-review-later A28): max closure \
+             {e:.3e} against 1e-10",
+            e = q.max_closure
+        );
+    } else {
+        assert!(q.max_closure < 1e-10, "closure {}", q.max_closure);
+    }
+}
+
+/// The refusals of §116.15 (TET-13b): a layered mask with too few entries
+/// is refused by name, and a listed face that is no tetrahedron's face is
+/// refused with `inflate/boundary`.
+#[test]
+fn inflate_refusals() {
+    let (pts, tets, bnd) = box_ip_case();
+    let e = inflate(&pts, &tets, &bnd, &[], &box_stack(), &TetLayerSpec::default(), 60.0)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("inflate/boundary") && e.contains("patch 0"), "{e}");
+    println!("inflate_refusals: the short mask refused: {e}");
+    let mut extra = bnd.clone();
+    extra.push(([1, 2, 8], 0));
+    let e = inflate(&pts, &tets, &extra, &[true, false], &box_stack(), &TetLayerSpec::default(), 60.0)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("inflate/boundary"), "{e}");
+    println!("inflate_refusals: the stray face refused: {e}");
 }

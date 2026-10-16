@@ -35903,11 +35903,14 @@ key:
   differs from the defaults (the tet path has no snap stage), `domain.grading` other than
   `[1, 1, 1]` (sizes come from §116.8, not from a graded block) and a `castellation.min_faces`
   other than its default `4`;
-- with `kind: "tet"`, the two parts of the list above that the tet path does not build yet:
-  `castellation.bodies` (TET-19) and `layers.patches` (prism layers, TET-13b).
+- with `kind: "tet"`, a `layers` key other than `patches`, `n`, `first_thickness` and `growth`
+  that differs from its default (the tet path's limiters are `tet.layers`, §116.15);
+- with `kind: "tet"`, the part of the list above that the tet path does not build yet:
+  `castellation.bodies` (TET-19).
 
-*Tree against the list above.* `bodies` and `layers` are reused by the design, but until TET-19
-and TET-13b land they are refused rather than ignored. `driver::run` (the hex path) refuses a
+*Tree against the list above.* `bodies` is reused by the design, but until TET-19 lands it is
+refused rather than ignored. `layers.patches` was refused the same way until TET-13b built the
+prism layers (§116.15). `driver::run` (the hex path) refuses a
 `tet` config, `driver::run_tet` a hex one, and `ofgpu-automesher` refuses `-stopAfter` on a tet
 config: (92.55)'s stop rule names the hex stages.
 
@@ -37616,13 +37619,113 @@ point moves by
 s(x) = sum_i w_i(x) s_i / sum_i w_i(x),        w_i = A_i phi( |x - x_i| )                   (116.25)
 ```
 
-`A_i` is the area associated with wall point `i`. TET-13b transcribes the paper's two-term
-`phi` and its constants into this subsection, from the paper, when it builds it.
+`A_i` is the area associated with boundary node `i`.
 
 After the move, every tetrahedron must keep `orient3d > 0`. Where one does not, the thickness
 is cut locally and the move is redone. The gap is then filled with `N` prisms per wall
 triangle, `(a, b, c)` to `(a', b', c')`, so the prism-tet interface is the displaced wall
 triangulation itself, conformal by construction (Kallinderis, Khawaja & McMorris 1996).
+
+**The deformation and the prisms, as TET-13b builds them** (`tetmesh/inflate.rs`'s `inflate`,
+`tetmesh/emit.rs`'s `emit_mixed`). The input is the optimised tetrahedra (§116.14) and their
+boundary faces with patches (§116.16), and a per-patch mask of the layered patches.
+
+*The surface.* Every boundary face is wound so that `orient3d(a, b, c, d) < 0`, `d` the fourth
+point of its tetrahedron: its right-hand normal points into the fluid, as (116.22) and (116.24)
+require. These faces, on all the mesh's points and with their patches, are the surface of
+TET-13a's normals and thicknesses. The box sides and every unlayered patch are therefore
+obstacles to the gap (116.24d). A listed face that is not the face of exactly one tetrahedron is
+refused (`inflate/boundary`). A wall point with no normal, or with `T(p) = 0`, is refused
+(`inflate/taper`), naming the points: collapsing a stack is TET-13c's.
+
+*The weight.* The paper's own text was not open to this unit. Its two-term weight is taken as
+§105.9 already reads it (exponents 3 and 5, `alpha = 5 max |s_i| / L`, a length from the
+control points' bounding box), with the area weight of (116.25):
+
+```
+phi(r) = ( L / r )^3 + ( alpha L / r )^5,       alpha = 5 max_i |s_i| / L                  (116.25a)
+L      = | hi - lo |, the diagonal of the bounding box of the boundary nodes                (116.25b)
+A_i    = (1/3) * the sum of the areas of the boundary faces incident to node i              (116.25c)
+```
+
+The boundary nodes are the points of the boundary faces. A wall point is displaced by
+`s_i = T(p_i) n*_i`, and every other boundary node by 0, so the box sides and the unlayered
+patches stay where they are. A point on no boundary face that a tetrahedron uses moves by
+(116.25), with the sums in ascending node order and `r = |x - x_i|` on the undeformed points. A
+point that coincides with a node takes that node's `s_i`. Every evaluation is f64 (§116.2). A
+move costs `O(N_interior N_boundary)`, because the paper's tree code is not built.
+
+*The cut.* After a move, every tetrahedron must have `orient3d > 0` (116.2) on the moved points,
+and every prism must pass (116.25f) below. A failing tetrahedron names, for each of its four
+points, the wall point that the point follows: the point itself if it is a wall point, and
+otherwise the wall point with `T > 0` of largest `w_i` at the point's undeformed position (the
+lowest wall-point index on a tie). A failing prism names its three wall points. Each named
+point's `T(p)` is halved, once per round, and its limit becomes `Inversion`. (116.24c)'s sweep
+then runs again over the new thicknesses, and the move is redone from the undeformed points.
+After 30 rounds with a failure left, the run is refused (`inflate/invert`), naming the cells.
+
+*The layers.* With `T` the stack's total (116.23):
+
+```
+d_k(p) = ( T(p) / T ) t_1 ( r^k - 1 ) / ( r - 1 )      ( ( T(p) / T ) k t_1 when r = 1 ),   k = 0 .. N
+x_k(p) = x(p) + d_k(p) n*(p)   for k < N,             x_N(p) = x(p) + s(p)                (116.25d)
+```
+
+Every wall point `p` keeps its id, which after the move is its top point `x_N(p)`. The
+tetrahedra keep their ids, so they sit on the displaced wall. `p` gains the new points
+`x_0(p) .. x_{N-1}(p)` of (116.25d), appended in ascending wall-point order and, per point, in
+layer order. `x_0(p) = x(p)` is the undeformed wall. A cut point's layers keep the ratio `r` and
+are scaled by `T(p) / T`, so its first layer is `t_1 T(p) / T`. Each wall triangle `(a, b, c)`,
+wound into the fluid, gets `N` prisms, triangle by triangle and in each from the wall out:
+
+```
+[ a_{k-1}, b_{k-1}, c_{k-1}, a_k, b_k, c_k ],     k = 1 .. N                               (116.25e)
+```
+
+Its outward faces are `(a_{k-1}, c_{k-1}, b_{k-1})` (bottom), `(a_k, b_k, c_k)` (top), and the quads
+`(a_{k-1}, b_{k-1}, b_k, a_k)`, `(b_{k-1}, c_{k-1}, c_k, b_k)` and `(c_{k-1}, a_{k-1}, a_k, c_k)`.
+The top of layer `N` is the wall triangle `(a, b, c)` itself, a face of a tetrahedron, so the
+prism-tet interface is conformal by construction. A prism `[v0, .., v5]` is valid when the three
+tetrahedra of its split
+
+```
+[ v0, v2, v1, v3 ],    [ v2, v1, v3, v4 ],    [ v3, v2, v4, v5 ]                           (116.25f)
+```
+
+all have `orient3d > 0`. On the right prism over the unit corner triangle (`v0 .. v2` =
+`(0,0,0), (1,0,0), (0,1,0)`, the top `+z`) each is exactly `+1`, and the three volumes sum to the
+prism's `1/2`.
+
+The boundary after the inflation follows the input's order. Each wall triangle is replaced by its
+bottom `(a_0, c_0, b_0)` on its patch, and every other boundary face is unchanged: its wall
+points, if any, are now at their tops. Then come the side quads. Where an edge `(a, b)` of a wall
+triangle (in its into-the-fluid winding) borders a boundary face of an unlayered patch `q`, the
+quads `(a_{k-1}, b_{k-1}, b_k, a_k)`, `k = 1 .. N`, go on `q`, in wall-triangle, edge and layer
+order. An edge on other than two boundary faces is refused (`inflate/edges`). When the unlayered
+face meets the wall at a right angle and `n*` lies in its plane, the side quads lie in it too.
+Otherwise the side does not lie in the patch's plane, and TET-13c tapers it.
+
+*The emission.* §116.16's emitter takes the tetrahedra and the prisms. Cells `0 .. n_tets - 1`
+are the tetrahedra, and the prisms follow in (116.25e)'s order. A face is a triangle or a
+quadrilateral, keyed by its sorted points. The rest of the layout is unchanged, and a mesh of
+tetrahedra only is emitted exactly as before. A prism that fails (116.25f) is refused like a
+tetrahedron (`emit/orient`), and (116.26)'s prism arm evaluates (116.25f) on the rounded points.
+
+*In the driver.* `run_tet` inflates inside stage 7 (`emit`), before the emission, when
+`layers.n > 0` and `layers.patches` is not empty. The stage list is unchanged. The layered
+patches are the surface patches named in `layers.patches`, never a domain patch, and a name that
+is no surface patch is refused (`tet/layers`). The stack is `layers.n`,
+`layers.first_thickness` and `layers.growth`; the limiters are `tet.layers`; the crease angle is
+`refinement.feature_angle_deg`. With `kind: "tet"`, every other `layers` key that differs from
+its default is refused by name, because the tet path does not read it (§116.3's rule). The
+summary's `n_prisms` is the prism count, and the `emit` row adds `n_prisms`,
+`n_layer_points`, `inflate_rounds` and `n_cut`.
+
+*DESIGN.* These choices are this section's own. A cut halves `T(p)`, because the paper prescribes
+no cut. A cut point's stack is scaled rather than given fewer layers, so every wall triangle keeps
+`N` prisms. Thirty rounds bound the halving at `2^-30 T`. A point that cannot carry layers is
+refused rather than collapsed until TET-13c. The parameters of (116.25a) are §105.9's reading of
+Luke, Collins & Blades (2012), the reading this tree already uses for ALE.
 
 **Sharp edges and corners** (TET-13c). Layers at sharp convex and concave edges and corners
 collapse or taper instead of inverting, and the report names each tapered point. Coverage is
@@ -37680,8 +37783,9 @@ emitter writes the f64 points and is no longer where a point becomes `Scalar`; t
 f32 cast it guards"). (116.26) therefore rounds each point by `to_vec3` and widens it back by
 `to_dvec3`, both exact apart from the one rounding, and evaluates (116.2) with the exact
 `orient3d` of §116.4. Under `single` it runs before the polyMesh is built, so the cells it names
-are the input's tetrahedron indices, which are the emitted cell numbers. A prism's three-tetrahedron
-arm of (116.26) arrives with the prisms (TET-13b).
+are the input's tetrahedron indices, which are the emitted cell numbers. A prism's arm (TET-13b)
+evaluates the three tetrahedra of (116.25f) on the rounded points, and names the prism by its cell
+number, `n_tets` plus its index.
 
 *The gate under `single`.* §92.3 is `automesher::quality::check`, which measures the `HostMesh`
 in `Scalar`. Under `--features single` its G2 sums f32-rounded area vectors, and on TET-10b's
@@ -37728,7 +37832,7 @@ returned Ok, as §92.14.4 requires. `-check` needed no change: it reads any poly
 `config` and `identity`, with `stopped_after` and `layout` always `null`. It adds `"kind": "tet"`,
 seven `stages` rows named as above, each with `seconds` and its own counts, and a `tet` block:
 
-- `n_tets`, and `n_prisms`, which is 0 until TET-13b;
+- `n_tets`, and `n_prisms`, the prisms of §116.15 (0 without layers);
 - `min_dihedral_deg` and `max_dihedral_deg`;
 - `steiner`: `recover` (`ball`, `split`, `encroach_split`, `facet`, `facet_centroids`, `total`),
   `refine` (`interior`, `segment_splits`, `facet_splits`, `facet_centroids`, `box_face_splits`,
@@ -37919,6 +38023,12 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13a | the concave limit (116.24b) inside an open 16-sided pipe of radius 1 | all 48 points at `0.5 rho_c` = 0.331195617048069, `w / (3 phi)` with `w = 2 sin(pi/16)` and `phi = pi/8`, within 1e-12 relative, `n*` radial within 1e-12; outside the same pipe `T` is kept, with no gap and no `rho_c` | the TET-13a commit |
 | TET-13a | (116.22a) against a direct optimisation (the supervisor, outside the tree) | 300 random sets of 2 to 8 unit normals in a cap: Nelder-Mead from 20 starts never beat the candidate optimum by more than 3.3e-16 | the TET-13a commit |
 | TET-13a | the f32 arm | `rust/tests/tetmesh_inflate.rs` (the 7 shared tests) under `--features single`: all pass with the same printed numbers | the TET-13a commit |
+| TET-13b | `inflate::sphere_layers`: the sphere in a box of TET-09/10b (h = 0.25 on the sphere, H = 0.5, g = 1.2, box [-2, 2]^3), 5 layers, `t_1 = 2e-3` (1e-3 D), `r = 1.2`, `T` = 1.48832e-2 | 489 wall points, 974 wall triangles, 4 870 prisms (5 x 974); one move, no cut, every point at the requested stack; `t_1` within 1 % at 489 of 489 points (worst relative 3.95e-14); 0 inverted tetrahedra, 0 prisms failing (116.25f); §92.3 G2 max closure 5.595e-15 (f64) | the TET-13b commit |
+| TET-13b | the same: the wall non-orthogonality, the angle between a sphere face's area vector and the line from its cell's centre to the face centre, on `build_host_mesh` | **MISSED** against 5 degrees: 5.0012 degrees. Every point carries the full stack, so the first prism's shear comes from the point normals alone: its vertices extrude along `n*` (116.22), which on the polyhedral sphere differs from the face normal by O(h/R) (TET-13a's rows). A cure would change the extrusion direction (a smoothed or face-weighted normal), which is (116.22)'s definition and the user's to decide; docs/17-review-later lists it | the TET-13b commit |
+| TET-13b | `inflate::conformal` | 13 968 cells (9 098 tetrahedra, 4 870 prisms); 974 prism-tet faces = the wall triangles; the sphere patch is the undeformed wall bit for bit and the domain patch the tets-only one (1 518 faces); every cell's f64 Gauss volume positive (smallest 6.144e-6); the total 59.953697049370 equals the tetrahedra-only volume within 9.96e-15 relative (bar 1e-12) | the TET-13b commit |
+| TET-13b | `inflate::inversion_cut`: the unit box, 12 tetrahedra on an interior point at (0.5, 0.5, 0.005), the floor layered with 2 layers of 0.15 (`T` = 0.3) | 5 moves: the floor corners' `T` halved four times to 0.01875 = 0.3 x 2^-4, each `Inversion`; 4 cut points, 4 prisms, 16 cells; the boundary is 2 bottoms on the floor and 10 triangles plus 8 side quads on the sides; G2 max closure 6.074e-16 | the TET-13b commit |
+| TET-13b | `driver::tests::tet_cases::tet_layers_end_to_end`: `box_sphere_tet.json` with `layers` on the sphere, 3 layers of 0.02 m, `r = 1.2` | seven stages; 20 309 tetrahedra and 3 420 prisms (3 x 1 140 sphere faces); §92.3 passes (max closure 1.590e-15); the emit row: 1 716 layer points, one move, no cut | the TET-13b commit |
+| TET-13b | the f32 arm | `rust/tests/tetmesh_inflate.rs` (12 tests) and `rust/tests/automesher_tet.rs` (4) under `--features single` all pass with the same f64 numbers (`t_1` 489 of 489, 0 inverted cells, the conformal volume within 9.96e-15, the cut at 0.01875); **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.908e-6 on the sphere and 1.582e-7 on the box, and `run_tet` with layers refused on 21 929 cells; the wall non-orthogonality on the f32 host mesh 5.0006 degrees | the TET-13b commit |
 | TET-15 | `perf::thread_invariant`: the size field of the 9024-triangle sphere (18 048 curvature and proximity sources plus a band, a point and a box; 27 074 primitives, 164 431 leaves, depth 8), and the remesh of that sphere (3 417 points) and of the six-patch cube (459 points), on 1, 4 and 8 workers | identical: the sources, the stats, `h` at 20 000 probes and every 97th leaf box bit for bit, both remeshes point for point as bits; the field built in 3.10 s, 0.92 s and 0.60 s (4 CPUs, shared with two other lanes), the two remeshes in 0.13 s, 0.11 s and 0.12 s | the TET-15 commit |
 | TET-15 | `box_sphere_tet.json` end to end, release, before and after TET-15 | the same polyMesh byte for byte (points, faces, owner, neighbour, boundary); the size-field stage 0.8 s before, 0.1 s after; total 12.3 s and 11.8 s, of which refinement 6.2 s and optimisation 5.1 s | the TET-15 commit |
 | TET-15 | `perf::million_tets`: the example at `base_size` 0.25 m with the sphere at 0.125 m (about 1.3 M tetrahedra, the example's 20 309 times 4^3) | **MISSED**: stages 1-4 take 0.3 s; then the refinement of §116.13 refuses after 9.0 s with `refine/centre: kept tetrahedron [13317, 14196, 11265, 16918] has no finite circumcentre` | the TET-15 commit |

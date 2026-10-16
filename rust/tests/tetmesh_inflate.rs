@@ -5,7 +5,7 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! TET-13a's gates (SPEC-LIT §116.15, §116.18) as an integration test, so
+//! TET-13a's and TET-13b's gates (SPEC-LIT §116.15, §116.18) as an integration test, so
 //! the `--features single` build runs them too: the library's own test
 //! crate does not compile under `single` (SPEC-LIT §112.3). The cases are
 //! tests/shared/tetmesh_inflate_cases.rs, which src/tetmesh/inflate.rs

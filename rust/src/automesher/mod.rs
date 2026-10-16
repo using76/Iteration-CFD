@@ -874,12 +874,29 @@ impl AutomeshConfig {
                         self.castellation.bodies.len()
                     )));
                 }
-                if !self.layers.patches.is_empty() {
-                    return Err(Error::Mesh(format!(
-                        "layers.patches: kind \"{kind}\" does not grow prism layers yet (SPEC-LIT \
-                         §116.15, docs/17 TET-13b); {} patch(es) asked for",
-                        self.layers.patches.len()
-                    )));
+                // The tet path reads layers.patches, n, first_thickness and
+                // growth (SPEC-LIT §116.15's stack); every other key it does
+                // not read is refused by name (§116.3's rule).
+                let d = LayerSpec::default();
+                let l = &self.layers;
+                for (key, differs) in [
+                    ("min_thickness", l.min_thickness != d.min_thickness),
+                    ("medial_frac", l.medial_frac != d.medial_frac),
+                    ("normal_passes", l.normal_passes != d.normal_passes),
+                    ("cell_frac", l.cell_frac != d.cell_frac),
+                    ("smoothing", l.smoothing != d.smoothing),
+                    ("smoothing_passes", l.smoothing_passes != d.smoothing_passes),
+                    ("retreat_limit", l.retreat_limit != d.retreat_limit),
+                    ("terminate", l.terminate != d.terminate),
+                    ("junction_angle_deg", l.junction_angle_deg != d.junction_angle_deg),
+                ] {
+                    if differs {
+                        return Err(Error::Mesh(format!(
+                            "layers.{key}: kind \"{kind}\" does not read it (the tet path's \
+                             layers are patches, n, first_thickness and growth, SPEC-LIT \
+                             §116.15) - remove the key"
+                        )));
+                    }
                 }
                 match &self.tet {
                     Some(t) => t.validate(),
@@ -1261,7 +1278,7 @@ mod config_tests {
                 },
                 "castellation.bodies: kind \"tet\"",
             ),
-            ({ let mut c = tet(); c.layers.patches = vec!["site".to_string()]; c }, "layers.patches: kind \"tet\""),
+            ({ let mut c = tet(); c.layers.min_thickness = 0.2; c }, "layers.min_thickness: kind \"tet\""),
             (
                 {
                     let mut c = tet();

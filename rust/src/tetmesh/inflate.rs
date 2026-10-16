@@ -6,7 +6,8 @@
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
 //! Prism layers by post-inflation, SPEC-LIT §116.15: the wall point
-//! normals and the per-point layer thicknesses (TET-13a).
+//! normals and the per-point layer thicknesses (TET-13a), then the
+//! deformation, its inversion cuts and the prisms (TET-13b, [`inflate`]).
 //!
 //! The wall is every triangle of the surface whose patch carries layers.
 //! At each wall point the inflation direction is the "most normal" normal
@@ -23,11 +24,24 @@
 //! and by the ratio to its wall neighbours (116.24c). Every limit only
 //! lowers a thickness. The geometry is f64 in both builds (§116.2).
 //!
+//! [`inflate`] then moves the wall points by `T(p) n*(p)` and every other
+//! point a tetrahedron uses by the explicit inverse-distance interpolation
+//! (116.25) with the two-term weight (116.25a); where a tetrahedron or a
+//! prism (116.25f) fails, it halves the thickness of the wall points that
+//! cell follows and moves again from the undeformed points. The gap is then
+//! filled with `N` prisms per wall triangle (116.25e), whose top layer is
+//! the wall triangle itself, so the prism-tet interface is conformal.
+//!
 //! Provenance: ORIGINAL. Written from Aubry & Löhner (2008), "On the 'most
 //! normal' normal" (the definition (116.22) only; its solution by the
 //! support set is this module's), and SPEC-LIT §116.8's curvature (116.9b)
-//! and gap (116.10a) estimates. No GPL-licensed source was consulted.
+//! and gap (116.10a) estimates; the deformation from Luke, Collins &
+//! Blades (2012) as SPEC-LIT §105.9 and §116.15 read it, and the prism
+//! fill from Kallinderis, Khawaja & McMorris (1996), the published
+//! descriptions only. No GPL-licensed source was consulted.
 
+use super::emit::prism_valid;
+use super::predicates::orient3d;
 use super::sizefield::GapScanner;
 use super::surfprep::TetSurface;
 use super::{Point, TetLayerSpec};
@@ -322,6 +336,9 @@ pub enum Limit {
     Concave,
     /// The ratio to a wall neighbour, (116.24c).
     Neighbour,
+    /// A cell the move inverted cut the point's thickness, §116.15's
+    /// "The cut": its `T` was halved and the move redone.
+    Inversion,
     /// No normal (116.22): the point gets no layers and is TET-13c's.
     NoNormal,
 }
@@ -491,7 +508,32 @@ pub fn thicknesses(
 
     // (116.24c): the smallest-first sweep over the layered edges.
     let slot: HashMap<u32, usize> = wp.iter().enumerate().map(|(k, &p)| (p, k)).collect();
-    let live = |k: usize, total: &[f64]| normals.normal[k].is_some() && total[k] > 0.0;
+    let mut adj = wall_adjacency(surf, layered, &slot, np);
+    neighbour_sweep(
+        &mut adj,
+        spec.max_neighbour_ratio,
+        &normals.normal,
+        &mut total,
+        &mut limit,
+    );
+    Ok(Thicknesses {
+        requested,
+        total,
+        gap,
+        rho_c,
+        limit,
+    })
+}
+
+/// The wall-point adjacency of (116.24c): `adj[i]` holds the wall points
+/// sharing an edge of a layered triangle with wall point `i`, first push
+/// per edge, in triangle and edge order.
+fn wall_adjacency(
+    surf: &TetSurface,
+    layered: &[bool],
+    slot: &HashMap<u32, usize>,
+    np: usize,
+) -> Vec<Vec<usize>> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); np];
     for t in 0..surf.tris.len() {
         if !is_wall(surf, layered, t) {
@@ -508,10 +550,25 @@ pub fn thicknesses(
             }
         }
     }
-    let ratio = spec.max_neighbour_ratio;
+    adj
+}
+
+/// (116.24c)'s exact smallest-first sweep over the layered edges: the
+/// smallest unfinished `T(q)` caps each neighbour at `ratio * T(q)`. A
+/// point with no normal, or with `T = 0`, takes no part. Every limit only
+/// lowers `T`; a point the sweep lowers, and that no cut has claimed,
+/// is marked [`Limit::Neighbour`].
+fn neighbour_sweep(
+    adj: &mut [Vec<usize>],
+    ratio: f64,
+    normal: &[Option<Point>],
+    total: &mut [f64],
+    limit: &mut [Limit],
+) {
+    let live = |k: usize, total: &[f64]| normal[k].is_some() && total[k] > 0.0;
     let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
-    for k in 0..np {
-        if live(k, &total) {
+    for k in 0..total.len() {
+        if live(k, total) {
             heap.push(Reverse((total[k].to_bits(), k)));
         }
     }
@@ -521,24 +578,602 @@ pub fn thicknesses(
         }
         let cap = ratio * total[i];
         for &j in &adj[i] {
-            if live(j, &total) && cap < total[j] {
+            if live(j, total) && cap < total[j] {
                 total[j] = cap;
-                limit[j] = Limit::Neighbour;
+                if limit[j] != Limit::Inversion {
+                    limit[j] = Limit::Neighbour;
+                }
                 heap.push(Reverse((cap.to_bits(), j)));
             }
         }
     }
-    Ok(Thicknesses {
-        requested,
-        total,
-        gap,
-        rho_c,
-        limit,
+}
+
+/// What the post-inflation built (§116.15, TET-13b).
+#[derive(Debug, Clone)]
+pub struct Inflated {
+    /// The input points moved by `s` (unused points unchanged), then the
+    /// new layer points `x_0(p) .. x_{N-1}(p)` of (116.25d), appended in
+    /// ascending wall-point order and, per point, in layer order.
+    pub points: Vec<Point>,
+    /// The input tetrahedra, same ids: they sit on the displaced wall.
+    pub tets: Vec<[u32; 4]>,
+    /// The prisms of (116.25e), triangle by triangle and in each from the
+    /// wall out.
+    pub prisms: Vec<[u32; 6]>,
+    /// The boundary after the inflation, §116.15's order: each input face
+    /// (a wall triangle replaced by its bottom, the rest unchanged), then
+    /// the side quads.
+    pub boundary: Vec<(Vec<u32>, u32)>,
+    /// The wall normals over the oriented boundary surface.
+    pub normals: WallNormals,
+    /// The thicknesses over that surface, FINAL: after every cut.
+    pub thickness: Thicknesses,
+    /// Per wall point, in [`WallNormals::points`] order: the `N + 1` ids of
+    /// `x_0 .. x_N`, the last the wall point's own id.
+    pub layers: Vec<Vec<u32>>,
+    /// The moves made (1 when nothing was cut).
+    pub rounds: usize,
+    /// The wall points whose `T` a cut lowered.
+    pub n_cut: usize,
+}
+
+/// Up to 20 items, then "and N more".
+fn named20<T: std::fmt::Debug>(items: &[T]) -> String {
+    let shown: Vec<String> = items.iter().take(20).map(|x| format!("{x:?}")).collect();
+    let more = items.len().saturating_sub(20);
+    if more > 0 {
+        format!("{} and {more} more", shown.join(", "))
+    } else {
+        shown.join(", ")
+    }
+}
+
+/// The explicit inverse-distance displacement of Luke, Collins & Blades
+/// (2012), §116.15's (116.25) with the weight (116.25a): the wall points
+/// move by `T(p) n*(p)`, every other boundary node by 0, and every other
+/// point a tetrahedron uses by `sum w_i s_i / sum w_i`, the sums in
+/// ascending node order over the undeformed points; a point that coincides
+/// with a node takes that node's `s_i`. A point on no boundary face that no
+/// tetrahedron uses stays where it is.
+#[allow(clippy::too_many_arguments)]
+fn displacement(
+    points: &[Point],
+    used: &[bool],
+    is_node: &[bool],
+    area: &[f64],
+    l_len: f64,
+    alpha: f64,
+    normals: &WallNormals,
+    total: &[f64],
+) -> Vec<Point> {
+    let n = points.len();
+    let mut s_node = vec![[0.0; 3]; n];
+    for (k, &p) in normals.points.iter().enumerate() {
+        if let Some(m) = normals.normal[k] {
+            let t = total[k];
+            s_node[p as usize] = [t * m[0], t * m[1], t * m[2]];
+        }
+    }
+    // The boundary nodes in ascending order, so each sum runs over them
+    // alone in the order (116.25) fixes.
+    let nodes: Vec<usize> = (0..n).filter(|&j| is_node[j]).collect();
+    let mut out = vec![[0.0; 3]; n];
+    for i in 0..n {
+        if is_node[i] {
+            out[i] = s_node[i];
+            continue;
+        }
+        if !used[i] {
+            continue;
+        }
+        let x = points[i];
+        let mut num = [0.0; 3];
+        let mut den = 0.0f64;
+        for &j in &nodes {
+            let r = norm(sub(x, points[j]));
+            if r == 0.0 {
+                num = s_node[j];
+                den = 1.0;
+                break;
+            }
+            let u = l_len / r;
+            let v = alpha * u;
+            let w = area[j] * (u * u * u + v * v * v * v * v);
+            num[0] += w * s_node[j][0];
+            num[1] += w * s_node[j][1];
+            num[2] += w * s_node[j][2];
+            den += w;
+        }
+        if den > 0.0 {
+            out[i] = [num[0] / den, num[1] / den, num[2] / den];
+        }
+    }
+    out
+}
+
+/// The prism layers by post-inflation (§116.15, TET-13b): the optimised
+/// tetrahedra, their boundary faces with patches, and the per-patch mask of
+/// the layered patches (one entry per patch; a boundary patch id past the
+/// mask is refused by name). The wall moves by `s_i = T(p_i) n*_i`, every
+/// other point a tetrahedron uses by (116.25), every tetrahedron keeps
+/// `orient3d > 0` and every prism (116.25f) - where one does not, the
+/// thickness is cut locally (`Limit::Inversion`) and the move is redone,
+/// 30 rounds at most - and the gap is filled with `N` prisms per wall
+/// triangle (116.25e), conformal by construction.
+pub fn inflate(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    boundary: &[([u32; 3], u32)],
+    layered: &[bool],
+    stack: &LayerStack,
+    spec: &TetLayerSpec,
+    crease_deg: f64,
+) -> Result<Inflated> {
+    stack.validate()?;
+    for (k, &(_, p)) in boundary.iter().enumerate() {
+        if p as usize >= layered.len() {
+            return Err(Error::Mesh(format!(
+                "inflate/boundary: face {k} names patch {p}, but the layered mask has {} entries",
+                layered.len()
+            )));
+        }
+    }
+    if stack.n == 0 || !boundary.iter().any(|&(_, p)| layered[p as usize]) {
+        let faces: Vec<(Vec<u32>, u32)> =
+            boundary.iter().map(|&(f, p)| (f.to_vec(), p)).collect();
+        return Ok(Inflated {
+            points: points.to_vec(),
+            tets: tets.to_vec(),
+            prisms: Vec::new(),
+            boundary: faces,
+            normals: WallNormals { points: Vec::new(), normal: Vec::new(), min_cos: Vec::new() },
+            thickness: Thicknesses {
+                requested: stack.total(),
+                total: Vec::new(),
+                gap: Vec::new(),
+                rho_c: Vec::new(),
+                limit: Vec::new(),
+            },
+            layers: Vec::new(),
+            rounds: 1,
+            n_cut: 0,
+        });
+    }
+    build_inflated(points, tets, boundary, layered, stack, spec, crease_deg)
+}
+
+/// Everything [`inflate`] does past its empty path.
+#[allow(clippy::too_many_arguments)]
+fn build_inflated(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    boundary: &[([u32; 3], u32)],
+    layered: &[bool],
+    stack: &LayerStack,
+    spec: &TetLayerSpec,
+    crease_deg: f64,
+) -> Result<Inflated> {
+    // The surface of TET-13a's normals and thicknesses: every boundary face
+    // wound so that its right-hand normal points into the fluid, on all the
+    // mesh's points, with its patch. A listed face must be the face of
+    // exactly one tetrahedron; §116.4's outward row, reversed, is the
+    // winding (orient3d < 0 against the tet's fourth point).
+    let mut on_tet: HashMap<[u32; 3], (u32, u8, u32)> = HashMap::with_capacity(4 * tets.len());
+    for (c, t) in tets.iter().enumerate() {
+        for (l, row) in super::emit::FACES.iter().enumerate() {
+            let mut k = row.map(|i| t[i]);
+            k.sort_unstable();
+            let e = on_tet.entry(k).or_insert((c as u32, l as u8, 0));
+            e.2 += 1;
+        }
+    }
+    let mut surf = TetSurface {
+        points: points.to_vec(),
+        tris: Vec::with_capacity(boundary.len()),
+        tri_patch: Vec::with_capacity(boundary.len()),
+        patch_names: (0..layered.len()).map(|i| i.to_string()).collect(),
+    };
+    let mut bad: Vec<[u32; 3]> = Vec::new();
+    for &(f, p) in boundary {
+        let mut k = f;
+        k.sort_unstable();
+        match on_tet.get(&k) {
+            Some(&(c, l, 1)) => {
+                let w = super::emit::FACES[l as usize].map(|i| tets[c as usize][i]);
+                surf.tris.push([w[0], w[2], w[1]]);
+                surf.tri_patch.push(p);
+            }
+            _ => bad.push(f),
+        }
+    }
+    if !bad.is_empty() {
+        return Err(Error::Mesh(format!(
+            "inflate/boundary: {} listed face(s) are not the face of exactly one tetrahedron: {}",
+            bad.len(),
+            named20(&bad)
+        )));
+    }
+    inflate_rest(points, tets, boundary, layered, stack, spec, crease_deg, surf)
+}
+
+/// The normals, the thicknesses, the move and its cuts, then the prisms.
+#[allow(clippy::too_many_arguments)]
+fn inflate_rest(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    boundary: &[([u32; 3], u32)],
+    layered: &[bool],
+    stack: &LayerStack,
+    spec: &TetLayerSpec,
+    crease_deg: f64,
+    surf: TetSurface,
+) -> Result<Inflated> {
+    let n = points.len();
+    let normals = wall_normals(&surf, layered)?;
+    let mut th = thicknesses(&surf, layered, &normals, stack, spec, crease_deg)?;
+    let taper: Vec<u32> = (0..normals.points.len())
+        .filter(|&k| normals.normal[k].is_none() || !(th.total[k] > 0.0))
+        .map(|k| normals.points[k])
+        .collect();
+    if !taper.is_empty() {
+        return Err(Error::Mesh(format!(
+            "inflate/taper: {} wall points cannot carry the stack (no normal, or T = 0): points {}",
+            taper.len(),
+            named20(&taper)
+        )));
+    }
+    let np = normals.points.len();
+    // The boundary nodes, their (116.25c) areas, (116.25b)'s length, and
+    // which points a tetrahedron uses.
+    let mut is_node = vec![false; n];
+    let mut area = vec![0.0f64; n];
+    for tri in &surf.tris {
+        let (pa, pb, pc) =
+            (points[tri[0] as usize], points[tri[1] as usize], points[tri[2] as usize]);
+        let ar = 0.5 * norm(cross(sub(pb, pa), sub(pc, pa)));
+        for &i in tri {
+            is_node[i as usize] = true;
+            area[i as usize] += ar;
+        }
+    }
+    for a in area.iter_mut() {
+        *a /= 3.0;
+    }
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [-f64::INFINITY; 3]);
+    for (i, &on) in is_node.iter().enumerate() {
+        if on {
+            for a in 0..3 {
+                lo[a] = lo[a].min(points[i][a]);
+                hi[a] = hi[a].max(points[i][a]);
+            }
+        }
+    }
+    let l_len = norm(sub(hi, lo));
+    let mut used = vec![false; n];
+    for t in tets {
+        for &v in t {
+            used[v as usize] = true;
+        }
+    }
+    let slot: HashMap<u32, usize> =
+        normals.points.iter().enumerate().map(|(k, &p)| (p, k)).collect();
+    // The wall triangles in boundary order, their wall slots, and the map
+    // from an edge to the boundary faces on it, for the side quads.
+    let mut wall_tri: Vec<usize> = Vec::new();
+    let mut tri_slots: Vec<[usize; 3]> = Vec::new();
+    let mut wall_ix: HashMap<usize, usize> = HashMap::new();
+    for (bi, &(_, p)) in boundary.iter().enumerate() {
+        if layered[p as usize] {
+            let tri = surf.tris[bi];
+            wall_ix.insert(bi, wall_tri.len());
+            wall_tri.push(bi);
+            tri_slots.push([slot[&tri[0]], slot[&tri[1]], slot[&tri[2]]]);
+        }
+    }
+    let mut edge_faces: HashMap<[u32; 2], Vec<usize>> = HashMap::new();
+    for (bi, &(f, _)) in boundary.iter().enumerate() {
+        for e in 0..3 {
+            let (a, b) = (f[e], f[(e + 1) % 3]);
+            edge_faces.entry([a.min(b), a.max(b)]).or_default().push(bi);
+        }
+    }
+    let up = Setup {
+        points,
+        tets,
+        boundary,
+        layered,
+        stack,
+        spec,
+        surf: &surf,
+        normals: &normals,
+        np,
+        n,
+        is_node,
+        area,
+        l_len,
+        used,
+        slot,
+        wall_tri,
+        tri_slots,
+        wall_ix,
+        edge_faces,
+    };
+    build_final(&up, &mut th)
+}
+
+/// Everything the move and the prisms are built from, derived once from the
+/// undeformed input.
+struct Setup<'a> {
+    points: &'a [Point],
+    tets: &'a [[u32; 4]],
+    boundary: &'a [([u32; 3], u32)],
+    layered: &'a [bool],
+    stack: &'a LayerStack,
+    spec: &'a TetLayerSpec,
+    surf: &'a TetSurface,
+    normals: &'a WallNormals,
+    np: usize,
+    n: usize,
+    is_node: Vec<bool>,
+    area: Vec<f64>,
+    l_len: f64,
+    used: Vec<bool>,
+    slot: HashMap<u32, usize>,
+    wall_tri: Vec<usize>,
+    tri_slots: Vec<[usize; 3]>,
+    wall_ix: HashMap<usize, usize>,
+    edge_faces: HashMap<[u32; 2], Vec<usize>>,
+}
+
+/// (116.25a)'s `alpha = 5 max_i |s_i| / L`, over the current thicknesses.
+fn alpha_of(normals: &WallNormals, total: &[f64], l_len: f64) -> f64 {
+    let mut max_s = 0.0f64;
+    for (k, m) in normals.normal.iter().enumerate() {
+        if let Some(m) = m {
+            let t = total[k];
+            max_s = max_s.max(norm([t * m[0], t * m[1], t * m[2]]));
+        }
+    }
+    if l_len > 0.0 {
+        5.0 * max_s / l_len
+    } else {
+        0.0
+    }
+}
+
+/// The wall point a tetrahedron's point follows, §116.15's "The cut": the
+/// point itself when it is a wall point, else the wall point with `T > 0`
+/// of largest `w_i` at the point's undeformed position, the lowest
+/// wall-point index on a tie.
+fn follower(
+    up: &Setup,
+    total: &[f64],
+    alpha: f64,
+    v: u32,
+) -> Option<usize> {
+    if let Some(&k) = up.slot.get(&v) {
+        return Some(k);
+    }
+    let x = up.points[v as usize];
+    let mut best: Option<(f64, usize)> = None;
+    for (k, &p) in up.normals.points.iter().enumerate() {
+        if !(total[k] > 0.0) {
+            continue;
+        }
+        let r = norm(sub(x, up.points[p as usize]));
+        if r == 0.0 {
+            return Some(k);
+        }
+        let u = up.l_len / r;
+        let b = alpha * u;
+        let w = up.area[p as usize] * (u * u * u + b * b * b * b * b);
+        if best.map_or(true, |(bw, _)| w > bw) {
+            best = Some((w, k));
+        }
+    }
+    best.map(|(_, k)| k)
+}
+
+/// The move, its cuts, and the prisms, over the setup.
+fn build_final(up: &Setup, th: &mut Thicknesses) -> Result<Inflated> {
+    let (n, np, n_layers) = (up.n, up.np, up.stack.n);
+    let mut adj = wall_adjacency(up.surf, up.layered, &up.slot, np);
+    // The id of layer `j` of wall slot `k`; `j == N` is the wall point.
+    let id_of = |k: usize, j: usize| -> u32 {
+        if j >= n_layers {
+            up.normals.points[k]
+        } else {
+            (n + k * n_layers + j) as u32
+        }
+    };
+    let t_total = up.stack.total();
+    let mut rounds = 0usize;
+    let mut cut = vec![false; np];
+    let (moved, layer_pts) = loop {
+        rounds += 1;
+        let alpha = alpha_of(up.normals, &th.total, up.l_len);
+        let s = displacement(
+            up.points, &up.used, &up.is_node, &up.area, up.l_len, alpha, up.normals, &th.total,
+        );
+        let moved: Vec<Point> = (0..n)
+            .map(|i| if s[i] == [0.0; 3] { up.points[i] } else { add(up.points[i], s[i]) })
+            .collect();
+        // (116.25d), on the undeformed points; x_0 is the undeformed wall.
+        let mut layer_pts: Vec<Point> = Vec::with_capacity(np * n_layers);
+        for (k, &p) in up.normals.points.iter().enumerate() {
+            let m = up.normals.normal[k].unwrap();
+            for j in 0..n_layers {
+                if j == 0 {
+                    layer_pts.push(up.points[p as usize]);
+                    continue;
+                }
+                let frac = th.total[k] / t_total;
+                let d = if up.stack.growth == 1.0 {
+                    frac * j as f64 * up.stack.first_thickness
+                } else {
+                    frac * up.stack.first_thickness
+                        * (up.stack.growth.powi(j as i32) - 1.0)
+                        / (up.stack.growth - 1.0)
+                };
+                layer_pts
+                    .push([up.points[p as usize][0] + d * m[0], up.points[p as usize][1] + d * m[1], up.points[p as usize][2] + d * m[2]]);
+            }
+        }
+        let mut all = moved.clone();
+        all.extend_from_slice(&layer_pts);
+        let bad_tets: Vec<usize> = (0..up.tets.len())
+            .filter(|&c| {
+                let q = up.tets[c].map(|v| all[v as usize]);
+                orient3d(&q[0], &q[1], &q[2], &q[3]) <= 0.0
+            })
+            .collect();
+        let mut bad_prisms: Vec<usize> = Vec::new();
+        for (pi, slots) in up.tri_slots.iter().enumerate() {
+            for k in 1..=n_layers {
+                let p = [
+                    id_of(slots[0], k - 1), id_of(slots[1], k - 1), id_of(slots[2], k - 1),
+                    id_of(slots[0], k), id_of(slots[1], k), id_of(slots[2], k),
+                ];
+                if !prism_valid(&all, &p) {
+                    bad_prisms.push(pi * n_layers + k - 1);
+                }
+            }
+        }
+        if bad_tets.is_empty() && bad_prisms.is_empty() {
+            break (moved, layer_pts);
+        }
+        if rounds >= 30 {
+            let mut names: Vec<String> =
+                bad_tets.iter().map(|c| format!("tet {c}")).collect();
+            names.extend(bad_prisms.iter().map(|j| format!("prism {j}")));
+            return Err(Error::Mesh(format!(
+                "inflate/invert: the move still fails {} cells after 30 rounds: {}",
+                bad_tets.len() + bad_prisms.len(),
+                named20(&names)
+            )));
+        }
+        // The cut: each named point's T is halved, once per round, its
+        // limit becomes Inversion, the sweep runs again, the move is
+        // redone from the undeformed points.
+        let mut hits: Vec<usize> = Vec::new();
+        for &c in &bad_tets {
+            for &v in &up.tets[c] {
+                if let Some(k) = follower(up, &th.total, alpha, v) {
+                    hits.push(k);
+                }
+            }
+        }
+        for &j in &bad_prisms {
+            hits.extend_from_slice(&up.tri_slots[j / n_layers]);
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        for &k in &hits {
+            th.total[k] *= 0.5;
+            th.limit[k] = Limit::Inversion;
+            cut[k] = true;
+        }
+        neighbour_sweep(
+            &mut adj,
+            up.spec.max_neighbour_ratio,
+            &up.normals.normal,
+            &mut th.total,
+            &mut th.limit,
+        );
+    };
+    assemble(up, th, &moved, &layer_pts, rounds, &cut)
+}
+
+/// The layer points appended, the prisms of (116.25e), and the boundary in
+/// §116.15's order: each input face (a wall triangle replaced by its
+/// bottom), then the side quads in wall-triangle, edge and layer order.
+fn assemble(
+    up: &Setup,
+    th: &Thicknesses,
+    moved: &[Point],
+    layer_pts: &[Point],
+    rounds: usize,
+    cut: &[bool],
+) -> Result<Inflated> {
+    let (n, np, n_layers) = (up.n, up.np, up.stack.n);
+    let id_of = |k: usize, j: usize| -> u32 {
+        if j >= n_layers {
+            up.normals.points[k]
+        } else {
+            (n + k * n_layers + j) as u32
+        }
+    };
+    let mut points_out: Vec<Point> = moved.to_vec();
+    points_out.extend_from_slice(layer_pts);
+    let mut layers_out: Vec<Vec<u32>> = Vec::with_capacity(np);
+    for k in 0..np {
+        let mut row = Vec::with_capacity(n_layers + 1);
+        for j in 0..=n_layers {
+            row.push(id_of(k, j));
+        }
+        layers_out.push(row);
+    }
+    let mut prisms_out: Vec<[u32; 6]> = Vec::with_capacity(up.wall_tri.len() * n_layers);
+    let mut boundary_out: Vec<(Vec<u32>, u32)> = Vec::with_capacity(up.boundary.len());
+    for (bi, &(_, p)) in up.boundary.iter().enumerate() {
+        if !up.layered[p as usize] {
+            boundary_out.push((up.boundary[bi].0.to_vec(), p));
+            continue;
+        }
+        let wi = up.wall_ix[&bi];
+        let slots = up.tri_slots[wi];
+        for k in 1..=n_layers {
+            prisms_out.push([
+                id_of(slots[0], k - 1), id_of(slots[1], k - 1), id_of(slots[2], k - 1),
+                id_of(slots[0], k), id_of(slots[1], k), id_of(slots[2], k),
+            ]);
+        }
+        boundary_out
+            .push((vec![id_of(slots[0], 0), id_of(slots[2], 0), id_of(slots[1], 0)], p));
+    }
+    for &bi in up.wall_tri.iter() {
+        let tri = up.surf.tris[bi];
+        for e in 0..3 {
+            let (a, b) = (tri[e], tri[(e + 1) % 3]);
+            let key = [a.min(b), a.max(b)];
+            let list = up.edge_faces.get(&key).map_or(0usize, Vec::len);
+            if list != 2 {
+                return Err(Error::Mesh(format!(
+                    "inflate/edges: edge ({a}, {b}) lies on {list} boundary faces, not 2"
+                )));
+            }
+            let other = *up.edge_faces[&key].iter().find(|&&x| x != bi).unwrap();
+            let q = up.boundary[other].1;
+            if up.layered[q as usize] {
+                continue;
+            }
+            let (ia, ib) = (up.slot[&a], up.slot[&b]);
+            for k in 1..=n_layers {
+                boundary_out.push((
+                    vec![
+                        id_of(ia, k - 1), id_of(ib, k - 1), id_of(ib, k), id_of(ia, k),
+                    ],
+                    q,
+                ));
+            }
+        }
+    }
+    Ok(Inflated {
+        points: points_out,
+        tets: up.tets.to_vec(),
+        prisms: prisms_out,
+        boundary: boundary_out,
+        normals: up.normals.clone(),
+        thickness: th.clone(),
+        layers: layers_out,
+        rounds,
+        n_cut: cut.iter().filter(|&&c| c).count(),
     })
 }
 
-/// TET-13a's gates, shared with tests/tetmesh_inflate.rs so the `single`
-/// build runs them too.
+/// TET-13a's and TET-13b's gates, shared with tests/tetmesh_inflate.rs so
+/// the `single` build runs them too.
 #[cfg(test)]
 mod tests {
     use crate as ofgpu;
