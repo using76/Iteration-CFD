@@ -505,6 +505,7 @@ fn a_spray_deposits_every_live_parcel_exactly_once() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
@@ -601,6 +602,7 @@ fn the_sort_holds_at_twenty_thousand_parcels_and_thirty_two_tiles() {
                 mass_flow: 1e-3,
                 parcels_per_event: 125,
                 interval: 0.0,
+                size: crate::parcels::SizeDistribution::Monodisperse,
             }
         })
         .collect();
@@ -814,6 +816,7 @@ fn shifting_every_injected_parcel_into_a_different_slot_moves_no_bit() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
 
@@ -975,6 +978,7 @@ fn the_pool_grid_geometry_does_not_move_the_deposition() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
 
@@ -1040,6 +1044,7 @@ fn the_sort_and_the_gather_capture_once_and_replay() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 15usize;
@@ -1194,6 +1199,7 @@ fn the_cost_of_the_sort_at_a_million_slots() {
         mass_flow: 1e-3,
         parcels_per_event: per_event,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
 
     // TWO occupancies of the SAME pool, because the load-bearing statement is

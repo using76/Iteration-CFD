@@ -12875,7 +12875,9 @@ or Threefry, Salmon et al. 2011 — because a stateful per-parcel generator woul
 have to be checkpointed and would make a parcel's draws depend on how many
 times it had been visited. Until that exists, Rosin-Rammler stratified sampling
 (Chan 1994) and the FM `D_v50 ~ We^(-1/3)` correlation (Yu 1986) cannot be
-sampled, and a ring is what an unsampled hollow cone is. A regular ring is also
+sampled, and a ring is what an unsampled hollow cone is. *(VAL-71 adds the
+Rosin-Rammler diameter draw on (66.9)'s bijection, §147.1; the ring and the
+correlation are unchanged.)* A regular ring is also
 exactly reproducible, which the whole of §66.9 depends on.
 
 **The weight, and why it makes the flow rate exact.** With the mass of one
@@ -54194,6 +54196,100 @@ Table II's mean free path, gas viscosity and density). The leg cannot separate t
 other differences: drop size, the surface, and how each paper defines the onset of splash. Mundo's
 own droplet-wall data are still not transcribed (§78.10), so this leg measures the criteria on
 millimetric drops on glass, which is a different experiment from the one either was fitted to.
+
+---
+
+## 147. Gate 68-C's coupled leg — a sampled spray and the pressure-coupled driver
+
+`No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §147 to VAL-71 (§147.1, a
+Rosin-Rammler injector) and VAL-72b (the coupled leg of Gate 68-C, §68.12). §68.12 names three
+things the Theobald comparison lacks: a mesh that resolves the stream, a pressure-coupled solve,
+and the Rosin-Rammler size distribution. This section adds the third first. Nothing that existed
+before it changes: an injector that does not ask for a distribution is the §66.8 injector, bit
+for bit.
+
+### 147.1 A Rosin-Rammler injector (VAL-71)
+
+**The distribution.** P. Rosin and E. Rammler, "The laws governing the fineness of powdered
+coal", *J. Inst. Fuel* 7 (1933) 29-36 (no DOI; the form below is the one every atomisation text
+restates, e.g. A. H. Lefebvre and V. G. McDonell, *Atomization and Sprays*, 2nd ed., CRC Press
+2017, ch. 3, "Rosin-Rammler"). `Q(d)` is the fraction of the total liquid VOLUME (so mass, at one
+liquid density) carried by drops of diameter less than `d`:
+
+```
+  Q(d) = 1 - exp( -(d/X)^q ),        d > 0,  X > 0,  q > 0                       (147.1)
+  MMD  = X (ln 2)^(1/q)              (Q(MMD) = 1/2, the mass median diameter)     (147.2)
+  d(u) = X ( -ln(1 - u) )^(1/q),     0 < u < 1   (the inverse of (147.1))         (147.3)
+```
+
+`X` is the characteristic diameter (Q(X) = 1 - 1/e) and `q` the spread; the injector states both,
+and §66's Chan (1994) citation names the same family.
+
+**The draw.** §66.8 refused this until a counter-based draw existed (Salmon, Moraes, Dror & Shaw,
+SC '11). The draw here is counter-based in their sense, a keyed bijection of a counter, but its
+mix is SplitMix64's finaliser of (66.9) rather than Philox: parcel `i` of `n` in an event, with
+identity `uid` from (66.9) and the injector's `seed`,
+
+```
+  h   = mix64( uid XOR (seed * 0x9E3779B97F4A7C15 mod 2^64) )
+  r   = ( floor(h / 2^11) + 1/2 ) * 2^-53                    (0 < r < 1)
+  u_i = ( i + r ) / n                                                              (147.4)
+```
+
+`mix64` is (66.9)'s three xor-shifts and two multiplications, applied to the 64-bit key alone.
+This is stratified sampling: parcel `i` lands in the `i`-th of `n` equal strata of `u`, so the
+sample's distribution function is within `1/n` of (147.1) for any `r`, and the draw only places a
+parcel inside its stratum. That is also why one uniform per parcel from a 64-bit mix is enough:
+the Kolmogorov-Smirnov row below measures the result, not the generator. Every quantity is a pure
+function of `(injector, event, index, seed)`, so the same seed gives the same bits and nothing
+depends on thread order, and the injection stays inside §66.7's captured graph.
+
+**The weight.** A distribution sampled in volume fraction gives every parcel of an event the same
+liquid mass. With `d_i` the STORED diameter (rounded once to `Scalar`),
+
+```
+  n_p,i = mdot dt stride / ( n rho_l (pi/6) d_i^3 )                               (147.5)
+```
+
+so the event's mass `sum_i n_p,i rho_l (pi/6) d_i^3` is `mdot dt stride` to round-off, exactly as
+(66.13) makes it for one diameter. (147.5) is (66.13) with `d` replaced by `d_i`. The kernel
+evaluates (147.3)-(147.5) in `double` in BOTH builds and rounds `d_i` and `n_p,i` once each to
+`Scalar`; the host precomputes `c = mdot dt stride / (n rho_l pi/6)` in f64.
+
+**Refusals, at `Parcels::new`, by name:** `X` or `q` not finite and positive; a largest draw
+`X (ln n + 54 ln 2)^(1/q)` (the `u` nearest 1 that (147.4) can produce) that is not finite in
+`Scalar`; a smallest draw `X (-ln(1 - 2^-54/n))^(1/q)` that rounds to 0 in `Scalar`, or whose
+`n_p` from (147.5) is not finite in `Scalar`. An injector without a distribution reads
+`diameter`; one with a distribution does not read it.
+
+**What must hold** (`rust/tests/parcel_sizes.rs`, both builds; the classes are docs/17 §5.1.4's):
+
+| Row | Check | Class | Tolerance |
+|---|---|---|---|
+| `rosin_rammler_closed_forms` | `Q(d(u)) = u` on a sweep, `Q(MMD) = 1/2`, (147.4)'s `r` inside (0,1) | D/A, host f64 | 1e-14 |
+| `the_sampled_cdf_is_rosin_rammler` | KS distance of the mass-weighted sample against (147.1), N = 1e5, one event and 100 events of 1000 | P | `1.36/sqrt(N)` = 4.30e-3 |
+| `the_mass_median_is_the_closed_form` | the sample's mass median against (147.2) | P | 0.5 % |
+| `the_device_draw_is_the_host_draw` | each parcel's `d_i` against the f64 host twin of (147.3)-(147.4) | R | 1e-12 (f32: 1e-5) |
+| `the_event_mass_is_exact` | (147.5)'s event mass against `mdot dt stride` | R | 1e-12 (f32: 1e-5) |
+| `same_seed_same_bits` | two pools, one seed: `d` and `n_p` bit for bit; another seed moves them | D | 0 |
+| `rosin_rammler_refusals` | each refusal above, by name | D | — |
+| `a_monodisperse_injector_is_unchanged` | without a distribution: every `d` is `diameter` and every `n_p` is (66.13) in `Scalar`, bit for bit | D | 0 |
+
+**Measured (VAL-71, RTX 5070 Ti, both builds).** X = 0.1 mm, q = 2.5, seed 7. KS
+distance 1.000e-5 (f64) and 1.004e-5 (single) for one event of 1e5, 1.795e-4 in both for 100
+events of 1000, against 4.30e-3. The mass median is 8.636276e-5 m (f64) and 8.636402e-5 m
+(single) against (147.2)'s 8.636349e-5 m, so 8.4e-6 and 6.1e-6 relative. The device draw leaves
+the host twin by 3.1e-16 (f64) and 5.9e-8 (single, the one rounding to f32). The event mass
+closes to 0 (f64) and 5.6e-11 (single). Another seed moves 20000 of 20000 diameters in f64 and
+19974 of 20000 in single, where 26 neighbouring draws round to the same f32.
+
+The default is checked by construction and by measurement: the monodisperse branch of the kernel
+is the §66.8 code unchanged, and `ofgpu-validate -sections 35-40` (§66-§68, §76-§78) gives the
+same rows bit for bit before and after (`tools/f64_identity.py rows`).
+
+**Not here.** The case blocks of §137.6 do not reach the distribution yet: it is a library field
+(`Injector::size`), which VAL-72b builds in code as §68 does. FDS's lognormal lower branch
+(Chan 1994) and the `D_v50 ~ We^(-1/3)` correlation (Yu 1986) are not built.
 
 ---
 

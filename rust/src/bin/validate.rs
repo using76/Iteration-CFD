@@ -15579,7 +15579,7 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::couple::{CouplingControls, CouplingMode, MassCoupling, ParcelCoupling};
     use ofgpu::parcels::{
         DragModel, EvaporationControls, Injector, ParcelControls, ParcelDeposition,
-        ParcelPhysics, Parcels, SeedParcel, WallAction,
+        ParcelPhysics, Parcels, SeedParcel, SizeDistribution, WallAction,
     };
     use ofgpu::momentum::{BuoyancyCoeffs, Momentum, MomentumControls};
     use ofgpu::timescheme::DdtScheme;
@@ -15900,6 +15900,7 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow,
         parcels_per_event: 2,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
 
     let coupled_range = |couple: bool| -> Result<(Scalar, Scalar)> {
@@ -18264,7 +18265,8 @@ fn dc_chain(n: usize) -> Result<HostMesh> {
 fn check_parcels(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         drag_k, parcel_uid, terminal_velocity, DragModel, EvaporationControls, Injector,
-        ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels, SeedParcel, WallAction,
+        ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels, SeedParcel, SizeDistribution,
+        WallAction,
     };
 
     let uniform = |n: [usize; 3], hi: [Scalar; 3], t: [&str; 6]| -> Result<HostMesh> {
@@ -18486,6 +18488,7 @@ fn check_parcels(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 20usize;
@@ -18602,7 +18605,7 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         parcel_uid, DepositSnapshot, DeviceScan, DragModel, EvaporationControls, Injector,
         ParcelControls, ParcelCsrSnapshot, ParcelDeposition, ParcelPhysics, ParcelSnapshot,
-        Parcels, SeedParcel, WallAction,
+        Parcels, SeedParcel, SizeDistribution, WallAction,
     };
 
     let uniform = |n: usize| -> Result<HostMesh> {
@@ -18943,6 +18946,7 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 20usize;
@@ -20014,8 +20018,8 @@ fn check_parcel_vapour_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         surface_tension, DragModel, Injector, ParcelControls, ParcelPhysics, Parcels, SeedParcel,
-        SplashCriterion, SurfaceTension, WallAction, WallImpactControls, WallRegime,
-        FLAG_DEPOSITED,
+        SizeDistribution, SplashCriterion, SurfaceTension, WallAction, WallImpactControls,
+        WallRegime, FLAG_DEPOSITED,
     };
 
     // ---- (78.2): the surface tension, against IAPWS R1-76's own table ---
@@ -20217,6 +20221,7 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 2,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let spray = |wall: WallAction| ParcelControls {
         capacity: 4096,

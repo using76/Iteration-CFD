@@ -433,6 +433,10 @@ impl JsonParcels {
                 mass_flow: j.mass_flow as Scalar,
                 parcels_per_event: j.parcels_per_event.unwrap_or(di.parcels_per_event),
                 interval: sc(j.interval, di.interval),
+                // SPEC-LIT 147.1: the case blocks of §137.6 do not reach
+                // the size distribution yet; it is a library field, and an
+                // injector read from a case is Monodisperse.
+                size: di.size,
             })
             .collect();
 
@@ -770,6 +774,7 @@ injectors
                     mass_flow: s(1e-3),
                     parcels_per_event: 4,
                     interval: s(0.01),
+                    size: crate::parcels::SizeDistribution::Monodisperse,
                 },
                 Injector { position: v(0.5, 0.5, 0.5), mass_flow: s(2e-3), ..di },
             ],
