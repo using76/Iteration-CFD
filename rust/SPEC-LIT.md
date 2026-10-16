@@ -46104,8 +46104,54 @@ OPTION on the existing model: `fvDdtEulerRho`/`fvDdtBdf2Rho` with `rho`, convect
 `mdot`, the diffusion coefficient `rho (nu + nu~)/sigma`, and the last term explicit.
 With `rho = 1` the matrix must be the kinematic one bitwise
 (`rho_one_is_bitwise_kinematic`, class D); `conservative_form_conserves_rho_nutilda_in_closed_box`
-(class A). Every other turbulence model is refused by name in `ofgpu-compressible`
+(class R; §127.1.1: its `1e-12` sits below f32 round-off, so D-F32-1's `tol_r` applies).
+Every other turbulence model is refused by name in `ofgpu-compressible`
 (docs/17 COMP decision 9). ρ-weighted k-ω SST and the k-ε family are backlog.
+
+#### 127.1.1 The conservative form as built (CMP-25)
+
+`SaConservative` carries the two fields the kinematic model does not have - `rho` at
+all three time levels plus the boundary, and `mu`, whose per-cell quotient
+`nu_c = mu/rho` is what (127.1)'s `nu` means here, per boundary face as well.
+`correct_conservative` follows `correct` step for step; the discretisation, as built:
+
+1. `ddt`: `Ddt::add_rho`, each old level carrying its OWN density, which is what makes
+   the discrete term conserve `rho nu~` rather than `nu~` (§86). `localEuler` is
+   refused there by name (§86) and that error is let through.
+2. Convection: on `flow.phi`, which the CALLER sets to the mass flux `mdot` - no code
+   difference from the kinematic operator (§86).
+3. Diffusion: the cell value `Gamma_c = (rho_c (nu_c + nu~_c f_n(nu~_c/nu_c)))/sigma`,
+   interpolated exactly as §56's kinematic coefficient is, `(w*gP + (1-w)*gN)*magSf`;
+   boundary `((rho_b (nu_b + nu~_b f_n))/sigma)*bMagSf`.
+4. Sources: `su = rho_c*su_kin - ((nu_c + nu~_c f_n)/sigma)*grad rho . grad nu~`, `sp
+   = 0`, `susp = rho_c*susp_kin`, where `su_kin` and `susp_kin` are EXACTLY what the
+   kinematic source kernel forms (56.15). The cross term is DERIVED, not quoted: the
+   product rule gives `rho div(G grad nu~) = div(rho G grad nu~) - G grad rho .
+   grad nu~` with `G = (nu + f_n nu~)/sigma`, so the remainder lands on the explicit
+   source with the diffusivity's own `f_n` carrying it onto the negative continuation;
+   for `nu~ >= 0` (`f_n = 1`) it is (127.1)'s last term verbatim. `grad rho` is
+   `fvc_grad_scalar_scheme` of `rho` under `ctrl.grad_scheme` (§3).
+5. `nu_t = nu~ f_v1(nu~/nu_c)`, exactly `0` where `nu~ < 0` (56.13), capped at §6's
+   `nut_max` - `flow.nu` is read for the cap ONLY. `mu_t = rho nu_t` is the caller's
+   product.
+6. Refused by name (`Error::Config`, the message names the setting and §127.1): a
+   `bounded` convection entry (`eps_conv().bounded`; `div(mdot)` is `-ddt(rho)` in a
+   compressible flow, §123.1/§125.1, so the correction would subtract exactly the term
+   (127.1) keeps), an attached DES length scale (§57's fixed point is defined against
+   the kinematic solve), and wrong buffer lengths.
+
+Bitwise at `rho = 1`: every kernel computes the kinematic value first and multiplies
+by `rho` afterwards, never reassociating, and `x*1` is exact - so with `rho = 1`,
+`mu = nu` and `mdot = phi` the matrix, the sources, `nu~` and `nut` equal the
+kinematic `correct` BIT FOR BIT. The four kernels are `saNutRho`, `saSourcesRho`,
+`saGammaInternalRho` and `saGammaBoundaryRho`, appended to `cuda/sa.cu` beside §56's
+six, which are untouched.
+
+| test | class | measured |
+|---|---|---|
+| `rho_one_is_bitwise_kinematic` | D | both legs bitwise over every array, in both builds |
+| `conservative_form_conserves_rho_nutilda_in_closed_box` | R `tol_r(1e-12)` | `E = 1.50e-16`, `E_ctrl = 9.41e-4` (f64); `E = 1.54e-8`, `E_ctrl = 9.41e-4` (f32) |
+| `the_conservative_form_refuses_bounded_and_local_euler` | D | both refusals name the setting and the section |
 
 ### 127.2 The analytic answer keys (CMP-06, CMP-07), host-side in `compressible/exact.rs`
 

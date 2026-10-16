@@ -1068,3 +1068,15 @@ fn the_variant_names_parse_and_an_unknown_one_does_not() {
         assert!(SaVariant::menu().contains(&v.name()));
     }
 }
+
+// ==========================================================================
+//  CMP-25 - the conservative rho-weighted form, SPEC-LIT §127.1: the same
+//  three gates the integration test `tests/sa_conservative.rs` runs,
+//  written once and included twice.
+// ==========================================================================
+
+mod conservative {
+    use crate as ofgpu;
+
+    include!("../../../tests/shared/sa_conservative_cases.rs");
+}
