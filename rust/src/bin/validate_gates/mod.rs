@@ -73,3 +73,8 @@ pub(crate) mod nozzle;
 /// SPEC-LIT §127.6, Gate CMP-OBL: the oblique shock on a 2-D compression
 /// ramp at M 2, 10 degrees, against (127.4)'s theta-beta-M (CMP-23).
 pub(crate) mod oblique;
+
+/// SPEC-LIT §127.6, Gate CMP-RING: Ringleb's transonic smooth flow on
+/// three meshes, h, h/2, h/4, the observed order of the L2 entropy error
+/// against the isentropic key (CMP-24).
+pub(crate) mod ringleb;

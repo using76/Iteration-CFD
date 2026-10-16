@@ -46609,6 +46609,63 @@ finite or not positive; `deflection_deg` not finite or not in (0, 45); and
 
 No GPL-licensed source was consulted.
 
+#### 127.5.4 The Ringleb domain (CMP-24)
+
+`src/compressible/gatemesh.rs`'s `ringleb_domain` builds Gate CMP-RING's mesh in memory, as a
+one-cell-deep `PolyMeshRaw` (`f64` points in both builds, §118.2) for `build_host_mesh`: `nt`
+columns along the streamlines and `nk` cells across them, between the streamline `k = k_max`
+(`j = 0`, the `innerWall`) and the streamline `k = k_min` (`j = nk`, the `outerWall`), the two
+ends the iso-speed lines `q = q_b` of §127.3 - the `inlet` where `y < 0` and the `outlet`
+where `y > 0`, by (127.11) - ONE cell deep in `z`, so an `nt x nk` grid of `nt nk` cells. The
+grid (127.28) — ORIGINAL, this gate's: uniform in the streamline angle theta
+(`sin theta = q/k`, §127.3) along each streamline and uniform in `k` across, so the ends
+`t = -1, +1` are exactly `q = q_b`, and every node is the answer key itself, read from
+`exact::ringleb_point` (CMP-07):
+
+```
+t_i = -1 + 2 i/nt   (i = 0..nt),        k_j = k_max - (k_max - k_min) j/nk   (j = 0..nk)
+theta_0(k) = asin(q_b/k),   theta_ij = theta_0(k_j) + (pi/2 - theta_0(k_j)) (1 - |t_i|)
+q_ij = k_j sin(theta_ij),   node(i, j) = ringleb_point(q_ij, k_j, t_i >= 0)                  (127.28)
+```
+
+With `k` DECREASING in `j` every cell is right-handed in `(x, y)` (positive area), and the
+topology, the face order and the vertex orders are exactly §127.5.3's compression ramp's:
+point index `k (nt+1)(nk+1) + j (nt+1) + i` (`k = 0` at `z = 0`, 1 at `z = depth`), cell
+`c = j nt + i`; internal faces per cell in order `+x` (if `i < nt-1`) then `+y` (if
+`j < nk-1`); the patches in order `inlet` (`patch`, `nk` faces), `outlet` (`patch`, `nk`),
+`innerWall` (`symmetry`, `nt`, the `j = 0` side), `outerWall` (`symmetry`, `nt`, the
+`j = nk` side) and `frontAndBack` (`symmetry`, `2 nt nk`, `z = 0` then `z = depth`).
+`RinglebSpec` defaults: `nt = 24`, `nk = 6`, `k_min = 0.6`, `k_max = 1.0`, `q_b = 0.5`,
+`depth = 0.1` m - the lengths are §127.3's non-dimensional ones (Euler is free of a length
+scale). Refusals name the module and the field: `nt` or `nk` 0; `k_min`, `k_max`, `q_b` or
+`depth` not finite or not positive; `k_min >= k_max`; `q_b >= k_min`, where `theta_0` would
+leave `(0, pi/2]`; a node `ringleb_point` refuses (its message passed on); a cell whose
+shoelace area in `(x, y)` is not positive (names the cell `(i, j)`).
+
+**Landed (CMP-24).** The gate's six tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (27 = 10 of §127.5.1 + 6 of §127.5.2 + 5 of
+§127.5.3 + 6). The default domain is 350 points, 144 cells, 258 internal faces, 606 faces;
+the patches run inlet/outlet/innerWall/outerWall/frontAndBack, sizes 6, 6, 24, 24, 288,
+starts 0, 6, 12, 36, 60. The three gate meshes, measured - the areas and `h` are the SAME
+DIGITS in both builds, the nodes being `f64` in both:
+
+| (nt, nk) | area | `h = sqrt(area/(nt nk))` (94.1) |
+|---|---|---|
+| (24, 6) | 6.683306249307762 | 0.2154340942226326 |
+| (48, 12) | 6.700499073855934 | 0.1078555093266496 |
+| (96, 24) | 6.704944806371485 | 0.05394564203373678 |
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `ringleb_topology_counts_and_patches` | D | the counts and the five patches above; innerWall face `i` owned by cell `i`, outerWall face `i` by cell `i + nt (nk-1)` | both builds |
+| `ringleb_nodes_lie_on_the_key` | D | every node equals `ringleb_point(k_j sin theta_ij, k_j, t_i >= 0)` bitwise; the oracle nodes `(0.85434920353164368, -1.9690267404734381)`, `(-1.8432463433712392, 0)`, `(-0.74330610572259548, -1.1583949186320603)` within `1e-13`; `node(12, 0)` at `x = -0.62864823852691393`, `y = 0` exactly; `ringleb_state` reads `q = 0.5` within `1e-10` at every end node and `k` within `1e-10` of 1.0 and 0.6 on the walls | both builds, bitwise and inside the tolerances |
+| `ringleb_volumes_close_and_sum` | R | every volume positive; per-cell closure `<= tol_r(1e-13)` of the faces' magnitudes; the volumes sum to `depth x area` within `tol_r(1e-12)` | sum f64 6.683306249307762e-1, f32 6.683306246995926e-1 |
+| `ringleb_boundary_normals` | D | inlet faces `Sf_y < 0`, outlet faces `Sf_y > 0`; innerWall faces 11, 12 `Sf_x > 0`, outerWall faces 11, 12 `Sf_x < 0`; frontAndBack's first half `Sf_z < 0`, second half `Sf_z > 0` | both builds |
+| `ringleb_three_gate_meshes` | R | the three areas and `h` within `1e-12` relative | both builds, the table above |
+| `ringleb_spec_refusals` | D | `nt` 0, `nk` 0, `k_min` 0, `k_max` NaN, `q_b` -1, `depth` 0, `k_min >= k_max` (names `k_min`), `q_b >= k_min` (names `q_b`) refused, each message `gatemesh: ringleb_domain: ...` | both builds |
+
+No GPL-licensed source was consulted.
+
 ### 127.6 The gates
 
 The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
@@ -46663,6 +46720,10 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-23 | CMP-OBL shock angle, least-squares fit of the `p`-jump locus (bar 0.5 degrees) | f64 0.1441 (39.4580), f32 0.1414 (39.4554) (field stop NOT met, §127.6.6) | CMP-23 |
 | CMP-23 | CMP-OBL post-shock `M_2`, mean over (127.27)'s region (bar 1 %) | f64 3.694e-4, f32 3.582e-4 (field stop NOT met, §127.6.6) | CMP-23 |
 | CMP-23 | CMP-OBL with §127.6.5's one outer iteration (the inputs CMP-21 runs; printed by a supervisor probe, not a row) | f64: stops on a bound at step 23 (`T = -70.48` K at ramp-wall cell 47); f32: step 25 (`T = -1.71` K, cell 48): **MISSED** (§127.6.6) | CMP-23 |
+| CMP-24 | CMP-RING observed order of the L2 entropy error over h, h/2, h/4 (96 x 24, 48 x 12, 24 x 6), `linearUpwind` momentum, `vanLeer` energy, LTS CFL 1, 10000 iterations (bar >= 1.5, f64 only) | f64 0.456 (`E` 1.0304e-2 / 1.4008e-2 / 1.9372e-2): **MISSED** (§127.6.7; no mesh's field stop met); f32 0.469, measured, not checked | CMP-24 |
+| CMP-24 | CMP-RING the three runs stop on no bound (class D) | f64 and f32: all three pass | CMP-24 |
+| CMP-24 | CMP-RING with `Gauss linear` energy (the first decision; printed by the run that measured it, not a row) | every mesh stops on a `T <= 0` bound, f64 at steps 811 / 584 / 654, f32 at 827 / 576 / 615: **MISSED** (§127.6.7) | CMP-24 |
+| CMP-24 | CMP-RING f32 error floor `E_min` on the finest mesh (printed, never checked) | f64 -, f32 4.396e-8 | CMP-24 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -47097,6 +47158,99 @@ deliberate: a missed row's note states the miss ("... against the bar ...")
 without printing a verdict word, because §69.2 fails any transcript line that
 prints one outside the registry - the verdict itself comes from the registry's
 one report, as CMP-21's does.
+
+#### 127.6.7 Gate CMP-RING as built (CMP-24)
+
+`src/bin/validate_gates/ringleb.rs`, one `ofgpu-validate` section right after Gate CMP-OBL's,
+live in both builds. **The mesh** is §127.5.4's `ringleb_domain` at three levels, (24, 6),
+(48, 12) and (96, 24) cells - `h`, `h/2`, `h/4` by (94.1), the areas and `h` in §127.5.4's
+table. **The key** is §127.3's field itself, evaluated live by `compressible::exact`
+(`ringleb_state`, CMP-07), in `f64` in BOTH builds. The exact field is isentropic with
+`p/rho^gamma = 1/gamma`, so with `rho = p/(R_s T)` the gate's error measure is §127.3's
+`p/rho^gamma gamma - 1`, written in the downloaded absolute `p` [Pa] and `T` [K] over their
+stagnation values (derived; `p_i` absolute = gauge `+ P_OP`):
+
+```
+e_i = (p_i/P0)^(1-gamma) (T_i/T0)^gamma - 1                                          (127.29)
+E = sqrt( sum_i V_i e_i^2 / sum_i V_i ),   h = sqrt( sum_i V_i / (D n_cells) )       (94.1)
+p_fit = fitted_order(h, E) over the three meshes (the least-squares slope of ln E on ln h)
+pair order (a finer, b coarser) = ln(E_b/E_a) / ln(h_b/h_a)
+```
+
+Dimensional air: `P0 = P_OP = 1e5` Pa is the stagnation pressure AND the gauge datum (the
+inlet's `p0` is `uniform 0`), `T0 = 300` K, lengths in metres ARE §127.3's non-dimensional
+lengths (Euler is free of a length scale); the gas an inviscid `PerfectGas` (`mu = 0`) about
+`PerfectGas::air(P_OP)`. **BCs**: `inlet` `p` `totalPressure` with `p0 "uniform 0"` and
+`gamma "1.4"`, `T` `totalTemperature` with `T0 "uniform 300"` and `gamma "1.4"`, `U`
+`zeroGradient`; `outlet` `p` `fixedValue` at `(p/p0)(q_b) - 1` gauge = **-16433.421986194164**
+Pa by (127.8) - the outlet is an iso-`q` line, so it is isobaric on the key - with `T` and
+`U` `zeroGradient`; `innerWall`, `outerWall` and `frontAndBack` `symmetry` on all three
+fields. **Start**, NOT from the key: `u = 0`, `T = T0`, and the gauge `p` of cell
+`c = j nt + i` equal to `((i + 0.5)/nt)` times the outlet's gauge - the ramp linearly in
+`t` toward the outlet value. **Controls** are §127.6.5's: PBiCGStab + DILU (`U` and `T` at
+`1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000), `LocalEuler` on momentum and
+energy, LTS CFL 1, `u_relax 0.7`, `t_relax 0.7`, `p_relax 0.3`, `n_outer 1`,
+`residualControl` off; `set_boundary_rules` AND `set_outlet_rules`. **The schemes**, the plan
+against the tree, decided as (mom, energy, rho) = (`linearUpwind`, `vanLeer`, `vanLeer`):
+momentum `linearUpwind` - the plan's - unlimited, its explicit correction carried by the
+momentum assembly; energy `vanLeer`, because the energy equation REFUSES `linearUpwind` by
+name (a deferred-correction scheme's face value is not a weight, and `K_f` must use the face
+weights of `T_f` so the face sum is a flux of `h_0`, (125.1)) - the tree wins over the plan's
+wording - and its one unlimited second-order choice, `Gauss linear`, was run first and stops
+every mesh on a bound in both builds (measured below), so the energy equation carries the
+limiter CMP-NOZ and CMP-OBL run (decision TAKEN, inputs only); the retarded density takes
+`vanLeer`'s limiter, its options being first-order upwind or a limiter. March in chunks of
+200 iterations until no cell's `M_i` moves by more than `1e-5` across a chunk, capped at
+10000 per mesh (CMP-OBL's cap; decision TAKEN, inputs only: with 20000 the stop is not met
+either - the supervisor's f64 run ended at a cell-M change of 6.6e-3, 7.1e-3 and 5.2e-3 per
+chunk on 96 x 24, 48 x 12 and 24 x 6, `E` 1.0327e-2 / 1.4035e-2 / 1.9489e-2, fitted order
+0.459 - and 20000 put the section past ten minutes on the shared GPU). An `Error::Refused`
+from `run` (a bound, §122.3) ends that mesh: its `E` is NaN and the notes carry the message
+and the iterations.
+
+**The row**, class P, f64 only: the observed order of the L2 entropy error `>= 1.5` across
+`h`, `h/2`, `h/4`, `err = (1.5 - p_fit).max(0.0)` with the NaN guard written out - a NaN
+`p_fit` FAILS the row, because `(1.5 - NaN).max(0.0)` is 0. Each mesh also carries a class D
+row, "the `nt x nk` run stops on no bound". Under `single` there is no order row: one note
+measures the three `E`, the fitted order, and the f32 error floor `E_min` - (127.29) on the
+key's own gauge `p` and `T` at the finest mesh's centres after a round trip through `f32`,
+the smallest `E` an f32 field can carry there, printed and never checked. The §94 study of
+the three `E` (`vv::grid_study`) is printed and is the verdict's uncertainty.
+
+**Measured: the gate misses in both builds, and no mesh's solve converges.** Every march
+runs its 10000 iterations without a bound, and none meets the field stop:
+
+| quantity | f64 | f32 |
+|---|---|---|
+| `E`, 96 x 24 / 48 x 12 / 24 x 6 | 1.0304e-2 / 1.4008e-2 / 1.9372e-2 | 1.0284e-2 / 1.4148e-2 / 1.9683e-2 |
+| L-infinity of `e`, same order | 6.357e-2 / 7.570e-2 / 7.784e-2 | 6.179e-2 / 7.780e-2 / 7.842e-2 |
+| pair orders, h/2 vs h; h/4 vs h/2 | 0.469; 0.443 | 0.477; 0.460 |
+| fitted order (bar `>= 1.5`) | **0.456: MISSED** | 0.469 (not checked) |
+| §94 study | monotone, `p = 0.537`, `phi_ext = 2.09e-3`, `U_fine = 1.027e-2` (Fs 1.25) | monotone, `p = 0.521`, `U_fine = 1.111e-2` |
+| last cell-M change per chunk, same order | 1.29e-2 / 5.25e-3 / 5.93e-3 | 9.05e-3 / 5.71e-3 / 3.42e-3 |
+| `M_max` (key 1.1180339887498948) | 1.0682 / 1.0004 / 0.8571 | 1.0675 / 1.0008 / 0.8582 |
+| `M_mean` (the solver's last line) | 0.6465 / 0.6243 / 0.5680 | 0.6466 / 0.6244 / 0.5684 |
+| printed L2 of `p/p0 - gamma p_key` | 1.981e-2 / 3.341e-2 / 7.006e-2 | 1.980e-2 / 3.342e-2 / 6.961e-2 |
+| seconds (GPU shared by three lanes) | 54.4 / 215.6 / 202.4 (section 473 s) | 180.3 / 129.8 / 154.5 (section 465 s) |
+| f32 error floor `E_min` | - | 4.396e-8 |
+
+The two builds agree to the digits the moving fields allow, so the miss is not the
+precision. **What was measured about the cause** (supervisor probes on these inputs unless
+named, none of them a row): (1) energy `Gauss linear` (the first decision) stops every mesh on
+a `T <= 0` bound, f64 at steps 811 / 584 / 654 (`T = -20.95` K at cell (43, 13), `-3.46` K at
+(9, 7), `-3.51` K at (6, 0) of 96 x 24 / 48 x 12 / 24 x 6) and f32 at steps 827 / 576 / 615
+(`-0.87`, `-0.36`, `-16.85` K), every bound cell in the accelerating `t < 0` half; (2) started
+FROM THE KEY on 24 x 6 the march leaves it - `M_mean` 0.652 and `M_max` 1.054 after the first
+chunk fall to 0.568 and 0.858 by iteration 1800, the state the rest start reaches - so the
+start is not the cause: the scheme's fixed point on these meshes is far from the key, with
+the transonic pocket gone on 24 x 6 and the coarse flow slower than the key; (3) on 24 x 6,
+five outer iterations park at a change of 3.7e-3 to 6.9e-3 per chunk from iteration 1400 to
+4000, `vanLeer` on momentum raises the residuals to about 2e-2, and LTS CFL 0.3 is still in
+its transient at 3000 iterations. The entropy error falls at about half an order in `h`,
+which no smooth second-order truncation error does; WHICH term carries it (the polygonal
+walls' vertices, the total-pressure inlet's direction, the limiters at the extremum of `q`
+on each streamline, or the coupling's parked state) is NOT measured. Every candidate cure
+changes numerics or the gate's measure and is the user's; none was built.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 

@@ -42,15 +42,28 @@
 //! [`PolyMeshRaw`] points are [`DVec3`], so the two builds' ramps are the
 //! same bits.
 //!
+//! The Ringleb domain of SPEC-LIT section 127.5.4 (CMP-24) lives beside
+//! them: [`ringleb_domain`] meshes the smooth transonic answer key of
+//! section 127.3 between the streamlines `k = k_max` (the innerWall) and
+//! `k = k_min` (the outerWall), cut by the two iso-speed ends `q = q_b`
+//! (the `inlet` at `y < 0`, the `outlet` at `y > 0`). The nodes are the
+//! key itself: uniform in the streamline angle theta along each streamline
+//! and uniform in `k` across, each node read from
+//! [`crate::compressible::exact::ringleb_point`] (127.28), one cell deep in
+//! `z`, every wall and the front/back `symmetry`. Like the ramp it is
+//! host-only and `f64` in BOTH builds: the [`PolyMeshRaw`] points are
+//! [`DVec3`], so the two builds' domains are the same bits.
+//!
 //! Provenance: LITERATURE - Thompson, Warsi & Mastin (1985), Chapters VI
 //! and VIII, read from the Internet Archive's page images of the
 //! Mississippi State HPC² copy (rust/PROVENANCE.md names the equations and
-//! the captures' sha256). The duct and the ramp are ORIGINAL
-//! (rust/PROVENANCE.md, §127.5.2 and §127.5.3). No GPL-licensed source was
-//! consulted.
+//! the captures' sha256). The duct, the ramp and the Ringleb domain are
+//! ORIGINAL (rust/PROVENANCE.md, §127.5.2, §127.5.3 and §127.5.4). No
+//! GPL-licensed source was consulted.
 
 use std::f64::consts::PI;
 
+use crate::compressible::exact::ringleb_point;
 use crate::error::{Error, Result};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::{PatchInfo, PatchKind};
@@ -1216,6 +1229,335 @@ pub fn compression_ramp(spec: &RampSpec) -> Result<Ramp> {
         patches,
     };
     Ok(ramp)
+}
+
+// ==========================================================================
+//  The Ringleb domain, SPEC-LIT §127.5.4 (CMP-24)
+// ==========================================================================
+
+/// The streamline constant of row `j`, `k_j = k_max - (k_max - k_min)
+/// j/nk` (127.28): `k_max` on the innerWall (`j = 0`), `k_min` on the
+/// outerWall (`j = nk`).
+fn ringleb_k(spec: &RinglebSpec, j: usize) -> f64 {
+    spec.k_max - (spec.k_max - spec.k_min) * (j as f64) / (spec.nk as f64)
+}
+
+/// The `t` of column `i`, `t_i = -1 + 2 i/nt` (127.28): `-1` at the inlet,
+/// `0` at the apex, `+1` at the outlet.
+fn ringleb_t(spec: &RinglebSpec, i: usize) -> f64 {
+    -1.0 + 2.0 * (i as f64) / (spec.nt as f64)
+}
+
+/// The streamline angle of node `(i, j)`, (127.28): `theta_0(k_j) =
+/// asin(q_b/k_j)` at the ends `t = -1, +1` - where `q = k sin theta_0 =
+/// q_b`, the iso-speed cut - rising linearly in `|t|` to `pi/2` at the
+/// apex `t = 0`, where `q = k`. Uniform in the angle along each
+/// streamline, which is what makes the grid this gate's own.
+fn ringleb_theta(spec: &RinglebSpec, i: usize, j: usize) -> f64 {
+    let th0 = (spec.q_b / ringleb_k(spec, j)).asin();
+    let t = ringleb_t(spec, i);
+    th0 + (PI / 2.0 - th0) * (1.0 - t.abs())
+}
+
+/// The node `(i, j)` of (127.28) as `(x, y)`: the key's own point
+/// [`ringleb_point`]` (k_j sin theta_ij, k_j, t_i >= 0)` - the answer key
+/// IS the grid. The one expression [`Ringleb::node`], [`Ringleb::area`]
+/// and [`ringleb_domain`] all read, so they agree bit for bit; the
+/// builder takes the `Err`, where it can pass the refusal on.
+fn ringleb_node(spec: &RinglebSpec, i: usize, j: usize) -> Result<(f64, f64)> {
+    let k = ringleb_k(spec, j);
+    let q = k * ringleb_theta(spec, i, j).sin();
+    let (x, y) = ringleb_point(q, k, ringleb_t(spec, i) >= 0.0)?;
+    Ok((x, y))
+}
+
+/// The Ringleb domain's controls: `nt` columns along the streamlines (the
+/// `t` of (127.28), from the inflow `t = -1` to the outflow `t = +1`),
+/// `nk` cells between the streamlines `k = k_max` (the innerWall, `j =
+/// 0`) and `k = k_min` (the outerWall, `j = nk`), the iso-speed ends at
+/// `q = q_b`, and the depth in `z`. The defaults are the coarsest gate
+/// mesh: 24 x 6 cells on `k` in `[0.6, 1.0]`, `q_b = 0.5`, `D = 0.1` m -
+/// the lengths are SPEC-LIT §127.3's non-dimensional ones, Euler being
+/// free of a length scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RinglebSpec {
+    pub nt: usize,
+    pub nk: usize,
+    pub k_min: f64,
+    pub k_max: f64,
+    pub q_b: f64,
+    pub depth: f64,
+}
+
+impl Default for RinglebSpec {
+    fn default() -> Self {
+        Self { nt: 24, nk: 6, k_min: 0.6, k_max: 1.0, q_b: 0.5, depth: 0.1 }
+    }
+}
+
+/// The built domain: the raw polyMesh and the spec it was built from.
+#[derive(Debug, Clone)]
+pub struct Ringleb {
+    pub raw: PolyMeshRaw,
+    pub spec: RinglebSpec,
+}
+
+impl Ringleb {
+    /// The streamline constant of row `j`, (127.28).
+    pub fn k_of(&self, j: usize) -> f64 {
+        ringleb_k(&self.spec, j)
+    }
+
+    /// The streamline angle of node `(i, j)`, (127.28).
+    pub fn theta_of(&self, i: usize, j: usize) -> f64 {
+        ringleb_theta(&self.spec, i, j)
+    }
+
+    /// The node `(i, j)` of (127.28). Panics only if the spec was not
+    /// checked by [`ringleb_domain`], which refuses every input
+    /// [`ringleb_point`] would.
+    pub fn node(&self, i: usize, j: usize) -> [f64; 2] {
+        let (x, y) = ringleb_node(&self.spec, i, j)
+            .expect("ringleb_domain checked the spec, so every node is on the key");
+        [x, y]
+    }
+
+    /// The domain's area in `(x, y)`: the sum of the cells' shoelace
+    /// areas, walked in cell order.
+    pub fn area(&self) -> f64 {
+        let (nt, nk) = (self.spec.nt, self.spec.nk);
+        let mut a = 0.0;
+        for j in 0..nk {
+            for i in 0..nt {
+                let c = [self.node(i, j), self.node(i + 1, j), self.node(i + 1, j + 1), self.node(i, j + 1)];
+                let s: f64 = (0..4)
+                    .map(|m| c[m][0] * c[(m + 1) % 4][1] - c[(m + 1) % 4][0] * c[m][1])
+                    .sum();
+                a += 0.5 * s;
+            }
+        }
+        a
+    }
+}
+
+/// Build the Ringleb domain of §127.5.4: `nt` columns along the
+/// streamlines and `nk` cells across them, between `k = k_max` (`j = 0`,
+/// the `innerWall`) and `k = k_min` (`j = nk`, the `outerWall`), the ends
+/// the iso-speed lines `q = q_b` (the `inlet` at `y < 0`, the `outlet` at
+/// `y > 0`), ONE cell deep in `z`, so an `nt x nk` grid of `nt nk` cells.
+/// The nodes are (127.28) - ORIGINAL, this gate's grid: uniform in the
+/// streamline angle theta along each streamline and uniform in `k` across,
+/// so the ends `t = -1, +1` are exactly `q = q_b`. With `k` DECREASING in
+/// `j` every cell is right-handed in `(x, y)`, and the topology, the face
+/// order and the vertex orders are exactly [`compression_ramp`]'s: point
+/// `k (nt+1)(nk+1) + j (nt+1) + i` (`k = 0` at `z = 0`, 1 at `z = depth`),
+/// cell `c = j nt + i`, each cell's `+x` internal face first then its
+/// `+y`, and the patches in order `inlet` (`patch`, `nk` faces), `outlet`
+/// (`patch`, `nk`), `innerWall` (`symmetry`, `nt`, the `j = 0` side),
+/// `outerWall` (`symmetry`, `nt`, the `j = nk` side) and `frontAndBack`
+/// (`symmetry`, `2 nt nk`, `z = 0` then `z = depth`).
+///
+/// Refusals, every message starting `gatemesh: ringleb_domain: ` and
+/// naming the field and its value: `nt` or `nk` 0; `k_min`, `k_max`,
+/// `q_b` or `depth` not finite or not positive; `k_min >= k_max`; and
+/// `q_b >= k_min`, where `theta_0 = asin(q_b/k)` would leave `(0, pi/2]`.
+/// A node [`ringleb_point`] refuses, or a cell whose shoelace area in
+/// `(x, y)` is not positive, refuses too, the latter naming the cell
+/// `(i, j)`.
+pub fn ringleb_domain(spec: &RinglebSpec) -> Result<Ringleb> {
+    if spec.nt == 0 || spec.nk == 0 {
+        let (name, v) = if spec.nt == 0 {
+            ("nt", spec.nt as f64)
+        } else {
+            ("nk", spec.nk as f64)
+        };
+        return Err(Error::Mesh(format!(
+            "gatemesh: ringleb_domain: {name} {v} would carry no cells"
+        )));
+    }
+    for (name, v) in
+        [("k_min", spec.k_min), ("k_max", spec.k_max), ("q_b", spec.q_b), ("depth", spec.depth)]
+    {
+        if !v.is_finite() || v <= 0.0 {
+            return Err(Error::Mesh(format!(
+                "gatemesh: ringleb_domain: {name} {v} is not finite and positive"
+            )));
+        }
+    }
+    if spec.k_min >= spec.k_max {
+        return Err(Error::Mesh(format!(
+            "gatemesh: ringleb_domain: k_min {} is not below k_max {}",
+            spec.k_min, spec.k_max
+        )));
+    }
+    if spec.q_b >= spec.k_min {
+        return Err(Error::Mesh(format!(
+            "gatemesh: ringleb_domain: q_b {} is not below k_min {}, so theta_0 = \
+             asin(q_b/k) would leave (0, pi/2]",
+            spec.q_b, spec.k_min
+        )));
+    }
+    build_ringleb(spec)
+}
+
+/// The mesh assembly, past the spec checks: the nodes on the key, the
+/// right-handedness test, then the ramp's face and patch walk.
+fn build_ringleb(spec: &RinglebSpec) -> Result<Ringleb> {
+    let (nt, nk) = (spec.nt, spec.nk);
+    let stride = (nt + 1) * (nk + 1);
+    let pid = |i: usize, j: usize, k: usize| (k * stride + j * (nt + 1) + i) as Label;
+    let mut points = Vec::with_capacity(2 * stride);
+    for z_layer in 0..2 {
+        let z = if z_layer == 0 { 0.0 } else { spec.depth };
+        for j in 0..=nk {
+            for i in 0..=nt {
+                let (x, y) = ringleb_node(spec, i, j)?;
+                points.push(DVec3::new(x, y, z));
+            }
+        }
+    }
+
+    // Every cell right-handed in (x, y): its walk (i, j) -> (i+1, j) ->
+    // (i+1, j+1) -> (i, j+1) must carry a positive shoelace area. The
+    // points are f64 in both builds, so this reads back what was built.
+    let xy = |i: usize, j: usize| {
+        let p = &points[pid(i, j, 0) as usize];
+        [p.x, p.y]
+    };
+    for j in 0..nk {
+        for i in 0..nt {
+            let c = [xy(i, j), xy(i + 1, j), xy(i + 1, j + 1), xy(i, j + 1)];
+            let s: f64 = (0..4)
+                .map(|m| c[m][0] * c[(m + 1) % 4][1] - c[(m + 1) % 4][0] * c[m][1])
+                .sum();
+            if !(0.5 * s > 0.0) {
+                return Err(Error::Mesh(format!(
+                    "gatemesh: ringleb_domain: cell ({i}, {j}) has shoelace area \
+                     {:.3e} in (x, y), not positive",
+                    0.5 * s
+                )));
+            }
+        }
+    }
+
+    // Internal faces in (owner, neighbour) order: each cell names its +x
+    // face first, then its +y. The cells are right-handed in (x, y), so
+    // the ramp's vertex orders give the outward right-hand normals
+    // unchanged.
+    let mut faces: Vec<Vec<Label>> = Vec::new();
+    let mut owner: Vec<Label> = Vec::new();
+    let mut neighbour: Vec<Label> = Vec::new();
+    for j in 0..nk {
+        for i in 0..nt {
+            if i < nt - 1 {
+                faces.push(vec![
+                    pid(i + 1, j, 0),
+                    pid(i + 1, j + 1, 0),
+                    pid(i + 1, j + 1, 1),
+                    pid(i + 1, j, 1),
+                ]);
+                owner.push((j * nt + i) as Label);
+                neighbour.push((j * nt + i + 1) as Label);
+            }
+            if j < nk - 1 {
+                faces.push(vec![
+                    pid(i, j + 1, 0),
+                    pid(i, j + 1, 1),
+                    pid(i + 1, j + 1, 1),
+                    pid(i + 1, j + 1, 0),
+                ]);
+                owner.push((j * nt + i) as Label);
+                neighbour.push(((j + 1) * nt + i) as Label);
+            }
+        }
+    }
+
+    // Boundary faces in patch order: inlet (the iso-q line at y < 0),
+    // outlet (the iso-q line at y > 0), innerWall (the k_max streamline,
+    // the j = 0 side), outerWall (the k_min streamline, the j = nk side),
+    // frontAndBack (-z then +z). Each cell's face vertices are ordered so
+    // the right-hand normal points out of the owner.
+    let mut bnd: Vec<(Label, Vec<Label>)> = Vec::new();
+    for j in 0..nk {
+        bnd.push((
+            (j * nt) as Label,
+            vec![pid(0, j, 1), pid(0, j + 1, 1), pid(0, j + 1, 0), pid(0, j, 0)],
+        ));
+    }
+    for j in 0..nk {
+        bnd.push((
+            (nt - 1 + j * nt) as Label,
+            vec![pid(nt, j, 0), pid(nt, j + 1, 0), pid(nt, j + 1, 1), pid(nt, j, 1)],
+        ));
+    }
+    for i in 0..nt {
+        bnd.push((
+            i as Label,
+            vec![pid(i + 1, 0, 0), pid(i + 1, 0, 1), pid(i, 0, 1), pid(i, 0, 0)],
+        ));
+    }
+    for i in 0..nt {
+        bnd.push((
+            (i + nt * (nk - 1)) as Label,
+            vec![
+                pid(i, nk, 0),
+                pid(i, nk, 1),
+                pid(i + 1, nk, 1),
+                pid(i + 1, nk, 0),
+            ],
+        ));
+    }
+    for j in 0..nk {
+        for i in 0..nt {
+            bnd.push((
+                (j * nt + i) as Label,
+                vec![
+                    pid(i, j, 0),
+                    pid(i, j + 1, 0),
+                    pid(i + 1, j + 1, 0),
+                    pid(i + 1, j, 0),
+                ],
+            ));
+        }
+    }
+    for j in 0..nk {
+        for i in 0..nt {
+            bnd.push((
+                (j * nt + i) as Label,
+                vec![
+                    pid(i, j, 1),
+                    pid(i + 1, j, 1),
+                    pid(i + 1, j + 1, 1),
+                    pid(i, j + 1, 1),
+                ],
+            ));
+        }
+    }
+    let patches = vec![
+        PatchInfo { name: "inlet".to_string(), type_name: "patch".to_string(),
+            kind: PatchKind::Generic, start: 0, size: nk, nbr_patch: None },
+        PatchInfo { name: "outlet".to_string(), type_name: "patch".to_string(),
+            kind: PatchKind::Generic, start: nk, size: nk, nbr_patch: None },
+        PatchInfo { name: "innerWall".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * nk, size: nt, nbr_patch: None },
+        PatchInfo { name: "outerWall".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * nk + nt, size: nt, nbr_patch: None },
+        PatchInfo { name: "frontAndBack".to_string(), type_name: "symmetry".to_string(),
+            kind: PatchKind::Symmetry, start: 2 * nk + 2 * nt, size: 2 * nt * nk,
+            nbr_patch: None },
+    ];
+    let mut faces_all: Vec<Vec<Label>> = faces;
+    let mut owner_all: Vec<Label> = owner;
+    for (c, verts) in &bnd {
+        faces_all.push(verts.clone());
+        owner_all.push(*c);
+    }
+    debug_assert_eq!(faces_all.len(), owner_all.len());
+    debug_assert_eq!(neighbour.len() + bnd.len(), owner_all.len());
+    Ok(Ringleb {
+        raw: PolyMeshRaw { points, faces: faces_all, owner: owner_all, neighbour, patches },
+        spec: spec.clone(),
+    })
 }
 
 #[cfg(test)]

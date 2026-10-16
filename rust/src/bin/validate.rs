@@ -3952,6 +3952,17 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_oblique", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-RING: Ringleb's transonic smooth flow on
+    // the three meshes h, h/2, h/4 of src/compressible/gatemesh.rs
+    // (SPEC-LIT 127.5.4), the observed order of the L2 entropy error
+    // against the isentropic key (127.8)-(127.11a), live, in
+    // src/bin/validate_gates/ringleb.rs (CMP-24).
+    if c.section("Gate CMP-RING: Ringleb's transonic flow on three meshes, h, h/2, h/4 (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::ringleb::GATE);
+    let r = validate_gates::ringleb::check_ringleb(c, &gpu);
+    c.ran("check_ringleb", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
