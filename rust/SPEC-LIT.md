@@ -45526,9 +45526,11 @@ error. Under `-permissive` the scheme runs without the prefix and says so.
 `constant/dynamicMeshDict` other than `staticFvMesh` (motion); JSONC `sources` and the files
 `fvOptions`, `fvModels` and `fvConstraints` under `constant/` or `system/` (sources); every
 turbulence model but laminar; `physics.buoyancy` `boussinesq` (this solver carries the full
-density); a non-Newtonian rheology; a case with no gas. *DESIGN* (CMP-15): until CMP-25 builds
-(127.1), Spalart-Allmaras is refused too, with a message that names CMP-25, because the solver
-has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A boundary
+density); a non-Newtonian rheology; a case with no gas. *As built* (CMP-25): Spalart-Allmaras
+runs here in its conservative form (§127.1), on the OpenFOAM route and with the coupling of
+§127.1.2; a JSONC case naming it is refused with a message that names `physics.turbulence`,
+`SpalartAllmaras` and `nuTilda`, because the JSONC format has no nuTilda initial field to state
+the model's unknown with. A boundary
 condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
 `mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
 as set up is the whole condition (§126.7). Every other type is refused with the field, the
@@ -45560,7 +45562,7 @@ warning (`energy::refuse_above_low_mach`, §93.6) and its banner line now name
 |---|---|---|
 | `every_knob_changes_the_run` | D | The 50-cell tube below, three steps. Each of 20 settings changes the written bytes: `div(phi,U)`, `div(phi,T)`, `div(phid,p)`, `grad` (with a limited scheme that reads it), `relaxation` `U`, `T` and `p` (with two outer correctors, so a non-final iteration is relaxed), `correctors`, `outerCorrectors`, the `p`, `U` and `T` solver tolerances, `ddt` Euler to backward, `deltaT`, `gamma`, `W`, `Pr`, the Sutherland `As`, `pOperating` and `gravity`. `nonOrthogonalCorrectors` is §13.4.1's one admissible exception (the tube is orthogonal, so the correction it repeats is zero) and is asserted on the controls |
 | `the_orthogonal_settings_reach_the_controls` | D | `nonOrthogonalCorrectors 2` reaches `pressure.n_non_orth_corr`; `-iters 7` overrides the case's 3 steps. On the OpenFOAM cavity made steady with `localEuler`, `SIMPLE/residualControl { p 1e-3; U 1e-4; h 1e-5; }` reaches the three bars and `maxCo 5` reaches `lts.cfl` (a steady run's stop and its pseudo step are not shown by three transient steps) |
-| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming CMP-25, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
+| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming nuTilda, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
 | `a_fifty_cell_tube_runs_in_under_thirty_seconds` | P | The smoke run: 1 m tube, 50 x 1 x 1 cells, air at 300 K and 50 m/s, a 320 K inlet, a fixed `p = 0` outlet, symmetry sides, Euler at `1e-5` s for 30 steps. It runs in under 30 s with no bounds violation, `M_max` in (0.14, 0.15) (50/347.2 = 0.144), and the five fields written |
 | `an_openfoam_case_runs_and_writes_the_five_fields` | P | A blockgen 8 x 8 x 1 cavity with `thermophysicalProperties` (§122.6's air), laminar, Euler at `1e-3` s for 5 steps, writes the five fields |
 
@@ -46152,6 +46154,55 @@ six, which are untouched.
 | `rho_one_is_bitwise_kinematic` | D | both legs bitwise over every array, in both builds |
 | `conservative_form_conserves_rho_nutilda_in_closed_box` | R `tol_r(1e-12)` | `E = 1.50e-16`, `E_ctrl = 9.41e-4` (f64); `E = 1.54e-8`, `E_ctrl = 9.41e-4` (f32) |
 | `the_conservative_form_refuses_bounded_and_local_euler` | D | both refusals name the setting and the section |
+
+#### 127.1.2 In the compressible solver (CMP-25)
+
+`Compressible` (§125.6) takes the model through `set_turbulence`, called BEFORE
+`initialise`, and the coupling is (122.8): at the top of every outer iteration, right
+after the transport laws, the laminar `mu` is copied aside (`mu_lam`, cells AND
+boundary faces), `mu_t = rho nu_t` is formed from the PREVIOUS correction's `nut`
+(the standard segregated lag), `mu_eff = mu + mu_t`, and then `mu_t *= c_p/Pr_t` and
+`kappa_eff = kappa + mu_t`. `correct_conservative` reads `mu_lam`, never `s.mu`, so
+(127.1)'s per-cell `nu_c = mu/rho` stays the laminar quotient; `flow.phi` is the mass
+flux `mdot` the loop already carries, and `flow.nu` is `nu_ref` - the largest cell
+`mu/rho`, downloaded ONCE at `initialise` from the still-laminar state. *DESIGN*:
+§6's `nut` cap is inactive on any converged field, so its reference is formed once
+and never refreshed.
+
+*DESIGN* - SA is corrected ONCE PER STEP: every outer iteration of a steady run, the
+final one of a transient run. A transient step's non-final outer iterations are
+relaxed predictors, and the half-converged nu~ they would feed `mu_t` is worse than
+the one step of lag the segregated coupling already carries. A steady run needs the
+model on `ddt` `steadyState` and takes the nuTilda relaxation instead (`localEuler`
+on the model itself is §86.7's refusal, let through); a transient one needs the SAME
+scheme and `delta_t` the momentum equation carries - one time step advances every
+equation (§125.3) - and the disagreement is refused by name, in `Error::Config`,
+naming `ddt` or `delta_t` and §127.1. Nothing allocates in `step`: `mu_lam` and the
+`mu_t` scratch are allocated in `set_turbulence`. A laminar run is untouched: the
+report's new field stays `None` and `line()` prints nothing extra, so the output and
+the arithmetic are byte for byte what they were.
+
+The driver (§125.8) accepts RAS `SpalartAllmaras` with no LES/DES on the OpenFOAM
+route only. `0/nuTilda` and `0/nut` are required, `nuTilda`'s patch types go through
+the same static check as `U`'s, `p`'s and `T`'s (§126.7), and `nut`'s own patch types
+must be one of `calculated`, `fixedValue`, `zeroGradient`, `nutLowReWallFunction`,
+`empty`, `symmetry`, `symmetryPlane`, `wedge` and `cyclic` - SA has no `k`, so a
+k-based wall function would be a wall treatment with no model behind it (§56.7), and
+the refusal names `nut patch <name>` and the type. A JSONC case naming SA is refused
+with a message that names `physics.turbulence`, `SpalartAllmaras` and `nuTilda`: the
+JSONC format has no nuTilda initial field to state the model's unknown with
+(`LoweredCase` carries none). The model's convection entry is `div(phi,nuTilda)`
+through the driver's `bounded` refusal (§123.1, §125.1). The written times gain
+`nuTilda` and `nut` when a model is attached - the case's own patch types, dimensions
+`[0 2 -1 0 0 0 0]` - and the report line gains ` nuTilda <initial residual>` on the
+iterations that corrected the model.
+
+| test | class | measured |
+|---|---|---|
+| `sa_with_zero_nu_tilda_is_laminar_bitwise` | D | 30 buffers bitwise between the laminar run and the nu~ = 0 run over five Euler steps, `nut` exactly 0 in all 60 cells, u moved; both builds |
+| `sa_eddy_viscosity_raises_mu_eff_and_changes_the_flow` | D | every cell's `mu_eff` strictly above its laminar `mu` after five steps, largest `(mu_eff - mu)/mu` `1.787e1` (f64), `nut` finite and positive, u off the laminar run; both builds |
+| `set_turbulence_refuses_a_ddt_that_disagrees` | D | both refusals name the setting and §127.1 |
+| `an_openfoam_sa_cavity_runs_and_writes_nu_tilda` | P | the 8 x 8 cavity, five Euler steps at `1e-3` s: no bounds violation, `nuTilda` and `nut` written finite with `nut >= 0`; the `nutkWallFunction` case refused naming `nut patch` |
 
 ### 127.2 The analytic answer keys (CMP-06, CMP-07), host-side in `compressible/exact.rs`
 

@@ -15,8 +15,11 @@
 //! `nCorrectors >= 1`) and steady SIMPLE in one loop with two switches, the
 //! energy equation inside the outer loop, the old time levels refreshed once
 //! per step, the bounds of §122.3 counted (never clipped), and the mass
-//! imbalance and the `h_0` residual reported on every outer iteration. Its
-//! submodules:
+//! imbalance and the `h_0` residual reported on every outer iteration.
+//! [`Compressible::set_turbulence`] attaches Spalart-Allmaras in its
+//! conservative form (§127.1, §127.1.2): (122.8)'s `mu_eff` and `kappa_eff`
+//! are formed at the top of every outer iteration, and `nu~` is corrected
+//! once per step. Its submodules:
 //!
 //! - [`thermo`] (§122.1-§122.3, §122.5), the perfect-gas state, CMP-08;
 //! - [`momentum`] (§123), momentum in conservative form, CMP-09;
@@ -71,8 +74,10 @@ use crate::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
 use crate::fv::{self, FvKernels};
 use crate::mesh::GpuMesh;
+use crate::models::spalart_allmaras::{SaConservative, SpalartAllmaras};
 use crate::solver::SolverPerformance;
 use crate::timescheme::DdtScheme;
+use crate::turbulence::FlowState;
 use crate::{Label, Scalar};
 
 use energy::{EnergyInputs, RhoEnergy, RhoEnergyControls};
@@ -253,6 +258,12 @@ pub struct OuterReport {
     /// (93.7): `max_P M_P` and `sum_P M_P V_P / sum_P V_P`.
     pub mach_max: f64,
     pub mach_mean: f64,
+    /// §127.1.2: the nu~ solve, `Some` only when Spalart-Allmaras is
+    /// attached and this outer iteration corrected it - every outer
+    /// iteration of a steady run, the final one of a transient one. A
+    /// laminar run leaves it `None`, and nothing else about the report or
+    /// the arithmetic changes.
+    pub nu_tilda: Option<SolverPerformance>,
 }
 
 impl OuterReport {
@@ -274,6 +285,9 @@ impl OuterReport {
             self.mach_max,
             self.mach_mean,
         );
+        if let Some(nt) = &self.nu_tilda {
+            s.push_str(&format!(" nuTilda {:.3e}", nt.initial_residual));
+        }
         if self.bounds.total() > 0 {
             s.push_str(&format!(
                 " BOUNDS {} (T {}, p_abs {}, rho {})",
@@ -361,6 +375,19 @@ pub struct Compressible<'m> {
     farfields: Option<bc::CompressibleFarfields>,
     /// SPEC-LIT §126.11: the free-stream family, if any.
     freestreams: Option<bc::CompressibleFreestreams>,
+    /// SPEC-LIT §127.1.2: Spalart-Allmaras in its conservative form, if the
+    /// run attached one through [`Self::set_turbulence`].
+    sa: Option<SpalartAllmaras<'m>>,
+    /// The laminar `mu` copied at the top of every outer iteration - what
+    /// (127.1)'s per-cell `nu_c = mu/rho` reads, `s.mu` carrying `mu_eff`.
+    mu_lam: Option<GpuScalarField>,
+    /// Scratch for `mu_t = rho nu_t`, reused as `c_p mu_t/Pr_t` for the
+    /// conduction. Allocated once in [`Self::set_turbulence`].
+    mu_t: Option<GpuScalarField>,
+    /// The largest cell `mu/rho` at [`Self::initialise`] - §6's `nut` cap
+    /// reference. DESIGN: the cap is inactive on any converged field, so the
+    /// reference is formed once and never refreshed.
+    nu_ref: Scalar,
 }
 
 impl<'m> Compressible<'m> {
@@ -491,6 +518,10 @@ impl<'m> Compressible<'m> {
             outlets: None,
             farfields: None,
             freestreams: None,
+            sa: None,
+            mu_lam: None,
+            mu_t: None,
+            nu_ref: 0.0,
         })
     }
 
@@ -583,6 +614,75 @@ impl<'m> Compressible<'m> {
     /// The attached free-stream rules (empty when none).
     pub fn freestream_rules(&self) -> &[bc::FreestreamRule] {
         self.freestreams.as_ref().map_or(&[], |f| f.rules())
+    }
+
+    /// SPEC-LIT §127.1.2: attach Spalart-Allmaras in its conservative form,
+    /// before [`Self::initialise`]. From here on the run carries a laminar
+    /// copy of `mu` and a `mu_t` scratch (cells AND boundary faces) - both
+    /// allocated HERE, so [`Self::step`] allocates nothing.
+    ///
+    /// Refused by name ([`Error::Config`]) when the model's time controls
+    /// disagree with the flow's: a steady run (`steadyState` or `localEuler`)
+    /// needs the model on `ddt` `steadyState`, a transient one the SAME
+    /// scheme and `delta_t` the momentum equation carries - one time step
+    /// advances every equation (§125.3). `localEuler` on the model itself is
+    /// refused by [`crate::timescheme::Ddt::add_rho`] (§86.7) at solve time.
+    pub fn set_turbulence(&mut self, gpu: &Gpu, sa: SpalartAllmaras<'m>) -> Result<()> {
+        let who = "Compressible::set_turbulence";
+        let mc = &self.ctrl.momentum;
+        let (sa_ddt, sa_dt) = (sa.core().ctrl.ddt, sa.core().ctrl.delta_t);
+        if self.steady {
+            if sa_ddt != DdtScheme::SteadyState {
+                return Err(Error::Config(format!(
+                    "{who}: the flow is steady ({ddt:?}) and SpalartAllmaras names ddt \
+                     {sa_ddt:?}; a steady SIMPLE run has no time step to share, so the \
+                     model advances on steadyState and takes the nuTilda relaxation \
+                     instead (SPEC-LIT §127.1)",
+                    ddt = mc.ddt
+                )));
+            }
+        } else {
+            if sa_ddt != mc.ddt {
+                return Err(Error::Config(format!(
+                    "{who}: the momentum equation advances ddt {ddt:?} and SpalartAllmaras \
+                     names ddt {sa_ddt:?}; one time step advances every equation \
+                     (SPEC-LIT §125.3, §127.1)",
+                    ddt = mc.ddt
+                )));
+            }
+            if sa_dt != mc.delta_t {
+                return Err(Error::Config(format!(
+                    "{who}: the momentum equation advances delta_t {} and SpalartAllmaras \
+                     names delta_t {}; one delta_t advances every equation \
+                     (SPEC-LIT §125.3, §127.1)",
+                    w64(mc.delta_t),
+                    w64(sa_dt)
+                )));
+            }
+        }
+        self.mu_lam = Some(GpuScalarField::zeros(gpu, self.m, "mu_lam")?);
+        self.mu_t = Some(GpuScalarField::zeros(gpu, self.m, "mu_t")?);
+        self.sa = Some(sa);
+        Ok(())
+    }
+
+    /// The attached model, if any.
+    pub fn turbulence(&self) -> Option<&SpalartAllmaras<'m>> {
+        self.sa.as_ref()
+    }
+
+    /// The attached model, mutably - [`Self::set_turbulence`] has run for
+    /// this to be `Some`, and the caller seed its fields before
+    /// [`Self::initialise`].
+    pub fn turbulence_mut(&mut self) -> Option<&mut SpalartAllmaras<'m>> {
+        self.sa.as_mut()
+    }
+
+    /// The laminar dynamic viscosity copied at the top of every outer
+    /// iteration - `s.mu` carries `mu_eff` ((122.8)) once
+    /// [`Self::set_turbulence`] has attached a model.
+    pub fn laminar_viscosity(&self) -> Option<&GpuScalarField> {
+        self.mu_lam.as_ref()
     }
 
     /// Whether any boundary rule of §126.8-§126.11 is attached.
@@ -738,7 +838,91 @@ impl<'m> Compressible<'m> {
         for f in [&mut s.rho, &mut s.p, &mut s.t] {
             field_ops::seed_old_time(gpu, &self.fldk, f)?;
         }
-        field_ops::seed_old_time_vector(gpu, &self.fldk, &mut s.u)
+        field_ops::seed_old_time_vector(gpu, &self.fldk, &mut s.u)?;
+
+        // §127.1.2: the model starts from the laminar state (`s.mu` is still
+        // laminar here). `nu_ref` is the largest cell `mu/rho`, on the host,
+        // once - DESIGN: §6's cap is inactive on any converged field, so its
+        // reference is formed once and never refreshed.
+        if let Some(sa) = &mut self.sa {
+            let mu_h = gpu.download(&s.mu.f)?;
+            let rho_h = gpu.download(&s.rho.f)?;
+            self.nu_ref =
+                (0..m.n_cells).map(|i| w64(mu_h[i]) / w64(rho_h[i])).fold(0.0_f64, f64::max) as Scalar;
+            let flow = FlowState::new(&s.u, &s.mdot, self.nu_ref);
+            let cons = SaConservative { rho: &s.rho, mu: &s.mu };
+            sa.initialise(gpu, &flow)?;
+            sa.correct_nut_conservative(gpu, &flow, &cons)?;
+        }
+        Ok(())
+    }
+
+    // ---- §127.1.2's coupling ----------------------------------------------
+
+    /// (122.8), the top of every outer iteration: `mu_t = rho nu_t` from the
+    /// PREVIOUS correction's `nut` (the standard segregated lag), then
+    /// `mu_eff = mu + mu_t` and `kappa_eff = kappa + c_p mu_t/Pr_t`. The
+    /// laminar `mu` is kept for (127.1)'s `nu_c = mu/rho`. Nothing without a
+    /// model.
+    fn apply_eddy_viscosity(&mut self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
+        let Some(sa) = self.sa.as_ref() else { return Ok(()) };
+        let (Some(mu_lam), Some(mu_t)) = (&mut self.mu_lam, &mut self.mu_t) else {
+            return Err(refuse(
+                "Compressible::step",
+                "SpalartAllmaras is attached without its mu buffers; \
+                 set_turbulence allocates them"
+                    .to_string(),
+            ));
+        };
+        let (n, nbf) = (self.m.n_cells, self.m.n_boundary_faces);
+        // mu's laminar copy, cells and boundary faces.
+        field_ops::copy_field(gpu, &self.fldk, &mut mu_lam.f, &s.mu.f, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut mu_lam.bf, &s.mu.bf, nbf)?;
+        // mu_t = rho nu_t, the mul kernel, cells with rho.f and nut.f,
+        // boundary faces with rho.bf and nut.bf.
+        Self::launch_mul(gpu, &self.mul, &mut mu_t.f, &s.rho.f, &sa.nut().f, n)?;
+        Self::launch_mul(gpu, &self.mul, &mut mu_t.bf, &s.rho.bf, &sa.nut().bf, nbf)?;
+        // mu_eff = mu + mu_t.
+        field_ops::add_field(gpu, &self.fldk, &mut s.mu.f, &mu_t.f, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut s.mu.bf, &mu_t.bf, nbf)?;
+        // kappa_eff = kappa + c_p mu_t/Pr_t.
+        let cp_prt = (self.ctrl.gas.cp() / self.ctrl.gas.pr_t) as Scalar;
+        field_ops::scale_field(gpu, &self.fldk, &mut mu_t.f, cp_prt, n)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut mu_t.bf, cp_prt, nbf)?;
+        field_ops::add_field(gpu, &self.fldk, &mut s.kappa.f, &mu_t.f, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut s.kappa.bf, &mu_t.bf, nbf)
+    }
+
+    /// Step 7: the model is corrected ONCE PER STEP - every outer iteration
+    /// of a steady run, the final one of a transient run. DESIGN: a transient
+    /// step's non-final outer iterations are relaxed predictors, and the
+    /// half-converged nu~ they would feed `mu_t` is worse than the one step
+    /// of lag the segregated coupling already carries. `cons.mu` is the
+    /// laminar copy, so (127.1)'s `nu_c` is never the eddy viscosity.
+    fn correct_turbulence(
+        &mut self,
+        gpu: &Gpu,
+        s: &mut CompressibleState,
+        steady: bool,
+        is_final: bool,
+    ) -> Result<Option<SolverPerformance>> {
+        let Compressible { sa, mu_lam, nu_ref, .. } = self;
+        let Some(sa) = sa else { return Ok(None) };
+        if !(steady || is_final) {
+            return Ok(None);
+        }
+        let Some(mu_lam) = mu_lam.as_ref() else {
+            return Err(refuse(
+                "Compressible::step",
+                "SpalartAllmaras is attached without its laminar mu; set_turbulence \
+                 allocates it"
+                    .to_string(),
+            ));
+        };
+        let flow = FlowState::new(&s.u, &s.mdot, *nu_ref);
+        let cons = SaConservative { rho: &s.rho, mu: mu_lam };
+        let (perf, _) = sa.correct_conservative(gpu, &flow, &cons)?;
+        Ok(Some(perf))
     }
 
     // ---- the loop ---------------------------------------------------------
@@ -784,8 +968,11 @@ impl<'m> Compressible<'m> {
             // streams, inlets, far-fields and outlets from the latest state.
             self.apply_boundary_rules(gpu, s, true)?;
 
-            // 1. mu and kappa from T (psi follows at step 4).
+            // 1. mu and kappa from T (psi follows at step 4); with SA
+            // attached (§127.1.2) they become the effective ones, (122.8),
+            // from the previous correction's nut.
             self.transport(gpu, s)?;
+            self.apply_eddy_viscosity(gpu, s)?;
 
             // 2. The momentum predictor, relaxed unless final.
             self.mom.set_u_relax(if is_final { 1.0 } else { self.ctrl.momentum.u_relax })?;
@@ -840,7 +1027,10 @@ impl<'m> Compressible<'m> {
                 self.gas_state(gpu, s)?;
             }
 
-            // 7. Turbulence: none yet (SA is CMP-14); the gas is laminar.
+            // 7. Turbulence: Spalart-Allmaras in its conservative form
+            // (SPEC-LIT §127.1.2), corrected once per step - every outer
+            // iteration of a steady run, the final one of a transient one.
+            let nu_tilda = self.correct_turbulence(gpu, s, steady, is_final)?;
 
             // 8. Bounds, residuals, the report.
             let (bounds, mach_max, mach_mean) = self.bounds_and_mach(gpu, s)?;
@@ -856,6 +1046,7 @@ impl<'m> Compressible<'m> {
                 bounds,
                 mach_max,
                 mach_mean,
+                nu_tilda,
             };
             if self.ctrl.log {
                 println!("{}", rep.line());
