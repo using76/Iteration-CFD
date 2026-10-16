@@ -103,6 +103,30 @@ use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
+//  Where one component's system is solved - SPEC-LIT 139.3 (PAR-10b)
+// ==========================================================================
+
+/// Where one velocity component's system is solved.
+///
+/// `None` (the default, and every existing path) is [`solver::solve`], the
+/// call this module has always made, launch for launch. `Some` routes the
+/// solve elsewhere: a distributed run's
+/// [`SpmdMomentumRoute`](crate::distflow::SpmdMomentumRoute) puts the SPMD
+/// Krylov of SPEC-LIT 138.5/138.6 in its place, so the residual norms are
+/// the world's and every rank reports the same bits, instead of this rank's
+/// alone.
+pub trait ComponentRoute {
+    fn solve_component(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        ctrl: &SolverControls,
+    ) -> Result<SolverPerformance>;
+}
+
+// ==========================================================================
 //  Buoyancy - SPEC-LIT §9
 // ==========================================================================
 
@@ -828,6 +852,11 @@ pub struct Momentum<'m> {
     a: GpuLduMatrix,
     ws: SolverWorkspace,
 
+    /// SPEC-LIT 139.3 (PAR-10b): where the three component systems are
+    /// solved. `None` - the default from [`Self::new`], and every path the
+    /// crate shipped before it - is [`solver::solve`], launch for launch.
+    route: Option<Box<dyn ComponentRoute + 'm>>,
+
     /// The scalar view of one velocity component; refilled per component.
     uc: GpuScalarField,
 
@@ -980,6 +1009,10 @@ impl<'m> Momentum<'m> {
             a: GpuLduMatrix::new(gpu, m)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
 
+            // SPEC-LIT 139.3 (PAR-10b): unrouted. Nothing existing sets a
+            // route, so nothing existing changes what it launches.
+            route: None,
+
             uc: GpuScalarField::zeros(gpu, m, "Ucmpt")?,
 
             su: gpu.zeros(one(n_local))?,
@@ -1114,6 +1147,19 @@ impl<'m> Momentum<'m> {
     /// `lower` are the ones all three components were solved with.
     pub fn matrix(&self) -> &GpuLduMatrix {
         &self.a
+    }
+
+    /// SPEC-LIT 139.3 (PAR-10b): set where the three component systems are
+    /// solved. `None` restores [`solver::solve`], launch for launch the call
+    /// this module always made.
+    pub fn set_route(&mut self, route: Option<Box<dyn ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// True when a route is set - the three component solves go through
+    /// [`ComponentRoute::solve_component`], not [`solver::solve`].
+    pub fn has_route(&self) -> bool {
+        self.route.is_some()
     }
 
     /// `rAU = V/diag`, or SIMPLEC's `rAtU`.
@@ -1711,17 +1757,16 @@ impl<'m> Momentum<'m> {
                 }
             }
 
-            let Self { solk, uc, a, ws, ctrl, .. } = self;
-            // SPEC-LIT 13.4: `solvers/U/solver`, honoured.
-            perf[c] = solver::solve(
-                gpu,
-                solk,
-                &mut uc.f,
-                a,
-                m,
-                ws,
-                &ctrl.u_solver,
-            )?;
+            let Self { solk, uc, a, ws, ctrl, route, .. } = self;
+            // SPEC-LIT 13.4: `solvers/U/solver`, honoured. SPEC-LIT 139.3
+            // (PAR-10b): `route` is `None` on every path the crate shipped
+            // before it, which keeps the call below launch for launch the
+            // same; `Some` hands the component system to the route instead -
+            // a part's solve, whose residual norms must be the world's.
+            perf[c] = match route {
+                Some(r) => r.solve_component(gpu, &mut uc.f, a, m, &ctrl.u_solver)?,
+                None => solver::solve(gpu, solk, &mut uc.f, a, m, ws, &ctrl.u_solver)?,
+            };
 
             {
                 let Self { mk, uc, .. } = self;

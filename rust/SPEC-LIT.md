@@ -51094,7 +51094,7 @@ contract (ORIGINAL). It has no external input.
 §71 cuts the mesh and §73 solves a linear system across the cut. §138 moves
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
-(§139.2, PAR-10a), the Krylov routing (PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
+(§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
 
 This section defines no equation, so it carries no equation label.
 
@@ -51303,8 +51303,166 @@ Green-Gauss sum nearly cancels - a smooth field's gradient is small next to
 its face fluxes - a few reordered additions show up as many ulps of the
 result. The conditioning check is what shows the miss is the order of
 rounding and not a wrong value. PAR-13a makes the gradients bitwise. A
-part's p and momentum solves do not go through the SPMD Krylov solvers yet:
-that is PAR-10b. No decomposed SIMPLE is gated here: that is PAR-10c.
+part's p and momentum solves go through the SPMD Krylov solvers in §139.3
+(PAR-10b). No decomposed SIMPLE is gated here: that is PAR-10c.
+
+### 139.3 The Krylov routing (PAR-10b)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** A part's linear solves still went through the serial `solver::solve`,
+whose every residual norm is THIS RANK'S alone: `sum|b - A·psi|` summed over
+the part's own cells, `normFactor` divided by the part's cell count. Two
+ranks of one SIMPLE iteration would then disagree about whether the equation
+converged, and a rank could declare convergence while the world's residual
+was far from met. §138.5/§138.6's `spmd_solve` reports the world's norms -
+each one a cross-part reduction, the same bits on every rank. This
+subsection routes a part's pressure and momentum solves through it.
+
+**The one-part system, part-assembled.** `DistSystem::for_rank(gpu, comm,
+dec)` builds part `comm.rank()` of `dec` as ONE part: the mesh uploaded with
+`GpuMesh::upload_with_halo` (§139.1), a zero `GpuLduMatrix::new` of that
+mesh, `n = [part.mesh.n_cells]`, `n_local = [part.n_local()]`,
+`part = Some(rank)`. It refuses (`distsolve: `) a world whose rank count
+differs from the decomposition's part count, naming both numbers, before
+any upload. `DistSystem::load_matrix(gpu, halo, comm, a)` then copies a
+matrix ASSEMBLED ON THE PART into that shell - diag, source, is_fixed and
+fixed_value over the owned cells, upper and lower over the internal faces,
+internal_coeffs and boundary_coeffs over the boundary faces, one
+`memcpy_dtod` each - and fills the halo of `is_fixed` (FIRST) and
+`fixed_value` (second) through `halo.label`/`halo.scalar`, exactly as
+`split` and `split_one` fill them. Only the two constraint arrays cross the
+halo because they are the only matrix state a kernel reads at a halo index
+(`lduSetValues` at a coupled face's neighbour); every other array is read
+only at owned indices, and the halo slots of `diag` and `source` are never
+read - `split_one`'s comment says why - so they stay as they are. The
+matrix is assembled on the part, never split from a whole: the flow path
+has no whole-mesh matrix to split. `load_matrix` refuses, in order and
+BEFORE any copy or exchange: the system is not a one-part `for_rank`
+system; `a.n_cells` differs (both counts named); `n_internal_faces` or
+`n_boundary_faces` differs (both named); any source buffer is shorter than
+what would be copied (the array and both lengths named).
+
+**The three handles.** `SpmdKrylov` holds one rank's `comm`, `SpmdHalo`,
+`DistSystem`, `SpmdWorkspace` and `SolverKernels`, plus the colouring flag
+and the solve count. One `run` is, in order: refuse GAMG as solver or
+preconditioner - a part's flow solve routes PCG and PBiCGStab only, the
+distributed cycle of §141.11 not being attached on the flow path; refuse a
+mesh that is not the part's and a `psi` shorter than `n_local` (both
+counts, `upload_with_halo` named); build the part-local colouring the first
+DIC/DILU solve needs (a device pass, once, not a collective);
+`load_matrix`; `spmd_solve`; count and remember. The refusals fire BEFORE
+anything collective, so every rank given the same input refuses alike and
+no rank waits for one that refused (§138.1, R10). `SpmdPressureBackend`
+wraps a `SpmdKrylov` as a `PressureBackend` - `name` "SPMD Krylov",
+`applicable` always, `setup` refusing a host or uploaded mesh that is not
+the part's (both counts and the rank named), `solve` mapping the
+distributed record onto `SolverPerformance` - and drops into the seam
+`Simple` already takes, `&mut dyn PressureBackend`. `SpmdMomentumRoute`
+wraps one as a `ComponentRoute`, the ONE seam in `momentum.rs`'s
+`solve_once`: `Momentum` gains `set_route`/`has_route`, `None` (the
+default, and every path shipped before) keeping the old `solver::solve`
+call launch for launch, and `Simple::set_momentum_route` passes it through
+unchanged. Routing only: the SIMPLE loop itself does not change.
+
+**Not capturable.** Each routed solve is a host round trip by construction -
+`load_matrix`'s constraint exchange and `spmd_solve`'s per-iteration
+exchanges and reductions all leave the device - and `spmd_solve` refuses
+inside a CUDA-graph capture by name (§81.3, §138.5). A routed solve fails a
+capture rather than silently serialising it. No kernel is launched in
+`distflow.rs`.
+
+**Under `single`.** The routed solve is refined (§118.12): the flag vote
+counts `n_iterations + 2·outer + 1` reads, and `refined_solution` hands out
+the f64 `x_hi`, the answer's precision class A form.
+
+**The gate.** `tests/distflow_krylov.rs`, in BOTH builds, P = 1, 2, 4,
+Hilbert, Linear and round robin, two meshes (A, the axis-aligned box
+`build_case(Big, 12, 10, 8)`; B, `solid::prototype::jittered_block(10,
+0.25)`), solver pairs (PCG, DIC), (PCG, Diagonal), (PBiCGStab, DILU),
+tolerance `1e-12` in both builds (a solver control, not a gate), the exact
+reduction:
+
+| test | what it holds |
+|---|---|
+| `a_part_assembled_poisson_reaches_the_serial_answer` | a part-assembled SPD Poisson solved by `SpmdPressureBackend` reaches the whole-mesh `solver::solve` answer: every owned cell `<= 1e-8` rel in BOTH builds (class A - under `single` both sides are the refined f64 solutions, docs/17 §12.3 note 5), every rank converged, `initial_residual`, `final_residual` and `n_iterations` the same bits on every rank - a rank-local serial solve would norm its own cells only, so identical norms everywhere is what shows the route was taken - the flag vote `n_iterations + 2·outer + 1` on every rank, and the parts' owned cells covering the mesh exactly once; the fixture folds every coefficient in f64 and rounds ONCE, because under `single` a float running sum would make the part's operator differ from the whole's by its summation order - the assembly question PAR-13a owns, not this gate's |
+| `a_part_momentum_solve_goes_through_the_spmd_route` | the routed momentum predictor on P = 2, 4 (Hilbert, round robin), controls `nu 0.01`, upwind, uncorrected snGrad, no bounded convection, no variable-viscosity stress: every component `n_iterations > 0` and its residual bits and iterations identical on every rank, and the owned U within `1e-8` rel of the whole mesh's in f64, tol32 `1e-5` under `single` (class R, §5.1.4 - the stored field is float); `has_route` false before and true after `set_route` |
+| `the_spmd_routes_refuse_by_name` | the refusal table below, all six rows, on every rank of a 2-part cut |
+
+The refusals, all `Error::Config`, checked with `contains`:
+
+| call | message starts | names |
+|---|---|---|
+| `for_rank`, ranks != parts | `distsolve: ` | both counts |
+| `load_matrix`, no one-part system | `distsolve: ` | - |
+| `load_matrix`, `n_cells` differs | `distsolve: ` | both counts |
+| `load_matrix`, face counts differ | `distsolve: ` | all four counts |
+| `load_matrix`, a source buffer short | `distsolve: ` | the array and both lengths |
+| `SpmdPressureBackend::new`/`SpmdKrylov::run`, GAMG | `distflow: ` | `GAMG` |
+| `SpmdKrylov::run`, mesh/`psi` sizes | `distflow: ` | both counts, `upload_with_halo` |
+| `SpmdPressureBackend::setup`, whole-mesh meshes | `distflow: ` | `setup`, both counts, the rank |
+
+**Measured (2026-10-16, RTX 5070 Ti).** The fixture folds every coefficient
+in f64 and rounds ONCE (the gate row says why). f64: the gate HOLDS
+everywhere - 42 Poisson cases, max rel `1.182e-11` (bound `1e-8`), the same
+number run to run because in this build the fixture's arithmetic is the
+same as it ever was; every case converged with identical residual bits and
+iteration counts on every rank; the routed solves ran 17-59 iterations
+against serial references at 18-59; the momentum cases at
+`2.654e-13`-`6.408e-13` (bound `1e-8`), 10-14 iterations per component;
+the refusal test green. Under `single` the Poisson gate HOLDS on every row
+too: 42 cases, max rel `1.595e-11`, the P = 1 rows at `0` to `1.277e-12`,
+the routed solves 18-68 iterations against references at 18-68; the
+momentum gate holds at max rel `1.364e-7` against its tol32 `1e-5`,
+9-12 iterations per component; the refusal test green.
+
+The gate also prints, per case and WITHOUT asserting on it, how many owned
+rows' `diag` or `source` differ BITWISE between the part's host fold and
+the whole fold's row at the global cell, summed over ranks. Under `single`
+that count is 0 on EVERY case: one rounding of an f64 sum makes the part's
+float matrix the whole's, bit for bit. In f64 it is 0 at P = 1 and 34-400
+on the cuts (worst 400, mesh B round robin) - the two f64 folds still add
+in different orders and differ in their last bits, and the single rounding
+is what removes those last bits.
+
+**What a float running sum in the fixture gave.** The fixture's first
+version summed `diag` and `source` in Scalar - a float running sum under
+`single` - so the part's operator differed from the whole's by its
+summation order: a part adds a processor face in its boundary loop, after
+its internal faces, where the whole adds it inside the internal loop, and
+the two solves answered two different float systems. Every P >= 2 row of
+every solver pair missed the `1e-8` line by ~2e-7 to ~5e-7; the measured
+single-build maxima of that version, kept as the evidence that a part's
+float assembly order moves the answer by ~5e-7 - the assembly question
+PAR-13a owns, not this gate:
+
+| mesh, partitioner | P = 2 | P = 4 |
+|---|---|---|
+| A box, Hilbert | `3.507e-7` | `5.338e-7` |
+| A box, Linear | `2.459e-7` | `2.792e-7` |
+| A box, round robin | `4.003e-7` | `4.371e-7` |
+| B jittered, Hilbert | `1.993e-7` | `3.191e-7` |
+| B jittered, Linear | `2.693e-7` | `2.677e-7` |
+| B jittered, round robin | `3.021e-7` | `2.984e-7` |
+
+In that version every P = 1 row held (`0` to `5.2e-13`), so the route
+itself was class A and the miss began exactly at the first cut; and on one
+mesh and cut the error was the same to the digits shown on ALL THREE
+solver pairs - on mesh B to every printed digit - which says the
+difference was NOT the iterate path (a cut-dependent preconditioner would
+move the pairs apart) but the MATRIX: each fold converged to the solution
+of its own slightly different float system.
+
+**What this does not establish.** No decomposed SIMPLE: the exchange points
+and this routing are in place, but `Simple` does not reduce globally or
+exchange per outer iteration yet - that is PAR-10c. The part-assembled
+matrix is not bitwise the split one (PAR-13a): this gate's fixture now
+folds in f64 and rounds once, so its two folds agree bitwise here, but the
+library's own float assembly still sums in whatever order the fold walks
+the faces - the first version's numbers above are what that cost. GAMG on the flow
+path is refused by name, not run. MPI and
+multi-GPU are deferred: the gates run `ThreadComm` ranks on one GPU.
 
 ---
 

@@ -29,22 +29,53 @@
 //! this module inside `Gpu::capture` fails with a message starting
 //! `halo: `.
 //!
+//! SPEC-LIT 139.3 (PAR-10b) routes a part's linear solves through the SPMD
+//! Krylov of SPEC-LIT 138.5/138.6, which is what makes every residual norm
+//! the world's and every rank report the same bits: a part still solved by
+//! the serial `solver::solve` would norm its OWN cells only, and two ranks
+//! of one SIMPLE iteration would disagree about whether the equation
+//! converged. `DistSystem::for_rank` and `load_matrix` hold the
+//! part-assembled matrix - assembled on the part, never split from a whole -
+//! and of its state only the two constraint arrays cross the halo, because
+//! they are the only matrix state a kernel reads at a halo index:
+//!
+//! | type | what it is |
+//! |---|---|
+//! | [`SpmdKrylov`] | one rank's system, halo, workspace and kernels behind one `run`: load the part's matrix in, exchange the constraints, `spmd_solve` - and a refusal table that fires before anything collective |
+//! | [`SpmdPressureBackend`] | the pressure equation's [`PressureBackend`] over that Krylov, dropped into `Simple`'s existing `&mut dyn PressureBackend` seam |
+//! | [`SpmdMomentumRoute`] | the momentum predictor's [`ComponentRoute`](crate::momentum::ComponentRoute), set through `Simple::set_momentum_route`; `None` keeps the old call launch for launch |
+//!
+//! Each routed solve is a host round trip by construction and therefore NOT
+//! capturable: `spmd_solve` refuses inside a CUDA-graph capture by name
+//! (SPEC-LIT 81.3, 138.5), and so every solve this module routes fails a
+//! capture rather than silently serialising it.
+//!
 //! Provenance: ORIGINAL - the exchange points are this project's own design
-//! (SPEC-LIT 139.2, PAR-10a) over the SPMD exchange of 138.3 (PAR-02) and
-//! the boundary evaluation this crate already ships; no kernel is launched
-//! here and no existing numerics change. No external source. No GPL-licensed
+//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b) over the SPMD exchange of
+//! 138.3 (PAR-02), the boundary evaluation this crate already ships and the
+//! SPMD Krylov of 138.5/138.6 (PAR-04a/b); no kernel is launched here and
+//! no existing numerics change. No external source. No GPL-licensed
 //! source was consulted.
 
 use crate::comm::Comm;
-use crate::decompose::PartMesh;
+use crate::decompose::{Decomposition, PartMesh};
 use crate::device::{DevBuf, Gpu};
+use crate::distsolve::{spmd_solve, DistPerformance, DistReduce, DistSystem, SpmdWorkspace};
 use crate::error::{Error, Result};
 use crate::exactsum::SpmdReduction;
 use crate::field::{GpuScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
 use crate::halo::SpmdHalo;
+use crate::io::case::SolverControls;
+use crate::ldu::GpuLduMatrix;
 use crate::mesh::GpuMesh;
-use crate::{Tensor, Vec3};
+use crate::momentum::ComponentRoute;
+use crate::pressure::{PressureBackend, SystemProbe};
+use crate::solver::{
+    LinearSolverKind, Preconditioner, SolverKernels, SolverPerformance,
+};
+use crate::HostMesh;
+use crate::{Scalar, Tensor, Vec3};
 
 /// One rank's view of a decomposed flow solve: its part, the transport, and
 /// the two objects every cross-part step goes through.
@@ -212,6 +243,369 @@ impl<'c> RankCtx<'c> {
     /// moved as one [`Tensor`], the exchange plan's third payload.
     pub fn exchange_gradient_tensor(&mut self, gpu: &Gpu, g: &mut DevBuf<Tensor>) -> Result<()> {
         self.halo.tensor(gpu, self.comm, g)
+    }
+}
+
+// ==========================================================================
+//  The Krylov routing - SPEC-LIT 139.3 (PAR-10b)
+// ==========================================================================
+
+/// The GAMG refusal [`SpmdKrylov::run`] and [`SpmdPressureBackend::new`]
+/// both make, the latter BEFORE the collective `SpmdKrylov::new` performs,
+/// so every rank given the same controls refuses alike and no rank is left
+/// waiting in a collective (SPEC-LIT 138.1, R10).
+fn refuse_gamg(ctrl: &SolverControls) -> Result<()> {
+    if ctrl.solver == LinearSolverKind::Gamg || ctrl.precon == Preconditioner::Gamg {
+        return Err(Error::Config(format!(
+            "distflow: GAMG is refused on a part's flow solve (solver {}, \
+             preconditioner {}); a part's flow solve routes PCG and \
+             PBiCGStab only - the distributed cycle of SPEC-LIT 141.11 is \
+             not attached on the flow path (SPEC-LIT 139.3)",
+            ctrl.solver.name(),
+            ctrl.precon.name()
+        )));
+    }
+    Ok(())
+}
+
+/// A distributed solve's record, mapped onto the [`SolverPerformance`] the
+/// flow path carries. The counters `spmd_solve` alone owns - the exchange
+/// and reduction counts - stop here: the flow path's record never had them.
+fn as_solver_performance(d: DistPerformance) -> SolverPerformance {
+    SolverPerformance {
+        initial_residual: d.initial_residual,
+        final_residual: d.final_residual,
+        n_iterations: d.n_iterations,
+        converged: d.converged,
+    }
+}
+
+/// One rank's SPMD Krylov solve, wired for the flow path (SPEC-LIT 139.3,
+/// PAR-10b).
+///
+/// [`DistSystem::for_rank`] builds the part's system - a matrix ASSEMBLED ON
+/// THE PART, never split from a whole - and [`SpmdWorkspace`] holds this
+/// rank's Krylov vectors, its [`SpmdReduction`] and, once a DIC or DILU
+/// preconditioner first asks, the part-local colouring. One [`Self::run`] is
+/// then: load the caller's matrix in, exchange the two constraint arrays,
+/// and hand the whole thing to [`spmd_solve`], whose every residual norm is
+/// a cross-part reduction and so the same bits on every rank.
+///
+/// The refusals - GAMG, and the two size rows - fire BEFORE anything
+/// collective, so every rank given the same input refuses alike and no rank
+/// waits for one that refused (SPEC-LIT 138.1, R10).
+pub struct SpmdKrylov<'c> {
+    comm: &'c dyn Comm,
+    halo: SpmdHalo,
+    sys: DistSystem,
+    ws: SpmdWorkspace,
+    kernels: SolverKernels,
+    /// Whether the part-local colouring is built; a DIC/DILU solve needs it
+    /// once, and building it is a device pass, not a collective.
+    coloured: bool,
+    n_solves: usize,
+    last: Option<DistPerformance>,
+}
+
+impl<'c> SpmdKrylov<'c> {
+    /// Build the rank's Krylov route: `comm.rank()`'s part of `dec`, its
+    /// halo plan, its system, its workspace and the solver kernels.
+    ///
+    /// Refused (`Error::Config`, starting `distflow: `) when
+    /// `comm.size() != dec.n_parts`, naming both numbers, BEFORE anything
+    /// collective - [`SpmdWorkspace::new`]'s reduction allgathers, and a
+    /// rank that refuses there strands the others.
+    pub fn new(
+        gpu: &Gpu,
+        comm: &'c dyn Comm,
+        dec: &Decomposition,
+        reduce: DistReduce,
+    ) -> Result<Self> {
+        if comm.size() != dec.n_parts {
+            return Err(Error::Config(format!(
+                "distflow: the Krylov route needs one rank per part: the \
+                 world has {} ranks, the decomposition has {} parts",
+                comm.size(),
+                dec.n_parts
+            )));
+        }
+        let rank = comm.rank();
+        let halo = SpmdHalo::new(gpu, &dec.parts[rank], comm.size())?;
+        let sys = DistSystem::for_rank(gpu, comm, dec)?;
+        let ws = SpmdWorkspace::new(gpu, comm, &sys, reduce)?;
+        let kernels = SolverKernels::new(gpu)?;
+        Ok(Self {
+            comm,
+            halo,
+            sys,
+            ws,
+            kernels,
+            coloured: false,
+            n_solves: 0,
+            last: None,
+        })
+    }
+
+    /// This rank's number - `comm.rank()`.
+    pub fn rank(&self) -> usize {
+        self.comm.rank()
+    }
+
+    /// The rank count the route was built with.
+    pub fn n_ranks(&self) -> usize {
+        self.comm.size()
+    }
+
+    /// The part's OWNED cells - what a kernel launches threads for and what
+    /// an owned answer is `0..` this long.
+    pub fn n_cells(&self) -> usize {
+        self.sys.owned()[0]
+    }
+
+    /// The rank's SPMD workspace: its vectors, its reduction, its counts.
+    pub fn workspace(&self) -> &SpmdWorkspace {
+        &self.ws
+    }
+
+    /// Turn the workspace's flag vote on or off. A COLLECTIVE setting - call
+    /// it alike on every rank, or the vote counts disagree.
+    pub fn set_flag_vote(&mut self, on: bool) {
+        self.ws.set_flag_vote(on);
+    }
+
+    /// How many solves this route has run.
+    pub fn n_solves(&self) -> usize {
+        self.n_solves
+    }
+
+    /// The last solve's distributed record, `None` before the first.
+    pub fn last_performance(&self) -> Option<&DistPerformance> {
+        self.last.as_ref()
+    }
+
+    /// The double solution `x_hi` of the last solve (SPEC-LIT 118.12), which
+    /// under `single` is the answer's precision class A form. `single` only.
+    #[cfg(feature = "single")]
+    pub fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        self.ws.refined_solution()
+    }
+
+    /// Solve `a·psi = b` for this rank's part, the norms global.
+    ///
+    /// In order: refuse GAMG as solver or preconditioner; refuse a mesh or a
+    /// solution buffer that is not the part's; build the part-local
+    /// colouring the first DIC/DILU solve needs; load the caller's
+    /// part-assembled matrix in and exchange the constraints through the
+    /// halo; [`spmd_solve`]; count and remember. Every rank given the same
+    /// controls sees the same refusals, so the world refuses alike or not at
+    /// all.
+    pub fn run(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        ctrl: &SolverControls,
+    ) -> Result<DistPerformance> {
+        // (1) GAMG: the distributed cycle of SPEC-LIT 141.11 is not attached
+        // on the flow path.
+        refuse_gamg(ctrl)?;
+        // (2) The sizes: the mesh must be this rank's part, and psi must be
+        // long enough for the halo the solve's matrix product reads.
+        if m.n_cells != self.n_cells() {
+            return Err(Error::Config(format!(
+                "distflow: the mesh given to the Krylov route has {} cells, \
+                 but this rank's part owns {}; the route runs on the part's \
+                 own mesh",
+                m.n_cells,
+                self.n_cells()
+            )));
+        }
+        let n_local = self.sys.local()[0];
+        if psi.len() < n_local {
+            return Err(Error::Config(format!(
+                "distflow: psi is {} long, the part's solve needs {} (owned \
+                 + halo); upload the part with GpuMesh::upload_with_halo so \
+                 every cell buffer carries the halo (SPEC-LIT 139.1)",
+                psi.len(),
+                n_local
+            )));
+        }
+        // (3) The part-local colouring, once, when the preconditioner sweeps
+        // a coloured order.
+        if !self.coloured && matches!(ctrl.precon, Preconditioner::Dic | Preconditioner::Dilu) {
+            self.ws.colour(gpu, &self.sys)?;
+            self.coloured = true;
+        }
+        // (4) The part-assembled matrix, in; the constraints exchanged.
+        self.sys
+            .load_matrix(gpu, &mut self.halo, self.comm, a)?;
+        // (5) The solve, every residual norm a cross-part reduction.
+        let d = spmd_solve(
+            gpu,
+            &self.kernels,
+            self.comm,
+            psi,
+            &self.sys,
+            &mut self.halo,
+            &mut self.ws,
+            ctrl,
+        )?;
+        // (6) Counted and remembered.
+        self.n_solves += 1;
+        self.last = Some(d.clone());
+        Ok(d)
+    }
+}
+
+/// The pressure equation's backend over one rank's [`SpmdKrylov`] (SPEC-LIT
+/// 139.3, PAR-10b).
+///
+/// Dropped into the seam `Simple` already takes - `&mut dyn
+/// PressureBackend` - so a decomposed driver changes what the pressure
+/// equation is SOLVED BY and nothing about the equation. `setup` checks the
+/// meshes are the part's and nothing else: a part's system holds no
+/// hierarchy and no factorisation to refresh, and every solve loads the
+/// matrix as the caller assembled it.
+pub struct SpmdPressureBackend<'c> {
+    krylov: SpmdKrylov<'c>,
+    ctrl: SolverControls,
+}
+
+impl<'c> SpmdPressureBackend<'c> {
+    /// Build the backend for `comm.rank()`'s part of `dec`, solving to
+    /// `ctrl`.
+    ///
+    /// The GAMG refusal fires BEFORE [`SpmdKrylov::new`], whose workspace
+    /// constructor allgathers: a case that asks for GAMG on a part's
+    /// pressure equation refuses on every rank alike instead of stranding
+    /// the world in a collective.
+    pub fn new(
+        gpu: &Gpu,
+        comm: &'c dyn Comm,
+        dec: &Decomposition,
+        ctrl: SolverControls,
+        reduce: DistReduce,
+    ) -> Result<Self> {
+        refuse_gamg(&ctrl)?;
+        Ok(Self {
+            krylov: SpmdKrylov::new(gpu, comm, dec, reduce)?,
+            ctrl,
+        })
+    }
+
+    /// The Krylov route underneath: its rank, its workspace, its counts.
+    pub fn krylov(&self) -> &SpmdKrylov<'c> {
+        &self.krylov
+    }
+
+    /// The same, mutable - the flag vote and the workspace's counters live
+    /// there.
+    pub fn krylov_mut(&mut self) -> &mut SpmdKrylov<'c> {
+        &mut self.krylov
+    }
+}
+
+impl PressureBackend for SpmdPressureBackend<'_> {
+    fn name(&self) -> &'static str {
+        "SPMD Krylov"
+    }
+
+    fn applicable(&self, _probe: &SystemProbe) -> bool {
+        // A part's pressure equation is an ordinary LDU system with a
+        // halo-coupled boundary, exactly what the SPMD Krylov solves; no
+        // structural fact of the WHOLE mesh can take it out.
+        true
+    }
+
+    fn setup(&mut self, _gpu: &Gpu, hm: &HostMesh, m: &GpuMesh, _probe: &SystemProbe) -> Result<()> {
+        let owned = self.krylov.n_cells();
+        if hm.n_cells != owned || m.n_cells != owned {
+            return Err(Error::Config(format!(
+                "distflow: the SPMD Krylov pressure backend's setup on rank \
+                 {} was given a host mesh of {} cells and an uploaded mesh \
+                 of {} cells, but the part this rank owns has {}; set the \
+                 backend up on the part's own mesh, uploaded with \
+                 GpuMesh::upload_with_halo",
+                self.krylov.rank(),
+                hm.n_cells,
+                m.n_cells,
+                owned
+            )));
+        }
+        Ok(())
+    }
+
+    fn solve(
+        &mut self,
+        gpu: &Gpu,
+        p: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+    ) -> Result<SolverPerformance> {
+        self.krylov
+            .run(gpu, p, a, m, &self.ctrl)
+            .map(as_solver_performance)
+    }
+
+    /// The workspace's refined solution (SPEC-LIT 118.12), unless these
+    /// controls are `fixed_iters`, which is never refined. `single` only.
+    #[cfg(feature = "single")]
+    fn refined_solution(&self) -> Option<&DevBuf<f64>> {
+        if self.ctrl.fixed_iters {
+            return None;
+        }
+        self.krylov.refined_solution()
+    }
+}
+
+/// The momentum predictor's component-solve route over one rank's
+/// [`SpmdKrylov`] (SPEC-LIT 139.3, PAR-10b).
+///
+/// Set on a part's `Momentum` through [`ComponentRoute`]
+/// (`Simple::set_momentum_route` passes it through); `None` keeps the
+/// serial `solver::solve` call launch for launch. Each of the three
+/// component systems is one [`SpmdKrylov::run`], so the norms are the
+/// world's and the same bits land on every rank.
+pub struct SpmdMomentumRoute<'c> {
+    krylov: SpmdKrylov<'c>,
+}
+
+impl<'c> SpmdMomentumRoute<'c> {
+    /// Build the route for `comm.rank()`'s part of `dec`.
+    pub fn new(
+        gpu: &Gpu,
+        comm: &'c dyn Comm,
+        dec: &Decomposition,
+        reduce: DistReduce,
+    ) -> Result<Self> {
+        Ok(Self {
+            krylov: SpmdKrylov::new(gpu, comm, dec, reduce)?,
+        })
+    }
+
+    /// The Krylov route underneath.
+    pub fn krylov(&self) -> &SpmdKrylov<'c> {
+        &self.krylov
+    }
+
+    /// The same, mutable.
+    pub fn krylov_mut(&mut self) -> &mut SpmdKrylov<'c> {
+        &mut self.krylov
+    }
+}
+
+impl ComponentRoute for SpmdMomentumRoute<'_> {
+    fn solve_component(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        ctrl: &SolverControls,
+    ) -> Result<SolverPerformance> {
+        self.krylov.run(gpu, psi, a, m, ctrl)
+            .map(as_solver_performance)
     }
 }
 
