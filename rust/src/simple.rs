@@ -451,8 +451,6 @@ impl<'m> Simple<'m> {
             )));
         }
 
-        let nc = m.n_cells.max(1);
-
         Ok(Self {
             m,
             ctrl,
@@ -464,8 +462,10 @@ impl<'m> Simple<'m> {
             phi: GpuSurfaceScalarField::zeros(gpu, m, "phi")?,
 
             a_p: GpuLduMatrix::new(gpu, m)?,
-            p_old: gpu.zeros(nc)?,
-            div_phi: gpu.zeros(nc)?,
+            // SPEC-LIT 139.1: cell buffers carry the halo; `red` is a device
+            // scalar, not a cell field.
+            p_old: gpu.zeros(m.n_local().max(1))?,
+            div_phi: gpu.zeros(m.n_local().max(1))?,
             red: gpu.zeros(1)?,
 
             residual_control: None,

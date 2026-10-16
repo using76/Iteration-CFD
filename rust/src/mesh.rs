@@ -648,6 +648,12 @@ pub struct GpuMesh {
     pub n_cells: usize,
     pub n_internal_faces: usize,
     pub n_boundary_faces: usize,
+    /// Ghost cells `n_cells .. n_cells + n_halo`; 0 on a whole mesh;
+    /// SPEC-LIT 139.1. A decomposed part's `b_nbr_cell` entries point into
+    /// this range, so every cell buffer this mesh solves on is `n_local()`
+    /// long. Nothing exchanges the range here (PAR-10a): the halo only has
+    /// to EXIST.
+    pub n_halo: usize,
 
     pub owner: DevBuf<Label>,
     pub neighbour: DevBuf<Label>,
@@ -836,6 +842,38 @@ fn b_sf_recon_host(m: &HostMesh) -> Option<Vec<Vec3>> {
 }
 
 impl GpuMesh {
+    /// The length every CELL buffer on this mesh has: the owned cells plus
+    /// the halo of SPEC-LIT 139.1. Face buffers stay face-sized. On a whole
+    /// mesh this is `n_cells`.
+    #[inline]
+    pub fn n_local(&self) -> usize {
+        self.n_cells + self.n_halo
+    }
+
+    /// SPEC-LIT 139.1 (PAR-09): upload a decomposed part and give its halo
+    /// room. A part IS an ordinary mesh - the upload is the plain
+    /// [`GpuMesh::upload`], unchanged - and only the count is added, refused
+    /// by name when some `b_nbr_cell` would point past the room asked for:
+    /// the kernels read `psi[bNbrCell[f]]` unconditionally, and a short
+    /// buffer is a read out of bounds rather than an error.
+    pub fn upload_with_halo(gpu: &Gpu, m: &HostMesh, n_halo: usize) -> Result<Self> {
+        let room = m.n_cells + n_halo;
+        for (bf, &nbr) in m.b_nbr_cell.iter().enumerate() {
+            if nbr >= 0 && (nbr as usize) >= room {
+                return Err(Error::Config(format!(
+                    "GpuMesh::upload_with_halo: boundary face {bf} names \
+                     neighbour cell {nbr}, past n_cells + n_halo = {room}; \
+                     n_halo = {n_halo} is too small for this part. The \
+                     processor faces' neighbours live in the halo and every \
+                     cell buffer must be n_cells + n_halo long"
+                )));
+            }
+        }
+        let mut g = Self::upload(gpu, m)?;
+        g.n_halo = n_halo;
+        Ok(g)
+    }
+
     pub fn upload(gpu: &Gpu, m: &HostMesh) -> Result<Self> {
         let t = GpuTopology::upload(gpu, m)?;
 
@@ -843,6 +881,7 @@ impl GpuMesh {
             n_cells: m.n_cells,
             n_internal_faces: m.n_internal_faces,
             n_boundary_faces: m.n_boundary_faces,
+            n_halo: 0,
 
             owner: t.owner,
             neighbour: t.neighbour,
@@ -962,6 +1001,7 @@ impl GpuMesh {
             n_cells: m.n_cells,
             n_internal_faces: m.n_internal_faces,
             n_boundary_faces: m.n_boundary_faces,
+            n_halo: 0,
 
             owner: t.owner,
             neighbour: t.neighbour,

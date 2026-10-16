@@ -1744,13 +1744,17 @@ impl GpuScalarField {
     /// silent Dirichlet condition on every patch.
     pub fn zeros(gpu: &Gpu, m: &GpuMesh, name: &str) -> Result<Self> {
         let kinds: Vec<Label> = kinds_from_patches(m);
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`), so a
+        // kernel's `psi[bNbrCell[f]]` on a decomposed part lands inside the
+        // buffer. Launches still count `n_cells` owned cells; the face
+        // buffers stay face-sized.
         Ok(Self {
             name: name.to_string(),
             n_cells: m.n_cells,
             n_boundary_faces: m.n_boundary_faces,
-            f: gpu.zeros(m.n_cells)?,
-            f0: gpu.zeros(m.n_cells)?,
-            f00: gpu.zeros(m.n_cells)?,
+            f: gpu.zeros(m.n_local())?,
+            f0: gpu.zeros(m.n_local())?,
+            f00: gpu.zeros(m.n_local())?,
             bf: gpu.zeros(m.n_boundary_faces)?,
             fr: gpu.zeros(m.n_boundary_faces)?,
             ref_value: gpu.zeros(m.n_boundary_faces)?,
@@ -1842,9 +1846,9 @@ impl GpuVectorField {
             name: name.to_string(),
             n_cells: m.n_cells,
             n_boundary_faces: m.n_boundary_faces,
-            f: gpu.zeros(m.n_cells)?,
-            f0: gpu.zeros(m.n_cells)?,
-            f00: gpu.zeros(m.n_cells)?,
+            f: gpu.zeros(m.n_local())?,
+            f0: gpu.zeros(m.n_local())?,
+            f00: gpu.zeros(m.n_local())?,
             bf: gpu.zeros(m.n_boundary_faces)?,
             fr: gpu.zeros(m.n_boundary_faces)?,
             ref_value: gpu.zeros(m.n_boundary_faces)?,

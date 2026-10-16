@@ -323,7 +323,8 @@ impl<'m> ScalarTransport<'m> {
         self.mass = Some(MassState {
             rho_face: GpuSurfaceScalarField::zeros(gpu, m, "rhof")?,
             phi_m: GpuSurfaceScalarField::zeros(gpu, m, "phiM")?,
-            cont_ddt: gpu.zeros(m.n_cells.max(1))?,
+            // SPEC-LIT 139.1: a cell buffer, so it carries the halo.
+            cont_ddt: gpu.zeros(m.n_local().max(1))?,
         });
         Ok(())
     }

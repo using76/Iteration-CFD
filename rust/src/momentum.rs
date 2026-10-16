@@ -715,10 +715,12 @@ pub struct MomentumSources {
 impl MomentumSources {
     pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
         let n = m.n_cells;
-        let one = n.max(1);
+        // SPEC-LIT 139.1: the accumulators carry the halo (`n_local`); `n`
+        // stays the owned count the launches run over.
+        let n_local = m.n_local().max(1);
         Ok(Self {
-            su: gpu.zeros(one)?,
-            sp: gpu.zeros(one)?,
+            su: gpu.zeros(n_local)?,
+            sp: gpu.zeros(n_local)?,
             fldk: FieldKernels::new(gpu)?,
             registered: 0,
             n,
@@ -921,23 +923,25 @@ impl<'m> Momentum<'m> {
             }
         }
 
-        let n = m.n_cells;
         let nif = m.n_internal_faces;
         let nbf = m.n_boundary_faces;
 
         // A zero-length device allocation is an error rather than an empty
         // buffer, so degenerate counts get one element nothing reads.
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`); the
+        // face buffers stay face-sized.
         let one = |k: usize| k.max(1);
+        let n_local = m.n_local();
 
-        let mut ones = gpu.zeros::<Scalar>(one(n))?;
-        gpu.write(&mut ones, &vec![1.0 as Scalar; one(n)])?;
+        let mut ones = gpu.zeros::<Scalar>(one(n_local))?;
+        gpu.write(&mut ones, &vec![1.0 as Scalar; one(n_local)])?;
 
         // SPEC-LIT 38.5(i): the laminar viscosity is a FIELD, seeded with the
         // case's own uniform `nu`. Under a Newtonian model nothing ever
         // rewrites it, and `nu_lam[i] + nu_t[i]` is then the same IEEE-754
         // addition `nu_t[i] + nu` was.
-        let mut nu_lam = gpu.zeros::<Scalar>(one(n))?;
-        gpu.write(&mut nu_lam, &vec![ctrl.nu; one(n)])?;
+        let mut nu_lam = gpu.zeros::<Scalar>(one(n_local))?;
+        gpu.write(&mut nu_lam, &vec![ctrl.nu; one(n_local)])?;
         let mut b_nu_lam = gpu.zeros::<Scalar>(one(nbf))?;
         gpu.write(&mut b_nu_lam, &vec![ctrl.nu; one(nbf)])?;
 
@@ -978,25 +982,25 @@ impl<'m> Momentum<'m> {
 
             uc: GpuScalarField::zeros(gpu, m, "Ucmpt")?,
 
-            su: gpu.zeros(one(n))?,
-            force: gpu.zeros(one(n))?,
-            hbya: gpu.zeros(one(n))?,
-            stress: gpu.zeros(one(n))?,
+            su: gpu.zeros(one(n_local))?,
+            force: gpu.zeros(one(n_local))?,
+            hbya: gpu.zeros(one(n_local))?,
+            stress: gpu.zeros(one(n_local))?,
 
-            rau: gpu.zeros(one(n))?,
+            rau: gpu.zeros(one(n_local))?,
             ones,
-            row_sum: gpu.zeros(one(n))?,
-            au: gpu.zeros(one(n))?,
-            tmp_cell: gpu.zeros(one(n))?,
+            row_sum: gpu.zeros(one(n_local))?,
+            au: gpu.zeros(one(n_local))?,
+            tmp_cell: gpu.zeros(one(n_local))?,
 
-            grad_uc: gpu.zeros(one(n))?,
-            grad_u: gpu.zeros(one(n))?,
-            grad_nu: gpu.zeros(one(n))?,
-            grad_p: gpu.zeros(one(n))?,
+            grad_uc: gpu.zeros(one(n_local))?,
+            grad_u: gpu.zeros(one(n_local))?,
+            grad_nu: gpu.zeros(one(n_local))?,
+            grad_p: gpu.zeros(one(n_local))?,
 
             nu_lam,
             b_nu_lam,
-            gdot: gpu.zeros(one(n))?,
+            gdot: gpu.zeros(one(n_local))?,
             b_gdot: gpu.zeros(one(nbf))?,
             rheok,
 
@@ -1005,7 +1009,7 @@ impl<'m> Momentum<'m> {
             nu_eff_mag_sf: GpuSurfaceScalarField::zeros(gpu, m, "nuEffMagSf")?,
 
             u_mag: GpuScalarField::zeros(gpu, m, "magU")?,
-            grad_u_mag: gpu.zeros(one(n))?,
+            grad_u_mag: gpu.zeros(one(n_local))?,
 
             w: gpu.zeros(one(nif))?,
             bw: gpu.zeros(one(nbf))?,

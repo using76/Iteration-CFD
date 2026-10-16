@@ -51086,6 +51086,92 @@ solver decomposed (PAR-10c, §139).
 
 ---
 
+## 139. Distributed flow — the flow solver on a part of a cut mesh
+
+`No GPL-licensed source was consulted.` This section is this project's own
+contract (ORIGINAL). It has no external input.
+
+§71 cuts the mesh and §73 solves a linear system across the cut. §138 moves
+the bytes between ranks. This section runs the flow solver itself on one part:
+first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
+(PAR-10a), the Krylov routing (PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
+
+This section defines no equation, so it carries no equation label.
+
+### 139.1 Room for the halo (PAR-09)
+
+**What a part is.** §71.4 builds a part as an ordinary `HostMesh`. Its processor
+faces are `PatchKind::Cyclic` (§71.5), and their `b_nbr_cell` points past
+`n_cells`, into the halo `n_cells .. n_cells + n_halo`. Every kernel that
+couples across a cyclic face reads `psi[bNbrCell[f]]` without a check. For
+example, `lduAmul` reads `psi[nbr]` and the fixed-cell elimination reads
+`isFixed[nbr]` (cuda/ldu.cu). So on a part, every buffer such a read can reach
+must be `n_cells + n_halo` long. A shorter buffer is a read out of bounds,
+not an error.
+
+**The rule.** `GpuMesh` carries `n_halo` and `n_local() = n_cells + n_halo`.
+Every existing constructor sets `n_halo = 0`. `GpuMesh::upload_with_halo(gpu,
+m, n_halo)` is the plain upload plus the count. It refuses by name a mesh with
+some `b_nbr_cell >= n_cells + n_halo`, and names the face, the cell and the
+room. On the laminar SIMPLE + scalar + energy path, every cell buffer is
+`n_local` long:
+- `f`, `f0` and `f00` of the scalar and vector field constructors (their
+  signatures are unchanged);
+- `diag`, `source`, `is_fixed` and `fixed_value` of `GpuLduMatrix::new`;
+- the cell vectors of `SolverWorkspace::for_mesh`, and under `single` the
+  §118.4 `x_hi`, `d` and `b_in`;
+- every per-cell buffer of `Simple`, `Momentum`, the energy equation and the
+  scalar transport.
+
+Face buffers stay face-sized. The cell-length checks of `src/fv.rs` want
+`n_local`. Every launch still runs `n_cells` threads with `nCells = n_cells`,
+and every solve still runs over `n_cells` rows. So no kernel writes the halo,
+and nothing here fills it: the exchange is PAR-10a's. `SolverWorkspace::new(gpu,
+n)` and `GpuMesh::upload` are unchanged. On a whole mesh `n_local = n_cells`,
+every allocation has its former length, and the f64 build is unchanged bit for
+bit.
+
+**The audit.** `tests/halo_room.rs` (`every_simple_path_buffer_has_room_for_the_halo`)
+reads the non-test part of `field.rs`, `fv.rs`, `simple.rs`, `momentum.rs`,
+`energy.rs`, `scalar_transport.rs`, `ldu.rs`, `solver.rs` and `mesh.rs`. It
+classifies every `.zeros(` site by its argument:
+- the argument spells `n_local`: a halo site, and there must be exactly 62;
+- the argument names `faces`: face-sized;
+- otherwise the site must be on an allow list, with its exact count in that
+  file and a reason. The list has 15 kinds and 33 sites: device scalars,
+  reduction partials, `one(nbf)`/`one(nif)` face scratch, the CSR `nnz`
+  slots, and the energy scratch sized `max(n_local, n_boundary_faces)`.
+
+A new `zeros(n_cells)` on the path fails the audit. To pass, it either spells
+`n_local` or joins the list with a reason (the PAR-09 rule of docs/17-completion-plan.md). `compressible/`,
+`chem/`, `radiation/` and `dust/` are outside the audit, because their drivers
+refuse decomposition by name.
+
+**Measured (2026-10-16, RTX 5070 Ti).** The mesh is an 8 x 8 x 1 lid cavity cut
+in two (`Linear`). Each part has 32 cells and a halo of 8, and its processor
+faces are left `Cyclic` for U, p and T. The test runs three steady SIMPLE
+iterations with PBiCGStab pressure on each part, under `compute-sanitizer
+--tool memcheck`:
+- uploaded without the room (`GpuMesh::upload`, so `n_halo = 0`): 377 errors,
+  all invalid 8-byte global reads;
+- uploaded with `upload_with_halo`: 0 errors, in f64 and in `single`.
+
+The halo tail of U and p is still exactly zero after the three iterations, so
+no kernel launched over it. A whole mesh gives `n_halo = 0` and
+`n_local = n_cells`. A halo one cell short is refused by name. The serial
+`ofgpu-validate -sections 1-9,16,57,61` rows were compared before and after:
+all 329 rows of the JSON document (276 checks and the skip rows) are
+identical (`tools/f64_identity.py rows`).
+
+**What this does not establish.** The halo holds zeros. A part's answer is not
+the whole mesh's answer until PAR-10a fills the halo and PAR-10c gates the
+decomposed SIMPLE. On a part, `gpu.download` of a field returns `n_local`
+values; trimming them to the owned cells for writers and drivers is PAR-14's
+job. A host write of `n_cells` values into an `n_local` buffer is refused by
+`Gpu::write`'s length check, which is loud and is not a read out of bounds.
+
+---
+
 ## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §141 to the GAMG units
