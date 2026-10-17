@@ -49436,8 +49436,8 @@ as f64 host twins and as two device kernels in `cuda/chem.cu`
 (`chemEdmSource`, `chemPasrScale`), which compute in `double` in both
 builds, as the rest of `chem.cu` does (§132.6, §118.10). Their inputs and
 outputs are ofscalar. The tests are in `tests/chem_tci.rs`, an integration
-test, so every row runs in both builds. EDC is §134.3's and CHR-15's. Until
-CHR-15 lands, the selector refuses it by name. `ofgpu-lowmach` still refuses
+test, so every row runs in both builds. EDC is §134.3's and CHR-15's, built
+in §134.7. Until CHR-15 landed, the selector refused it by name. `ofgpu-lowmach` still refuses
 every closure (§137.7). Wiring a closure into the split step is not part of
 CHR-14's row.
 The two kernels capture into one CUDA graph and replay bitwise
@@ -49446,7 +49446,8 @@ The two kernels capture into one CUDA graph and replay bitwise
 **Selection.** `tci::select(combustion, MixingKind, k_present)` applies
 §134.1's refusals in this order. `laminar` is always accepted. Any closure
 with `MixingRate::None` is refused, naming the model and the arm. EDM or EDC
-with `MixingRate::Strain` is refused. EDC is refused as not built. For PaSR,
+with `MixingRate::Strain` is refused. EDC was refused as not built until
+CHR-15; §134.7 replaces that step. For PaSR,
 `tauMix strain` is refused under a RANS arm, and any other `tauMix` under
 `Strain`. `kolmogorov` and `geometric` under `Omega` without the model's `k`
 field are refused, naming `k`. `integral` without `Cmix` is refused.
@@ -49513,6 +49514,137 @@ twin):
 | `tci_device_matches_host` | 4096 random cells: `chemEdmSource` and `chemPasrScale` against the host twins. The tolerance is 1e-13 relative to the cell's largest `\|W ω̄\|` in f64. In f32 it is 1e-6, with the host fed the f32-rounded inputs (R) |
 
 Labels: (134.1)-(134.15).
+
+### 134.7 EDC as built (CHR-15)
+
+`src/chem/tci.rs` builds §134.3's EDC as an f64 host twin (`edc_host`)
+and as one device kernel in `cuda/chem.cu` (`chemEdcIntegrate`). The
+kernel computes in `double` in both builds, as the rest of `chem.cu` does
+(§132.6, §118.10). Its inputs and its `W ω̄` output are ofscalar; the fine
+state `(Y*, T*)` stays in an f64 work buffer. The tests are in
+`tests/chem_tci.rs`, an integration test, so every row runs in both
+builds. `ofgpu-lowmach` still refuses every closure (§137.7). Wiring EDC
+into the split step is CHR-16's (Flame D).
+
+**Selection** (it replaces §134.6's "EDC is refused as not built" step,
+in the same place in the order). EDC with `MixingRate::None` is refused,
+and so is EDC with `MixingRate::Strain`. EDC under `Omega` without the
+model's `k` field is refused, naming `k`, because (134.4) and (134.5) read
+`ε = β* k ω` (§134.1). Otherwise `select` returns `Closure::Edc` with the
+lowered `variant`, `CD1`, `CD2`, `gammaMax` and `psrSpan`.
+
+**The per-cell order of operations** (host and device alike; DESIGN in
+its order, the formulas are §134.3's):
+
+```
+Epsilon { k, ε }:  k, ε                 Omega { ω, β* }:  k = the model's k,  ε = (β* k) ω
+C_γ = (3 C_D2 / (4 C_D1 C_D1))^(1/4),   C_τ = (C_D2 / 3)^(1/2)    (host f64, once per closure)
+γ_λ = C_γ (ν ε / (k k))^(1/4);  capped when γ_λ > gammaMax, and then γ_λ = gammaMax
+γ*  = γ_λ γ_λ γ_λ (1989)  |  γ_λ γ_λ (2005)
+τ*  = C_τ (ν / ε)^(1/2);    τ_e = (1 - γ*) τ*;    span = psrSpan τ_e
+```
+
+`γ* = 0` (`ε = 0` or `ν = 0`) means no fine structures. Then
+`W_k ω̄_k = 0` exactly, `Y* = Ỹ` and `T* = T̃`, and nothing is integrated
+(DESIGN: (134.10) carries the factor `γ*`, and `τ*` would be `+∞` at
+`ε = 0`).
+
+**The fine-structure reactor's energy** (DESIGN, derived here).
+§134.3 states that `T*` solves `h(T*, Y*) = h̃`. The integrated state is
+`(Y*, T*)`, as in §132.10. Its temperature equation is the chemistry part
+of (132.7)-(132.9) plus a mixing term:
+
+```
+dT*/dt = [(132.9)'s chemistry rate at (Y*, T*)]
+         - (Σ_k Ỹ_k h_k(T*) - h̃) / (c_p(T*, Y*⁺) τ_e),      h̃ = Σ_k Ỹ_k h_k(T̃)   (134.16)
+```
+
+Here `h_k` is the species' enthalpy per unit mass, `c_p` the mixture
+`c_p` over the clipped `Y*⁺ = max(Y*, 0)` (as (132.9) takes it), and both
+sums skip species with `Ỹ_k = 0`. Derivation: the chemistry part keeps
+`h(T*, Y*)` constant (that is (132.9)). The species term of (134.9)
+changes `h` by `-Σ_k h_k(T*) (Y*_k - Ỹ_k)/τ_e`. Adding `c_p` times the
+mixing term of (134.16) makes the total `dh/dt = -(h(T*, Y*) - h̃)/τ_e`.
+The start `(Ỹ, T̃)` has `h = h̃`, so `h* = h̃` holds along the whole
+path, and it holds exactly at any steady state, whatever the path.
+
+**The integration.** (134.9) with (134.16) is integrated from
+`(Ỹ, T̃)` over `[0, span]` by §132.10's integrator. It uses the same
+control array (`DeviceReactor`, built from the case's `ReactorOptions`:
+method, `rtol`, `atol_y`, `atol_t`, `h_max`, `max_steps`), R9's input
+checks and R10's observer. The host twin runs
+`rosenbrock::integrate_observed` from `opts.h0`. The kernel copies
+`chemIntegrate`'s step loop with only the right-hand side replaced.
+`chemIntegrate` itself is not edited, so its SASS is unchanged. Each
+cell's first trial step is carried over calls in the work buffer, as
+`integrate`'s `h` is; it starts at `opts.h0`.
+
+**The residual of (134.8)** after the span, in the integrator's own
+error weights (the (132.5) norm of `τ_e f`):
+
+```
+r_res = ( (1/m) Σ_l ( τ_e f_l(Y*, T*) / (atol_l + rtol |y_l|) )^2 )^(1/2),   m = K + 1   (134.17)
+```
+
+`f` is the right-hand side of (134.9) with (134.16). `τ_e f_k` is
+`(1 - γ*) τ* R*_k/ρ* - (Y*_k - Ỹ_k)`, which is (134.8)'s residual. A cell
+with `r_res > 1`, or with a non-finite `r_res`, is flagged
+`UNCONVERGED`. It is counted, and its `W ω̄` is still written. A cell
+whose `γ_λ` was capped is flagged `CAPPED`. `edc_report` downloads the
+flags and the statuses and returns the two counts plus the refused
+count. It is the step's report. It synchronises, so it runs after the
+step, outside any capture.
+
+**The mean rate** is (134.10) with `χ = 1`, in this order:
+`W_k ω̄_k = ((ρ̄ γ*) (Y*_k - Ỹ_k)) / τ_e`. `ρ̄` is the caller's mean
+density.
+
+**Cell statuses** (§132.10's codes keep their meaning; §134.6's 11 and 12
+are reused for the same causes). In this order: 1 `p`, 3 a `Y` negative
+or not finite, 2 `T̃`, 12 `ρ̄ ≤ 0` or not finite, and 11 when `k ≤ 0`,
+`ε < 0`, `ν < 0`, `ω < 0` or any of them is not finite. Then, only when
+`γ* > 0`: 5 for `h̃` with `T̃` outside a needed record's range, 9 for a
+carried step that is not finite or not above 0, and §132.10's run codes
+(2, 4, 5, 6, 7, 8). Last come the residual evaluation's own codes. A
+refused cell writes NaN to its `W ω̄` and to its fine state, leaves its
+carried step as it was, and has flags 0.
+
+**The rows CHR-15 makes true** (§134.5's EDC rows, plus the energy and
+device rows):
+
+| row | as built |
+|---|---|
+| `edc_constants_by_variant` | `C_γ`, `C_τ` of row (a) against 2.129810347487575 and 0.408248290463863 (40-digit evaluations of (134.4)-(134.5)). `γ_λ`, `γ*` and `τ*` of §134.3's table against their exact forms 18^(-1/2), 18^(-3/2) (1989), 1/18 (2005) and 5e-4, to 1e-14 relative (P). The table prints these rounded to 15 digits |
+| `edc_psr_closed_form` | `FUEL => PROD` at `k_r = 1000 1/s` (no activation, equal thermo records, so `T*` stays `T̃`). `Ỹ = (0.05, 0, 0.95)`, `T̃ = 1000 K`, `ν = 1.5e-5`, `k = 1`, `ε = 10`, both variants, `rtol 1e-10`. The host twin's `Y*_F` and `W_F ω̄_F/ρ̄` match (134.11) to 1e-8 relative (P). So does the device over 64 cells in f64, and to 1e-6 in f32 (R). No cell is unconverged |
+| `edc_cap_is_counted` | 64 cells with `k = 0.01 + 0.003 c`. The 18 cells with `k < 0.0616` have `γ_λ > 0.95`. The device's `CAPPED` count equals the host twin's count (18), and each capped cell's `γ*` is `0.95^3` (D) |
+| `edc_refuses_batch_variant` | `variant "batch"` is refused at lowering, naming `batch` and (134.9) (D) |
+| `edc_psr_holds_mean_enthalpy` | an exothermic `FUEL => PROD` (`θ ≈ 5032 K`, the product's enthalpy 5000 K · R per mole below the fuel's): `h(T*, Y*) = h̃` to 1e-8 relative on the host, with `T* > T̃` (P). Over 256 random cells the device matches the host twin fed the values the device saw, to 1e-8 of the cell's largest `\|W ω̄\|` and of `T̃` in f64, and to 1e-6 in f32 (R). The `CAPPED` and `UNCONVERGED` counts are equal |
+| `edc_replays_under_capture` | `chemEdcIntegrate` captures into one graph and replays bitwise (§81.6; a lib test, f64 build) |
+
+**Measured at landing (2026-10-17).** `edc_constants_by_variant`: worst
+2.1e-16. `edc_psr_closed_form`: host worst 3.0e-13, device worst 6.6e-13
+in f64 and 1.9e-8 in f32, `T*` exactly 1000 K. `edc_cap_is_counted`: 18
+and 18, bits on the same cells. `edc_psr_holds_mean_enthalpy`: host
+`|h* - h̃|` = 0 (`T*` = 1309.86 K, `r_res` 2.4e-5). Device against host:
+3.1e-13 in the rate and 1.6e-14 in `T*` in f64, and 5.3e-8 in f32.
+`CAPPED` was 9 and 9.
+
+**`UNCONVERGED` at `rtol 1e-10`.** 11 of the 256 random cells are
+`UNCONVERGED`, on the host and the device alike. So are 19 of the 64
+cells of `edc_cap_is_counted`, the 18 capped ones among them. The largest
+host `r_res` is 4.8, at `τ_e` = 3.4e-5 s and `T̃` = 910 K, where
+`k_r τ_e` is about 0.14. The cause is the size of the span. (134.9)'s
+deviation from its steady state decays as
+`exp(-(1 + k_r τ_e) t/τ_e)`. After `psrSpan = 20` it is about 2e-9 of the
+starting residual, which is itself about `k_r τ_e Ỹ`. That leftover is
+below §134.3's 1e-8, the target the default `psrSpan` was sized for. It is
+above these rows' `rtol 1e-10 · Y`, though, whenever the chemistry is
+slow against the mixing. The flag reports exactly that, and no row
+asserts zero there. Not built: a span sized from `rtol`, for example
+`ln(1/rtol)` time constants. That would change the default, so it is left
+for review.
+
+Labels: (134.16)-(134.17).
 
 ---
 

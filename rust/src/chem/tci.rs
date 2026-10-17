@@ -5,35 +5,44 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! Turbulence-chemistry interaction, as built by CHR-14 (SPEC-LIT §134.6):
-//! the EDM closure of §134.2 - (134.2)'s rate of progress with Magnussen &
-//! Hjertager's product-limiting third argument - and PaSR's frozen-mean
-//! form of §134.4 - (134.13) with (134.14)'s mixing times and (134.15)'s
-//! reacting-fraction edges. Every closure is selected through the running
-//! turbulence model's [`MixingRate`] (`src/models/coupled.rs`) by
-//! [`select`], which applies §134.1's refusals in §134.6's order and
-//! refuses EDC by name until CHR-15 builds it.
+//! Turbulence-chemistry interaction, as built by CHR-14 (SPEC-LIT §134.6)
+//! and CHR-15 (SPEC-LIT §134.7): the EDM closure of §134.2 - (134.2)'s
+//! rate of progress with Magnussen & Hjertager's product-limiting third
+//! argument -, PaSR's frozen-mean form of §134.4 - (134.13) with
+//! (134.14)'s mixing times and (134.15)'s reacting-fraction edges - and
+//! EDC of §134.3 as §134.7 builds it: the fine-structure reactor (134.9)
+//! with (134.16)'s energy mixing term, integrated to steady state over
+//! `psrSpan` time constants, reported through (134.17)'s residual and
+//! closed with (134.10)'s mean rate. Every closure is selected through the
+//! running turbulence model's [`MixingRate`] (`src/models/coupled.rs`) by
+//! [`select`], which applies §134.1's refusals in §134.6's order.
 //!
-//! The host twins take f64 and never refuse per cell; the per-cell
-//! statuses of §134.6 are the device path's, extending §132.9's codes with
-//! 11 [`status::BAD_MIXING`], 12 [`status::BAD_DENSITY`] and 13
-//! [`status::BAD_RATE`] - a refused cell writes NaN to every one of its
-//! outputs. The device kernels are `chemEdmSource` and `chemPasrScale` in
+//! The EDM and PaSR host twins take f64 and never refuse per cell, and
+//! [`edc_host`] refuses only the inputs its kernel refuses; the per-cell
+//! statuses of §134.6 and §134.7 are the device path's, extending
+//! §132.9's codes with 11 [`status::BAD_MIXING`], 12
+//! [`status::BAD_DENSITY`] and 13 [`status::BAD_RATE`] - a refused cell
+//! writes NaN to every one of its outputs. The device kernels are
+//! `chemEdmSource`, `chemPasrScale` and `chemEdcIntegrate` in
 //! `cuda/chem.cu`, one thread per cell in `ofchem` double in both builds,
 //! in the host's operation order, so the twin test holds at 1e-13 in f64.
 //! The flat EDM layout [`EdmMechanism::flatten`] emits is stated here and
 //! repeated in `cuda/chem.cu`; the two field lists must stay identical.
 //!
-//! Written from SPEC-LIT §134.1, §134.2, §134.4 and §134.6.
+//! Written from SPEC-LIT §134.1, §134.2, §134.3, §134.4, §134.6 and
+//! §134.7.
 //! No GPL-licensed source was consulted.
 
+use crate::chem::device::{DeviceMechanism, DeviceReactor, CTRL_LEN};
 use crate::chem::mechanism::Mechanism;
+use crate::chem::reactor::{ConstPressureReactor, ReactorOptions};
+use crate::chem::rosenbrock::{error_norm, integrate_observed, RosOptions};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
 use crate::error::{Error, Result};
 use crate::field::GpuScalarField;
-use crate::io::case_chem::{LoweredCombustion, MixingKind, TauChem, TauMix};
+use crate::io::case_chem::{EdcVariant, LoweredCombustion, MixingKind, TauChem, TauMix};
 use crate::models::coupled::MixingRate;
-use crate::Scalar;
+use crate::{Label, Scalar};
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 /// The per-cell refusal codes §134.6 adds above
@@ -50,20 +59,25 @@ pub mod status {
     pub const BAD_RATE: i32 = 13;
 }
 
-/// The closure [`select`] accepted (SPEC-LIT §134.6). EDC never reaches
-/// here: the selector refuses it until CHR-15.
+/// The closure [`select`] accepted (SPEC-LIT §134.6, §134.7): EDC arrives
+/// lowered, as [`EdcParams`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Closure {
     Laminar,
     Edm { a: f64, b: Option<f64> },
+    Edc(EdcParams),
     Pasr { tau_mix: TauMix, tau_chem: TauChem, c_mix: Option<f64> },
 }
 
-/// §134.6 "Selection", in exactly that order. `laminar` is always
-/// accepted; any closure with [`MixingRate::None`] is refused, naming the
-/// model and the arm; EDM or EDC with [`MixingRate::Strain`] is refused;
-/// EDC is refused as not built; PaSR's `tauMix strain` is refused under a
-/// RANS arm and any other `tauMix` under [`MixingRate::Strain`];
+/// §134.6 "Selection" and §134.7's step, in exactly that order.
+/// `laminar` is always accepted; any closure with [`MixingRate::None`] is
+/// refused, naming the model and the arm; EDM or EDC with
+/// [`MixingRate::Strain`] is refused; EDC under [`MixingRate::Omega`]
+/// without the model's `k` field is refused, naming `k`, because (134.4)
+/// and (134.5) read `eps = beta_star k omega`, and otherwise returns
+/// [`Closure::Edc`] with the lowered `variant`, `CD1`, `CD2`, `gammaMax`
+/// and `psrSpan` (SPEC-LIT §134.7); PaSR's `tauMix strain` is refused
+/// under a RANS arm and any other `tauMix` under [`MixingRate::Strain`];
 /// `kolmogorov` and `geometric` under the `Omega` arm without the model's
 /// `k` field are refused, naming `k`; `integral` without `Cmix` is
 /// refused. Each refusal names the combination (SPEC-LIT §134.1).
@@ -92,17 +106,26 @@ pub fn select(c: &LoweredCombustion, mixing: MixingKind, k_present: bool) -> Res
             }
             Ok(Closure::Edm { a: *a, b: *b })
         }
-        LoweredCombustion::Edc { .. } => {
+        LoweredCombustion::Edc { variant, cd1, cd2, gamma_max, psr_span } => {
             if mixing == MixingKind::None {
                 return Err(none("EDC"));
             }
             if mixing == MixingKind::Strain {
                 return Err(strain("EDC"));
             }
-            Err(Error::Config(format!(
-                "EDC is refused as not built: CHR-15 builds the fine-structure reactor of \
-                 SPEC-LIT §134.3 {TAG}"
-            )))
+            if mixing == MixingKind::Omega && !k_present {
+                return Err(Error::Config(format!(
+                    "EDC with MixingRate::Omega without the model's k field: eps = beta_star \
+                     k omega needs k, and (134.4) and (134.5) read that eps {TAG}"
+                )));
+            }
+            Ok(Closure::Edc(EdcParams {
+                variant: *variant,
+                cd1: *cd1,
+                cd2: *cd2,
+                gamma_max: *gamma_max,
+                psr_span: *psr_span,
+            }))
         }
         LoweredCombustion::Pasr { tau_mix, tau_chem, c_mix } => {
             if mixing == MixingKind::None {
@@ -391,12 +414,17 @@ impl<'a> DeviceMixing<'a> {
 pub struct TciKernels {
     edm: CudaFunction,
     pasr: CudaFunction,
+    edc: CudaFunction,
 }
 
 impl TciKernels {
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let k = KernelSet::new(gpu, crate::kernels::CHEM)?;
-        Ok(Self { edm: k.func("chemEdmSource")?, pasr: k.func("chemPasrScale")? })
+        Ok(Self {
+            edm: k.func("chemEdmSource")?,
+            pasr: k.func("chemPasrScale")?,
+            edc: k.func("chemEdcIntegrate")?,
+        })
     }
 }
 
@@ -630,6 +658,473 @@ pub fn pasr_source_device(
     Ok(())
 }
 
+/// EDC's lowered parameters (SPEC-LIT §134.3, §134.7).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdcParams {
+    pub variant: EdcVariant,
+    pub cd1: f64,
+    pub cd2: f64,
+    pub gamma_max: f64,
+    pub psr_span: f64,
+}
+
+/// (134.4)-(134.5)'s cascade constants, `(C_gamma, C_tau)`, computed from
+/// the row's `C_D1` and `C_D2` in f64 and never typed in (SPEC-LIT
+/// §134.3): row (a)'s `C_D1 = 0.135`, `C_D2 = 0.50` gives
+/// `(2.129810347487575, 0.408248290463863)`.
+pub fn edc_constants(cd1: f64, cd2: f64) -> (f64, f64) {
+    (
+        (3.0 * cd2 / (4.0 * cd1 * cd1)).powf(0.25),
+        (cd2 / 3.0).sqrt(),
+    )
+}
+
+/// One cell's fine-structure scales, as [`edc_scales`] returns them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdcScales {
+    /// `gamma_lambda`, after the `gamma_max` cap when [`Self::capped`].
+    pub gamma_lambda: f64,
+    /// `gamma_lambda` exceeded `gamma_max` and was capped (§134.3).
+    pub capped: bool,
+    /// `gamma_lambda^3` (1989) or `gamma_lambda^2` (2005).
+    pub gamma_star: f64,
+    /// `C_tau (nu / eps)^(1/2)`, which may be `+inf` at `eps = 0`.
+    pub tau_star: f64,
+}
+
+/// §134.7's scales, in its order: `g = C_gamma (nu eps / (k k))^(1/4)`,
+/// capped when `g > gamma_max` and then `g = gamma_max`; `gamma_star` is
+/// `g^3` (1989) or `g^2` (2005); `tau_star = C_tau (nu / eps)^(1/2)`, which
+/// may be `+inf` at `eps = 0`.
+pub fn edc_scales(p: &EdcParams, nu: f64, k: f64, eps: f64) -> EdcScales {
+    let (c_gamma, c_tau) = edc_constants(p.cd1, p.cd2);
+    let mut gamma_lambda = c_gamma * (nu * eps / (k * k)).powf(0.25);
+    let capped = gamma_lambda > p.gamma_max;
+    if capped {
+        gamma_lambda = p.gamma_max;
+    }
+    let gamma_star = match p.variant {
+        EdcVariant::V1989 => gamma_lambda * gamma_lambda * gamma_lambda,
+        EdcVariant::V2005 => gamma_lambda * gamma_lambda,
+    };
+    let tau_star = c_tau * (nu / eps).sqrt();
+    EdcScales { gamma_lambda, capped, gamma_star, tau_star }
+}
+
+/// One cell's EDC result, the host twin's report (SPEC-LIT §134.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdcCell {
+    /// The cell's fine-structure scales.
+    pub scales: EdcScales,
+    /// The fine state's `Y*` the reactor converged to.
+    pub y_star: Vec<f64>,
+    /// The fine state's `T*`.
+    pub t_star: f64,
+    /// (134.10)'s mean rate `W_k omega-bar_k`, kg/(m^3 s).
+    pub wdot: Vec<f64>,
+    /// (134.17)'s residual `r_res`.
+    pub residual: f64,
+    /// `r_res` finite and at most 1.
+    pub converged: bool,
+}
+
+/// The f64 host twin of `chemEdcIntegrate` for ONE cell (SPEC-LIT §134.7):
+/// §134.3's fine-structure reactor, integrated from `(Ytilde, Ttilde)` over
+/// `psr_span` time constants `tau_e` by §132's Rosenbrock kernel with
+/// advance's R10 observer, then (134.17)'s residual and (134.10)'s mean
+/// rate. Refuses, each an `Error::Config` naming the cause and
+/// "(SPEC-LIT §134.7)", the inputs the kernel refuses: a `y_bar` whose
+/// length is not the species count, a `p`/`t_bar`/`rho_bar` not finite or
+/// not above 0, and a mixing input with `k <= 0`, `eps < 0` or `nu < 0` or
+/// any of them not finite. A `gamma_star` of 0 (eps 0 or nu 0) returns
+/// `Y* = Ytilde`, `T* = Ttilde`, `wdot = 0` exactly, and integrates
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn edc_host(
+    mech: &Mechanism,
+    prm: &EdcParams,
+    opts: &ReactorOptions,
+    p: f64,
+    t_bar: f64,
+    y_bar: &[f64],
+    rho_bar: f64,
+    nu: f64,
+    k: f64,
+    eps: f64,
+) -> Result<EdcCell> {
+    const TAG: &str = "(SPEC-LIT §134.7)";
+    let n_sp = mech.species().len();
+    if y_bar.len() != n_sp {
+        return Err(Error::Config(format!(
+            "edc_host: y_bar holds {} mass fraction(s), the mechanism has {n_sp} species {TAG}",
+            y_bar.len()
+        )));
+    }
+    if !p.is_finite() || p <= 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: p = {p} Pa must be finite and above 0 {TAG}"
+        )));
+    }
+    for (name, &v) in mech.species().iter().zip(y_bar) {
+        if !v.is_finite() || v < 0.0 {
+            return Err(Error::Config(format!(
+                "edc_host: species {name}: the mean mass fraction {v} must be finite and at \
+                 least 0 {TAG}"
+            )));
+        }
+    }
+    if !t_bar.is_finite() || t_bar <= 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: T_bar = {t_bar} K must be finite and above 0 {TAG}"
+        )));
+    }
+    if !rho_bar.is_finite() || rho_bar <= 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: rho_bar = {rho_bar} kg/m3 must be finite and above 0 {TAG}"
+        )));
+    }
+    if !k.is_finite() || k <= 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: the mixing k = {k} m2/s2 must be finite and above 0 {TAG}"
+        )));
+    }
+    if !eps.is_finite() || eps < 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: the mixing eps = {eps} m2/s3 must be finite and at least 0 {TAG}"
+        )));
+    }
+    if !nu.is_finite() || nu < 0.0 {
+        return Err(Error::Config(format!(
+            "edc_host: the mixing nu = {nu} m2/s must be finite and at least 0 {TAG}"
+        )));
+    }
+    let scales = edc_scales(prm, nu, k, eps);
+    if scales.gamma_star == 0.0 {
+        return Ok(EdcCell {
+            scales,
+            y_star: y_bar.to_vec(),
+            t_star: t_bar,
+            wdot: vec![0.0; n_sp],
+            residual: 0.0,
+            converged: true,
+        });
+    }
+    let te = (1.0 - scales.gamma_star) * scales.tau_star;
+    let span = prm.psr_span * te;
+    let thermo = mech.thermo();
+    let h_bar = thermo.h_mass(t_bar, y_bar)?;
+    let reactor = ConstPressureReactor::new(mech, p)?;
+    let mut rhs = |yy: &[f64], dydt: &mut [f64]| -> crate::Result<()> {
+        reactor.rhs(yy, dydt)?;
+        let t = yy[n_sp];
+        for (l, y_l) in yy[..n_sp].iter().enumerate() {
+            dydt[l] = dydt[l] - (y_l - y_bar[l]) / te;
+        }
+        let yp: Vec<f64> = yy[..n_sp].iter().map(|v| v.max(0.0)).collect();
+        let cp = thermo.cp_mass(t, &yp)?;
+        let hs = thermo.h_mass(t, y_bar)?;
+        dydt[n_sp] = dydt[n_sp] - (hs - h_bar) / (cp * te);
+        Ok(())
+    };
+    let mut state: Vec<f64> = y_bar.to_vec();
+    state.push(t_bar);
+    let mut atol = vec![opts.atol_y; n_sp];
+    atol.push(opts.atol_t);
+    let ros = RosOptions {
+        method: opts.method,
+        rtol: opts.rtol,
+        atol,
+        h0: opts.h0,
+        h_min: 0.0,
+        h_max: opts.h_max,
+        max_steps: opts.max_steps,
+    };
+    let names = mech.species();
+    let mut observe = |_: f64, yy: &mut [f64]| -> crate::Result<()> {
+        for l in 0..n_sp {
+            if yy[l] < -opts.atol_y {
+                return Err(Error::Config(format!(
+                    "species {}: Y = {:e} is below -atol_y = {:e} at an accepted step {}",
+                    names[l], yy[l], opts.atol_y, TAG
+                )));
+            }
+            if yy[l] < 0.0 {
+                yy[l] = 0.0;
+            }
+        }
+        Ok(())
+    };
+    integrate_observed(&mut rhs, &mut state, 0.0, span, &ros, &mut observe)?;
+    let mut f_res = vec![0.0; n_sp + 1];
+    rhs(&state, &mut f_res)?;
+    let est: Vec<f64> = f_res.iter().map(|v| te * v).collect();
+    let residual = error_norm(&state, &est, opts.rtol, &ros.atol);
+    let converged = residual.is_finite() && residual <= 1.0;
+    let wdot: Vec<f64> = state[..n_sp]
+        .iter()
+        .zip(y_bar)
+        .map(|(ys, yb)| ((rho_bar * scales.gamma_star) * (ys - yb)) / te)
+        .collect();
+    Ok(EdcCell {
+        scales,
+        y_star: state[..n_sp].to_vec(),
+        t_star: state[n_sp],
+        wdot,
+        residual,
+        converged,
+    })
+}
+
+/// `flags[c]`'s bits of `chemEdcIntegrate` (SPEC-LIT §134.7): the step's
+/// per-cell report, which is never a refusal - a refused cell has flags 0.
+pub mod edc_flag {
+    /// The cell's `gamma_lambda` was capped at `gamma_max`.
+    pub const CAPPED: i32 = 1;
+    /// (134.17)'s residual exceeded 1 or was not finite; the cell's
+    /// `W omega-bar` is still written.
+    pub const UNCONVERGED: i32 = 2;
+}
+
+/// What [`edc_report`] counted over the step's cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EdcReport {
+    pub capped: usize,
+    pub unconverged: usize,
+    pub refused: usize,
+}
+
+/// The device scratch of one `chemEdcIntegrate` step (SPEC-LIT §134.7),
+/// all f64/i32 SoA with stride [`EdcWork::n_cells`] - `IntegrateWork` and
+/// `ChemWork`'s buffers, owned here: `state` (K+1)n holds the fine state
+/// `(Y*, T*)`, `ybar` K n the mean the kernel widens every call, `h` n the
+/// per-cell carried trial step (filled with `dr.options().h0` at
+/// [`EdcWork::new`], carried over calls as `integrate`'s `h` is),
+/// `counts` 3n, `flags` n, `vecs` 10 m n, `jac` m m n, `lu` m m n, `piv`
+/// m n, `conc`/`g`/`omega`/`yp` K n, `ypert`/`fpert` m n; `m = K + 1`.
+/// Everything computes in double in both builds (§132.6).
+pub struct EdcWork {
+    state: DevBuf<f64>,
+    ybar: DevBuf<f64>,
+    h: DevBuf<f64>,
+    counts: DevBuf<i32>,
+    flags: DevBuf<i32>,
+    vecs: DevBuf<f64>,
+    jac: DevBuf<f64>,
+    lu: DevBuf<f64>,
+    piv: DevBuf<i32>,
+    conc: DevBuf<f64>,
+    g: DevBuf<f64>,
+    omega: DevBuf<f64>,
+    yp: DevBuf<f64>,
+    ypert: DevBuf<f64>,
+    fpert: DevBuf<f64>,
+    n_species: usize,
+    n_cells: usize,
+}
+
+impl EdcWork {
+    pub fn new(gpu: &Gpu, dm: &DeviceMechanism, dr: &DeviceReactor, n_cells: usize) -> Result<Self> {
+        let k = dm.n_species();
+        let m = k + 1;
+        let n = n_cells;
+        Ok(Self {
+            state: gpu.zeros(m * n)?,
+            ybar: gpu.zeros(k * n)?,
+            h: gpu.upload(&vec![dr.options().h0; n])?,
+            counts: gpu.zeros(3 * n)?,
+            flags: gpu.zeros(n)?,
+            vecs: gpu.zeros(10 * m * n)?,
+            jac: gpu.zeros(m * m * n)?,
+            lu: gpu.zeros(m * m * n)?,
+            piv: gpu.zeros(m * n)?,
+            conc: gpu.zeros(k * n)?,
+            g: gpu.zeros(k * n)?,
+            omega: gpu.zeros(k * n)?,
+            yp: gpu.zeros(k * n)?,
+            ypert: gpu.zeros(m * n)?,
+            fpert: gpu.zeros(m * n)?,
+            n_species: k,
+            n_cells,
+        })
+    }
+
+    /// The cell count the scratch was sized for.
+    pub fn n_cells(&self) -> usize {
+        self.n_cells
+    }
+
+    /// The fine state `(Y*, T*)`, element `k` of cell `c` at `[k * n + c]`,
+    /// `T*` at `[(K) * n + c]`.
+    pub fn fine_state(&self) -> &DevBuf<f64> {
+        &self.state
+    }
+
+    /// The per-cell flag bits ([`edc_flag`]).
+    pub fn flags(&self) -> &DevBuf<i32> {
+        &self.flags
+    }
+}
+
+/// (134.9) with (134.16) at every cell: the device [`edc_host`] - the
+/// fine-structure reactor integrated to steady state by the kernel's copy
+/// of `chemIntegrate`'s step loop, then (134.17)'s residual into
+/// [`edc_flag`]'s bits and (134.10)'s mean rate (SPEC-LIT §134.7).
+/// Layouts: `nu/rho/t/p/status[c]`, `y/wdot[k*n+c]`, the mixing buffers
+/// `[c]`; the fine state, the carried step and every scratch live in
+/// `work`. `Strain` is refused (EDC is RANS); `Omega` without the model's
+/// `k` field is refused, naming `k`; a `K` mismatch between `dm` and
+/// `work` and every short buffer are refused. `n == 0` launches nothing;
+/// no sync, no allocation, so the call captures - [`edc_report`] reads
+/// the step afterwards, outside any capture.
+#[allow(clippy::too_many_arguments)]
+pub fn edc_source_device(
+    gpu: &Gpu,
+    kern: &TciKernels,
+    dm: &DeviceMechanism,
+    dr: &DeviceReactor,
+    work: &mut EdcWork,
+    prm: &EdcParams,
+    mix: &DeviceMixing<'_>,
+    nu: &DevBuf<Scalar>,
+    rho: &DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    p: &DevBuf<Scalar>,
+    y: &DevBuf<Scalar>,
+    wdot: &mut DevBuf<Scalar>,
+    status: &mut DevBuf<i32>,
+    n: usize,
+) -> Result<()> {
+    const TAG: &str = "(SPEC-LIT §134.1)";
+    let f = "chemEdcIntegrate";
+    let ks = dm.n_species();
+    let (arm, m0, m1, kf, beta_star): (i32, &DevBuf<Scalar>, &DevBuf<Scalar>, &DevBuf<Scalar>, f64) =
+        match mix {
+            DeviceMixing::Epsilon { k, epsilon } => (0, k, epsilon, k, 0.0),
+            DeviceMixing::Omega { omega, beta_star, k } => {
+                let kf = match k {
+                    Some(kf) => kf,
+                    None => {
+                        return Err(Error::Config(format!(
+                            "{f}: MixingRate::Omega without the model's k field: eps = \
+                             beta_star k omega needs k {TAG}"
+                        )));
+                    }
+                };
+                (1, omega, omega, kf, f64::from(*beta_star))
+            }
+            DeviceMixing::Strain(_) => {
+                return Err(Error::Config(format!(
+                    "{f}: MixingRate::Strain (LES) is refused; EDC reads eps of a RANS arm, \
+                     eps = beta_star k omega or the Epsilon arm's eps (SPEC-LIT §134.1)"
+                )));
+            }
+        };
+    if work.n_species != ks {
+        return Err(Error::Config(format!(
+            "{f}: the work buffers hold the scratch of {} species, the mechanism has {ks}",
+            work.n_species
+        )));
+    }
+    if n > work.n_cells {
+        return Err(Error::Config(format!(
+            "{f}: the call asks for {n} cell(s), the work buffers were sized for {}",
+            work.n_cells
+        )));
+    }
+    check_layout(f, "nu", nu.len(), n)?;
+    check_layout(f, "rho", rho.len(), n)?;
+    check_layout(f, "t", t.len(), n)?;
+    check_layout(f, "p", p.len(), n)?;
+    check_layout(f, "y", y.len(), ks * n)?;
+    check_layout(f, "wdot", wdot.len(), ks * n)?;
+    check_layout(f, "status", status.len(), n)?;
+    for (name, buf) in [("m0", m0), ("m1", m1), ("kf", kf)] {
+        check_layout(f, name, buf.len(), n)?;
+    }
+    check_layout(f, "ctrl", dr.ctrl().len(), CTRL_LEN)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let cube = i32::from(prm.variant == EdcVariant::V1989);
+    let (c_gamma, c_tau) = edc_constants(prm.cd1, prm.cd2);
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&kern.edc)
+            .arg(&arm)
+            .arg(m0)
+            .arg(m1)
+            .arg(kf)
+            .arg(&beta_star)
+            .arg(nu)
+            .arg(&cube)
+            .arg(&c_gamma)
+            .arg(&c_tau)
+            .arg(&prm.gamma_max)
+            .arg(&prm.psr_span)
+            .arg(rho)
+            .arg(t)
+            .arg(p)
+            .arg(y)
+            .arg(&mut *wdot)
+            .arg(&mut *status)
+            .arg(&mut work.flags)
+            .arg(&mut work.state)
+            .arg(&mut work.ybar)
+            .arg(&mut work.h)
+            .arg(&mut work.counts)
+            .arg(dr.ctrl())
+            .arg(&mut work.vecs)
+            .arg(&mut work.jac)
+            .arg(&mut work.lu)
+            .arg(&mut work.piv)
+            .arg(&mut work.conc)
+            .arg(&mut work.g)
+            .arg(&mut work.omega)
+            .arg(&mut work.yp)
+            .arg(&mut work.ypert)
+            .arg(&mut work.fpert)
+            .arg(dm.flat_f())
+            .arg(dm.flat_i())
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// Downloads `work`'s flags and `status` - this synchronises, so it runs
+/// after the step and never inside a capture - and counts them: the
+/// [`edc_flag::CAPPED`] and [`edc_flag::UNCONVERGED`] bits, plus the cells
+/// whose status is not 0 (SPEC-LIT §134.7's step report).
+pub fn edc_report(gpu: &Gpu, work: &EdcWork, status: &DevBuf<i32>, n: usize) -> Result<EdcReport> {
+    let f = "edc_report";
+    if n > work.n_cells {
+        return Err(Error::Config(format!(
+            "{f}: the call asks for {n} cell(s), the work buffers were sized for {}",
+            work.n_cells
+        )));
+    }
+    check_layout(f, "status", status.len(), n)?;
+    if n == 0 {
+        return Ok(EdcReport::default());
+    }
+    let flags = gpu.download(work.flags())?;
+    let sts = gpu.download(status)?;
+    let mut rep = EdcReport::default();
+    for c in 0..n {
+        if flags[c] & edc_flag::CAPPED != 0 {
+            rep.capped += 1;
+        }
+        if flags[c] & edc_flag::UNCONVERGED != 0 {
+            rep.unconverged += 1;
+        }
+        if sts[c] != 0 {
+            rep.refused += 1;
+        }
+    }
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,5 +1233,99 @@ mod tests {
         )
         .expect("SPEC-LIT 134.6: the TCI kernels must capture and replay bitwise");
         println!("  TCI kernels: {report}");
+    }
+
+    /// The LIN fixture of §134.7: `FUEL => PROD` at 1000 1/s over FUEL,
+    /// PROD, N2 - equal thermo records, so `T*` stays `Ttilde`.
+    fn lin_mech() -> Mechanism {
+        let mut t = String::from("THERMO ALL\n   200.000  1000.000  6000.000\n");
+        for (n, e) in
+            [("FUEL", &[("C", 1), ("H", 4)][..]), ("PROD", &[("C", 1), ("H", 4)]), ("N2", &[("N", 2)])]
+        {
+            t.push_str(&record(n, e));
+        }
+        t.push_str("END\n");
+        let set = ThermoSet::read_chemkin(&t, "tci test", P_ATM, &ElementTable::standard())
+            .expect("the thermo fixture reads");
+        let text = "ELEMENTS C H N END\nSPECIES FUEL PROD N2 END\nREACTIONS\n\
+                    FUEL => PROD   1000.0 0.0 0.0\nEND\n";
+        Mechanism::read_chemkin(text, "tci test", Some(&set)).expect("the mechanism reads")
+    }
+
+    /// SPEC-LIT 81.6's gate for `chemEdcIntegrate` (§134.7): capture one
+    /// iteration - the EDC step, then Y moved by its mean rate times
+    /// 1e-6/1.2 - and replay bitwise. The carried trial step and the
+    /// fine state carry across iterations, so a replay that skipped a
+    /// launch cannot pass.
+    #[test]
+    fn edc_replays_under_capture() {
+        let Some(g) = Gpu::new(0).ok() else { return };
+        let m = lin_mech();
+        let ks = m.species().len();
+        let n = 64usize;
+        let prm = EdcParams {
+            variant: EdcVariant::V1989,
+            cd1: 0.135,
+            cd2: 0.5,
+            gamma_max: 0.95,
+            psr_span: 20.0,
+        };
+        let opts = crate::chem::ReactorOptions {
+            rtol: 1.0e-10,
+            atol_y: 1.0e-14,
+            atol_t: 1.0e-8,
+            ..Default::default()
+        };
+        let mut y0 = vec![0.0 as Scalar; ks * n];
+        for c in 0..n {
+            for (k, v) in [0.05, 0.0, 0.95].iter().enumerate() {
+                y0[k * n + c] = *v as Scalar;
+            }
+        }
+        let kf0 = vec![1.0 as Scalar; n];
+        let ef0 = vec![10.0 as Scalar; n];
+        let report = capture_replays_bitwise(
+            &g,
+            "chemEdcIntegrate (SPEC-LIT 134.7)",
+            || {
+                let kern = TciKernels::new(&g)?;
+                let dm = DeviceMechanism::upload(&g, &m)?;
+                let dr = DeviceReactor::new(&g, &opts)?;
+                let work = EdcWork::new(&g, &dm, &dr, n)?;
+                Ok((
+                    kern,
+                    FieldKernels::new(&g)?,
+                    dm,
+                    dr,
+                    work,
+                    g.upload(&vec![1.5e-5 as Scalar; n])?,
+                    g.upload(&vec![1.0 as Scalar; n])?,
+                    g.upload(&vec![1000.0 as Scalar; n])?,
+                    g.upload(&vec![101325.0 as Scalar; n])?,
+                    g.upload(&kf0)?,
+                    g.upload(&ef0)?,
+                    g.upload(&y0)?,
+                    g.zeros::<Scalar>(ks * n)?,
+                    g.zeros::<i32>(n)?,
+                ))
+            },
+            |(tk, fk, dm, dr, work, nu, rho, t, p, kf, ef, y, wdot, st)| {
+                let mix = DeviceMixing::Epsilon { k: kf, epsilon: ef };
+                edc_source_device(
+                    &g, tk, dm, dr, work, &prm, &mix, nu, rho, t, p, y, wdot, st, n,
+                )?;
+                field_ops::scale_field(&g, fk, wdot, (1.0e-6 / 1.2) as Scalar, ks * n)?;
+                field_ops::add_field(&g, fk, y, wdot, ks * n)
+            },
+            |(_tk, _fk, _dm, _dr, _work, _nu, _rho, _t, _p, _kf, _ef, y, wdot, st)| {
+                Ok(vec![
+                    ("y", g.download(y)?),
+                    ("edc wdot", g.download(wdot)?),
+                    ("status", g.download(st)?.iter().map(|&v| v as Scalar).collect()),
+                ])
+            },
+        )
+        .expect("SPEC-LIT 134.7: chemEdcIntegrate must capture and replay bitwise");
+        println!("  EDC kernel: {report}");
     }
 }

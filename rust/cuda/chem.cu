@@ -99,6 +99,15 @@
   Y, 11 BAD_MIXING, 12 BAD_DENSITY, 13 BAD_RATE; a refused cell writes
   NaN to every one of its wdot entries.
   ------------------------------------------------------------------------
+
+  CHR-15 adds EDC (SPEC-LIT 134.7): chemEdcIntegrate integrates each
+  cell's fine-structure reactor, (134.9) with (134.16)'s energy mixing
+  term, from (Ybar, Tbar) over psrSpan tau_e by a copy of chemIntegrate's
+  step loop whose right-hand side is chemEdcRhs - chemIntegrate itself is
+  not edited, so its SASS is unchanged - then writes (134.17)'s residual
+  verdict into the flag bits and (134.10)'s mean rate. Its host twin is
+  src/chem/tci.rs's edc_host.
+  ------------------------------------------------------------------------
 */
 
 #include "ofgpu_device.cuh"
@@ -1326,3 +1335,440 @@ extern "C" __global__ void chemPasrScale
     status[c] = st;
 }
 
+//- chemEdcRhs: the fine-structure reactor's right-hand side of SPEC-LIT
+//  134.7 - (134.9)'s chemistry part from chemRhs at (Y*, T*), then the
+//  mixing terms - (Y*_k - Ybar_k)/tau_e per species and (134.16)'s
+//  - (sum Ybar_k h_k(T*) - hbar)/(cp(T*, Y*+) tau_e) - exactly the host
+//  twin edc_host's rhs closure, in its order. hbar is
+//  sum Ybar_k h_k(Tbar), computed once per cell by the caller. The
+//  pointers are cell-column pointers, as chemRhs takes them (element k at
+//  [k*n]). cp runs over yp != 0 as chemRhs's does, hs over Ybar != 0;
+//  a chemRange miss returns its code (5). Returns chemRhs's code, or the
+//  range miss, or 0. -
+OFGPU_DEV int chemEdcRhs(const ofchem* y, ofchem p, const ofchem* ybar, ofchem hbar, ofchem te,
+                         const ofchem* mf, const int* mi, ofchem* yp, ofchem* conc, ofchem* g,
+                         ofchem* omg, ofchem* dydt, oflabel n)
+{
+    const int K = mi[0];
+    const int st = chemRhs(y, p, mf, mi, yp, conc, g, omg, dydt, n);
+    if (st != 0) return st;
+    const ofchem rg = mf[18 * K];
+    const ofchem t = y[K * n];
+    for (int k = 0; k < K; ++k)
+    {
+        dydt[k * n] = __dsub_rn(dydt[k * n],
+            __ddiv_rn(__dsub_rn(y[k * n], ybar[k * n]), te));
+    }
+    ofchem cp = 0.0;
+    for (int k = 0; k < K; ++k)
+    {
+        if (yp[k * n] == 0.0) continue;
+        const ofchem* sp = mf + 18 * k;
+        const int miss = chemRange(sp, t);
+        if (miss != 0) return miss;
+        cp = __dadd_rn(cp, __ddiv_rn(
+            __dmul_rn(yp[k * n], __dmul_rn(rg, chemCpR(chemCoeffs(sp, t), t))), mf[18 * k]));
+    }
+    ofchem hs = 0.0;
+    for (int k = 0; k < K; ++k)
+    {
+        if (ybar[k * n] == 0.0) continue;
+        const ofchem* sp = mf + 18 * k;
+        const int miss = chemRange(sp, t);
+        if (miss != 0) return miss;
+        hs = __dadd_rn(hs, __ddiv_rn(
+            __dmul_rn(ybar[k * n], __dmul_rn(__dmul_rn(rg, t), chemHrt(chemCoeffs(sp, t), t))),
+            mf[18 * k]));
+    }
+    dydt[K * n] = __dsub_rn(dydt[K * n], __ddiv_rn(__dsub_rn(hs, hbar), __dmul_rn(cp, te)));
+    return 0;
+}
+
+//- chemEdcIntegrate: EDC's device source of SPEC-LIT 134.7 - one thread
+//  per cell integrates the fine-structure reactor, (134.9) with
+//  (134.16)'s energy mixing term, from (Ybar, Tbar) over psrSpan tau_e by
+//  a copy of chemIntegrate's step loop whose every chemRhs call is
+//  chemEdcRhs and whose duration is span; then (134.17)'s residual in
+//  (132.5)'s weights - a cell with r_res > 1, or a non-finite one, is
+//  flagged UNCONVERGED and still written - and (134.10)'s mean rate
+//  W_k omega-bar_k = ((rho gamma*) (Y*_k - Ybar_k)) / tau_e. gamma_lambda
+//  capped at gamma_max flags CAPPED. gamma_star = 0 (eps = 0 or nu = 0)
+//  means no fine structures: Y* = Ybar, T* = Tbar, W omega-bar = 0
+//  exactly, nothing integrated, the carried step untouched. arm:
+//  0 Epsilon (m0 = k, m1 = eps), 1 Omega (m0 = omega, kf = k,
+//  eps = (beta_star k) omega); cube 1 = 1989 (gamma* = gl^3), 0 = 2005
+//  (gl^2). Statuses, in the input checks' order: 1 p, 3 a Y negative or
+//  not finite, 2 Tbar, 12 rho, 11 the mixing inputs (k <= 0, eps < 0,
+//  nu < 0, omega < 0, or one of them not finite); then, only when
+//  gamma* > 0, 5 a Tbar outside a record hbar needs, 9 a carried step
+//  that is not finite or not above 0, then the run codes the copy
+//  carries (2, 4, 5 from chemEdcRhs, 6 a singular I - gamma h J,
+//  7 max_steps, 8 the observer's Y below -atol_y). A refused cell writes
+//  NaN to its wdot and its fine state, leaves its carried step, and has
+//  flags 0; on success h[c] holds the proposed step, as chemIntegrate's
+//  does. -
+extern "C" __global__ void chemEdcIntegrate
+(
+    const int arm,
+    const ofscalar* __restrict__ m0,
+    const ofscalar* __restrict__ m1,
+    const ofscalar* __restrict__ kf,
+    const double beta_star,
+    const ofscalar* __restrict__ nu,
+    const int cube,
+    const double c_gamma,
+    const double c_tau,
+    const double gamma_max,
+    const double psr_span,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ y,
+    ofscalar* __restrict__ wdot,
+    int* __restrict__ status,
+    int* __restrict__ flags,
+    ofchem* __restrict__ state,
+    ofchem* __restrict__ ybar,
+    ofchem* __restrict__ h,
+    int* __restrict__ counts,
+    const ofchem* __restrict__ ctrl,
+    ofchem* __restrict__ vecs,
+    ofchem* __restrict__ jac,
+    ofchem* __restrict__ lu,
+    int* __restrict__ piv,
+    ofchem* __restrict__ conc,
+    ofchem* __restrict__ g,
+    ofchem* __restrict__ omg,
+    ofchem* __restrict__ yp,
+    ofchem* __restrict__ ypert,
+    ofchem* __restrict__ fpert,
+    const ofchem* __restrict__ mf,
+    const int* __restrict__ mi,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    const int K = mi[0];
+    const int m = K + 1;
+    //- The control array, in the layout the header states. -
+    const ofchem gamma = ctrl[0];
+    const ofchem* alpha = ctrl + 1;
+    const ofchem* gij = ctrl + 17;
+    const ofchem* b = ctrl + 33;
+    const ofchem* bhat = ctrl + 37;
+    const int stages = (int)ctrl[41];
+    const int emb_order = (int)ctrl[42];
+    const ofchem rtol = ctrl[43];
+    const ofchem atol_y = ctrl[44];
+    const ofchem atol_t = ctrl[45];
+    const ofchem h_max = ctrl[46];
+    const int max_steps = (int)ctrl[47];
+    //- The cell's columns of the ten SoA work vectors: f0, y_new, est,
+    //  arg, rhs, v, then the four stage vectors; element l at [l * n]. -
+    ofchem* f0 = vecs + c;
+    ofchem* ynew = vecs + m * n + c;
+    ofchem* est = vecs + 2 * m * n + c;
+    ofchem* arg = vecs + 3 * m * n + c;
+    ofchem* rhs = vecs + 4 * m * n + c;
+    ofchem* v = vecs + 5 * m * n + c;
+    ofchem* kj[4];
+    for (int i = 0; i < 4; ++i) kj[i] = vecs + (6 + i) * m * n + c;
+
+    int st = 0;
+    int accepted = 0;
+    int rejected = 0;
+    int clipped = 0;
+    int fl = 0;
+    //- Widen the inputs and write ybar and the fine state's start
+    //  (Ybar, Tbar) first; the refused cell overwrites it with NaN. -
+    for (int k = 0; k < K; ++k)
+    {
+        const ofchem yk = (ofchem)y[k * n + c];
+        ybar[k * n + c] = yk;
+        state[k * n + c] = yk;
+    }
+    const ofchem t_d = (ofchem)t[c];
+    state[K * n + c] = t_d;
+    const ofchem p_c = (ofchem)p[c];
+    const ofchem rho_c = (ofchem)rho[c];
+    const ofchem nu_c = (ofchem)nu[c];
+    //- The input checks, in 134.7's status order. -
+    if (!isfinite(p_c) || p_c <= 0.0) st = 1;
+    for (int k = 0; k < K && st == 0; ++k)
+    {
+        if (!isfinite(state[k * n + c]) || state[k * n + c] < 0.0) st = 3;
+    }
+    if (st == 0 && (!isfinite(t_d) || t_d <= 0.0)) st = 2;
+    if (st == 0 && (!isfinite(rho_c) || rho_c <= 0.0)) st = 12;
+    ofchem kk = 0.0;
+    ofchem eps = 0.0;
+    if (st == 0)
+    {
+        if (arm == 0)
+        {
+            kk = (ofchem)m0[c];
+            eps = (ofchem)m1[c];
+            if (!isfinite(kk) || kk <= 0.0 || !isfinite(eps) || eps < 0.0) st = 11;
+        }
+        else
+        {
+            const ofchem om = (ofchem)m0[c];
+            kk = (ofchem)kf[c];
+            eps = (beta_star * kk) * om;
+            if (!isfinite(kk) || kk <= 0.0 || !isfinite(eps) || eps < 0.0
+                || !isfinite(om) || om < 0.0) st = 11;
+        }
+        if (st == 0 && (!isfinite(nu_c) || nu_c < 0.0)) st = 11;
+    }
+    ofchem te = 0.0;
+    ofchem span = 0.0;
+    ofchem gs = 0.0;
+    ofchem hbar = 0.0;
+    ofchem hstep = 0.0;
+    if (st == 0)
+    {
+        //- The scales of 134.7's order: gamma_lambda, the cap, gamma*,
+        //  tau_e and the span. -
+        ofchem gl = __dmul_rn(c_gamma,
+            pow(__ddiv_rn(__dmul_rn(nu_c, eps), __dmul_rn(kk, kk)), 0.25));
+        if (gl > gamma_max) { gl = gamma_max; fl |= 1; }
+        gs = (cube != 0) ? __dmul_rn(__dmul_rn(gl, gl), gl) : __dmul_rn(gl, gl);
+        te = __dmul_rn(__dsub_rn(1.0, gs), __dmul_rn(c_tau, sqrt(__ddiv_rn(nu_c, eps))));
+        span = __dmul_rn(psr_span, te);
+        if (gs == 0.0)
+        {
+            //- No fine structures: Y* = Ybar, T* = Tbar (already
+            //  written), W omega-bar = 0 exactly, nothing integrated. -
+            for (int k = 0; k < K; ++k) wdot[k * n + c] = (ofscalar)0.0;
+            counts[c] = 0;
+            counts[n + c] = 0;
+            counts[2 * n + c] = 0;
+            flags[c] = 0;
+            status[c] = 0;
+            return;
+        }
+        //- hbar = sum Ybar_k h_k(Tbar) over Ybar != 0; a range miss is 5. -
+        const ofchem rg = mf[18 * K];
+        for (int k = 0; k < K; ++k)
+        {
+            const ofchem yb = ybar[k * n + c];
+            if (yb == 0.0) continue;
+            const ofchem* sp = mf + 18 * k;
+            const int miss = chemRange(sp, t_d);
+            if (miss != 0) { st = miss; break; }
+            hbar = __dadd_rn(hbar, __ddiv_rn(__dmul_rn(yb,
+                __dmul_rn(__dmul_rn(rg, t_d), chemHrt(chemCoeffs(sp, t_d), t_d))),
+                mf[18 * k]));
+        }
+    }
+    if (st == 0)
+    {
+        hstep = h[c];
+        if (!isfinite(hstep) || hstep <= 0.0) st = 9;
+    }
+    if (st == 0)
+    {
+        //- R3: h = min(min(h_in, h_max), span); advance's h_min is 0. -
+        hstep = fmin(fmin(hstep, h_max), span);
+        ofchem fac_max = 10.0;
+        int accepted_any = 0;
+        int have_jac = 0;
+        int attempts = 0;
+        const ofchem inv_p1 = 1.0 / ((ofchem)emb_order + 1.0);
+        ofchem t_run = 0.0;
+        while (t_run < span && st == 0)
+        {
+            //- R3: the end point; the shortened last step. -
+            const int last = __dadd_rn(t_run, hstep) >= span;
+            if (last) hstep = __dsub_rn(span, t_run);
+            //- R2: f0 and the FD Jacobian at y, once per accepted point; a
+            //  retry after a rejection reuses it. Any chemEdcRhs refusal
+            //  ends the cell with that status, as the host's ? does. -
+            if (!have_jac)
+            {
+                st = chemEdcRhs(state + c, p_c, ybar + c, hbar, te, mf, mi, yp + c,
+                                conc + c, g + c, omg + c, f0, n);
+                for (int j = 0; j < m && st == 0; ++j)
+                {
+                    const ofchem y_j = state[j * n + c];
+                    const ofchem atol_j = (j < K) ? atol_y : atol_t;
+                    const ofchem delta = __dmul_rn(1.4901161193847656e-08,
+                                                   fmax(fabs(y_j), atol_j));
+                    for (int i = 0; i < m; ++i) ypert[i * n + c] = state[i * n + c];
+                    ypert[j * n + c] = __dadd_rn(y_j, delta);
+                    st = chemEdcRhs(ypert + c, p_c, ybar + c, hbar, te, mf, mi, yp + c,
+                                    conc + c, g + c, omg + c, fpert + c, n);
+                    for (int i = 0; i < m && st == 0; ++i)
+                        jac[(i * m + j) * n + c] = __ddiv_rn(
+                            __dsub_rn(fpert[i * n + c], f0[i * n]), delta);
+                }
+                if (st != 0) break;
+                have_jac = 1;
+            }
+            attempts++;
+            if (attempts > max_steps) { st = 7; break; }
+            //- The matrix lu = (-gamma h) J, then the +1 diagonal
+            //  (rosenbrock.rs's ros_step). -
+            for (int i = 0; i < m; ++i)
+            {
+                for (int j = 0; j < m; ++j)
+                    lu[(i * m + j) * n + c] =
+                        __dmul_rn(__dmul_rn(-gamma, hstep),
+                                  jac[(i * m + j) * n + c]);
+                lu[(i * m + i) * n + c] =
+                    __dadd_rn(lu[(i * m + i) * n + c], 1.0);
+            }
+            if (chemLuFactor(lu + c, piv + c, m, n)) { st = 6; break; }
+            //- The stages of (132.1): the argument y + sum alpha_ij k_j,
+            //  f there, then rhs = h f + h J v with v = sum gamma_ij k_j,
+            //  then the solve that gives k_i. -
+            for (int i = 0; i < stages && st == 0; ++i)
+            {
+                for (int l = 0; l < m; ++l) arg[l * n] = state[l * n + c];
+                for (int j = 0; j < i; ++j)
+                {
+                    const ofchem a_ij = alpha[i * 4 + j];
+                    if (a_ij == 0.0) continue;
+                    for (int l = 0; l < m; ++l)
+                        arg[l * n] = __dadd_rn(arg[l * n],
+                            __dmul_rn(a_ij, kj[j][l * n]));
+                }
+                st = chemEdcRhs(arg, p_c, ybar + c, hbar, te, mf, mi, yp + c,
+                                conc + c, g + c, omg + c, rhs, n);
+                if (st != 0) break;
+                for (int l = 0; l < m; ++l) v[l * n] = 0.0;
+                for (int j = 0; j < i; ++j)
+                {
+                    const ofchem g_ij = gij[i * 4 + j];
+                    if (g_ij == 0.0) continue;
+                    for (int l = 0; l < m; ++l)
+                        v[l * n] = __dadd_rn(v[l * n],
+                            __dmul_rn(g_ij, kj[j][l * n]));
+                }
+                for (int l = 0; l < m; ++l)
+                {
+                    ofchem jv = 0.0;
+                    for (int q = 0; q < m; ++q)
+                        jv = __dadd_rn(jv, __dmul_rn(jac[(l * m + q) * n + c],
+                                                     v[q * n]));
+                    rhs[l * n] = __dadd_rn(__dmul_rn(hstep, rhs[l * n]),
+                                           __dmul_rn(hstep, jv));
+                }
+                chemLuSolve(lu + c, piv + c, m, rhs, n);
+                for (int l = 0; l < m; ++l) kj[i][l * n] = rhs[l * n];
+            }
+            if (st != 0) break;
+            //- (132.2): y_new = y + sum b_i k_i, est = sum (b_i - bhat_i)
+            //  k_i, both sums in i order, one loop. -
+            for (int l = 0; l < m; ++l)
+            {
+                ofchem sy = 0.0;
+                ofchem se = 0.0;
+                for (int i = 0; i < stages; ++i)
+                {
+                    sy = __dadd_rn(sy, __dmul_rn(b[i], kj[i][l * n]));
+                    se = __dadd_rn(se, __dmul_rn(__dsub_rn(b[i], bhat[i]),
+                                                 kj[i][l * n]));
+                }
+                ynew[l * n] = __dadd_rn(state[l * n + c], sy);
+                est[l * n] = se;
+            }
+            //- (132.5): Err = sqrt(sum (est/(atol + rtol|y_new|))^2 / m),
+            //  m = K + 1. -
+            ofchem err_sum = 0.0;
+            int finite = 1;
+            for (int l = 0; l < m; ++l)
+            {
+                const ofchem y_l = ynew[l * n];
+                if (!isfinite(y_l)) finite = 0;
+                const ofchem atol_l = (l < K) ? atol_y : atol_t;
+                const ofchem e = __ddiv_rn(est[l * n],
+                    __dadd_rn(atol_l, __dmul_rn(rtol, fabs(y_l))));
+                err_sum = __dadd_rn(err_sum, __dmul_rn(e, e));
+            }
+            const ofchem err = sqrt(__ddiv_rn(err_sum, (ofchem)m));
+            if (!isfinite(err)) finite = 0;
+            const ofchem fac = fmin(fac_max,
+                fmax(0.1, __ddiv_rn(0.9, pow(err, inv_p1))));
+            if (finite && err < 1.0)
+            {
+                //- Accept; on the last step t is span exactly (R3). -
+                t_run = last ? span : __dadd_rn(t_run, hstep);
+                for (int l = 0; l < m; ++l) state[l * n + c] = ynew[l * n];
+                accepted++;
+                accepted_any = 1;
+                fac_max = 10.0;
+                hstep = fmin(__dmul_rn(hstep, fac), h_max);
+                have_jac = 0;
+                //- advance's observer (R10): below -atol_y refuses, in
+                //  [-atol_y, 0) clips to 0, in species order. -
+                for (int l = 0; l < K; ++l)
+                {
+                    if (state[l * n + c] < -atol_y) { st = 8; break; }
+                    if (state[l * n + c] < 0.0)
+                    {
+                        state[l * n + c] = 0.0;
+                        clipped++;
+                    }
+                }
+            }
+            else
+            {
+                //- Reject; R4's non-finite step always divides h by 10. -
+                rejected++;
+                fac_max = 1.0;
+                if (!finite) hstep = __ddiv_rn(hstep, 10.0);
+                else if (accepted_any) hstep = __dmul_rn(hstep, fac);
+                else hstep = __ddiv_rn(hstep, 10.0);
+            }
+        }
+    }
+    if (st == 0)
+    {
+        //- (134.17): the residual of (134.8) after the span, in the
+        //  integrator's own weights, with f at the final state in the f0
+        //  column. -
+        st = chemEdcRhs(state + c, p_c, ybar + c, hbar, te, mf, mi, yp + c,
+                        conc + c, g + c, omg + c, f0, n);
+        if (st == 0)
+        {
+            ofchem rsum = 0.0;
+            for (int l = 0; l < m; ++l)
+            {
+                const ofchem atol_l = (l < K) ? atol_y : atol_t;
+                const ofchem e = __ddiv_rn(__dmul_rn(te, f0[l * n]),
+                    __dadd_rn(atol_l, __dmul_rn(rtol, fabs(state[l * n + c]))));
+                rsum = __dadd_rn(rsum, __dmul_rn(e, e));
+            }
+            const ofchem res = sqrt(__ddiv_rn(rsum, (ofchem)m));
+            if (!isfinite(res) || res > 1.0) fl |= 2;
+        }
+    }
+    if (st == 0)
+    {
+        //- (134.10) with chi = 1: W_k omega-bar_k =
+        //  ((rho gamma*) (Y*_k - Ybar_k)) / tau_e. -
+        const ofchem base = __dmul_rn(rho_c, gs);
+        for (int k = 0; k < K; ++k)
+        {
+            wdot[k * n + c] = (ofscalar)(__ddiv_rn(
+                __dmul_rn(base, __dsub_rn(state[k * n + c], ybar[k * n + c])), te));
+        }
+    }
+    if (st != 0)
+    {
+        for (int k = 0; k < K; ++k) wdot[k * n + c] = (ofscalar)nan("");
+        for (int l = 0; l < m; ++l) state[l * n + c] = nan("");
+        flags[c] = 0;
+    }
+    else
+    {
+        flags[c] = fl;
+        h[c] = hstep;
+    }
+    counts[c] = accepted;
+    counts[n + c] = rejected;
+    counts[2 * n + c] = clipped;
+    status[c] = st;
+}
