@@ -82,3 +82,9 @@ pub(crate) mod oblique;
 /// three meshes, h, h/2, h/4, the observed order of the L2 entropy error
 /// against the isentropic key (CMP-24).
 pub(crate) mod ringleb;
+
+/// SPEC-LIT §144.7, Gates 88-T and 90-T leg 3: T3B and T3A- (and T3A
+/// refitted) on §144.3's harness with a per-case inflow omega fitted to
+/// ERCOFTAC's measured free-stream Tu(x), onset ordering and spread held
+/// against Roach & Brierley (docs/17 VAL-35).
+pub(crate) mod t3_fitted;

@@ -3970,6 +3970,14 @@ fn run(c: &mut Checks) -> Result<()> {
     if c.section("Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17)") {
     validate_gates::pipe_tet::check_pipe_tet(c)?;
     }
+    // SPEC-LIT 144.7 - Gates 88-T and 90-T leg 3: T3B and T3A- (and T3A
+    // refitted) on the flat-plate harness with a per-case inflow omega fitted
+    // to ERCOFTAC's measured free-stream Tu(x), the fit held as an input
+    // check, onset ordering and spread against Roach & Brierley, replayed,
+    // in src/bin/validate_gates/t3_fitted.rs (docs/17 VAL-35).
+    if c.section("Gate 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to ERCOFTAC's measured Tu(x), onset ordering and spread, replayed (SPEC-LIT 144.7)") {
+    validate_gates::t3_fitted::check_t3_fitted(c)?;
+    }
 
     Ok(())
 }

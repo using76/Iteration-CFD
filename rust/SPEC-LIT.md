@@ -24200,6 +24200,11 @@ decay is as strong a lever on onset as `Tu` itself.** Separating the two needs
 a per-case inflow `omega`, which the TMR publishes for T3A and not for T3A- or
 T3B. **So the T3A-/T3B legs are NOT claimed**, and the measurement above is
 recorded as the reason rather than the trend being reported as a result.
+§144.7 (docs/17 VAL-35) ran T3B and T3A- with a per-case inflow fitted to the
+measured Tu(x), which removes this construction: its LM spread read
+`S_sim = 2.4242e1` against the keys' `S_key = 2.5578e1` (`E = -5.22 %`, band
+15 %, undecided under `u_val 32.97 %`) where the single-rig construction read
+`51.9x`; its verdicts are there.
 
 **Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). §144.3 runs
 the T3A rig in 2-D on the flat-plate harness, and §144.6 places Roach & Brierley's measured `C_f(Re_x)` (the ERCOFTAC
@@ -24240,6 +24245,7 @@ the 1-D correlations, and leg 4 is the measured verdict on the 2-D solution.
 | **Gate 88-T leg 1** | `Tu` at the T3A leading edge `3.3530 %` against the published `3.300 %` — **1.61 %** |
 | **Gate 88-T leg 2** | onset at `Re_x = 8.525e4` — **OPEN**, no published digit to close it against |
 | **Gate 88-T leg 3** | monotone in `Tu`, and the `51.9×` spread that says a single-rig trend gate measures the decay |
+| **Gate 88-T leg 3, fitted** (§144.7) | T3B and T3A- with fitted inflows: the LM ordering holds at the (144.7e) onsets; T3B laminar `+58.3 %` **MISSES** (10 %); T3A- LM turbulent `+132.1 %` and laminar `+27.6 %` **MISSES** (10 %); the T3A- fit `3.63 %` **MISSES** (3 %); the onsets and the spread `E = -5.22 %` **OPEN**, undecided - see §144.7 |
 | **Gate 88-T leg 4** (§144.4) | 2-D `C_f(Re_x)` against Roach & Brierley: onset `-35.9 %` **MISSES** (15 %); turbulent `C_f` `-7.1 %` **OPEN**, undecided (10 %, `u_val 5.2 %`); laminar part `+16.3 %` of Blasius **MISSES** (10 %) |
 | the CUDA graph | a transitional `correct` captures and replays bitwise (§81) |
 
@@ -25134,7 +25140,11 @@ verdict stays OPEN.**
 **Leg 3 — not claimed.** §88.10's leg 3 measured the reason: on one rig
 the free-stream decay is as strong a lever on onset as `Tu` itself, and
 its 51.9x spread is the evidence. This gate does not repeat the
-construction with a new correlation on top of it.
+construction with a new correlation on top of it. §144.7 (docs/17 VAL-35)
+ran T3B and T3A- with a per-case inflow fitted to the measured Tu(x),
+which removes this construction: its LM spread read `E = -5.22 %` against
+the keys' ratio (band 15 %), undecided under `u_val 32.97 %`, where the
+single-rig construction read `51.9x`; its verdicts are there.
 
 **Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). This is §88.10's
 leg 4, with the same records (§144.3), key (§144.6), definitions and bands, read for `kOmegaSSTGamma`. On the
@@ -56030,12 +56040,309 @@ refusal. `ercoftac_t3a_key_reads_sixteen_stations_or_is_missing_by_name` holds t
 Placed, it must read 16 stations from `x = 45` to `1495 mm`, with `x` and `Re_x` strictly
 increasing and every `Cf` and `Tu` positive and finite. Absent, it must be `NotFound` and the
 missing line must name the id and the file. The census test counts 43 markers and four
-`fetched` rows.
+`fetched` rows. *Amended (docs/17 VAL-35):* with §144.7's two keys the census
+is 47 markers and six `fetched` rows.
 
 **Not claimed.** This subsection reads the key and judges nothing with it. Leg 4 (§144.4, VAL-33)
 is the gate that reads it, and its verdict word against the measurement is `MISSES`, as VAL-33's
 row states. Nothing here judges the
 quality of the measurement beyond what the host page states.
+
+### 144.7 Gates 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to the measured Tu(x)
+
+`No GPL-licensed source was consulted.` Docs/17's row VAL-35 reads "(optional)
+T3B and T3A- are claimed with a per-case inflow omega fitted to ERCOFTAC's
+measured Tu(x) decay. Gate: the fitted decay reproduces the measured Tu(x)
+within 3 %, as a stated input check. Onset ordering and the Re_x spread are
+held against the data, which retires §88.10's 51.9x construction artefact. The
+bands are the same as VAL-33." §88.10's leg 3 measured why one rig and three
+leading-edge `Tu`s do not make a trend gate: the free-stream decay is as strong
+a lever on onset as `Tu` itself, and the single-rig construction's spread read
+51.9x against the roughly 10x the series measures. What separates the two
+levers is a per-case inflow `omega`, and the TMR publishes one for T3A only.
+This subsection takes it from the measurement instead: each case's own key
+carries the free-stream decay `Tu(x)` its tunnel had, the fit below turns it
+into the rig's inflow state, and the gate on the fit is an input check - a
+statement about what the run was fed, not about the solver. The new code is
+`src/bin/validate_gates/t3_fitted.rs`, a `runner` refactor of
+`src/bin/validate_gates/t3a.rs` that changes no numerics, and one section of
+`ofgpu-validate`. As in §144.3, the plan's case files are not shipped, because
+no driver can run the transition fields; the case lives on the harness, in
+memory.
+
+**The two keys.** The ERCOFTAC case 020 page (§144.6's source, read 2026-10-17)
+serves the same summary-table layout for T3B (`t3by.dat`, row `ercoftac-t3b`,
+2086 bytes, sha256 `95e04aca4510ead26c80ede79182cbd8e97bda9f6f30dd8ca6ce8e1b1c21a394`,
+fifteen single-wire stations from `x = 25` to `1495 mm`) and T3A- (`t3amy.dat`,
+row `ercoftac-t3am`, 2182 bytes, sha256
+`65aca3ecfc9349abe8b727d1ae15c38d62289e12c0691e78d9629998fcbd90a9`, sixteen
+stations from `x = 95` to `1552 mm`). Both are `fetched` rows of
+`reference/PROVENANCE.md` under the same CC BY-NC-SA licence as `ercoftac-t3a`,
+so docs/17 decision D-VAL-2 extends to them: fetched, never tracked, placed by
+`tools/keys/fetch_answer_keys.py fetch` or `--from DIR`, kept only when the
+digest is the row's. No number of either file is copied into this section, a
+test or a source file; the tests that read them assert shapes, station counts,
+names and digests, and the fit reads the rest at run time.
+
+**The fit (144.7a).** On a key's stations `(Re_x,i, Tu_i)` in file order, with
+`n = beta*/(2 beta_2)` the crate's own exponent (§88.10's `0.543478...`):
+
+```text
+e_i(b) = ln Tu_i + n ln(1 + b Re_x,i)
+h(b)   = (max_i e_i - min_i e_i)/2 ,   m(b) = (max_i e_i + min_i e_i)/2
+b*     = argmin_{b > 0} h(b) ,          Tu_LE = exp(m(b*))                (144.7a)
+```
+
+`b*` is the Chebyshev point of the one-parameter decay family through the
+stations and `Tu_LE` its mid-range: the gate is a max-norm, so the fit
+minimises the half-range of `ln Tu`, not a least square. The search is exactly
+the stated deterministic one. `L_j = ln 1e-9 + j (ln 1e-2 - ln 1e-9)/4000`,
+`j = 0..=4000`; `j*` is the first `j` of least `h(exp L_j)`; `lo =
+L_max(j*-1, 0)`, `hi = L_min(j*+1, 4000)`; then 200 golden-section steps with
+`phi = (sqrt 5 - 1)/2`: `a = hi - phi (hi - lo)`, `c = lo + phi (hi - lo)`,
+`if h(e^a) < h(e^c) { hi = c } else { lo = a }`; and `b* = exp((lo + hi)/2)`.
+Fewer than three stations, or any non-finite or non-positive station value,
+refuses the fit by name.
+
+**The fitted decay and the input check (144.7b).**
+
+```text
+Tu_fit(Re_x) = Tu_LE (1 + b* Re_x)^(-n)
+worst        = max_i |Tu_fit(Re_x,i)/Tu_i - 1|      holds iff worst <= 0.03   (144.7b)
+```
+
+This is §88.10's closed form measured from the leading edge,
+`b* = beta_2 omega_LE nu / U^2`, with `omega_LE` the value the measurement
+implies rather than the one a handbook states. The row is born class P, band
+3 %, live in the fit gate's scope; a miss is `MISSES` as a gate verdict and the
+run uses the fitted inflow anyway - the check says what the run was fed.
+
+**The inflow at the harness inlet (144.7c).** `Re_up = U x_up/nu` at the
+leading edge's distance `x_up` ahead of the plate; refused, naming the case,
+when `s >= 1` - past the pole the closed form has no inflow state to hand a
+solver:
+
+```text
+s        = b* Re_up
+Tu_in    = Tu_LE (1 - s)^(-n)
+k_in     = (3/2) (Tu_in U/100)^2
+omega_in = b* U^2 / (beta_2 nu (1 - s))                                      (144.7c)
+```
+
+§88.10's closed form from `(Tu_in, omega_in)` then gives `Tu_fit` at every
+`x >= x_up`: `tau(x_up + d) = (1 + b* U d/nu)/(1 - s)`, an identity the unit
+test holds to `1e-12`.
+
+**The three rigs.** §144.3's plate geometry on each case's tunnel state:
+`U = 1 m/s`, leading edge `0.25 m` from the inlet, `L = 3 m`, end-cell ratio
+`r_y = 1000`, the three §144.3 levels, everything else §144.3's:
+
+| case | key id | `nu` (m^2/s) | `H` (m) | `Re_up` | `Re_L` |
+|---|---|---|---|---|---|
+| T3B | `ercoftac-t3b` | 3.0e-6 | 0.25 | 8.3333e4 | 1.0e6 |
+| T3A- | `ercoftac-t3am` | 1.25e-6 | 0.25 | 2.0e5 | 2.4e6 |
+| T3A (refitted) | `ercoftac-t3a` | 5.0e-6 (§144.3's) | 0.5 | 5.0e4 | 6.0e5 |
+
+`H = 0.25 m` for T3B and T3A- keeps the wall cells at half §144.3's height on
+the higher-`Re_L` rigs. The third case refits T3A from its own key by (144.7a)
+so the ordering below compares one inflow method; until its run is recorded the
+ordering falls back to §144.3's TMR-inflow record, and the note says which one
+it read.
+
+**The record grid.** A record carries `C_f` at forty-nine log-spaced `Re_x`,
+`Re_log(i) = 1e4 (240)^(i/48)` for `i < 49` - power-law interpolation suits a
+boundary layer - and the run's fitted `(Tu_in, omega_in)`, so the replay can
+hold every record to its own key's fit. `C_f` at an off-grid `Re_x` is the
+power law through the two bracketing grid points, NaN off the grid. Each
+(case, model, level) run is an ignored test
+`record_t3fit_{t3b,t3am,t3a}_{lm,gamma}_{fine,medium,coarse}` of the validate
+binary, run the §144.3 way, printing the record literal its slot holds;
+`ofgpu-validate` never runs the harness (§110.1).
+
+**The rows.** Per case and model, §144.4's three rows with the same
+definitions, bands and rule: onset `Re_x` (the record's least `C_f` against
+(144.4a), read by (144.7e) below when that face is the trailing edge), band
+15 %, `u_D = 0`; worst turbulent `C_f` ((144.4b) between the
+bracketing grid points), band 10 %, `u_D = 2 %`; worst laminar `C_f` against
+Blasius ((144.4c)), band 10 %, `u_D = 0`. `u_val` squares the §94 study's
+`u_fine` with `u_D`; a result within `u_val` of a band edge is undecided
+(§110.1). Inside rows are class P taken under `replaying`; the per-record
+stale-inflow row - every record, f64 and single, against its key's (144.7c) -
+and the single-build row are class D and R as §144.4's are. A missing key, no
+transition in a key, or a run not recorded leaves the gate `OPEN` naming what
+is missing, never passed.
+
+**The ordering and the spread (144.7d).** Per model, from the finest f64
+records' (144.4a) onsets `O_B`, `O_A`, `O_Am`: the ordering `O_B < O_A < O_Am`
+is a class D row when it holds and a `MISSES` verdict with the three numbers
+when it does not; the keys' own onset ordering `T3B < T3A < T3A-` is required
+of the data itself. The spread, which is what retires §88.10 leg 3's
+construction artefact:
+
+```text
+S_sim = O_Am / O_B ,  S_key = Re_on(T3A-)/Re_on(T3B) ,  E = S_sim/S_key - 1
+u_num = sqrt((u_fine(O_B)/O_B)^2 + (u_fine(O_Am)/O_Am)^2)                  (144.7d)
+```
+
+band 15 % (the plan's onset band applied to the ratio), `u_D = 0`, the same
+band rule. The spread gate's uncertainty slot carries the T3A- study when both
+onsets' studies stand, and `SingleMesh` when one is refused. The note prints
+`S_sim`, `S_key`, and §88.10 leg 3's single-rig `51.9x` beside them.
+
+**Decisions taken, by recommendation.** The Chebyshev fit (the gate is a
+max-norm); both `Tu_LE` and `omega_in` fitted per case; the spread band = the
+onset band 15 %; T3A refitted as a third case so the ordering uses one inflow
+method (falling back to §144.3's TMR-inflow record until recorded); `H = 0.25
+m` for T3B and T3A- (wall cells half §144.3's); the spread gate's uncertainty
+slot carries the T3A- study; and the record's onset rule (144.7e), TAKEN by
+recommendation, because §144.4's least-face reading returns the trailing edge
+on a plate whose turbulent `C_f` falls below its transition minimum, which
+VAL-33's T3A plate never met.
+
+**The record's onset (144.7e).** §144.4 reads a record's onset as its
+least-`C_f` face. On T3B's plate (`Re_L = 1e6`) the turbulent `C_f` decays
+below the transition minimum, so the least face of the recorded grid is the
+trailing edge and the least-face reading returns the plate's end as the
+onset: the fine LM record's `C_f` falls to a local minimum `5.207e-3` at
+`Re_x = 4.95e4`, rises to `5.668e-3` at `9.81e4`, then decays to `3.820e-3`
+at `9.63e5` - its least face is its last station, and §144.4's reading would
+put the onset `+1663 %` high. Every reading of a record's onset in this
+subsection therefore takes the least face only while it lies inside the
+recorded grid, and past it reads the grid instead:
+
+```text
+onset_rec = cf_min_re_x                       if cf_min_re_x <= Re_log(last finite)
+          = vertex (144.4a) through the first local minimum of the record's
+            grid C_f in [2e4, Re_L]           otherwise, if one exists
+          = 2e4 (an upper bound)              otherwise                    (144.7e)
+```
+
+The three outcomes are named where the section prints them: the onset row's
+headline and each per-record note say `LeastFace`, `GridMinimum` ("onset
+read at the first grid minimum (144.7e), the least face being the trailing
+edge") or `Upstream` ("C_f falls over the whole band: onset upstream of 2e4,
+read as that bound (144.7e)"). An `Upstream` onset is an upper bound, not a
+measurement: the laminar band of such a record is empty and its laminar row
+fails on the NaN. The rule is a reading of the record, not of the solver;
+§144.3/§144.4's T3A records and every number in them are untouched, and
+VAL-33's T3A plate never met the case - its least face is interior.
+
+**Prices and the caps.** Priced the VAL-50 way - 200 timed iterations, LM -
+on the one RTX 5070 Ti, before any run: T3B fine 49.5 s, medium 34.8 s,
+coarse 23.3 s; T3A- fine 73.4 s; T3A fine 59.9 s per 200 iterations; a
+600-iteration T3B fine run re-read 48.5 s/200. At that price §144.3's
+40 000-iteration cap costs 2.7 h for ONE fine run, so the caps became
+`MAX_ITERS = [12000, 8000, 10000]` (fine, medium, coarse) and the card time
+was held to about 3 h. Speed varied 0.036-0.37 s per fine iteration with the
+other lanes' load.
+
+**The recorded runs** (2026-10-17, one RTX 5070 Ti shared with lanes S and G
+and another project's GPU job, utilisation 95-97 % before these runs
+started). "met" is §144.3's stopping rule (`C_f` change `<= 1e-6`), "last" its last `C_f` change,
+"s" its wall-clock seconds, `Tu_LE` its (144.3b) leading-edge `Tu`:
+
+| case model level | iters | met | last | s | Tu_LE % |
+|---|---|---|---|---|---|
+| T3B LM fine | 12000 | no | 5.18e-4 | 2665 | 6.087064 |
+| T3B LM medium | 8000 | no | 1.07e-5 | 1187 | 6.086961 |
+| T3B LM coarse | 2800 | yes | 2.65e-7 | 286 | 6.086654 |
+| T3B gamma medium | 8000 | no | 1.71e-5 | 731 | 6.086964 |
+| T3B gamma coarse | 2700 | yes | 3.78e-7 | 260 | 6.086656 |
+| T3A- LM fine | 12000 | no | 4.82e-6 | 1240 | 0.910754 |
+| T3A- LM medium | 4000 | yes | 2.48e-7 | 663 | 0.910755 |
+| T3A- LM coarse | 1200 | yes | 2.73e-7 | 130 | 0.910762 |
+| T3A- gamma medium | 1600 | yes | 7.68e-7 | 258 | 0.910754 |
+
+The 2-D `Tu_LE` reproduces the fit's `Tu_LE` (`6.086009`, `0.910763 %`) to
+`+0.017 %` and `-0.001 %`. NOT RUN or diverged:
+
+- T3A- gamma coarse DIVERGES, deterministic (run twice): iteration 87, "p
+  residual is not finite (NaN); Ux 4.238e-1 Uy 4.238e-1". No input or
+  numerics change was tried (none authorised for this unit).
+- T3A- gamma fine: started, stopped by hand at 4000 of 12000 iterations
+  (23.6 min, `C_f` change still 2.6e-3) when the card had slowed to
+  0.35 s/iteration: its price (about 70 min) was over the remaining budget.
+  NOT RUN.
+- T3B gamma fine: NOT RUN, price about 70 min at that speed, over budget.
+- All single-build runs: NOT RUN (four fine runs at 45-70 min each, over
+  budget). The single validate binary builds; `RECORDS_SINGLE` stays `None`.
+- The refitted T3A (case 3): NOT RUN (six runs, over budget); the ordering
+  uses §144.3's TMR-inflow T3A record, as designed.
+- A first T3A- LM fine run at a 5000-iteration cap was discarded (`C_f`
+  change 2.0e-3 at 5000) and re-run at 12000.
+- Card time of the unit: about 2.7 h (records 124 min, pricing 6.5 min, the
+  discarded and stopped runs 33 min).
+- Earlier wave runs keep their numbers; nothing in §144.3/§144.4 moves.
+
+**The replay** (the finest f64 record of each case and model, read on
+`ofgpu-validate -sections 78`; the onset E against the key's own (144.4a)
+onset, `5.642944e4` for T3B and `1.443366e6` for T3A-):
+
+| case model | onset Re_x (kind) | onset E | worst turbulent C_f E (at) | worst laminar E (at) |
+|---|---|---|---|---|
+| T3B LM | `4.9938e4` GridMinimum (144.7e) | `-11.50 %` | `+5.62 %` (`5.794e5`) | `+58.30 %` (`3.936e4`) |
+| T3B gamma | no fine run recorded | - | - | - |
+| T3A- LM | `1.2106e6` LeastFace | `-16.13 %` | `+132.12 %` (`2.0220e6`) | `+27.55 %` (`1.2097e6`) |
+| T3A- gamma | no fine run recorded | - | - | - |
+| T3A LM, T3A gamma | no runs recorded | - | - | - |
+
+Per-record notes name the kind: T3B LM fine and medium at their first grid
+minimum, T3B LM coarse `Upstream` (its `C_f` falls over the whole band, so
+its onset is the `2e4` bound and its laminar band is empty). The studies
+read on: T3B LM's onset study is oscillatory (`U_fine 1.611e4`,
+`u_val 28.55 %` - the coarse record's `2e4` bound is in it), T3A- LM's
+oscillatory (`U_fine 8.204e4`, `u_val 5.68 %`); T3B LM's turbulent study
+holds under its inside row (`p = 1.057`), T3A- LM's under its miss
+(`p = 0.633`); the laminar studies of the two misses (`u_val 8.97 %` and
+`0.63 %`).
+
+**The verdicts** (25 registered gates: 4 `MISSES`, 17 `OPEN`, 4 inside their
+bands as check rows, `c.failures = 0`):
+
+| gate | verdict |
+|---|---|
+| T3B fit (144.7b) | inside, `1.53 %` of `3 %` (check row) |
+| T3A- fit (144.7b) | `MISSES`, `3.63 %` of `3 %`; the run uses the fitted inflow anyway |
+| T3A fit (144.7b) | inside, `2.69 %` of `3 %` (check row) |
+| T3B LM onset | `OPEN`, undecided: `E = -11.50 %`, band `15 %`, `u_val 28.55 %` |
+| T3B LM turbulent | inside: `abs(E) + u_val = 8.17 %` of `10 %` (check row) |
+| T3B LM laminar | `MISSES`: `+58.30 %` of `10 %` at `3.936e4` |
+| T3B gamma onset / turbulent / laminar | `OPEN`, no fine run (3 gates) |
+| T3A- LM onset | `OPEN`, undecided: `E = -16.13 %`, band `15 %`, `u_val 5.68 %` |
+| T3A- LM turbulent | `MISSES`: `+132.12 %` of `10 %` at `2.0220e6` |
+| T3A- LM laminar | `MISSES`: `+27.55 %` of `10 %` at `1.2097e6` |
+| T3A- gamma onset / turbulent / laminar | `OPEN`, no fine run (3 gates) |
+| T3A LM onset / turbulent / laminar | `OPEN`, no runs (3 gates) |
+| T3A gamma onset / turbulent / laminar | `OPEN`, no runs (3 gates) |
+| LM onset ordering | holds at the (144.7e) onsets `4.99e4 < 8.89e4 < 1.21e6` (check row) |
+| LM onset spread (144.7d) | `OPEN`, undecided: `S_sim = 2.4242e1` against `S_key = 2.5578e1`, `E = -5.22 %`, band `15 %`, `u_val 32.97 %` |
+| gamma onset ordering | `OPEN`, no T3B/T3A- fine runs |
+| gamma onset spread | `OPEN`, no T3B/T3A- fine runs |
+
+**The ordering and the spread.** The keys' own ordering `T3B < T3A < T3A-`
+holds, as required of the data. The LM ordering holds at the (144.7e) onsets,
+`O(T3B) = 4.9938e4 < O(T3A) = 8.8932e4` (§144.3's TMR-inflow record, the
+fallback, its kind named in the note) `< O(T3A-) = 1.2106e6`, as a check
+row; the gamma ordering is open for its missing fine runs. The LM spread
+reads `S_sim = 2.4242e1` against `S_key = 2.5578e1`, `E = -5.22 %`, band
+`15 %`, undecided under `u_val 32.97 %` - the same T3B onset study that
+carries the coarse record's `2e4` bound - with §88.10 leg 3's single-rig
+`51.9x` in the note beside them; the gamma spread is open. What the plan
+asked this leg to measure is therefore in: the fitted-inflow spread reads
+`-5.22 %` from the keys' ratio where the single-rig construction read
+`51.9x`, and the gate stays open because the study of a three-level onset
+triplet whose coarsest member is the `2e4` bound is too wide to close it.
+
+**What the misses are, as far as this unit measured.** T3A- LM's turbulent
+row is read at the key's last station, `Re_x = 2.022e6`, which is still
+transitional (`H = 1.9` in the key), so a run that onsets early reads its
+whole turbulent branch high - the `+132 %` is where the row looks, not a
+downstream `C_f` the solver got wrong. T3B's laminar part is already
+`+12.9 %` / `+11.7 %` above Blasius in the key itself, and the records sit
+`+55 %` to `+58 %` over their laminar band, so that band cannot be met by
+the measurement either. The T3A- fit's `3.63 %` miss is the decay shape:
+SST's exponent `n` is fixed and the key's `Tu(x)` flattens near the end of
+its station list.
 
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 
