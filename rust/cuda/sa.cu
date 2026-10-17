@@ -441,3 +441,209 @@ extern "C" __global__ void saLogLayerTerms
     prod[c] = cb1*((ofscalar)1 - ft2)*stil*nt;
     dest[c] = (cw1*fw - (cb1/(kappa*kappa))*ft2)*(nt/dw)*(nt/dw);
 }
+
+
+// ==========================================================================
+//  Section 127.1 - the CONSERVATIVE rho-weighted form (CMP-25)
+//
+//      d(rho nu~)/dt + d(mdot nu~)/dx_j
+//         = rho c_b1 (1 - f_t2) S~ nu~
+//           - rho [ c_w1 f_w - (c_b1/kappa^2) f_t2 ] (nu~/d)^2
+//           + (1/sigma) [ div(rho (nu + nu~) grad nu~)
+//                         + rho c_b2 |grad nu~|^2 ]
+//           - (1/sigma) (nu + nu~) grad rho . grad nu~                (127.1)
+//
+//  These four kernels are the twins of saNut, saSources, saGammaInternal
+//  and saGammaBoundary, with the constant `nu` replaced by the per-cell
+//  `nu_c = mu/rho` and with the rho weight folded into each term. At
+//  `rho = 1` (and `mu = nu`, `mdot = phi`) every one of them is BIT FOR BIT
+//  its kinematic twin: each body computes the kinematic value first and
+//  multiplies by `rho` afterwards, never reassociating, and `x*1` is
+//  exact. The host side is `src/models/spalart_allmaras/conservative.rs`.
+//
+//  The one term with no kinematic counterpart is the last of (127.1), the
+//  product-rule remainder
+//
+//      rho div(G grad nu~) = div(rho G grad nu~) - G grad rho . grad nu~,
+//      G = (nu + f_n nu~)/sigma,
+//
+//  which `saSourcesRho` carries on the explicit source. For `nu~ >= 0`
+//  (`f_n = 1`) it is (127.1)'s last term verbatim; the `f_n` form is the
+//  negative continuation's, DERIVED in SPEC-LIT 127.1.1.
+// ==========================================================================
+
+//- `nu_t = nu~ f_v1(nu~/nu_c)`, exactly zero where `nu~ < 0`, capped at
+//  `nutMax` - (127.1)'s `mu_t = rho nu~ f_v1` DIVIDED by `rho`, which is the
+//  kinematic field the caller multiplies. `nu_c = mu[c]/rho[c]` per cell;
+//  `flow.nu` is the CALLER's business (it sets the cap only).
+extern "C" __global__ void saNutRho
+(
+    ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ nuTilda,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ rho,
+    ofscalar cv1,
+    ofscalar nutMax,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar nt = nuTilda[c];
+    if (nt < (ofscalar)0)
+    {
+        nut[c] = (ofscalar)0;
+        return;
+    }
+    const ofscalar nu = mu[c]/rho[c];
+    const ofscalar chi = nt/nu;
+    nut[c] = ofmin_(nt*saFv1(chi, cv1), nutMax);
+}
+
+
+//- (56.15) under a rho weight: `su = rho*suk - G grad rho . grad nu~` with
+//  `suk = (c_b2/sigma)|grad nu~|^2` the kinematic explicit source and `G =
+//  (nu_c + nu~ f_n)/sigma` the cross term of (127.1); `sp = 0`; `susp =
+//  rho*susp_kin` with `susp_kin = -A` EXACTLY what saSources forms. The A
+//  branch is the kinematic one line for line, with `nu_c = mu[c]/rho[c]`.
+extern "C" __global__ void saSourcesRho
+(
+    ofscalar* __restrict__ su,
+    ofscalar* __restrict__ sp,
+    ofscalar* __restrict__ susp,
+    const ofscalar* __restrict__ nuTilda,
+    const ofvec3* __restrict__ gradNuTilda,
+    const ofvec3* __restrict__ gradRho,
+    const ofscalar* __restrict__ omega,
+    const ofscalar* d,
+    const ofscalar* dtil,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ rho,
+    ofscalar cb1,
+    ofscalar cb2,
+    ofscalar cv1,
+    ofscalar cv2,
+    ofscalar cv3,
+    ofscalar cw1,
+    ofscalar cw2,
+    ofscalar cw3,
+    ofscalar ct3Pos,
+    ofscalar ct3Neg,
+    ofscalar ct4,
+    ofscalar sigma,
+    ofscalar kappa,
+    ofscalar rlim,
+    ofscalar cn1,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    const ofscalar nt   = nuTilda[c];
+    const ofscalar nu   = mu[c]/rho[c];
+    const ofscalar om   = omega[c];
+    const ofvec3   gnt  = gradNuTilda[c];
+    const ofvec3   grho = gradRho[c];
+    const ofscalar dw   = d[c];
+    const ofscalar dt   = dtil[c];
+    const ofscalar k2d2 = kappa*kappa*dw*dw;
+
+    //- The kinematic explicit source, then its rho weight; and the
+    //  product-rule remainder, which vanishes with grad rho (so at
+    //  rho = 1 this whole line is `1*suk - 0`, bitwise `suk`).
+    const ofscalar suk    = (cb2/sigma)*dot3(gnt, gnt);
+    const ofscalar gcross = (nu + nt*saFn(nt/nu, cn1))/sigma;
+    su[c] = rho[c]*suk - gcross*dot3(grho, gnt);
+
+    sp[c] = (ofscalar)0;
+
+    ofscalar A;
+
+    if (nt >= (ofscalar)0)
+    {
+        const ofscalar chi = nt/nu;
+        const ofscalar fv1 = saFv1(chi, cv1);
+        const ofscalar fv2 = saFv2(chi, fv1);
+        const ofscalar sbar = nt*fv2/k2d2;
+        const ofscalar stil = saStilde(om, sbar, cv2, cv3);
+
+        const ofscalar r = (stil > (ofscalar)0)
+            ? ofmin_(nt/(stil*k2d2), rlim)
+            : rlim;
+
+        const ofscalar fw  = saFw(r, cw2, cw3);
+        const ofscalar ft2 = ct3Pos*ofexp_(-ct4*chi*chi);
+
+        A = cb1*((ofscalar)1 - ft2)*stil
+          - (cw1*fw - (cb1/(kappa*kappa))*ft2)*nt/(dt*dt);
+    }
+    else
+    {
+        A = cb1*((ofscalar)1 - ct3Neg)*om + cw1*nt/(dt*dt);
+    }
+
+    susp[c] = rho[c]*(-A);
+}
+
+
+//- The face diffusivity of the conservative form, `Gamma_c = (rho_c
+//  (nu_c + nu~_c f_n))/sigma` at each of the two cells, interpolated
+//  EXACTLY as saGammaInternal interpolates the kinematic one:
+//  `(w*gP + (1-w)*gN)*magSf`. At `rho = 1` with `mu = nu` this is
+//  saGammaInternal bit for bit: the per-cell `mu/rho` is `nu`, and the
+//  `rho*` factor multiplies by exactly 1 before the same division.
+extern "C" __global__ void saGammaInternalRho
+(
+    ofscalar* __restrict__ gammaMagSf,
+    const ofscalar* __restrict__ nuTilda,
+    const ofscalar* __restrict__ mu,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ weights,
+    const ofscalar* __restrict__ magSf,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    ofscalar sigma,
+    ofscalar cn1,
+    oflabel nInternalFaces
+)
+{
+    const oflabel f = OFGPU_TID;
+    if (f >= nInternalFaces) return;
+
+    const ofscalar w  = weights[f];
+
+    const ofscalar np = nuTilda[owner[f]];
+    const ofscalar nn = nuTilda[neighbour[f]];
+
+    const ofscalar nuP = mu[owner[f]]/rho[owner[f]];
+    const ofscalar nuN = mu[neighbour[f]]/rho[neighbour[f]];
+
+    const ofscalar gP = rho[owner[f]]*(nuP + np*saFn(np/nuP, cn1))/sigma;
+    const ofscalar gN = rho[neighbour[f]]*(nuN + nn*saFn(nn/nuN, cn1))/sigma;
+
+    gammaMagSf[f] = (w*gP + ((ofscalar)1 - w)*gN)*magSf[f];
+}
+
+
+//- The boundary twin: `((rho_b (nu_b + nu~_b f_n))/sigma)*bMagSf`.
+extern "C" __global__ void saGammaBoundaryRho
+(
+    ofscalar* __restrict__ bGammaMagSf,
+    const ofscalar* __restrict__ nuTildaB,
+    const ofscalar* __restrict__ muB,
+    const ofscalar* __restrict__ rhoB,
+    const ofscalar* __restrict__ bMagSf,
+    ofscalar sigma,
+    ofscalar cn1,
+    oflabel nBoundaryFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nBoundaryFaces) return;
+
+    const ofscalar nb = nuTildaB[i];
+    const ofscalar nub = muB[i]/rhoB[i];
+    bGammaMagSf[i] = ((rhoB[i]*(nub + nb*saFn(nb/nub, cn1)))/sigma)*bMagSf[i];
+}

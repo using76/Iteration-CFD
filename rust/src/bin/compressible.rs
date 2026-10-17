@@ -63,6 +63,7 @@ use ofgpu::compressible::{
 };
 use ofgpu::field_setup::{
     harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_vector_field,
+    wall_coeffs_from_case, NutRoughness, WallFaces,
 };
 use ofgpu::fv::DivScheme;
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
@@ -73,8 +74,11 @@ use ofgpu::io::fields::{
 use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::io::{DivEntry, FoamDict};
 use ofgpu::models::registry::{select_turbulence_model, RasModel};
+use ofgpu::models::{sa_coeffs, SpalartAllmaras};
 use ofgpu::momentum::BuoyancyForm;
 use ofgpu::timescheme::DdtScheme;
+use ofgpu::turbulence::TurbulenceControls;
+use ofgpu::walldistance;
 use ofgpu::{Error, Gpu, GpuMesh, GpuScalarField, GpuVectorField, HostMesh, Result, Scalar};
 
 #[path = "common/mod.rs"]
@@ -298,23 +302,29 @@ fn refuse_out_of_scope(case_path: &Path, cc: &CaseControls, lowered: Option<&Low
     };
     if let Some(sel) = named {
         let is_laminar = sel.model == RasModel::Laminar && sel.les.is_none() && sel.des.is_none();
-        if !is_laminar {
+        let is_sa = sel.model == RasModel::SpalartAllmaras && sel.les.is_none() && sel.des.is_none();
+        // SPEC-LIT §127.1.2: Spalart-Allmaras runs here in its conservative
+        // form - but only through the OpenFOAM case format, whose `0/nuTilda`
+        // states the field the equation transports. The JSONC format has no
+        // nuTilda initial field (`LoweredCase` carries none), so an SA case
+        // stated in JSONC would run the model without its unknown.
+        if !is_laminar && !(is_sa && lowered.is_none()) {
             let setting = if lowered.is_some() {
                 "physics.turbulence"
             } else {
                 "constant/momentumTransport"
             };
             let name = sel.describe();
-            let why = if sel.model == RasModel::SpalartAllmaras && sel.les.is_none() && sel.des.is_none() {
+            let why = if is_sa {
                 format!(
-                    "{name}: Spalart-Allmaras runs in ofgpu-compressible in its conservative \
-                     form, which CMP-25 builds (SPEC-LIT §127.1); until then this driver is \
-                     laminar only and running SA as laminar would be a substitution \
-                     (SPEC-LIT §13.4). Alternative: laminar"
+                    "{name}: SpalartAllmaras runs in ofgpu-compressible in its conservative \
+                     form (SPEC-LIT §127.1), which reads a nuTilda initial field - and the \
+                     JSONC format has no nuTilda to state it with. Alternative: the OpenFOAM \
+                     case format"
                 )
             } else {
                 format!(
-                    "{name}: every turbulence model but Spalart-Allmaras is refused \
+                    "{name}: every turbulence model but SpalartAllmaras is refused \
                      (SPEC-LIT §127.1, docs/17 COMP decision 9). Alternative: laminar"
                 )
             };
@@ -404,6 +414,41 @@ fn check_static_bcs(field: &str, boundary: &BTreeMap<String, PatchFieldSpec>) ->
             )
         };
         return Err(refuse(&format!("{field} patch {patch}"), &why));
+    }
+    Ok(())
+}
+
+/// The `nut` patch types the SA coupling accepts (SPEC-LIT §56.7, §127.1):
+/// SA has no `k`, so a k-based wall function would be a wall treatment with
+/// no model behind it here - `nutLowReWallFunction` is the one wall type.
+const SA_NUT_TYPES: &[&str] = &[
+    "calculated",
+    "fixedValue",
+    "zeroGradient",
+    "nutLowReWallFunction",
+    "empty",
+    "symmetry",
+    "symmetryPlane",
+    "wedge",
+    "cyclic",
+];
+
+/// `nut`'s patch types, checked apart from `nuTilda`'s - the wall-function
+/// families the incompressible drivers take name a `k` this model does not
+/// have (SPEC-LIT §56.7).
+fn check_nut_bcs(nut: &RawScalarField) -> Result<()> {
+    for (patch, spec) in &nut.boundary {
+        if !SA_NUT_TYPES.contains(&spec.type_name.as_str()) {
+            return Err(refuse(
+                &format!("nut patch {patch}"),
+                &format!(
+                    "{}: SpalartAllmaras has no k, so this wall treatment has no model \
+                     behind it here (SPEC-LIT §56.7, §127.1). Accepted: {}",
+                    spec.type_name,
+                    SA_NUT_TYPES.join(", ")
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -538,6 +583,56 @@ fn driver_controls(
     Ok(DriverControls { ctrl, transient, n_steps })
 }
 
+/// The `0/` fields and controls of the SA coupling (SPEC-LIT §127.1.2), the
+/// pattern of `ofgpu-sa`'s setup. `0/nuTilda` and `0/nut` are REQUIRED - the
+/// equation transports nu~, and nut's own patch types are what decide its
+/// wall treatment (SPEC-LIT §15.5) - and nuTilda's types go through the same
+/// static check U, p and T do. Reached on the OpenFOAM route only (§122.4's
+/// refusal above).
+fn sa_fields(
+    case_path: &Path,
+    cc: &CaseControls,
+    dc: &DriverControls,
+    hm: &HostMesh,
+) -> Result<(RawScalarField, RawScalarField, TurbulenceControls)> {
+    let dir = case_path.join(find_start_time(case_path)?);
+    for name in ["nuTilda", "nut"] {
+        if !dir.join(name).exists() {
+            return Err(refuse(
+                &format!("{}/{}", dir.display(), name),
+                &format!(
+                    "no {name} field: SpalartAllmaras transports nu~ and nut's own patch \
+                     types are its wall treatment (SPEC-LIT §127.1, §15.5). Add the file"
+                ),
+            ));
+        }
+    }
+    let raw_nt = read_scalar_field(&dir.join("nuTilda"), hm.n_cells)?;
+    let raw_nut = read_scalar_field(&dir.join("nut"), hm.n_cells)?;
+    check_static_bcs("nuTilda", &raw_nt.boundary)?;
+    check_nut_bcs(&raw_nut)?;
+
+    // The model's controls are the case's own `system/` entries, with the
+    // ddt pinned to the flow's - §127.1.2 refuses the disagreement, and a
+    // steady run takes steadyState and the nuTilda relaxation instead
+    // (`localEuler` on the model itself is §86.7's refusal).
+    let num = CaseNumerics::read(case_path, cc, None)?;
+    let mut ctrl = cc.turb;
+    if dc.transient {
+        ctrl.steady = false;
+        ctrl.ddt = dc.ctrl.momentum.ddt;
+        ctrl.delta_t = dc.ctrl.momentum.delta_t;
+    } else {
+        ctrl.steady = true;
+        ctrl.ddt = DdtScheme::SteadyState;
+    }
+    // A `bounded` entry is refused by name like U's and T's: div(mdot) is
+    // -ddt(rho) in a compressible flow (§123.1, §125.1).
+    ctrl.eps_div_scheme = unbounded("div(phi,nuTilda)", num.div("div(phi,nuTilda)")?, false)?;
+    ctrl.eps_bounded_convection = false;
+    Ok((raw_nt, raw_nut, ctrl))
+}
+
 /// The controls banner: every setting the run took, in one place.
 fn print_controls(dc: &DriverControls) {
     let c = &dc.ctrl;
@@ -617,6 +712,10 @@ struct InitialFields {
     u: RawVectorField,
     p: RawScalarField,
     t: RawScalarField,
+    /// The SA fields as read, kept for the written patch types (§127.1.2);
+    /// `None` on a laminar run.
+    nu_tilda: Option<RawScalarField>,
+    nut: Option<RawScalarField>,
 }
 
 /// `U`, `p` (gauge, SPEC-LIT §122.2) and `T` from either case format, and
@@ -642,6 +741,8 @@ fn load_fields_and_gas(
                 u: l.u_field.to_raw(hm.n_cells),
                 p: l.p_field.to_raw(hm.n_cells),
                 t: t.to_raw(hm.n_cells),
+                nu_tilda: None,
+                nut: None,
             };
             Ok((f, gas))
         }
@@ -673,6 +774,8 @@ fn load_fields_and_gas(
                 u: read_vector_field(&dir.join("U"), hm.n_cells)?,
                 p: read_scalar_field(&dir.join("p"), hm.n_cells)?,
                 t: read_scalar_field(&dir.join("T"), hm.n_cells)?,
+                nu_tilda: None,
+                nut: None,
             };
             Ok((f, gas))
         }
@@ -700,11 +803,13 @@ fn calculated_like(t: &RawScalarField, name: &str) -> RawScalarField {
 /// check reads the same list).
 const OUTPUT_FIELDS: [&str; 5] = ["U", "p", "T", "rho", "Mach"];
 
-/// Write the five fields at time label `t` (seconds, or the iteration count
-/// of a steady run), through the one pipeline.
+/// Write the five fields - plus `nuTilda` and `nut` when SA is attached
+/// (§127.1.2) - at time label `t` (seconds, or the iteration count of a
+/// steady run), through the one pipeline.
 #[allow(clippy::too_many_arguments)]
 fn write_time(
     gpu: &Gpu,
+    solver: &Compressible,
     s: &CompressibleState,
     gas: &PerfectGas,
     hm: &HostMesh,
@@ -755,20 +860,47 @@ fn write_time(
         }
     }
 
-    let foam = vec![
+    // §127.1.2: the SA fields carry the case's own patch types as read, and
+    // kinematic viscosity dimensions. Gathered first, so the writes below
+    // can borrow them.
+    let (out_nt, out_nut) = match solver.turbulence() {
+        Some(sa) => {
+            let missing = |f: &str| {
+                Error::Config(format!("{DRIVER}: SpalartAllmaras is attached but {f} was not read"))
+            };
+            let raw_nt = fields.nu_tilda.as_ref().ok_or_else(|| missing("nuTilda"))?;
+            let raw_nut = fields.nut.as_ref().ok_or_else(|| missing("nut"))?;
+            let mut o1 = raw_nt.types_only();
+            harvest_scalar_field(gpu, &mut o1, sa.nu_tilda(), hm)?;
+            o1.dimensions = "[0 2 -1 0 0 0 0]".to_string();
+            let mut o2 = raw_nut.types_only();
+            harvest_scalar_field(gpu, &mut o2, sa.nut(), hm)?;
+            o2.dimensions = "[0 2 -1 0 0 0 0]".to_string();
+            (Some(o1), Some(o2))
+        }
+        None => (None, None),
+    };
+
+    let mut foam = vec![
         ofgpu::io::FoamField::vector("U", &out_u),
         ofgpu::io::FoamField::scalar("p", &out_p),
         ofgpu::io::FoamField::scalar("T", &out_t),
         ofgpu::io::FoamField::scalar("rho", &out_rho),
         ofgpu::io::FoamField::scalar("Mach", &out_m),
     ];
-    let vis = vec![
+    let mut vis = vec![
         ofgpu::io::OutputField::vector("U", &out_u.internal),
         ofgpu::io::OutputField::scalar("p", &out_p.internal),
         ofgpu::io::OutputField::scalar("T", &out_t.internal),
         ofgpu::io::OutputField::scalar("rho", &out_rho.internal),
         ofgpu::io::OutputField::scalar("Mach", &out_m.internal),
     ];
+    if let (Some(nt), Some(nut)) = (&out_nt, &out_nut) {
+        foam.push(ofgpu::io::FoamField::scalar("nuTilda", nt));
+        foam.push(ofgpu::io::FoamField::scalar("nut", nut));
+        vis.push(ofgpu::io::OutputField::scalar("nuTilda", &nt.internal));
+        vis.push(ofgpu::io::OutputField::scalar("nut", &nut.internal));
+    }
     let cart = ofgpu::pressure::cartesian::detect(hm).ok().map(|c| ofgpu::io::cartesian_info(hm, &c));
     let ctx = ofgpu::io::WriteCtx {
         time: t as Scalar,
@@ -805,7 +937,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     refuse_out_of_scope(&o.case_path, &cc, lowered.as_ref())?;
     hm.print_report();
 
-    let (fields, gas) = load_fields_and_gas(&o.case_path, &hm, lowered.as_ref())?;
+    let (mut fields, gas) = load_fields_and_gas(&o.case_path, &hm, lowered.as_ref())?;
     // SPEC-LIT §126.8: the compressible inlets become placeholders and
     // rules; `fields` keeps the types as read, for the written fields.
     let inlets = ofgpu::compressible::bc::lower(&fields.u, &fields.p, &fields.t, &hm, &gas)
@@ -856,6 +988,20 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     let dc = driver_controls(&o.case_path, &cc, lowered.as_ref(), gas, o.iters)?;
     print_controls(&dc);
+
+    // SPEC-LIT §127.1.2: SA reached the solver on the OpenFOAM route (the
+    // refusal above); read its fields and controls now, and attach the model
+    // once the solver exists, before `initialise`.
+    let sa_parts =
+        match select_turbulence_model(&cc) {
+            Ok(sel) if sel.model == RasModel::SpalartAllmaras
+                && sel.les.is_none()
+                && sel.des.is_none() =>
+            {
+                Some(sa_fields(&o.case_path, &cc, &dc, &hm)?)
+            }
+            _ => None,
+        };
 
     // ---- the output pipeline (SPEC-LIT §44), resolved before any kernel --
     let mut output_plan = common::output_plan(lowered.as_ref())?;
@@ -971,6 +1117,36 @@ fn run(o: &Options) -> Result<RunEnd> {
     solver.set_outlet_rules(&gpu, inlets.outlets)?;
     solver.set_farfield_rules(&gpu, inlets.farfields)?;
     solver.set_freestream_rules(&gpu, inlets.freestreams)?;
+    if let Some((raw_nt, raw_nut, sa_ctrl)) = sa_parts {
+        // SPEC-LIT §6.6: the wall distance, once, at setup; nut's own patch
+        // types are its wall treatment (§15.5), and the conservative form
+        // takes the case's coefficients (`RAS { ... }`, the defaults absent).
+        let wd = walldistance::wall_distance(&gpu, &hm, &mesh, &cc.p_solver, cc.turb.n_non_orth_correctors)?;
+        let wf = WallFaces::from_case(&raw_nt, Some(&raw_nut), &hm)?;
+        let rough = NutRoughness::from_case(Some(&raw_nut), &hm)?;
+        let mut model = SpalartAllmaras::new(
+            &gpu,
+            &hm,
+            &mesh,
+            sa_coeffs(&cc)?,
+            sa_ctrl,
+            wall_coeffs_from_case(&cc.wall),
+            &wf,
+            &rough,
+            &wd.y.f,
+        )?;
+        setup_scalar_field(&gpu, model.nu_tilda_mut(), &raw_nt, &hm)?;
+        setup_scalar_field(&gpu, model.nut_mut(), &raw_nut, &hm)?;
+        println!(
+            "turbulence: SpalartAllmaras, the conservative rho-weighted form of SPEC-LIT \
+             §127.1 on the mass flux (mu_eff = mu + rho nu_t); {} wall faces carry the \
+             wall distance",
+            wd.n_wall_faces
+        );
+        fields.nu_tilda = Some(raw_nt);
+        fields.nut = Some(raw_nut);
+        solver.set_turbulence(&gpu, model)?;
+    }
     solver.initialise(&gpu, &mut s)?;
 
     let dt = f64::from(dc.ctrl.momentum.delta_t);
@@ -987,12 +1163,12 @@ fn run(o: &Options) -> Result<RunEnd> {
             }
         }
         let clock = if dc.transient { step as f64 * dt } else { step as f64 };
-        if o.do_write && !last_step && write_time(&gpu, &s, &gas, &hm, &fields, clock, &mut pipeline, false, volume.as_ref())? {
+        if o.do_write && !last_step && write_time(&gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, false, volume.as_ref())? {
             println!("    written at {}", g(clock));
         }
         if last_step {
             if o.do_write {
-                write_time(&gpu, &s, &gas, &hm, &fields, clock, &mut pipeline, true, volume.as_ref())?;
+                write_time(&gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, true, volume.as_ref())?;
                 println!("    final state written at {} to {}", g(clock), out_root.display());
             }
             break;
@@ -1337,7 +1513,7 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         let jsonc: Vec<Row> = vec![
             ("SA", r#""initial":"#,
                 r#""turbulence": {"kind":"RAS","model":"SpalartAllmaras","wallFunctions":{"kappa":0.41,"E":9.8}}, "initial":"#,
-                &[], &["physics.turbulence", "SpalartAllmaras", "CMP-25"]),
+                &[], &["physics.turbulence", "SpalartAllmaras", "nuTilda"]),
             ("SST", r#""initial":"#,
                 r#""turbulence": {"kind":"RAS","model":"kOmegaSST","wallFunctions":{"kappa":0.41,"E":9.8}}, "initial":"#,
                 &[], &["physics.turbulence", "kOmegaSST"]),
@@ -1484,5 +1660,83 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         assert_eq!(end.steps, 5);
         assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
         five_fields(&dir.join("0.005"));
+    }
+
+    /// Turn a laminar cavity into the SA case of SPEC-LIT §127.1.2: the RAS
+    /// block names `SpalartAllmaras`, the `bounded` prefix is off
+    /// `div(phi,nuTilda)`, a `0/nuTilda` at rest sits beside `0/nut`, and
+    /// every `nutkWallFunction` becomes the one wall type SA has a model for
+    /// (SPEC-LIT §56.7).
+    fn sa_cavity(tag: &str) -> PathBuf {
+        let dir = openfoam_cavity(tag);
+        edit(&dir.join("constant/momentumTransport"), "simulationType  laminar;", "simulationType  RAS;");
+        edit(
+            &dir.join("constant/momentumTransport"),
+            "model           kEpsilon;",
+            "model           SpalartAllmaras;",
+        );
+        edit(
+            &dir.join("system/fvSchemes"),
+            "div(phi,nuTilda) bounded Gauss upwind;",
+            "div(phi,nuTilda) Gauss upwind;",
+        );
+        // `0/nuTilda`, walls pinned at 0 (the exact Dirichlet §56.7 gives
+        // nu~), a freestream-sized seed in the cells - nu~ = 0 is the
+        // equation's exact fixed point, and a case seeded there stays there.
+        let mut nt = read_scalar_field(&dir.join("0").join("nut"), 64).expect("read the cavity nut");
+        nt.name = "nuTilda".to_string();
+        nt.dimensions = "[0 2 -1 0 0 0 0]".to_string();
+        nt.internal = vec![1.0e-4 as Scalar; 64];
+        for spec in nt.boundary.values_mut() {
+            if spec.type_name == "nutkWallFunction" {
+                spec.type_name = "fixedValue".to_string();
+                spec.value = vec![0.0 as Scalar];
+            }
+        }
+        ofgpu::io::fields::write_scalar_field(&dir.join("0").join("nuTilda"), &nt, "0")
+            .expect("write nuTilda");
+        let nut = dir.join("0").join("nut");
+        let s = std::fs::read_to_string(&nut).expect("read nut");
+        std::fs::write(&nut, s.replace("nutkWallFunction", "nutLowReWallFunction")).expect("write nut");
+        dir
+    }
+
+    /// CMP-25 through the driver (SPEC-LIT §127.1.2): the SA cavity runs all
+    /// five steps with no bounds violation and writes `nuTilda` and `nut` -
+    /// finite, `nut >= 0` - and the same case with `nut` left at
+    /// `nutkWallFunction` is refused by name.
+    #[test]
+    fn an_openfoam_sa_cavity_runs_and_writes_nu_tilda() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = sa_cavity("cmp25_sa");
+        let o = parse(&argv(&[dir.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the SA cavity runs");
+        assert_eq!(end.steps, 5);
+        let last = end.last.expect("an outer report");
+        assert_eq!(last.bounds.total(), 0);
+        assert!(last.nu_tilda.is_some(), "the nu~ solve is not reported");
+
+        for name in ["nuTilda", "nut"] {
+            let f = read_scalar_field(&dir.join("0.005").join(name), 64).expect("parse");
+            assert!(f.internal.iter().all(|x| f64::from(*x).is_finite()), "{name} is not finite");
+            assert!(f.internal.iter().all(|x| f64::from(*x) >= 0.0), "{name} went negative");
+            let text = std::fs::read_to_string(dir.join("0.005").join(name)).expect("written");
+            assert!(text.contains(&format!("object      {name};")), "{name}: {text}");
+        }
+        let nut = read_scalar_field(&dir.join("0.005").join("nut"), 64).expect("parse nut");
+        assert!(nut.internal.iter().any(|x| f64::from(*x) > 0.0), "nut never left zero");
+
+        // The same case with `nut` still asking for the k-based wall
+        // function: refused by name - SA has no k (SPEC-LIT §56.7).
+        let dir = sa_cavity("cmp25_sa_nutk");
+        let nut = dir.join("0").join("nut");
+        let s = std::fs::read_to_string(&nut).expect("read nut");
+        std::fs::write(&nut, s.replace("nutLowReWallFunction", "nutkWallFunction")).expect("write nut");
+        let e = refusal(&dir, &[]);
+        for w in ["nut patch", "nutkWallFunction"] {
+            assert!(e.contains(w), "{w:?} not in {e}");
+        }
     }
 }

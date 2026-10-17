@@ -939,7 +939,7 @@ pub struct TetOutput {
     /// One row per stage of [`TET_STAGES`].
     pub stages: Vec<TetStageTiming>,
     pub n_tets: usize,
-    /// 0 until the prism layers of §116.15 (TET-13b).
+    /// The prism count of §116.15 (TET-13b), 0 without layers.
     pub n_prisms: usize,
     /// The smallest and the largest dihedral angle of the emitted cells,
     /// degrees, evaluated in f64 (§116.2).
@@ -1003,7 +1003,8 @@ pub fn run_tet(
     progress: &mut dyn FnMut(&str),
 ) -> Result<TetOutput> {
     use crate::tetmesh::carve::CarveStart;
-    use crate::tetmesh::emit::{carved_boundary, emit, EmitPatch};
+    use crate::tetmesh::emit::{carved_boundary, emit, emit_mixed, EmitPatch};
+    use crate::tetmesh::inflate::{inflate, LayerStack};
     use crate::tetmesh::optimise::{dihedral_extremes, freedoms, optimise};
     use crate::tetmesh::recover::recover_faces;
     use crate::tetmesh::refine::refine;
@@ -1012,7 +1013,7 @@ pub fn run_tet(
         sources_from_refinement, surface_sources, GapSide, OctreeOptions, PatchTris, SizeField,
         SizeParams,
     };
-    use crate::tetmesh::surfprep::{prepare, TetSurface};
+    use crate::tetmesh::surfprep::{prepare_with, Cavity, TetSurface};
     use crate::tetmesh::Point;
 
     if cfg.kind != MeshKind::Tet {
@@ -1054,10 +1055,37 @@ pub fn run_tet(
             domain_names.join(", ")
         )));
     }
+    // The prism layers (§116.15, TET-13b): the layered patches are the
+    // surface patches named in layers.patches, and the stack is layers.n,
+    // layers.first_thickness and layers.growth. A name that is no surface
+    // patch is refused before any stage runs.
+    let layers_on = cfg.layers.n > 0 && !cfg.layers.patches.is_empty();
+    let mut layered_surf: Vec<bool> = Vec::new();
+    if layers_on {
+        for name in &cfg.layers.patches {
+            if !ts.patch_names.contains(name) {
+                return Err(Error::Mesh(format!(
+                    "tet/layers: layers.patches names \"{name}\", which is no surface patch ({})",
+                    ts.patch_names.join(", ")
+                )));
+            }
+        }
+        layered_surf = ts
+            .patch_names
+            .iter()
+            .map(|n| cfg.layers.patches.contains(n))
+            .collect();
+    }
 
-    // ---- stage 1: surface preparation (§116.9).
+    // ---- stage 1: surface preparation (§116.9). With a seed carve
+    // (TET-14) a cavity shell holds the fluid of an internal flow, so the
+    // order-5 refusal is lifted for `V_s < 0`; the hull start keeps it.
     let started = tet_begin(progress, 0);
-    let prep = prepare(&ts, feature)?;
+    let cavity = match cfg.castellation.keep_region {
+        KeepRegion::Seed => Cavity::Allow,
+        KeepRegion::Largest => Cavity::Refuse,
+    };
+    let prep = prepare_with(&ts, feature, cavity)?;
     let r = &prep.report;
     let counts = json!({
         "n_points": r.n_points, "n_tris": r.n_tris, "n_shells": r.n_shells,
@@ -1256,15 +1284,48 @@ pub fn run_tet(
             .iter()
             .map(|name| EmitPatch { name: name.clone(), type_name: "wall".to_string() }),
     );
-    let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
-    let mut mesh = emitted.raw;
-    rename_patches(&mut mesh, &cfg.output.patch_names)?;
+    // The inflation of §116.15 runs here, before the emission, when
+    // layers.n > 0 and layers.patches is not empty.
+    let (mesh, quality, n_prisms, n_layer_points, inflate_rounds, n_cut, n_collapsed, n_tapered, coverage) =
+        if layers_on {
+            let mut layered = vec![false; domain_names.len()];
+            layered.extend(layered_surf.iter().copied());
+            let stack = LayerStack {
+                n: cfg.layers.n,
+                first_thickness: cfg.layers.first_thickness,
+                growth: cfg.layers.growth,
+            };
+            let inf = inflate(&o.points, &o.tets, &bnd, &layered, &stack, &spec.layers, feature)?;
+            let (emitted, quality) =
+                emit_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (
+                mesh,
+                quality,
+                inf.prisms.len(),
+                inf.points.len() - o.points.len(),
+                inf.rounds,
+                inf.n_cut,
+                inf.collapsed.len(),
+                inf.tapered.len(),
+                inf.coverage(),
+            )
+        } else {
+            let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (mesh, quality, 0usize, 0usize, 1usize, 0usize, 0usize, 0usize, 1.0f64)
+        };
     let line = quality.summary();
     let counts = json!({
         "n_cells": quality.n_cells, "n_points": mesh.points.len(),
         "n_internal_faces": mesh.neighbour.len(),
         "n_boundary_faces": mesh.faces.len() - mesh.neighbour.len(),
         "gate_passed": quality.passed(),
+        "n_prisms": n_prisms, "n_layer_points": n_layer_points,
+        "inflate_rounds": inflate_rounds, "n_cut": n_cut,
+        "n_collapsed": n_collapsed, "n_tapered": n_tapered, "coverage": coverage,
     });
     tet_end(progress, &mut stages, 6, started, line, counts);
 
@@ -1278,7 +1339,7 @@ pub fn run_tet(
         quality,
         stages,
         n_tets: o.tets.len(),
-        n_prisms: 0,
+        n_prisms,
         min_dihedral_deg: dmin,
         max_dihedral_deg: dmax,
         steiner,

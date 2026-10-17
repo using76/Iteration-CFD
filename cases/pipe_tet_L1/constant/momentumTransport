@@ -1,0 +1,21 @@
+/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      momentumTransport;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+simulationType  laminar;
+
+
+// ************************************************************************* //

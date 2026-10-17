@@ -586,6 +586,10 @@ pub fn ghia_1982() -> Result<Ghia> {
 
 /// The manifest id of the T3A summary table (SPEC-LIT §144.6).
 pub const T3A_ID: &str = "ercoftac-t3a";
+/// The manifest id of the same table for the T3B case (SPEC-LIT §144.7).
+pub const T3B_ID: &str = "ercoftac-t3b";
+/// The manifest id of the same table for the T3A- case (SPEC-LIT §144.7).
+pub const T3AM_ID: &str = "ercoftac-t3am";
 
 /// The nine column names of the T3A summary table, in the file's order.
 const T3A_COLUMNS: [&str; 9] = [
@@ -618,20 +622,21 @@ pub struct T3a {
     pub digest_line: String,
 }
 
-/// Parse the T3A summary table (SPEC-LIT §144.6). The column header is the
-/// first line whose whitespace-separated fields are exactly
+/// Parse one summary table of the T3 family (SPEC-LIT §144.6, §144.7): the
+/// T3A, T3B and T3A- files share the layout and the nine columns. The column
+/// header is the first line whose whitespace-separated fields are exactly
 /// `RUN X REX UO CF H RETHETA DELTA TUFS`; lines before it are the file's
 /// title and key and are skipped. Every later non-empty line is a station:
 /// nine fields, the run id then eight numbers. Refuses by name
-/// (`Error::Parse`, `msg` naming `ercoftac-t3a`): no header line; a station
+/// (`Error::Parse`, `msg` naming `id`): no header line; a station
 /// line with another field count (line number); a cell that does not parse
 /// as `f64` (line number, cell text); a non-finite cell, or an `X`, `REX`,
 /// `UO`, `CF` or `TUFS` that is not positive (line number, column); no
 /// station at all.
-pub fn parse_t3ay(path: &str, text: &str) -> Result<Vec<T3aStation>> {
+pub fn parse_t3_summary(path: &str, id: &str, text: &str) -> Result<Vec<T3aStation>> {
     let refuse = |msg: String| Error::Parse {
         path: path.to_string(),
-        msg: format!("answer key \"{T3A_ID}\": {msg}"),
+        msg: format!("answer key \"{id}\": {msg}"),
     };
     let mut lines = text.lines().enumerate();
     lines
@@ -690,9 +695,42 @@ pub fn parse_t3ay(path: &str, text: &str) -> Result<Vec<T3aStation>> {
     Ok(stations)
 }
 
+/// [`parse_t3_summary`] at the T3A id: today's [`parse_t3ay`], unchanged.
+pub fn parse_t3ay(path: &str, text: &str) -> Result<Vec<T3aStation>> {
+    parse_t3_summary(path, T3A_ID, text)
+}
+
 /// `ercoftac_t3a_from(&Manifest::load()?, &reference_dir())`.
 pub fn ercoftac_t3a() -> Result<T3a> {
     ercoftac_t3a_from(&Manifest::load()?, &reference_dir())
+}
+
+/// The T3B key, `reference/ercoftac_t3a/t3by.dat` (SPEC-LIT §144.7): the
+/// same summary table and refusals as [`ercoftac_t3a`], at [`T3B_ID`].
+pub fn ercoftac_t3b() -> Result<T3a> {
+    // answer-key: ercoftac-t3b
+    ercoftac_t3_from(&Manifest::load()?, &reference_dir(), T3B_ID)
+}
+
+/// The T3A- key, `reference/ercoftac_t3a/t3amy.dat` (SPEC-LIT §144.7): the
+/// same summary table and refusals as [`ercoftac_t3a`], at [`T3AM_ID`].
+pub fn ercoftac_t3am() -> Result<T3a> {
+    // answer-key: ercoftac-t3am
+    ercoftac_t3_from(&Manifest::load()?, &reference_dir(), T3AM_ID)
+}
+
+/// One T3-family key through `manifest`, its file under `dir`, at `id`:
+/// [`load_text_from`]'s refusals (an absent file is `Error::Io` with
+/// `NotFound`, the key being `fetched` and git-ignored), then
+/// [`parse_t3_summary`]'s.
+pub fn ercoftac_t3_from(manifest: &Manifest, dir: &Path, id: &str) -> Result<T3a> {
+    let (digest_line, text) = load_text_from(manifest, dir, id)?;
+    let file = manifest.row(id).map(|r| r.file.clone()).unwrap_or_default();
+    let stations = parse_t3_summary(&display_path(&dir.join(file)), id, &text)?;
+    Ok(T3a {
+        stations,
+        digest_line,
+    })
 }
 
 /// The T3A key through `manifest`, its file under `dir`: [`load_text_from`]'s
@@ -700,13 +738,7 @@ pub fn ercoftac_t3a() -> Result<T3a> {
 /// `fetched` and git-ignored), then [`parse_t3ay`]'s.
 pub fn ercoftac_t3a_from(manifest: &Manifest, dir: &Path) -> Result<T3a> {
     // answer-key: ercoftac-t3a
-    let (digest_line, text) = load_text_from(manifest, dir, T3A_ID)?;
-    let file = manifest.row(T3A_ID).map(|r| r.file.clone()).unwrap_or_default();
-    let stations = parse_t3ay(&display_path(&dir.join(file)), &text)?;
-    Ok(T3a {
-        stations,
-        digest_line,
-    })
+    ercoftac_t3_from(manifest, dir, T3A_ID)
 }
 
 /// The NASA TMR zero-pressure-gradient plate's Karman-Schoenherr file,
@@ -1049,7 +1081,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 45, "forty-five markers, found {markers:?}");
+        assert_eq!(markers.len(), 48, "forty-eight markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -1081,6 +1113,7 @@ mod tests {
                 "martin-moyce-1952",
                 "riboux-gordillo-2014",
                 "rae2822-coordinates",
+                "rae2822-cp-case6",
                 "driver-seegmiller1985",
                 "mccaffrey1979-table1",
                 "huang2020-leeds-st-b",
@@ -1099,7 +1132,14 @@ mod tests {
             .collect();
         assert_eq!(
             fetched_ids,
-            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590", "ercoftac-t3a"]
+            [
+                "mkm99-chan180",
+                "mkm99-chan395",
+                "mkm99-chan590",
+                "ercoftac-t3a",
+                "ercoftac-t3b",
+                "ercoftac-t3am",
+            ]
         );
         for row in &m.rows {
             assert!(!row.source.is_empty(), "{}: an empty source cell", row.id);
@@ -1126,7 +1166,7 @@ mod tests {
     /// The `fetched` rows' files are git-ignored, so their presence is a
     /// property of the TREE, not of the manifest: one that is present must
     /// carry exactly the digest its row pins, and one that is absent must be
-    /// plainly absent (NotFound) - on a clean clone all four are.
+    /// plainly absent (NotFound) - on a clean clone all six are.
     #[test]
     fn every_fetched_key_that_is_present_matches_its_manifest_digest() {
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
@@ -1137,8 +1177,15 @@ mod tests {
             .collect();
         assert_eq!(
             fetched.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["mkm99-chan180", "mkm99-chan395", "mkm99-chan590", "ercoftac-t3a"],
-            "exactly the four fetched rows, in manifest order"
+            [
+                "mkm99-chan180",
+                "mkm99-chan395",
+                "mkm99-chan590",
+                "ercoftac-t3a",
+                "ercoftac-t3b",
+                "ercoftac-t3am",
+            ],
+            "exactly the six fetched rows, in manifest order"
         );
         let mut present = 0usize;
         for row in &fetched {
@@ -1156,7 +1203,7 @@ mod tests {
                 ),
             }
         }
-        println!("  [answer-key] fetched keys present on this tree: {present}/4");
+        println!("  [answer-key] fetched keys present on this tree: {present}/6");
     }
 
     /// A `fetched` row reads exactly as a `file` row through
@@ -1287,6 +1334,56 @@ mod tests {
                     "{line}"
                 );
                 println!("  [answer-key] {line}");
+            }
+        }
+    }
+
+    /// The fetched T3B and T3A- keys on this tree (SPEC-LIT §144.7): placed,
+    /// T3B reads fifteen stations with `Re_x` rising from `1.51e4` and a last
+    /// `Tu` of 2.400 %, T3A- sixteen stations from `1.225e5` with a last `Cf`
+    /// of 0.001514; absent (a clean clone), both are plainly `NotFound`, as
+    /// the T3A key is.
+    #[test]
+    fn ercoftac_t3b_and_t3am_keys_read_their_stations_or_are_missing_by_name() {
+        for (id, file, read) in [
+            (T3B_ID, "ercoftac_t3a/t3by.dat", ercoftac_t3b as fn() -> Result<T3a>),
+            (T3AM_ID, "ercoftac_t3a/t3amy.dat", ercoftac_t3am as fn() -> Result<T3a>),
+        ] {
+            match read() {
+                Ok(t) => {
+                    let s = &t.stations;
+                    if id == T3B_ID {
+                        assert_eq!(s.len(), 15, "fifteen stations");
+                        assert!((s[0].re_x / 1.51e4 - 1.0).abs() <= 1e-12, "{:?}", s[0]);
+                        assert!((s[14].tu_pct - 2.400).abs() <= 1e-12, "{:?}", s[14]);
+                    } else {
+                        assert_eq!(s.len(), 16, "sixteen stations");
+                        assert!((s[0].re_x / 1.225e5 - 1.0).abs() <= 1e-12, "{:?}", s[0]);
+                        assert!((s[15].cf - 0.001514).abs() <= 1e-12, "{:?}", s[15]);
+                    }
+                    for w in s.windows(2) {
+                        assert!(w[1].re_x > w[0].re_x, "{w:?}");
+                    }
+                    for st in s {
+                        assert!(st.cf.is_finite() && st.cf > 0.0, "{st:?}");
+                        assert!(st.tu_pct.is_finite() && st.tu_pct > 0.0, "{st:?}");
+                    }
+                    assert!(t.digest_line.starts_with(&format!("answer key {id}: reference/{file} sha256 ")), "{}", t.digest_line);
+                    println!("  [answer-key] {} ({} stations)", t.digest_line, s.len());
+                }
+                Err(e) => {
+                    assert!(
+                        matches!(&e, Error::Io { source, .. }
+                            if source.kind() == std::io::ErrorKind::NotFound),
+                        "an absent fetched key is NotFound, got: {e}"
+                    );
+                    let line = crate::answer_key_missing_line(id, file, &e);
+                    assert!(
+                        line.starts_with(&format!("answer key {id} missing: reference/{file} ")),
+                        "{line}"
+                    );
+                    println!("  [answer-key] {line}");
+                }
             }
         }
     }
@@ -2438,5 +2535,74 @@ mod tests {
         println!(
             "  [answer-key] rae2822-coordinates  65 stations, closed at both ends"
         );
+    }
+
+    /// SPEC-LIT section 127.6.8: the RAE 2822 Case 6 key holds the NPARC
+    /// archive's 103 measured Cp points at the corrected conditions - the
+    /// upper surface from the trailing edge, the leading edge once, then
+    /// the lower surface to the trailing edge - with the extremes Gate
+    /// CMP-RAE quotes.
+    #[test]
+    fn rae2822_cp_key_holds_103_points_of_case6() {
+        // answer-key: rae2822-cp-case6
+        let key =
+            load("rae2822-cp-case6").expect("load the answer key \"rae2822-cp-case6\"");
+        assert_eq!(
+            key.columns,
+            ["x_c", "minus_cp", "surface"],
+            "rae2822-cp-case6: the header row"
+        );
+        assert_eq!(key.rows.len(), 103, "rae2822-cp-case6: the row count");
+        let x = key.column("x_c").expect("the x_c column");
+        let mcp = key.column("minus_cp").expect("the minus_cp column");
+        let s = key.column("surface").expect("the surface column");
+        for (i, row) in s.iter().enumerate() {
+            let want = if i < 53 {
+                1.0
+            } else if i == 53 {
+                0.0
+            } else {
+                -1.0
+            };
+            assert_eq!(
+                *row, want,
+                "rae2822-cp-case6: row {i}: surface {} is not {want}",
+                row
+            );
+        }
+        assert_eq!(
+            (x[0], mcp[0], s[0]),
+            (0.9938, -0.1432, 1.0),
+            "rae2822-cp-case6: row 0, the upper trailing edge"
+        );
+        assert_eq!(
+            (x[53], mcp[53], s[53]),
+            (0.0, -0.8328, 0.0),
+            "rae2822-cp-case6: row 53, the leading edge"
+        );
+        assert_eq!(
+            (x[102], mcp[102], s[102]),
+            (0.9938, -0.2146, -1.0),
+            "rae2822-cp-case6: row 102, the lower trailing edge"
+        );
+        let (hi, lo) = (
+            mcp.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |(a, m), (i, v)| {
+                if *v > m { (i, *v) } else { (a, m) }
+            }),
+            mcp.iter().enumerate().fold((0usize, f64::INFINITY), |(a, m), (i, v)| {
+                if *v < m { (i, *v) } else { (a, m) }
+            }),
+        );
+        assert_eq!(
+            (x[hi.0], mcp[hi.0], s[hi.0]),
+            (0.525, 1.2201, 1.0),
+            "rae2822-cp-case6: the largest minus_cp is the upper surface's peak"
+        );
+        assert_eq!(
+            (x[lo.0], mcp[lo.0], s[lo.0]),
+            (0.0016, -1.1338, -1.0),
+            "rae2822-cp-case6: the smallest minus_cp is the lower surface's stagnation"
+        );
+        println!("  [answer-key] rae2822-cp-case6  103 points of Case 6, upper, LE, lower");
     }
 }

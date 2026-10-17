@@ -24200,6 +24200,11 @@ decay is as strong a lever on onset as `Tu` itself.** Separating the two needs
 a per-case inflow `omega`, which the TMR publishes for T3A and not for T3A- or
 T3B. **So the T3A-/T3B legs are NOT claimed**, and the measurement above is
 recorded as the reason rather than the trend being reported as a result.
+§144.7 (docs/17 VAL-35) ran T3B and T3A- with a per-case inflow fitted to the
+measured Tu(x), which removes this construction: its LM spread read
+`S_sim = 2.4242e1` against the keys' `S_key = 2.5578e1` (`E = -5.22 %`, band
+15 %, undecided under `u_val 32.97 %`) where the single-rig construction read
+`51.9x`; its verdicts are there.
 
 **Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). §144.3 runs
 the T3A rig in 2-D on the flat-plate harness, and §144.6 places Roach & Brierley's measured `C_f(Re_x)` (the ERCOFTAC
@@ -24240,6 +24245,7 @@ the 1-D correlations, and leg 4 is the measured verdict on the 2-D solution.
 | **Gate 88-T leg 1** | `Tu` at the T3A leading edge `3.3530 %` against the published `3.300 %` — **1.61 %** |
 | **Gate 88-T leg 2** | onset at `Re_x = 8.525e4` — **OPEN**, no published digit to close it against |
 | **Gate 88-T leg 3** | monotone in `Tu`, and the `51.9×` spread that says a single-rig trend gate measures the decay |
+| **Gate 88-T leg 3, fitted** (§144.7) | T3B and T3A- with fitted inflows: the LM ordering holds at the (144.7e) onsets; T3B laminar `+58.3 %` **MISSES** (10 %); T3A- LM turbulent `+132.1 %` and laminar `+27.6 %` **MISSES** (10 %); the T3A- fit `3.63 %` **MISSES** (3 %); the onsets and the spread `E = -5.22 %` **OPEN**, undecided - see §144.7 |
 | **Gate 88-T leg 4** (§144.4) | 2-D `C_f(Re_x)` against Roach & Brierley: onset `-35.9 %` **MISSES** (15 %); turbulent `C_f` `-7.1 %` **OPEN**, undecided (10 %, `u_val 5.2 %`); laminar part `+16.3 %` of Blasius **MISSES** (10 %) |
 | the CUDA graph | a transitional `correct` captures and replays bitwise (§81) |
 
@@ -25134,7 +25140,11 @@ verdict stays OPEN.**
 **Leg 3 — not claimed.** §88.10's leg 3 measured the reason: on one rig
 the free-stream decay is as strong a lever on onset as `Tu` itself, and
 its 51.9x spread is the evidence. This gate does not repeat the
-construction with a new correlation on top of it.
+construction with a new correlation on top of it. §144.7 (docs/17 VAL-35)
+ran T3B and T3A- with a per-case inflow fitted to the measured Tu(x),
+which removes this construction: its LM spread read `E = -5.22 %` against
+the keys' ratio (band 15 %), undecided under `u_val 32.97 %`, where the
+single-rig construction read `51.9x`; its verdicts are there.
 
 **Leg 4 — the `C_f(Re_x)` in two dimensions, against the measurement** (docs/17 VAL-33, §144.4). This is §88.10's
 leg 4, with the same records (§144.3), key (§144.6), definitions and bands, read for `kOmegaSSTGamma`. On the
@@ -35903,11 +35913,14 @@ key:
   differs from the defaults (the tet path has no snap stage), `domain.grading` other than
   `[1, 1, 1]` (sizes come from §116.8, not from a graded block) and a `castellation.min_faces`
   other than its default `4`;
-- with `kind: "tet"`, the two parts of the list above that the tet path does not build yet:
-  `castellation.bodies` (TET-19) and `layers.patches` (prism layers, TET-13b).
+- with `kind: "tet"`, a `layers` key other than `patches`, `n`, `first_thickness` and `growth`
+  that differs from its default (the tet path's limiters are `tet.layers`, §116.15);
+- with `kind: "tet"`, the part of the list above that the tet path does not build yet:
+  `castellation.bodies` (TET-19).
 
-*Tree against the list above.* `bodies` and `layers` are reused by the design, but until TET-19
-and TET-13b land they are refused rather than ignored. `driver::run` (the hex path) refuses a
+*Tree against the list above.* `bodies` is reused by the design, but until TET-19 lands it is
+refused rather than ignored. `layers.patches` was refused the same way until TET-13b built the
+prism layers (§116.15). `driver::run` (the hex path) refuses a
 `tet` config, `driver::run_tet` a hex one, and `ofgpu-automesher` refuses `-stopAfter` on a tet
 config: (92.55)'s stop rule names the hex stages.
 
@@ -36542,7 +36555,7 @@ index and its patch:
 | 2 | `surface/degenerate` | a triangle whose f64 cross product `(x_1 - x_0) x (x_2 - x_0)` is exactly zero, or whose apex (116.13e) lies on its own plane |
 | 3 | `surface/closed` | an edge with one triangle (open) or three or more (non-manifold) |
 | 4 | `surface/orientation` | a manifold edge traversed in the same direction by both its triangles, or a shell with no consistent orientation |
-| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive |
+| 5 | `surface/inward` | a shell whose enclosed volume (116.13a) is not positive; with a seed (`castellation.keep_region = "seed"`, TET-14), a zero volume only |
 | 6 | `surface/self-intersection` | two triangles that share no point and meet, or a fold at a shared edge |
 
 1. **Not closed.** Every undirected edge must be shared by exactly two triangles. This is the
@@ -36575,7 +36588,13 @@ V_s = (1/6) sum_{t in s} (x_0(t) - o_s) . ( (x_1(t) - o_s) x (x_2(t) - o_s) ),
    (116.13a) is (116.13) for one shell, taken about a point of that shell. On a closed shell
    the sum does not depend on the origin, and the shifted form keeps the terms small far from
    the coordinate origin, which is the local-origin rule of docs/17 §5.1.7. A cavity shell,
-   whose normals point into the cavity, has `V_s < 0` and is refused in this unit.
+   whose normals point into the cavity, has `V_s < 0` and is refused in this unit. TET-14 lifts
+   the refusal when the carve starts from a seed (`castellation.keep_region = "seed"`,
+   `surfprep::prepare_with(.., Cavity::Allow)`): a cavity shell then holds the fluid of an
+   internal flow, which §116.12's carve keeps from the seed, and a seed on the solid side is
+   still refused there by name (`carve/seed`). A zero `V_s` is refused either way. The hull
+   start (`"largest"`) keeps the refusal, because §116.12 would find its hull region solid.
+   `tools/automesher/examples/pipe_tet.json` is the worked case.
 
 3. **Self-intersecting.** Two triangles that share no point must not meet. The sets are
    closed, so touching counts as meeting. For `T_1 = (a_1, b_1, c_1)` and `T_2`, the test
@@ -37568,8 +37587,8 @@ the last being the direction at equal angles from three. Each candidate's object
 `min_i n . n_i` is evaluated over all the normals and the largest wins; ties keep the first
 candidate in the order above. No tolerance decides whether a candidate is valid, because a
 candidate that is not the optimum simply scores lower. A point where no candidate scores above
-0 sees no side of every incident face. It gets no normal and no layers, and TET-13c's taper owns
-it. This exhaustive solution is cubic in the distinct normals at a point. It is this section's,
+0 sees no side of every incident face. It gets no normal and no layers, and TET-13c collapses
+it (below). This exhaustive solution is cubic in the distinct normals at a point. It is this section's,
 derived from the definition. Aubry & Löhner (2008) is the source of the definition, and its own
 iterative solver is not transcribed.
 
@@ -37616,18 +37635,187 @@ point moves by
 s(x) = sum_i w_i(x) s_i / sum_i w_i(x),        w_i = A_i phi( |x - x_i| )                   (116.25)
 ```
 
-`A_i` is the area associated with wall point `i`. TET-13b transcribes the paper's two-term
-`phi` and its constants into this subsection, from the paper, when it builds it.
+`A_i` is the area associated with boundary node `i`.
 
 After the move, every tetrahedron must keep `orient3d > 0`. Where one does not, the thickness
 is cut locally and the move is redone. The gap is then filled with `N` prisms per wall
 triangle, `(a, b, c)` to `(a', b', c')`, so the prism-tet interface is the displaced wall
 triangulation itself, conformal by construction (Kallinderis, Khawaja & McMorris 1996).
 
-**Sharp edges and corners** (TET-13c). Layers at sharp convex and concave edges and corners
-collapse or taper instead of inverting, and the report names each tapered point. Coverage is
-the fraction of wall points carrying the full `N` layers. It is reported, and its bar is in
-§116.18.
+**The deformation and the prisms, as TET-13b builds them** (`tetmesh/inflate.rs`'s `inflate`,
+`tetmesh/emit.rs`'s `emit_mixed`). The input is the optimised tetrahedra (§116.14) and their
+boundary faces with patches (§116.16), and a per-patch mask of the layered patches.
+
+*The surface.* Every boundary face is wound so that `orient3d(a, b, c, d) < 0`, `d` the fourth
+point of its tetrahedron: its right-hand normal points into the fluid, as (116.22) and (116.24)
+require. These faces, on all the mesh's points and with their patches, are the surface of
+TET-13a's normals and thicknesses. The box sides and every unlayered patch are therefore
+obstacles to the gap (116.24d). A listed face that is not the face of exactly one tetrahedron is
+refused (`inflate/boundary`). A wall point with no normal, or with `T(p) = 0`, collapses: it
+carries no layers (TET-13c, (116.25g) below).
+
+*The weight.* The paper's own text was not open to this unit. Its two-term weight is taken as
+§105.9 already reads it (exponents 3 and 5, `alpha = 5 max |s_i| / L`, a length from the
+control points' bounding box), with the area weight of (116.25):
+
+```
+phi(r) = ( L / r )^3 + ( alpha L / r )^5,       alpha = 5 max_i |s_i| / L                  (116.25a)
+L      = | hi - lo |, the diagonal of the bounding box of the boundary nodes                (116.25b)
+A_i    = (1/3) * the sum of the areas of the boundary faces incident to node i              (116.25c)
+```
+
+The boundary nodes are the points of the boundary faces. A wall point is displaced by
+`s_i = T(p_i) n*_i`, and every other boundary node by 0, so the box sides and the unlayered
+patches stay where they are. A point on no boundary face that a tetrahedron uses moves by
+(116.25), with the sums in ascending node order and `r = |x - x_i|` on the undeformed points. A
+point that coincides with a node takes that node's `s_i`. Every evaluation is f64 (§116.2). A
+move costs `O(N_interior N_boundary)`, because the paper's tree code is not built.
+
+*The cut.* After a move, every tetrahedron must have `orient3d > 0` (116.2) on the moved points,
+and every prism must pass (116.25f) below. A failing tetrahedron names, for each of its four
+points, the wall point that the point follows: the point itself if it is a wall point, and
+otherwise the wall point with `T > 0` of largest `w_i` at the point's undeformed position (the
+lowest wall-point index on a tie). A failing prism names its three wall points. Each named
+point's `T(p)` is halved, once per round, and its limit becomes `Inversion`. (116.24c)'s sweep
+then runs again over the new thicknesses, and the move is redone from the undeformed points.
+After 30 rounds with a failure left, the run is refused (`inflate/invert`), naming the cells.
+
+*The layers.* With `T` the stack's total (116.23):
+
+```
+d_k(p) = ( T(p) / T ) t_1 ( r^k - 1 ) / ( r - 1 )      ( ( T(p) / T ) k t_1 when r = 1 ),   k = 0 .. N
+x_k(p) = x(p) + d_k(p) n*(p)   for k < N,             x_N(p) = x(p) + s(p)                (116.25d)
+```
+
+Every wall point `p` keeps its id, which after the move is its top point `x_N(p)`. The
+tetrahedra keep their ids, so they sit on the displaced wall. `p` gains the new points
+`x_0(p) .. x_{N-1}(p)` of (116.25d), appended in ascending wall-point order and, per point, in
+layer order. `x_0(p) = x(p)` is the undeformed wall. A cut point's layers keep the ratio `r` and
+are scaled by `T(p) / T`, so its first layer is `t_1 T(p) / T`. Each wall triangle `(a, b, c)`,
+wound into the fluid, gets `N` prisms, triangle by triangle and in each from the wall out:
+
+```
+[ a_{k-1}, b_{k-1}, c_{k-1}, a_k, b_k, c_k ],     k = 1 .. N                               (116.25e)
+```
+
+Its outward faces are `(a_{k-1}, c_{k-1}, b_{k-1})` (bottom), `(a_k, b_k, c_k)` (top), and the quads
+`(a_{k-1}, b_{k-1}, b_k, a_k)`, `(b_{k-1}, c_{k-1}, c_k, b_k)` and `(c_{k-1}, a_{k-1}, a_k, c_k)`.
+The top of layer `N` is the wall triangle `(a, b, c)` itself, a face of a tetrahedron, so the
+prism-tet interface is conformal by construction. A prism `[v0, .., v5]` is valid when the three
+tetrahedra of its split
+
+```
+[ v0, v2, v1, v3 ],    [ v2, v1, v3, v4 ],    [ v3, v2, v4, v5 ]                           (116.25f)
+```
+
+all have `orient3d > 0`. On the right prism over the unit corner triangle (`v0 .. v2` =
+`(0,0,0), (1,0,0), (0,1,0)`, the top `+z`) each is exactly `+1`, and the three volumes sum to the
+prism's `1/2`.
+
+The boundary after the inflation follows the input's order. Each wall triangle is replaced by its
+bottom `(a_0, c_0, b_0)` on its patch, and every other boundary face is unchanged: its wall
+points, if any, are now at their tops. Then come the side quads. Where an edge `(a, b)` of a wall
+triangle (in its into-the-fluid winding) borders a boundary face of an unlayered patch `q`, the
+quads `(a_{k-1}, b_{k-1}, b_k, a_k)`, `k = 1 .. N`, go on `q`, in wall-triangle, edge and layer
+order. An edge on other than two boundary faces is refused (`inflate/edges`). When the unlayered
+face meets the wall at a right angle and `n*` lies in its plane, the side quads lie in it too.
+Otherwise the side does not lie in the patch's plane. TET-13c leaves such a side as built (below).
+
+*The emission.* §116.16's emitter takes the tetrahedra and the prisms. Cells `0 .. n_tets - 1`
+are the tetrahedra, and the prisms follow in (116.25e)'s order. A face is a triangle or a
+quadrilateral, keyed by its sorted points. The rest of the layout is unchanged, and a mesh of
+tetrahedra only is emitted exactly as before. A prism that fails (116.25f) is refused like a
+tetrahedron (`emit/orient`), and (116.26)'s prism arm evaluates (116.25f) on the rounded points.
+A prism whose ids repeat (TET-13c's collapse, below) is a pyramid or a tetrahedron.
+
+*In the driver.* `run_tet` inflates inside stage 7 (`emit`), before the emission, when
+`layers.n > 0` and `layers.patches` is not empty. The stage list is unchanged. The layered
+patches are the surface patches named in `layers.patches`, never a domain patch, and a name that
+is no surface patch is refused (`tet/layers`). The stack is `layers.n`,
+`layers.first_thickness` and `layers.growth`; the limiters are `tet.layers`; the crease angle is
+`refinement.feature_angle_deg`. With `kind: "tet"`, every other `layers` key that differs from
+its default is refused by name, because the tet path does not read it (§116.3's rule). The
+summary's `n_prisms` is the prism count, and the `emit` row adds `n_prisms`,
+`n_layer_points`, `inflate_rounds` and `n_cut`.
+
+*DESIGN.* These choices are this section's own. A cut halves `T(p)`, because the paper prescribes
+no cut. A cut point's stack is scaled rather than given fewer layers, so every wall triangle keeps
+`N` prisms. Thirty rounds bound the halving at `2^-30 T`. A point that cannot carry layers
+collapses (TET-13c). The parameters of (116.25a) are §105.9's reading of
+Luke, Collins & Blades (2012), the reading this tree already uses for ALE.
+
+**Sharp edges and corners, as TET-13c builds them** (`tetmesh/inflate.rs`'s `inflate`,
+`tetmesh/emit.rs`). Layers at sharp convex and concave edges and corners collapse or taper
+instead of inverting, and the report names each tapered point. Coverage is the fraction of wall
+points carrying the full `N` layers. It is reported, and its bar is in §116.18.
+
+*The collapse.* After TET-13a's thicknesses and before the first move, a wall point `p`
+collapses when
+
+```
+n*(p) does not exist,   or   T(p) = 0,   or   min_i n*(p) . n_i  <  cos 60 deg = 1/2        (116.25g)
+```
+
+with the minimum over the unit normals `n_i` of its incident wall triangles, as in (116.22)
+(`WallNormals::min_cos`). A collapsed point carries no layers. Its `T(p)` is 0 and its limit is
+`Collapsed`. As a boundary node it has `s_i = 0`, so it stays where it is. It gains no layer
+points, and its `x_k(p)` is `p` itself for every `k`. The third clause is the sharp edge or
+corner, where the stack would leave the wall along `n*` at more than 60 degrees to an incident
+face. On the 30-degree wedge's apex edge that angle is 75 degrees. A concave edge sharper than 60
+degrees meets the same clause, because its `n*` is the bisector too. The edges and corners of a
+cube (45 and 54.7 degrees) keep their layers.
+
+*The taper.* When a point has collapsed, every other wall point `q` is capped by its distance to
+the nearest collapsed point:
+
+```
+T(q) <= s_T  min_c | x(q) - x(c) |,      c over the collapsed points,      s_T = 1/2      (116.25h)
+```
+
+The distance is taken on the undeformed points, with the minimum over the collapsed points in
+ascending wall-point order, in f64. A point that the cap lowers is tapered: its limit becomes
+`Taper`, and the report names it. (116.24c)'s sweep then runs again. Collapsed points take no
+part in it, as no point with `T = 0` ever does. A tapered stack keeps its `N` layers, scaled by
+`T(q) / T` as a cut's are (116.25d). When no point collapses, none of this runs, and the result
+is TET-13b's bit for bit.
+
+*The cut* is TET-13b's, except that it never names a collapsed point. A failing tetrahedron's
+point follows a wall point with `T > 0`, as before, and a failing prism names only its
+uncollapsed wall points.
+
+*The prisms at a collapse.* A wall triangle whose three points have all collapsed gets no prisms.
+It stays the face of its tetrahedron, and its bottom, the same triangle, stays on its patch. Every
+other wall triangle gets its `N` prisms (116.25e), in which a collapsed point's ids repeat:
+`a_{k-1} = a_k = a`. Such a prism is a pyramid when one point has collapsed (the quad on the
+other two columns, with the collapsed point as apex) and a tetrahedron when two have. Its faces
+are (116.25e)'s with repeated consecutive points removed, cyclically, and a face left with fewer
+than three distinct points is no face. The side quads on unlayered patches are reduced the same
+way. The layer points are appended for the uncollapsed wall points only, in ascending wall-point
+order and per point in layer order. With no collapse this numbering is TET-13b's. A prism is
+valid when every tetrahedron of its split (116.25f) with four distinct ids has `orient3d > 0`,
+and at least one has four distinct ids. A split tetrahedron is skipped by its ids, never by its
+volume, so (116.26)'s rounded arm skips the same ones. On the right prism of (116.25f) with
+`v3 = v0`, the two remaining split tetrahedra have `orient3d = +1` each, a pyramid of volume
+`1/3`. With `v3 = v0` and `v4 = v1` as well, the one remaining tetrahedron has `+1` and volume `1/6`.
+
+*The report.* `Inflated` names the collapsed points (`collapsed`) and the tapered ones
+(`tapered`) by point id, ascending, and `coverage()` is
+
+```
+coverage = ( n_wall - n_collapsed ) / n_wall        (1 when there is no wall point)         (116.25i)
+```
+
+The driver's `emit` row adds `n_collapsed`, `n_tapered` and `coverage`. A side quad that leaves
+its unlayered patch's plane is left as built. No case in §116.18 has one, and docs/17-review-later
+lists it.
+
+*DESIGN.* The 60 degrees of (116.25g) and the slope `s_T = 1/2` of (116.25h) are this
+section's own. They were chosen on the supervisor's probe of the TET-13c fixture (§116.18). On the
+30-degree wedge, TET-13b alone fails §92.3's G4 on one face next to the apex corner. The collapse
+with no taper fails it on two faces, and the slope 0.3 fails G5 on thin tapered stacks. The
+slopes 0.5 and 1 pass. A taper that drops layers instead of scaling the stack was probed too. It
+failed G4 on seven faces, so the stack is scaled, as TET-13b's cut scales it. No paper prescribes
+these numbers.
 
 ### 116.16 Emission, the gate and the f32 rounding check
 
@@ -37680,8 +37868,9 @@ emitter writes the f64 points and is no longer where a point becomes `Scalar`; t
 f32 cast it guards"). (116.26) therefore rounds each point by `to_vec3` and widens it back by
 `to_dvec3`, both exact apart from the one rounding, and evaluates (116.2) with the exact
 `orient3d` of §116.4. Under `single` it runs before the polyMesh is built, so the cells it names
-are the input's tetrahedron indices, which are the emitted cell numbers. A prism's three-tetrahedron
-arm of (116.26) arrives with the prisms (TET-13b).
+are the input's tetrahedron indices, which are the emitted cell numbers. A prism's arm (TET-13b)
+evaluates the three tetrahedra of (116.25f) on the rounded points, and names the prism by its cell
+number, `n_tets` plus its index.
 
 *The gate under `single`.* §92.3 is `automesher::quality::check`, which measures the `HostMesh`
 in `Scalar`. Under `--features single` its G2 sums f32-rounded area vectors, and on TET-10b's
@@ -37728,7 +37917,7 @@ returned Ok, as §92.14.4 requires. `-check` needed no change: it reads any poly
 `config` and `identity`, with `stopped_after` and `layout` always `null`. It adds `"kind": "tet"`,
 seven `stages` rows named as above, each with `seconds` and its own counts, and a `tet` block:
 
-- `n_tets`, and `n_prisms`, which is 0 until TET-13b;
+- `n_tets`, and `n_prisms`, the prisms of §116.15 (0 without layers);
 - `min_dihedral_deg` and `max_dihedral_deg`;
 - `steiner`: `recover` (`ball`, `split`, `encroach_split`, `facet`, `facet_centroids`, `total`),
   `refine` (`interior`, `segment_splits`, `facet_splits`, `facet_centroids`, `box_face_splits`,
@@ -37751,6 +37940,49 @@ f32 run must sit within §112.1's floor. This is the one P-class gate of §116. 
 incompressible steady binary the §110 gates use, which the supervisor names in TET-14's brief.
 TET-18 then runs the real drone surface (x500, about 251k triangles, BSD-3) through the whole
 pipeline. Its output stays outside the repository.
+
+**The recipe (TET-14).** The pipe is `tools/automesher/examples/make_pipe_stl.py`'s: R = 0.5 m,
+L = 12 m, 64 input facets round and 96 stations, wound inward, so `pipe_tet.json` keeps the fluid
+by the seed carve of §116.12. The size field runs at H = 0.1 with the radius-edge bound B = 2.5
+of (116.17): the default 2 does not finish on this surface - the §116.13 refinement keeps demanding
+insertions around the pipe's 90-degree rims, at x = 0 and x = 12, and more of them each pass (the
+L = 2 m pipe at H = 0.25: 59 133 points after 209 passes, the next pass asking 14 339 more) - and
+2.5 does. The wall prisms are n = 3 layers at t_1 = 0.002, growth 1.2: thicker stacks
+(n 5 / t1 0.005, n 3 / t1 0.0025-0.003) fail §92.3's G4 and G5 at those rims, where the inward
+corner bends the wall normals. The case is `cases/pipe_tet_L1`, solved by `ofgpu-lowmach`:
+laminar and steady, U_in = 1 m/s uniform at the inlet, nu = 0.01 m^2/s (Re = 100), leastSquares
+gradients, relaxation U 0.5 and p 0.2 (0.7 and 0.3 stall at a residual of 1e-2 on the thin prisms;
+two non-orthogonal correctors diverge), 1500 iterations. The measure is the volume-weighted
+least-squares dp/dx over the cells with x in [7, 11] m - past the entrance length, about 5.7
+diameters at Re 100 - against (116.27) per unit length with Q = U_in A_inlet. Gate 116-P of
+`ofgpu-validate` replays the record (`validate_gates/pipe_tet.rs`). The f32 leg is the same run in
+the single build, and a P-class gate holds the same 2 % there (docs/17 §5.1.4); §116.17's "within
+§112.1's floor" is read that way.
+
+**The record (TET-14, the supervisor's runs of 2026-10-17, on the RTX 5070 Ti shared with two
+other lanes and an outside job at 95-97 % load).** The f64 automesher writes the L1 mesh in 87.5 s
+(refine 58.8 s, 1 015 passes; optimise 26.3 s): 179 955 cells, 100 545 tetrahedra and 79 410
+prisms, dihedral 26.30-154.98 degrees, §92.3 passed with max non-orthogonality 66.23 degrees, min
+thickness ratio 0.0835, max cond 71.2. `ofgpu-lowmach` (f64) converges in 78.6 s for 1 500
+iterations (|U| residual 4.8e-10, |p| 9.7e-9 at the last check). The fit over the 59 781 window cells
+gives dp/dx = 0.366354 m/s^2 of kinematic p, against (116.27)'s 0.317210 at A_inlet = 0.778550 m^2:
+**MISSED, +15.49 %** against the 2 % bar. The solve bar (180 s) and the mesh gate pass. The cause is
+the discretisation on the tetrahedra, not the run: the profile is Poiseuille's (the volume-mean U_x
+over 8 <= x <= 10 m is 1.0022 m/s and its largest cell value 2.0002, against Q/A = 1 and 2), and
+the error moves with the gradient scheme alone. On the same mesh and inputs, measured once with an
+outside f64 oracle that reproduces the record's +15.4928 %: Gauss linear gradients give +27.14 %, the
+uncorrected Laplacian +31.71 %; with no prisms at all (100 545 tetrahedra) Gauss linear gives
++28.47 % and leastSquares +13.85 %; five layers of t_1 = 0.005 (a mesh §92.3 refuses at the rims,
+written for this probe only) give +9.98 %. The polygonal section adds a known +1.77 %: A_inlet is
+0.99128 pi R^2, and (116.27) is evaluated at the nominal R. A finer level (H = 0.07, 303 721 kept
+tetrahedra, refine 360.5 s) is refused by §92.3's G4 on 4 rim faces, so no mesh study exists. A cure
+would change the face-gradient (non-orthogonal) discretisation on tetrahedra or the mesher's rim
+treatment; both are the user's decisions, and neither was built. **The single build:** the
+single-build automesher refuses the L1 mesh at §92.3 G2 on 172 074 cells (E = 2.620e-8 against
+1e-10, the known A28 of docs/17-review-later), and the single-build `ofgpu-lowmach` on the f64-built
+mesh is quiet through step 19 and stops at step 20 on §93.6's guard (max Mach 33 821.6 at cell
+10020, an interior tetrahedron at x = 7.43 m, r = 0.36 m): both **MISSED**, recorded as text in the
+gate.
 
 ### 116.18 Gates, their precision classes, and what has been measured
 
@@ -37780,7 +38012,7 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13a | sphere normal radial within 1e-6 rad; cube-corner equal angles within 1e-9; a gap of `3T` limited to `gap/2` or less | A |
 | TET-13b | `t_1` within 1 % at 95 % or more of wall points; 0 negative volumes; §92.3 G2; wall non-orthogonality 5 degrees or less | A, D |
 | TET-13c | 0 inverted cells; §92.3 passes; coverage 90 % or more, reported | D |
-| TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor; the solve takes 3 min or less | P |
+| TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor, read as the same 2 % (class P); the solve takes 3 min or less; the L1 mesh passes §92.3; `tests/tetmesh_pipe.rs`: a cavity shell is taken with a seed and refused with the hull start, its volume to 1e-12 (class R, 1e-5 under single) | P, D, R |
 | TET-15 | a 1 M-tet sphere in a box end to end in 120 s or less; bit-identical across 1, 4 and 8 threads | measured, D |
 | TET-18 | the drone surface passes §92.3; dihedral bounds and wall time recorded | measured |
 
@@ -37919,10 +38151,26 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-13a | the concave limit (116.24b) inside an open 16-sided pipe of radius 1 | all 48 points at `0.5 rho_c` = 0.331195617048069, `w / (3 phi)` with `w = 2 sin(pi/16)` and `phi = pi/8`, within 1e-12 relative, `n*` radial within 1e-12; outside the same pipe `T` is kept, with no gap and no `rho_c` | the TET-13a commit |
 | TET-13a | (116.22a) against a direct optimisation (the supervisor, outside the tree) | 300 random sets of 2 to 8 unit normals in a cap: Nelder-Mead from 20 starts never beat the candidate optimum by more than 3.3e-16 | the TET-13a commit |
 | TET-13a | the f32 arm | `rust/tests/tetmesh_inflate.rs` (the 7 shared tests) under `--features single`: all pass with the same printed numbers | the TET-13a commit |
+| TET-13b | `inflate::sphere_layers`: the sphere in a box of TET-09/10b (h = 0.25 on the sphere, H = 0.5, g = 1.2, box [-2, 2]^3), 5 layers, `t_1 = 2e-3` (1e-3 D), `r = 1.2`, `T` = 1.48832e-2 | 489 wall points, 974 wall triangles, 4 870 prisms (5 x 974); one move, no cut, every point at the requested stack; `t_1` within 1 % at 489 of 489 points (worst relative 3.95e-14); 0 inverted tetrahedra, 0 prisms failing (116.25f); §92.3 G2 max closure 5.595e-15 (f64) | the TET-13b commit |
+| TET-13b | the same: the wall non-orthogonality, the angle between a sphere face's area vector and the line from its cell's centre to the face centre, on `build_host_mesh` | **MISSED** against 5 degrees: 5.0012 degrees. Every point carries the full stack, so the first prism's shear comes from the point normals alone: its vertices extrude along `n*` (116.22), which on the polyhedral sphere differs from the face normal by O(h/R) (TET-13a's rows). A cure would change the extrusion direction (a smoothed or face-weighted normal), which is (116.22)'s definition and the user's to decide; docs/17-review-later lists it | the TET-13b commit |
+| TET-13b | `inflate::conformal` | 13 968 cells (9 098 tetrahedra, 4 870 prisms); 974 prism-tet faces = the wall triangles; the sphere patch is the undeformed wall bit for bit and the domain patch the tets-only one (1 518 faces); every cell's f64 Gauss volume positive (smallest 6.144e-6); the total 59.953697049370 equals the tetrahedra-only volume within 9.96e-15 relative (bar 1e-12) | the TET-13b commit |
+| TET-13b | `inflate::inversion_cut`: the unit box, 12 tetrahedra on an interior point at (0.5, 0.5, 0.005), the floor layered with 2 layers of 0.15 (`T` = 0.3) | 5 moves: the floor corners' `T` halved four times to 0.01875 = 0.3 x 2^-4, each `Inversion`; 4 cut points, 4 prisms, 16 cells; the boundary is 2 bottoms on the floor and 10 triangles plus 8 side quads on the sides; G2 max closure 6.074e-16 | the TET-13b commit |
+| TET-13b | `driver::tests::tet_cases::tet_layers_end_to_end`: `box_sphere_tet.json` with `layers` on the sphere, 3 layers of 0.02 m, `r = 1.2` | seven stages; 20 309 tetrahedra and 3 420 prisms (3 x 1 140 sphere faces); §92.3 passes (max closure 1.590e-15); the emit row: 1 716 layer points, one move, no cut | the TET-13b commit |
+| TET-13b | the f32 arm | `rust/tests/tetmesh_inflate.rs` (12 tests) and `rust/tests/automesher_tet.rs` (4) under `--features single` all pass with the same f64 numbers (`t_1` 489 of 489, 0 inverted cells, the conformal volume within 9.96e-15, the cut at 0.01875); **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.908e-6 on the sphere and 1.582e-7 on the box, and `run_tet` with layers refused on 21 929 cells; the wall non-orthogonality on the f32 host mesh 5.0006 degrees | the TET-13b commit |
+| TET-13c | the fixture, and why it skips `refine` | §116.13's refinement does not terminate on these bodies in the box `[-2, 2]^3` (`H = 0.5`, `g = 1.2`). A cube body `[-0.5, 0.5]^3` remeshed at `h = 0.25` had inserted 19 845 points after 202 passes against a cap of 20 000; at `h = 0.4` it ends with 6 162 tetrahedra. The cube minus cylinder at `h = 0.15` had 18 234 after 220 passes, and the 30-degree wedge at `h = 0.15` 2 648 after 145 passes (cap 3 000). Coarser, the cube minus cylinder is refused by `recover/protect` (a vertex ball of radius 0) at `h` = 0.3 to 0.5, and the wedge by `refine/centre` at `h = 0.3`. The fixture therefore skips `refine`. It takes the surface remeshed at `h = 0.1`, adds a BCC lattice of spacing 0.2 in `[-1.5, 1.5]^3` (the candidates in the fluid at least 0.14 from every surface point), then runs `recover_faces`, the carve from the hull and `optimise`. On the tetrahedra alone §92.3 passes for both: the wedge has 40 450 tetrahedra (non-orthogonality 60.4 degrees, thickness 0.2185, cond 40.3) and the cube minus cylinder 39 866 (56.7, 0.2536, 71.0) | the supervisor's probe, outside the tree |
+| TET-13c | `inflate::sharp_edges_taper`: 5 layers, `t_1 = 5e-3`, `r = 1.2`, `T = 3.7208e-2` | The 30-degree wedge: 394 wall points, 11 collapsed (the apex edge, points 0, 3, 11, 16, 21, 67, 81, 108, 125, 7616 and 7626), 10 tapered, coverage 383 / 394 = 97.2 %; one move, no cut, 3 920 prisms (5 x 784); 0 inverted cells; §92.3 passes (max closure 3.189e-15, non-orthogonality 68.1 degrees, thickness 0.0576, cond 107.0). The cube minus cylinder (with a concave 90-degree edge at the bore's floor): 780 wall points, none collapsed (`min_cos` 0.577 or more everywhere), coverage 1; two moves, 3 cut points, 7 780 prisms; §92.3 passes (3.100e-15, 65.3, 0.1021, 72.9). Both equal the supervisor's probe value for value | the TET-13c commit |
+| TET-13c | the design probe (the supervisor, outside the tree, the same fixtures) | On the wedge at `h = 0.1`, TET-13b alone fails §92.3's G4 on one face at 70.742 degrees next to the apex corner. The collapse with no taper fails G4 on 2 faces (72.5). The slope 0.3 fails G5 on 13 cells (0.0346), while the slopes 0.5 and 1 pass. A collapse angle of 50 degrees collapses 33 points and fails G4 or G5 at the slopes 0.3, 0.5 and 1. 60 and 70 degrees collapse the same 11. Dropping layers in place of scaling the stack fails G4 on 7 faces (75.4). **MISSED** beyond the gate's fixture: at `h = 0.08` G4 fails on 29 to 33 faces at 76.4 degrees (slope 0.5, 1 or none), and at `h = 0.06` on 26 faces at 82.7 (slope 0.5). Those faces are on tetrahedra that the move deforms; the tets-only maximum at `h = 0.06` is already 68.4. At `t_1` = 1e-3 and 2e-3 (`h = 0.1`) G5 fails on the wedge (thin layers against the bar 0.05), and G4 fails on 2 faces of the cube minus cylinder (74.0 and 72.0, a wall-adjacent tetrahedron against a thin prism). A 30-degree concave V-groove was probed too: its fixture fails §92.3 on the tetrahedra alone (74.4 degrees at `h = 0.12`), and at `h = 0.1` `recover_faces` refuses it (`delaunay/duplicate`) | docs/17-review-later |
+| TET-13c | the f32 arm | `rust/tests/tetmesh_inflate.rs` (15 tests) under `--features single` passes with the same f64 numbers. **MISSED**: §92.3's G2 on f32 area vectors (§116.16, docs/17-review-later A28), max closure 1.234e-6 on the cube minus cylinder and 1.310e-6 on the wedge | the TET-13c commit |
+| TET-14 | §116.9, changed by this unit | order 5 takes a cavity shell (`V_s < 0`) when the carve starts from a seed (`surfprep::prepare_with(.., Cavity::Allow)`, `driver::run_tet`); the hull start and `prepare` refuse it as before. `surfprep::tests::cavity_allowed_with_seed`: the inward unit cube reports `V_s = -1` exactly | the TET-14 commit |
+| TET-14 | `tests/tetmesh_pipe.rs`, f64: the pipe R 0.5, L 2, 32 x 8 facets, wound inward | the shell volume against `-(32/2) R^2 sin(2 pi/32) L` within 1e-12; the hull start refused `surface/inward`; `pipe_tet.json` at H = 0.25 and t_1 = 0.005 (n 3, B 2.5): 1 967 tetrahedra and 2 676 prisms, dihedral 20.425-157.667 degrees, §92.3 passed, in 0.8 s; the inlet's points lie within 1.6e-3 m of x = 0 and the outlet's within 7.9e-4 m of x = 2 (the rim stacks' n* leans off the cap planes) | the TET-14 commit |
+| TET-14 | Gate 116-P, the L1 pipe (§116.17's record) | **MISSED**: dp/dx +15.49 % of (116.27) in f64 (0.366354 against 0.317210 m/s^2); the solve 78.6 s (bar 180 s) and §92.3 (max non-orthogonality 66.23 degrees) pass; the f64 recipe's mesh 87.5 s | the TET-14 commit |
+| TET-14 | the f32 arm | `tests/tetmesh_pipe.rs` under `--features single`: the volume within 1e-5 (class R) and the hull refusal pass; the H = 0.25 fixture is **MISSED** at §92.3 G2 on 4 457 cells (A28). The L1 legs: the single automesher **MISSED** at G2 on 172 074 cells (A28); the single `ofgpu-lowmach` on the f64 mesh **MISSED**, stopped at step 20 by §93.6's guard (max Mach 33 821.6) | the TET-14 commit |
 | TET-15 | `perf::thread_invariant`: the size field of the 9024-triangle sphere (18 048 curvature and proximity sources plus a band, a point and a box; 27 074 primitives, 164 431 leaves, depth 8), and the remesh of that sphere (3 417 points) and of the six-patch cube (459 points), on 1, 4 and 8 workers | identical: the sources, the stats, `h` at 20 000 probes and every 97th leaf box bit for bit, both remeshes point for point as bits; the field built in 3.10 s, 0.92 s and 0.60 s (4 CPUs, shared with two other lanes), the two remeshes in 0.13 s, 0.11 s and 0.12 s | the TET-15 commit |
 | TET-15 | `box_sphere_tet.json` end to end, release, before and after TET-15 | the same polyMesh byte for byte (points, faces, owner, neighbour, boundary); the size-field stage 0.8 s before, 0.1 s after; total 12.3 s and 11.8 s, of which refinement 6.2 s and optimisation 5.1 s | the TET-15 commit |
 | TET-15 | `perf::million_tets`: the example at `base_size` 0.25 m with the sphere at 0.125 m (about 1.3 M tetrahedra, the example's 20 309 times 4^3) | **MISSED**: stages 1-4 take 0.3 s; then the refinement of §116.13 refuses after 9.0 s with `refine/centre: kept tetrahedron [13317, 14196, 11265, 16918] has no finite circumcentre` | the TET-15 commit |
 | TET-15 | the same at `base_size` 0.27 m (about 1.0 M) and at 0.5 m with the sphere at 0.25 m (about 160 k) | **not finished**: stages 1-4 in 0.3 s, then the refinement was still running when it was stopped, after 10 min (0.27 m) and 19.8 min (0.5 m). At 1 m the same stage takes 6.2 s. The time is in refinement and optimisation, which TET-15 does not thread | the TET-15 commit |
+| TET-18 | the drone surface (the PX4 x500 sim surface of `tools/drone/sim_geom.py`, about 251k triangles, BSD-3-Clause) through the tet path with prism layers: §92.3, the dihedral minimum and maximum, the wall time | **NOT RUN**: the input is not on disk. `sim_geom.py` writes its STLs under `--out`, outside the repository, and the drone tranche's `--out` was a session scratchpad that no longer exists. A search of every file on both drives (C: and I:, 2026-10-17) for `x500*`, `sim_surface.stl`, `motors.stl`, `skids.stl` and `rotors.json` finds none, as VIO-06's search found no `x500_assembled.blend` or `rotors.json` (§117.13's measured rows). The tree does not record where the source GLB was obtained, and fetching a third-party model was not authorised for this unit. With no surface there is no price, so no card or CPU time was spent. The gate stays open, and so does §116.3's plan B question, which this run was to answer | the TET-18 commit |
+| TET-18 | the run, once the GLB is back (the recipe, not yet measured) | `blender -b --factory-startup --python tools/drone/sim_geom.py -- --glb <x500 GLB> --out <dir>` writes `body.stl`, `arms.stl`, `motors.stl` and `skids.stl`. The tet config is `tools/drone/tunnel_mesh.py`'s `build_config` with `"kind": "tet"` and a `tet` block, its `layers` on the four patches, its seed `keep_region` and no `snap` key (the tet path refuses hex-only keys by name, TET-12's rows); `ofgpu-automesher <config>` then leaves the `.meshSummary.json` tet block (TET-17: dihedral bounds and seven stage times). Expected risks, from the fixtures: §116.13's refinement does not terminate on sharp-edged bodies (TET-13c's rows) and stops on a non-finite circumcentre (TET-15's rows); either is recorded with its stage, point count and time, as **MISSED**, without changing the mesher. Under `single`, §92.3's G2 refusal of tet meshes (TET-11's rows) is recorded as **MISSED** too. Budget: about 3 h of card time; the tet path itself runs on the CPU | the TET-18 commit |
 
 ### 116.19 References
 
@@ -45526,9 +45774,11 @@ error. Under `-permissive` the scheme runs without the prefix and says so.
 `constant/dynamicMeshDict` other than `staticFvMesh` (motion); JSONC `sources` and the files
 `fvOptions`, `fvModels` and `fvConstraints` under `constant/` or `system/` (sources); every
 turbulence model but laminar; `physics.buoyancy` `boussinesq` (this solver carries the full
-density); a non-Newtonian rheology; a case with no gas. *DESIGN* (CMP-15): until CMP-25 builds
-(127.1), Spalart-Allmaras is refused too, with a message that names CMP-25, because the solver
-has no `mu_t` yet and running SA as laminar would be a substitution (§13.4). A boundary
+density); a non-Newtonian rheology; a case with no gas. *As built* (CMP-25): Spalart-Allmaras
+runs here in its conservative form (§127.1), on the OpenFOAM route and with the coupling of
+§127.1.2; a JSONC case naming it is refused with a message that names `physics.turbulence`,
+`SpalartAllmaras` and `nuTilda`, because the JSONC format has no nuTilda initial field to state
+the model's unknown with. A boundary
 condition on `U`, `p` or `T` must be one of `fixedValue`, `zeroGradient`, `fixedGradient`,
 `mixed`, `noSlip`, `slip`, `symmetry`, `symmetryPlane` and `empty`, the types whose §4 triple
 as set up is the whole condition (§126.7). Every other type is refused with the field, the
@@ -45560,7 +45810,7 @@ warning (`energy::refuse_above_low_mach`, §93.6) and its banner line now name
 |---|---|---|
 | `every_knob_changes_the_run` | D | The 50-cell tube below, three steps. Each of 20 settings changes the written bytes: `div(phi,U)`, `div(phi,T)`, `div(phid,p)`, `grad` (with a limited scheme that reads it), `relaxation` `U`, `T` and `p` (with two outer correctors, so a non-final iteration is relaxed), `correctors`, `outerCorrectors`, the `p`, `U` and `T` solver tolerances, `ddt` Euler to backward, `deltaT`, `gamma`, `W`, `Pr`, the Sutherland `As`, `pOperating` and `gravity`. `nonOrthogonalCorrectors` is §13.4.1's one admissible exception (the tube is orthogonal, so the correction it repeats is zero) and is asserted on the controls |
 | `the_orthogonal_settings_reach_the_controls` | D | `nonOrthogonalCorrectors 2` reaches `pressure.n_non_orth_corr`; `-iters 7` overrides the case's 3 steps. On the OpenFOAM cavity made steady with `localEuler`, `SIMPLE/residualControl { p 1e-3; U 1e-4; h 1e-5; }` reaches the three bars and `maxCo 5` reaches `lts.cfl` (a steady run's stop and its pseudo step are not shown by three transient steps) |
-| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming CMP-25, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
+| `refusals_name_the_setting` | D | 11 JSONC refusals (SA naming nuTilda, kOmegaSST, `sources`, `motion`, `boussinesq`, `div(phid,p) Gauss linear`, `bounded`, an `inletOutlet` `U`, no `physics.compressible`, `-np`, `-writeEvery` on a transient run) and 5 OpenFOAM ones (`processor0`, `dynamicMeshDict`, `system/fvOptions`, `simulationType RAS`, no `thermophysicalProperties`); each message names its setting |
 | `a_fifty_cell_tube_runs_in_under_thirty_seconds` | P | The smoke run: 1 m tube, 50 x 1 x 1 cells, air at 300 K and 50 m/s, a 320 K inlet, a fixed `p = 0` outlet, symmetry sides, Euler at `1e-5` s for 30 steps. It runs in under 30 s with no bounds violation, `M_max` in (0.14, 0.15) (50/347.2 = 0.144), and the five fields written |
 | `an_openfoam_case_runs_and_writes_the_five_fields` | P | A blockgen 8 x 8 x 1 cavity with `thermophysicalProperties` (§122.6's air), laminar, Euler at `1e-3` s for 5 steps, writes the five fields |
 
@@ -46104,8 +46354,103 @@ OPTION on the existing model: `fvDdtEulerRho`/`fvDdtBdf2Rho` with `rho`, convect
 `mdot`, the diffusion coefficient `rho (nu + nu~)/sigma`, and the last term explicit.
 With `rho = 1` the matrix must be the kinematic one bitwise
 (`rho_one_is_bitwise_kinematic`, class D); `conservative_form_conserves_rho_nutilda_in_closed_box`
-(class A). Every other turbulence model is refused by name in `ofgpu-compressible`
+(class R; §127.1.1: its `1e-12` sits below f32 round-off, so D-F32-1's `tol_r` applies).
+Every other turbulence model is refused by name in `ofgpu-compressible`
 (docs/17 COMP decision 9). ρ-weighted k-ω SST and the k-ε family are backlog.
+
+#### 127.1.1 The conservative form as built (CMP-25)
+
+`SaConservative` carries the two fields the kinematic model does not have - `rho` at
+all three time levels plus the boundary, and `mu`, whose per-cell quotient
+`nu_c = mu/rho` is what (127.1)'s `nu` means here, per boundary face as well.
+`correct_conservative` follows `correct` step for step; the discretisation, as built:
+
+1. `ddt`: `Ddt::add_rho`, each old level carrying its OWN density, which is what makes
+   the discrete term conserve `rho nu~` rather than `nu~` (§86). `localEuler` is
+   refused there by name (§86) and that error is let through.
+2. Convection: on `flow.phi`, which the CALLER sets to the mass flux `mdot` - no code
+   difference from the kinematic operator (§86).
+3. Diffusion: the cell value `Gamma_c = (rho_c (nu_c + nu~_c f_n(nu~_c/nu_c)))/sigma`,
+   interpolated exactly as §56's kinematic coefficient is, `(w*gP + (1-w)*gN)*magSf`;
+   boundary `((rho_b (nu_b + nu~_b f_n))/sigma)*bMagSf`.
+4. Sources: `su = rho_c*su_kin - ((nu_c + nu~_c f_n)/sigma)*grad rho . grad nu~`, `sp
+   = 0`, `susp = rho_c*susp_kin`, where `su_kin` and `susp_kin` are EXACTLY what the
+   kinematic source kernel forms (56.15). The cross term is DERIVED, not quoted: the
+   product rule gives `rho div(G grad nu~) = div(rho G grad nu~) - G grad rho .
+   grad nu~` with `G = (nu + f_n nu~)/sigma`, so the remainder lands on the explicit
+   source with the diffusivity's own `f_n` carrying it onto the negative continuation;
+   for `nu~ >= 0` (`f_n = 1`) it is (127.1)'s last term verbatim. `grad rho` is
+   `fvc_grad_scalar_scheme` of `rho` under `ctrl.grad_scheme` (§3).
+5. `nu_t = nu~ f_v1(nu~/nu_c)`, exactly `0` where `nu~ < 0` (56.13), capped at §6's
+   `nut_max` - `flow.nu` is read for the cap ONLY. `mu_t = rho nu_t` is the caller's
+   product.
+6. Refused by name (`Error::Config`, the message names the setting and §127.1): a
+   `bounded` convection entry (`eps_conv().bounded`; `div(mdot)` is `-ddt(rho)` in a
+   compressible flow, §123.1/§125.1, so the correction would subtract exactly the term
+   (127.1) keeps), an attached DES length scale (§57's fixed point is defined against
+   the kinematic solve), and wrong buffer lengths.
+
+Bitwise at `rho = 1`: every kernel computes the kinematic value first and multiplies
+by `rho` afterwards, never reassociating, and `x*1` is exact - so with `rho = 1`,
+`mu = nu` and `mdot = phi` the matrix, the sources, `nu~` and `nut` equal the
+kinematic `correct` BIT FOR BIT. The four kernels are `saNutRho`, `saSourcesRho`,
+`saGammaInternalRho` and `saGammaBoundaryRho`, appended to `cuda/sa.cu` beside §56's
+six, which are untouched.
+
+| test | class | measured |
+|---|---|---|
+| `rho_one_is_bitwise_kinematic` | D | both legs bitwise over every array, in both builds |
+| `conservative_form_conserves_rho_nutilda_in_closed_box` | R `tol_r(1e-12)` | `E = 1.50e-16`, `E_ctrl = 9.41e-4` (f64); `E = 1.54e-8`, `E_ctrl = 9.41e-4` (f32) |
+| `the_conservative_form_refuses_bounded_and_local_euler` | D | both refusals name the setting and the section |
+
+#### 127.1.2 In the compressible solver (CMP-25)
+
+`Compressible` (§125.6) takes the model through `set_turbulence`, called BEFORE
+`initialise`, and the coupling is (122.8): at the top of every outer iteration, right
+after the transport laws, the laminar `mu` is copied aside (`mu_lam`, cells AND
+boundary faces), `mu_t = rho nu_t` is formed from the PREVIOUS correction's `nut`
+(the standard segregated lag), `mu_eff = mu + mu_t`, and then `mu_t *= c_p/Pr_t` and
+`kappa_eff = kappa + mu_t`. `correct_conservative` reads `mu_lam`, never `s.mu`, so
+(127.1)'s per-cell `nu_c = mu/rho` stays the laminar quotient; `flow.phi` is the mass
+flux `mdot` the loop already carries, and `flow.nu` is `nu_ref` - the largest cell
+`mu/rho`, downloaded ONCE at `initialise` from the still-laminar state. *DESIGN*:
+§6's `nut` cap is inactive on any converged field, so its reference is formed once
+and never refreshed.
+
+*DESIGN* - SA is corrected ONCE PER STEP: every outer iteration of a steady run, the
+final one of a transient run. A transient step's non-final outer iterations are
+relaxed predictors, and the half-converged nu~ they would feed `mu_t` is worse than
+the one step of lag the segregated coupling already carries. A steady run needs the
+model on `ddt` `steadyState` and takes the nuTilda relaxation instead (`localEuler`
+on the model itself is §86.7's refusal, let through); a transient one needs the SAME
+scheme and `delta_t` the momentum equation carries - one time step advances every
+equation (§125.3) - and the disagreement is refused by name, in `Error::Config`,
+naming `ddt` or `delta_t` and §127.1. Nothing allocates in `step`: `mu_lam` and the
+`mu_t` scratch are allocated in `set_turbulence`. A laminar run is untouched: the
+report's new field stays `None` and `line()` prints nothing extra, so the output and
+the arithmetic are byte for byte what they were.
+
+The driver (§125.8) accepts RAS `SpalartAllmaras` with no LES/DES on the OpenFOAM
+route only. `0/nuTilda` and `0/nut` are required, `nuTilda`'s patch types go through
+the same static check as `U`'s, `p`'s and `T`'s (§126.7), and `nut`'s own patch types
+must be one of `calculated`, `fixedValue`, `zeroGradient`, `nutLowReWallFunction`,
+`empty`, `symmetry`, `symmetryPlane`, `wedge` and `cyclic` - SA has no `k`, so a
+k-based wall function would be a wall treatment with no model behind it (§56.7), and
+the refusal names `nut patch <name>` and the type. A JSONC case naming SA is refused
+with a message that names `physics.turbulence`, `SpalartAllmaras` and `nuTilda`: the
+JSONC format has no nuTilda initial field to state the model's unknown with
+(`LoweredCase` carries none). The model's convection entry is `div(phi,nuTilda)`
+through the driver's `bounded` refusal (§123.1, §125.1). The written times gain
+`nuTilda` and `nut` when a model is attached - the case's own patch types, dimensions
+`[0 2 -1 0 0 0 0]` - and the report line gains ` nuTilda <initial residual>` on the
+iterations that corrected the model.
+
+| test | class | measured |
+|---|---|---|
+| `sa_with_zero_nu_tilda_is_laminar_bitwise` | D | 30 buffers bitwise between the laminar run and the nu~ = 0 run over five Euler steps, `nut` exactly 0 in all 60 cells, u moved; both builds |
+| `sa_eddy_viscosity_raises_mu_eff_and_changes_the_flow` | D | every cell's `mu_eff` strictly above its laminar `mu` after five steps, largest `(mu_eff - mu)/mu` `1.787e1` (f64), `nut` finite and positive, u off the laminar run; both builds |
+| `set_turbulence_refuses_a_ddt_that_disagrees` | D | both refusals name the setting and §127.1 |
+| `an_openfoam_sa_cavity_runs_and_writes_nu_tilda` | P | the 8 x 8 cavity, five Euler steps at `1e-3` s: no bounds violation, `nuTilda` and `nut` written finite with `nut >= 0`; the `nutkWallFunction` case refused naming `nut patch` |
 
 ### 127.2 The analytic answer keys (CMP-06, CMP-07), host-side in `compressible/exact.rs`
 
@@ -46509,6 +46854,163 @@ point bits are `b5ca6cb8433c8b1d` and `3f8d774e11d077a1` in both builds. The wal
 256 (default) and 128 (coarse) distinct points, not the brief's 257 and 129: the two
 trailing-edge ends of the surface walk are one node through the cut.
 
+#### 127.5.2 The quasi-1-D duct (CMP-21)
+
+`src/compressible/gatemesh.rs`'s `nozzle_duct` builds the quasi-1-D nozzle of Gate
+CMP-NOZ in memory, as a one-cell-across `PolyMeshRaw` (`f64` points in both builds,
+§118.2) for `build_host_mesh`: `n` cells along the axis, `xi = x/L` in `[0, 1]`, ONE
+cell across in `y` and in `z`. §127.5's sentence is the whole point: "with one cell
+across the finite-volume form IS the quasi-1-D scheme: the inclined slip walls carry
+the `p dA/dx` force" — the walls are `y = -H(x)/2` and `y = +H(x)/2`, straight
+between nodes, `symmetry` on both, and the `x`-component of their `p dS` is exactly
+the quasi-1-D momentum's area force. The depth is `z` in `[0, D]`, also one cell,
+`symmetry` front and back.
+
+The area ratio, (127.22), ORIGINAL — this tree's choice: exit-to-throat ratio 2, so
+the duct is §127.2's oracle nozzle `A_e/A_* = 2`:
+
+```
+a(xi) = 1 + 4 (xi - 1/2)^2 ,   xi = x/L ,   a(0) = a(1) = 2 ,   a(1/2) = 1        (127.22)
+x_i = L (i/n) ,   H_i = H_t a(i/n) ,   i = 0..n        nodes; cell i spans [x_i, x_{i+1}]
+```
+
+Node `i` of `n + 1` sits at `x_i` with the full height `H_i` and carries four points
+`4i + k`: `k = 0` `(x_i, -H_i/2, 0)`, `k = 1` `(x_i, +H_i/2, 0)`, `k = 2` `(x_i,
++H_i/2, D)`, `k = 3` `(x_i, -H_i/2, D)`. Cell `i` is a trapezoid prism, volume
+`(x_{i+1} - x_i) D (H_i + H_{i+1})/2` (derived). The `n - 1` internal faces stand at
+nodes `1..n`, owner `j - 1`, neighbour `j`, normal `+x`; the boundary faces follow in
+patch order `inlet` (`patch`, 1 face at node 0, normal `-x`), `outlet` (`patch`, 1
+face at node `n`, `+x`), `walls` (`symmetry`, `2n` faces: the `y = -H/2` wall of
+every cell, then the `y = +H/2` wall) and `frontAndBack` (`symmetry`, `2n` faces:
+`z = 0`, then `z = D`), every face's vertices ordered so its right-hand normal points
+OUT of its owner. `DuctSpec` defaults: `n = 200`, `L = 1` m, `H_t = D = 0.05` m.
+Refusals name the module and the field: `n` under 2; `length`, `throat_height` or
+`depth` not finite or not positive.
+
+**Landed (CMP-21).** The gate's six tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (16 = 10 of §127.5.1 + 6). The
+default duct is 804 points, 200 cells, 199 internal faces, 1001 faces; the patches
+run inlet/outlet/walls/frontAndBack, sizes 1, 1, 400, 400, starts 0, 1, 2, 402.
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `duct_area_ratio_values` | D | `a` at 0, 1, 1/2, 1/4 is 2, 2, 1, 1.25 bitwise | both builds bitwise |
+| `duct_topology_counts_and_patches` | D | the counts and the four patches above | both builds |
+| `duct_face_areas_follow_the_area_ratio` | R | internal `|Sf| = H_j D` within `tol_r(1e-13)`, ends `2 H_t D`, `Sf_x` signed | inlet/outlet `|Sf|` 5.000000e-3 = `2 H_t D`, both builds |
+| `duct_volumes_are_trapezoids` | R | worst relative error, `tol_r(1e-12)` | f64 1.501e-14, f32 5.271e-8 |
+| `duct_cells_close_and_centres_lie_on_the_axis` | R | worst closure ratio, `tol_r(1e-13)`; centres on the axis at mid depth, `x` increasing | f64 1.750e-19, f32 1.064e-10 |
+| `duct_spec_refusals` | D | `n = 1`, `length` 0/-1/NaN, `throat_height` 0, `depth` +inf refused by field name | both builds |
+
+No GPL-licensed source was consulted.
+
+#### 127.5.3 The compression ramp (CMP-23)
+
+`src/compressible/gatemesh.rs`'s `compression_ramp` builds Gate CMP-OBL's mesh in
+memory, as a one-cell-deep `PolyMeshRaw` (`f64` points in both builds, §118.2) for
+`build_host_mesh`: `nx = n_up + n_ramp` columns of `ny` cells between the lower wall
+and the flat top `y = H`, ONE cell deep in `z`. The lower wall is the flat slip
+plate `y_w = 0` up to the corner `(x_c, 0)` and the straight ramp
+`(x - x_c) tan(theta)` from it; above it every `j` line is the algebraic mix of
+wall and top, (127.26) — ORIGINAL, this tree's choice: a flat slip plate ahead of a
+straight ramp of deflection theta starting at the corner, algebraic lines between
+the wall and the straight top, so the approach cells are square and the ramp
+columns tilt with the wall.
+
+```
+x_i = x_c i/n_up                        (i <= n_up)
+x_i = x_c + l_r (i - n_up)/n_ramp       (n_up < i <= nx),   nx = n_up + n_ramp ,  L = x_c + l_r
+y_w(x) = 0 (x <= x_c),  (x - x_c) tan(theta) (x > x_c)                 the lower slip wall
+y_ij = y_w(x_i) + (H - y_w(x_i)) j/ny,   j = 0..ny                     (127.26)
+```
+
+Two point layers, `z = 0` and `z = D`: point index `k (nx+1)(ny+1) + j (nx+1) + i`,
+`k = 0` at `z = 0` and `k = 1` at `z = D`; cell `(i, j)`, `i = 0..nx-1`,
+`j = 0..ny-1`, has index `j nx + i`. Every face is planar. The internal faces run in
+`(owner, neighbour)` order, each cell's `+x` face first, then its `+y` face; the
+boundary faces follow in patch order `inlet` (`patch`, `ny` faces at `x = 0`),
+`outlet` (`patch`, `ny` faces at `x = L`), `lowerWall` (`symmetry`, `nx` faces),
+`top` (`symmetry`, `nx` faces) and `frontAndBack` (`symmetry`, `2 nx ny` faces,
+`z = 0` then `z = D`), every face's vertices ordered so its right-hand normal
+points OUT of its owner. `RampSpec` defaults: `n_up = 30`, `n_ramp = 60`, `ny = 60`,
+`x_c = 0.5` m, `l_r = H = 1` m, `theta = 10` degrees, `D = 1/60` m - a 90 x 60 grid
+whose approach cells are square. Refusals name the module and the field:
+`n_up`, `n_ramp` or `ny` 0; `x_corner`, `ramp_length`, `height` or `depth` not
+finite or not positive; `deflection_deg` not finite or not in (0, 45); and
+`height` not above `ramp_length tan(theta)` (the ramp would reach the top).
+
+**Landed (CMP-23).** The gate's five tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (21 = 10 of §127.5.1 + 6 of
+§127.5.2 + 5). The default ramp is 11102 points, 5400 cells, 10650 internal faces,
+21750 faces; the patches run inlet/outlet/lowerWall/top/frontAndBack, sizes 60,
+60, 90, 90, 10800, starts 0, 60, 120, 210, 300.
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `ramp_topology_counts_and_patches` | D | the counts and the five patches above, owners non-decreasing and upper-triangular | both builds |
+| `ramp_nodes_follow_the_wall` | D | `node(30, 0) = [0.5, 0]` bitwise; `node(90, 0) = [1.5, 0.17632698070846498]` within `1e-15` relative; every top node at `y = H` within `1e-15`; `wall_y(0.25) = 0` bitwise | both builds |
+| `ramp_wall_normals_and_areas` | R | flat wall `(0, -1, 0)` with area `2.7777777777777778e-4`; deflected wall `(0.17364817766693033, -0.984807753012208, 0)` (sin 10, -cos 10) with area `2.820629477460403e-4`, `tol_r(1e-13)` per unit-normal component and `tol_r(1e-12)` relative on areas; inlet `2.7778e-4` with `Sf_x < 0`; outlet `2.2879806091431529e-4` with `Sf_x > 0` | f64 and f32 inside the tolerances, both builds |
+| `ramp_volumes_close_and_sum` | R | every volume positive; per-cell closure `<= tol_r(1e-13)` of the faces' magnitudes; the sum `D (L H - l_r^2 tan(theta)/2)` (derived) within `tol_r(1e-12)` | worst closure f64 5.851e-20, f32 1.273e-11; sum f64 2.353060849409612e-2, f32 2.353060834138887e-2 |
+| `ramp_spec_refusals` | D | `n_up`/`n_ramp`/`ny` 0, `x_corner` 0, `ramp_length` NaN, `height` -1, `depth` 0, `deflection_deg` 0/45/NaN, `height` 0.1 (below `l_r tan 10 deg`) refused by field name | both builds |
+
+No GPL-licensed source was consulted.
+
+#### 127.5.4 The Ringleb domain (CMP-24)
+
+`src/compressible/gatemesh.rs`'s `ringleb_domain` builds Gate CMP-RING's mesh in memory, as a
+one-cell-deep `PolyMeshRaw` (`f64` points in both builds, §118.2) for `build_host_mesh`: `nt`
+columns along the streamlines and `nk` cells across them, between the streamline `k = k_max`
+(`j = 0`, the `innerWall`) and the streamline `k = k_min` (`j = nk`, the `outerWall`), the two
+ends the iso-speed lines `q = q_b` of §127.3 - the `inlet` where `y < 0` and the `outlet`
+where `y > 0`, by (127.11) - ONE cell deep in `z`, so an `nt x nk` grid of `nt nk` cells. The
+grid (127.28) — ORIGINAL, this gate's: uniform in the streamline angle theta
+(`sin theta = q/k`, §127.3) along each streamline and uniform in `k` across, so the ends
+`t = -1, +1` are exactly `q = q_b`, and every node is the answer key itself, read from
+`exact::ringleb_point` (CMP-07):
+
+```
+t_i = -1 + 2 i/nt   (i = 0..nt),        k_j = k_max - (k_max - k_min) j/nk   (j = 0..nk)
+theta_0(k) = asin(q_b/k),   theta_ij = theta_0(k_j) + (pi/2 - theta_0(k_j)) (1 - |t_i|)
+q_ij = k_j sin(theta_ij),   node(i, j) = ringleb_point(q_ij, k_j, t_i >= 0)                  (127.28)
+```
+
+With `k` DECREASING in `j` every cell is right-handed in `(x, y)` (positive area), and the
+topology, the face order and the vertex orders are exactly §127.5.3's compression ramp's:
+point index `k (nt+1)(nk+1) + j (nt+1) + i` (`k = 0` at `z = 0`, 1 at `z = depth`), cell
+`c = j nt + i`; internal faces per cell in order `+x` (if `i < nt-1`) then `+y` (if
+`j < nk-1`); the patches in order `inlet` (`patch`, `nk` faces), `outlet` (`patch`, `nk`),
+`innerWall` (`symmetry`, `nt`, the `j = 0` side), `outerWall` (`symmetry`, `nt`, the
+`j = nk` side) and `frontAndBack` (`symmetry`, `2 nt nk`, `z = 0` then `z = depth`).
+`RinglebSpec` defaults: `nt = 24`, `nk = 6`, `k_min = 0.6`, `k_max = 1.0`, `q_b = 0.5`,
+`depth = 0.1` m - the lengths are §127.3's non-dimensional ones (Euler is free of a length
+scale). Refusals name the module and the field: `nt` or `nk` 0; `k_min`, `k_max`, `q_b` or
+`depth` not finite or not positive; `k_min >= k_max`; `q_b >= k_min`, where `theta_0` would
+leave `(0, pi/2]`; a node `ringleb_point` refuses (its message passed on); a cell whose
+shoelace area in `(x, y)` is not positive (names the cell `(i, j)`).
+
+**Landed (CMP-24).** The gate's six tests pass in the lib and, through
+`tests/compressible_gatemesh.rs`, in both builds (27 = 10 of §127.5.1 + 6 of §127.5.2 + 5 of
+§127.5.3 + 6). The default domain is 350 points, 144 cells, 258 internal faces, 606 faces;
+the patches run inlet/outlet/innerWall/outerWall/frontAndBack, sizes 6, 6, 24, 24, 288,
+starts 0, 6, 12, 36, 60. The three gate meshes, measured - the areas and `h` are the SAME
+DIGITS in both builds, the nodes being `f64` in both:
+
+| (nt, nk) | area | `h = sqrt(area/(nt nk))` (94.1) |
+|---|---|---|
+| (24, 6) | 6.683306249307762 | 0.2154340942226326 |
+| (48, 12) | 6.700499073855934 | 0.1078555093266496 |
+| (96, 24) | 6.704944806371485 | 0.05394564203373678 |
+
+| test | class | row | measured (f64; f32) |
+|---|---|---|---|
+| `ringleb_topology_counts_and_patches` | D | the counts and the five patches above; innerWall face `i` owned by cell `i`, outerWall face `i` by cell `i + nt (nk-1)` | both builds |
+| `ringleb_nodes_lie_on_the_key` | D | every node equals `ringleb_point(k_j sin theta_ij, k_j, t_i >= 0)` bitwise; the oracle nodes `(0.85434920353164368, -1.9690267404734381)`, `(-1.8432463433712392, 0)`, `(-0.74330610572259548, -1.1583949186320603)` within `1e-13`; `node(12, 0)` at `x = -0.62864823852691393`, `y = 0` exactly; `ringleb_state` reads `q = 0.5` within `1e-10` at every end node and `k` within `1e-10` of 1.0 and 0.6 on the walls | both builds, bitwise and inside the tolerances |
+| `ringleb_volumes_close_and_sum` | R | every volume positive; per-cell closure `<= tol_r(1e-13)` of the faces' magnitudes; the volumes sum to `depth x area` within `tol_r(1e-12)` | sum f64 6.683306249307762e-1, f32 6.683306246995926e-1 |
+| `ringleb_boundary_normals` | D | inlet faces `Sf_y < 0`, outlet faces `Sf_y > 0`; innerWall faces 11, 12 `Sf_x > 0`, outerWall faces 11, 12 `Sf_x < 0`; frontAndBack's first half `Sf_z < 0`, second half `Sf_z > 0` | both builds |
+| `ringleb_three_gate_meshes` | R | the three areas and `h` within `1e-12` relative | both builds, the table above |
+| `ringleb_spec_refusals` | D | `nt` 0, `nk` 0, `k_min` 0, `k_max` NaN, `q_b` -1, `depth` 0, `k_min >= k_max` (names `k_min`), `q_b >= k_min` (names `q_b`) refused, each message `gatemesh: ringleb_domain: ...` | both builds |
+
+No GPL-licensed source was consulted.
+
 ### 127.6 The gates
 
 The bars are docs/17 §12.1's, fixed before measurement. A missed bar is a finding,
@@ -46552,6 +47054,30 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-20 | CMP-LM Re 100, lid `M = 0.05`, 80 x 80: worst `abs(v/U - Ghia)` over Table II (bar 0.02) | f64 7.255e-3, f32 7.257e-3 | CMP-20 |
 | CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: adiabatic-wall `T_w - T_top`, error over `Pr U^2/(2 c_p)` (bar 0.5 %) | f64 1.103e-4, f32 5.842e-4 | CMP-22 |
 | CMP-22 | CMP-COU Couette, `U = 200` m/s, 40 cells: `T` profile L-infinity over the rise (bar 0.5 %) | f64 1.541e-4, f32 4.935e-4 | CMP-22 |
+| CMP-21 | CMP-NOZ subsonic `M(x)`, 200 cells, LTS CFL 1 (bar 0.5 %) | f64 6.001e-3, f32 6.002e-3: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ subsonic exit `p`, the last cell (bar 0.5 %) | f64 8.366e-5, f32 8.365e-5 | CMP-21 |
+| CMP-21 | CMP-NOZ supersonic `M(x)`, 200 cells (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5; the march stops on a bound) | CMP-21 |
+| CMP-21 | CMP-NOZ supersonic exit `p`, the last cell (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked shock position (bar 1 % of the length) | f64 NaN, f32 NaN: **MISSED** (§127.6.5; the march stops on a bound) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked `p_t2/p_t1`, the last cell (bar 1 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-21 | CMP-NOZ shocked exit `p`, the last cell (bar 0.5 %) | f64 NaN, f32 NaN: **MISSED** (§127.6.5) | CMP-21 |
+| CMP-23 | CMP-OBL post-shock `p_2/p_1`, mean over (127.27)'s region, 90 x 60, LTS CFL 1, 5 outer iterations (bar 1 %) | f64 1.036e-3, f32 9.957e-4 (field stop NOT met: the solve did not converge, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL shock angle, least-squares fit of the `p`-jump locus (bar 0.5 degrees) | f64 0.1441 (39.4580), f32 0.1414 (39.4554) (field stop NOT met, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL post-shock `M_2`, mean over (127.27)'s region (bar 1 %) | f64 3.694e-4, f32 3.582e-4 (field stop NOT met, §127.6.6) | CMP-23 |
+| CMP-23 | CMP-OBL with §127.6.5's one outer iteration (the inputs CMP-21 runs; printed by a supervisor probe, not a row) | f64: stops on a bound at step 23 (`T = -70.48` K at ramp-wall cell 47); f32: step 25 (`T = -1.71` K, cell 48): **MISSED** (§127.6.6) | CMP-23 |
+| CMP-24 | CMP-RING observed order of the L2 entropy error over h, h/2, h/4 (96 x 24, 48 x 12, 24 x 6), `linearUpwind` momentum, `vanLeer` energy, LTS CFL 1, 10000 iterations (bar >= 1.5, f64 only) | f64 0.456 (`E` 1.0304e-2 / 1.4008e-2 / 1.9372e-2): **MISSED** (§127.6.7; no mesh's field stop met); f32 0.469, measured, not checked | CMP-24 |
+| CMP-24 | CMP-RING the three runs stop on no bound (class D) | f64 and f32: all three pass | CMP-24 |
+| CMP-24 | CMP-RING with `Gauss linear` energy (the first decision; printed by the run that measured it, not a row) | every mesh stops on a `T <= 0` bound, f64 at steps 811 / 584 / 654, f32 at 827 / 576 / 615: **MISSED** (§127.6.7) | CMP-24 |
+| CMP-24 | CMP-RING f32 error floor `E_min` on the finest mesh (printed, never checked) | f64 -, f32 4.396e-8 | CMP-24 |
+| CMP-27 | CMP-RAE upper-surface shock `x/c` (127.33), replayed (bar `+-0.04` of the experiment's 0.57786) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE lower-surface `Cp` RMS (127.33), replayed (bar `<= 0.05`) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE `Cl` (127.32), replayed (bar within 6 % of `Cl_exp` 0.74300) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE f64 L0 (8 448 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 4 of step 5968 after 5800 iterations (`T <= 0` 1, `rho <= 0` 1; `T` at cell 6312, -5.441498878025827 K), f32 not attempted: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE f64 L1 (33 792 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 5 of step 5454 after 5400 iterations (`T` at cell 21072, -5.194727211491283 K), f32 (the single build's recorded L1) stopped on a bound, outer 4 of step 210 after 200 iterations (`T <= 0` 2, `p_abs <= 0` 2; `T` at cell 151, -47663.30078125 K): **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE f64 L2 (135 168 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 5 of step 5376 after 5200 iterations (`T` at cell 75232, -4.433695285638386 K), f32 not attempted: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: the coarse run stops on no bound and every field is finite (class D) | f64 pass (2000 iterations, 65.2 s), f32 stops on a bound after 0 iterations, outer 3 of step 13 (`p_abs` at cell 151 -8763310.648889285 Pa): **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: the residual converges, the last chunk's `p` residual below a tenth of the first chunk's (bar 0.1) | f64 6.998e-6 against the first chunk's 2.701e-6, 2.6x not a tenth: **MISSED** (§127.6.8); f32 no field: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: a shock present, the upper-surface `Cp` crosses `Cp*` past `x/c` 0.1 | f64 passes on the crossing at `x/c` 0.9794 (the wall `Cp` reads up to 2.1 elsewhere on the aerofoil (the lower surface at `x/c` 0.155), above the stagnation 1.14: an unconverged start, not a shock); f32 no field: **MISSED** (§127.6.8) | CMP-27 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -46761,6 +47287,517 @@ never reads it. The last outer line's mass imbalance is `6.5e-16` (f64). The cyc
 runs in `ofgpu::compressible` as `build_mesh` declares it, with no solver change. One
 `-sections` run of the gate took 346 s (f64) and 199 s (f32) while another program shared
 this machine's GPU. The coder's runs of the first stop took 47 s and 48 s on an idle GPU.
+
+#### 127.6.5 Gate CMP-NOZ as built (CMP-21)
+
+`src/bin/validate_gates/nozzle.rs`, one `ofgpu-validate` section after Gate CMP-COU,
+live in both builds. **The keys**, host `f64` in both builds, every root and ratio
+evaluated live by `compressible::exact` (CMP-06) with `gamma = 1.4` (`PerfectGas::air`)
+and `A_e/A_t = 2` by (127.22):
+
+```
+subsonic    p_b/p_t1 = 0.95 (above the choked limit 0.9371625024322055):
+            M_e = sqrt( 2/(gamma-1) ((p_t1/p_b)^((gamma-1)/gamma) - 1) )     NACA (44) inverted   (127.23)
+            A_*/A_t = a(1)/(A/A_*)(M_e) = 0.89857446310320031 ;  M(xi) the subsonic root
+            of (A/A_*) = a(xi)/(A_*/A_t) ;  p/p_t1 = (p/p_t)(M)
+            (oracle M: 0.27169046111338039 at xi = 1, 0.67603052349157071 at 1/2,
+            0.47486927485876826 at 1/4)
+supersonic  p_b/p_t1 = 0.05 (below the design exit 0.09393264573284488): A_* = A_t ;
+            M(xi) the subsonic root of a(xi) for xi <= 1/2, the supersonic root for
+            xi > 1/2                                                                          (127.24)
+            (oracle M: 0.30590383418910821 at xi = 0, exactly 1 at 1/2, 1.5997084401485519
+            at 3/4, 2.1971981216521865 at 1)
+shocked     the shock at A_s/A_t = 1.5 fixes the back pressure (the forward map, §127.2):
+            p_b/p_t1 = 0.70445197792232862 ;  xi_s = 1/2 + sqrt(0.125) = 0.85355339059327376
+            (a(xi_s) = 1.5, diverging side), M_1 = 1.8541235267373254 (the supersonic root
+            of (A/A_*) = 1.5), p_t2/p_t1 = 0.78835942907796554 = NACA (99) at M_1 ;
+            xi < xi_s reads (127.24)'s branch about A_*1 = A_t ;  xi >= xi_s reads
+            A/A_*2 = a(xi) (p_t2/p_t1), A_*2 = A_*1 p_t1/p_t2 (derived) ;
+            p/p_t1 = (p_t2/p_t1) (p/p_t)(M)                                                   (127.25)
+            (oracle behind the shock: M(xi_s) = 0.60484304654839300, M(0.9) =
+            0.52613022109693165, p(0.9)/p_t1 = 0.65285737593055416, M_e = 0.40419695203975395)
+```
+
+`total_over_static(gamma, M) = (1 + (gamma-1)/2 M^2)^(gamma/(gamma-1))` is NACA (44)
+inverted (derived; 7.8244490668672641 at M 2). Five bin tests hold these values to
+`1e-12` relative from a 40-digit mpmath oracle (`1e-10` at `M(xi_s)`, and `1e-6`
+absolute against `M_1` at `xi_s - 1e-9`, just ahead of the branch switch), and `locate_shock(xi, p,
+p_mid, after)` — the first upward crossing of `p_mid` whose BOTH entries sit after
+`after`, linear in `xi` (derived) — is held on hand-made profiles.
+
+**The run**, the three regimes in order subsonic, supersonic, shocked: the default
+duct, air inviscid (`mu = 0`), `p_op = p_t1 = 1e5` Pa, `T_0 = 300` K. `inlet`:
+`totalPressure` with `p0 "uniform 0"` (gauge, so `p_t1 = P_OP` absolute) and
+`totalTemperature` with `T0 "uniform 300"`, `U` `zeroGradient`; `outlet`: `p`
+`fixedValue` at the gauge `(p_b/p_t1 - 1) p_op`, `T` and `U` `zeroGradient`;
+`walls` and `frontAndBack`: `symmetry` on all three fields. Started NOT from the
+key: `u = 0`, `T = T_0`, gauge `p_i = (p_b/p_t1 - 1) p_op xi_i`. SIMPLE with
+§125.4's local time step at LTS CFL 1, `u_relax = t_relax = 0.7`, `p_relax = 0.3`,
+`n_outer 1`, no residual control; `vanLeer`-limited on momentum and `T`, the
+retarded face `p` `vanLeer`-limited (§124.3); PBiCGStab + DILU, `U` and `T` at
+`1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000. `set_boundary_rules`
+AND `set_outlet_rules` — the latter attaches §126.4's supersonic switch to the
+fixed-`p` outlet; without it a supersonic exit cannot work. March in chunks of 200
+iterations until no cell's `M_i = |u_i|/sqrt(gamma R_s T_i)` moves by more than
+`1e-5` across a chunk, capped at 20000. An `Error::Refused` from `run` (a bound,
+§122.3) is that regime's miss: its rows are NaN and a note carries the solver's
+message. **The CFL** (decision TAKEN, inputs only): the coder's first build tried
+CFL 5, then 2, then 1 on a bound. In f64 the subsonic regime stopped on the
+`p_abs <= 0` bound at step 103 (CFL 5) and step 1568 (CFL 2), and only CFL 1 reached
+its fixed point; in f32 CFL 5 stopped at step 48 and CFL 2 ran. The gate takes CFL 1
+in both builds, with no fallback, so that both builds measure the same inputs.
+
+**The rows**, class P (the same bar in both builds), every measure computed in `f64`
+from the downloaded fields:
+
+| row | measure | bar |
+|---|---|---|
+| subsonic `M(x)` | `max_i |M_i/M(xi_i) - 1|`, all 200 cells | 0.005 |
+| subsonic exit `p` | `|(p_last + p_op)/(p_t1 (p/p_t1)(xi_last)) - 1|`, the last cell, against the key at its centre `xi_last` | 0.005 |
+| supersonic `M(x)` | as subsonic | 0.005 |
+| supersonic exit `p` | as subsonic | 0.005 |
+| shocked shock position | `|xi_num - xi_s|` over the length, `xi_num` the `p/p_t1` profile's first upward crossing of `(p_1 + p_2)/(2 p_t1)` after the throat, `p_1/p_t1 = (p/p_t)(M_1)` and `p_2 = p_1 (p_2/p_1)(M_1)`; None reads NaN | 0.01 |
+| shocked `p_t2/p_t1` | `|p_t,last/p_t1/(p_t2/p_t1) - 1|`, `p_t,last = (p_last + p_op) total_over_static(gamma, M_last)` | 0.01 |
+| shocked exit `p` | as subsonic | 0.005 |
+
+Exit `p` is read at the last cell CENTRE, not the outlet face (decision TAKEN): at
+the supersonic exit the zero-gradient face value sits half a cell from the centre,
+which is 0.89 % in `p` at the exit (derived from (127.24): the key's `p` falls 0.89 %
+over the last half cell) — larger than the bar — and the centre is where the solver's
+value and the key's `xi` agree.
+
+**Measured: the gate misses in both builds.** Only the subsonic regime reaches a fixed
+point, and one of its two rows misses. One `-sections` run of the gate took 264 s (f64)
+and 296 s (f32) while the other lanes shared this machine's GPU; the subsonic march
+alone took 82 s in the coder's f64 run.
+
+*Subsonic.* f64: 14800 iterations, field stop met, `M_max` 0.6736 against the key's
+0.67603 at the throat. `M(x)` reads **6.0014e-3, MISSED** against 0.005. Exit `p` reads
+8.366e-5, inside the bar. Printed only: the outlet face `p` over the key's exit value
+is 1.000000, and the first cell's `p_t/p_t1` is 1.000300. f32: 14800 iterations, field
+stop met, `M(x)` **6.002e-3, MISSED**, exit `p` 8.365e-5, the same printed values.
+**Where the miss sits** (measured once by the supervisor, f64, with a temporary
+per-cell print): every cell's `M` is LOW. The interior error grows from `-2.2e-3` near
+the ends to `-3.6e-3` at the throat, and the static `p` sits above the key by the
+matching amount, so the discrete mass flow is about 0.3 % below the isentropic one.
+On top of that, the two cells next to the boundaries carry a wiggle: cell 1 reads
+`-6.00e-3` between `-2.04e-3` (cell 0) and `-3.36e-3` (cell 2), and cell 199 reads
+`-5.73e-3` after `-0.48e-3` (cell 198). Those two cells are the row's maximum; every
+other cell is inside the bar. The same probe with first-order `upwind` on `U`, `T` and
+the retarded density gives a 5.4e-2 error and the same wiggle in smaller form (cell 1
+`-3.47e-2` between `-3.27e-2` and `-3.32e-2`). `linearUpwind` on `U` (with `T` still
+van Leer, because (125.1) refuses a deferred-correction scheme on `T`) stops on a bound
+(`T <= 0` at cell 167, step 8756). The cause of the wiggle is not measured. It appears
+with every scheme tried, so it is in the boundary-adjacent discretisation, not in the
+limiter alone.
+
+*Supersonic started and shocked.* Both stop on a bound in both builds, so their five
+rows have no field and read NaN: **MISSED**. At CFL 1 the supersonic march stops at
+step 76 in f64 (`T = -313.7` K at cell 195) and at step 292 in f32 (`p_abs = -6424.6`
+Pa at cell 195). The shocked march stops at step 866 in f64 (`T = -183.1` K at cell
+164) and at step 1883 in f32 (`p_abs = -60022` Pa at cell 168). Nothing is clipped
+(§122.3). **What the supervisor's probes measured** (f64, each once, inputs only, the
+gate's code unchanged otherwise):
+
+* Not the CFL: the coder's run stopped the supersonic regime at steps 8, 52 and 76 (CFL
+  5, 2, 1) and the shocked regime at steps 38, 113 and 866. CFL 0.3 with `p_relax 0.1`
+  and `u_relax = t_relax = 0.3` also stops (step 193 supersonic, step 363 shocked).
+  `nOuterCorrectors 3` stops the shocked march sooner, at step 353.
+* Not the rest start: started FROM THE KEY ((127.24)-(127.25) in `u`, `p` and `T`, a
+  probe only), the supersonic march stops at step 251 (`T <= 0` at cell 197, where the
+  key's `M` is about 2.19) and the shocked march at step 262 (`T <= 0` at cell 171,
+  just behind the shock).
+* Not the outlet value: the supersonic key start with the outlet held at the design
+  pressure 0.0939326 instead of 0.05 stops at the same step on the same bits, so the
+  supersonic switch takes the face, as §126.9 says.
+* A weaker shock holds. Continuing from the subsonic field while lowering `p_b/p_t1`
+  (0.95, 0.93, 0.90, 0.85, 3000 iterations each) reaches a shocked field at 0.85 whose
+  chunk change is 5.4e-5 (`M_max` 1.48), but the next stage, 0.80, stops on `T <= 0`
+  at cell 144 at its step 778.
+
+So the solver holds this duct's flow up to about `M` 1.5 and loses `T` above it. The
+bound sits in the supersonic part or just behind the shock in every probe but one (CFL
+0.3, shocked: cell 79, on the converging side). The mechanism is not
+measured. §127.6.1's finding is the nearest one measured: in a one-outer step, (125.1)
+reads `dp/dt` and `K` from the previous iterate. Possible cures change numerics (the
+energy equation's form or ordering, or a positivity treatment of `T`), so they are the
+user's and none was built. The gate's verdict carries all seven rows' values.
+
+#### 127.6.6 Gate CMP-OBL as built (CMP-23)
+
+`src/bin/validate_gates/oblique.rs`, one `ofgpu-validate` section after Gate
+CMP-NOZ, live in both builds. **The mesh** is §127.5.3's default: 90 x 60 cells,
+`x_c = 0.5` m, `l_r = H = 1` m, `D = 1/60` m, slip walls (`lowerWall`, `top`,
+`frontAndBack` all `symmetry`). **The key** (127.4) is evaluated live by
+`compressible::exact::oblique_shock_weak` in `f64` in BOTH builds at
+`M_1 = 2`, `theta = 10` degrees, `gamma = 1.4`: `beta = 39.31393184481887`
+degrees, `p_2/p_1 = 1.7065786040000334`, `M_2 = 1.6405222290010812`. A deflection
+of 30 degrees at `M_1 = 2` is refused as detached, which the bin test asserts.
+
+**The region and the fit** (127.27) — ORIGINAL, this gate's choice:
+
+```
+region R: cell centres with x' = x - x_c in [0.4 l_r, 0.9 l_r] and
+          phi = atan2(y, x') (degrees) in [theta + 5, beta - 5]            (127.27)
+```
+
+so neither the smeared shock nor the corner nor the outlet enters it. `p_2/p_1`
+and `M_2` are the means of `p_abs/p_1` and `M` over R. The shock locus reads each
+column's `p_abs/p_1` from the TOP cell down (columns whose bottom cell's centre
+`x'` is in `[0.2, 0.9] l_r`), takes the first upward crossing of
+`p_mid = (1 + p_2/p_1)/2`, interpolates `(x_s, y_s)` linearly between the two
+cell centres, and fits `y_s = a + b (x_s - x_c)` by least squares over every
+crossing column; `beta` measured is `atan(b)` in degrees, NaN under 10 crossings.
+
+**The run**: air (`PerfectGas::air`, inviscid, `p_op = 1e5` Pa), the uniform free
+stream in every cell (`U_1 = (2 sqrt(gamma R_s T_1), 0, 0)` at `T_1 = 300` K,
+gauge `p = 0`, so `p_1 = p_op`), `characteristicFarfield` on `U`, `p` and `T` of
+both `inlet` and `outlet` (§126.10: supersonic inflow takes the free stream,
+supersonic outflow takes the interior), `symmetry` on the three slip patches.
+Controls are §127.6.5's except one input: `LocalEuler` on momentum and energy, LTS
+CFL 1, `u_relax 0.7`, `t_relax 0.7`, `p_relax 0.3`, **`n_outer 5`**, `residualControl`
+off, Van Leer on `U`, `T` and the retarded density, PBiCGStab + DILU at the same
+tolerances. The march runs chunks of 200 iterations until no cell's `M_i` moves by
+more than `1e-5` across a chunk, capped at 10000.
+
+**The outer iterations** (decision TAKEN, inputs only, measured once each in f64 by
+the supervisor with a temporary probe): with §127.6.5's `n_outer 1` the march stops
+on a bound inside its first chunk in both builds - f64 at outer iteration 1 of step
+23 (`T <= 0` and `rho <= 0`, one cell each, the first ramp-wall cell 47 at
+`T = -70.48` K), f32 at step 25 (cell 48, `T = -1.71` K), both on the ramp wall
+about `0.29 l_r` behind the corner. Inputs that keep one outer iteration all stop
+too: CFL 0.3 with `u_relax = t_relax = 0.3` and `p_relax 0.1` (step 92, wall cell 37),
+first-order `upwind` on `U`, `T` and the retarded density (step 55, cell 64), and
+both together (step 117, cell 38). Three outer iterations hold for the 10000
+iterations, and so does five; with five the last chunk's cell-`M` change is about
+four times smaller and the outer residuals about twenty times smaller than with
+three, so the gate takes five. (CFL 0.5 with three also holds.) No scheme, bar or
+mesh was changed.
+
+**The measures** (class P, the same bar in both builds):
+
+| row | measure | bar |
+|---|---|---|
+| post-shock `p_2/p_1` | `|mean_R(p_abs/p_1) / key.p2_p1 - 1|` | 0.01 |
+| shock angle | `|beta_fit - key.beta_deg|` in degrees, NaN under 10 crossings | 0.5 |
+| post-shock `M_2` | `|mean_R(M) / key.m2 - 1|` | 0.01 |
+
+**Measured: all three rows pass in both builds, on a solve that does NOT converge.**
+The field stop is not met in 10000 iterations in either build: the per-chunk cell-`M`
+change falls from 0.44 to about 1e-2 by iteration 800 and then wanders between
+6e-3 and 3.4e-2 (f32; f64 ends at 1.67e-2, f32 at 1.90e-2), while the outer
+residuals sit near 1e-4 (f64: `Ux 9.0e-5`, `p 1.1e-4`, `h0 1.9e-4`). The largest
+changes sit inside the post-shock region, cells `(i, j)` from `(59, 19)` to
+`(67, 22)`, and near the shock's exit at the outlet (`(87, 43)`), measured once in
+f64 by the supervisor's probe. So the plateau carries an unsteady, non-uniform
+pattern - over R `p/p_1` spans 1.6247-1.7911 (f64; f32 1.6263-1.7918) and `M`
+1.6119-1.6705 - whose MEANS sit on the key. Its cause was not measured; possible
+cures change numerics, so they are the user's and none was built.
+
+| quantity | f64 | f32 |
+|---|---|---|
+| iterations; field stop | 10000; NOT met | 10000; NOT met |
+| seconds (GPU shared by three lanes) | 250.5 | 253.8 |
+| `p_2/p_1` row: mean over R / key - 1 | 1.036e-3 | 9.957e-4 |
+| shock angle row: fit `beta` (degrees), error | 39.458036, 0.1441 | 39.455380, 0.1414 |
+| `M_2` row: mean over R / key - 1 | 3.694e-4 | 3.582e-4 |
+| R: cells; `p/p_1` range; `M` range | 551; 1.624670-1.791055; 1.611944-1.670498 | 551; 1.626309-1.791803; 1.611850-1.670355 |
+| locus: crossings; fit intercept `a` | 42; -0.009946 | 42; -0.009902 |
+| printed only: mean flow angle over R (degrees, wall 10) | 9.9752 | 9.9746 |
+| printed only: lowerWall mean `p/p_1`, `[0.4, 0.9] l_r` | 1.708182 | 1.708276 |
+
+The gate prints a note saying the solve did not converge whenever the field stop
+is not met; with every row inside its bar it reports no verdict. One wording is
+deliberate: a missed row's note states the miss ("... against the bar ...")
+without printing a verdict word, because §69.2 fails any transcript line that
+prints one outside the registry - the verdict itself comes from the registry's
+one report, as CMP-21's does.
+
+#### 127.6.7 Gate CMP-RING as built (CMP-24)
+
+`src/bin/validate_gates/ringleb.rs`, one `ofgpu-validate` section right after Gate CMP-OBL's,
+live in both builds. **The mesh** is §127.5.4's `ringleb_domain` at three levels, (24, 6),
+(48, 12) and (96, 24) cells - `h`, `h/2`, `h/4` by (94.1), the areas and `h` in §127.5.4's
+table. **The key** is §127.3's field itself, evaluated live by `compressible::exact`
+(`ringleb_state`, CMP-07), in `f64` in BOTH builds. The exact field is isentropic with
+`p/rho^gamma = 1/gamma`, so with `rho = p/(R_s T)` the gate's error measure is §127.3's
+`p/rho^gamma gamma - 1`, written in the downloaded absolute `p` [Pa] and `T` [K] over their
+stagnation values (derived; `p_i` absolute = gauge `+ P_OP`):
+
+```
+e_i = (p_i/P0)^(1-gamma) (T_i/T0)^gamma - 1                                          (127.29)
+E = sqrt( sum_i V_i e_i^2 / sum_i V_i ),   h = sqrt( sum_i V_i / (D n_cells) )       (94.1)
+p_fit = fitted_order(h, E) over the three meshes (the least-squares slope of ln E on ln h)
+pair order (a finer, b coarser) = ln(E_b/E_a) / ln(h_b/h_a)
+```
+
+Dimensional air: `P0 = P_OP = 1e5` Pa is the stagnation pressure AND the gauge datum (the
+inlet's `p0` is `uniform 0`), `T0 = 300` K, lengths in metres ARE §127.3's non-dimensional
+lengths (Euler is free of a length scale); the gas an inviscid `PerfectGas` (`mu = 0`) about
+`PerfectGas::air(P_OP)`. **BCs**: `inlet` `p` `totalPressure` with `p0 "uniform 0"` and
+`gamma "1.4"`, `T` `totalTemperature` with `T0 "uniform 300"` and `gamma "1.4"`, `U`
+`zeroGradient`; `outlet` `p` `fixedValue` at `(p/p0)(q_b) - 1` gauge = **-16433.421986194164**
+Pa by (127.8) - the outlet is an iso-`q` line, so it is isobaric on the key - with `T` and
+`U` `zeroGradient`; `innerWall`, `outerWall` and `frontAndBack` `symmetry` on all three
+fields. **Start**, NOT from the key: `u = 0`, `T = T0`, and the gauge `p` of cell
+`c = j nt + i` equal to `((i + 0.5)/nt)` times the outlet's gauge - the ramp linearly in
+`t` toward the outlet value. **Controls** are §127.6.5's: PBiCGStab + DILU (`U` and `T` at
+`1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000), `LocalEuler` on momentum and
+energy, LTS CFL 1, `u_relax 0.7`, `t_relax 0.7`, `p_relax 0.3`, `n_outer 1`,
+`residualControl` off; `set_boundary_rules` AND `set_outlet_rules`. **The schemes**, the plan
+against the tree, decided as (mom, energy, rho) = (`linearUpwind`, `vanLeer`, `vanLeer`):
+momentum `linearUpwind` - the plan's - unlimited, its explicit correction carried by the
+momentum assembly; energy `vanLeer`, because the energy equation REFUSES `linearUpwind` by
+name (a deferred-correction scheme's face value is not a weight, and `K_f` must use the face
+weights of `T_f` so the face sum is a flux of `h_0`, (125.1)) - the tree wins over the plan's
+wording - and its one unlimited second-order choice, `Gauss linear`, was run first and stops
+every mesh on a bound in both builds (measured below), so the energy equation carries the
+limiter CMP-NOZ and CMP-OBL run (decision TAKEN, inputs only); the retarded density takes
+`vanLeer`'s limiter, its options being first-order upwind or a limiter. March in chunks of
+200 iterations until no cell's `M_i` moves by more than `1e-5` across a chunk, capped at
+10000 per mesh (CMP-OBL's cap; decision TAKEN, inputs only: with 20000 the stop is not met
+either - the supervisor's f64 run ended at a cell-M change of 6.6e-3, 7.1e-3 and 5.2e-3 per
+chunk on 96 x 24, 48 x 12 and 24 x 6, `E` 1.0327e-2 / 1.4035e-2 / 1.9489e-2, fitted order
+0.459 - and 20000 put the section past ten minutes on the shared GPU). An `Error::Refused`
+from `run` (a bound, §122.3) ends that mesh: its `E` is NaN and the notes carry the message
+and the iterations.
+
+**The row**, class P, f64 only: the observed order of the L2 entropy error `>= 1.5` across
+`h`, `h/2`, `h/4`, `err = (1.5 - p_fit).max(0.0)` with the NaN guard written out - a NaN
+`p_fit` FAILS the row, because `(1.5 - NaN).max(0.0)` is 0. Each mesh also carries a class D
+row, "the `nt x nk` run stops on no bound". Under `single` there is no order row: one note
+measures the three `E`, the fitted order, and the f32 error floor `E_min` - (127.29) on the
+key's own gauge `p` and `T` at the finest mesh's centres after a round trip through `f32`,
+the smallest `E` an f32 field can carry there, printed and never checked. The §94 study of
+the three `E` (`vv::grid_study`) is printed and is the verdict's uncertainty.
+
+**Measured: the gate misses in both builds, and no mesh's solve converges.** Every march
+runs its 10000 iterations without a bound, and none meets the field stop:
+
+| quantity | f64 | f32 |
+|---|---|---|
+| `E`, 96 x 24 / 48 x 12 / 24 x 6 | 1.0304e-2 / 1.4008e-2 / 1.9372e-2 | 1.0284e-2 / 1.4148e-2 / 1.9683e-2 |
+| L-infinity of `e`, same order | 6.357e-2 / 7.570e-2 / 7.784e-2 | 6.179e-2 / 7.780e-2 / 7.842e-2 |
+| pair orders, h/2 vs h; h/4 vs h/2 | 0.469; 0.443 | 0.477; 0.460 |
+| fitted order (bar `>= 1.5`) | **0.456: MISSED** | 0.469 (not checked) |
+| §94 study | monotone, `p = 0.537`, `phi_ext = 2.09e-3`, `U_fine = 1.027e-2` (Fs 1.25) | monotone, `p = 0.521`, `U_fine = 1.111e-2` |
+| last cell-M change per chunk, same order | 1.29e-2 / 5.25e-3 / 5.93e-3 | 9.05e-3 / 5.71e-3 / 3.42e-3 |
+| `M_max` (key 1.1180339887498948) | 1.0682 / 1.0004 / 0.8571 | 1.0675 / 1.0008 / 0.8582 |
+| `M_mean` (the solver's last line) | 0.6465 / 0.6243 / 0.5680 | 0.6466 / 0.6244 / 0.5684 |
+| printed L2 of `p/p0 - gamma p_key` | 1.981e-2 / 3.341e-2 / 7.006e-2 | 1.980e-2 / 3.342e-2 / 6.961e-2 |
+| seconds (GPU shared by three lanes) | 54.4 / 215.6 / 202.4 (section 473 s) | 180.3 / 129.8 / 154.5 (section 465 s) |
+| f32 error floor `E_min` | - | 4.396e-8 |
+
+The two builds agree to the digits the moving fields allow, so the miss is not the
+precision. **What was measured about the cause** (supervisor probes on these inputs unless
+named, none of them a row): (1) energy `Gauss linear` (the first decision) stops every mesh on
+a `T <= 0` bound, f64 at steps 811 / 584 / 654 (`T = -20.95` K at cell (43, 13), `-3.46` K at
+(9, 7), `-3.51` K at (6, 0) of 96 x 24 / 48 x 12 / 24 x 6) and f32 at steps 827 / 576 / 615
+(`-0.87`, `-0.36`, `-16.85` K), every bound cell in the accelerating `t < 0` half; (2) started
+FROM THE KEY on 24 x 6 the march leaves it - `M_mean` 0.652 and `M_max` 1.054 after the first
+chunk fall to 0.568 and 0.858 by iteration 1800, the state the rest start reaches - so the
+start is not the cause: the scheme's fixed point on these meshes is far from the key, with
+the transonic pocket gone on 24 x 6 and the coarse flow slower than the key; (3) on 24 x 6,
+five outer iterations park at a change of 3.7e-3 to 6.9e-3 per chunk from iteration 1400 to
+4000, `vanLeer` on momentum raises the residuals to about 2e-2, and LTS CFL 0.3 is still in
+its transient at 3000 iterations. The entropy error falls at about half an order in `h`,
+which no smooth second-order truncation error does; WHICH term carries it (the polygonal
+walls' vertices, the total-pressure inlet's direction, the limiters at the extremum of `q`
+on each streamline, or the coupling's parked state) is NOT measured. Every candidate cure
+changes numerics or the gate's measure and is the user's; none was built.
+
+#### 127.6.8 Gate CMP-RAE as built (CMP-27)
+
+`src/bin/validate_gates/rae2822.rs`, one `ofgpu-validate` section right after Gate CMP-RING's,
+live in both builds. The gate's rows are REPLAYED from recorded runs (the `pipe_tet.rs`/
+`t3_fitted.rs` pattern, §110.1's split of recipe and verdict), and beside them the section
+runs a LIVE coarse smoke in both builds — what the plan's "beyond 10 min" looks like here
+(docs/17 5.3 rule 4).
+
+**Decisions TAKEN by the supervisor**, each with its reason:
+
+1. NPARC's data at M 0.729, alpha 2.31 deg, Re 6.5e6 is AR-138's **Case 6** (the corrected
+   conditions), not the plan's Case 9 — the plan's `cp_case9.csv` name follows the case it
+   named, and the key follows the data instead. The supervisor wrote the key from the NPARC
+   files and confirmed the conditions there: the archive's base page states Case 6 at M 0.725,
+   alpha 2.92 deg in the tunnel, and its Study #4 and `cp.exp.gen` state M 0.729, alpha 2.31
+   deg, Re 6.5e6 — the corrected conditions the key and this gate carry. The key:
+   `rae2822-cp-case6`, `reference/rae2822/cp_case6.csv`, its row in `reference/PROVENANCE.md` —
+   the archive's 103 measured `Cp` points in the archive's order (upper surface trailing edge
+   to leading edge, the leading edge `x/c = 0` once, then the lower surface to the trailing
+   edge), columns `x_c`, `minus_cp`, `surface` (1 upper, 0 the leading edge, -1 lower; the
+   archive's own second column is `-Cp`, so `Cp = -minus_cp`).
+2. §94's `vv::grid_study` refuses two levels (SPEC-LIT 94.2: "this crate never makes" a
+   two-level estimate), so the gate runs THREE C-meshes L0/L1/L2, L1 being CMP-26's default
+   gate mesh, every level's `CMeshSpec::span` and the smoke's at decision 6's `1e-5` m:
+
+   | level | `refine` | `n_wake` | `n_normal` | N x J | cells |
+   |---|---|---|---|---|---|
+   | L0 | 1 | 24 | 48 | 176 x 48 | 8 448 |
+   | L1 | 2 | 48 | 96 | 352 x 96 | 33 792 |
+   | L2 | 4 | 96 | 192 | 704 x 192 | 135 168 |
+   | smoke | 1 | 24 | 32 (`CMeshSpec::coarse()`) | 176 x 32 | 5 632 |
+
+   `N = 2 n_wake + 128 refine` (§127.5.1), so `(94.1)`'s `h` roughly halves per level.
+3. The rows run in `ofgpu-validate` from RECORDED runs (the `pipe_tet.rs`/`t3_fitted.rs`
+   replay pattern); the section also runs a LIVE coarse smoke (<= 10 min) in both builds.
+4. The experimental `Cl` is the key's own `Cp` integrated (derived): with `Cn = trapz(lower
+   Cp) - trapz(upper Cp)` over `x`, the leading-edge point in both surfaces,
+
+   ```
+   Cl_exp = Cn cos(alpha)                                                                     (derived)
+   ```
+
+   and the dropped `-Ca sin(alpha)` term is 8.3e-4 (0.11 %), measured once by the supervisor.
+5. The shock position is the sonic crossing, the SAME function for experiment and simulation:
+   on the upper surface sorted by `x`, the first pair of points with `x_k > 0.1` and
+   `Cp_k < Cp* <= Cp_(k+1)`, crossed linearly.
+6. LTS CFL **0.1** and the C-mesh span **1e-5** m — every level's `CMeshSpec::span` and the
+   smoke's — decision TAKEN, inputs only, measured on L0 before the recorded runs: §125.7's
+   local step is `CFL V^(1/3)/(|u| + c)`, so on a one-cell-thick mesh the span sets the step
+   of the `y+ = 1` wall cells. At span 1 the FIRST outer iteration of step 1 stops on a
+   `T <= 0` bound at CFL 1 (cell 70, `T = -10.98` K) and at CFL 0.1 (cell 70, `T = -8.46` K);
+   laminar and inviscid (`mu = 0`) runs stop the same way (cells 68 and 25, cell 25 the lower
+   wall cell at `x` 0.998). At span 1e-5 the first steps hold at CFL 0.1 and 0.3 and stop at
+   CFL 1 (cell 79) and 3 (cell 72).
+
+**The free stream** is host `f64` arithmetic in BOTH builds (device values cast once with the
+binary's `s()`), computed from Case 6's constants — `M_INF = 0.729`, `ALPHA_DEG = 2.31`,
+`RE_C = 6.5e6`, `CHORD = 1.0` m, `T_INF = 460.0/1.8` K (NPARC's 460 R) — never from
+`gas.mu()` (a `Scalar`). The gas is `PerfectGas::air(p_inf)`: Sutherland `a_s = 1.458e-6`,
+`t_s = 110.4`, `W = 0.0289647`, and the gauge datum `p_op = p_inf`, so the solver's `p` field
+IS `Cp q_inf` directly. In the order the relations chain, all derived:
+
+```
+R_s = R/W;   mu_inf = a_s T^1.5/(T + t_s);   U_inf = M sqrt(gamma R_s T)
+rho_inf = Re_c mu_inf/(U_inf CHORD);   p_inf = rho_inf R_s T_inf;   nu_inf = mu_inf/rho_inf
+nu_tilda_inf = 3 nu_inf (the TMR's fully turbulent free stream, §127.1);   q_inf = rho U^2/2
+U = U_inf (cos alpha, sin alpha, 0)                                                (127.30)
+```
+
+The free stream's oracle: `R_s` 287.0550227690948, `mu_inf` 1.627635558889652e-05,
+`U_inf` 233.62363914459755, `rho_inf` 0.45284934228058354, `p_inf` 33220.351110715754,
+`nu_inf` 3.594209832993809e-05, `nu_tilda_inf` 1.0782629498981425e-04, `q_inf`
+12358.259630240922. The sonic pressure coefficient, (derived) from NACA 1135 (44), the
+isentropic `p/p_t`, taken at `M = 1` and at `M_inf`, with `Cp = (p - p_inf)/q_inf` and
+`q_inf = gamma p_inf M_inf^2/2`:
+
+```
+Cp* = (2/(gamma M^2)) [ ((2 + (gamma-1) M^2)/(gamma+1))^(gamma/(gamma-1)) - 1 ]             (127.31)
+```
+
+The measures, derived (the face `Sf` points out of the fluid, INTO the aerofoil, so
+`sum p Sf` is the force ON the aerofoil; `Cp_f = p_gauge,f/q_inf` because the datum is
+`p_inf`):
+
+```
+F = sum_airfoil p_gauge,f Sf_f;   Cl = F . (-sin alpha, cos alpha, 0)/(q_inf CHORD span)
+                                                                              (127.32)
+x_s = x_k + (x_(k+1) - x_k)(Cp* - Cp_k)/(Cp_(k+1) - Cp_k), the first k (x ascending) with
+      x_k > 0.1 and Cp_k < Cp* <= Cp_(k+1)
+RMS = sqrt(mean over the key's lower points with x inside the simulated lower range of
+      (Cp_sim(x) - Cp_exp)^2), Cp_sim linear in x)                                 (127.33)
+```
+
+**BCs, start, SA inputs, controls.** `farfield` AND `outlet`: `characteristicFarfield` on all
+three fields — `U` at (127.30)'s vector, `p` at `0` gauge, `T` at `T_inf` (§126.10). `airfoil`
+(the wall): `U` `fixedValue` `(0,0,0)`, `p` `zeroGradient`, `T` `zeroGradient` (adiabatic).
+`frontAndBack`: `empty` on all three. **Start**: the uniform free stream in every cell —
+(127.30)'s `U`, gauge `p = 0`, `T = T_inf` — so the start carries no cell's answer. **SA**
+attaches exactly as `ofgpu-compressible` attaches it (§127.1.2): `walldistance::wall_distance`
+once at setup, `WallFaces::from_case` on nuTilda and nut, `NutRoughness::from_case` on nut,
+`SpalartAllmaras::new` with `SaCoeffs::default()` and `WallFunctionCoeffs::default()`,
+`setup_scalar_field` on `nu_tilda_mut`/`nut_mut`, then `set_turbulence` and — only then —
+`initialise`. `0/nuTilda`: internal `nu_tilda_inf`, `airfoil` `fixedValue` `0`, `farfield`
+`fixedValue` `nu_tilda_inf`, `outlet` `zeroGradient`, `frontAndBack` `empty`. `0/nut`:
+internal `0`, `airfoil` `nutLowReWallFunction` (value `0`), `farfield`/`outlet` `calculated`,
+`frontAndBack` `empty`. **Controls**, one `controls(gas)` the run and the smoke both read
+(decision 6's inputs sit in one place): the flow controls Gate CMP-OBL's exactly — PBiCGStab
++ DILU (`U` and `T` at `1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000),
+`LocalEuler` on momentum and energy, LTS CFL **0.1** (decision 6), `u_relax 0.7`,
+`t_relax 0.7`, `p_relax 0.3`, five outer iterations, `residualControl` off, `vanLeer` on
+momentum, energy and the retarded density; SA: steady `true`, `ddt` `steadyState`,
+`div(phi,nuTilda)` `upwind` with NO `bounded` prefix (§127.1's refusal), `eps_relax 0.7`,
+`epsilon_solver` PBiCGStab + DILU `1e-9` relTol 0.01. **March** in chunks of 200 iterations
+until no cell's `M_i` moves by more than `1e-5` across a chunk, capped at 20000 a level;
+after each chunk the run takes the max cell-M change, the wall `Cp` and `Cl`; the last
+chunk's `p` residual is the last outer's `p[0].initial_residual`. An `Error::Refused` from
+`run` (a bound, §122.3) ends the run as an `Err` carrying the iterations reached. The wall
+`Cp` reads the OWNER cell's `p` (a `zeroGradient` wall), `x` the face centre's; airfoil face
+`m` (0-based in the patch) is LOWER iff `m < n_s/2` — the patch's `n_s` faces run lower
+TE->LE first, then upper LE->TE (§127.5.1) — and `h = sqrt(sum V/(span n_cells))` by (94.1).
+
+**The rows**, class P, the plan's bars: the upper-surface shock `x/c` within `+-0.04` of the
+experiment's; the lower-surface `Cp` RMS within `0.05`; `Cl` within 6 % of `Cl_exp`. The
+replay (`check_rae2822_replay`) reads the FINEST recorded f64 level — the `RaeRecord`
+literals the ignored `record_rae_l0/l1/l2` tests print and the file's constants hold — and
+the single build's L1 the same three rows; each row is taken inside `c.replaying` like Gate
+116-P's. A NaN shock fails its row (`!(err <= bar)` written out). The (94.9) studies of `Cl`,
+`x_s` and RMS run on all three f64 levels finest first when all three are recorded, each
+printed with `one_line()` or its refusal text; on fewer, a note says how many are recorded,
+and the verdict's uncertainty is `Uncertainty::Study` of the Cl study when it is Ok, else
+`Uncertainty::SingleMesh("no recorded C-mesh reached a field: every run stopped on a bound
+(SPEC-LIT 127.6.8)")`. **A recorded run that stopped on a bound** (§122.3) makes rows of its
+own: the refusal text in a note and one failed `require`, "the recorded run reaches its field
+stop or its cap without a bound (SPEC-LIT 127.6.8)", per run — and a build with stops but no
+record reads its three measure rows at NaN, which fail them: no field to compare. The gate's
+headline names every stop's level, step and first out-of-bounds cell. **The skip rule**: a
+build with NEITHER a record NOR a stop skips its three rows,
+`c.skip(label, "DEFERRED (docs/17 5.3 rule 4): NOT RUN - <the finest level's reason>")`; with
+no f64 level at all and nothing failed, the gate's one verdict is the Open one — "the three
+C-meshes are NOT RUN (DEFERRED, docs/17 5.3 rule 4); the live coarse smoke ran". No note
+spells a verdict word (§69.2): a failed row's note states its number "against the bar" and
+the registry's one report carries the verdict.
+
+**The live smoke** (the section's own, both builds): 2000 iterations (`SMOKE_ITERS`) on
+`CMeshSpec::coarse()` (5 632 cells), three rows — the coarse C-mesh run stops on no bound and
+every field is finite; the residual converges, the last chunk's `p` residual below a tenth of
+the first chunk's; a shock is present, the upper-surface `Cp` crosses `Cp*` past `x/c 0.1`.
+A refused march makes all three rows fail with the message in a note. The notes carry the
+cells, iterations, seconds, both residuals, the last change, `M_max`, `Cl`, the shock `x/c`
+and the RMS.
+
+**The experiment's own numbers**, read once from the key (the tests hold them): 53 upper
+points, 49 lower, the leading edge `(0.0, 0.8328)`; `Cp*` at `M = 0.729` is **-0.66578** by
+(127.31); the experiment's shock `x_s = ` **0.57786**; `Cn = ` **0.74360**; `Cl_exp =
+Cn cos(2.31 deg) = ` **0.74300**, the dropped `-Ca sin(alpha)` term 8.3e-4.
+
+**Measured: every recorded run stopped on a bound, and no run reached a field.** The price,
+200 timed iterations per level: L0 0.025 s, L1 0.042 s, L2 0.243 s per iteration (mesh 0.2 /
+2.4 / 36.2 s); the unit's card time, probes included, about 1 h 20 min. The four recorded
+runs (`record_rae_l0/l1/l2`, MAX_ITERS 20000, the shipped inputs) all stopped on a bound
+(§122.3), none reached a field:
+
+| run | stop | last progress line | wall s |
+|---|---|---|---|
+| f64 L0 (8 448) | after 5800 iterations, outer 4 of step 5968: `T <= 0` 1, `rho <= 0` 1; `T` at cell 6312, `T = -5.441498878025827` | iter 5800: dM 2.158e-1, p-res 8.459e-6, Cl 0.22186 | 200 |
+| f64 L1 (33 792) | after 5400 iterations, outer 5 of step 5454: `T <= 0` 1, `rho <= 0` 1; `T` at cell 21072, `T = -5.194727211491283` | iter 5400: dM 1.012e0, p-res 9.096e-6, Cl 0.18970 | 183 |
+| f64 L2 (135 168) | after 5200 iterations, outer 5 of step 5376: `T <= 0` 1, `rho <= 0` 1; `T` at cell 75232, `T = -4.433695285638386` | iter 5200: dM 2.925e0, p-res 5.353e-6, Cl 0.19236 | 385 (mesh 36) |
+| single L1 | after 200 iterations, outer 4 of step 210: `T <= 0` 2, `p_abs <= 0` 2; `T` at cell 151, `T = -47663.30078125` | iter 200: dM 7.253e-1, p-res 1.936e-6 | 9 |
+
+**What was measured about the cause** (supervisor, f64): every f64 stop is in the column of
+cells `i = N - n_wake`, the eta-line leaving the trailing edge upward — L0 cell 6312 is
+(i 152, j 35), centre (1.0003, 0.7640), area 1.49e-4 against 6.14e-3 for its neighbour
+(i 151): the trailing edge's surface spacing runs up that eta-line to the far field as a
+column about 40 times narrower than the next one. The single L1 stop is a lower-surface wall
+cell (i 151, j 0) at step 210; its cause was NOT measured. Two more probes on L0, printed
+only (no row): CFL 0.3 with 10 outer iterations stops at step 1030 (cell 5127 =
+(i 23, j 29), the column beside the trailing edge on the wake side); first-order `upwind` on
+momentum and energy at CFL 0.1 runs 10000 iterations with no bound, Cl 0.22265 and dM 9.8e-3
+at the end (`Cl_exp` 0.74300) — with span 1e-5 the far field's step is so small that the lift
+builds over far more iterations than the cap.
+
+The live smoke, both builds: f64 65.2 s on the coarse 5 632-cell mesh, no bound, `p`
+residual 2.701e-6 first chunk / 6.998e-6 last (the residual row fails), last cell-M change
+2.300e-1, `M_max` 0.9491, Cl 0.346150, a `Cp*` crossing at `x/c` 0.9794 — the shock row
+passes on it, but the wall `Cp` reads up to 2.1 elsewhere on the aerofoil (the lower surface at `x/c` 0.155), above the stagnation 1.14: an
+unconverged start, not a shock — lower-surface RMS 0.86212 over 48 points; single: the smoke
+stops on a bound after 0 iterations, outer 3 of step 13, `p_abs` at cell 151 =
+-8763310.648889285 (all three rows fail).
+
+**MISSED**: every row. The cure is a C-mesh whose trailing-edge eta-line widens away from
+the aerofoil (a change to §127.5.1's generator) or a solver change, and both are the user's;
+none was built.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
@@ -55205,12 +56242,309 @@ refusal. `ercoftac_t3a_key_reads_sixteen_stations_or_is_missing_by_name` holds t
 Placed, it must read 16 stations from `x = 45` to `1495 mm`, with `x` and `Re_x` strictly
 increasing and every `Cf` and `Tu` positive and finite. Absent, it must be `NotFound` and the
 missing line must name the id and the file. The census test counts 43 markers and four
-`fetched` rows.
+`fetched` rows. *Amended (docs/17 VAL-35):* with §144.7's two keys the census
+is 47 markers and six `fetched` rows.
 
 **Not claimed.** This subsection reads the key and judges nothing with it. Leg 4 (§144.4, VAL-33)
 is the gate that reads it, and its verdict word against the measurement is `MISSES`, as VAL-33's
 row states. Nothing here judges the
 quality of the measurement beyond what the host page states.
+
+### 144.7 Gates 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to the measured Tu(x)
+
+`No GPL-licensed source was consulted.` Docs/17's row VAL-35 reads "(optional)
+T3B and T3A- are claimed with a per-case inflow omega fitted to ERCOFTAC's
+measured Tu(x) decay. Gate: the fitted decay reproduces the measured Tu(x)
+within 3 %, as a stated input check. Onset ordering and the Re_x spread are
+held against the data, which retires §88.10's 51.9x construction artefact. The
+bands are the same as VAL-33." §88.10's leg 3 measured why one rig and three
+leading-edge `Tu`s do not make a trend gate: the free-stream decay is as strong
+a lever on onset as `Tu` itself, and the single-rig construction's spread read
+51.9x against the roughly 10x the series measures. What separates the two
+levers is a per-case inflow `omega`, and the TMR publishes one for T3A only.
+This subsection takes it from the measurement instead: each case's own key
+carries the free-stream decay `Tu(x)` its tunnel had, the fit below turns it
+into the rig's inflow state, and the gate on the fit is an input check - a
+statement about what the run was fed, not about the solver. The new code is
+`src/bin/validate_gates/t3_fitted.rs`, a `runner` refactor of
+`src/bin/validate_gates/t3a.rs` that changes no numerics, and one section of
+`ofgpu-validate`. As in §144.3, the plan's case files are not shipped, because
+no driver can run the transition fields; the case lives on the harness, in
+memory.
+
+**The two keys.** The ERCOFTAC case 020 page (§144.6's source, read 2026-10-17)
+serves the same summary-table layout for T3B (`t3by.dat`, row `ercoftac-t3b`,
+2086 bytes, sha256 `95e04aca4510ead26c80ede79182cbd8e97bda9f6f30dd8ca6ce8e1b1c21a394`,
+fifteen single-wire stations from `x = 25` to `1495 mm`) and T3A- (`t3amy.dat`,
+row `ercoftac-t3am`, 2182 bytes, sha256
+`65aca3ecfc9349abe8b727d1ae15c38d62289e12c0691e78d9629998fcbd90a9`, sixteen
+stations from `x = 95` to `1552 mm`). Both are `fetched` rows of
+`reference/PROVENANCE.md` under the same CC BY-NC-SA licence as `ercoftac-t3a`,
+so docs/17 decision D-VAL-2 extends to them: fetched, never tracked, placed by
+`tools/keys/fetch_answer_keys.py fetch` or `--from DIR`, kept only when the
+digest is the row's. No number of either file is copied into this section, a
+test or a source file; the tests that read them assert shapes, station counts,
+names and digests, and the fit reads the rest at run time.
+
+**The fit (144.7a).** On a key's stations `(Re_x,i, Tu_i)` in file order, with
+`n = beta*/(2 beta_2)` the crate's own exponent (§88.10's `0.543478...`):
+
+```text
+e_i(b) = ln Tu_i + n ln(1 + b Re_x,i)
+h(b)   = (max_i e_i - min_i e_i)/2 ,   m(b) = (max_i e_i + min_i e_i)/2
+b*     = argmin_{b > 0} h(b) ,          Tu_LE = exp(m(b*))                (144.7a)
+```
+
+`b*` is the Chebyshev point of the one-parameter decay family through the
+stations and `Tu_LE` its mid-range: the gate is a max-norm, so the fit
+minimises the half-range of `ln Tu`, not a least square. The search is exactly
+the stated deterministic one. `L_j = ln 1e-9 + j (ln 1e-2 - ln 1e-9)/4000`,
+`j = 0..=4000`; `j*` is the first `j` of least `h(exp L_j)`; `lo =
+L_max(j*-1, 0)`, `hi = L_min(j*+1, 4000)`; then 200 golden-section steps with
+`phi = (sqrt 5 - 1)/2`: `a = hi - phi (hi - lo)`, `c = lo + phi (hi - lo)`,
+`if h(e^a) < h(e^c) { hi = c } else { lo = a }`; and `b* = exp((lo + hi)/2)`.
+Fewer than three stations, or any non-finite or non-positive station value,
+refuses the fit by name.
+
+**The fitted decay and the input check (144.7b).**
+
+```text
+Tu_fit(Re_x) = Tu_LE (1 + b* Re_x)^(-n)
+worst        = max_i |Tu_fit(Re_x,i)/Tu_i - 1|      holds iff worst <= 0.03   (144.7b)
+```
+
+This is §88.10's closed form measured from the leading edge,
+`b* = beta_2 omega_LE nu / U^2`, with `omega_LE` the value the measurement
+implies rather than the one a handbook states. The row is born class P, band
+3 %, live in the fit gate's scope; a miss is `MISSES` as a gate verdict and the
+run uses the fitted inflow anyway - the check says what the run was fed.
+
+**The inflow at the harness inlet (144.7c).** `Re_up = U x_up/nu` at the
+leading edge's distance `x_up` ahead of the plate; refused, naming the case,
+when `s >= 1` - past the pole the closed form has no inflow state to hand a
+solver:
+
+```text
+s        = b* Re_up
+Tu_in    = Tu_LE (1 - s)^(-n)
+k_in     = (3/2) (Tu_in U/100)^2
+omega_in = b* U^2 / (beta_2 nu (1 - s))                                      (144.7c)
+```
+
+§88.10's closed form from `(Tu_in, omega_in)` then gives `Tu_fit` at every
+`x >= x_up`: `tau(x_up + d) = (1 + b* U d/nu)/(1 - s)`, an identity the unit
+test holds to `1e-12`.
+
+**The three rigs.** §144.3's plate geometry on each case's tunnel state:
+`U = 1 m/s`, leading edge `0.25 m` from the inlet, `L = 3 m`, end-cell ratio
+`r_y = 1000`, the three §144.3 levels, everything else §144.3's:
+
+| case | key id | `nu` (m^2/s) | `H` (m) | `Re_up` | `Re_L` |
+|---|---|---|---|---|---|
+| T3B | `ercoftac-t3b` | 3.0e-6 | 0.25 | 8.3333e4 | 1.0e6 |
+| T3A- | `ercoftac-t3am` | 1.25e-6 | 0.25 | 2.0e5 | 2.4e6 |
+| T3A (refitted) | `ercoftac-t3a` | 5.0e-6 (§144.3's) | 0.5 | 5.0e4 | 6.0e5 |
+
+`H = 0.25 m` for T3B and T3A- keeps the wall cells at half §144.3's height on
+the higher-`Re_L` rigs. The third case refits T3A from its own key by (144.7a)
+so the ordering below compares one inflow method; until its run is recorded the
+ordering falls back to §144.3's TMR-inflow record, and the note says which one
+it read.
+
+**The record grid.** A record carries `C_f` at forty-nine log-spaced `Re_x`,
+`Re_log(i) = 1e4 (240)^(i/48)` for `i < 49` - power-law interpolation suits a
+boundary layer - and the run's fitted `(Tu_in, omega_in)`, so the replay can
+hold every record to its own key's fit. `C_f` at an off-grid `Re_x` is the
+power law through the two bracketing grid points, NaN off the grid. Each
+(case, model, level) run is an ignored test
+`record_t3fit_{t3b,t3am,t3a}_{lm,gamma}_{fine,medium,coarse}` of the validate
+binary, run the §144.3 way, printing the record literal its slot holds;
+`ofgpu-validate` never runs the harness (§110.1).
+
+**The rows.** Per case and model, §144.4's three rows with the same
+definitions, bands and rule: onset `Re_x` (the record's least `C_f` against
+(144.4a), read by (144.7e) below when that face is the trailing edge), band
+15 %, `u_D = 0`; worst turbulent `C_f` ((144.4b) between the
+bracketing grid points), band 10 %, `u_D = 2 %`; worst laminar `C_f` against
+Blasius ((144.4c)), band 10 %, `u_D = 0`. `u_val` squares the §94 study's
+`u_fine` with `u_D`; a result within `u_val` of a band edge is undecided
+(§110.1). Inside rows are class P taken under `replaying`; the per-record
+stale-inflow row - every record, f64 and single, against its key's (144.7c) -
+and the single-build row are class D and R as §144.4's are. A missing key, no
+transition in a key, or a run not recorded leaves the gate `OPEN` naming what
+is missing, never passed.
+
+**The ordering and the spread (144.7d).** Per model, from the finest f64
+records' (144.4a) onsets `O_B`, `O_A`, `O_Am`: the ordering `O_B < O_A < O_Am`
+is a class D row when it holds and a `MISSES` verdict with the three numbers
+when it does not; the keys' own onset ordering `T3B < T3A < T3A-` is required
+of the data itself. The spread, which is what retires §88.10 leg 3's
+construction artefact:
+
+```text
+S_sim = O_Am / O_B ,  S_key = Re_on(T3A-)/Re_on(T3B) ,  E = S_sim/S_key - 1
+u_num = sqrt((u_fine(O_B)/O_B)^2 + (u_fine(O_Am)/O_Am)^2)                  (144.7d)
+```
+
+band 15 % (the plan's onset band applied to the ratio), `u_D = 0`, the same
+band rule. The spread gate's uncertainty slot carries the T3A- study when both
+onsets' studies stand, and `SingleMesh` when one is refused. The note prints
+`S_sim`, `S_key`, and §88.10 leg 3's single-rig `51.9x` beside them.
+
+**Decisions taken, by recommendation.** The Chebyshev fit (the gate is a
+max-norm); both `Tu_LE` and `omega_in` fitted per case; the spread band = the
+onset band 15 %; T3A refitted as a third case so the ordering uses one inflow
+method (falling back to §144.3's TMR-inflow record until recorded); `H = 0.25
+m` for T3B and T3A- (wall cells half §144.3's); the spread gate's uncertainty
+slot carries the T3A- study; and the record's onset rule (144.7e), TAKEN by
+recommendation, because §144.4's least-face reading returns the trailing edge
+on a plate whose turbulent `C_f` falls below its transition minimum, which
+VAL-33's T3A plate never met.
+
+**The record's onset (144.7e).** §144.4 reads a record's onset as its
+least-`C_f` face. On T3B's plate (`Re_L = 1e6`) the turbulent `C_f` decays
+below the transition minimum, so the least face of the recorded grid is the
+trailing edge and the least-face reading returns the plate's end as the
+onset: the fine LM record's `C_f` falls to a local minimum `5.207e-3` at
+`Re_x = 4.95e4`, rises to `5.668e-3` at `9.81e4`, then decays to `3.820e-3`
+at `9.63e5` - its least face is its last station, and §144.4's reading would
+put the onset `+1663 %` high. Every reading of a record's onset in this
+subsection therefore takes the least face only while it lies inside the
+recorded grid, and past it reads the grid instead:
+
+```text
+onset_rec = cf_min_re_x                       if cf_min_re_x <= Re_log(last finite)
+          = vertex (144.4a) through the first local minimum of the record's
+            grid C_f in [2e4, Re_L]           otherwise, if one exists
+          = 2e4 (an upper bound)              otherwise                    (144.7e)
+```
+
+The three outcomes are named where the section prints them: the onset row's
+headline and each per-record note say `LeastFace`, `GridMinimum` ("onset
+read at the first grid minimum (144.7e), the least face being the trailing
+edge") or `Upstream` ("C_f falls over the whole band: onset upstream of 2e4,
+read as that bound (144.7e)"). An `Upstream` onset is an upper bound, not a
+measurement: the laminar band of such a record is empty and its laminar row
+fails on the NaN. The rule is a reading of the record, not of the solver;
+§144.3/§144.4's T3A records and every number in them are untouched, and
+VAL-33's T3A plate never met the case - its least face is interior.
+
+**Prices and the caps.** Priced the VAL-50 way - 200 timed iterations, LM -
+on the one RTX 5070 Ti, before any run: T3B fine 49.5 s, medium 34.8 s,
+coarse 23.3 s; T3A- fine 73.4 s; T3A fine 59.9 s per 200 iterations; a
+600-iteration T3B fine run re-read 48.5 s/200. At that price §144.3's
+40 000-iteration cap costs 2.7 h for ONE fine run, so the caps became
+`MAX_ITERS = [12000, 8000, 10000]` (fine, medium, coarse) and the card time
+was held to about 3 h. Speed varied 0.036-0.37 s per fine iteration with the
+other lanes' load.
+
+**The recorded runs** (2026-10-17, one RTX 5070 Ti shared with lanes S and G
+and another project's GPU job, utilisation 95-97 % before these runs
+started). "met" is §144.3's stopping rule (`C_f` change `<= 1e-6`), "last" its last `C_f` change,
+"s" its wall-clock seconds, `Tu_LE` its (144.3b) leading-edge `Tu`:
+
+| case model level | iters | met | last | s | Tu_LE % |
+|---|---|---|---|---|---|
+| T3B LM fine | 12000 | no | 5.18e-4 | 2665 | 6.087064 |
+| T3B LM medium | 8000 | no | 1.07e-5 | 1187 | 6.086961 |
+| T3B LM coarse | 2800 | yes | 2.65e-7 | 286 | 6.086654 |
+| T3B gamma medium | 8000 | no | 1.71e-5 | 731 | 6.086964 |
+| T3B gamma coarse | 2700 | yes | 3.78e-7 | 260 | 6.086656 |
+| T3A- LM fine | 12000 | no | 4.82e-6 | 1240 | 0.910754 |
+| T3A- LM medium | 4000 | yes | 2.48e-7 | 663 | 0.910755 |
+| T3A- LM coarse | 1200 | yes | 2.73e-7 | 130 | 0.910762 |
+| T3A- gamma medium | 1600 | yes | 7.68e-7 | 258 | 0.910754 |
+
+The 2-D `Tu_LE` reproduces the fit's `Tu_LE` (`6.086009`, `0.910763 %`) to
+`+0.017 %` and `-0.001 %`. NOT RUN or diverged:
+
+- T3A- gamma coarse DIVERGES, deterministic (run twice): iteration 87, "p
+  residual is not finite (NaN); Ux 4.238e-1 Uy 4.238e-1". No input or
+  numerics change was tried (none authorised for this unit).
+- T3A- gamma fine: started, stopped by hand at 4000 of 12000 iterations
+  (23.6 min, `C_f` change still 2.6e-3) when the card had slowed to
+  0.35 s/iteration: its price (about 70 min) was over the remaining budget.
+  NOT RUN.
+- T3B gamma fine: NOT RUN, price about 70 min at that speed, over budget.
+- All single-build runs: NOT RUN (four fine runs at 45-70 min each, over
+  budget). The single validate binary builds; `RECORDS_SINGLE` stays `None`.
+- The refitted T3A (case 3): NOT RUN (six runs, over budget); the ordering
+  uses §144.3's TMR-inflow T3A record, as designed.
+- A first T3A- LM fine run at a 5000-iteration cap was discarded (`C_f`
+  change 2.0e-3 at 5000) and re-run at 12000.
+- Card time of the unit: about 2.7 h (records 124 min, pricing 6.5 min, the
+  discarded and stopped runs 33 min).
+- Earlier wave runs keep their numbers; nothing in §144.3/§144.4 moves.
+
+**The replay** (the finest f64 record of each case and model, read on
+`ofgpu-validate -sections 78`; the onset E against the key's own (144.4a)
+onset, `5.642944e4` for T3B and `1.443366e6` for T3A-):
+
+| case model | onset Re_x (kind) | onset E | worst turbulent C_f E (at) | worst laminar E (at) |
+|---|---|---|---|---|
+| T3B LM | `4.9938e4` GridMinimum (144.7e) | `-11.50 %` | `+5.62 %` (`5.794e5`) | `+58.30 %` (`3.936e4`) |
+| T3B gamma | no fine run recorded | - | - | - |
+| T3A- LM | `1.2106e6` LeastFace | `-16.13 %` | `+132.12 %` (`2.0220e6`) | `+27.55 %` (`1.2097e6`) |
+| T3A- gamma | no fine run recorded | - | - | - |
+| T3A LM, T3A gamma | no runs recorded | - | - | - |
+
+Per-record notes name the kind: T3B LM fine and medium at their first grid
+minimum, T3B LM coarse `Upstream` (its `C_f` falls over the whole band, so
+its onset is the `2e4` bound and its laminar band is empty). The studies
+read on: T3B LM's onset study is oscillatory (`U_fine 1.611e4`,
+`u_val 28.55 %` - the coarse record's `2e4` bound is in it), T3A- LM's
+oscillatory (`U_fine 8.204e4`, `u_val 5.68 %`); T3B LM's turbulent study
+holds under its inside row (`p = 1.057`), T3A- LM's under its miss
+(`p = 0.633`); the laminar studies of the two misses (`u_val 8.97 %` and
+`0.63 %`).
+
+**The verdicts** (25 registered gates: 4 `MISSES`, 17 `OPEN`, 4 inside their
+bands as check rows, `c.failures = 0`):
+
+| gate | verdict |
+|---|---|
+| T3B fit (144.7b) | inside, `1.53 %` of `3 %` (check row) |
+| T3A- fit (144.7b) | `MISSES`, `3.63 %` of `3 %`; the run uses the fitted inflow anyway |
+| T3A fit (144.7b) | inside, `2.69 %` of `3 %` (check row) |
+| T3B LM onset | `OPEN`, undecided: `E = -11.50 %`, band `15 %`, `u_val 28.55 %` |
+| T3B LM turbulent | inside: `abs(E) + u_val = 8.17 %` of `10 %` (check row) |
+| T3B LM laminar | `MISSES`: `+58.30 %` of `10 %` at `3.936e4` |
+| T3B gamma onset / turbulent / laminar | `OPEN`, no fine run (3 gates) |
+| T3A- LM onset | `OPEN`, undecided: `E = -16.13 %`, band `15 %`, `u_val 5.68 %` |
+| T3A- LM turbulent | `MISSES`: `+132.12 %` of `10 %` at `2.0220e6` |
+| T3A- LM laminar | `MISSES`: `+27.55 %` of `10 %` at `1.2097e6` |
+| T3A- gamma onset / turbulent / laminar | `OPEN`, no fine run (3 gates) |
+| T3A LM onset / turbulent / laminar | `OPEN`, no runs (3 gates) |
+| T3A gamma onset / turbulent / laminar | `OPEN`, no runs (3 gates) |
+| LM onset ordering | holds at the (144.7e) onsets `4.99e4 < 8.89e4 < 1.21e6` (check row) |
+| LM onset spread (144.7d) | `OPEN`, undecided: `S_sim = 2.4242e1` against `S_key = 2.5578e1`, `E = -5.22 %`, band `15 %`, `u_val 32.97 %` |
+| gamma onset ordering | `OPEN`, no T3B/T3A- fine runs |
+| gamma onset spread | `OPEN`, no T3B/T3A- fine runs |
+
+**The ordering and the spread.** The keys' own ordering `T3B < T3A < T3A-`
+holds, as required of the data. The LM ordering holds at the (144.7e) onsets,
+`O(T3B) = 4.9938e4 < O(T3A) = 8.8932e4` (§144.3's TMR-inflow record, the
+fallback, its kind named in the note) `< O(T3A-) = 1.2106e6`, as a check
+row; the gamma ordering is open for its missing fine runs. The LM spread
+reads `S_sim = 2.4242e1` against `S_key = 2.5578e1`, `E = -5.22 %`, band
+`15 %`, undecided under `u_val 32.97 %` - the same T3B onset study that
+carries the coarse record's `2e4` bound - with §88.10 leg 3's single-rig
+`51.9x` in the note beside them; the gamma spread is open. What the plan
+asked this leg to measure is therefore in: the fitted-inflow spread reads
+`-5.22 %` from the keys' ratio where the single-rig construction read
+`51.9x`, and the gate stays open because the study of a three-level onset
+triplet whose coarsest member is the `2e4` bound is too wide to close it.
+
+**What the misses are, as far as this unit measured.** T3A- LM's turbulent
+row is read at the key's last station, `Re_x = 2.022e6`, which is still
+transitional (`H = 1.9` in the key), so a run that onsets early reads its
+whole turbulent branch high - the `+132 %` is where the row looks, not a
+downstream `C_f` the solver got wrong. T3B's laminar part is already
+`+12.9 %` / `+11.7 %` above Blasius in the key itself, and the records sit
+`+55 %` to `+58 %` over their laminar band, so that band cannot be met by
+the measurement either. The T3A- fit's `3.63 %` miss is the decay shape:
+SST's exponent `n` is fixed and the key's `Tu(x)` flattens near the end of
+its station list.
 
 ## 145. Martin & Moyce's collapsing column — the surge-front key
 

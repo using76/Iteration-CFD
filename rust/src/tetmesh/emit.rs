@@ -8,7 +8,13 @@
 //! The emission of SPEC-LIT §116.16 (TET-11): the tetrahedra become a
 //! `PolyMeshRaw`, the §92.3 gate is run on it, and under `--features
 //! single` a mesh that the f32 rounding of its points would flip is
-//! refused, naming the cells (116.26).
+//! refused, naming the cells (116.26). TET-13b extends the same layout to
+//! the prisms of §116.15: cells `0..n_tets` are the tetrahedra and the
+//! prisms follow in (116.25e)'s order, a face being a triangle or a
+//! quadrilateral keyed by its sorted points. TET-13c's collapsed wall
+//! points repeat ids in a prism - a pyramid or a tetrahedron - whose faces
+//! drop their repeated consecutive points, and a face left with fewer than
+//! three ids is no face.
 //!
 //! The layout is OpenFOAM's polyMesh convention as §1 and §92.3's G7 state
 //! it:
@@ -50,10 +56,87 @@ use std::collections::HashMap;
 /// The faces of a tetrahedron `[v0, v1, v2, v3]` with `orient3d > 0`,
 /// wound so the right-hand normal points out, opposite `v3, v2, v1, v0`
 /// (§116.4's table).
-const FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]];
+pub(crate) const FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]];
 
 /// How many cells or faces a refusal names before it says "and N more".
 const NAMED: usize = 20;
+
+/// The three tetrahedra of a prism's split (116.25f): `PRISM_SPLIT[k]` is
+/// `[v_i, v_j, v_k, v_l]` of `[v0..v5]`, and the prism is valid when every
+/// row with four distinct ids has `orient3d > 0` and at least one row does.
+/// On the right prism over the unit corner triangle (`v0..v2` =
+/// `(0,0,0), (1,0,0), (0,1,0)`, the top `+z`) each is exactly `+1`.
+pub const PRISM_SPLIT: [[usize; 4]; 3] = [[0, 2, 1, 3], [2, 1, 3, 4], [3, 2, 4, 5]];
+
+/// (116.25f) with TET-13c's repeated ids: a split row whose four ids are
+/// not distinct is skipped, never by its volume; every other row needs
+/// `orient3d > 0` on `at`'s points, and at least one row must have four
+/// distinct ids. A prism whose ids repeat is a pyramid or a tetrahedron.
+fn prism_split_ok(p: &[u32; 6], at: impl Fn(u32) -> Point) -> bool {
+    let mut any = false;
+    for row in &PRISM_SPLIT {
+        let q = row.map(|i| p[i]);
+        let [a, b, c, d] = q;
+        if a == b || a == c || a == d || b == c || b == d || c == d {
+            continue;
+        }
+        any = true;
+        let (x0, x1, x2, x3) = (at(a), at(b), at(c), at(d));
+        if !(orient3d(&x0, &x1, &x2, &x3) > 0.0) {
+            return false;
+        }
+    }
+    any
+}
+
+/// A prism `[v0..v5]` = `[a, b, c, a', b', c']` (116.25e) is valid when
+/// every tetrahedron of its split ([`PRISM_SPLIT`]) with four distinct ids
+/// has `orient3d > 0` (116.2), and one does. Unchanged for a prism whose
+/// ids are all distinct.
+pub fn prism_valid(points: &[Point], p: &[u32; 6]) -> bool {
+    prism_split_ok(p, |v| points[v as usize])
+}
+
+/// A face's repeated consecutive ids removed, cyclically: `a b b a` is
+/// `a b`, and a one- or two-id result is no face.
+pub(crate) fn reduce_cyclic(f: Vec<u32>) -> Vec<u32> {
+    let mut f = f;
+    loop {
+        let mut g: Vec<u32> = Vec::with_capacity(f.len());
+        for &x in &f {
+            if g.last() != Some(&x) {
+                g.push(x);
+            }
+        }
+        if g.len() > 1 && g[0] == g[g.len() - 1] {
+            g.pop();
+        }
+        if g.len() == f.len() {
+            return g;
+        }
+        f = g;
+    }
+}
+
+/// A prism's local face `l` in `0..5`, wound out of the prism (§116.4):
+/// the bottom `(v0, v2, v1)`, the top `(v3, v4, v5)`, and the three side
+/// quads `(v0, v1, v4, v3)`, `(v1, v2, v5, v4)`, `(v2, v0, v3, v5)` - with
+/// repeated consecutive ids removed cyclically (TET-13c's collapse).
+fn prism_face(p: &[u32; 6], l: usize) -> Vec<u32> {
+    let f = match l {
+        0 => vec![p[0], p[2], p[1]],
+        1 => vec![p[3], p[4], p[5]],
+        2 => vec![p[0], p[1], p[4], p[3]],
+        3 => vec![p[1], p[2], p[5], p[4]],
+        _ => vec![p[2], p[0], p[3], p[5]],
+    };
+    reduce_cyclic(f)
+}
+
+fn keyv(mut f: Vec<u32>) -> Vec<u32> {
+    f.sort_unstable();
+    f
+}
 
 /// One patch of the emitted mesh: its name and its OpenFOAM type
 /// (`wall`, `patch`, `symmetryPlane`, ...), kept verbatim.
@@ -68,15 +151,12 @@ pub struct EmitPatch {
 /// The emitted mesh.
 #[derive(Clone, Debug)]
 pub struct Emitted {
-    /// The polyMesh; cell `i` is the input's `tets[i]`.
+    /// The polyMesh; cell `i` is the input's `tets[i]`, then the prisms.
     pub raw: PolyMeshRaw,
-    /// Beside `raw.points`: the input index of each emitted point.
+    /// Beside `raw.points`: the index in the caller's array of each emitted
+    /// point (the input index; for a prism layer point, its own index, whose
+    /// wall point is the last entry of its `layers[w]` row).
     pub point_of: Vec<u32>,
-}
-
-fn key(mut f: [u32; 3]) -> [u32; 3] {
-    f.sort_unstable();
-    f
 }
 
 fn named<T: std::fmt::Debug>(items: &[T]) -> String {
@@ -152,6 +232,27 @@ pub fn to_poly_mesh(
     boundary: &[([u32; 3], u32)],
     patches: &[EmitPatch],
 ) -> Result<Emitted> {
+    let bnd: Vec<(Vec<u32>, u32)> = boundary.iter().map(|&(f, p)| (f.to_vec(), p)).collect();
+    to_poly_mesh_mixed(points, tets, &[], &bnd, patches)
+}
+
+/// The tetrahedra and the prisms as a `PolyMeshRaw` (§116.16's layout with
+/// TET-13b's prisms, SPEC-LIT §116.15): cells `0..tets.len()` are the
+/// tetrahedra and the prisms follow in (116.25e)'s order; a face is a
+/// triangle or a quadrilateral, keyed by its sorted points. The boundary
+/// faces are `(points, patch)` pairs, any rotation, either winding. The
+/// refusals are [`to_poly_mesh`]'s, with a prism that fails (116.25f)
+/// refused like a tetrahedron (`emit/orient`); TET-13c's repeated ids make
+/// a prism's faces drop their repeated consecutive points, and a face left
+/// with fewer than three ids is not emitted. No gate runs here;
+/// [`emit_mixed`] runs them.
+pub fn to_poly_mesh_mixed(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    prisms: &[[u32; 6]],
+    boundary: &[(Vec<u32>, u32)],
+    patches: &[EmitPatch],
+) -> Result<Emitted> {
     if tets.len() > Label::MAX as usize {
         return Err(Error::Refused(format!(
             "emit/cells: {} tetrahedra do not fit in a 32-bit label",
@@ -179,19 +280,51 @@ pub fn to_poly_mesh(
             named(&inverted)
         )));
     }
+    let flat: Vec<usize> = (0..prisms.len())
+        .filter(|&j| !prism_valid(points, &prisms[j]))
+        .map(|j| tets.len() + j)
+        .collect();
+    if !flat.is_empty() {
+        return Err(Error::Refused(format!(
+            "emit/orient: {} prisms have a split tetrahedron with orient3d <= 0 (116.25f): cells {}",
+            flat.len(),
+            named(&flat)
+        )));
+    }
 
-    // Each face's first visit is from the lower cell, its owner.
+    // Each face's first visit is from the lower cell, its owner. A face is
+    // a triangle or a quadrilateral, keyed by its sorted points.
     // value: (owner, owner's local face, neighbour or u32::MAX)
-    let mut face: HashMap<[u32; 3], (u32, u8, u32)> = HashMap::with_capacity(2 * tets.len() + 8);
-    let mut crowded: Vec<[u32; 3]> = Vec::new();
+    let mut face: HashMap<Vec<u32>, (u32, u8, u32)> =
+        HashMap::with_capacity(2 * tets.len() + 5 * prisms.len() + 8);
+    let mut crowded: Vec<Vec<u32>> = Vec::new();
     for (c, t) in tets.iter().enumerate() {
         for (l, row) in FACES.iter().enumerate() {
-            let k = key(row.map(|i| t[i]));
+            let k = keyv(row.map(|i| t[i]).to_vec());
             match face.get_mut(&k) {
                 None => {
                     face.insert(k, (c as u32, l as u8, u32::MAX));
                 }
                 Some(e) if e.2 == u32::MAX && e.0 != c as u32 => e.2 = c as u32,
+                Some(_) => crowded.push(k),
+            }
+        }
+    }
+    for (j, p) in prisms.iter().enumerate() {
+        for l in 0..5 {
+            // A prism face reduced below three ids (TET-13c's collapse) is
+            // no face: not keyed, not emitted.
+            let f = prism_face(p, l);
+            if f.len() < 3 {
+                continue;
+            }
+            let k = keyv(f);
+            let c = (tets.len() + j) as u32;
+            match face.get_mut(&k) {
+                None => {
+                    face.insert(k, (c, l as u8, u32::MAX));
+                }
+                Some(e) if e.2 == u32::MAX && e.0 != c => e.2 = c,
                 Some(_) => crowded.push(k),
             }
         }
@@ -207,15 +340,15 @@ pub fn to_poly_mesh(
     }
 
     // The boundary's patches.
-    let mut patch_of: HashMap<[u32; 3], u32> = HashMap::with_capacity(boundary.len());
-    for &(f, p) in boundary {
+    let mut patch_of: HashMap<Vec<u32>, u32> = HashMap::with_capacity(boundary.len());
+    for &(ref f, p) in boundary {
         if p as usize >= patches.len() {
             return Err(Error::Refused(format!(
                 "emit/patches: boundary face {f:?} names patch {p} of {}",
                 patches.len()
             )));
         }
-        let k = key(f);
+        let k = keyv(f.clone());
         match face.get(&k) {
             Some(e) if e.2 == u32::MAX => {}
             _ => {
@@ -233,12 +366,15 @@ pub fn to_poly_mesh(
         }
     }
 
-    let mut internal: Vec<(u32, u32, [u32; 3])> = Vec::with_capacity(2 * tets.len());
-    let mut bnd: Vec<(u32, u32, u8, [u32; 3])> = Vec::with_capacity(patch_of.len());
-    let mut unpatched: Vec<(u32, [u32; 3])> = Vec::new();
+    let mut internal: Vec<(u32, u32, Vec<u32>)> = Vec::with_capacity(2 * tets.len());
+    let mut bnd: Vec<(u32, u32, u8, Vec<u32>)> = Vec::with_capacity(patch_of.len());
+    let mut unpatched: Vec<(u32, Vec<u32>)> = Vec::new();
     for (k, &(o, l, n)) in &face {
-        let t = tets[o as usize];
-        let wound = FACES[l as usize].map(|i| t[i]);
+        let wound = if (o as usize) < tets.len() {
+            FACES[l as usize].map(|i| tets[o as usize][i]).to_vec()
+        } else {
+            prism_face(&prisms[o as usize - tets.len()], l as usize)
+        };
         if n != u32::MAX {
             internal.push((o, n, wound));
         } else {
@@ -269,6 +405,11 @@ pub fn to_poly_mesh(
             new_of[v as usize] = 0;
         }
     }
+    for p in prisms {
+        for &v in p {
+            new_of[v as usize] = 0;
+        }
+    }
     let mut point_of = Vec::new();
     for (v, slot) in new_of.iter_mut().enumerate() {
         if *slot == 0 {
@@ -283,22 +424,22 @@ pub fn to_poly_mesh(
             DVec3::new(p[0], p[1], p[2])
         })
         .collect();
-    let lab = |f: [u32; 3]| -> Vec<Label> { f.iter().map(|&v| new_of[v as usize] as Label).collect() };
+    let lab = |f: &[u32]| -> Vec<Label> { f.iter().map(|&v| new_of[v as usize] as Label).collect() };
 
     let n_faces = internal.len() + bnd.len();
     let mut faces: Vec<Vec<Label>> = Vec::with_capacity(n_faces);
     let mut owner: Vec<Label> = Vec::with_capacity(n_faces);
     let mut neighbour: Vec<Label> = Vec::with_capacity(internal.len());
-    for &(o, n, f) in &internal {
+    for (o, n, f) in &internal {
         faces.push(lab(f));
-        owner.push(o as Label);
-        neighbour.push(n as Label);
+        owner.push(*o as Label);
+        neighbour.push(*n as Label);
     }
     let mut sizes = vec![0usize; patches.len()];
-    for &(p, o, _, f) in &bnd {
+    for (p, o, _, f) in &bnd {
         faces.push(lab(f));
-        owner.push(o as Label);
-        sizes[p as usize] += 1;
+        owner.push(*o as Label);
+        sizes[*p as usize] += 1;
     }
     let mut start = 0usize;
     let mut infos = Vec::with_capacity(patches.len());
@@ -322,18 +463,39 @@ pub fn to_poly_mesh(
 /// (116.26): the cells whose volume (116.2), evaluated exactly in f64 on
 /// the points rounded to `Scalar` by [`crate::types::to_vec3`] and widened
 /// back, is not positive, ascending. Empty in the f64 build for any input
-/// with `orient3d > 0`, because the rounding is the identity there.
-pub fn rounding_flips(points: &[Point], tets: &[[u32; 4]]) -> Vec<usize> {
+/// with `orient3d > 0`, because the rounding is the identity there. A
+/// tetrahedron is cell `c`; a prism is cell `tets.len() + j`, and its arm
+/// evaluates (116.25f)'s three tetrahedra on the rounded points.
+pub fn rounding_flips_mixed(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    prisms: &[[u32; 6]],
+) -> Vec<usize> {
     let round = |p: Point| -> Point {
         let r = crate::types::to_dvec3(crate::types::to_vec3(DVec3::new(p[0], p[1], p[2])));
         [r.x, r.y, r.z]
     };
-    (0..tets.len())
+    let mut out: Vec<usize> = (0..tets.len())
         .filter(|&c| {
             let q = tets[c].map(|v| round(points[v as usize]));
             orient3d(&q[0], &q[1], &q[2], &q[3]) <= 0.0
         })
-        .collect()
+        .collect();
+    for (j, p) in prisms.iter().enumerate() {
+        // The prism arm of [`prism_valid`] on the rounded points: a split
+        // row with repeated ids is skipped, never by its volume, so the
+        // same rows are skipped here.
+        if !prism_split_ok(p, |v| round(points[v as usize])) {
+            out.push(tets.len() + j);
+        }
+    }
+    out
+}
+
+/// (116.26) for a mesh of tetrahedra only: [`rounding_flips_mixed`] with no
+/// prisms.
+pub fn rounding_flips(points: &[Point], tets: &[[u32; 4]]) -> Vec<usize> {
+    rounding_flips_mixed(points, tets, &[])
 }
 
 /// §116.16 end to end: under `--features single` the f32 check (116.26)
@@ -362,6 +524,38 @@ pub fn emit(
         }
     }
     let e = to_poly_mesh(points, tets, boundary, patches)?;
+    let q = quality::check(&e.raw, thresholds)
+        .map_err(|err| Error::Refused(format!("emit/gate (SPEC-LIT 92.3): {err}")))?;
+    Ok((e, q))
+}
+
+/// §116.16 end to end for the tetrahedra and the prisms of TET-13b: the
+/// f32 check (116.26) first, with (116.25f)'s prism arm, refused naming the
+/// cells; then [`to_poly_mesh_mixed`]; then §92.3's gate,
+/// [`quality::check`], refused with §92.3's message.
+pub fn emit_mixed(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    prisms: &[[u32; 6]],
+    boundary: &[(Vec<u32>, u32)],
+    patches: &[EmitPatch],
+    thresholds: &QualityThresholds,
+) -> Result<(Emitted, QualityReport)> {
+    #[cfg(feature = "single")]
+    {
+        let flips = rounding_flips_mixed(points, tets, prisms);
+        if !flips.is_empty() {
+            return Err(Error::Refused(format!(
+                "emit/f32: rounding the points to f32 makes {} of {} cells flat or inverted \
+                 by (116.26) of SPEC-LIT 116.16: cells {}; translate the geometry to a local origin near the body \
+                 (docs/17 5.1.7) and mesh again",
+                flips.len(),
+                tets.len() + prisms.len(),
+                named(&flips)
+            )));
+        }
+    }
+    let e = to_poly_mesh_mixed(points, tets, prisms, boundary, patches)?;
     let q = quality::check(&e.raw, thresholds)
         .map_err(|err| Error::Refused(format!("emit/gate (SPEC-LIT 92.3): {err}")))?;
     Ok((e, q))
@@ -437,7 +631,7 @@ mod tests {
         for (c, t) in tets.iter().enumerate() {
             for r in FACES {
                 let f = r.map(|i| t[i]);
-                if key(f) != [0, 1, 2] {
+                if keyv(f.to_vec()) != vec![0, 1, 2] {
                     bnd.push((f, c as u32));
                 }
             }

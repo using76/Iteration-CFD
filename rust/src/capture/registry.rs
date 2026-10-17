@@ -344,6 +344,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_spalart_allmaras_correction_replays_bitwise"),
     ),
     (
+        "src/models/spalart_allmaras/conservative.rs",
+        Stance::Via("src/models/spalart_allmaras.rs"),
+    ),
+    (
         "src/models/transition.rs",
         Stance::Gate("the_transition_correction_replays_bitwise"),
     ),

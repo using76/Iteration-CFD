@@ -1,0 +1,76 @@
+/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    p
+    {
+        solver          PBiCGStab;
+        preconditioner  DIC;
+        tolerance       1e-08;
+        relTol          0.01;
+        maxIter         1000;
+    }
+    Phi
+    {
+        solver          PBiCGStab;
+        preconditioner  DIC;
+        tolerance       1e-12;
+        relTol          0;
+        maxIter         5000;
+    }
+    U
+    {
+        solver          PBiCGStab;
+        preconditioner  diagonal;
+        tolerance       1e-08;
+        relTol          0.1;
+        maxIter         200;
+    }
+    T
+    {
+        solver          PBiCGStab;
+        preconditioner  diagonal;
+        tolerance       1e-08;
+        relTol          0.01;
+        maxIter         200;
+    }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+}
+
+relaxationFactors
+{
+    // Measured on this mesh (TET-14): U 0.7 and p 0.3 stall at a residual
+    // of 1e-2 on the thin wall prisms, and two non-orthogonal correctors
+    // diverge. U 0.5 with p 0.2 converges.
+    fields
+    {
+        p               0.2;
+    }
+    equations
+    {
+        U               0.5;
+        T               0.7;
+    }
+}
+
+
+// ************************************************************************* //
