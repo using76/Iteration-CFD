@@ -61,6 +61,7 @@ use crate::dust::progress::{
 };
 use crate::dust::psi::{reaction_time, AdiabaticCurve, PsiOptions, PsiProblem};
 use crate::dust::thermo::EquivalentGas;
+use crate::dust::vessel0d::{BurningLaw, UnburnedDensity};
 use crate::error::{Error, Result};
 use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops;
@@ -83,6 +84,13 @@ pub struct DustSetup {
     pub fsc: FscConstants,
     /// The ignition source of (155.4); `None` when the case named none.
     pub ignition: Option<IgnitionSource>,
+    /// Gate DST-VES's prescribed `U_t` law (SPEC-LIT §157.6); `None` runs
+    /// the §154 closures.
+    pub prescribed_ut: Option<BurningLaw>,
+    /// Which density the propagation reads (SPEC-LIT §157.6): the
+    /// compressed (155.10) gas, or the initial one for the negative
+    /// control.
+    pub unburned_density: UnburnedDensity,
     /// The ignition's t0 (§151.5): the origin of the flame development time.
     /// 0.0 without an ignition, so t_fd is the clock itself.
     pub t_fd_origin: f64,
@@ -170,6 +178,8 @@ impl DustSetup {
             gas,
             fsc,
             ignition,
+            prescribed_ut: d.prescribed_ut,
+            unburned_density: d.unburned_density,
             t_fd_origin,
             t_u: d.t_u,
             p_init,
@@ -192,6 +202,17 @@ impl DustSetup {
     /// at the run's `p0`.
     pub fn rho_u(&self, p: f64) -> f64 {
         unburned_density(self.rho_u0, p, self.p_init, self.gamma_u)
+    }
+
+    /// The density the flame PROPAGATION reads at `p` (SPEC-LIT §157.6):
+    /// the (155.10) compressed gas of [`Self::rho_u`], or `rho_u0` held at
+    /// the initial state for `unburnedDensity "initial"` - INSIGHTS (g)'s
+    /// negative control.
+    pub fn propagation_density(&self, p: f64) -> f64 {
+        match self.unburned_density {
+            UnburnedDensity::Compressed => self.rho_u(p),
+            UnburnedDensity::Initial => self.rho_u0,
+        }
     }
 
     /// (155.2)'s burned density: `rho_b(p) = p W_B/(R0 T_b(p))` with
@@ -495,6 +516,19 @@ impl<'m> DustSource<'m> {
             t_new,
             n,
         )?;
+        // 2b. Gate DST-VES's prescribed U_t (SPEC-LIT §157.6): the case's
+        //     law at the CURRENT p0 replaces the closures' U_t - the TFC
+        //     kernel already gives D_t = 0 and K = 0 on a laminar case.
+        if let Some(law) = self.setup.prescribed_ut {
+            field_ops::set_field(
+                gpu,
+                &self.fldk,
+                &mut self.u_t,
+                law.s_u(f64::from(gas.p0()), self.setup.p_init, self.setup.gamma_u)
+                    as Scalar,
+                n,
+            )?;
+        }
         // 3. The ignition bracket (155.4), or nothing without a source.
         if let (Some(src), Some(p)) = (&self.setup.ignition, self.p_local) {
             dev::ignition(gpu, &self.pk, &mut self.w_ign, &m.c, src, p, t_new, n)?;
@@ -523,7 +557,7 @@ impl<'m> DustSource<'m> {
                 u_t: &self.u_t,
                 k_rate: &self.k_rate,
                 w_ign: has_ign.then_some(&self.w_ign),
-                rho_u: self.setup.rho_u(f64::from(gas.p0())),
+                rho_u: self.setup.propagation_density(f64::from(gas.p0())),
             },
         )?;
         // 7. wdot_c = S_U - S_P' c~ (155.2), kg/(m3 s).
@@ -618,6 +652,19 @@ impl<'m> DustSource<'m> {
             .iter()
             .take(n)
             .fold(0.0f64, |a, &v| a.max(f64::from(v)));
+        // Gate DST-VES's prescribed U_t (SPEC-LIT §157.6): the prediction
+        // reads the case's law at BOTH ends of the pressure range, the
+        // initial and the AICC end state, not the closures' U_t,ISP.
+        let isp_max = match self.setup.prescribed_ut {
+            Some(law) => {
+                let p_e = self.setup.p_init
+                    * self.setup.gas.aicc(self.setup.t_u)?.p_ratio;
+                let s0 = law.s_u(self.setup.p_init, self.setup.p_init, self.setup.gamma_u);
+                let s_e = law.s_u(p_e, self.setup.p_init, self.setup.gamma_u);
+                f64::max(s0, s_e)
+            }
+            None => isp_max,
+        };
         let u_max = gpu
             .download(&u.f)?
             .iter()
@@ -660,7 +707,7 @@ impl<'m> DustSource<'m> {
             &gas.rho().f,
             &self.u_t,
             &m.v,
-            self.setup.rho_u(f64::from(gas.p0())),
+            self.setup.propagation_density(f64::from(gas.p0())),
             dt,
             n,
         )?;

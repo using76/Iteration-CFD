@@ -3701,6 +3701,13 @@ fn run(c: &mut Checks) -> Result<()> {
     validate_gates::dst_leeds::check_dst_leeds(c)?;
     c.leave_gate();
     }
+    // SPEC-LIT 157.6 - Gate DST-VES: the closed vessels, the thin-flame
+    // spheres and the REMBE closed stage, in src/bin/validate_gates/dst_vessel.rs.
+    if c.section("Gate DST-VES: closed vessels, thin-flame spheres against (157.4) and the REMBE closed stage against Huang et al. 2022 Fig. 10 (SPEC-LIT 157.6)") {
+    c.enter_gate(validate_gates::dst_vessel::GATE);
+    validate_gates::dst_vessel::check_dst_vessel(c)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

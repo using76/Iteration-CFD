@@ -1,0 +1,57 @@
+// Gate DST-VES's 20 L sphere (SPEC-LIT 157.6 (i)): R = 0.1684 m, the
+// prescribed constant-c_p, constant-W thermo where (157.2) is exact (the
+// AICC end pressure is 9.4117 p0), the TFC operator at a PRESCRIBED
+// U_t = S0 (T_u/T_u0)^alpha (p/p0)^beta with S0 = 0.5 m/s, alpha = 2.0,
+// beta = -0.5 - a test input, not a correlation claim - and D_t negligible,
+// which is the laminar case (no turbulence block). Central ignition; the
+// host integrator `dust::vessel0d` holds (157.4) against this run.
+// REDUCED: 200 cells - 199 of 0.1676/199 = 0.8422 mm out to 0.1676 m and
+// one of 0.8 mm to the wall - instead of the gate's R/1000 = 0.168 mm
+// brush row; the sector is mesh.sector's 1-D one (SPEC-LIT 157.3).
+{
+  "name": "sphere20L",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.1684, 0, 0] },
+    "cells": [199, 1, 1],
+    "boundaries": { "xmin": "apex", "xmax": "vessel", "ymin": "sideYmin",
+      "ymax": "sideYmax", "zmin": "sideZmin", "zmax": "sideZmax" },
+    "sector": { "angle": 90, "fineRadius": 0.1676, "growth": 1.0 }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.7, "Prt": 0.7, "TRef": 300 },
+    "buoyancy": "densityRatio"
+  },
+  "patches": [
+    // The apex has no faces; it only needs a rule so every boundary name
+    // resolves - no lowered field carries a boundary entry under it.
+    { "match": "apex", "kind": "symmetry" },
+    { "match": "vessel", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" } },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 300, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "GAMG", "tolerance": 1e-10, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.2, "deltaT": 1e-4 },
+  "combustion": { "model": "TFC", "PrT": 0.7,
+    "prescribedUt": { "S0": 0.5, "alpha": 2.0, "beta": -0.5 },
+    "ignition": { "point": [0, 0, 0], "sigmaR": 2.1e-3, "W0": 1e4, "t0": 1e-3 } },
+  "dust": { "thermo": "prescribed", "cp": 1000, "Wu": 0.029, "Wb": 0.029,
+    "Tb": 2100, "SL": 0.5 }
+}

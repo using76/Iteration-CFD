@@ -150,10 +150,12 @@ pub fn dust_turbulence_of<'a>(
 }
 
 /// One banner line for the start-up log: the model, the thermo mode and the
-/// state of (152.9)-(152.10), (153.2) and (155.9) the step runs with.
+/// state of (152.9)-(152.10), (153.2) and (155.9) the step runs with. A
+/// Gate DST-VES case appends its prescribed `U_t` law and the density the
+/// propagation reads (SPEC-LIT §157.6).
 pub fn describe(ds: &DustSource<'_>) -> String {
     let s = ds.setup();
-    format!(
+    let mut line = format!(
         "dust (SPEC-LIT §157.4): model {:?}, thermo {:?}, T_u {} K, T_b {} K, sigma {}, \
          S_L {} m/s, Psi {} (dimensionless), t_r {} s, max flame Courant {}",
         s.fsc.model,
@@ -165,7 +167,17 @@ pub fn describe(ds: &DustSource<'_>) -> String {
         sci(s.psi, 4),
         sci(s.t_r, 4),
         g(s.max_flame_courant),
-    )
+    );
+    if let Some(law) = s.prescribed_ut {
+        line.push_str(&format!(
+            ", prescribed U_t S0 {} alpha {} beta {}, unburned density {:?}",
+            g(law.s0),
+            g(law.alpha),
+            g(law.beta),
+            s.unburned_density,
+        ));
+    }
+    line
 }
 
 #[cfg(test)]

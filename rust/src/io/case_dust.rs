@@ -47,6 +47,7 @@ use crate::dust::laminar::LaminarSpeed;
 use crate::dust::thermo::{
     EquivalentGas, FormulaInputs, N2_PER_O2_CENTI, PrescribedInputs, StarchFuel, tm4513_gas_set,
 };
+use crate::dust::vessel0d::{BurningLaw, UnburnedDensity};
 use crate::error::{Error, Result};
 use crate::io::case_chem::JsonCombustion;
 use crate::io::case_json::{
@@ -200,6 +201,13 @@ pub struct LoweredDust {
     pub max_flame_courant: f64,
     /// The ignition source of (155.4); `None` when the case named none.
     pub ignition: Option<IgnitionSource>,
+    /// Gate DST-VES's prescribed `U_t` law (SPEC-LIT §157.6); `None` runs
+    /// the §154 closures. TFC only, and only on a laminar case.
+    pub prescribed_ut: Option<BurningLaw>,
+    /// Which density the propagation reads (SPEC-LIT §157.6): the
+    /// compressed (155.10) gas, or the initial one - INSIGHTS (g)'s
+    /// negative control, `unburnedDensity "initial"`.
+    pub unburned_density: UnburnedDensity,
     /// The equivalent-gas thermo mode (§152.9).
     pub thermo: DustThermo,
     /// The unburned temperature T_u, the case's `initial.T`: the fresh
@@ -520,6 +528,57 @@ pub fn lower_dust(
              production (SPEC-LIT §156.7)",
         ));
     }
+    // ---- Gate DST-VES's prescribed U_t and its negative control (§157.6) --
+    let prescribed_ut = match &c.prescribed_ut {
+        None => None,
+        Some(u) => {
+            if model == CombustionModel::Fsc {
+                return Err(refused(
+                    "combustion.prescribedUt",
+                    "stated with combustion.model FSC; the prescribed U_t is the TFC \
+                     operator of Gate DST-VES alone (SPEC-LIT §157.6) - FSC forms U_t \
+                     from its own closures",
+                ));
+            }
+            if sst_model {
+                return Err(refused(
+                    "combustion.prescribedUt",
+                    "stated with turbulence.model kOmegaSST; the case's law holds U_t \
+                     itself, so the turbulent diffusivity has to be negligible - run \
+                     it laminar",
+                ));
+            }
+            let law = BurningLaw { s0: u.s0, alpha: u.alpha, beta: u.beta };
+            law.validate()
+                .map_err(|e| keyed("combustion.prescribedUt", e))?;
+            Some(law)
+        }
+    };
+    let unburned_density = match c.unburned_density.as_deref() {
+        None => UnburnedDensity::Compressed,
+        Some("compressed") => UnburnedDensity::Compressed,
+        Some("initial") => {
+            if c.prescribed_ut.is_none() {
+                return Err(refused(
+                    "combustion.unburnedDensity",
+                    "\"initial\" without combustion.prescribedUt; holding rho_u at its \
+                     initial value is the negative control of Gate DST-VES (INSIGHTS (g), \
+                     SPEC-LIT §157.6), and the control exists to MISS (dp/dt)_max only \
+                     against the prescribed law's compressed run",
+                ));
+            }
+            UnburnedDensity::Initial
+        }
+        Some(other) => {
+            return Err(refused(
+                "combustion.unburnedDensity",
+                &format!(
+                    "\"{other}\": the recognised modes are \"compressed, initial\" \
+                     (SPEC-LIT §157.6)"
+                ),
+            ))
+        }
+    };
     if cx.compressible {
         return Err(refused(
             "physics.compressible",
@@ -572,6 +631,8 @@ pub fn lower_dust(
         t_flacc,
         max_flame_courant,
         ignition,
+        prescribed_ut,
+        unburned_density,
         thermo,
         t_u,
         s_l,

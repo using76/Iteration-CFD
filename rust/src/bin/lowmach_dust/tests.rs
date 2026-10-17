@@ -691,3 +691,73 @@ fn dust_sst_case_runs() {
     println!("  [157.4] SST box: 5 steps, c~ max {c_max:.4}, out of bounds {worst_c}");
     assert_eq!(worst_c, 0, "the c~ solve left a cell out of bounds");
 }
+
+/// **SPEC-LIT §157.6.** The prescribed `U_t` of Gate DST-VES follows the
+/// law: the 20 L sphere case at a REDUCED 20-cell sector runs five sealed
+/// steps, and the written `Ut` field is uniform at the case's own law
+/// `S_u(p0_final)`, within 1e-3 relative, every value finite. The
+/// `unburnedDensity: "initial"` negative control runs the same five steps
+/// and ends with finite c and T.
+#[test]
+fn dust_prescribed_ut_follows_the_law() {
+    let Ok(_g) = Gpu::new(0) else { return };
+    let full = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cases/dust/sphere20L.jsonc"),
+    )
+    .expect("the shipped sphere20L case reads");
+    let reduced = full
+        .replace("\"cells\": [199, 1, 1]", "\"cells\": [19, 1, 1]")
+        .replace("\"fineRadius\": 0.1676", "\"fineRadius\": 0.16");
+    assert!(reduced != full, "the REDUCED replacements matched");
+    let path = write_case("vessel_ut", &reduced);
+    run_case(
+        &path,
+        &["-sealed", "-p0", "101325", "-endTime", "5e-4", "-deltaT", "1e-4"],
+    )
+    .unwrap_or_else(|e| panic!("the prescribed-U_t sphere runs: {e}"));
+    let n = 20;
+    let out = final_dir(&path);
+    let ut = written(&out, "Ut", n);
+    assert!(ut.iter().all(|v| f64::from(*v).is_finite()), "Ut is not finite");
+    let (lo, hi) = ut
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+            (lo.min(f64::from(v)), hi.max(f64::from(v)))
+        });
+    assert!(hi - lo <= 1e-12 * hi.abs().max(f64::MIN_POSITIVE), "Ut is not uniform: [{lo}, {hi}]");
+    // The case's own law at the run's FINAL p0, with the case's gamma_u.
+    let l = read_case_jsonc(&path).expect("parse").lower().expect("lower");
+    let d = l.dust.as_ref().expect("the case states dust");
+    let gas = d.gas().expect("gas");
+    let cp_u = gas.cp_u(300.0).expect("cp_u");
+    let gamma_u = cp_u / (cp_u - ofgpu::chem::thermo::R_GAS / gas.w_u());
+    let law = d.prescribed_ut.expect("the case states prescribedUt");
+    let p0_final = f64::from(written(&out, "p0", n)[0]);
+    let want = law.s_u(p0_final, 101325.0, gamma_u);
+    let got = f64::from(ut[0]);
+    assert!(
+        (got - want).abs() <= 1e-3 * want.abs(),
+        "Ut {got} is not S_u(p0) {want} within 1e-3 relative"
+    );
+    // The negative control: rho_u held at its initial value runs too.
+    let control = reduced.replace(
+        "\"beta\": -0.5 }",
+        "\"beta\": -0.5 }, \"unburnedDensity\": \"initial\"",
+    );
+    assert!(control != reduced, "the control replacement matched");
+    let path = write_case("vessel_ut_initial", &control);
+    run_case(
+        &path,
+        &["-sealed", "-p0", "101325", "-endTime", "5e-4", "-deltaT", "1e-4"],
+    )
+    .unwrap_or_else(|e| panic!("the negative control runs: {e}"));
+    let out = final_dir(&path);
+    for name in ["c", "T"] {
+        let f = written(&out, name, n);
+        assert!(
+            f.iter().all(|v| f64::from(*v).is_finite()),
+            "{name} is not finite in the negative control"
+        );
+    }
+}

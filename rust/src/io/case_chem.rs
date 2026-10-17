@@ -211,6 +211,36 @@ pub struct JsonCombustion {
     /// The ignition source of (155.4); absent is no ignition source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignition: Option<JsonIgnition>,
+    /// Gate DST-VES's prescribed `U_t` (SPEC-LIT §157.6): the TFC operator
+    /// runs at `U_t = S0 (T_u/T_u0)^alpha (p/p0)^beta` instead of the
+    /// closures'. TFC only - refused beside `model` FSC and beside any
+    /// turbulence model, and lowered in `crate::io::case_dust`.
+    #[serde(rename = "prescribedUt", default, skip_serializing_if = "Option::is_none")]
+    pub prescribed_ut: Option<JsonPrescribedUt>,
+    /// Gate DST-VES's density the propagation reads (SPEC-LIT §157.6):
+    /// `"compressed"` (the default, the (155.10) gas) or `"initial"` - the
+    /// negative control of INSIGHTS (g). Lowered in `crate::io::case_dust`.
+    #[serde(rename = "unburnedDensity", default, skip_serializing_if = "Option::is_none")]
+    pub unburned_density: Option<String>,
+}
+
+/// `combustion.prescribedUt`, the prescribed burning law of Gate DST-VES
+/// (SPEC-LIT §157.6 (i)): `U_t = S0 (T_u(p)/T_u0)^alpha (p/p0)^beta` with
+/// `T_u(p)/T_u0 = (p/p0)^((g-1)/g)` - a test input, not a correlation
+/// claim. `alpha` and `beta` omitted are 0, the constant law.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonPrescribedUt {
+    /// m/s, the burning velocity at the initial state. Required, finite
+    /// and above zero.
+    #[serde(rename = "S0")]
+    pub s0: f64,
+    /// The exponent of the unburned-temperature ratio; omitted is 0.
+    #[serde(default)]
+    pub alpha: f64,
+    /// The exponent of the pressure ratio; omitted is 0.
+    #[serde(default)]
+    pub beta: f64,
 }
 
 /// `combustion.ignition`, the source of (155.4) (SPEC-LIT §155.3). `sigmaT`
@@ -725,7 +755,7 @@ fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<Lo
     // §13.4.1: a key of a closure the case did not select is refused. The
     // FSC/TFC keys lower in `crate::io::case_dust`; under laminar/EDM/EDC/
     // PaSR they are refused here by the same table.
-    let keys: [(&str, bool, &str); 14] = [
+    let keys: [(&str, bool, &str); 16] = [
         ("A", c.a.is_some(), "EDM"),
         ("B", c.b.is_some(), "EDM"),
         ("variant", c.variant.is_some(), "EDC"),
@@ -740,6 +770,8 @@ fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<Lo
         ("tFlacc", c.t_flacc.is_some(), "FSC/TFC"),
         ("maxFlameCourant", c.max_flame_courant.is_some(), "FSC/TFC"),
         ("ignition", c.ignition.is_some(), "FSC/TFC"),
+        ("prescribedUt", c.prescribed_ut.is_some(), "FSC/TFC"),
+        ("unburnedDensity", c.unburned_density.is_some(), "FSC/TFC"),
     ];
     if !["laminar", "EDM", "EDC", "PaSR"].contains(&model) {
         return Err(refused(

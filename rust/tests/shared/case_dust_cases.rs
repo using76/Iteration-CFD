@@ -13,12 +13,14 @@
 use ofgpu::dust::courant::CO_F_MAX;
 use ofgpu::dust::fsc::{A_FSC, CombustionModel};
 use ofgpu::dust::laminar::LaminarSpeed;
+use ofgpu::dust::vessel0d::{BurningLaw, UnburnedDensity};
 use ofgpu::error::Error;
 use ofgpu::io::case_chem::JsonCombustion;
 use ofgpu::io::case_dust::{
-    DustThermo, LoweredDust, LoweredDustSst, decimal_fraction, is_dust_model,
+    DustContext, DustThermo, JsonDust, LoweredDust, LoweredDustSst, decimal_fraction,
+    is_dust_model, lower_dust,
 };
-use ofgpu::io::case_json::{JsonCase, LoweredCase, read_case_jsonc_str};
+use ofgpu::io::case_json::{JsonCase, LoweredCase, read_case_jsonc, read_case_jsonc_str};
 
 /// The duct's six boundary names: an inlet at `xmin`, an open outlet at
 /// `xmax`, symmetry sides - the heated-duct shape of `src/bin/lowmach.rs`.
@@ -477,4 +479,123 @@ fn dust_refusals() {
     // refuse_dust_case's text is the driver seam's one message.
     let e = ofgpu::io::case_dust::refuse_dust_case("ofgpu-buoyant");
     assert!(e.to_string().contains("ofgpu-buoyant") && e.to_string().contains("DST-06"), "{e}");
+}
+
+/// **SPEC-LIT §157.6.** The three Gate DST-VES case files lower: sphere20L
+/// carries the prescribed `U_t` law and the compressed density and lands on
+/// the 200-cell REDUCED sector, sphere1m3 the same at its radius, and
+/// rembeClosed states neither key. Host only: no card is needed.
+#[test]
+fn vessel_cases_lower() {
+    let case = |name: &str| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../cases/dust/{name}.jsonc"));
+        read_case_jsonc(&path)
+            .unwrap_or_else(|e| panic!("{} parses: {e}", path.display()))
+            .lower()
+            .unwrap_or_else(|e| panic!("{} lowers: {e}", path.display()))
+    };
+    let law = BurningLaw { s0: 0.5, alpha: 2.0, beta: -0.5 };
+    let sphere = case("sphere20L");
+    {
+        let d = sphere.dust.as_ref().expect("the case states dust");
+        assert_eq!(d.model, CombustionModel::Tfc);
+        assert_eq!(d.prescribed_ut, Some(law));
+        assert_eq!(d.unburned_density, UnburnedDensity::Compressed);
+    }
+    assert_eq!(sphere.build_host_mesh().expect("mesh").n_cells, 200);
+    let big = case("sphere1m3");
+    let d = big.dust.as_ref().expect("the case states dust");
+    assert_eq!(d.model, CombustionModel::Tfc);
+    assert_eq!(d.prescribed_ut, Some(law));
+    assert_eq!(d.unburned_density, UnburnedDensity::Compressed);
+    let rembe = case("rembeClosed");
+    let d = rembe.dust.as_ref().expect("the case states dust");
+    assert_eq!(d.model, CombustionModel::Fsc);
+    assert_eq!(d.prescribed_ut, None);
+    assert_eq!(d.unburned_density, UnburnedDensity::Compressed);
+}
+
+/// **SPEC-LIT §157.6.** Every refusal of the two Gate DST-VES keys names
+/// its JSON path: `prescribedUt` beside FSC, beside a turbulence model and
+/// with a value the law refuses, and `unburnedDensity` misspelled or
+/// `"initial"` without the law.
+#[test]
+fn prescribed_ut_refusals_name_the_setting() {
+    // The TFC operator is Gate DST-VES's alone: refused beside model FSC.
+    let fsc_ut = r#", "combustion": { "model": "FSC", "PrT": 0.3,
+        "prescribedUt": { "S0": 0.5, "alpha": 2.0, "beta": -0.5 } }"#;
+    refuses(lowers(&dust_case("300", fsc_ut, FORMULA_MIN)), "combustion.prescribedUt");
+    // The law holds U_t itself, so a turbulence model has no job: refused
+    // beside kOmegaSST (the FSC_MIN text re-typed TFC with the law).
+    let sst_ut = sst_case_text("[0,0,0]", "", &PRESCRIBED_DUST).replace(
+        r#""model": "FSC""#,
+        r#""model": "TFC", "prescribedUt": { "S0": 0.5, "alpha": 2.0, "beta": -0.5 }"#,
+    );
+    refuses(lowers(&sst_ut), "combustion.prescribedUt");
+    // S0 has to be finite and above zero; the law's own refusal, keyed.
+    let s0_zero = r#", "combustion": { "model": "TFC", "PrT": 0.3,
+        "prescribedUt": { "S0": 0.0 } }"#;
+    refuses(lowers(&dust_case("300", s0_zero, FORMULA_MIN)), "combustion.prescribedUt");
+    // alpha/beta not finite cannot ride through JSON, so this one drives
+    // `lower_dust` directly.
+    let cx_names = vec!["vessel".to_string()];
+    let cx = DustContext {
+        species: false,
+        chemistry: false,
+        turbulence_kind: None,
+        turbulence_model: None,
+        compressible: false,
+        gravity: [0.0, 0.0, 0.0],
+        initial_t: Some(300.0),
+        patch_names: &cx_names,
+        rules: &[],
+    };
+    let dust = JsonDust {
+        thermo: "prescribed".to_string(),
+        phi: None,
+        cp: Some(1000.0),
+        w_u: Some(0.029),
+        w_b: Some(0.029),
+        t_b: Some(2100.0),
+        s_l: Some(0.5),
+        sst: None,
+    };
+    let combustion = |u: ofgpu::io::case_chem::JsonPrescribedUt| JsonCombustion {
+        model: Some("TFC".to_string()),
+        a: None,
+        b: None,
+        variant: None,
+        cd1: None,
+        cd2: None,
+        gamma_max: None,
+        psr_span: None,
+        tau_mix: None,
+        tau_chem: None,
+        c_mix: None,
+        pr_t: Some(0.7),
+        t_flacc: None,
+        max_flame_courant: None,
+        ignition: None,
+        prescribed_ut: Some(u),
+        unburned_density: None,
+    };
+    for (s0, alpha, beta) in [(0.5, f64::NAN, 0.0), (0.5, 2.0, f64::INFINITY)] {
+        let u = ofgpu::io::case_chem::JsonPrescribedUt { s0, alpha, beta };
+        refuses(
+            lower_dust(Some(&combustion(u)), Some(&dust), &cx),
+            "combustion.prescribedUt",
+        );
+    }
+    // The negative control's key: a spelling that is not one of the two
+    // modes, and "initial" without the law it controls against.
+    let bogus = r#", "combustion": { "model": "TFC", "PrT": 0.3,
+        "unburnedDensity": "bogus" }"#;
+    refuses(lowers(&dust_case("300", bogus, FORMULA_MIN)), "combustion.unburnedDensity");
+    let initial_bare = r#", "combustion": { "model": "TFC", "PrT": 0.3,
+        "unburnedDensity": "initial" }"#;
+    refuses(
+        lowers(&dust_case("300", initial_bare, FORMULA_MIN)),
+        "combustion.unburnedDensity",
+    );
 }

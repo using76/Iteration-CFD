@@ -1,0 +1,60 @@
+// Gate DST-VES's REMBE closed stage (SPEC-LIT 157.6 (ii)) on the
+// equal-volume sphere, R = 1.4 m for the 11.5 m3 vessel: H22's inputs with
+// the formula thermo at phi = 0.62, FSC with A = 0.4 and Pr_t = 0.28, the
+// rho-weighted SST WITHOUT sust at u' = 0.75 m/s and L = 0.1 m - hence the
+// initial k = 1.5 u'^2 = 0.8438 m2/s2 and omega = k^0.5/(0.09 L) =
+// 102.06 1/s - and T_0 = 273 K. Run with `-p0 107325`: the ambient
+// 101325 Pa plus the key J.2 initial overpressure of 0.06 bar. A
+// REPRODUCTION row: H22 guessed and adjusted u' and L on this curve
+// (H22 3.6). REDUCED: 182 sector cells (140 of 5 mm out to 0.7 m, growth
+// 1.05 beyond) instead of the gate's R/1000 brush row.
+{
+  "name": "rembeClosed",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [1.4, 0, 0] },
+    "cells": [140, 1, 1],
+    "boundaries": { "xmin": "apex", "xmax": "vessel", "ymin": "sideYmin",
+      "ymax": "sideYmax", "zmin": "sideZmin", "zmax": "sideZmax" },
+    "sector": { "angle": 90, "fineRadius": 0.7, "growth": 1.05 }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.7, "Prt": 0.28, "TRef": 273 },
+    "buoyancy": "densityRatio"
+  },
+  "turbulence": { "kind": "RAS", "model": "kOmegaSST",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 } },
+  "patches": [
+    // The apex has no faces; it only needs a rule so every boundary name
+    // resolves - no lowered field carries a boundary entry under it.
+    { "match": "apex", "kind": "symmetry" },
+    { "match": "vessel", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 0.8438 },
+      "omega": { "type": "omegaWallFunction", "value": 102.06 } },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 273, "p": 0.0, "k": 0.8438, "omega": 102.06 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-10, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "k|omega", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.12, "deltaT": 2e-4 },
+  "combustion": { "model": "FSC", "A": 0.4, "PrT": 0.28,
+    "ignition": { "point": [0, 0, 0], "sigmaR": 0.01, "W0": 1e4, "t0": 1e-3 } },
+  "dust": { "thermo": "formula", "phi": 0.62 }
+}

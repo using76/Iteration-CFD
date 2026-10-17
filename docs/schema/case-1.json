@@ -385,6 +385,17 @@
             "null"
           ]
         },
+        "prescribedUt": {
+          "description": "Gate DST-VES's prescribed `U_t` (SPEC-LIT §157.6): the TFC operator\nruns at `U_t = S0 (T_u/T_u0)^alpha (p/p0)^beta` instead of the\nclosures'. TFC only - refused beside `model` FSC and beside any\nturbulence model, and lowered in `crate::io::case_dust`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonPrescribedUt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "psrSpan": {
           "type": [
             "number",
@@ -409,6 +420,13 @@
         },
         "tauMix": {
           "description": "PaSR's mixing time by name (§134.4). No default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unburnedDensity": {
+          "description": "Gate DST-VES's density the propagation reads (SPEC-LIT §157.6):\n`\"compressed\"` (the default, the (155.10) gas) or `\"initial\"` - the\nnegative control of INSIGHTS (g). Lowered in `crate::io::case_dust`.",
           "type": [
             "string",
             "null"
@@ -2110,6 +2128,33 @@
         "gravity",
         "fluid",
         "buoyancy"
+      ]
+    },
+    "JsonPrescribedUt": {
+      "description": "`combustion.prescribedUt`, the prescribed burning law of Gate DST-VES\n(SPEC-LIT §157.6 (i)): `U_t = S0 (T_u(p)/T_u0)^alpha (p/p0)^beta` with\n`T_u(p)/T_u0 = (p/p0)^((g-1)/g)` - a test input, not a correlation\nclaim. `alpha` and `beta` omitted are 0, the constant law.",
+      "type": "object",
+      "properties": {
+        "S0": {
+          "description": "m/s, the burning velocity at the initial state. Required, finite\nand above zero.",
+          "type": "number",
+          "format": "double"
+        },
+        "alpha": {
+          "description": "The exponent of the unburned-temperature ratio; omitted is 0.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        },
+        "beta": {
+          "description": "The exponent of the pressure ratio; omitted is 0.",
+          "type": "number",
+          "format": "double",
+          "default": 0.0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "S0"
       ]
     },
     "JsonRegion": {

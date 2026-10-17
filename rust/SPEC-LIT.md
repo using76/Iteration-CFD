@@ -56409,7 +56409,8 @@ as built in §157.8.
 
 `src/dust/vessel0d.rs` integrates (157.4) on the host (classical RK4, f64, with the same S_u(p)
 and γ_u as the run). `src/bin/validate_gates/dst_vessel.rs`, `cases/dust/{sphere20L, sphere1m3,
-rembeClosed}.jsonc`. f64 and f32 rows, P class, ≤ 8 min per build.
+rembeClosed}.jsonc`. f64 and f32 rows, P class, ≤ 8 min per build. As built, with its
+measurements and its recorded misses, in §157.9.
 
 **(i) Spheres of 20 L (R = 0.1684 m) and 1 m³ (R = 0.6204 m)**, central ignition, the TFC operator
 (154.9) at a prescribed `U_t = S_u(p)` and a negligible D_t, in the prescribed constant-c_p,
@@ -56656,6 +56657,164 @@ bracket quotient for S_t,b; the four runs as child processes of the validate bin
 needs `ofgpu-lowmach` built beside it (the gate reports itself open by name otherwise).
 
 Labels: none.
+
+### 157.9 What DST-08 landed
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Equations from §157.2 and
+(155.10) only; the three below are the test input and the integration procedure §157.6 left
+open.
+
+**The test burning law.** §157.6 (i) prescribes `U_t = S_u(p)`, "constant or a test power law
+in (T_u, p)". The power law, a test input and not a correlation claim:
+
+```
+  S_u(p) = S0 (T_u(p)/T_u0)^α (p/p0)^β ,      T_u(p)/T_u0 = (p/p0)^{(γ_u − 1)/γ_u}  (155.10)       (157.9)
+```
+
+formed on the host in f64 in this operation order: `pr = p/p0; tr = pr^((γ_u−1)/γ_u);
+S0 tr^α pr^β` (`BurningLaw::s_u`, `src/dust/vessel0d.rs`), one function for the run and its
+reference.
+
+**The host reference** (`src/dust/vessel0d.rs`, host f64 in both builds). (157.4) is integrated
+by classical RK4 at a fixed step h from a start (t_s, p_s) with p0 < p_s < p_e. The step that
+would carry p past p_e is replaced by the time the rest of the burn takes, by composite Simpson
+(64 intervals) on the inverse rate, and the same quadrature from the last point below
+`(p0 + p_e)/2` gives the half time:
+
+```
+  t(p_b) = t_n + ∫_{p_n}^{p_b} dp / (dp/dt)(p) ,      p_b = p_e  or  (p0 + p_e)/2                     (157.10)
+```
+
+(dp/dt) at p > p_e is (157.4) unclamped (its bracket exceeds 1), so an RK4 stage past p_e is
+smooth. **The anchor:** the run's reference starts from the run's own state,
+
+```
+  t_s, p_s = the first logged step k ≥ 1 with x_b(p0_k) ≥ 1e−3 (157.2) ,  its time (k + 1) Δt and its p0     (157.11)
+```
+
+so the ignition transient, which (157.4) does not model ((157.4) has dp/dt = 0 at x_b = 0), is
+not compared. h = Δt/10 of the run. The negative-control mode replaces (157.4)'s `(p/p0)^{1/γ_u}`
+by 1. Unit rows (`tests/dust_vessel0d.rs`, both builds, and `dust::vessel0d::tests`, 7 each, no
+GPU), on the sphere thermo below with S0 = 0.5 m/s, α = 2, β = −0.5 and x_b,s = 1e−3, each
+against an independent adaptive quadrature of (157.10) to 1e−13: t_half 0.055709372114720 s and
+t_end 0.068312423284637 s for 20 L at h = 1e−5 (1e−10 rel); (dp/dt)_max 4.4293237099e7 Pa/s =
+(157.5) (1e−12); the RK4 error ratios 15.53 and 15.76 at h = 4e−4, 2e−4, 1e−4 (band [14, 18]);
+K_st 1.2023817562643e7 Pa m/s for 20 L and 1 m³ (1e−12) and t_half(20 L)/t_half(1 m³) = R
+ratio (1e−10) — the cube-root law exact; the negative control's (dp/dt)_max ratio
+(p0/p_e)^{1/γ_u} = 0.202063965878226 (1e−12), a 79.8 % miss; every refusal by name. Class A
+(host f64, the same in both builds).
+
+**The case keys** (`src/io/case_chem.rs`, lowered in `src/io/case_dust.rs`).
+`combustion.prescribedUt { S0, alpha, beta }` (alpha and beta default 0) holds U_t at (157.9);
+it is refused beside `model` FSC (the closures form their own U_t) and beside kOmegaSST (D_t
+must be negligible, so the case is laminar), and S0 must be finite and positive.
+`combustion.unburnedDensity` is `"compressed"` (the default, (155.10)) or `"initial"`, the
+negative control of INSIGHTS (g), refused without `prescribedUt`. Under laminar/EDM/EDC/PaSR
+both keys are refused by name (§13.4.1). The schema carries both.
+
+**The driver** (`src/dust/source.rs`). With a prescribed law the step sets U_t on every cell to
+(157.9) at the step's opening p0, right after the closures (the TFC kernel already gives D_t =
+0 and K = 0 on a laminar case); the propagation density of (155.3) and of the measured Co_f is
+`propagation_density(p0)`, which is (155.10) or ρ_u0 under `"initial"`; the predicted Co_f
+(155.9) reads σ max(S_u(p_init), S_u(p_e)) with p_e from the case thermo's AICC. A case without
+the two keys runs bit for bit as before: `no_dust_no_change` and every `lowmach_dust` row hold,
+and `dust_prescribed_ut_follows_the_law` (both builds) finds U_t uniform and within 1e−3 of
+(157.9) at the run's p0 after five steps, with the `"initial"` twin finite.
+
+**The cases.** The two spheres share one thermo, in which (157.2) is exact: prescribed, c_p = 1000
+J/(kg K) and W = 0.029 kg/mol for both pseudo-species, T_u0 = 300 K, T_b = 2100 K, so σ = 7,
+γ_u = 1.40194569106215 and p_e/p0 = 1 + 6γ_u = 9.41167414637 (AICC; p0 = 101 325 Pa). The
+law is S0 = 0.5 m/s, α = 2, β = −0.5 (S_u(p_e) = 0.58945 m/s); K_st of (157.5) is 120.24
+bar m/s. `sphere20L`: R = 0.1684 m, 200 sector cells (199 of 0.8422 mm and one of 0.8 mm),
+central ignition σ_r = 2.1 mm, W_0 = 1e4 1/s, t_0 = 1 ms, Δt = 1e−4 s (predicted Co_f 0.445),
+to 0.2 s. `sphere1m3`: every length and time × 0.6204/0.1684 (R = 0.6204 m, Δt = 3.684e−4 s, to
+0.7368 s). The end times let the burn's tail finish (the p0 of the 20 L run still rose 0.04 %
+per 10 ms at 0.2 s). **REDUCED:** R/200 cells, not the R/1000 of §157.6's brush row. The
+pressure entry is PCG + GAMG (inputs: a 1-D chain's DIC took 1.1 s per step at 1000 cells
+against 0.37 s with GAMG, measured on the shared card). `rembeClosed`: R = 1.4 m, 182 cells (140
+of 5 mm to 0.7 m, growth 1.05 beyond), H22's inputs (formula thermo at φ = 0.62, FSC, A = 0.4,
+Pr_t = 0.28, k = 0.8438 m²/s², ω = k^{1/2}/(0.09 L) = 102.06 1/s, SST without sust, T_0 = 273
+K), sealed at p_init = 107 325 Pa (ambient plus the key's 0.06 bar), Δt = 2e−4 s, to 0.12 s.
+**Assumed (H22 states none):** its ignition, σ_r = 1 cm, W_0 = 1e4 1/s, t_0 = 1 ms. H20's
+0.25 mm kernel would need 0.1 mm cells and a step under 1e−5 s.
+
+**The gate procedure** (`src/bin/validate_gates/dst_vessel.rs`, validate section 67 in this
+tree). Four runs of the sibling `ofgpu-lowmach`, one after another: sphere20L, sphere1m3, the
+control (sphere20L with `"unburnedDensity": "initial"`) and rembeClosed, each with `-check 1`.
+The history is the `iter` lines' p0 and dp0/dt at (k + 1)Δt. Per sphere: the reference of
+(157.10)-(157.11); t_half of the run by linear interpolation; (dp/dt)_max the largest logged
+dp0/dt; p_end the last p0; the brush (155.6) from the written c‾ at the sample nearest t_half.
+Every relative row is two-sided, `|run/ref − 1|` (the review caught a signed form that would
+pass any fast run; `a_fast_run_misses_as_a_slow_one_does`). K_st,run = (dp/dt)_max,run V^{1/3}.
+REMBE: the overpressure `p0 − 101 325 Pa` at each `gated = 1` row of key J.2, and the first
+crossing of 0.1 bar.
+
+**Measured 2026-10-17.**
+
+| row | tolerance | f64 | single |
+|---|---|---|---|
+| 20 L t_half (anchor 0.0105 s, 102 179 Pa) | 1 % | 0.069611 s against 0.066203 s, **+5.15 % MISSED** | **refused at step 27 (Mach 0.94), MISSED** |
+| 20 L (dp/dt)_max | 2 % | 3.282e7 against 4.429e7 Pa/s, **−25.9 % MISSED** | not reached |
+| 20 L p_end at 0.2 s | 0.1 % of p_e | 879 167 against 953 638 Pa, **−7.81 % MISSED** | not reached |
+| 20 L brush | ≤ 5 cells of R/1000 | **22.6 cells MISSED** (3.80 mm at 0.070 s) | not reached |
+| 1 m³ t_half (anchor 0.0387 s) | 1 % | 0.256969 s against 0.243898 s, **+5.36 % MISSED** | **refused at step 3 (Mach 1.50), MISSED** |
+| 1 m³ (dp/dt)_max | 2 % | 8.565e6 against 1.202e7 Pa/s, **−28.8 % MISSED** | not reached |
+| 1 m³ p_end at 0.7368 s | 0.1 % | 861 752 Pa, **−9.64 % MISSED** | not reached |
+| 1 m³ brush | ≤ 5 cells | **21.7 cells MISSED** | not reached |
+| K_st(20 L)/K_st(1 m³) | 1 ± 0.02 | 89.09/85.66 bar m/s, **0.040 MISSED** | not reached |
+| negative control | miss ≥ 10 % | 7.962e6 Pa/s, miss **82.0 %, holds** (host Initial mode 79.8 %) | **refused at step 52 (Mach 1.45)** |
+| REMBE Δp at 0.05, 0.06 s | ± 0.009 bar | 0.0604, 0.0606 against 0.0600, 0.0675: hold | **refused at step 9 (Mach 12.9)** |
+| REMBE Δp at 0.07-0.10 s | ± 0.009 bar | 0.0610, 0.0616, 0.0626, 0.0640 against 0.0725, 0.0775, 0.0875, 0.0975: **MISSED** | not reached |
+| REMBE t(0.1 bar) | 0.10 ± 0.01 s | **not reached by 0.12 s, MISSED** | not reached |
+| wall, four runs | ≤ 8 min | **524 s** (86.7 + 189.4 + 212.8 + 35.3) on the card shared with two lanes; 29 s for the 20 L run alone on a quieter card | 61 s (the refusals) |
+
+**The recorded misses, and their measured causes.**
+(i) *t_half, +5 %.* The run burns slower than (157.9): the effective velocity `(dp/dt)_run /
+((157.4) / S_u)` is 0.86 S_u at R_f/R = 0.18, 0.92 at 0.54 and 0.985 at 0.95, a deficit that
+falls as the kernel outgrows the brush. Halving Δt moved t_half from +5.15 % to +4.87 % and
+left (dp/dt)_max at −25.8 %, so the cause is the REDUCED mesh's brush, not the step.
+(ii) *(dp/dt)_max, −26 % and −29 %.* (157.5)'s maximum is the instant the thin flame reaches
+the wall. On R/200 cells the brush, 22 cells of R/1000, meets the wall at x_b ≈ 0.85 and the
+burn tails off there: the effective velocity falls to 0.36 S_u at R_f/R = 0.988.
+(iii) *p_end, −7.8 % and −9.6 %.* The sealed sphere loses mass: Σ ρV ends at 0.945 of the
+initial charge at Δt = 1e−4 s and at 0.948 at 5e−5 s, so p_end = ρRT/W cannot reach the AICC
+state. It is §157.7 item (i)'s family (the explicit p0 step loses mass; 0.89 % in the box), larger
+here at a pressure ratio of 9.4 and not first order in Δt. A mass-conserving sealed p0 update
+would be the cure; it changes the numerics of the existing driver and is the user's decision.
+(iv) *The brush.* 22.6 and 21.7 cells of R/1000 on R/200 meshes, about 4.5 of their own
+cells, from upwind convection of the front and the molecular κ of (157.6). Only the R/1000 run
+can test the row. **NOT RUN:** at R/1000 the step falls five-fold, so each sphere takes about
+10 000 steps; at the 0.37 s per step measured for 1000 cells on the shared card that is about
+62 min per run, some 3 h per build for the three sphere runs.
+(v) *K_st, 0.040.* Mesh, step and ignition scale with R, so the two runs differ only by what
+does not: the molecular κ and ν, and (i)-(ii)'s brush effects through them.
+(vi) *REMBE.* The overpressure rises 0.0040 bar by 0.10 s, against the key's 0.0375. The
+kernel's c~ reaches 1 only by about 0.05 s, and the burned gas sits 100-180 K below T_b =
+1779.5 K (T max 1595 K at 0.08 s). There c‾ of (155.2) reads above 1 (1.61 at 0.05 s), because
+the BML relation divides by the isobaric ρ_b. That is §157.7 item (ii)'s family: one outer
+iteration per step, at a step 200 times the tube's. It acts together with the coarse 1-D mesh
+and the assumed ignition. u' and L are H22's tuned values, used as published and not re-tuned.
+(vii) *Single.* All four runs leave the low-Mach regime within 3-52 steps. The pressure
+residual jumps to 0.42 and then 0.999 at step 22-23 of the 20 L run with PCG + GAMG, and the same
+case with PCG + DIC is refused at step 36. This is the f32 flow path on the sector, the family of
+§157.7 item (iii), §157.8's single refusal and §118's F32-07, not the dust step (W_0 Δt = 1
+here). Curing it changes numerics.
+
+**Decisions (TAKEN, by recommendation).** D1: the power law (157.9) with S0 = 0.5 m/s, α = 2,
+β = −0.5 for all three sphere runs; the constant law is covered by the host rows. D2: one
+thermo (c_p 1000, W 0.029, 300 → 2100 K) for both spheres, so (157.2) is exact. D3: the
+reference starts from the run's own state at x_b = 1e−3 (157.11). D4: the negative control is a
+live run through the case key `unburnedDensity`, not a host-only check. D5: REDUCED R/200
+sphere meshes and a 182-cell REMBE sector, PCG + GAMG on the spheres; the end times 0.2 s and
+0.7368 s. D6: REMBE's ignition is assumed and stated.
+
+**Tree against plan.** (1) `src/dust/gatemesh.rs` needed no change: DST-07's `mesh.sector`
+builds every vessel. (2) The validate section is 67 in this tree, not the 71 a count of
+`c.section(` strings suggests. (3) The plan's ≤ 8 min per build was missed at 524 s on the shared
+card; the 20 L run alone took about a third of its shared-card time (29 s against 86.7 s).
+
+Labels: (157.9)-(157.11).
 
 ---
 

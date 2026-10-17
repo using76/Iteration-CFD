@@ -29,3 +29,9 @@ pub(crate) mod blasius_plate;
 /// four live runs of `ofgpu-lowmach`, against Bradley, Chen & Swithenbank
 /// (1989) via Huang et al. (2020) Fig. 9.
 pub(crate) mod dst_leeds;
+
+/// SPEC-LIT §157.6, Gate DST-VES: the closed vessels - the two thin-flame
+/// spheres against the host (157.4) integration, the constant-rho_u
+/// negative control, the cube-root law, and the REMBE closed stage
+/// against Huang, Bloching & Lipatnikov (2022) Fig. 10.
+pub(crate) mod dst_vessel;
