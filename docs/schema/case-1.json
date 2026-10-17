@@ -1944,6 +1944,22 @@
             }
           ]
         },
+        "agglomerate": {
+          "description": "s2s only (SPEC-LIT §51.1): the agglomeration, fine faces per coarse\nradiating face; 1 by default is the identity map.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "ambientTemperature": {
+          "description": "s2s only (SPEC-LIT §51.1): §49.6's ambient closure surface, K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "every": {
           "description": "Solve when the outer-iteration count `i mod every = 0`; 1 by default.",
           "type": [
@@ -1961,7 +1977,7 @@
           "format": "int64"
         },
         "model": {
-          "description": "`P1` | `fvDOM` | `s2s` | `viewFactor`; the last two name CHR-24's\nenclosure model and are refused here by name.",
+          "description": "`P1` | `fvDOM` | `s2s` | `viewFactor`; the last two name CHR-24's\nenclosure model, which lowers onto [`LoweredRadiation::s2s`]\n(SPEC-LIT §137.9).",
           "type": "string"
         },
         "open": {
@@ -1977,6 +1993,22 @@
             "string",
             "null"
           ]
+        },
+        "radiationRelaxation": {
+          "description": "s2s only (SPEC-LIT §51.1): §50.7's under-relaxation of `H`; 1 is no\nrelaxation.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "radiositySweeps": {
+          "description": "s2s only (SPEC-LIT §51.1): the radiosity sweep cap; 0 selects (S50.8).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         },
         "scatter": {
           "description": "The scattering; `none` by default.",
@@ -1996,6 +2028,14 @@
             "null"
           ],
           "format": "double"
+        },
+        "viewFactorQuadrature": {
+          "description": "s2s only (SPEC-LIT §51.1): a forced Gauss-Legendre order; 0 selects\n§49.2's own table.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
         },
         "walls": {
           "description": "Radiating walls by patch name; a wall not named is black at its own\n`T` (SPEC-LIT §137.8).",

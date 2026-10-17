@@ -15,13 +15,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use cudarc::driver::PushKernelArg;
 use ofgpu::device::cfg_for;
 use ofgpu::energy::EnergySources;
-use ofgpu::field::GpuScalarField;
+use ofgpu::field::{BcKind, GpuScalarField};
+use ofgpu::field_ops::{correct_boundary_conditions, FieldKernels};
 use ofgpu::field_setup::{setup_scalar_field_with, BcInputs};
 use ofgpu::io::case::{LinearSolverKind, Preconditioner, SolverControls};
 use ofgpu::io::case_json::LoweredCase;
+use ofgpu::io::case_rad::{claim_s2s_walls, DriverEnclosure};
 use ofgpu::io::fields::RawScalarField;
 use ofgpu::radiation::dom::DomControls;
-use ofgpu::{Error, Gpu, GpuMesh, HostMesh, KernelSet, Result, Scalar};
+use ofgpu::s2s::RadiantFaces;
+use ofgpu::types::to_vec3;
+use ofgpu::{Error, Gpu, GpuMesh, HostMesh, KernelSet, Label, Result, Scalar};
 
 use super::{CaseRadiation, Solver};
 use crate::common::CaseNumerics;
@@ -340,6 +344,12 @@ fn count_bad(a: &[Scalar], b: &[Scalar]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
 }
 
+/// The same, for a boundary-kind array.
+fn count_bad_label(a: &[Label], b: &[Label]) -> usize {
+    assert_eq!(a.len(), b.len(), "same length");
+    a.iter().zip(b).filter(|(x, y)| x != y).count()
+}
+
 /// **SPEC-LIT 137.8, row 4.** After one iteration, `ref_value` on a
 /// balanced face equals `q_stated + (q_r.n)` bitwise - both the rewritten
 /// adiabatic walls (`q_stated = 0`) and the case's own
@@ -552,4 +562,202 @@ fn radiation_every_is_honoured() -> Result<()> {
         assert_eq!(got, want, "every {every:?} over 9 iterations");
     }
     Ok(())
+}
+
+/// The s2s case of the equals gate: the same `xmin`/`xmax` walls as the P1
+/// one, one wall adiabatic and one at a stated flux, the enclosure closed at
+/// 350 K and the irradiation relaxed at 0.5 - which the restart refusal
+/// (SPEC-LIT 137.9) keys on.
+fn s2s_case(relaxation: &str) -> String {
+    let radiation = format!(
+        r#""radiation": {{ "model": "s2s", "walls": {{ "xmin": {{ "emissivity": 0.8 }}, "xmax": {{ "emissivity": 0.5 }} }}, "ambientTemperature": 350.0{relaxation} }}"#
+    );
+    box_case(
+        4,
+        "1.0|1.0|1.0",
+        r#"{ "type": "zeroGradient" }|{ "type": "fixedFluxTemperature", "q": 50.0 }"#,
+        600.0,
+        &radiation,
+        "",
+    )
+}
+
+/// **SPEC-LIT 137.9, the pair gate.** `claim_s2s_walls` plus
+/// `DriverEnclosure::exchange`, three times, against `S2s` built by hand
+/// from the same numbers and updated the same three times with the same wall
+/// conductivity: `bc_kind`, the stamped triple, `T`'s boundary values, the
+/// irradiation and the report's two powers are the same bits, and some
+/// radiating face carries a stamped `fr > 0`.
+#[test]
+fn lowmach_s2s_equals_library() -> Result<()> {
+    let Ok(g) = Gpu::new(0) else { return Ok(()) };
+    let path = write_case("s2sEq", &s2s_case(r#", "radiationRelaxation": 0.5"#));
+    let lowered = lowered_case(&path)?;
+    let rad_block = lowered.radiation.clone().expect("the case states radiation");
+    let cfg = rad_block.s2s.expect("the enclosure config");
+    let hm = lowered.build_host_mesh()?;
+    let m = GpuMesh::upload(&g, &hm)?;
+    let raw_t = lowered.t_field.as_ref().expect("T").to_raw(hm.n_cells);
+    let raw = crate::common::case_raw_mesh(&path, Some(&lowered))?;
+    let k_host: Vec<Scalar> = (0..hm.n_boundary_faces)
+        .map(|bf| (f64::from(0.025) + 1e-4 * bf as f64) as Scalar)
+        .collect();
+
+    // The driver path: the walls claimed, the field evaluated, three
+    // exchanges of gather/solve/relax/net/broadcast/stamp.
+    let mut t_drv = t_field(&g, &hm, &m, &raw_t)?;
+    let sel = claim_s2s_walls(&g, &hm, &mut t_drv, &rad_block.walls)?;
+    let fk = FieldKernels::new(&g)?;
+    correct_boundary_conditions(&g, &fk, &mut t_drv, &m)?;
+    let mut e = DriverEnclosure::new(&g, &m, &hm, &raw, sel, cfg)?;
+    for _ in 0..3 {
+        g.write(e.k_wall_mut(), &k_host)?;
+        e.exchange(&g, &mut t_drv)?;
+    }
+
+    // The library path: the same faces, the same triple and the same
+    // selection, set by hand from the case's own numbers.
+    let mut t_lib = t_field(&g, &hm, &m, &raw_t)?;
+    let mut sel_lib = RadiantFaces {
+        radiating: vec![false; hm.n_boundary_faces],
+        emissivity: vec![0.0; hm.n_boundary_faces],
+        q_ext: vec![0.0; hm.n_boundary_faces],
+    };
+    {
+        let mut kinds = g.download(&t_lib.bc_kind)?;
+        let mut fr = g.download(&t_lib.fr)?;
+        let mut rv = g.download(&t_lib.ref_value)?;
+        let mut rg = g.download(&t_lib.ref_grad)?;
+        for p in &hm.patches {
+            let (eps, q_ext) = match p.name.as_str() {
+                "xmin" => (0.8, 0.0),
+                "xmax" => (0.5, 50.0),
+                _ => continue,
+            };
+            for bf in p.start..p.start + p.size {
+                kinds[bf] = BcKind::S2sWall as Label;
+                fr[bf] = 0.0;
+                rv[bf] = 0.0;
+                rg[bf] = 0.0;
+                sel_lib.radiating[bf] = true;
+                sel_lib.emissivity[bf] = eps;
+                sel_lib.q_ext[bf] = q_ext;
+            }
+        }
+        g.write(&mut t_lib.bc_kind, &kinds)?;
+        g.write(&mut t_lib.fr, &fr)?;
+        g.write(&mut t_lib.ref_value, &rv)?;
+        g.write(&mut t_lib.ref_grad, &rg)?;
+    }
+    correct_boundary_conditions(&g, &fk, &mut t_lib, &m)?;
+    let lib_cfg = ofgpu::s2s::S2sConfig {
+        emissivity: 0.5,
+        ambient_temperature: Some(350.0),
+        relaxation: 0.5,
+        ..ofgpu::s2s::S2sConfig::default()
+    };
+    assert_eq!(lib_cfg, cfg, "the hand-built config IS the lowered one");
+    let pts: Vec<ofgpu::Vec3> = raw.points.iter().map(|&p| to_vec3(p)).collect();
+    let mut s2s = ofgpu::s2s::S2s::new(&g, &m, &hm, &pts, &raw.faces, &sel_lib, lib_cfg)?;
+    let k_dev = g.upload(&k_host)?;
+    for _ in 0..3 {
+        s2s.update(&g, &mut t_lib, &k_dev)?;
+    }
+
+    let mut bad = 0usize;
+    bad += count_bad_label(&g.download(&t_drv.bc_kind)?, &g.download(&t_lib.bc_kind)?);
+    bad += count_bad(&g.download(&t_drv.fr)?, &g.download(&t_lib.fr)?);
+    bad += count_bad(&g.download(&t_drv.ref_value)?, &g.download(&t_lib.ref_value)?);
+    bad += count_bad(&g.download(&t_drv.ref_grad)?, &g.download(&t_lib.ref_grad)?);
+    bad += count_bad(&g.download(&t_drv.bf)?, &g.download(&t_lib.bf)?);
+    let (rd, rl) = (e.report(), s2s.report().clone());
+    // The driver's irradiation comes out of the report, in the model's slot
+    // order - the same order `S2s::irradiation_fine` downloads in.
+    let drv_h: Vec<Scalar> = rd.faces.iter().map(|f| f.irradiation).collect();
+    bad += count_bad(&s2s.irradiation_fine(&g)?, &drv_h);
+    assert_eq!(rd.net_power.to_bits(), rl.net_power.to_bits(), "the same net power to the bit");
+    assert_eq!(rd.gross_power.to_bits(), rl.gross_power.to_bits(), "the same gross power to the bit");
+    let fr = g.download(&t_drv.fr)?;
+    let radiating_fr_positive = sel_lib
+        .radiating
+        .iter()
+        .zip(fr.iter())
+        .any(|(&r, &f)| r && f > 0.0);
+    println!(
+        "lowmach_s2s_equals_library: updates {}, mismatched bits {bad}, radiating fr > 0: {radiating_fr_positive}",
+        rd.updates
+    );
+    assert_eq!(rd.updates, 3);
+    assert!(radiating_fr_positive, "the stamp wrote a Robin triple");
+    assert_eq!(bad, 0, "driver and library must agree to the bit");
+    Ok(())
+}
+
+/// **SPEC-LIT 137.9, the driver gate.** The same case through
+/// `ofgpu-lowmach`'s own loop - three outer iterations, one exchange each:
+/// the enclosure is in the run's end state with its three updates and 32
+/// radiating faces, its power balance closes, and the run carried no
+/// participating-medium report.
+#[test]
+fn lowmach_s2s_runs() -> Result<()> {
+    let Ok(_g) = Gpu::new(0) else { return Ok(()) };
+    // A sealed box with no Dirichlet face on `T` has a singular energy
+    // equation - the run needs an anchor, so the four non-radiating walls
+    // hold the field at 600 K while the two s2s walls keep the forms the
+    // equals gate states them in (a `fixedValue` there is not claimable).
+    let text = s2s_case("").replace(
+        r#""ymin|ymax|zmin|zmax", "kind": "wall", "U": { "type": "fixedValue", "value": [0, 0, 0] }, "p": { "type": "zeroGradient" }, "T": { "type": "zeroGradient" }"#,
+        r#""ymin|ymax|zmin|zmax", "kind": "wall", "U": { "type": "fixedValue", "value": [0, 0, 0] }, "p": { "type": "zeroGradient" }, "T": { "type": "fixedValue", "value": 600.0 }"#,
+    );
+    assert!(
+        text.contains(r#""T": { "type": "fixedValue", "value": 600.0 }"#),
+        "the anchor landed on the non-radiating walls"
+    );
+    let path = write_case("s2sRun", &text);
+    let end = run_case(&path, &["-iters", "3"])?;
+    let rep = end.enclosure.as_ref().expect("the enclosure ran");
+    let tol = if std::mem::size_of::<Scalar>() == 4 { 1e-5 } else { 1e-10 };
+    println!(
+        "lowmach_s2s_runs: {} updates, {} faces, net {:.6} W, gross {:.6} W",
+        rep.updates,
+        rep.faces.len(),
+        f64::from(rep.net_power),
+        f64::from(rep.gross_power)
+    );
+    assert_eq!(rep.updates, 3, "one exchange per outer iteration");
+    assert_eq!(rep.faces.len(), 32, "16 faces on each of the two walls");
+    assert!(rep.gross_power > 0.0, "the walls exchange something");
+    assert!(
+        f64::from(rep.net_power).abs() <= tol * f64::from(rep.gross_power),
+        "the enclosure's power balance: net {} vs gross {}",
+        rep.net_power,
+        rep.gross_power
+    );
+    assert!(end.radiation.is_none(), "a transparent medium has no CaseRadiation");
+    Ok(())
+}
+
+/// **SPEC-LIT 137.9's restart refusal.** A relaxed irradiation is not in the
+/// checkpoint, so `-restartFrom` with `radiationRelaxation < 1` is refused
+/// by name - and relaxation 1 restarts, as the default does.
+#[test]
+fn s2s_restart_with_relaxation_is_refused() {
+    let relaxed: ofgpu::io::case_rad::JsonRadiation = serde_json::from_str(
+        r#"{ "model": "s2s", "walls": { "xmin": { "emissivity": 0.8 } }, "radiationRelaxation": 0.5 }"#,
+    )
+    .expect("parse");
+    let rad = relaxed.lower().expect("lowers");
+    let e = super::refuse_combinations(Some(&rad), false, false, true)
+        .expect_err("the relaxed restart is refused")
+        .to_string();
+    println!("{e}");
+    assert!(e.contains("-restartFrom"), "{e}");
+    assert!(e.contains("radiationRelaxation"), "{e}");
+    super::refuse_combinations(Some(&rad), false, false, false).expect("no restart, no refusal");
+    let unrelaxed: ofgpu::io::case_rad::JsonRadiation = serde_json::from_str(
+        r#"{ "model": "s2s", "walls": { "xmin": { "emissivity": 0.8 } }, "radiationRelaxation": 1.0 }"#,
+    )
+    .expect("parse");
+    let rad1 = unrelaxed.lower().expect("lowers");
+    super::refuse_combinations(Some(&rad1), false, false, true).expect("relaxation 1 restarts");
 }

@@ -173,8 +173,8 @@ impl CaseRadiation {
             }
             RadiationModel::ViewFactor => {
                 return Err(Error::Config(
-                    "radiation: viewFactor is CHR-24's enclosure model, not built \
-                     in ofgpu-lowmach (SPEC-LIT 137.8)"
+                    "radiation: an s2s block is run by case_rad::DriverEnclosure, \
+                     not CaseRadiation (SPEC-LIT 137.9)"
                         .to_string(),
                 ));
             }
@@ -529,6 +529,18 @@ pub fn refuse_combinations(
              solved for (SPEC-LIT 137.8)",
             rad.every
         )));
+    }
+    // SPEC-LIT 137.9: the enclosure's relaxed irradiation is not in the
+    // checkpoint either - `S2s`'s `h_old` starts at zero, so a resumed run
+    // would take the relaxation from the cold start, not from where the
+    // first run stopped.
+    if restart && rad.s2s.is_some_and(|c| c.relaxation < 1.0) {
+        return Err(Error::Config(
+            "radiation: radiationRelaxation < 1 with -restartFrom is refused - \
+             the relaxed irradiation is not in the checkpoint, so a resumed run \
+             would relax from a zero irradiation (SPEC-LIT 137.9)"
+                .to_string(),
+        ));
     }
     Ok(())
 }

@@ -22,6 +22,12 @@
 //! [`LoweredRadiation::dom_patches`] apply §137.8's patch table over the
 //! mesh's `PatchKind`s.
 //!
+//! CHR-24's enclosure (SPEC-LIT §137.9) lowers through the same one place:
+//! an `s2s`/`viewFactor` block is written out as §51.1's dictionary and read
+//! by [`crate::s2s::S2sConfig::from_dict`] onto [`LoweredRadiation::s2s`],
+//! and [`claim_s2s_walls`] rewrites the named walls' faces to `s2sWall`,
+//! which [`DriverEnclosure`] then runs once per outer iteration.
+//!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §137.2 - the `radiation` table and its refusals
 //!   ofgpu SPEC-LIT.md §137.8 - the as-built rules of this file
@@ -34,15 +40,21 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::cht::flow::EnclosureReport;
+use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
+use crate::field::{BcKind, GpuScalarField};
 use crate::io::dict::FoamDict;
 use crate::io::fields::{read_scalar_field, PatchFieldSpec};
-use crate::mesh::{HostMesh, PatchKind};
+use crate::mesh::{GpuMesh, HostMesh, PatchKind};
 use crate::radiation::dom::{DomCondition, DomPatch};
 use crate::radiation::dom_quad::Quadrature;
 use crate::radiation::p1::{MarshakPatch, WallTemperature};
 use crate::radiation::props::{self, ParticipatingConfig};
 use crate::radiation::RadiationModel;
+use crate::s2s::{RadiantFaces, S2s, S2sConfig};
+use crate::types::{to_vec3, Vec3};
+use crate::{Label, Scalar};
 
 /// The dictionary route's file inside a case directory.
 pub const FILE: &str = "constant/radiationProperties";
@@ -54,7 +66,8 @@ pub const FILE: &str = "constant/radiationProperties";
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct JsonRadiation {
     /// `P1` | `fvDOM` | `s2s` | `viewFactor`; the last two name CHR-24's
-    /// enclosure model and are refused here by name.
+    /// enclosure model, which lowers onto [`LoweredRadiation::s2s`]
+    /// (SPEC-LIT §137.9).
     pub model: String,
     /// The absorption/emission the medium carries; `constant` by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +95,24 @@ pub struct JsonRadiation {
     /// Open boundaries by patch name, each at its stated `Tinf`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub open: BTreeMap<String, JsonRadOpen>,
+    /// s2s only (SPEC-LIT §51.1): the agglomeration, fine faces per coarse
+    /// radiating face; 1 by default is the identity map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agglomerate: Option<i64>,
+    /// s2s only (SPEC-LIT §51.1): a forced Gauss-Legendre order; 0 selects
+    /// §49.2's own table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_factor_quadrature: Option<i64>,
+    /// s2s only (SPEC-LIT §51.1): §49.6's ambient closure surface, K.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambient_temperature: Option<f64>,
+    /// s2s only (SPEC-LIT §51.1): §50.7's under-relaxation of `H`; 1 is no
+    /// relaxation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation_relaxation: Option<f64>,
+    /// s2s only (SPEC-LIT §51.1): the radiosity sweep cap; 0 selects (S50.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiosity_sweeps: Option<i64>,
 }
 
 /// `radiation.absorption` - SPEC-LIT §137.2's absorption table.
@@ -198,6 +229,11 @@ pub struct LoweredRadiation {
     /// Dictionary route only: per-patch types read from `0/G` or
     /// `0/IDefault` (patch -> resolved condition).
     pub field_file: Option<Vec<RadPatchType>>,
+    /// CHR-24's enclosure (SPEC-LIT §137.9): §51.1's dictionary as
+    /// `S2sConfig::from_dict` read it, `Some` exactly for `s2s`/`viewFactor`
+    /// (whose `config` is then the transparent medium of §98.7). `None`
+    /// under P1/fvDOM.
+    pub s2s: Option<crate::s2s::S2sConfig>,
 }
 
 /// The refusal every driver but `ofgpu-lowmach` gives a case that states
@@ -246,17 +282,10 @@ impl JsonRadiation {
     /// `ParticipatingConfig::from_dict`, so both routes share every refusal.
     pub fn lower(&self) -> Result<LoweredRadiation> {
         let model = match RadiationModel::from_name(&self.model) {
-            Ok(RadiationModel::ViewFactor) => {
-                return Err(refused(
-                    "model",
-                    &format!(
-                        "{} is CHR-24's surface-to-surface enclosure in a \
-                         non-participating medium, not built in ofgpu-lowmach \
-                         (SPEC-LIT §137.8)",
-                        self.model
-                    ),
-                ));
-            }
+            // SPEC-LIT 137.9: the enclosure lowers, and runs in
+            // ofgpu-lowmach (and, from the case directory, ofgpu-buoyant)
+            // through `DriverEnclosure`.
+            Ok(RadiationModel::ViewFactor) => return self.lower_enclosure(),
             Ok(m) => m,
             Err(e) => return Err(keyed("model", e)),
         };
@@ -279,6 +308,24 @@ impl JsonRadiation {
                          read and then ignored",
                         model.name()
                     ),
+                ));
+            }
+        }
+        // The s2s-only settings: under a participating model they would be
+        // read and then ignored, which is the §13.4.1 defect every reader
+        // here refuses (SPEC-LIT §137.9).
+        for (key, set) in [
+            ("agglomerate", self.agglomerate.is_some()),
+            ("viewFactorQuadrature", self.view_factor_quadrature.is_some()),
+            ("ambientTemperature", self.ambient_temperature.is_some()),
+            ("radiationRelaxation", self.radiation_relaxation.is_some()),
+            ("radiositySweeps", self.radiosity_sweeps.is_some()),
+        ] {
+            if set {
+                return Err(refused(
+                    key,
+                    "is read by s2s only - it would be read and then ignored \
+                     by a participating-medium model (SPEC-LIT §51.1, §137.9)",
                 ));
             }
         }
@@ -335,7 +382,92 @@ impl JsonRadiation {
             walls,
             open,
             field_file: None,
+            s2s: None,
         })
+    }
+
+    /// CHR-24's enclosure lowering (SPEC-LIT §137.9): the s2s keys are
+    /// written out as §51.1's dictionary entries and read by
+    /// [`crate::s2s::S2sConfig::from_dict`], so both spellings share every
+    /// refusal of that reader. The medium is transparent - §98.7's
+    /// participating config with `kappa 0` and no scattering - and nothing
+    /// here is read by the P1/fvDOM solves, so every key of theirs present
+    /// under this model is refused as read-then-ignored.
+    fn lower_enclosure(&self) -> Result<LoweredRadiation> {
+        for (key, set) in [
+            ("absorption", self.absorption.is_some()),
+            ("scatter", self.scatter.is_some()),
+            ("quadrature", self.quadrature.is_some()),
+            ("scatterTol", self.scatter_tol.is_some()),
+            ("maxScatterIterations", self.max_scatter_iterations.is_some()),
+        ] {
+            if set {
+                let hint = if key == "quadrature" { " - use viewFactorQuadrature" } else { "" };
+                return Err(refused(
+                    key,
+                    &format!(
+                        "is read by the participating-medium solves (P1/fvDOM) \
+                         only, and model is s2s - it would be read and then \
+                         ignored{hint}"
+                    ),
+                ));
+            }
+        }
+        if self.every.is_some_and(|v| v != 1) {
+            return Err(refused(
+                "every",
+                &format!(
+                    "{} is refused - the enclosure exchange runs every \
+                     iteration, and §51.1 has no entry for another schedule \
+                     (SPEC-LIT §98.10)",
+                    self.every.unwrap()
+                ),
+            ));
+        }
+        if !self.open.is_empty() {
+            return Err(refused(
+                "open",
+                "is read by the participating-medium solves only - the view \
+                 through an open boundary is closed by ambientTemperature, \
+                 §49.6's black closure surface (SPEC-LIT §49.6)",
+            ));
+        }
+        if self.walls.is_empty() {
+            return Err(refused(
+                "walls",
+                "is empty - nothing radiates, and an enclosure nothing \
+                 radiates in is a setting the solver would ignore (SPEC-LIT \
+                 §98.7 row 14)",
+            ));
+        }
+        let mut eps_min = f64::INFINITY;
+        for (name, w) in &self.walls {
+            if w.t.is_some() {
+                return Err(refused(
+                    &format!("walls.{name}.T"),
+                    "is refused - an s2s wall radiates at its own `T` patch \
+                     value; a face whose temperature is stated is closed by \
+                     ambientTemperature (SPEC-LIT §49.6, §137.9)",
+                ));
+            }
+            if !w.emissivity.is_finite()
+                || !(f64::from(crate::s2s::EPS_MIN_SUPPORTED)..=1.0).contains(&w.emissivity)
+            {
+                return Err(refused(
+                    &format!("walls.{name}.emissivity"),
+                    &format!(
+                        "{} is refused - an s2s emissivity must lie in [{}, 1]; \
+                         below {} the diffuse radiosity formulation would be \
+                         truncated to a wrong answer (SPEC-LIT §50.9)",
+                        w.emissivity,
+                        crate::s2s::EPS_MIN_SUPPORTED,
+                        crate::s2s::EPS_MIN_SUPPORTED
+                    ),
+                ));
+            }
+            eps_min = eps_min.min(w.emissivity);
+        }
+        self.s2s_dict(eps_min)
     }
 
     /// §137.2's dictionary entries, written from the block's keys - the one
@@ -371,6 +503,50 @@ impl JsonRadiation {
         }
         FoamDict::parse(&t, "radiation (JSONC lowering)")
     }
+
+    /// §51.1's dictionary written from the s2s keys and read back through
+    /// [`crate::s2s::S2sConfig::from_dict`] - the one lowering both
+    /// spellings share (SPEC-LIT §137.9).
+    fn s2s_dict(&self, eps_min: f64) -> Result<LoweredRadiation> {
+        let mut t = String::from("radiationModel viewFactor;\n");
+        t.push_str(&format!("emissivity {eps_min};\n"));
+        if let Some(v) = self.ambient_temperature {
+            t.push_str(&format!("ambientTemperature {v};\n"));
+        }
+        if let Some(v) = self.radiation_relaxation {
+            t.push_str(&format!("radiationRelaxation {v};\n"));
+        }
+        if let Some(v) = self.radiosity_sweeps {
+            t.push_str(&format!("radiositySweeps {v};\n"));
+        }
+        if let Some(v) = self.agglomerate {
+            t.push_str(&format!("agglomerate {v};\n"));
+        }
+        if let Some(v) = self.view_factor_quadrature {
+            t.push_str(&format!("viewFactorQuadrature {v};\n"));
+        }
+        let d = FoamDict::parse(&t, "radiation (JSONC lowering)")?;
+        let cfg = crate::s2s::S2sConfig::from_dict(&d).map_err(|e| keyed("s2s", e))?;
+        Ok(LoweredRadiation {
+            config: ParticipatingConfig {
+                model: RadiationModel::ViewFactor,
+                absorption: props::Absorption::Constant { kappa: 0.0 },
+                scatter: props::Scatter::None,
+            },
+            quadrature: None,
+            scatter_tol: None,
+            max_sweeps: None,
+            every: 1,
+            walls: self
+                .walls
+                .iter()
+                .map(|(name, w)| RadWall { patch: name.clone(), emissivity: w.emissivity, t: None })
+                .collect(),
+            open: Vec::new(),
+            field_file: None,
+            s2s: Some(cfg),
+        })
+    }
 }
 
 /// The dictionary route: `constant/radiationProperties` when the case has
@@ -396,11 +572,27 @@ pub fn read_radiation_dir(case_dir: &Path) -> Result<Option<LoweredRadiation>> {
         )));
     }
     let model = match RadiationModel::from_name(name) {
+        // SPEC-LIT 137.9: the enclosure's dictionary is §51.1's own, read by
+        // `S2sConfig::from_dict` with its own refusals. The radiating faces
+        // are T's `s2sWall`/`greyDiffusiveRadiationViewFactor` patches, not
+        // anything this dictionary names.
         Ok(RadiationModel::ViewFactor) => {
-            return Err(Error::Config(format!(
-                "{FILE}/radiationModel {name}: s2s/viewFactor is CHR-24's \
-                 enclosure model, not built in ofgpu-lowmach (SPEC-LIT §137.8)"
-            )));
+            let cfg = crate::s2s::S2sConfig::from_dict(&d)?;
+            return Ok(Some(LoweredRadiation {
+                config: ParticipatingConfig {
+                    model: RadiationModel::ViewFactor,
+                    absorption: props::Absorption::Constant { kappa: 0.0 },
+                    scatter: props::Scatter::None,
+                },
+                quadrature: None,
+                scatter_tol: None,
+                max_sweeps: None,
+                every: 1,
+                walls: Vec::new(),
+                open: Vec::new(),
+                field_file: None,
+                s2s: Some(cfg),
+            }));
         }
         Ok(m) => m,
         Err(e) => return Err(e),
@@ -510,6 +702,7 @@ pub fn read_radiation_dir(case_dir: &Path) -> Result<Option<LoweredRadiation>> {
         walls: Vec::new(),
         open: Vec::new(),
         field_file,
+        s2s: None,
     }))
 }
 
@@ -866,6 +1059,217 @@ impl LoweredRadiation {
     }
 }
 
+/// Claim the case's radiating walls for the enclosure (SPEC-LIT §137.9):
+/// every named patch's faces are rewritten to [`BcKind::S2sWall`], the way
+/// an `s2sWall` spelling writes them, with the stated flux kept where the
+/// face already was `fixedFluxTemperature` and `q_ext = 0` where it was
+/// `zeroGradient` - §50.3's adiabatic, re-radiating wall. A stated
+/// temperature cannot ride (its view is closed by `ambientTemperature`, the
+/// lowering already refused one), and every other condition is refused by
+/// patch name. Returns the selection [`DriverEnclosure::new`] is built from.
+pub fn claim_s2s_walls(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    t: &mut GpuScalarField,
+    walls: &[RadWall],
+) -> Result<RadiantFaces> {
+    let mut kinds = gpu.download(&t.bc_kind)?;
+    let mut fr = gpu.download(&t.fr)?;
+    let mut ref_value = gpu.download(&t.ref_value)?;
+    let mut ref_grad = gpu.download(&t.ref_grad)?;
+    let mut sel = RadiantFaces {
+        radiating: vec![false; hm.n_boundary_faces],
+        emissivity: vec![0.0; hm.n_boundary_faces],
+        q_ext: vec![0.0; hm.n_boundary_faces],
+    };
+    let zg = BcKind::ZeroGradient as Label;
+    let ffq = BcKind::FixedFluxTemperature as Label;
+    for w in walls {
+        let Some(p) = hm.patches.iter().find(|p| p.name == w.patch) else {
+            let have: Vec<&str> = hm.patches.iter().map(|p| p.name.as_str()).collect();
+            return Err(Error::Config(format!(
+                "radiation.walls: no patch named \"{}\" - this mesh has: {} \
+                 (SPEC-LIT §137.9)",
+                w.patch,
+                have.join(", ")
+            )));
+        };
+        if p.kind != PatchKind::Wall {
+            return Err(Error::Config(format!(
+                "radiation.walls: \"{}\" is not a wall patch - a radiating \
+                 face of the enclosure is a wall condition (SPEC-LIT §137.9)",
+                w.patch
+            )));
+        }
+        for bf in p.start..p.start + p.size {
+            if !(kinds[bf] == zg || kinds[bf] == ffq) {
+                return Err(Error::Config(format!(
+                    "radiation.walls: patch {} carries a T condition the \
+                     enclosure cannot ride - a radiating wall's T must be \
+                     zeroGradient or fixedFluxTemperature; a stated temperature \
+                     is closed by ambientTemperature (SPEC-LIT §137.9)",
+                    w.patch
+                )));
+            }
+            sel.q_ext[bf] = if kinds[bf] == ffq { ref_value[bf] } else { 0.0 };
+            kinds[bf] = BcKind::S2sWall as Label;
+            fr[bf] = 0.0;
+            ref_value[bf] = 0.0;
+            ref_grad[bf] = 0.0;
+            sel.radiating[bf] = true;
+            sel.emissivity[bf] = w.emissivity as Scalar;
+        }
+    }
+    gpu.write(&mut t.bc_kind, &kinds)?;
+    gpu.write(&mut t.fr, &fr)?;
+    gpu.write(&mut t.ref_value, &ref_value)?;
+    gpu.write(&mut t.ref_grad, &ref_grad)?;
+    Ok(sel)
+}
+
+/// CHR-24's enclosure driver (SPEC-LIT §137.9): the [`S2s`] exchange of
+/// §49-§50, run once per outer iteration by whichever solver owns the
+/// energy equation - `ofgpu-lowmach`'s `Energy` (SPEC-LIT §98.8's step 4c)
+/// and `ofgpu-buoyant`'s `ScalarTransport` (137.7). Like `cht::flow`'s
+/// `Enclosure` without the interface halves: a transparent medium has no
+/// volumetric term (§50.3) and this driver owns no interfaces.
+pub struct DriverEnclosure<'m> {
+    s2s: S2s<'m>,
+    /// The wall conductivity, copied from the owner's accessor before every
+    /// update: `S2s::update` takes `T` mutably and the conductivity
+    /// immutably.
+    k_wall: DevBuf<Scalar>,
+    /// The selection the model was built from, per boundary face.
+    sel: RadiantFaces,
+    /// The last update's gathered `T0` and broadcast `H_b`, per slot.
+    t0: Vec<Scalar>,
+    h: Vec<Scalar>,
+    updates: usize,
+    view_factors: String,
+}
+
+impl<'m> DriverEnclosure<'m> {
+    /// §98.8's construction, over the driver's own mesh: the selection, then
+    /// `S2s::new` - the view factors, the agglomeration, the sweep count and
+    /// §50.6's memory refusal are the model's, unchanged. `raw` is the case's
+    /// polyMesh, which every construction path already has in hand at setup.
+    pub fn new(
+        gpu: &Gpu,
+        m: &'m GpuMesh,
+        hm: &HostMesh,
+        raw: &crate::io::polymesh::PolyMeshRaw,
+        sel: RadiantFaces,
+        cfg: S2sConfig,
+    ) -> Result<Self> {
+        if !sel.radiating.iter().any(|&r| r) {
+            return Err(Error::Config(
+                "s2s: no face carries a radiating wall (s2sWall) - nothing \
+                 radiates, and an enclosure nothing radiates in is a setting \
+                 the solver would ignore (SPEC-LIT §98.7 row 14, §137.9)"
+                    .to_string(),
+            ));
+        }
+        let pts: Vec<Vec3> = raw.points.iter().map(|&p| to_vec3(p)).collect();
+        let s2s = S2s::new(gpu, m, hm, &pts, &raw.faces, &sel, cfg)?;
+        let n_fine = s2s.n_fine();
+        let view_factors = s2s.view_factors().report().describe();
+        Ok(Self {
+            s2s,
+            k_wall: gpu.zeros(hm.n_boundary_faces.max(1))?,
+            sel,
+            t0: vec![0.0; n_fine],
+            h: vec![0.0; n_fine],
+            updates: 0,
+            view_factors,
+        })
+    }
+
+    /// The wall conductivity the owner copies its accessor's values into,
+    /// before every [`Self::exchange`] - `Energy::k_eff_wall()` on
+    /// ofgpu-lowmach, (137.7)'s `rhoRef CpRef alphaEff` on ofgpu-buoyant.
+    pub fn k_wall_mut(&mut self) -> &mut DevBuf<Scalar> {
+        &mut self.k_wall
+    }
+
+    /// `true` on every radiating boundary face, in boundary-face order.
+    pub fn radiating(&self) -> &[bool] {
+        &self.sel.radiating
+    }
+
+    /// The radiating fine faces the exchange gathers.
+    pub fn n_faces(&self) -> usize {
+        self.s2s.n_fine()
+    }
+
+    /// The start-up banner: the radiating faces, their emissivity range, the
+    /// relaxation, and the view-factor report.
+    pub fn describe(&self) -> String {
+        let (lo, hi) = self
+            .sel
+            .emissivity
+            .iter()
+            .zip(self.sel.radiating.iter())
+            .filter(|&(_, &r)| r)
+            .fold((Scalar::INFINITY, Scalar::NEG_INFINITY), |(lo, hi), (&e, _)| {
+                (lo.min(e), hi.max(e))
+            });
+        format!(
+            "s2s enclosure: {} radiating faces, emissivity {} - {}, relaxation {},\n{}",
+            self.s2s.n_fine(),
+            lo,
+            hi,
+            self.s2s.config().relaxation,
+            self.view_factors
+        )
+    }
+
+    /// Step 4c (SPEC-LIT §98.8): one `S2s::update` on the owner's `T` - the
+    /// gather, the solve, the relax, the net flux, the broadcast and the
+    /// stamp of §50 - with the face temperatures and the irradiation it used
+    /// read back for the report. The caller copies its wall conductivity
+    /// into [`Self::k_wall_mut`] first.
+    pub fn exchange(&mut self, gpu: &Gpu, t: &mut GpuScalarField) -> Result<()> {
+        self.s2s.update(gpu, t, &self.k_wall)?;
+        self.updates += 1;
+        let bt = gpu.download(&t.bf)?;
+        let hb = self.s2s.irradiation_fine(gpu)?;
+        for s in 0..self.t0.len() {
+            self.t0[s] = bt[self.s2s.b_face_of(s) as usize];
+            self.h[s] = hb[s];
+        }
+        Ok(())
+    }
+
+    /// §98.8's report of the last update, exactly `cht::flow`'s
+    /// `Enclosure::report` on a case with no radiating interface.
+    pub fn report(&self) -> EnclosureReport {
+        let r = self.s2s.report();
+        EnclosureReport {
+            net_power: r.net_power,
+            gross_power: r.gross_power,
+            radiosity_residual: r.radiosity_residual,
+            sweeps: r.sweeps,
+            view_factors: self.view_factors.clone(),
+            updates: self.updates,
+            relaxation: self.s2s.config().relaxation,
+            faces: (0..self.t0.len())
+                .map(|s| {
+                    let bf = self.s2s.b_face_of(s) as usize;
+                    crate::cht::flow::RadiatingFace {
+                        bf,
+                        emissivity: self.sel.emissivity[bf],
+                        q_ext: self.sel.q_ext[bf],
+                        interface: false,
+                        t0: self.t0[s],
+                        irradiation: self.h[s],
+                    }
+                })
+                .collect(),
+            interface_source: 0.0,
+        }
+    }
+}
+
 /// A field-file entry on a WALL patch: the type is what the file says.
 fn file_on_patch(t: &RadPatchType) -> Resolved {
     match t {
@@ -906,10 +1310,6 @@ mod tests {
         serde_json::from_str(text).map_err(|e| Error::Config(format!("{e}")))
     }
 
-    fn base(model: &str) -> String {
-        format!(r#"{{ "model": "{model}", "absorption": {{ "kappa": 1.0 }} }}"#)
-    }
-
     fn lower_text(text: &str) -> Result<LoweredRadiation> {
         parse(text)?.lower()
     }
@@ -926,10 +1326,6 @@ mod tests {
     fn case_radiation_refusals() {
         // The model, named with the recognised set (SPEC-LIT 137.2).
         wants(r#"{ "model": "P_one" }"#, "model", &["radiation.model", "P1", "fvDOM", "viewFactor"]);
-        // s2s / viewFactor: CHR-24's, refused here by name (SPEC-LIT 137.8).
-        for m in ["s2s", "viewFactor"] {
-            wants(&base(m), "model", &[m, "CHR-24", "137.8"]);
-        }
         // The absorption table.
         wants(
             r#"{ "model": "P1", "absorption": { "model": "greyMean" } }"#,
@@ -1063,6 +1459,114 @@ mod tests {
             "unknown key",
             &["qRad"],
         );
+    }
+
+    /// SPEC-LIT 137.9: an s2s/viewFactor block lowers onto `LoweredRadiation::s2s`,
+    /// written out as §51.1's dictionary and read by `S2sConfig::from_dict`,
+    /// under either spelling of the model name.
+    #[test]
+    fn case_radiation_s2s_lowers() {
+        let text = r#"{
+            "model": "s2s",
+            "walls": { "xmin": { "emissivity": 0.8 }, "xmax": { "emissivity": 0.5 } },
+            "ambientTemperature": 350.0,
+            "radiationRelaxation": 0.5,
+            "radiositySweeps": 60,
+            "agglomerate": 1,
+            "viewFactorQuadrature": 4
+        }"#;
+        for model in ["s2s", "viewFactor"] {
+            let l = lower_text(&text.replace(r#""model": "s2s""#, &format!(r#""model": "{model}""#)))
+                .expect("the enclosure lowers");
+            let cfg = l.s2s.as_ref().expect("the enclosure config is Some");
+            assert_eq!(cfg.emissivity, 0.5, "the dictionary carries the walls' minimum emissivity");
+            assert_eq!(cfg.ambient_temperature, Some(350.0));
+            assert_eq!(cfg.relaxation, 0.5);
+            assert_eq!(cfg.sweeps, 60);
+            assert_eq!(cfg.agglomerate, 1);
+            assert_eq!(cfg.quadrature, 4);
+            assert_eq!(l.config.model, RadiationModel::ViewFactor);
+            assert!(matches!(
+                l.config.absorption,
+                props::Absorption::Constant { kappa: 0.0 }
+            ));
+            assert_eq!(l.config.scatter, props::Scatter::None);
+            assert_eq!(l.walls.len(), 2);
+            assert_eq!(l.walls[0].patch, "xmax", "the walls come out of the BTreeMap sorted");
+            assert_eq!(l.walls[0].emissivity, 0.5);
+            assert_eq!(l.walls[1].patch, "xmin");
+            assert_eq!(l.walls[1].emissivity, 0.8);
+            assert_eq!(l.every, 1);
+            assert!(l.open.is_empty());
+            assert!(l.field_file.is_none());
+        }
+    }
+
+    /// SPEC-LIT 137.9's refusals: every participating-medium key under this
+    /// model would be read and then ignored, the schedule is the exchange's
+    /// own, and the enclosure's walls are its radiating faces.
+    #[test]
+    fn case_radiation_s2s_refusals() {
+        for (text, key, want) in [
+            (
+                r#"{ "model": "s2s", "absorption": { "kappa": 1.0 }, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "absorption",
+                &["radiation.absorption", "s2s", "read and then ignored"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "scatter": { "sigma": 0.1 }, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "scatter",
+                &["radiation.scatter", "read and then ignored"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "quadrature": "S4", "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "quadrature",
+                &["radiation.quadrature", "viewFactorQuadrature"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "scatterTol": 1e-8, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "scatterTol",
+                &["radiation.scatterTol"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "maxScatterIterations": 200, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "maxScatterIterations",
+                &["radiation.maxScatterIterations"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "every": 2, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "every",
+                &["radiation.every", "every iteration", "98.10"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "open": { "amb": { "Tinf": 300.0 } }, "walls": { "xmin": { "emissivity": 0.8 } } }"#,
+                "open",
+                &["radiation.open", "ambientTemperature", "49.6"][..],
+            ),
+            (r#"{ "model": "s2s" }"#, "walls", &["radiation.walls", "nothing radiates", "row 14"][..]),
+            (
+                r#"{ "model": "s2s", "walls": { "xmin": { "emissivity": 0.8, "T": 450.0 } } }"#,
+                "walls.xmin.T",
+                &["radiation.walls.xmin.T", "ambientTemperature"][..],
+            ),
+            (
+                r#"{ "model": "s2s", "walls": { "xmin": { "emissivity": 0.01 } } }"#,
+                "walls.xmin.emissivity",
+                &["radiation.walls.xmin.emissivity", "0.01", "50.9"][..],
+            ),
+        ] {
+            wants(text, key, want);
+        }
+        // Under P1 the s2s-only keys would be read and then ignored.
+        for (key, extra) in [
+            ("ambientTemperature", r#""ambientTemperature": 350.0"#),
+            ("radiositySweeps", r#""radiositySweeps": 60"#),
+        ] {
+            let text = format!(
+                r#"{{ "model": "P1", "absorption": {{ "kappa": 1.0 }}, {extra} }}"#
+            );
+            wants(&text, key, &[key, "s2s only", "read and then ignored"]);
+        }
     }
 
     /// The lowering with every key set, read back field by field; then the
@@ -1259,8 +1763,18 @@ mod tests {
         assert!(read_radiation_dir(&dir).expect("none").is_none());
         write_dict(&dir, "absorptionEmissionModel constant;");
         refuses_where(&dir, &["radiationModel", "no default"]);
+        // SPEC-LIT 137.9: the enclosure's dictionary needs §51.1's
+        // `emissivity` - `S2sConfig::from_dict`'s own refusal - and lowers
+        // with it onto `s2s`, a transparent medium.
         write_dict(&dir, "radiationModel viewFactor;");
-        refuses_where(&dir, &["viewFactor", "CHR-24"]);
+        refuses_where(&dir, &["viewFactor", "emissivity"]);
+        write_dict(&dir, "radiationModel viewFactor;\nemissivity 0.7;\n");
+        let l = read_radiation_dir(&dir).expect("lowers").expect("some");
+        let cfg = l.s2s.as_ref().expect("the enclosure config is Some");
+        assert_eq!(cfg.emissivity, 0.7);
+        assert_eq!(l.config.model, RadiationModel::ViewFactor);
+        assert!(matches!(l.config.absorption, props::Absorption::Constant { kappa: 0.0 }));
+        assert!(l.walls.is_empty(), "the radiating faces are T's s2sWall patches");
         write_dict(&dir, "radiationModel P1; absorptionCoefficient 1; solverFreq 0;");
         refuses_where(&dir, &["solverFreq"]);
         write_dict(&dir, "radiationModel P1; absorptionCoefficient 1; solverFreq 2.5;");

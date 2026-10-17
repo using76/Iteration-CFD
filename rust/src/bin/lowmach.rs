@@ -190,6 +190,7 @@ use ofgpu::field_setup::{
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field, RawScalarField, RawVectorField};
 use ofgpu::io::case_json::{LoweredCase, LoweredMotion};
+use ofgpu::io::case_rad::{claim_s2s_walls, DriverEnclosure};
 use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::mesh::ale::AleMesh;
 use ofgpu::mesh::gpugeom::flatten_faces;
@@ -549,6 +550,9 @@ pub fn outer_iteration(
     // SPEC-LIT 137.8: the case's radiation, rules 1-3 running in this
     // function between the thermostat and the target divergence.
     mut rad: Option<&mut CaseRadiation>,
+    // SPEC-LIT 137.9: the enclosure's exchange, step 4c of §98.8 - after
+    // the radiation block and before the target divergence reads its `Q`.
+    mut encl: Option<&mut DriverEnclosure<'_>>,
 ) -> Result<IterReport> {
     let fk = FieldKernels::new(gpu)?;
 
@@ -599,6 +603,15 @@ pub fn outer_iteration(
         let (t, sources) = energy.field_and_sources_mut();
         r.register(gpu, t, sources)?;
         r.balance_walls(gpu, energy.field_mut())?;
+    }
+
+    // SPEC-LIT 98.8 step 4c, SPEC-LIT 137.9: copy `k_eff_wall`, then one exchange -
+    // gather, solve, relax, net flux, broadcast, stamp (§50) - on the energy's
+    // `T`, whose Robin triple the energy solve below assembles from. `k_eff`
+    // is the previous iteration's, §50.7's lag.
+    if let Some(e) = encl.as_deref_mut() {
+        ofgpu::field_ops::copy_field(gpu, &fk, e.k_wall_mut(), energy.k_eff_wall(), m.n_boundary_faces)?;
+        e.exchange(gpu, energy.field_mut())?;
     }
 
     energy.update_target_divergence(gpu, gas, nut, k, nu)?;
@@ -2367,7 +2380,26 @@ fn run(o: &Options) -> Result<RunEnd> {
         o.rigid_body.is_some(),
         o.restart_from.is_some(),
     )?;
+    // SPEC-LIT 137.9: an s2s block is an enclosure, run by
+    // `case_rad::DriverEnclosure` - not a `CaseRadiation`, whose solve/
+    // register/balance steps a transparent medium has no use for.
+    let mut encl: Option<DriverEnclosure<'_>> = None;
     let mut rad: Option<CaseRadiation> = match &rad_block {
+        Some(r) if r.s2s.is_some() => {
+            let cfg = r.s2s.expect("the arm checked is_some");
+            let raw = common::case_raw_mesh(&o.case_path, lowered.as_ref())?;
+            let sel = if r.walls.is_empty() {
+                // The dictionary route: the radiating faces are T's own
+                // s2sWall patches, at the dictionary's one emissivity.
+                ofgpu::s2s::RadiantFaces::from_field(&gpu, energy.field(), cfg.emissivity)?
+            } else {
+                claim_s2s_walls(&gpu, &hm, energy.field_mut(), &r.walls)?
+            };
+            let e = DriverEnclosure::new(&gpu, &mesh, &hm, &raw, sel, cfg)?;
+            println!("{}", e.describe());
+            encl = Some(e);
+            None
+        }
         Some(r) => {
             let num = CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?;
             let c = CaseRadiation::new(&gpu, &hm, &mesh, r, &num, energy.field_mut())?;
@@ -2376,9 +2408,34 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
         None => None,
     };
+    // SPEC-LIT 98.7 row 15: an `s2sWall` patch with no radiation is the
+    // JSON path's key missing - the condition nothing would ever compute.
+    if rad.is_none() && encl.is_none() {
+        let s2s_faces = faces_where(&fields.t, &hm, BcKind::is_s2s_wall)?;
+        if s2s_faces.iter().any(|&on| on) {
+            return Err(Error::Config(format!(
+                "{}: T carries an s2sWall patch, and the case states no radiation - \
+                 a radiating wall with no enclosure is the key that is missing. \
+                 Name the enclosure in a `radiation` block (s2s) or in \
+                 constant/radiationProperties (radiationModel viewFactor) \
+                 (SPEC-LIT 98.7 row 15, 137.9)",
+                o.case_path.display()
+            )));
+        }
+    }
     let mut t_fixed_flux_faces = faces_where(&fields.t, &hm, BcKind::is_fixed_flux_temperature)?;
     if let Some(r) = &rad {
         r.fixed_flux_faces(&mut t_fixed_flux_faces);
+    }
+    // SPEC-LIT 137.9: a radiating face's triple is the stamp's - (S50.12),
+    // rewritten by the exchange every iteration. `update_fixed_flux` must
+    // not overwrite it.
+    if let Some(e) = &encl {
+        for (bf, &on) in e.radiating().iter().enumerate() {
+            if on {
+                t_fixed_flux_faces[bf] = false;
+            }
+        }
     }
     energy.set_fixed_flux_walls(&gpu, &t_fixed_flux_faces)?;
 
@@ -2919,6 +2976,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             if transient { Some(dt) } else { None },
             reacting.as_mut(),
             rad.as_mut(),
+            encl.as_mut(),
         )?;
 
         if !report.finite {
@@ -3025,6 +3083,20 @@ fn run(o: &Options) -> Result<RunEnd> {
         Some(r) => Some(r.finish(&gpu, &mesh, &hm, energy.field())?),
         None => None,
     };
+    // SPEC-LIT 137.9: the enclosure's own report of the last exchange, with
+    // one line beside it - the updates the loop took, §50.4's two powers and
+    // the residual the sweeps left.
+    let enclosure = encl.as_ref().map(|e| e.report());
+    if let Some(rep) = &enclosure {
+        println!(
+            "s2s enclosure (S50.4): net {} W | gross {} W | residual {} | {} sweeps | {} updates",
+            sci(f64::from(rep.net_power), 6),
+            sci(f64::from(rep.gross_power), 6),
+            sci(f64::from(rep.radiosity_residual), 3),
+            rep.sweeps,
+            rep.updates
+        );
+    }
     let run_end = RunEnd {
         steps: n_steps,
         transient,
@@ -3033,6 +3105,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         t_mean,
         final_state,
         radiation,
+        enclosure,
     };
 
     mem.sample(&gpu)?;
@@ -3857,6 +3930,11 @@ struct RunEnd {
     /// (137.6)'s two sides and scale, and the final `G` and wall flux.
     #[cfg_attr(not(test), allow(dead_code))]
     radiation: Option<lowmach_rad::RadiationEnd>,
+    /// SPEC-LIT 137.9: the enclosure's report of the last exchange - the
+    /// updates taken, (S50.4)'s net and gross powers, the (S50.3) residual
+    /// and the sweeps.
+    #[cfg_attr(not(test), allow(dead_code))]
+    enclosure: Option<ofgpu::cht::flow::EnclosureReport>,
 }
 
 /// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
@@ -4258,6 +4336,7 @@ mod lowmach_tests {
                 None,
                 None,
                 None,
+                None,
             )?;
             assert!(
                 last.finite,
@@ -4529,6 +4608,7 @@ mod lowmach_tests {
             None,
             true,
             Some(dt),
+            None,
             None,
             None,
         )
@@ -5884,8 +5964,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5905,8 +5985,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),

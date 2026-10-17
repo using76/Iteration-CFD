@@ -31618,7 +31618,9 @@ cold wall by radiation.
   `constant/radiationProperties`, or a `T` with a
   `greyDiffusiveRadiationViewFactor` or `s2sWall` patch, is refused naming
   `ofgpu-cht` and §98.7 - where before this section it was seeded adiabatic
-  and run.
+  and run. **Superseded by CHR-24 (§137.9):** `ofgpu-buoyant` now runs the
+  enclosure from the case directory. Its wall conductivity is (137.7), and
+  `-graph` with an enclosure is refused for the read-back reason above.
 * **§50.12's first item stands.** The coupled cavity of Balaji & Venkateshan
   and of Akiyama & Chong - its `Nu_conv`/`Nu_rad` tables are behind
   Elsevier's paywall - is not run. §98 ships with no gate against a published
@@ -51492,7 +51494,7 @@ unknown entry inside a recognised type are refused by name. Without the field
 file every wall is black at its own `T`, and an ordinary patch is refused.
 
 **Refusals at the driver.** `ofgpu-lowmach` refuses, by name: `s2s` or
-`viewFactor` (CHR-24 builds it); `wsgg` and `wsggGrey` (CHR-22's three open
+`viewFactor` (CHR-24 built it as §137.9's enclosure, which the driver now runs); `wsgg` and `wsggGrey` (CHR-22's three open
 items: per-cell `a_i(T, X)` and `kappa_i(T, X)`, the wall weight `a_i(T_w)`
 and the transparent window are named and not built); radiation with a
 `motion` block or `-rigidBody` (the radiation geometry is built once);
@@ -51635,6 +51637,131 @@ exact to their contract (bitwise, `radiative_walls_are_balanced`), and a
 case that runs radiation through the driver states its walls' `T`.
 
 Labels: (137.4)-(137.6).
+
+### 137.9 Surface-to-surface radiation from `ofgpu-buoyant` and `ofgpu-lowmach` as built (CHR-24)
+
+§98.7-§98.8 put an enclosure in a conjugate case. CHR-24 puts the same
+model, `S2s` of §49-§51 unchanged, in the two single-region drivers.
+`src/s2s.rs` is not modified. The construction, the cadence and the stamp
+are §98.8's. Only the selection of the radiating faces and the wall
+conductivity differ between the drivers.
+
+**What the case says.**
+
+| route | driver | the enclosure | the radiating faces |
+|---|---|---|---|
+| JSONC `radiation` | `ofgpu-lowmach` | `"model": "s2s"` (alias `viewFactor`), and the optional §51.1 entries in JSONC spelling: `ambientTemperature`, `radiationRelaxation`, `radiositySweeps`, `agglomerate`, `viewFactorQuadrature` | the `walls` patches, each with its own `emissivity` |
+| `constant/radiationProperties` | `ofgpu-lowmach`, `ofgpu-buoyant` | `radiationModel viewFactor` (or `s2s`), read by `S2sConfig::from_dict` exactly as §51.1 states it | every `T` patch whose type is `s2sWall` or `greyDiffusiveRadiationViewFactor`, at the dictionary's `emissivity`, with `q_ext = 0` |
+
+The JSONC block is written out as §51.1's dictionary entries and read by
+`S2sConfig::from_dict`, as §137.2 lowers the participating block. Its
+`emissivity` entry is the least of the walls' emissivities. Every
+radiating face carries its own, so that entry only feeds §50.2's sweep
+count and §50.9's lower bound. The lowering gives the transparent medium
+(`constant`, `kappa = 0`, no scatter) with `LoweredRadiation::s2s` set.
+
+A JSONC wall's `T` condition says how the wall is claimed
+(`case_rad::claim_s2s_walls`). A `zeroGradient` face becomes an adiabatic,
+re-radiating `s2sWall` (`q_ext = 0`). A `fixedFluxTemperature` face becomes
+an `s2sWall` whose `q_ext` is the stated `q` (§50.3). The face leaves
+`Energy`'s fixed-flux list, because the stamp's `refGrad = q_ext/k_eff`
+replaces that conversion. Each claimed face is seeded with the triple
+`(0, 0, 0)`. Any other condition is refused by patch name. A stated
+temperature is not an `s2sWall`. Where a surface at a stated temperature
+must close the view, `ambientTemperature` (§49.6) does it.
+
+**Refusals**, continuing §137.2's table for `s2s`. Each one names its key.
+
+| case | refused |
+|---|---|
+| `absorption`, `scatter`, `quadrature`, `scatterTol`, `maxScatterIterations` under `s2s` | a non-participating medium; the key would be read and ignored (§50.9) |
+| `every` other than 1 | the exchange runs every iteration (§98.10) |
+| `open` | the closure is `ambientTemperature` (§49.6) |
+| no `walls` | nothing radiates (§98.7 row 14) |
+| `walls.<p>.T` | a stated temperature is not an `s2sWall` |
+| a wall `emissivity` below `EPS_MIN_SUPPORTED` (0.02) | §50.2 |
+| any of the five §51.1 keys under `P1` or `fvDOM` | read by `s2s` only |
+| a `walls` patch that is missing, not a wall, or whose `T` is not `zeroGradient`/`fixedFluxTemperature` | at the driver, naming the patch |
+| a `T` with an `s2sWall` patch and no enclosure (`ofgpu-lowmach` dictionary route; `ofgpu-buoyant`) | §98.7 row 15 |
+| an enclosure where no face radiates | §98.7 row 14 |
+| `-restartFrom` with `radiationRelaxation < 1` | the relaxed irradiation `H_old` is not in the checkpoint |
+| `ofgpu-buoyant -graph` with an enclosure | the exchange reads back every iteration (§98.10) |
+| `ofgpu-buoyant` with `radiationModel P1` or `fvDOM` | `ofgpu-lowmach` runs a participating medium (§137.8) |
+
+`ofgpu-lowmach` keeps §137.8's refusals of a `motion` block and
+`-rigidBody`: the view factors are built once.
+
+**Where the exchange runs.** `case_rad::DriverEnclosure` holds `S2s` and
+the per-face read-backs that §98.8's `Enclosure` holds, without the
+interface parts. In `ofgpu-lowmach` it runs once per outer iteration,
+after the participating radiation's place in `outer_iteration` and before
+`Energy::update_target_divergence`. `Energy::k_eff_wall()` is copied and
+`S2s::update` runs on the energy's `T`. This is §98.8's step 4c, and it
+carries §50.7's lag of `k_eff`. In `ofgpu-buoyant` it runs once per pass,
+just before `ScalarTransport::correct`.
+
+**The wall conductivity of a kinematic `T` (DESIGN).** `ofgpu-buoyant`
+solves `T` with the diffusivity `alpha_eff = nu/Pr + nu_t/Pr_t`. No
+conductivity is in the equation, so (S50.12)'s `k_eff` is formed from two
+new entries of `physicalProperties` (or `transportProperties`), `rhoRef`
+and `CpRef`. Both are required whenever the case has an enclosure. Neither
+has a default, and each is refused by name when it is missing or not
+positive:
+
+```
+k_eff,b = rhoRef CpRef ( nu/Pr + nu_t,b / Pr_t )                         (137.7)
+```
+
+`nu_t,b` is the boundary `nut` that `ScalarTransport::correct` copies, so
+`k_eff,b / (rhoRef CpRef)` is the face diffusivity the `T` equation
+assembles. With this `k_eff`, (S50.12)'s `k_eff snGrad_b = a - h T_b` is
+`alpha_eff snGrad_b = (a - h T_b)/(rhoRef CpRef)`, the same wall balance
+in the equation's own units. `k_eff` is formed on the host from the
+current `nut` at every exchange, so `ofgpu-buoyant` has no `k_eff` lag.
+`ofgpu-lowmach` reads `Energy`'s, as §98.8 does.
+
+**What a run reports.** `ofgpu-lowmach`'s `RunEnd::enclosure` and
+`ofgpu-buoyant`'s `run_report` return §98.8's `EnclosureReport` of the
+last exchange. The setup prints the view-factor report, and the end
+prints the updates, `SUM A q_r`, `SUM A |q_r|`, the (S50.3) residual and
+the sweeps.
+
+**The gates.**
+
+| test | measure | tolerance | class |
+|---|---|---|---|
+| `buoyant_s2s_parallel_plates` | `ofgpu-buoyant`, plume 8^3, 3 iterations, ceiling `s2sWall` at `eps = 0.6` into the closure at 400 K: each face's `eps (sigma T0^4 - H_b)` against `parallel_plate_flux(T0, 400, 0.6, 1)` and `concentric_flux(T0, 400, 0.6, 1, A_ceiling/A_boundary)`; `SUM A q_r` | `1e-10` relative (§50) | R |
+| `lowmach_s2s_equals_library` | `DriverEnclosure` on a claimed JSONC box (xmin `eps 0.8`, xmax `eps 0.5` with `q 50`, closure 350 K, `radiationRelaxation 0.5`), 3 exchanges, against `S2s` built by hand | bitwise | D |
+| `lowmach_s2s_runs` | `ofgpu-lowmach` on the same box, 3 iterations: `SUM A q_r` against `SUM A \|q_r\|` | `1e-10` | R |
+| `an_enclosure_is_read_or_refused_by_name`, `case_radiation_s2s_refusals`, `s2s_restart_with_relaxation_is_refused` | every refusal above | refused, naming the key | D |
+| `case_radiation_s2s_lowers` | each JSONC key read back | exact | D |
+
+**Plan against tree (the tree wins).** The docs/17 row names two infinite
+parallel plates and concentric cylinders "through the driver". A view
+factor from quadrature over a finite mesh does not reach `1e-10` against
+the grey two-surface forms, as §98.9(b)(3) already found. The driver gate
+therefore takes §98.9(b)(3)'s construction. One planar surface radiates
+into the black closure, and its coplanar faces see none of each other.
+`H_b = sigma T_amb^4` on every face, and both closed forms hold to
+round-off at `e2 = 1`. The grey second surface and the unequal areas stay
+Gates 50-A and 50-B, on the hand-written `F` they need. No concentric-
+cylinder mesh is built.
+
+**Measured (f64, CHR-24).** `buoyant_s2s_parallel_plates`: the worst
+face's relative error against both closed forms is `9.5e-16`.
+`SUM A q_r = 8.9e-11` W against `SUM A |q_r| = 2.64e4` W, a ratio of
+`3.4e-15`. The (S50.3) residual is `7.4e-17` after 31 sweeps, over 3
+updates. `lowmach_s2s_equals_library` shows 0 differing bits over 3
+exchanges. `lowmach_s2s_runs`: `SUM A q_r = 4.5e-13` W against `5.22e3` W,
+a ratio of `8.7e-17`, with residual `1.6e-16` after 40 sweeps. That run
+holds the four non-radiating side walls at `fixedValue` 600 K. The equals
+gate's box has no Dirichlet face on `T`, so its sealed steady energy
+equation is singular with or without radiation. That is a property of the
+fixture, not of the enclosure. The `single` build compiles. The driver
+tests were not run under `single`; there the tolerance column is `1e-5`
+(class R round-off).
+
+Labels: (137.7).
 
 ---
 

@@ -138,7 +138,7 @@ describe('case blocks (CHR-28)', () => {
     expect(blocks.combustion.required).toEqual([])
     expect(blocks.radiation.required).toEqual(['model'])
     expect(blocks.parcels.required).toEqual(['capacity', 'injectors'])
-    expect(blocks.radiation.keys).toEqual(['absorption', 'every', 'maxScatterIterations', 'model', 'open', 'quadrature', 'scatter', 'scatterTol', 'walls'])
+    expect(blocks.radiation.keys).toEqual(['absorption', 'agglomerate', 'ambientTemperature', 'every', 'maxScatterIterations', 'model', 'open', 'quadrature', 'radiationRelaxation', 'radiositySweeps', 'scatter', 'scatterTol', 'viewFactorQuadrature', 'walls'])
     expect(blocks.species.keys).toEqual(['inert', 'initial', 'names', 'patches', 'transport'])
     expect(blocks.chemistry.keys).toEqual(['atol', 'integrator', 'mechanism', 'rtol', 'splitting', 'thermo', 'transport'])
     const union: Record<string, string[]> = {}
