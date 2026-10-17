@@ -60096,7 +60096,8 @@ leaves the box, and the fixed variable whose multiplier has the wrong sign freed
 the problem strictly convex, so the method ends, at the unique minimiser. The moment's priority is
 the weight: when the force cannot be met, the moment's error is `1/(W_m^2 L)` of the force's. General
 for N thrusters with any positions and directions; the yaw moment is not allocated (the contract's
-corner thrusters cannot give it).
+corner thrusters cannot give it) - unless the file has `control.lateral`, whose six-row allocation
+(§161.20) adds it with `F_x` and `F_y`.
 
 ### 161.15 Propellant, the thrust in the integrator, the ground, the CSV
 
@@ -60235,9 +60236,185 @@ the CSV, `U`, `p`, `T`, `nut`, `rho` and the moved points byte for byte the same
   of the step before, extrapolated; the thrust is exact over the step. No sub-iteration.
 * **The controller sees the state at the step's start** and holds the valves over the step (a
   zero-order hold of `dt`); it does not feed the fluid's moment forward; it allocates `F_z`, `M_x`,
-  `M_y` only - no yaw, no lateral force (the barrel roll's lateral drift is physics it does not fight).
+  `M_y` only - no yaw, no lateral force (the barrel roll's lateral drift is physics it does not fight);
+  version 3's `control.lateral` adds both (§161.19-§161.20).
 * **The descent law is the contract's**, with §161.14's feed-forward and latch; the touchdown is the
   lowest contact point crossing the ground plane, with no wheel, tyre or suspension model.
 * **Propellant** is a point mass at the centre of mass; its loss changes the mass only.
 * **The throttle** is linear in `u` (§161.10).
 * **Verified turbulence models** only (§161.16).
+
+### 161.19 Version 3 - the lateral velocity law and the yaw
+
+`No GPL-licensed source was consulted.` §161.19-§161.23 are the roadster contract's version 3
+(contract-v3 §3-§4, 2026-10-17), written for `src/rigid_body/control.rs`, `src/rigid_body.rs`,
+`src/rigid_body/tests_v3.rs` and `src/bin/lowmach.rs`. **ORIGINAL**: the law, the demanded wrench and
+the allocation's row weights are the contract's, and the coupling (161.20d) is derived here; the
+allocation's method is §161.14's (**P. B. Stark, R. L. Parker, Comput. Stat. 10 (1995) 129-141** on
+Householder QR, **G. H. Golub, C. F. Van Loan, *Matrix Computations*, 4th ed. (2013), sec. 5.2-5.3**).
+No controller, allocation or 6-DOF code was opened.
+
+The optional block `control.lateral`:
+
+| key | meaning | default |
+|---|---|---|
+| `velocity` | `[v_x, v_y]`, the world horizontal velocity targets, m/s; `null` leaves that axis free | required |
+| `gain` | `K_h`, 1/s | 2.0 |
+| `maxAccel` | `a_max`, m/s² | 4.0 |
+| `weight` | `w_h`, the `F_x`, `F_y` rows' weight against `F_z`'s in the allocation (§161.20) | 0.3 |
+
+Refused by name: a `velocity` entry that is neither a finite number nor `null`, a `velocity` that is not
+two entries, a `gain`, `maxAccel` or `weight` that is not positive and finite, an unknown key.
+
+**The law**, world axes, evaluated with §161.14's controller at the step's start (`v` the body's
+velocity, `m` its current mass):
+
+```
+a_h,k = K_h (v_target,k - v_k)   on each axis k in {x, y} with a target;   0 on a free axis      (161.19a)
+a_h  <- a_h a_max/|a_h|          when |a_h| > a_max   (its direction kept)                          (161.19b)
+F_h  = m (a_h,x, a_h,y, 0)                                                                            (161.19c)
+```
+
+**The demanded body wrench**, `R = R(q)` body to world:
+
+```
+F_b = R^T F_h + F_desc e_z        (F_desc: §161.14's descent law, unchanged)                         (161.19d)
+M_b = J alpha + w x (J w)         (§161.14's PD, all three components)                               (161.19e)
+```
+
+(161.19d) leaves the world's vertical force what the descent law asks: `R F_b = F_h + F_desc R e_z` and
+`F_h` has no z component, so the world z component is `F_desc uz = m a_cmd`, as in version 2. The
+PD's yaw moment has been computed from the full quaternion error since version 2; with
+`control.lateral` it is allocated, so the waypoint yaw is held. The law acts on velocity alone: a
+lateral offset in position is not returned. The roll case leaves `v_x` free, so the car keeps its
+forward speed.
+
+**Version 2 exactly without it.** A file without `control.lateral` runs §161.14's controller: the
+three-row demand `[F_z, M_x, M_y]` and the three-row allocation. `bounded_least_squares` became generic
+over its number of rows; on three rows its arithmetic is version 2's operation for operation (the
+column norm sums its squares in the same order), and §161.22 (e) compares the drop case against the
+version-2 binary.
+
+### 161.20 The six-row allocation
+
+Thruster `i` (centroid `r_i` from the centre of mass, gas direction `d_i`, body axes) gives per newton
+the column
+
+```
+a_i = (f_x, f_y, f_z, m_x, m_y, m_z),   f = -d_i,   m = r_i x f                                     (161.20a)
+```
+
+and the closed-loop thrusters share `b = (F_b, M_b) - sum_open a_i T_i`. Stage one is §161.14's
+problem on six rows; stage two is version 2's "smallest thrusts that give stage one's wrench":
+
+```
+min || W1 (A T - b) ||^2 + eps1 ||T||^2   over 0 <= T_i <= F_max,i                                 (161.20b)
+W1 = diag(w_h, w_h, 1, 1000/L, 1000/L, 1000/L),   eps1 = (1e-12 max_j |W1 A_j|)^2,   L = max_i |r_i|
+
+b2 = A T1,   min || W2 (A T - b2) ||^2 + eps2 ||T||^2,                                               (161.20c)
+W2 = diag(1, 1, 1, 1/L, 1/L, 1/L),   eps2 = (1e-5 max_j |W2 A_j|)^2
+```
+
+both by §161.14's active-set method. The thrusts are then bounded and limited by the propellant
+(§161.15) as in version 2.
+
+**The priority is a weighting, not a lexicographic order.** When the wrench cannot be met, stage one
+trades the rows' errors by their squared weights: the moment rows (in newtons by `L`) at `1000^2`, `F_z`
+at 1, `F_x` and `F_y` at `w_h^2` (0.09 at the default) - moments > `F_z` > horizontal for `w_h < 1`.
+Two nozzles at the centre of mass canted ±45° in y, asked for more than both rows can have, give
+`F_z`'s error `w_h^2 tan 45° = 0.09` of `F_y`'s (§161.22 (b), in closed form). `w_h = 1` makes the
+force rows equal partners; `w_h > 1` puts the horizontal ahead of `F_z` (allowed; the contract's order
+needs `w_h < 1`).
+
+**The side nozzles' roll coupling** (derived here, measured in §161.22 (c)). A side exit at height
+`r_z` relative to the centre of mass gives every lateral newton a roll moment, `m_x = -r_z f_y`. The
+floor exits give a roll moment only with `F_z >= |M_x|/y_f` (`y_f` their lateral arm), because they push
+one way. While neither the descent law nor the lateral law asks for force - the roll and the fall
+before braking - the allocation makes a roll moment `M` from the two kinds at the cost of an `F_y` error
+or an `F_z` error; the share `s` taken by the side nozzles minimises
+
+```
+w_h^2 (s M/r_z)^2 + ((1 - s) M/y_f)^2   =>   s = y_f^-2 / (w_h^2 r_z^-2 + y_f^-2)                  (161.20d)
+```
+
+On the test car's sill (`r_z = -0.217 m`, `y_f = 0.3125 m`) at `w_h = 0.3`, `s = 0.84` until the side
+nozzles saturate: they turn the car, and their thrust, turning with the body through the roll, pushes
+it sideways - the other way from version 2's floor-only drift, and harder. At `w_h = 1`, `s = 0.33`;
+with the side exits at the centre of mass's height (`r_z -> 0`) `s -> 0` and `w_h` stops mattering.
+
+### 161.21 The CSV of version 3
+
+A file with `control.lateral` appends, after §161.15's columns:
+
+| columns | meaning |
+|---|---|
+| `mdot_<patch>` | for every NOZZLE thruster, in the file's order: `u_i mdot_max,i` over the step, after the bounds and the propellant limit, kg/s |
+| `cmd_Fx_body, cmd_Fy_body, cmd_Fz_body, cmd_Mx_body, cmd_My_body, cmd_Mz_body` | the demanded wrench (161.19d-e), N and N m, body axes about the centre of mass, the open-loop thrusters' share included; `NaN` during the release hold, when no command is taken |
+| `ach_Fx_body, ach_Fy_body, ach_Fz_body, ach_Mx_body, ach_My_body, ach_Mz_body` | `sum_i a_i T_i` over every thruster: the wrench the thrust gives, after the bounds and the propellant limit |
+
+A row's `u_`, `F_`, `mdot_`, `cmd_` and `ach_` columns are its step's: the controller reads the state
+at the step's start and the valves are held over the step. Its state columns are at the step's end.
+`ach - cmd` is the allocation's residual. A file without `control.lateral` writes §161.15's CSV
+unchanged. The touchdown line of §161.15 is unchanged; it already carries `v_y` and the yaw.
+
+### 161.22 The tests of version 3
+
+`src/rigid_body/tests_v3.rs` (host only) and `src/bin/lowmach.rs`, each a few seconds:
+
+| | test | bar | measured |
+|---|---|---|---|
+| a | `the_lateral_law_meets_its_gain_and_its_clamp` | (161.19a-c) exactly, the clamp's length to 1e-15 with its direction kept; the block, its defaults (the contract's example) and five refusals by name; at a 90° roll a world +y demand is body -z to 1e-9; the PD's yaw moment in the demand to 1e-12 | `a_h` (0, 3) and (0, 4) exactly; clamped length 4 to one ulp, cross product with the raw vector 0; the roll's demand (0, -7.5e-13, -3400.000000000001, 0, 0, 0) N; `M_z` -2943.2953 N m for 2° of yaw |
+| b | `the_six_row_allocation_keeps_its_priorities` (the test car's eight nozzles) | feasible: the wrench 1e-9, stage one's KKT 1e-9, stage two keeps it 1e-9, the least-norm thrusts 1e-8 where they lie in the box; a pure moment met to 1e-4 with `F_z` giving way; a saturated lateral request keeps `M_z` to 1e-3; the canted pair's `B = c^2 F/(c^2 + w_h^2 s^2)` to 1e-9 and the error ratio `w_h^2 s/c`; on the four floor nozzles the six-row thrusts are the three-row ones to 1e-9 `F_max`, with and without an unattainable `F_y` and `M_z` | wrench error ≤ 1.1e-10, KKT ≤ 4.3e-14, least-norm 7.2e-11; the moment (3000, -2000, 1500) N m given as (2999.94, -2000.00, 1500.00) with `F_z` 9589 N; `F_y` 5539 of 30000 N with `M_z` -3999.99 of -4000; the pair 9174.311926 N against 9174.311927, errors 583.8 and 6487.2 N; the floor layout to 3.4e-14 `F_max` |
+| c | `a_roadster_with_side_thrusters_lands_upright_without_drift` | every flight lands with `|v_z|` ≤ 1.5 `touchdownSpeed`, upright, righted by 1.7 s, `v_x` within 0.5 m/s of 4, air left, `|v_y|` under version 2's; on the door and on the sill at `w_h = 1`, `|v_y|` ≤ a quarter of version 2's; yaw ≤ 0.5° (≤ 2° under the 300 N m moment) | the table below |
+| d | `a_rigid_body_lateral_run_writes_the_version_3_columns` (lowmach, the 6³ box of §161.17 (k) with `control.lateral` asking `v_x = 0` of a body at 0.5 m/s) | the version-3 columns in order after `quat_z`; `mdot = F/U_e` (ideal nozzle) to 1e-6; `ach_Fz = F_jet` to 1e-8; `cmd_Fx = -2 m v_x` to 0.05 N | as stated |
+| e | the drop case against the version-2 binary | below | below |
+
+**(c), the host-only closed loop.** The car is the v2 drop case's (1700 kg, inertia (576.5, 1974.9,
+2342.2) kg m², centre of mass (-0.1507, 0, 0.5169) m, four floor exits of `F_max` 14498 N, 40 bar,
+293.15 K, 250 kg of air) with four side nozzles of 0.004 m² at 40 bar (`F_max` 5272 N, `mdot_max`
+8.519 kg/s each, gas outward along ±y) at `|y|` 0.9 m and x 0.65 and -0.95 m (0.80 m ahead of and
+behind the centre of mass, between the wheel arches), on the doors at z 0.52 m (`r_z` +0.003 m) or on
+the sill at z 0.30 m (`r_z` -0.217 m). Released inverted at a 21 m centre of mass with 4 m/s forward,
+held 0.1 s, the minimum-jerk roll to upright by 1.6 s, the descent law (`touchdownSpeed` 0.5,
+`brakeAccel` 22.6, `velocityGain` 80), `control.lateral` the contract's example (`v_y` 0, `v_x` free,
+gain 2, maxAccel 4, weight 0.3) unless stated; no fluid, dt 1e-3 s.
+
+| flight | touchdown | v at touchdown, m/s | yaw at touchdown (max) | `v_y` at 1.6 s | braking from | peak thrust load | air used |
+|---|---|---|---|---|---|---|---|
+| version 2, four floor nozzles | 2.326 s | (4.000, -2.888, -0.490) | 0.000° | -2.885 | 1.669 s, h 5.20 m | 3.49 g | 80.2 kg |
+| version 3, door | 2.336 s | (4.000, -0.337, -0.487) | 0.000° | -1.468 | 1.686 s, h 5.09 m | 3.33 g | 87.7 kg |
+| version 3, door, constant 300 N m yaw moment | 2.336 s | (4.005, -0.337, -0.488) | 0.204° (0.205°) | -1.468 | 1.686 s, h 5.09 m | 3.33 g | 87.7 kg |
+| version 3, sill, `w_h` 0.3 | 2.419 s | (4.000, +1.234, -0.487) | 0.000° | +3.727 | 1.740 s, h 5.54 m | 3.51 g | 95.2 kg |
+| version 3, sill, `w_h` 1.0 | 2.366 s | (4.000, +0.169, -0.489) | 0.000° | +0.740 | 1.701 s, h 5.32 m | 3.40 g | 85.2 kg |
+
+All land upright (body z . world z 1.00000, roll and pitch within 0.001°), righted (> 0.99) at 1.327 s. The
+sill at `w_h` 0.3 is (161.20d) at work: the side nozzles run at full valve through the roll and carry
+the car to +3.7 m/s sideways. A sweep that was not kept as a test (sill z 0.30 / 0.40 / 0.45 / door
+0.517 m, `w_h` 0.3 / 1 / 3, gain and maxAccel 2 and 4 or 4 and 6) gave touchdown `|v_y|` from 1.23 m/s
+(sill, `w_h` 0.3, gain 2) down to 0.002-0.03 m/s with gain 4 and maxAccel 6 (at `w_h` 1 or 3 at every
+height, and at any `w_h` at the centre of mass's height).
+
+**(e), version 2 kept.** The drop case (709 260 cells, kOmegaSST with wall functions, the v2 file of
+`drop/` with `release` 0, the first waypoint moved to t = 0 and an initial angular velocity (0.3,
+-0.2, 0.1) rad/s, so that the controller valves the nozzles from the first step - u (0, 0.29, 0,
+0.08) at step 1), 20 steps at dt 1.75e-4 s with `-permissive`, under this tree and under the 7212e86
+binary: the written `U`, `p`, `T`, `k`, `omega`, `nut`, `rho` and moved points at 0.00175 s and
+0.0035 s are byte for byte the same, and so is every column of `rigidBody.csv` except `Fjx`, `Fjy`,
+`Fjz`. Those are round-off of order 1e-21 N (the nozzle exits are out of the fluid's force, §161.12,
+and the body walls' relative flux is round-off), and they differ between two runs of the 7212e86
+binary itself, as does the last digit of `yPlus.json`'s statistics. The `-rigidBody` RAS branch of
+`ofgpu-lowmach` now builds the kernels of the turbulence fields' `inletOutlet` switch (§161.16) once,
+before the time loop, instead of every step; the comparison covers it.
+
+### 161.23 Known limits of version 3
+
+* **Velocity only, proportional.** No position hold and no integral action: a steady lateral load
+  leaves a velocity offset `F/(m K_h)`.
+* **The priority is a weighting** (161.20b), and the side nozzles' roll coupling (161.20d) turns a low
+  `w_h` with exits below the centre of mass into a sideways push during the roll. Side exits near the
+  centre of mass's height, or `w_h` near 1, avoid it (§161.22 (c)).
+* **The roadster's layout has no `F_x` authority** (no nozzle along x); its `v_x` is left free.
+* **Near a 90° roll** the side nozzles push vertically and the floor nozzles sideways in one direction
+  only; lateral correction the other way waits until the roll moves on.
+* The lateral demand is evaluated at the step's start and held over the step in body axes (the
+  zero-order hold of §161.18). Version 2's limits (§161.18) stand.
