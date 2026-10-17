@@ -4,6 +4,34 @@
 // per-request system message built in agent/prompt.ts.
 import { BINARIES, MESH_PRESETS, MODELS, PICK_LISTS, PIPELINES, type BinarySpec } from '@cfd/shared'
 
+/**
+ * The string choices the generated schema's block descriptions offer, as
+ * dotted paths from the case root. A literal copy of the union of the case
+ * schema's `blocks[*].choices` (CHR-28): the prompt is static, so it must
+ * not read the schema file.
+ */
+export const CASE_BLOCK_CHOICES: Record<string, string[]> = {
+  'species.transport.model': ['lewis'],
+  'chemistry.integrator': ['rodas3', 'ros3'],
+  'chemistry.splitting': ['lie', 'strang'],
+  'combustion.model': ['laminar', 'EDM', 'EDC', 'PaSR'],
+  'combustion.variant': ['1989', '1996', '2005'],
+  'radiation.absorption.model': ['constant', 'wsgg', 'wsggGrey'],
+  'radiation.model': ['P1', 'fvDOM', 's2s', 'viewFactor'],
+  'radiation.quadrature': ['S2', 'S4', 'S6', 'S8'],
+  'radiation.scatter.model': ['none', 'isotropic', 'linearAnisotropic'],
+  'parcels.coupling.energy': ['off', 'explicit', 'semiImplicit'],
+  'parcels.coupling.mass': ['none', 'evaporation'],
+  'parcels.coupling.momentum': ['off', 'explicit', 'semiImplicit'],
+  'parcels.drag': ['none', 'stokes', 'schillerNaumann'],
+  'parcels.evaporation.saturation': ['clausiusClapeyron', 'hylandWexler'],
+  'parcels.evaporation.transfer': ['ranzMarshall', 'spalding', 'abramzonSirignano'],
+  'parcels.impact.splash': ['mundo', 'baiGosman'],
+  'parcels.impact.tension': ['constant', 'iapwsR1-76'],
+  'parcels.physics': ['inert', 'heating', 'evaporating'],
+  'parcels.wall': ['remove', 'rebound', 'stick', 'weber'],
+}
+
 function flagLine(b: BinarySpec): string {
   const pos = b.positionals.map((p) => (p.optional ? `[${p.name}]` : `<${p.name}>`)).join(' ')
   const flags = b.flags
@@ -52,11 +80,18 @@ export const STATIC_SYSTEM = `You are the Iteration CFD Studio assistant, workin
 ${registryDigest()}
 
 ## Cases and output layout
-- A case is EITHER a single JSONC file (docs/schema/case-1.json; top-level keys: name, mesh{kind:cartesian,bounds,cells,boundaries,grading,cyclic,regions}, physics, turbulence{kind,model,wallTreatment,wallFunctions}, patches[ordered rules {match,kind,...BCs}], initial, numerics, run, output, sources) OR an OpenFOAM ASCII directory (constant/polyMesh, 0/, system/).
+- A case is EITHER a single JSONC file (docs/schema/case-1.json; top-level keys: name, mesh{kind:cartesian,bounds,cells,boundaries,grading,cyclic,regions}, physics, turbulence{kind,model,wallTreatment,wallFunctions}, patches[ordered rules {match,kind,...BCs}], initial, numerics, run, output, sources, motion, and the optional species, chemistry, combustion, radiation and parcels blocks) OR an OpenFOAM ASCII directory (constant/polyMesh, 0/, system/).
 - JSONC cases are read only by ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-compressible, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose. A case with physics.compressible (gamma, W, Pr, viscosity sutherland|const, pOperating; SPEC-LIT §122.6) states a gas: only ofgpu-compressible runs it, laminar only, and it writes p (gauge, about pOperating), U, T, rho and Mach. ofgpu-k-omega, ofgpu-sa, ofgpu-plume, ofgpu-buoyant and ofgpu-vof need an OpenFOAM case directory (generate one with mesh_generate).
 - A JSONC case writes to <stem>_jsonc/ next to the file (cases/plume.jsonc -> cases/plume_jsonc/). An OpenFOAM case writes into its own directory.
 - Results: foam format -> <root>/<time>/{U,p,k,epsilon,omega,nut,T,...}; vtu -> <root>/VTK/<tag>_NNNNNN.vtu (+ .pvd; face geometry is a proxy); vdb/nvdb -> <root>/VDB/. A JSONC run does not write polyMesh on disk; the viewer rebuilds the geometry from the case's mesh block.
 - Structured cells are ordered i fastest: cell(i,j,k) = i + nx*(j + ny*k).
+- species {names (the inert one included), inert, initial {name: Y}, patches [{match, Y}], transport {model, Le, Sct}}, chemistry {mechanism, thermo (CHEMKIN files relative to the case), integrator, splitting, rtol, atol} and combustion {model, A, B, Cmix, tauMix, tauChem, variant, ...}: only ofgpu-lowmach runs a reacting JSONC case, transient (-endTime, -deltaT) with ddt Euler, splitting lie and combustion model laminar; EDM, EDC, PaSR, strang, a steady run, a restart and a moving mesh are refused by name, and every other driver refuses the case (SPEC-LIT §133.11, §137.7).
+- radiation {model, quadrature (fvDOM only), absorption {model, kappa, file, pressure}, scatter {model, sigma, A1}, walls {patch: {emissivity, T}}, open {patch: {Tinf}}, every, maxScatterIterations}: only ofgpu-lowmach runs it (P1 or fvDOM; s2s and viewFactor are refused by name) and writes G and qr; every other driver refuses the case (SPEC-LIT §137.8).
+- parcels {capacity, injectors [{position, massFlow, ...}], physics, drag, wall, coupling {momentum, energy, mass, vapour}, evaporation, impact, ...}: the block validates and lowers, but every driver refuses a parcels case today (SPEC-LIT §137.6).
+- Block choices (from the generated schema):
+${Object.entries(CASE_BLOCK_CHOICES)
+  .map(([path, choices]) => `  - ${path}: ${choices.join('|')}`)
+  .join('\n')}
 
 ## Editing rules
 - Never rewrite whole JSONC files. Use case_edit with JSON pointers (/turbulence/model, /numerics/relaxation/p, /patches/0/U/value, /mesh/cells/2); preview with dryRun when the change is non-trivial, and validate after editing (case_edit validates automatically; case_validate for a fresh check).
