@@ -32,15 +32,20 @@
 //! Written from:
 //!   SPEC-LIT §155.8 - the harness: the BML density and the cumulative sum
 //!   SPEC-LIT §155.1-§155.6, §153.1, §154 - the relations it composes
+//!   SPEC-LIT §160.5 - [`run_aged`], the same tube with the flame-age clock
+//!     on: late kernels seed fresh ignitions, one alpha solve follows every
+//!     c~ solve with the same coupling, the closures read the predicted age
+//!     a* of (160.4), and each step leaves one row of the alpha budget
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
 
 use crate::blockgen::{self, BlockSpec, GradedAxis};
 use crate::device::{DevBuf, Gpu};
+use crate::dust::age;
 use crate::dust::device::{
-    fsc as launch_fsc, ignition as launch_ignition, flame_courant, reynolds_mean, FscFields,
-    FscInputsDev, FscKernels, ProgressKernels,
+    fsc as launch_fsc, fsc_aged as launch_fsc_aged, flame_courant, ignition as launch_ignition,
+    reynolds_mean, FscFields, FscInputsDev, FscKernels, ProgressKernels,
 };
 use crate::dust::fsc::{development_time, FscConstants};
 use crate::dust::ignition::IgnitionSource;
@@ -129,6 +134,76 @@ fn wide(v: Scalar) -> f64 {
     v as f64
 }
 
+/// A fresh ignition seeded mid-run (SPEC-LIT §160.5): at the top of the
+/// first step whose time has reached `t_ig`, every cell's c~ becomes
+/// `max(c~, profile(x))` and the cells it burns start to age from that
+/// step.
+#[derive(Debug, Clone, Copy)]
+pub struct LateKernel {
+    /// The kernel's ignition time, s.
+    pub t_ig: f64,
+    /// The seeded c~ profile, x in m.
+    pub profile: fn(f64) -> f64,
+}
+
+/// The age option's settings for a run: the floor c_a and the late kernels,
+/// applied in the order they are listed.
+#[derive(Debug, Clone)]
+pub struct AgeOptions {
+    /// The floor c_a of (160.1).
+    pub c_a: f64,
+    /// Fresh ignitions seeded mid-run.
+    pub late: Vec<LateKernel>,
+}
+
+/// What [`run_aged`]'s sampler sees after every step: x ascending, c~ and
+/// the local age a = alpha/max(c~, c_a) in the same order.
+pub struct AgeSample<'a> {
+    pub t: f64,
+    pub x: &'a [f64],
+    pub c: &'a [f64],
+    pub age: &'a [f64],
+}
+
+/// One step's row of the alpha budget (SPEC-LIT §160.5's
+/// `age_budget_closes`), the Euler form:
+/// `storage + outflow = clock + inherit`.
+#[derive(Debug, Clone, Copy)]
+pub struct AgeBudgetRow {
+    /// The step's end time, s.
+    pub t: f64,
+    /// sum V (rho alpha - rho0 alpha0)/dt.
+    pub storage: f64,
+    /// sum over boundary faces of phi_m.bf alpha.bf.
+    pub outflow: f64,
+    /// sum V sua.
+    pub clock: f64,
+    /// -sum V spa alpha.
+    pub inherit: f64,
+}
+
+impl AgeBudgetRow {
+    /// `storage + outflow - clock - inherit`: zero for the exact solution.
+    pub fn residual(&self) -> f64 {
+        self.storage + self.outflow - self.clock - self.inherit
+    }
+
+    /// The sum of the four terms' magnitudes, the row's scale.
+    pub fn scale(&self) -> f64 {
+        self.storage.abs() + self.outflow.abs() + self.clock.abs() + self.inherit.abs()
+    }
+}
+
+/// A run with the age on: the plain run, the final alpha and local age
+/// ascending in x, and each step's budget row.
+#[derive(Debug, Clone)]
+pub struct AgedRun {
+    pub run: TubeRun,
+    pub alpha: Vec<f64>,
+    pub age: Vec<f64>,
+    pub budget: Vec<AgeBudgetRow>,
+}
+
 /// The tube's line of cubes, `empty` across.
 pub fn tube_mesh(spec: &TubeSpec) -> Result<HostMesh> {
     if spec.n_cells < 2 || !(spec.x_hi > spec.x_lo) {
@@ -167,6 +242,72 @@ pub fn run(
     t_end: f64,
     sample: &mut dyn FnMut(f64, &[f64], &[f64]),
 ) -> Result<TubeRun> {
+    run_tube(gpu, spec, c0, t_end, None, sample, &mut |_: &AgeSample<'_>| {})
+        .map(|(run, _, _, _)| run)
+}
+
+/// Runs the tube with the flame-age clock on (SPEC-LIT §160.5): the clock's
+/// origin is the spec's `t_fd_origin` with the floor `age.c_a`, every c~
+/// solve is followed by one alpha solve, the closures read the predicted
+/// age a* of (160.4) instead of the global clock, and after every step
+/// `sample` is called with x ascending, c~ and the local age in the same
+/// order. A late kernel of `age` whose time has come seeds
+/// `c~ := max(c~, profile(x))` at the top of its step.
+pub fn run_aged(
+    gpu: &Gpu,
+    spec: &TubeSpec,
+    age: &AgeOptions,
+    c0: &dyn Fn(f64) -> f64,
+    t_end: f64,
+    sample: &mut dyn FnMut(&AgeSample<'_>),
+) -> Result<AgedRun> {
+    let (run, budget, alpha, age_f) = run_tube(
+        gpu,
+        spec,
+        c0,
+        t_end,
+        Some(age),
+        &mut |_: f64, _: &[f64], _: &[f64]| {},
+        sample,
+    )?;
+    Ok(AgedRun { run, alpha, age: age_f, budget })
+}
+
+/// The closures at this outer iterate's temperature: `dustFsc` at the
+/// global clock, or `dustFscAged` at the per-cell age a* with the age on.
+#[allow(clippy::too_many_arguments)]
+fn launch_closures(
+    gpu: &Gpu,
+    fk: &FscKernels,
+    c: &FscConstants,
+    out: FscFields<'_>,
+    n_zero: &mut DevBuf<u64>,
+    inp: FscInputsDev<'_>,
+    t_fd: f64,
+    t_new: f64,
+    age: Option<&DevBuf<Scalar>>,
+    n: usize,
+) -> Result<()> {
+    match age {
+        Some(a) => launch_fsc_aged(gpu, fk, c, out, n_zero, inp, a, n),
+        None => launch_fsc(gpu, fk, c, out, n_zero, inp, t_fd, t_new, n),
+    }
+}
+
+/// The one body `run` and `run_aged` share: the step loop, with the age
+/// option's additions when `age` is `Some` (SPEC-LIT §160.5). Returns the
+/// plain run and, with the age on, the steps' budget rows and the final
+/// alpha and local age ascending in x (all empty with the age off).
+#[allow(clippy::too_many_arguments)]
+fn run_tube(
+    gpu: &Gpu,
+    spec: &TubeSpec,
+    c0: &dyn Fn(f64) -> f64,
+    t_end: f64,
+    age_opt: Option<&AgeOptions>,
+    plain_sample: &mut dyn FnMut(f64, &[f64], &[f64]),
+    age_sample: &mut dyn FnMut(&AgeSample<'_>),
+) -> Result<(TubeRun, Vec<AgeBudgetRow>, Vec<f64>, Vec<f64>)> {
     if !(spec.dt.is_finite() && spec.dt > 0.0) || spec.max_outer == 0 {
         return Err(Error::Refused(format!(
             "dust::tube1d: dt = {} must be positive and max_outer = {} at least 1",
@@ -250,6 +391,15 @@ pub fn run(
     let c_init: Vec<f64> = xs.iter().map(|&x| c0(x)).collect();
     gpu.write(&mut prog.field_mut().f, &to_s(&c_init))?;
     prog.initialise(gpu)?;
+    // The age option's clock: the origin is the spec's t_fd_origin (D-20a),
+    // the floor the caller's c_a.
+    if let Some(ag) = age_opt {
+        prog.enable_age(gpu, spec.t_fd_origin, ag.c_a)?;
+    }
+    let mut applied: Vec<bool> = vec![false; age_opt.map(|a| a.late.len()).unwrap_or(0)];
+    let mut budget: Vec<AgeBudgetRow> = Vec::new();
+    let mut c_sorted = vec![0.0f64; n];
+    let mut age_sorted = vec![0.0f64; n];
     let mut c_now: Vec<f64> = gpu.download(&prog.field().f)?.into_iter().map(wide).collect();
     let bml = |c: &[f64]| -> Vec<f64> {
         c.iter().map(|&ci| bml_density(spec.rho_u, spec.sigma, ci)).collect()
@@ -270,7 +420,31 @@ pub fn run(
     let x_sorted: Vec<f64> = order.iter().map(|&j| xs[j]).collect();
     while t < t_end * (1.0 - 1e-12) {
         let t_new = t + dt;
+        // A late kernel whose time has come seeds c~ (SPEC-LIT §160.5): the
+        // cells it burn start to age from this step. The old levels move
+        // with it, so the step's alpha predict reads the seeded c~.
+        if let Some(ag) = age_opt {
+            for (li, lk) in ag.late.iter().enumerate() {
+                if applied[li] || !(t >= lk.t_ig * (1.0 - 1e-12)) {
+                    continue;
+                }
+                applied[li] = true;
+                let seeded: Vec<Scalar> = xs
+                    .iter()
+                    .zip(&c_now)
+                    .map(|(&x, &ci)| ci.max((lk.profile)(x)) as Scalar)
+                    .collect();
+                prog.overwrite_field(gpu, &seeded)?;
+                c_now = seeded.iter().map(|&v| wide(v)).collect();
+                rho_n = bml(&c_now);
+                rho_nm1 = rho_n.clone();
+                c_prev = c_now.clone();
+            }
+        }
         prog.begin_step(gpu)?;
+        if age_opt.is_some() {
+            prog.begin_age_step(gpu, t_new)?;
+        }
         gpu.write(&mut rho.f0, &to_s(&rho_n))?;
         gpu.write(&mut rho.f00, &to_s(&rho_nm1))?;
         if let (Some(src), Some(p)) = (&spec.ignition, p_local) {
@@ -331,7 +505,7 @@ pub fn run(
                 c_it.iter().map(|&ci| spec.t_u * (1.0 + (spec.sigma - 1.0) * ci)).collect();
             gpu.write(&mut t_cell, &to_s(&t_h))?;
             gpu.write(&mut n_zero, &[0u64])?;
-            launch_fsc(
+            launch_closures(
                 gpu,
                 &fk,
                 &spec.fsc,
@@ -346,6 +520,7 @@ pub fn run(
                 FscInputsDev { t: &t_cell, k: &k_buf, omega: &w_buf, nu_t: &nut_buf },
                 t_fd,
                 t_new,
+                prog.closure_age(),
                 n,
             )?;
             if !spec.with_q {
@@ -405,6 +580,29 @@ pub fn run(
         let co_h = gpu.download(&co)?;
         max_co_f = co_h.iter().fold(max_co_f, |a, &v| a.max(wide(v)));
 
+        // The alpha budget row of the step (SPEC-LIT §160.5's
+        // `age_budget_closes`), BEFORE rho.f is overwritten with the step's
+        // own density: the Euler form, cells summed in f64 from downloads.
+        if let (Some(_), Some(al)) = (age_opt, prog.age_field()) {
+            let (sua, spa) = prog.age_source_terms().expect("the age sources");
+            let (rho_f, rho_0) = (gpu.download(&rho.f)?, gpu.download(&rho.f0)?);
+            let (al_f, al_0) = (gpu.download(&al.f)?, gpu.download(&al.f0)?);
+            let (al_bf, phi_b) = (gpu.download(&al.bf)?, gpu.download(&phi_m.bf)?);
+            let (sua_h, spa_h) = (gpu.download(sua)?, gpu.download(spa)?);
+            let (mut storage, mut clock, mut inherit) = (0.0f64, 0.0f64, 0.0f64);
+            for j in 0..n {
+                storage += vol[j]
+                    * ((wide(rho_f[j]) * wide(al_f[j]) - wide(rho_0[j]) * wide(al_0[j])) / dt);
+                clock += vol[j] * wide(sua_h[j]);
+                inherit -= vol[j] * wide(spa_h[j]) * wide(al_f[j]);
+            }
+            let mut outflow = 0.0f64;
+            for i in 0..nbf {
+                outflow += wide(phi_b[i]) * wide(al_bf[i]);
+            }
+            budget.push(AgeBudgetRow { t: t_new, storage, outflow, clock, inherit });
+        }
+
         c_prev = std::mem::replace(&mut c_now, c_it);
         rho_nm1 = std::mem::replace(&mut rho_n, bml(&c_now));
         t = t_new;
@@ -417,19 +615,54 @@ pub fn run(
         for (s, &j) in order.iter().enumerate() {
             cbar_h[s] = wide(cb[j]);
         }
-        sample(t, &x_sorted, &cbar_h);
+        match age_opt {
+            Some(ag) => {
+                // x ascending, c~ and the local age a = alpha/max(c~, c_a)
+                // in the same order.
+                let ch = gpu.download(&prog.field().f)?;
+                let ah = gpu.download(&prog.age_field().expect("the age field").f)?;
+                for (s, &j) in order.iter().enumerate() {
+                    let cj = wide(ch[j]);
+                    c_sorted[s] = cj;
+                    age_sorted[s] = age::local_age(wide(ah[j]), cj, ag.c_a);
+                }
+                age_sample(&AgeSample { t, x: &x_sorted, c: &c_sorted, age: &age_sorted });
+            }
+            None => plain_sample(t, &x_sorted, &cbar_h),
+        }
     }
 
-    Ok(TubeRun {
-        t,
-        steps,
-        x: x_sorted,
-        c: order.iter().map(|&j| c_now[j]).collect(),
-        cbar: cbar_h,
-        out_of_bounds,
-        max_excursion,
-        max_co_f,
-        max_outer_used,
-        outer_total,
-    })
+    // The final alpha and local age, ascending in x.
+    let (alpha_f, age_f) = match age_opt {
+        Some(ag) => {
+            let ch = gpu.download(&prog.field().f)?;
+            let ah = gpu.download(&prog.age_field().expect("the age field").f)?;
+            let (mut al, mut agv) = (vec![0.0f64; n], vec![0.0f64; n]);
+            for (s, &j) in order.iter().enumerate() {
+                let (aj, cj) = (wide(ah[j]), wide(ch[j]));
+                al[s] = aj;
+                agv[s] = age::local_age(aj, cj, ag.c_a);
+            }
+            (al, agv)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+
+    Ok((
+        TubeRun {
+            t,
+            steps,
+            x: x_sorted,
+            c: order.iter().map(|&j| c_now[j]).collect(),
+            cbar: cbar_h,
+            out_of_bounds,
+            max_excursion,
+            max_co_f,
+            max_outer_used,
+            outer_total,
+        },
+        budget,
+        alpha_f,
+        age_f,
+    ))
 }

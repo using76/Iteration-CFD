@@ -404,6 +404,13 @@
           ],
           "format": "double"
         },
+        "flameAge": {
+          "description": "`global` (the default, the papers' clock of (154.2)) or `local` (the\ntransported flame age of SPEC-LIT §160.5); FSC only - refused with\nTFC, which has no clock.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "gammaMax": {
           "type": [
             "number",

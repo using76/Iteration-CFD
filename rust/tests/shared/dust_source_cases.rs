@@ -501,3 +501,142 @@ fn predicted_courant_refuses_a_large_step() {
     assert!(msg.contains("maxFlameCourant"), "the refusal does not name the bound: {msg}");
     println!("  [dust src] refusal at twice the bound: {msg}");
 }
+
+// ==========================================================================
+//  DST-20: the flame-age clock (SPEC-LIT §160.5)
+// ==========================================================================
+
+use ofgpu::dust::age::C_A;
+
+/// The box step's rig, as `dust_source_box_step` builds it: the 2x2x2 box,
+/// the REMBE formula case with the `combustion` text, laminar, T 300 K, U 0,
+/// c 0, the open GasState on `DustSource::mixture` with rho from it.
+fn box_rig<'m>(
+    g: &Gpu,
+    hm: &HostMesh,
+    m: &'m GpuMesh,
+    combustion: &str,
+) -> (DustSource<'m>, Energy<'m>, GasState<'m>) {
+    let n = hm.n_cells;
+    let d = formula_dust("300", combustion, DUST_PHI_062);
+    let setup = DustSetup::new(&d, 101_325.0, 0.026).expect("setup");
+    let raw = raw_c_zeros(hm, "c", "[0 0 0 0 0 0 0]");
+    let dt = 1.0e-4;
+    let dust = DustSource::new(g, hm, m, setup, &raw, progress_controls(dt)).expect("dust");
+    let props = GasProperties { k: 0.026, ..GasProperties::default() };
+    let mut energy = Energy::new(g, m, energy_controls(dt), props.clone()).expect("energy");
+    let tv: Vec<Scalar> = vec![300.0 as Scalar; n];
+    g.write(&mut energy.field_mut().f, &tv).expect("T");
+    energy.initialise(g).expect("T init");
+    energy.sources_mut().use_meters(g).expect("meters");
+    let mut gas = GasState::new(g, m, props, DomainKind::Open, 101_325.0).expect("gas");
+    gas.use_mixture(g, dust.mixture().expect("mixture")).expect("use mixture");
+    dust.update_density(g, &mut gas, energy.field()).expect("rho");
+    (dust, energy, gas)
+}
+
+/// The ignition of `dust_source_box_step`'s case, as case text (`""` for
+/// the `flameAge` the global clock runs without).
+fn box_ignition(flame_age: &str) -> String {
+    format!(
+        r#", "combustion": {{ "model": "FSC", "PrT": 0.28{flame_age},
+        "ignition": {{ "point": [0.005, 0.005, 0.005], "sigmaR": 1.0e3,
+        "W0": 1000.0, "t0": 1.0e-3 }} }}"#
+    )
+}
+
+/// **The local clock keeps the laminar step bit-identical** (D, SPEC-LIT
+/// §160.5): `dust_source_box_step`'s case once as is and once with
+/// `flameAge: local` - after ONE step at t_new = dt the c~ field and wdot
+/// are bit for bit the same (laminar: the closures do not read the clock),
+/// the local run's age field exists with every cell exactly 0.0 (t_new <
+/// t0, so the clock (160.3) has not started), and the global run has none.
+#[test]
+fn flame_age_local_keeps_c_bitwise() {
+    let Some(g) = gpu() else { return };
+    let hm = box_mesh(2, 0.01);
+    let m = GpuMesh::upload(&g, &hm).expect("mesh");
+    let n = hm.n_cells;
+    let dt = 1.0e-4;
+    let u = GpuVectorField::zeros(&g, &m, "U").expect("U");
+    let phi = GpuSurfaceScalarField::zeros(&g, &m, "phi").expect("phi");
+    let run = |combustion: &str| {
+        let (mut dust, mut energy, mut gas) = box_rig(&g, &hm, &m, combustion);
+        dust.open_step(&g).expect("open step");
+        energy.sources_mut().clear(&g).expect("clear");
+        dust.before_flow(&g, &m, &mut energy, &mut gas, &phi, &u, None, dt)
+            .expect("before_flow");
+        let c = down(&g, &dust.c().f);
+        let w = down(&g, dust.wdot());
+        let a = dust.age().map(|f| down(&g, &f.f));
+        (c, w, a)
+    };
+    let (c_off, w_off, a_off) = run(&box_ignition(""));
+    let (c_on, w_on, a_on) = run(&box_ignition(r#", "flameAge": "local""#));
+    assert!(a_off.is_none(), "the global run built an age field");
+    let alpha = a_on.expect("the local run built no age field");
+    assert_eq!(alpha.len(), n, "the age field is not n_cells long");
+    for i in 0..n {
+        assert!(
+            c_off[i].to_bits() == c_on[i].to_bits(),
+            "c~[{i}] differs with the age on: {:e} vs {:e}",
+            c_off[i],
+            c_on[i]
+        );
+        assert!(
+            w_off[i].to_bits() == w_on[i].to_bits(),
+            "wdot[{i}] differs with the age on: {:e} vs {:e}",
+            w_off[i],
+            w_on[i]
+        );
+        assert_eq!(alpha[i], 0.0, "alpha[{i}] = {} is not exactly 0", alpha[i]);
+    }
+    println!("  [dust src] local clock: c~ and wdot bitwise the global run's, alpha all 0.0");
+}
+
+/// **The local clock holds the uniform solution on the box** (R, §160.2):
+/// one ignition at t0 = 0 with `flameAge: local`, three laminar steps of
+/// the 2x2x2 box. Every cell's c~ is 0 when step 1 opens, so there is no
+/// burned gas to age yet: (160.5)'s clock source reads the old level and
+/// the clock starts at the END of step 1 (SPEC-LIT §160.5). So alpha is
+/// exactly 0 after step 1 (D), and after step k >= 2 every cell's
+/// a = alpha/max(c~, c_a) is t_new - dt to tol_r(1e-10) relative. A miss
+/// is a finding, printed as MISSED.
+#[test]
+fn flame_age_local_box_holds_the_clock() {
+    let Some(g) = gpu() else { return };
+    let hm = box_mesh(2, 0.01);
+    let m = GpuMesh::upload(&g, &hm).expect("mesh");
+    let n = hm.n_cells;
+    let combustion = r#", "combustion": { "model": "FSC", "PrT": 0.28, "flameAge": "local",
+        "ignition": { "point": [0.005, 0.005, 0.005], "sigmaR": 1.0e3,
+        "W0": 1000.0, "t0": 0.0, "sigmaT": 1.0e-3 } }"#;
+    let (mut dust, mut energy, mut gas) = box_rig(&g, &hm, &m, combustion);
+    let u = GpuVectorField::zeros(&g, &m, "U").expect("U");
+    let phi = GpuSurfaceScalarField::zeros(&g, &m, "phi").expect("phi");
+    let dt = 1.0e-4;
+    let mut worst = 0.0f64;
+    for k in 1..=3usize {
+        let t_new = k as f64 * dt;
+        dust.open_step(&g).expect("open step");
+        energy.sources_mut().clear(&g).expect("clear");
+        dust.before_flow(&g, &m, &mut energy, &mut gas, &phi, &u, None, t_new)
+            .expect("before_flow");
+        let alpha = down(&g, &dust.age().expect("the local run's age field").f);
+        let c = down(&g, &dust.c().f);
+        if k == 1 {
+            assert!(alpha.iter().all(|&v| v == 0.0), "step 1 left alpha nonzero: {alpha:?}");
+            continue;
+        }
+        let want = t_new - dt;
+        for i in 0..n {
+            let a = alpha[i] / c[i].max(C_A);
+            worst = worst.max(((a - want) / want).abs());
+        }
+    }
+    let tol = tol_r(1e-10);
+    println!("  [dust src] box clock: max |a - (t - dt)|/(t - dt) {worst:.3e} (bar {tol:.0e})");
+    if worst > tol {
+        println!("MISSED box clock (R): measured {worst:.3e}, bar {tol:.0e}");
+    }
+}

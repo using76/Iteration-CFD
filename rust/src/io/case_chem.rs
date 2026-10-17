@@ -204,6 +204,11 @@ pub struct JsonCombustion {
     /// (§154.6).
     #[serde(rename = "tFlacc", default, skip_serializing_if = "Option::is_none")]
     pub t_flacc: Option<f64>,
+    /// `global` (the default, the papers' clock of (154.2)) or `local` (the
+    /// transported flame age of SPEC-LIT §160.5); FSC only - refused with
+    /// TFC, which has no clock.
+    #[serde(rename = "flameAge", default, skip_serializing_if = "Option::is_none")]
+    pub flame_age: Option<String>,
     /// The flame-Courant limit Co_f,max of (155.9); the default is
     /// `ofgpu::dust::courant::CO_F_MAX` = 0.5.
     #[serde(rename = "maxFlameCourant", default, skip_serializing_if = "Option::is_none")]
@@ -755,7 +760,7 @@ fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<Lo
     // §13.4.1: a key of a closure the case did not select is refused. The
     // FSC/TFC keys lower in `crate::io::case_dust`; under laminar/EDM/EDC/
     // PaSR they are refused here by the same table.
-    let keys: [(&str, bool, &str); 16] = [
+    let keys: [(&str, bool, &str); 17] = [
         ("A", c.a.is_some(), "EDM"),
         ("B", c.b.is_some(), "EDM"),
         ("variant", c.variant.is_some(), "EDC"),
@@ -768,6 +773,7 @@ fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<Lo
         ("Cmix", c.c_mix.is_some(), "PaSR"),
         ("PrT", c.pr_t.is_some(), "FSC/TFC"),
         ("tFlacc", c.t_flacc.is_some(), "FSC/TFC"),
+        ("flameAge", c.flame_age.is_some(), "FSC/TFC"),
         ("maxFlameCourant", c.max_flame_courant.is_some(), "FSC/TFC"),
         ("ignition", c.ignition.is_some(), "FSC/TFC"),
         ("prescribedUt", c.prescribed_ut.is_some(), "FSC/TFC"),

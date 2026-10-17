@@ -43,6 +43,7 @@ use std::f64::consts::PI;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::dust::age::FlameAge;
 use crate::dust::char::CharInputs;
 use crate::dust::courant::CO_F_MAX;
 use crate::dust::fsc::{CombustionModel, A_FSC};
@@ -217,6 +218,9 @@ pub struct LoweredDust {
     /// The extended FSC's t_flacc (154.7); `None` for TFC, which has no
     /// clock (§154.6), and for an FSC case that named none.
     pub t_flacc: Option<f64>,
+    /// The clock of the closures (SPEC-LIT §160.5): the papers' global one,
+    /// or the transported local flame age of `flameAge: local`.
+    pub flame_age: FlameAge,
     /// The flame-Courant limit Co_f,max of (155.9); `CO_F_MAX` = 0.5 unless
     /// the case named another.
     pub max_flame_courant: f64,
@@ -457,6 +461,25 @@ pub fn lower_dust(
     let a = c.a.map(|v| positive("combustion.A", v)).transpose()?.unwrap_or(A_FSC);
     let pr_t = positive("combustion.PrT", pr_t)?;
     let t_flacc = c.t_flacc.map(|v| positive("combustion.tFlacc", v)).transpose()?;
+    // The flame-age clock (§160.5): `global` unless the case says `local`,
+    // any other string by name - and ANY stated flameAge beside TFC, which
+    // has no clock to make local.
+    if model == CombustionModel::Tfc && c.flame_age.is_some() {
+        return Err(refused(
+            "combustion.flameAge",
+            "stated with combustion.model TFC; TFC has no clock (SPEC-LIT §154.6), so there \
+             is no flame development time to make local (SPEC-LIT §160.5)",
+        ));
+    }
+    let flame_age = match c.flame_age.as_deref() {
+        None => FlameAge::Global,
+        Some(v) => FlameAge::parse(v).ok_or_else(|| {
+            refused(
+                "combustion.flameAge",
+                &format!("\"{v}\": the recognised values are \"global, local\""),
+            )
+        })?,
+    };
     let max_flame_courant = c
         .max_flame_courant
         .map(|v| positive("combustion.maxFlameCourant", v))
@@ -678,6 +701,7 @@ pub fn lower_dust(
         a,
         pr_t,
         t_flacc,
+        flame_age,
         max_flame_courant,
         ignition,
         prescribed_ut,

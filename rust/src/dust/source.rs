@@ -38,6 +38,10 @@
 //! energy equation (158.4) in energy units on `rho cp(c~)`, with
 //! `h_s = cp(c~) T` and q = Δh_c wdot_c.
 //!
+//! DST-20's option (SPEC-LIT §160.5): a case stating `flameAge: local` runs
+//! the closures on the transported flame age a* of (160.4) instead of the
+//! papers' global clock.
+//!
 //! Written from:
 //!   SPEC-LIT §158.4, §158.6 - the compressible coupling (DST-10)
 //!   SPEC-LIT §157.4 - the step and its order
@@ -61,6 +65,7 @@ use crate::compressible::energy::RhoEnergy;
 use crate::compressible::thermo::{DustHConst, MixKernels};
 use crate::compressible::CompressibleState;
 use crate::device::{DevBuf, Gpu};
+use crate::dust::age::{C_A, FlameAge};
 use crate::dust::device::{
     self as dev, FscFields, FscInputsDev, ProgressKernels, SourceKernels,
 };
@@ -107,6 +112,10 @@ pub struct DustSetup {
     /// The ignition's t0 (§151.5): the origin of the flame development time.
     /// 0.0 without an ignition, so t_fd is the clock itself.
     pub t_fd_origin: f64,
+    /// The clock of the closures (SPEC-LIT §160.5): the papers' global one
+    /// (`Global`), or the transported local flame age (`Local`), which
+    /// switches the age on in the constructors.
+    pub flame_age: FlameAge,
     /// K, the unburned temperature (the case's `initial.T`).
     pub t_u: f64,
     /// Pa, the initial thermodynamic pressure.
@@ -194,6 +203,7 @@ impl DustSetup {
             prescribed_ut: d.prescribed_ut,
             unburned_density: d.unburned_density,
             t_fd_origin,
+            flame_age: d.flame_age,
             t_u: d.t_u,
             p_init,
             rho_u0,
@@ -313,6 +323,10 @@ impl<'m> DustSource<'m> {
         let mut progress = ProgressEquation::new(gpu, hm, m, ctrl)?;
         setup_scalar_field(gpu, progress.field_mut(), raw_c, hm)?;
         progress.initialise(gpu)?;
+        // The local flame-age clock (SPEC-LIT §160.5): the case's call.
+        if setup.flame_age == FlameAge::Local {
+            progress.enable_age(gpu, setup.t_fd_origin, C_A)?;
+        }
         let mut diff = GpuScalarField::zeros(gpu, m, "dustGamma")?;
         gpu.write(&mut diff.bc_kind, &vec![BcKind::ZeroGradient as crate::Label; nb])?;
         let p_local = setup.ignition.map(|src| src.local_point(hm));
@@ -397,6 +411,12 @@ impl<'m> DustSource<'m> {
         self.progress.field()
     }
 
+    /// The transported flame-age alpha field, when the case runs the local
+    /// clock (SPEC-LIT §160.5); `None` with the global clock.
+    pub fn age(&self) -> Option<&GpuScalarField> {
+        self.progress.age_field()
+    }
+
     /// The ignition bracket W of (155.4) as `before_flow` last formed it;
     /// zeros without an ignition.
     pub fn w_ign(&self) -> &DevBuf<Scalar> {
@@ -443,8 +463,13 @@ impl<'m> DustSource<'m> {
 
     /// Step 1 of the outer iteration: the `inletOutlet` faces of c~ switch
     /// on the flux the flow solve last made (§155.3's convection follows).
+    /// The age field switches with them, the same call (SPEC-LIT §160.5).
     pub fn update_inlet_outlet(&mut self, gpu: &Gpu, phi: &GpuSurfaceScalarField) -> Result<()> {
-        field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, self.progress.field_mut(), phi)
+        field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, self.progress.field_mut(), phi)?;
+        if let Some(alpha) = self.progress.age_field_mut() {
+            field_ops::update_inlet_outlet_scalar(gpu, &self.fldk, alpha, phi)?;
+        }
+        Ok(())
     }
 
     /// Step 2: (133.20) - the density of the two pseudo-species at the c~
@@ -485,6 +510,9 @@ impl<'m> DustSource<'m> {
                 out_of_bounds: 0,
             });
         }
+        // The local clock's levels move once per step, before the first
+        // outer solve (SPEC-LIT §160.5); nothing with the global clock.
+        self.progress.begin_age_step(gpu, t_new)?;
         // 1. (133.18) on the cells and the boundary faces, onto the cp field.
         dev::mixture_cp(
             gpu,
@@ -507,28 +535,48 @@ impl<'m> DustSource<'m> {
             self.nb,
         )?;
         energy.set_cp_field(gpu, &self.cp_cells, &self.cp_faces)?;
-        // 2. The closures of §154 at this step's clock.
+        // 2. The closures of §154 at this step's clock - a* of (160.4) with
+        //    the local flame age on, the global clock without (§160.5).
         let (k_b, o_b, n_b) = match &turb {
             Some(t) => (t.k, t.omega, t.nu_t),
             None => (&self.zero, &self.zero, &self.zero),
         };
-        dev::fsc(
-            gpu,
-            &self.fk,
-            &self.setup.fsc,
-            FscFields {
-                d_t: &mut self.d_t,
-                u_t: &mut self.u_t,
-                u_t_isp: &mut self.u_t_isp,
-                tau_l: &mut self.tau_l,
-                k_rate: &mut self.k_rate,
-            },
-            &mut self.n_zero,
-            FscInputsDev { t: &energy.field().f, k: k_b, omega: o_b, nu_t: n_b },
-            development_time(t_new, self.setup.t_fd_origin),
-            t_new,
-            n,
-        )?;
+        if let Some(age) = self.progress.closure_age() {
+            dev::fsc_aged(
+                gpu,
+                &self.fk,
+                &self.setup.fsc,
+                FscFields {
+                    d_t: &mut self.d_t,
+                    u_t: &mut self.u_t,
+                    u_t_isp: &mut self.u_t_isp,
+                    tau_l: &mut self.tau_l,
+                    k_rate: &mut self.k_rate,
+                },
+                &mut self.n_zero,
+                FscInputsDev { t: &energy.field().f, k: k_b, omega: o_b, nu_t: n_b },
+                age,
+                n,
+            )?;
+        } else {
+            dev::fsc(
+                gpu,
+                &self.fk,
+                &self.setup.fsc,
+                FscFields {
+                    d_t: &mut self.d_t,
+                    u_t: &mut self.u_t,
+                    u_t_isp: &mut self.u_t_isp,
+                    tau_l: &mut self.tau_l,
+                    k_rate: &mut self.k_rate,
+                },
+                &mut self.n_zero,
+                FscInputsDev { t: &energy.field().f, k: k_b, omega: o_b, nu_t: n_b },
+                development_time(t_new, self.setup.t_fd_origin),
+                t_new,
+                n,
+            )?;
+        }
         // 2b. Gate DST-VES's prescribed U_t (SPEC-LIT §157.6): the case's
         //     law at the CURRENT p0 replaces the closures' U_t - the TFC
         //     kernel already gives D_t = 0 and K = 0 on a laminar case.
@@ -956,6 +1004,10 @@ impl<'m> CompressibleDust<'m> {
         let mut progress = ProgressEquation::new(gpu, hm, m, ctrl)?;
         setup_scalar_field(gpu, progress.field_mut(), raw_c, hm)?;
         progress.initialise(gpu)?;
+        // The local flame-age clock (SPEC-LIT §160.5): the case's call.
+        if setup.flame_age == FlameAge::Local {
+            progress.enable_age(gpu, setup.t_fd_origin, C_A)?;
+        }
         let zg = |name: &str| -> Result<GpuScalarField> {
             let mut f = GpuScalarField::zeros(gpu, m, name)?;
             gpu.write(&mut f.bc_kind, &vec![BcKind::ZeroGradient as crate::Label; nb])?;
@@ -1144,6 +1196,9 @@ impl<'m> CompressibleDust<'m> {
         if n == 0 {
             return Ok(());
         }
+        // The local clock's levels move once per step, before the first
+        // outer solve (SPEC-LIT §160.5); nothing with the global clock.
+        self.progress.begin_age_step(gpu, t_new)?;
         // (a) The closures of §154 at this step's clock, on the solver's T
         //     and the model's frozen k, omega, nu_t (zeros when laminar).
         let fields;
@@ -1164,23 +1219,44 @@ impl<'m> CompressibleDust<'m> {
             }
             None => (&self.zero, &self.zero, &self.zero),
         };
-        dev::fsc(
-            gpu,
-            &self.fk,
-            &self.setup.fsc,
-            FscFields {
-                d_t: &mut self.d_t,
-                u_t: &mut self.u_t_raw,
-                u_t_isp: &mut self.u_t_isp,
-                tau_l: &mut self.tau_l,
-                k_rate: &mut self.k_rate,
-            },
-            &mut self.n_zero,
-            FscInputsDev { t: &s.t.f, k: k_b, omega: o_b, nu_t: n_b },
-            development_time(t_new, self.setup.t_fd_origin),
-            t_new,
-            n,
-        )?;
+        //     a* of (160.4) with the local flame age on, the global clock
+        //     without (SPEC-LIT §160.5).
+        if let Some(age) = self.progress.closure_age() {
+            dev::fsc_aged(
+                gpu,
+                &self.fk,
+                &self.setup.fsc,
+                FscFields {
+                    d_t: &mut self.d_t,
+                    u_t: &mut self.u_t_raw,
+                    u_t_isp: &mut self.u_t_isp,
+                    tau_l: &mut self.tau_l,
+                    k_rate: &mut self.k_rate,
+                },
+                &mut self.n_zero,
+                FscInputsDev { t: &s.t.f, k: k_b, omega: o_b, nu_t: n_b },
+                age,
+                n,
+            )?;
+        } else {
+            dev::fsc(
+                gpu,
+                &self.fk,
+                &self.setup.fsc,
+                FscFields {
+                    d_t: &mut self.d_t,
+                    u_t: &mut self.u_t_raw,
+                    u_t_isp: &mut self.u_t_isp,
+                    tau_l: &mut self.tau_l,
+                    k_rate: &mut self.k_rate,
+                },
+                &mut self.n_zero,
+                FscInputsDev { t: &s.t.f, k: k_b, omega: o_b, nu_t: n_b },
+                development_time(t_new, self.setup.t_fd_origin),
+                t_new,
+                n,
+            )?;
+        }
         //     Gate DST-VES's prescribed constant U_t, as `DustSource` does.
         if let Some(law) = self.setup.prescribed_ut {
             field_ops::set_field(

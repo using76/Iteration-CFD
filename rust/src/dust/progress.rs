@@ -48,6 +48,18 @@
 //! Co_f <= 0.5 (155.9). That bound holds for the OLD level's gradient,
 //! which is why the gradient is not refreshed by the outer iterations.
 //!
+//! **The flame-age option (SPEC-LIT §160, DST-20).** With
+//! [`crate::dust::age::FlameAge::Local`] on ([`ProgressEquation::enable_age`]),
+//! every solve of (155.3) is followed by one solve of the transported age
+//! concentration alpha with the SAME coupling - the same rho levels, rho_f,
+//! face mass flux, `kappa + D_t`, convection entry, ddt scheme, relaxation
+//! factor and linear-solver controls, through the same assembly - with the
+//! clock source (160.5) and the implicit inheritance (160.6); the closures
+//! read the predicted age a* of (160.4) instead of the global clock. The
+//! arithmetic lives in [`crate::dust::age`]. OFF adds nothing to a step:
+//! no alpha field exists and the closures are the global-clock kernel
+//! `dustFsc` with the same arguments.
+//!
 //! Written from:
 //!   SPEC-LIT §155.1 - (155.1), (155.2); §155.2 - (155.3) and its
 //!     discretisation; §155.4 - (155.5), (155.6); §155.7 - (155.10)
@@ -64,7 +76,11 @@
 //! No GPL-licensed source was consulted.
 
 use crate::device::{DevBuf, Gpu};
-use crate::dust::device::{count_out_of_bounds, progress_sources, ProgressKernels, SourceInputs};
+use crate::dust::age::{self, AgeState};
+use crate::dust::device::{
+    age_predict, age_sources, count_out_of_bounds, progress_sources, AgeSourceInputs,
+    ProgressKernels, SourceInputs,
+};
 use crate::dust::fsc::bracket;
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
@@ -237,6 +253,9 @@ pub struct ProgressEquation<'m> {
     n_out: DevBuf<u64>,
     bounds_tol: Scalar,
     pk: ProgressKernels,
+    /// The flame-age option (SPEC-LIT §160): `None` until
+    /// [`Self::enable_age`]; OFF adds nothing to a step.
+    age: Option<AgeState>,
 }
 
 impl<'m> ProgressEquation<'m> {
@@ -272,6 +291,7 @@ impl<'m> ProgressEquation<'m> {
             n_out: gpu.zeros(1)?,
             bounds_tol: BOUNDS_TOL,
             pk: ProgressKernels::new(gpu)?,
+            age: None,
         })
     }
 
@@ -336,7 +356,101 @@ impl<'m> ProgressEquation<'m> {
     /// number of [`Self::solve`] calls (outer iterations) may follow.
     pub fn begin_step(&mut self, gpu: &Gpu) -> Result<()> {
         field_ops::store_old_time(gpu, &self.core.fld, &mut self.c)?;
-        self.old_gradient(gpu)
+        self.old_gradient(gpu)?;
+        // The age's levels move once per step, after this (SPEC-LIT §160.5);
+        // `begin_age_step` consumes the flag.
+        if let Some(a) = &mut self.age {
+            a.pending = true;
+        }
+        Ok(())
+    }
+
+    /// Switches the local flame-age clock (160.1) on: the alpha field
+    /// `"flameAge"` with c~'s patch kinds at zero values, the a*/S_alpha
+    /// buffers, and the clock's origin t_0 with its floor c_a. Refused by
+    /// name: a second call, a c_a that is not positive and finite, a
+    /// t_origin that is not finite, and a c~ field carrying any
+    /// `mean_rules`, `mapped` or `turbulent` boundary rule - the age field
+    /// carries none of them (SPEC-LIT §160.5).
+    pub fn enable_age(&mut self, gpu: &Gpu, t_origin: f64, c_a: f64) -> Result<()> {
+        const W: &str = "dust::age::enable_age";
+        if self.age.is_some() {
+            return Err(Error::Refused(format!(
+                "{W}: the flame-age clock is already on; one alpha field per equation"
+            )));
+        }
+        if !(c_a.is_finite() && c_a > 0.0) {
+            return Err(Error::Refused(format!(
+                "{W}: c_a = {c_a} must be positive and finite (SPEC-LIT §160.1)"
+            )));
+        }
+        if !t_origin.is_finite() {
+            return Err(Error::Refused(format!(
+                "{W}: t_origin = {t_origin} must be finite (SPEC-LIT §160.5)"
+            )));
+        }
+        if !(self.c.mean_rules.is_empty()
+            && self.c.mapped.is_empty()
+            && self.c.turbulent.is_empty())
+        {
+            return Err(Error::Refused(format!(
+                "{W}: the c~ field carries a mean/mapped/turbulent boundary rule; the age \
+                 field carries none (SPEC-LIT §160.5)"
+            )));
+        }
+        let m = self.core.mesh;
+        let mut alpha = GpuScalarField::zeros(gpu, m, "flameAge")?;
+        // The patch kinds and fractions are c~'s; the values stay zero, so
+        // a fixedValue c~ patch gives alpha 0: inflow enters with age 0.
+        gpu.write(&mut alpha.bc_kind, &gpu.download(&self.c.bc_kind)?)?;
+        gpu.write(&mut alpha.fr, &gpu.download(&self.c.fr)?)?;
+        field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut alpha, m)?;
+        let n = m.n_cells.max(1);
+        self.age = Some(AgeState {
+            alpha,
+            closure_age: gpu.zeros(n)?,
+            sua: gpu.zeros(n)?,
+            spa: gpu.zeros(n)?,
+            c_a,
+            t_origin,
+            t_prev: None,
+            delta: 0.0,
+            delta_prev: 0.0,
+            pending: false,
+            last: None,
+        });
+        Ok(())
+    }
+
+    /// Moves the age's levels and forms the step's predicted level and the
+    /// closures' age a* of (160.4), once per step after [`Self::begin_step`]
+    /// and before the first outer solve. `Ok(())` and nothing with the age
+    /// off or nothing pending.
+    pub fn begin_age_step(&mut self, gpu: &Gpu, t_new: f64) -> Result<()> {
+        let m = self.core.mesh;
+        let Some(a) = &mut self.age else { return Ok(()) };
+        if !a.pending {
+            return Ok(());
+        }
+        let t_old = a.t_prev.unwrap_or(t_new - f64::from(self.core.ddt.state.dt));
+        a.delta_prev = a.delta;
+        a.delta = age::clock_increment(t_old, t_new, a.t_origin);
+        field_ops::store_old_time(gpu, &self.core.fld, &mut a.alpha)?;
+        age_predict(
+            gpu,
+            &self.pk,
+            &mut a.alpha.f,
+            &mut a.closure_age,
+            &a.alpha.f0,
+            &self.c.f0,
+            a.delta,
+            a.c_a,
+            m.n_cells,
+        )?;
+        field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut a.alpha, m)?;
+        a.t_prev = Some(t_new);
+        a.pending = false;
+        Ok(())
     }
 
     /// The gradient of the field as it stands, whose boundary values were
@@ -425,7 +539,99 @@ impl<'m> ProgressEquation<'m> {
         gpu.write(&mut self.n_out, &[0u64])?;
         count_out_of_bounds(gpu, &self.pk, &mut self.n_out, &self.c.f, self.bounds_tol, n)?;
         let out_of_bounds = gpu.download(&self.n_out)?[0];
+
+        // The flame-age option (SPEC-LIT §160.5): every solve of (155.3) is
+        // followed by one solve of alpha with the SAME coupling - the same
+        // rho levels, rho_f, face mass flux, kappa + D_t (the diffusivity
+        // is already in place), convection entry, ddt scheme, relaxation
+        // factor and linear-solver controls, through the same assembly -
+        // with the clock source (160.5) and the implicit inheritance
+        // (160.6).
+        if let Some(a) = &mut self.age {
+            let coeffs = self.core.ddt.state.coeffs(self.core.ddt.scheme)?;
+            let (w0, w00) = age::clock_weights(coeffs, a.delta, a.delta_prev);
+            age_sources(
+                gpu,
+                &self.pk,
+                &mut a.sua,
+                &mut a.spa,
+                &AgeSourceInputs {
+                    su: &self.su,
+                    sp: &self.sp,
+                    c: &self.c.f,
+                    rho0: &cp.rho.f0,
+                    c0: &self.c.f0,
+                    rho00: &cp.rho.f00,
+                    c00: &self.c.f00,
+                    w0,
+                    w00,
+                    c_a: a.c_a,
+                },
+                n,
+            )?;
+            let flow = FlowState { u: cp.u, phi: cp.phi_mass, nu: 0.0 };
+            let mass = MassWeighting {
+                rho: &cp.rho.f,
+                rho0: &cp.rho.f0,
+                rho00: &cp.rho.f00,
+                rho_face: cp.rho_face,
+                cont_ddt: &self.cont_ddt,
+            };
+            self.core
+                .assemble_transport_mass_weighted(gpu, &flow, &a.alpha, self.conv, 1.0, &mass)?;
+            {
+                let RasCore { fv, a: mtrx, .. } = &mut self.core;
+                crate::fv::fvm_su(gpu, fv, mtrx, m, &a.sua, 1.0)?;
+                crate::fv::fvm_sp(gpu, fv, mtrx, m, &a.spa, 1.0)?;
+            }
+            let perf = self
+                .core
+                .solve_equation_with(gpu, &mut a.alpha, alpha, &sc, false, false)?;
+            field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut a.alpha, m)?;
+            a.last = Some(perf);
+        }
         Ok(ProgressSolve { perf, out_of_bounds })
+    }
+
+    /// The flame-age option is on (SPEC-LIT §160.5).
+    pub fn age_enabled(&self) -> bool {
+        self.age.is_some()
+    }
+
+    /// The alpha field, when the age is on.
+    pub fn age_field(&self) -> Option<&GpuScalarField> {
+        self.age.as_ref().map(|a| &a.alpha)
+    }
+
+    /// The alpha field, mutable, when the age is on.
+    pub fn age_field_mut(&mut self) -> Option<&mut GpuScalarField> {
+        self.age.as_mut().map(|a| &mut a.alpha)
+    }
+
+    /// The closures' age a* of (160.4), when the age is on: what
+    /// [`crate::dust::device::fsc_aged`] reads instead of the global clock.
+    pub fn closure_age(&self) -> Option<&DevBuf<Scalar>> {
+        self.age.as_ref().map(|a| &a.closure_age)
+    }
+
+    /// The (160.5)-(160.6) source pair as [`Self::solve`] last assembled
+    /// it, when the age is on - `(sua, spa)`, the alpha twins of
+    /// [`Self::source_terms`].
+    pub fn age_source_terms(&self) -> Option<(&DevBuf<Scalar>, &DevBuf<Scalar>)> {
+        self.age.as_ref().map(|a| (&a.sua, &a.spa))
+    }
+
+    /// The last alpha solve's report, when the age is on.
+    pub fn age_last_solve(&self) -> Option<SolverPerformance> {
+        self.age.as_ref().and_then(|a| a.last)
+    }
+
+    /// Writes c~'s cells and corrects its boundary values - the tube's late
+    /// kernel (SPEC-LIT §160.5's `run_aged`) seeds a fresh ignition with it.
+    pub fn overwrite_field(&mut self, gpu: &Gpu, c: &[Scalar]) -> Result<()> {
+        let m = self.core.mesh;
+        gpu.write(&mut self.c.f, c)?;
+        field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut self.c, m)
     }
 }
 

@@ -56460,7 +56460,8 @@ FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Equations from §1
 
 **The case blocks** (`src/io/case_dust.rs`). `combustion.model` takes `FSC` or `TFC` beside the
 §137.7 names, with the keys `A` (default 0.4 for both, §151.5), `PrT` (required, no default),
-`tFlacc` (FSC only), `maxFlameCourant` (default 0.5) and `ignition { point, sigmaR, W0, t0,
+`tFlacc` (FSC only), `flameAge` (FSC only, `global` or `local`, §160.5, DST-20),
+`maxFlameCourant` (default 0.5) and `ignition { point, sigmaR, W0, t0,
 sigmaT }` (`sigmaT` defaults to `t0`, §151.7 item 8). The `dust` block holds `thermo`
 (`formula` with `phi`, or `prescribed` with `cp`, `Wu`, `Wb`, `Tb`), `SL` (required when
 prescribed, (152.13) at phi otherwise) and `sst { limitOmegaProduction, sust { kAmb, omegaAmb }
@@ -57717,7 +57718,8 @@ silent change of c_a.
 ### 160.3 What DST-20 must make true
 
 `src/dust/age.rs`, `src/dust/progress.rs`, `src/bin/lowmach.rs`, `src/bin/compressible.rs`,
-`src/io/case_dust.rs`, the schema. ≤ 5 min per build:
+`src/io/case_dust.rs`, the schema (as built in §160.5: the drivers need no edit, because
+`src/dust/source.rs` carries the switch). ≤ 5 min per build:
 
 * `dust::age::tests::off_is_global_clock_bitwise`: OFF is bitwise the global-clock path (D).
 * `dust::age::tests::one_ignition_is_uniform_clock`: ON with one ignition, `t_fd = t − t_ig`
@@ -57740,5 +57742,135 @@ the REMBE vent. The DST-* validate sections appear in the studio's gate list. Fi
 `vent` block validates; `registry.test.ts` lists the dust options; `routes.test.ts`; the server
 and shared suites green at today's counts (one known failure allowed by name only, the
 `import.test.ts` 221-runs test). ≤ 5 min.
+
+### 160.5 The flame-age clock as built (DST-20)
+
+`No GPL-licensed source was consulted.` DST-20 (lane S, W4) builds (160.1) on the device as an
+option of the c~ equation of §155.2, in `src/dust/age.rs` (the clock arithmetic, the host twins
+and the state) and `src/dust/progress.rs` (the solve), with three kernels appended to
+`cuda/dust.cu`. The labels (160.3)-(160.6) are this subsection's.
+
+**The switch.** `combustion.flameAge` is `"global"` (the default, the papers' clock of (154.2))
+or `"local"` ((160.1)); any other string is refused by name. Beside `combustion.model` TFC it is
+refused by name, because TFC has no clock (§154.6); under laminar, EDM, EDC or PaSR it is refused
+by the chemistry side's key/owner table like every other FSC/TFC key. `LoweredDust::flame_age`
+carries it to `DustSetup::flame_age`, and `DustSource` and `CompressibleDust` switch the age on
+in their constructors. OFF adds nothing to a step: no α field exists, the closures are the
+global-clock kernel `dustFsc` with the same arguments, and the f64 build is unchanged (the SASS of
+every existing `dust.cu` kernel is identical, checked per kernel).
+
+**The clock's origin (decision D-20a, taken by recommendation).** The global clock is
+`t_fd = max(t − t_0, 0)` (154.2), t_0 the end of the ignition ramp. The clock source ρ‾ c~ of
+(160.1) is the rate of that clock, `ρ‾ c~ H(t − t_0)`: burned gas starts to age at t_0. With one
+ignition the uniform solution of §160.2 is then `a = max(t − t_0, 0)` - the global clock itself,
+origin included - and ON differs from OFF only where the uniform solution does not hold. Without
+an ignition source t_0 = 0.
+
+**The step.** With `t_fd^g(t) = max(t − t_0, 0)`, step n (t^n to t^{n+1}) uses the increment
+
+```
+  Δ_n = t_fd^g(t^{n+1}) − t_fd^g(t^n)                                                         (160.3)
+```
+
+t^n the previous step's t^{n+1}; the first step's t^n is t^{n+1} − Δt, Δt the c~ equation's step.
+When the step opens, after the c~ levels move (§155.2), the α levels move and the PREDICTED level
+and the closures' age are formed once, held over the step's outer iterations as |grad c~| is:
+
+```
+  α* = α^n + Δ_n c~^n ,        a* = α* / max(c~^n, c_a)                                        (160.4)
+```
+
+α* is also the first iterate of α. a* is t_fd AND the t of (154.7) in the kernel `dustFscAged`,
+which is `dustFsc` operation for operation with both clocks read per cell. Where c~^n ≥ c_a and
+the uniform clock holds, a* = a^n + Δ_n = a^{n+1}: the global clock of the step's end, which is
+the value `dustFsc` is given.
+
+**The age equation.** Every solve of (155.3) is followed by one solve of α with the SAME
+coupling: the same ρ levels, ρ_f, face mass flux, `κ + D_t`, convection entry, ddt scheme,
+relaxation factor and linear-solver controls, through the same assembly
+(`RasCore::assemble_transport_mass_weighted`), on the field α whose patch kinds are c~'s with
+zero values (so a fixedValue c~ patch gives α 0: inflow enters with age 0). The clock source is the discrete form of ρ‾ c~ dt_fd^g/dt that keeps the uniform
+clock exact under any scheme of §13 [derived: substitute α^k = a^k c~^k into the ddt of (86.3)
+with coefficients (a_n, a_0, a_00) and a^{n+1} − a^n = Δ_n, a^{n+1} − a^{n−1} = Δ_n + Δ_{n−1}]:
+
+```
+  S_α = − [ a_0 ρ^n c~^n Δ_n + a_00 ρ^{n−1} c~^{n−1} (Δ_n + Δ_{n−1}) ]       (Euler: ρ^n c~^n Δ_n / Δt)   (160.5)
+```
+
+The inheritance term a ω̇_c is implicit, with ω̇_c = S_U − S_P' c~ the net rate of the c~ solve
+just made (§155.2) and c~ its result:
+
+```
+  a ω̇_c = α (S_U − S_P' c~) / max(c~, c_a)  :   diag_α += V (S_P' c~⁺ − S_U) / max(c~, c_a) ,   c~⁺ = max(c~, 0)   (160.6)
+```
+
+A negative c~ (round-off below 0) counts as 0 in the S_P' half, so that half never lowers the
+diagonal. **[derived]** Substituting α = a^{n+1} c~ with a uniform a: the operator rows are
+linear in the field (the limiter weights of §7 are scale-free, and each α iterate is a^{n+1} times
+the c~ iterate of the same outer iteration from α* on, so the relaxation's previous iterate
+scales too), (160.6) returns a^{n+1}(S_U − S_P' c~), and (160.5) supplies the old-level remainder
+of the ddt. So α = a^{n+1} c~ solves the α rows exactly wherever c~ ≥ c_a, to the two linear
+solves' residuals and round-off. For a row with c~ ≥ c_a the α diagonal is the c~ diagonal
+minus V S_U/c~, which for the c~ that solves its own row is (b_c + Σ a_nb c~_nb)/c~ ≥ 0 when the
+old level and the neighbours are not negative; the matrix is not proved an M-matrix, so the solve
+is measured, not assumed.
+
+**What is not built.** α is not written to the time directories and is not read back: a restart
+starts α from zero, the clock of a fresh ignition. The predicted Courant number of (155.9) runs
+the closures at t_fd = 1e30 as before (developed, the bound). The driver summary lines are
+unchanged.
+
+**The rows (§160.3), as built.** `dust::age::tests` (and `tests/dust_age.rs` under `single`), on
+the 1-D tube of §155.8 (250 cells on [−0.08, 0.12] m, frozen Leeds turbulence, Q off, Co_f = 0.5)
+through `tube1d::run_aged`, each linear solve to its absolute tolerance (1e-13, `single` 1e-7):
+
+* `off_is_global_clock_bitwise` (D): `dustFscAged` with every cell's age equal to a clock g
+  writes the five outputs and the zero count of `dustFsc(t_fd = g, t = g)` bit for bit, for g in
+  {0, 1e-4, 3.4e-3, 0.02, 1e30} s with t_flacc = 5 ms; and a laminar tube (no turbulence, so the
+  closures do not read the clock) gives the same c~ and c‾ bit for bit with the age ON as OFF.
+  **Holds** in both builds (the laminar tube: 50 steps and 315 outer iterations in f64, 51 and 111
+  under `single`, identical ON and OFF).
+* `one_ignition_is_uniform_clock` (R, tol64 1e-10 relative, tol32 1e-5 by D-F32-1): the planar
+  kernel at t = 0 with t_0 = 1 ms; at every step with t ≥ 2 ms, `a = α/max(c~, c_a)` against
+  t − t_0 in every cell with c~ > c_a. **MISSED** in both builds: max e = 5.096e-2 (bar 1e-10;
+  `single` 5.096e-2, bar 1e-5), 257 samples. By band of c~: (c_a, 1e-4] 5.096e-2,
+  (1e-4, 1e-2] 5.608e-4, (1e-2, 1] 2.851e-6 (`single` 5.617e-4 and 1.355e-5). The error falls
+  about two decades per band, so it is the leading-edge defect this section's caveat names, not
+  round-off: see "The leading edge, measured" below.
+* `two_kernels_two_clocks` (R, same bars): kernel 1 c~ = 1 on x < −0.07 m at t = 0, kernel 2 a
+  slab c~ = 1 on [0.09, 0.11] m set at t = 5 ms, t_0 = 0, to 0.03 s; before the merge (the first
+  step at which c~ at x = 0.01 m, midway between the kernels, reaches c_a; no merge means every
+  step) each side's cells with c~ > c_a hold t and t − 5 ms. The window must hold at least 20
+  steps (D): a first layout (kernel 1 on x < 0, kernel 2 on [0.04, 0.06] m, midpoint 0.02 m)
+  merged at 2.76 ms, before kernel 2 existed, because the c_a level of an implicit Euler tail
+  outruns the flame. Window 176 steps (f64; merge at 1.1909e-2 s) and 178 (`single`; 1.1986e-2
+  s), so the D row holds. **MISSED** in both builds: kernel 1's side 8.283e-2 (`single`
+  8.401e-2), kernel 2's side 3.429e-1 (both), against 1e-10 and 1e-5. Kernel 2's largest error
+  is early, when t − 5 ms is a few steps and a one-step lag is a large fraction of it.
+* `age_budget_closes` (A, 1e-6 of the summed magnitudes, both builds): on the same run, at every
+  step after the merge, `Σ V (ρ α − ρ^n α^n)/Δt + Σ_b φ_b α_b = Σ V S_α − Σ V d_α α` with d_α the
+  coefficient (160.6) adds to the diagonal. **Holds** in f64: 8.935e-12 at worst, 5.024e-13
+  after the merge. **MISSED** under `single`: 2.906e-5 against 1e-6. f64 closes it at 1e-11, so
+  the identity holds; the float build's residual comes with the float α levels and the α
+  solve's float tolerance 1e-7 (not isolated further). A cure (α levels in f64, or the delta form
+  of §118.5 for α) changes numerics and is the user's call.
+* The refusals (D): `flameAge` with TFC, an unknown value, and under a non-dust model, each by
+  name (`io::case_dust::tests::{flame_age_lowers, flame_age_refusals}`). **Hold.**
+* The library the drivers run (`dust::source` tests, the laminar 2x2x2 box of
+  `dust_source_box_step`): `flame_age_local_keeps_c_bitwise` (D) - with `flameAge: local` one
+  step gives c~ and ω̇_c bit for bit the global run's and α exactly 0 before t_0 - and
+  `flame_age_local_box_holds_the_clock` (R) - a uniform ignition with t_0 = 0: α is exactly 0
+  after step 1 and a = t − Δt after steps 2 and 3, 1.4e-16 (`single` 3.5e-8). **Hold.**
+
+**The leading edge, measured.** Two discrete effects make newly burned gas younger than the
+uniform clock. (i) The clock source (160.5) reads the OLD level, so a cell whose c~^n is 0 has no
+burned gas to age during the step: its clock starts at the step's END, one Δt late (the box row
+shows it exactly: a = t − Δt). (ii) Where c~ < c_a the inherited age is α/c_a, below the cell's
+own age (§160.2's caveat). Both live at the leading edge, and the defect then diffuses into
+c~ ≥ c_a. The bands above put it at 5e-2 where c~ ≤ 1e-4 and below 3e-6 where c~ > 1e-2.
+Neither is round-off, so the R rows miss; the bands and tolerances are kept as written. A cure -
+a clock source that counts the gas burned within the step (the new level with a matching
+inheritance term), or a smaller c_a - changes numerics and is the user's call (docs/17 §5.3
+item 4).
 
 ---

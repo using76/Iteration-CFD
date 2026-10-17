@@ -31,6 +31,9 @@
 //!     counter; §154.8 - the implicit split (154.11)
 //!   SPEC-LIT §159.1-§159.4, §159.7 - the reacting parcel (DST-12)
 //!   SPEC-LIT §159.8 - its char stage and the five char accumulators (DST-13)
+//!   SPEC-LIT §160.5 - the flame-age kernels (DST-20): `dustFscAged` - the
+//!     closures at the per-cell age a* of (160.4) - `dustAgePredict` and
+//!     `dustAgeSources`, whose host twin is [`crate::dust::age`]
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
@@ -42,16 +45,24 @@ use crate::error::{Error, Result};
 use crate::{Acc, Label, Scalar, Vec3};
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
-/// The two kernels of `cuda/dust.cu`, loaded from the `DUST` module.
+/// The kernels of `cuda/dust.cu` loaded from the `DUST` module: the
+/// closures at the global clock, their f32-safe Arrhenius row, and - DST-20
+/// (SPEC-LIT §160) - `dustFscAged`, the same closure with both clocks read
+/// per cell from the flame-age field.
 pub struct FscKernels {
     fsc: CudaFunction,
     arrhenius: CudaFunction,
+    fsc_aged: CudaFunction,
 }
 
 impl FscKernels {
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let k = KernelSet::new(gpu, crate::kernels::DUST)?;
-        Ok(Self { fsc: k.func("dustFsc")?, arrhenius: k.func("dustArrhenius")? })
+        Ok(Self {
+            fsc: k.func("dustFsc")?,
+            arrhenius: k.func("dustArrhenius")?,
+            fsc_aged: k.func("dustFscAged")?,
+        })
     }
 }
 
@@ -149,6 +160,73 @@ pub fn fsc(
     Ok(())
 }
 
+/// `dustFscAged`: [`fsc`] with the flame-age clock on (SPEC-LIT §160.5) -
+/// the same closure operation for operation, with both clocks read per
+/// cell from `age` (the closures' age a* of (160.4): t_fd AND the t of
+/// (154.7)). Cells the zero rule writes as 0 are added to `n_zero[0]`.
+#[allow(clippy::too_many_arguments)]
+pub fn fsc_aged(
+    gpu: &Gpu,
+    k: &FscKernels,
+    c: &FscConstants,
+    out: FscFields<'_>,
+    n_zero: &mut DevBuf<u64>,
+    inp: FscInputsDev<'_>,
+    age: &DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("d_t", out.d_t.len()),
+        ("u_t", out.u_t.len()),
+        ("u_t_isp", out.u_t_isp.len()),
+        ("tau_l", out.tau_l.len()),
+        ("k_rate", out.k_rate.len()),
+        ("t", inp.t.len()),
+        ("k", inp.k.len()),
+        ("omega", inp.omega.len()),
+        ("nu_t", inp.nu_t.len()),
+        ("age", age.len()),
+    ] {
+        check_len("fsc_aged", name, len, n)?;
+    }
+    check_len("fsc_aged", "n_zero", n_zero.len(), 1)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let model: Label = c.model.code();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.fsc_aged)
+            .arg(&mut *out.d_t)
+            .arg(&mut *out.u_t)
+            .arg(&mut *out.u_t_isp)
+            .arg(&mut *out.tau_l)
+            .arg(&mut *out.k_rate)
+            .arg(&mut *n_zero)
+            .arg(inp.t)
+            .arg(inp.k)
+            .arg(inp.omega)
+            .arg(inp.nu_t)
+            .arg(age)
+            .arg(&nl)
+            .arg(&model)
+            .arg(&c.t_flacc)
+            .arg(&c.a)
+            .arg(&c.tau_f)
+            .arg(&c.pr_t)
+            .arg(&c.c_d)
+            .arg(&c.beta_star)
+            .arg(&c.k_b)
+            .arg(&c.theta_b)
+            .arg(&c.t_b)
+            .arg(&c.kappa_b)
+            .arg(&c.e_zero)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
 /// `dustArrhenius`: E(T) of (154.10) with the zero rule, cells zeroed added
 /// to `n_zero[0]`.
 pub fn arrhenius(
@@ -182,14 +260,19 @@ pub fn arrhenius(
     Ok(())
 }
 
-/// The five kernels of the progress-variable equation in `cuda/dust.cu`
-/// (SPEC-LIT §155, docs/17 DST-04), loaded from the `DUST` module.
+/// The kernels of the progress-variable equation in `cuda/dust.cu`
+/// (SPEC-LIT §155, docs/17 DST-04) loaded from the `DUST` module, with
+/// DST-20's two flame-age kernels (SPEC-LIT §160): the predicted alpha
+/// level and the closures' age of (160.4), and the source pair of
+/// (160.5)-(160.6).
 pub struct ProgressKernels {
     sources: CudaFunction,
     ignition: CudaFunction,
     courant: CudaFunction,
     reynolds: CudaFunction,
     bounds: CudaFunction,
+    age_predict: CudaFunction,
+    age_sources: CudaFunction,
 }
 
 impl ProgressKernels {
@@ -201,6 +284,8 @@ impl ProgressKernels {
             courant: k.func("dustFlameCourant")?,
             reynolds: k.func("dustReynoldsMean")?,
             bounds: k.func("dustCountOutOfBounds")?,
+            age_predict: k.func("dustAgePredict")?,
+            age_sources: k.func("dustAgeSources")?,
         })
     }
 }
@@ -265,6 +350,121 @@ pub fn progress_sources(
             .arg(&nl)
             .arg(&has_ign)
             .arg(&inp.rho_u)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The per-cell inputs of the age sources of (160.5)-(160.6): the c~
+/// solve's own S_U / S_P' pair and levels, the rho and c~ old levels, and
+/// the clock weights (w0, w00) of (160.5) with the floor c_a.
+pub struct AgeSourceInputs<'a> {
+    /// The S_U of the c~ solve just made, `[n]`.
+    pub su: &'a DevBuf<Scalar>,
+    /// The S_P' of the c~ solve just made, `[n]`.
+    pub sp: &'a DevBuf<Scalar>,
+    /// c~, the solved level, `[n]`.
+    pub c: &'a DevBuf<Scalar>,
+    /// rho^{n-1}, `[n]`.
+    pub rho0: &'a DevBuf<Scalar>,
+    /// c~^{n-1}, `[n]`.
+    pub c0: &'a DevBuf<Scalar>,
+    /// rho^{n-2}, `[n]`.
+    pub rho00: &'a DevBuf<Scalar>,
+    /// c~^{n-2}, `[n]`.
+    pub c00: &'a DevBuf<Scalar>,
+    /// (160.5)'s w0 = -a_0 Delta_n.
+    pub w0: f64,
+    /// (160.5)'s w00 = -a_00 (Delta_n + Delta_{n-1}).
+    pub w00: f64,
+    /// The floor c_a of (160.1).
+    pub c_a: f64,
+}
+
+/// `dustAgePredict`: the predicted alpha level alpha* = alpha^n +
+/// Delta_n c~^n and the closures' age a* = alpha*/max(c~^n, c_a) of
+/// (160.4), per cell (SPEC-LIT §160.5). Its host twin is
+/// [`crate::dust::age::predict_cell`].
+pub fn age_predict(
+    gpu: &Gpu,
+    k: &ProgressKernels,
+    alpha: &mut DevBuf<Scalar>,
+    age: &mut DevBuf<Scalar>,
+    alpha0: &DevBuf<Scalar>,
+    c0: &DevBuf<Scalar>,
+    delta: f64,
+    c_a: f64,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in
+        [("alpha", alpha.len()), ("age", age.len()), ("alpha0", alpha0.len()), ("c0", c0.len())]
+    {
+        check_len("age_predict", name, len, n)?;
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.age_predict)
+            .arg(&mut *alpha)
+            .arg(&mut *age)
+            .arg(alpha0)
+            .arg(c0)
+            .arg(&nl)
+            .arg(&delta)
+            .arg(&c_a)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustAgeSources`: the clock source S_alpha of (160.5) and the
+/// inheritance coefficient of (160.6) per cell - the pair
+/// `fvm_su(sua, +1)` and `fvm_sp(spa, +1)` put into the alpha matrix.
+/// Its host twin is [`crate::dust::age::sources_cell`].
+pub fn age_sources(
+    gpu: &Gpu,
+    k: &ProgressKernels,
+    sua: &mut DevBuf<Scalar>,
+    spa: &mut DevBuf<Scalar>,
+    inp: &AgeSourceInputs<'_>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("sua", sua.len()),
+        ("spa", spa.len()),
+        ("su", inp.su.len()),
+        ("sp", inp.sp.len()),
+        ("c", inp.c.len()),
+        ("rho0", inp.rho0.len()),
+        ("c0", inp.c0.len()),
+        ("rho00", inp.rho00.len()),
+        ("c00", inp.c00.len()),
+    ] {
+        check_len("age_sources", name, len, n)?;
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.age_sources)
+            .arg(&mut *sua)
+            .arg(&mut *spa)
+            .arg(inp.su)
+            .arg(inp.sp)
+            .arg(inp.c)
+            .arg(inp.rho0)
+            .arg(inp.c0)
+            .arg(inp.rho00)
+            .arg(inp.c00)
+            .arg(&nl)
+            .arg(&inp.w0)
+            .arg(&inp.w00)
+            .arg(&inp.c_a)
             .launch(cfg_for(n))?;
     }
     Ok(())

@@ -459,3 +459,167 @@ extern "C" __global__ void dustEnthalpyDiffusion
     const ofacc rg = __dmul_rn((ofacc)rho[i], (ofacc)gamma[i]);
     q[i] = (ofscalar)__dmul_rn(__dmul_rn(rg, dcp), dot);
 }
+
+// ==========================================================================
+//  The flame-age option (SPEC-LIT 160, docs/17 DST-20). Appended after the
+//  DST-03/DST-04/DST-06 kernels, which are unchanged. The same rule holds:
+//  every intermediate is `ofacc` in both builds and each output is rounded
+//  once at its store; the host twins are in src/dust/age.rs.
+// ==========================================================================
+
+//- The closures of §154 with the age on: `dustFsc` operation for operation,
+//  with BOTH clocks read per cell from `age` - the closures' age a* of
+//  (160.4) is t_fd AND the t of (154.7). Where c~^n >= c_a and the uniform
+//  clock of 160.2 holds, age[i] is the global clock of the step's end, the
+//  value `dustFsc` is given, so the two kernels write the same words.
+extern "C" __global__ void dustFscAged
+(
+    ofscalar* __restrict__ dt,
+    ofscalar* __restrict__ ut,
+    ofscalar* __restrict__ utisp,
+    ofscalar* __restrict__ taul,
+    ofscalar* __restrict__ krate,
+    unsigned long long* __restrict__ nzero,
+    const ofscalar* __restrict__ T,
+    const ofscalar* __restrict__ k,
+    const ofscalar* __restrict__ omega,
+    const ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ age,
+    oflabel n,
+    oflabel model,
+    ofacc tflacc,
+    ofacc a,
+    ofacc tauf,
+    ofacc prt,
+    ofacc cd,
+    ofacc betastar,
+    ofacc kb,
+    ofacc thetab,
+    ofacc tb,
+    ofacc kappab,
+    ofacc ezero
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofacc tfd = (ofacc)age[i];
+    const ofacc tign = tfd;
+
+    const ofacc ki = (ofacc)k[i];
+    const ofacc wi = (ofacc)omega[i];
+
+    // (154.4)-(154.6), §154.4's k-omega mapping. No turbulence, no
+    // turbulent closure (decision D5).
+    ofacc dinf = 0.0, u2 = 0.0, up = 0.0, isp = 0.0, tl = 0.0;
+    if (ki > 0.0 && wi > 0.0)
+    {
+        u2 = (2.0 * ki) / 3.0;
+        up = sqrt(u2);
+        const ofacc l = (cd * sqrt(ki)) / (betastar * wi);
+        dinf = (ofacc)nut[i] / prt;
+        tl = dinf / u2;
+        const ofacc da = (l / up) / tauf;
+        isp = (a * up) * sqrt(sqrt(da));
+    }
+
+    ofacc d = dinf, u = isp;
+    if (model == 0)
+    {
+        // (154.2)-(154.3), x = t_fd / tau_L; t_fd <= 0 is x = 0.
+        const ofacc x = (tfd > 0.0) ? tfd / tl : 0.0;
+        d = dinf * (-expm1(-x));
+        u = isp * sqrt(dustBracket(x));
+        // (154.7): T2 is not evaluated before t_flacc.
+        if (tflacc > 0.0 && tign >= tflacc)
+        {
+            u = u * sqrt(tign / tflacc);
+        }
+    }
+
+    ofacc kr = 0.0;
+    if (model == 0)
+    {
+        bool zeroed = false;
+        const ofacc e = dustArrheniusE((ofacc)T[i], thetab, tb, ezero, &zeroed);
+        if (!zeroed)
+        {
+            kr = (kb * e) / (1.0 + d / kappab);
+            if (kr < OFGPU_DUST_FLT_MIN)
+            {
+                kr = 0.0;
+                zeroed = true;
+            }
+        }
+        if (zeroed) atomicAdd(nzero, 1ULL);
+    }
+
+    dt[i] = (ofscalar)d;
+    ut[i] = (ofscalar)u;
+    utisp[i] = (ofscalar)isp;
+    taul[i] = (ofscalar)tl;
+    krate[i] = (ofscalar)kr;
+}
+
+//- (160.4), per cell: when the step opens the alpha levels move and the
+//  PREDICTED level and the closures' age are formed once, held over the
+//  step's outer iterations as |grad c~| is:
+//      alpha* = alpha^n + Delta_n c~^n ,   a* = alpha*/max(c~^n, c_a)
+//  Each output is rounded once at its store; a* is formed from the ROUNDED
+//  alpha*, never from v.
+extern "C" __global__ void dustAgePredict
+(
+    ofscalar* __restrict__ alpha,
+    ofscalar* __restrict__ age,
+    const ofscalar* __restrict__ alpha0,
+    const ofscalar* __restrict__ c0,
+    oflabel n,
+    ofacc delta,
+    ofacc ca
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    ofacc v = __dadd_rn((ofacc)alpha0[i], __dmul_rn(delta, (ofacc)c0[i]));
+    ofscalar s = (ofscalar)v;
+    alpha[i] = s;
+    age[i] = (ofscalar)((ofacc)s / fmax((ofacc)c0[i], ca));
+}
+
+//- (160.5) and (160.6), per cell: the clock source
+//      S_alpha = -[a_0 rho^n c~^n Delta_n + a_00 rho^{n-1} c~^{n-1}
+//              (Delta_n + Delta_{n-1})]
+//  arrives as the weights (w0, w00) of (160.5) on the host, and the
+//  inheritance coefficient of (160.6),
+//      S_P,a = (S_P' c~^+ - S_U)/max(c~, c_a) ,   c~^+ = max(c~, 0)
+//  whose V-fold `fvm_sp(spa, +1)` puts on the alpha diagonal - a negative
+//  c~ counts as 0 in the S_P' half, so that half never lowers the diagonal.
+extern "C" __global__ void dustAgeSources
+(
+    ofscalar* __restrict__ sua,
+    ofscalar* __restrict__ spa,
+    const ofscalar* __restrict__ su,
+    const ofscalar* __restrict__ sp,
+    const ofscalar* __restrict__ c,
+    const ofscalar* __restrict__ rho0,
+    const ofscalar* __restrict__ c0,
+    const ofscalar* __restrict__ rho00,
+    const ofscalar* __restrict__ c00,
+    oflabel n,
+    ofacc w0,
+    ofacc w00,
+    ofacc ca
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    sua[i] = (ofscalar)__dadd_rn
+    (
+        __dmul_rn(w0, __dmul_rn((ofacc)rho0[i], (ofacc)c0[i])),
+        __dmul_rn(w00, __dmul_rn((ofacc)rho00[i], (ofacc)c00[i]))
+    );
+    const ofacc ci = (ofacc)c[i];
+    spa[i] = (ofscalar)
+    (
+        __dsub_rn(__dmul_rn((ofacc)sp[i], fmax(ci, 0.0)), (ofacc)su[i]) / fmax(ci, ca)
+    );
+}

@@ -12,6 +12,7 @@
 // is needed. No GPL-licensed source was consulted.
 
 use ofgpu::DVec3;
+use ofgpu::dust::age::FlameAge;
 use ofgpu::dust::char::CharInputs;
 use ofgpu::dust::courant::CO_F_MAX;
 use ofgpu::dust::fsc::{A_FSC, CombustionModel};
@@ -588,6 +589,7 @@ fn prescribed_ut_refusals_name_the_setting() {
         c_mix: None,
         pr_t: Some(0.7),
         t_flacc: None,
+        flame_age: None,
         max_flame_courant: None,
         ignition: None,
         prescribed_ut: Some(u),
@@ -1016,4 +1018,44 @@ fn cloud_refusals() {
     let l = lowers(&dust_case("300", "", CLOUD)).expect("the cloud case lowers");
     let e = l.refuse_parcels().expect_err("the cloud case is refused");
     assert!(e.to_string().contains("dust.cloud"), "{e}");
+}
+
+// ==========================================================================
+//  DST-20: the flame-age clock (SPEC-LIT §160.5)
+// ==========================================================================
+
+/// **SPEC-LIT §160.5.** `flameAge` lowers onto the clock of the closures:
+/// absent is `Global` (the papers' clock of (154.2)), `"local"` is the
+/// transported clock of §160.5, and `"global"` states the default by name.
+#[test]
+fn flame_age_lowers() {
+    let d = dust_of(&dust_case("273", FSC_MIN, FORMULA_MIN)).expect("an FSC case lowers");
+    assert_eq!(d.flame_age, FlameAge::Global);
+    let local = r#", "combustion": { "model": "FSC", "PrT": 0.3, "flameAge": "local" }"#;
+    let d = dust_of(&dust_case("273", local, FORMULA_MIN)).expect("the local case lowers");
+    assert_eq!(d.flame_age, FlameAge::Local);
+    let global = r#", "combustion": { "model": "FSC", "PrT": 0.3, "flameAge": "global" }"#;
+    let d = dust_of(&dust_case("273", global, FORMULA_MIN)).expect("the global case lowers");
+    assert_eq!(d.flame_age, FlameAge::Global);
+}
+
+/// **SPEC-LIT §160.5.** Every refusal names its key: ANY stated `flameAge`
+/// beside TFC (which has no clock), a value that is neither `global` nor
+/// `local`, and `flameAge` under a non-dust model (the chemistry side's
+/// own table, which needs the case's species set to reach).
+#[test]
+fn flame_age_refusals() {
+    for v in ["local", "global"] {
+        let tfc = format!(
+            r#", "combustion": {{ "model": "TFC", "PrT": 0.3, "flameAge": "{v}" }}"#
+        );
+        refuses(lowers(&dust_case("273", &tfc, FORMULA_MIN)), "combustion.flameAge");
+    }
+    let both = r#", "combustion": { "model": "FSC", "PrT": 0.3, "flameAge": "both" }"#;
+    refuses(lowers(&dust_case("273", both, FORMULA_MIN)), "combustion.flameAge");
+    let edm = r#", "combustion": { "model": "EDM", "A": 4.0, "flameAge": "local" }"#;
+    refuses(
+        lowers(&dust_case("273", edm, &format!("{SPECIES}{CHEMISTRY}"))),
+        "combustion.flameAge",
+    );
 }
