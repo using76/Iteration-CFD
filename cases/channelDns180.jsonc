@@ -28,8 +28,8 @@
 // answer-key marker together or not at all. The gate itself is validate.rs's
 // check_channel_dns; the recipe is 110.5.
 //
-// UNVERIFIED: no run of this file has filled a cell of 110.5's table, and no
-// number anywhere below is a claim.
+// RECORDED (docs/17 VAL-51): this file's N_y 32 / 64 / 128 copies filled 110.5's
+// Gate 110-A row; the numbers below are the case's inputs, not results.
 // ============================================================================
 {
   "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",

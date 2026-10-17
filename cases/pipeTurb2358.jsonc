@@ -1,0 +1,139 @@
+// SPEC-LIT 143.5 Gate 131-P - TG0's fully developed turbulent pipe (SPEC-LIT
+// 114.1) at Re_tau = 2358, kOmegaSST with a resolved wall, on the true wedge
+// of SPEC-LIT 119 (BC-04/05): x is the radius, z the pipe axis, y the 5-degree
+// circumferential direction, one cell across. The pipe is periodic in z and
+// driven by the body force that fixes u_tau without a wall measurement,
+//
+//   u_tau = Re_tau nu / R,  g_z = 2 u_tau^2 / R,  R = 0.025 m,  nu = 1.516e-5 m2/s,
+//   Re_tau = 2358  ->  u_tau = 1.4298912 m/s,  g_z = 163.567108 m/s2,
+//
+// so the steady state's wall shear is (143.6)'s exact u_tau. The k and omega
+// solver tolerance is 1e-12 (SPEC-LIT 114.5's O1: at 1e-8 TG0's L1 omega
+// stopped changing, 114.2); everything else is TG0's case (114.1).
+//
+// The mesh study's level l has n = 40 2^l radial cells graded to a wall cell
+// of (R/2358) 2^-l (143.2); "expansion" is q^-(n-1), the wall cell over the
+// axis cell. THIS FILE IS LEVEL 1 (n = 80, TG0's L1): levels 0 and 2 run on
+// scratch copies of this file with ONLY "cells" and "expansion" edited
+// (40, 0.00306719135840698; 160, 0.00293619304606138).
+//
+// The catch-all rule below covers the cyclic pair only. It names k, omega
+// and nut explicitly, because without them the wallTreatment completion of a
+// "wall" rule gives the cyclic faces omegaWallFunction / kqRWallFunction,
+// and the solver's wall-cell set is read from those types: the cells next to
+// the cyclic faces are then pinned as wall cells and the pipe loses its
+// x-invariance (SPEC-LIT 143.5 records the measurement).
+//
+// Run (a write every 1000 iterations; the recorder reads the last two). The
+// plan's 8000 iterations do not reach the fixed point (SPEC-LIT 143.5): level
+// 0 runs 12000, level 1 24000, level 2 80000 (two 40000 legs through
+// -restartWrite 40000 / -restartFrom), e.g. for this file
+//   ofgpu-lowmach cases/pipeTurb2358.jsonc -iters 24000 -writeEvery 1000
+// The gate is ofgpu-validate's Gate 131-P, replayed from the records of
+// src/bin/validate_gates/pipe.rs; the recipe and the measured numbers are
+// SPEC-LIT 143.5.
+// ============================================================================
+{
+  "$schema": "https://meteor-cfd.msimul.com/schema/case-1.json",
+  "name": "pipeTurb2358",
+
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0.0, 0.0, 0.0], "max": [0.025, 0.0, 0.1] },
+    "cells":  [80, 1, 4],
+    "wedge": { "angle": 5 },
+
+    "boundaries": {
+      "xmin": "axis", "xmax": "wall",
+      "ymin": "back", "ymax": "front",
+      "zmin": "periodicMin", "zmax": "periodicMax",
+    },
+
+    "cyclic": [ { "a": "periodicMin", "b": "periodicMax", "transform": "translate" } ],
+
+    "grading": { "x": { "expansion": 0.00297925479726894 } },
+  },
+
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.516e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+  },
+
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kOmegaSST",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+  },
+
+  "sources": [
+    { "type": "momentumSource", "field": "U", "bodyForce": [0, 0, 163.567108] },
+  ],
+
+  "patches": [
+    // SPEC-LIT 119.3: the wedge is a constraint, no per-field condition.
+    { "match": "(back|front)", "kind": "wedge" },
+    {
+      // TG0's resolved wall (114.1): nut and k fixedValue 0, omega's wall cell
+      // pinned by omegaWallFunction (6.4); the wall is isothermal.
+      "match": "wall",
+      "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 293.15 },
+      "k": { "type": "fixedValue", "value": 0 },
+      "omega": { "type": "omegaWallFunction", "value": 224.585574 },
+      "nut": { "type": "fixedValue", "value": 0 },
+    },
+    {
+      // The cyclic pair (every field is cyclic there whatever this says);
+      // k, omega and nut are named so that no wall function lands on it.
+      "match": ".*",
+      "kind": "wall",
+      "U": { "type": "zeroGradient" },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "zeroGradient" },
+      "omega": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0 },
+    },
+  ],
+
+  // U_b from Prandtl's law at this Re_tau; k and omega TG0's own start
+  // (case_writer.py turb_refs: I = 1 %, l = 3 mm, at that U_b).
+  "initial": {
+    "U": [0, 0, 30.1313166],
+    "T": 293.15,
+    "p": 0.0,
+    "k": 0.136184436,
+    "omega": 224.585574,
+    "nut": 0,
+  },
+
+  "numerics": {
+    "algorithm": { "kind": "SIMPLE" },
+    "ddt": "steadyState",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "bounded Gauss linearUpwind grad(U)",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,omega)": "bounded Gauss upwind",
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 0.7, "p": 0.3, "T": 0.7, "k": 0.7, "omega": 0.7 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-10, "relTol": 0.05, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-10, "relTol": 0.1, "maxIter": 200 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-08, "relTol": 0.01, "maxIter": 200 },
+      { "match": "(k|omega)", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 0.01, "maxIter": 200 },
+    ],
+  },
+
+  "run": {
+    "endTime": 24000,
+    "deltaT": 1,
+    "adjustTimeStep": false,
+  },
+}

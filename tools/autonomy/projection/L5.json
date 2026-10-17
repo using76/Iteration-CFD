@@ -1,0 +1,1872 @@
+{
+ "$comment": "meteor-cfd - Copyright (c) 2026 주식회사 이터레이션즈 (Iterations Co., Ltd.). Source-available, not Open Source. No GPL-licensed source was consulted.",
+ "b0": {
+  "binary_sha256": "054bba67c8650082431ac01325e497208a9bc663c4760a36f7472ff62814a90b",
+  "campaign_id": "b0-template-tuning"
+ },
+ "gates": {
+  "G-BLC-0": {
+   "b0": {
+    "blc8_mean": 0.0,
+    "blc_full_mean": 0.0
+   },
+   "blc8_mean": 0.9428571428571428,
+   "blc_full_mean": 0.9428571428571428,
+   "conditions": {
+    "blc8_ge_090": true,
+    "blc_full_ge_080": true
+   },
+   "ids": [
+    "D-1-002",
+    "D-1-008",
+    "D-1-010",
+    "D-1-016",
+    "D-1-018",
+    "D-1-024",
+    "D-1-032",
+    "D-1-040",
+    "D-1-042",
+    "D-1-056",
+    "D-1-058",
+    "D-1-064",
+    "D-1-066",
+    "D-1-072",
+    "D-1-080",
+    "D-1-082",
+    "D-1-088",
+    "D-1-098",
+    "D-1-104",
+    "D-1-106",
+    "D-1-112",
+    "F-1-003",
+    "F-1-006",
+    "F-1-009",
+    "F-1-012",
+    "F-1-018",
+    "F-1-027",
+    "F-1-030",
+    "F-1-036",
+    "F-1-039",
+    "F-1-042",
+    "F-1-045",
+    "F-1-048",
+    "F-1-051",
+    "F-1-054"
+   ],
+   "n": 35,
+   "other": {
+    "capability_limited": [
+     {
+      "geometry_id": "A-1-001",
+      "patches": [
+       "wing"
+      ]
+     },
+     {
+      "geometry_id": "A-1-071",
+      "patches": [
+       "wing"
+      ]
+     },
+     {
+      "geometry_id": "A-1-106",
+      "patches": [
+       "wing"
+      ]
+     },
+     {
+      "geometry_id": "B-1-000",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-001",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-002",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-003",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-004",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-005",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-006",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-009",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-011",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-012",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-013",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-014",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-015",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-016",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-017",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-019",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-021",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-024",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-025",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-029",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-030",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-032",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-033",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-034",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-036",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-038",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-040",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-041",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-042",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-044",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-045",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-046",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-047",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-048",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-049",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-053",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-054",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-055",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-057",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-058",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-060",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-062",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-068",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-069",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-072",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-073",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-074",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-075",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-077",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-078",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-079",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-080",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-083",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-084",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-085",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-086",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-088",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-089",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-090",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-091",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-094",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-096",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-097",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-099",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-105",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-106",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-108",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-110",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-111",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-112",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-114",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "B-1-116",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-003",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-005",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-007",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-014",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-020",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-022",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-025",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-031",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-037",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-041",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-043",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-053",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-055",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-061",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-062",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-069",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-071",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-077",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-078",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-079",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-085",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-086",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-099",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-101",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-102",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-105",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-109",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-111",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-113",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-116",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-117",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "D-1-118",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-002",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-004",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-005",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-007",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-008",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-010",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-011",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-014",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-017",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-019",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-020",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-022",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-025",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-028",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-030",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-032",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-033",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-041",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-043",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-046",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-050",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-052",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-054",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-055",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-056",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "E-1-057",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "F-1-007",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "F-1-016",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "F-1-031",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "F-1-032",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "F-1-049",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-022",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-027",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-039",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-040",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-041",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-045",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-052",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-069",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-070",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-071",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-081",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-082",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-094",
+      "patches": [
+       "wing"
+      ]
+     },
+     {
+      "geometry_id": "G-1-099",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-100",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-105",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-108",
+      "patches": [
+       "body"
+      ]
+     },
+     {
+      "geometry_id": "G-1-117",
+      "patches": [
+       "body"
+      ]
+     }
+    ],
+    "per_family": {
+     "A": {
+      "blc8_mean": 0.0,
+      "blc_full_mean": 0.0,
+      "n": 84,
+      "n_capability_limited": 3
+     },
+     "B": {
+      "blc8_mean": 0.14285714285714285,
+      "blc_full_mean": 0.006761305070756897,
+      "n": 84,
+      "n_capability_limited": 72
+     },
+     "D": {
+      "blc8_mean": 0.3333333333333333,
+      "blc_full_mean": 0.28205952564858583,
+      "n": 63,
+      "n_capability_limited": 32
+     },
+     "E": {
+      "blc8_mean": 0.09523809523809523,
+      "blc_full_mean": 0.04723945530725293,
+      "n": 42,
+      "n_capability_limited": 26
+     },
+     "F": {
+      "blc8_mean": 0.25,
+      "blc_full_mean": 0.21841432438054173,
+      "n": 28,
+      "n_capability_limited": 5
+     },
+     "G": {
+      "blc8_mean": 0.10714285714285714,
+      "blc_full_mean": 0.07818375680935014,
+      "n": 84,
+      "n_capability_limited": 18
+     }
+    }
+   },
+   "verdict": "PASS"
+  },
+  "G-BLC-1": {
+   "b0": {
+    "blc8_mean": 0.0,
+    "blc_full_mean": 0.0
+   },
+   "blc8_mean": 0.14285714285714285,
+   "blc_full_mean": 0.08598257075993401,
+   "conditions": {
+    "blc8_ge_target": true,
+    "blc_full_ge_target": true
+   },
+   "families": [
+    "A",
+    "B",
+    "E",
+    "F"
+   ],
+   "ids": [
+    "A-1-000",
+    "A-1-001",
+    "A-1-002",
+    "A-1-003",
+    "A-1-004",
+    "A-1-005",
+    "A-1-006",
+    "A-1-007",
+    "A-1-009",
+    "A-1-010",
+    "A-1-011",
+    "A-1-012",
+    "A-1-013",
+    "A-1-015",
+    "A-1-016",
+    "A-1-017",
+    "A-1-020",
+    "A-1-021",
+    "A-1-022",
+    "A-1-023",
+    "A-1-024",
+    "A-1-025",
+    "A-1-026",
+    "A-1-028",
+    "A-1-029",
+    "A-1-032",
+    "A-1-033",
+    "A-1-034",
+    "A-1-036",
+    "A-1-037",
+    "A-1-039",
+    "A-1-040",
+    "A-1-041",
+    "A-1-044",
+    "A-1-047",
+    "A-1-048",
+    "A-1-049",
+    "A-1-050",
+    "A-1-052",
+    "A-1-053",
+    "A-1-056",
+    "A-1-057",
+    "A-1-060",
+    "A-1-061",
+    "A-1-063",
+    "A-1-064",
+    "A-1-065",
+    "A-1-066",
+    "A-1-068",
+    "A-1-069",
+    "A-1-070",
+    "A-1-071",
+    "A-1-072",
+    "A-1-073",
+    "A-1-074",
+    "A-1-075",
+    "A-1-076",
+    "A-1-078",
+    "A-1-080",
+    "A-1-081",
+    "A-1-087",
+    "A-1-088",
+    "A-1-089",
+    "A-1-090",
+    "A-1-091",
+    "A-1-095",
+    "A-1-096",
+    "A-1-097",
+    "A-1-098",
+    "A-1-099",
+    "A-1-100",
+    "A-1-101",
+    "A-1-102",
+    "A-1-103",
+    "A-1-106",
+    "A-1-107",
+    "A-1-108",
+    "A-1-109",
+    "A-1-112",
+    "A-1-114",
+    "A-1-116",
+    "A-1-117",
+    "A-1-118",
+    "A-1-119",
+    "B-1-000",
+    "B-1-001",
+    "B-1-002",
+    "B-1-003",
+    "B-1-004",
+    "B-1-005",
+    "B-1-006",
+    "B-1-009",
+    "B-1-011",
+    "B-1-012",
+    "B-1-013",
+    "B-1-014",
+    "B-1-015",
+    "B-1-016",
+    "B-1-017",
+    "B-1-019",
+    "B-1-020",
+    "B-1-021",
+    "B-1-023",
+    "B-1-024",
+    "B-1-025",
+    "B-1-026",
+    "B-1-029",
+    "B-1-030",
+    "B-1-032",
+    "B-1-033",
+    "B-1-034",
+    "B-1-036",
+    "B-1-038",
+    "B-1-040",
+    "B-1-041",
+    "B-1-042",
+    "B-1-044",
+    "B-1-045",
+    "B-1-046",
+    "B-1-047",
+    "B-1-048",
+    "B-1-049",
+    "B-1-052",
+    "B-1-053",
+    "B-1-054",
+    "B-1-055",
+    "B-1-057",
+    "B-1-058",
+    "B-1-060",
+    "B-1-061",
+    "B-1-062",
+    "B-1-064",
+    "B-1-068",
+    "B-1-069",
+    "B-1-070",
+    "B-1-072",
+    "B-1-073",
+    "B-1-074",
+    "B-1-075",
+    "B-1-076",
+    "B-1-077",
+    "B-1-078",
+    "B-1-079",
+    "B-1-080",
+    "B-1-083",
+    "B-1-084",
+    "B-1-085",
+    "B-1-086",
+    "B-1-088",
+    "B-1-089",
+    "B-1-090",
+    "B-1-091",
+    "B-1-094",
+    "B-1-095",
+    "B-1-096",
+    "B-1-097",
+    "B-1-099",
+    "B-1-100",
+    "B-1-105",
+    "B-1-106",
+    "B-1-108",
+    "B-1-110",
+    "B-1-111",
+    "B-1-112",
+    "B-1-113",
+    "B-1-114",
+    "B-1-116",
+    "B-1-119",
+    "E-1-000",
+    "E-1-001",
+    "E-1-002",
+    "E-1-003",
+    "E-1-004",
+    "E-1-005",
+    "E-1-007",
+    "E-1-008",
+    "E-1-009",
+    "E-1-010",
+    "E-1-011",
+    "E-1-012",
+    "E-1-014",
+    "E-1-015",
+    "E-1-017",
+    "E-1-018",
+    "E-1-019",
+    "E-1-020",
+    "E-1-022",
+    "E-1-023",
+    "E-1-024",
+    "E-1-025",
+    "E-1-027",
+    "E-1-028",
+    "E-1-030",
+    "E-1-032",
+    "E-1-033",
+    "E-1-039",
+    "E-1-041",
+    "E-1-043",
+    "E-1-045",
+    "E-1-046",
+    "E-1-048",
+    "E-1-050",
+    "E-1-051",
+    "E-1-052",
+    "E-1-054",
+    "E-1-055",
+    "E-1-056",
+    "E-1-057",
+    "E-1-058",
+    "E-1-059",
+    "F-1-001",
+    "F-1-002",
+    "F-1-003",
+    "F-1-005",
+    "F-1-006",
+    "F-1-007",
+    "F-1-008",
+    "F-1-009",
+    "F-1-010",
+    "F-1-011",
+    "F-1-012",
+    "F-1-016",
+    "F-1-018",
+    "F-1-020",
+    "F-1-022",
+    "F-1-023",
+    "F-1-025",
+    "F-1-027",
+    "F-1-028",
+    "F-1-029",
+    "F-1-030",
+    "F-1-031",
+    "F-1-032",
+    "F-1-035",
+    "F-1-036",
+    "F-1-037",
+    "F-1-038",
+    "F-1-039",
+    "F-1-040",
+    "F-1-041",
+    "F-1-042",
+    "F-1-045",
+    "F-1-046",
+    "F-1-047",
+    "F-1-048",
+    "F-1-049",
+    "F-1-050",
+    "F-1-051",
+    "F-1-053",
+    "F-1-054",
+    "F-1-055",
+    "F-1-056"
+   ],
+   "n": 252,
+   "per_family": {
+    "A": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "n": 84
+    },
+    "B": {
+     "blc8_mean": 0.14285714285714285,
+     "blc_full_mean": 0.006761305070756897,
+     "n": 84
+    },
+    "E": {
+     "blc8_mean": 0.09523809523809523,
+     "blc_full_mean": 0.04723945530725293,
+     "n": 42
+    },
+    "F": {
+     "blc8_mean": 0.47619047619047616,
+     "blc_full_mean": 0.45513335911083735,
+     "n": 42
+    }
+   },
+   "targets": {
+    "blc8": 0.09,
+    "blc_full": 0.05
+   },
+   "verdict": "PASS"
+  },
+  "G-COST": {
+   "items": {
+    "budget": {
+     "n_over": 0,
+     "verdict": "PASS"
+    },
+    "cells": {
+     "median_b0": 8688.0,
+     "median_full": 717000.0,
+     "n_both": 36,
+     "ratio": 82.52762430939227,
+     "verdict": "FAIL"
+    },
+    "orphans": {
+     "n": 0,
+     "verdict": "PASS"
+    },
+    "ram": {
+     "peak_frac": 0.2288108082335943,
+     "peak_rss_mib": 6467.44921875,
+     "verdict": "PASS"
+    },
+    "wall": {
+     "bound_12": 2358.8729203714256,
+     "longest_geometry_s": 819.2538161999546,
+     "seconds": 4717.745840742851,
+     "streams": 6,
+     "verdict": "PASS"
+    }
+   },
+   "verdict": "FAIL",
+   "wall_scaled_from_s": 11008.073628399987
+  },
+  "G-DET": {
+   "verdict": "NOT-PROJECTED",
+   "why": "needs two runs of the same ids"
+  },
+  "G-EXPL": {
+   "per_campaign": {
+    "system": {
+     "n_rows": 413,
+     "ok": true,
+     "untemplated": []
+    }
+   },
+   "verdict": "PASS"
+  },
+  "G-FAIL": {
+   "bar": 23,
+   "conditions": {
+    "mcnemar_p_lt_001": true,
+    "no_family_worse": true,
+    "ratio_le_quarter": false,
+    "upper_le_10pct": false
+   },
+   "failures": 177,
+   "failures_b0": 384,
+   "k_star": 10,
+   "mcnemar": {
+    "b": 207,
+    "b_test": 89,
+    "c": 0,
+    "c_test": 0,
+    "p": 3.2311742677852644e-27
+   },
+   "mfr": 0.42142857142857143,
+   "mfr_b0": 0.9142857142857143,
+   "n": 420,
+   "n_test": 180,
+   "projected_test_failures": 75.85714285714286,
+   "ratio_bar": 96,
+   "verdict": "FAIL",
+   "worse_families": []
+  },
+  "G-FID": {
+   "compared": 6,
+   "per_family": {
+    "A": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.7601932144474122,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.06265485263150322,
+       "ok": null
+      },
+      "pinned_frac": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.00030330603579011223,
+       "ok": null
+      }
+     },
+     "n_b0": 0,
+     "n_ft0_sharp": 0,
+     "n_full": 3
+    },
+    "B": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.9160749098318088,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": 0.01586019446956262,
+       "comparable": true,
+       "full": 0.06041132932664674,
+       "ok": false
+      },
+      "pinned_frac": {
+       "b0": 0.0,
+       "comparable": true,
+       "full": 0.0,
+       "ok": true
+      }
+     },
+     "n_b0": 21,
+     "n_ft0_sharp": 0,
+     "n_full": 84
+    },
+    "D": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.9995593099026516,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.04239742010975334,
+       "ok": null
+      },
+      "pinned_frac": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.0,
+       "ok": null
+      }
+     },
+     "n_b0": 0,
+     "n_ft0_sharp": 0,
+     "n_full": 73
+    },
+    "E": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.8867583740298985,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": 0.01589703417917316,
+       "comparable": true,
+       "full": 0.03181865213429978,
+       "ok": false
+      },
+      "pinned_frac": {
+       "b0": 0.0,
+       "comparable": true,
+       "full": 0.0,
+       "ok": true
+      }
+     },
+     "n_b0": 13,
+     "n_ft0_sharp": 0,
+     "n_full": 30
+    },
+    "F": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.9999754927217256,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.004331967969037176,
+       "ok": null
+      },
+      "pinned_frac": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.0,
+       "ok": null
+      }
+     },
+     "n_b0": 0,
+     "n_ft0_sharp": 0,
+     "n_full": 26
+    },
+    "G": {
+     "metrics": {
+      "feature_capture": {
+       "b0": null,
+       "comparable": false,
+       "full": 0.8860897672215231,
+       "ok": null
+      },
+      "p99_over_hf": {
+       "b0": 0.015921632724747704,
+       "comparable": true,
+       "full": 0.05898833603936269,
+       "ok": false
+      },
+      "pinned_frac": {
+       "b0": 0.0,
+       "comparable": true,
+       "full": 0.0,
+       "ok": true
+      }
+     },
+     "n_b0": 2,
+     "n_ft0_sharp": 0,
+     "n_full": 27
+    }
+   },
+   "seal_equal": true,
+   "verdict": "FAIL",
+   "worse": [
+    [
+     "B",
+     "p99_over_hf"
+    ],
+    [
+     "E",
+     "p99_over_hf"
+    ],
+    [
+     "G",
+     "p99_over_hf"
+    ]
+   ]
+  },
+  "G-OPT": {
+   "verdict": "NOT-PROJECTED",
+   "why": "decided on the test ablation"
+  },
+  "G-QUAL": {
+   "edits": 217,
+   "edits_bad": 0,
+   "not_projected": "the configs' quality block (a bundle carries no configs)",
+   "rows": 413,
+   "verdict": "PASS"
+  }
+ },
+ "inputs": {
+  "b0": {
+   "file": "tools/autonomy/baseline/tuning_b0-template.json.gz",
+   "sha256": "8d0309e70701908c2e29ff2f5a1ae8b6bae3360993c18e2c9c44281d9e560da7"
+  },
+  "full": {
+   "file": "tools/autonomy/aml/tuning_rules_L5.json.gz",
+   "sha256": "75acc3b0ca373ed191964e39e85542c281bda1b917e1960f98168ab27bec2615"
+  }
+ },
+ "n": 420,
+ "n_test": 180,
+ "note": "The AM-L L5 rules re-measure (2026-10-02, binary 3d90ce91) against the sealed B0-template tuning bundle (binary of 2026-09-24, scored before the 2026-09-26 rule); the selftest's fixture.",
+ "reasons": [
+  "G-FAIL FAIL: 177/420 > 23 (the 95 % upper bound on 180 test bodies holds at <= 10 failures); 4 x 177 > B0-template 384",
+  "G-FID FAIL: worse B p99_over_hf, E p99_over_hf, G p99_over_hf",
+  "G-COST FAIL: cells FAIL; cells median 717000 vs B0 8688 (ratio 82.5276 > 1.5)"
+ ],
+ "schema": "autonomy-projection/1",
+ "system": {
+  "binary_sha256": "3d90ce9156119b16ee6fdd1359c5913152ebc29be3e218ebb903fe70900d923b",
+  "campaign_id": "aml-l5-full",
+  "mode": "rules"
+ },
+ "systems": {
+  "b0-template": {
+   "blc8_mean": 0.0,
+   "blc_full_mean": 0.0,
+   "cells_median": 8688.0,
+   "failures": 384,
+   "mfr": 0.9142857142857143,
+   "mfr_ci": [
+    0.883309818285332,
+    0.9392454003748061
+   ],
+   "n": 420,
+   "per_family": {
+    "A": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": null,
+     "failures": 84,
+     "mfr": 1.0,
+     "mfr_ci": [
+      0.9570350803704349,
+      1.0
+     ],
+     "n": 84,
+     "strict": 84,
+     "strict_rate": 1.0
+    },
+    "B": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": 7104,
+     "failures": 63,
+     "mfr": 0.75,
+     "mfr_ci": [
+      0.6435841762567982,
+      0.8381050269965298
+     ],
+     "n": 84,
+     "strict": 84,
+     "strict_rate": 1.0
+    },
+    "D": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": null,
+     "failures": 84,
+     "mfr": 1.0,
+     "mfr_ci": [
+      0.9570350803704349,
+      1.0
+     ],
+     "n": 84,
+     "strict": 84,
+     "strict_rate": 1.0
+    },
+    "E": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": 10988,
+     "failures": 29,
+     "mfr": 0.6904761904761905,
+     "mfr_ci": [
+      0.5291393710678831,
+      0.8237789173580448
+     ],
+     "n": 42,
+     "strict": 42,
+     "strict_rate": 1.0
+    },
+    "F": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": null,
+     "failures": 42,
+     "mfr": 1.0,
+     "mfr_ci": [
+      0.9159161450596448,
+      1.0
+     ],
+     "n": 42,
+     "strict": 42,
+     "strict_rate": 1.0
+    },
+    "G": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": 11034.0,
+     "failures": 82,
+     "mfr": 0.9761904761904762,
+     "mfr_ci": [
+      0.9166255334330946,
+      0.997103437029467
+     ],
+     "n": 84,
+     "strict": 84,
+     "strict_rate": 1.0
+    }
+   },
+   "strict": 420,
+   "strict_rate": 1.0,
+   "terminals": {
+    "BASELINE": 372,
+    "SURFACE-OPEN": 47,
+    "SURFACE-REFUSED": 1
+   }
+  },
+  "system": {
+   "blc8_mean": 0.20476190476190476,
+   "blc_full_mean": 0.15715427028416593,
+   "cells_median": 559132,
+   "failures": 177,
+   "mfr": 0.42142857142857143,
+   "mfr_ci": [
+    0.3737135197902905,
+    0.47025837302091356
+   ],
+   "n": 420,
+   "per_family": {
+    "A": {
+     "blc8_mean": 0.0,
+     "blc_full_mean": 0.0,
+     "cells_median": 289737,
+     "failures": 81,
+     "mfr": 0.9642857142857143,
+     "mfr_ci": [
+      0.89915768842582,
+      0.9925734168774473
+     ],
+     "n": 84,
+     "strict": 84,
+     "strict_rate": 1.0
+    },
+    "B": {
+     "blc8_mean": 0.14285714285714285,
+     "blc_full_mean": 0.006761305070756897,
+     "cells_median": 1250454.0,
+     "failures": 0,
+     "mfr": 0.0,
+     "mfr_ci": [
+      0.0,
+      0.04296491962956506
+     ],
+     "n": 84,
+     "strict": 72,
+     "strict_rate": 0.8571428571428571
+    },
+    "D": {
+     "blc8_mean": 0.4880952380952381,
+     "blc_full_mean": 0.4496398823316775,
+     "cells_median": 429716,
+     "failures": 11,
+     "mfr": 0.13095238095238096,
+     "mfr_ci": [
+      0.06722355191163944,
+      0.22224096127398557
+     ],
+     "n": 84,
+     "strict": 43,
+     "strict_rate": 0.5119047619047619
+    },
+    "E": {
+     "blc8_mean": 0.09523809523809523,
+     "blc_full_mean": 0.04723945530725293,
+     "cells_median": 395630.0,
+     "failures": 12,
+     "mfr": 0.2857142857142857,
+     "mfr_ci": [
+      0.15719146676574539,
+      0.44583880330796877
+     ],
+     "n": 42,
+     "strict": 38,
+     "strict_rate": 0.9047619047619048
+    },
+    "F": {
+     "blc8_mean": 0.47619047619047616,
+     "blc_full_mean": 0.45513335911083735,
+     "cells_median": 230495.5,
+     "failures": 16,
+     "mfr": 0.38095238095238093,
+     "mfr_ci": [
+      0.23572054686321636,
+      0.5436325045021015
+     ],
+     "n": 42,
+     "strict": 22,
+     "strict_rate": 0.5238095238095238
+    },
+    "G": {
+     "blc8_mean": 0.10714285714285714,
+     "blc_full_mean": 0.07818375680935014,
+     "cells_median": 483914,
+     "failures": 57,
+     "mfr": 0.6785714285714286,
+     "mfr_ci": [
+      0.5677575201996716,
+      0.7763737796048663
+     ],
+     "n": 84,
+     "strict": 75,
+     "strict_rate": 0.8928571428571429
+    }
+   },
+   "strict": 334,
+   "strict_rate": 0.7952380952380952,
+   "terminals": {
+    "CAPABILITY-LIMITED": 157,
+    "EXHAUSTED": 104,
+    "NO-REMEDY": 9,
+    "PASS": 86,
+    "REFUSED": 16,
+    "SURFACE-OPEN": 47,
+    "SURFACE-REFUSED": 1
+   }
+  }
+ },
+ "tier0_ids": [
+  "D-1-002",
+  "D-1-008",
+  "D-1-010",
+  "D-1-016",
+  "D-1-018",
+  "D-1-024",
+  "D-1-032",
+  "D-1-040",
+  "D-1-042",
+  "D-1-056",
+  "D-1-058",
+  "D-1-064",
+  "D-1-066",
+  "D-1-072",
+  "D-1-080",
+  "D-1-082",
+  "D-1-088",
+  "D-1-098",
+  "D-1-104",
+  "D-1-106",
+  "D-1-112",
+  "F-1-003",
+  "F-1-006",
+  "F-1-009",
+  "F-1-012",
+  "F-1-018",
+  "F-1-027",
+  "F-1-030",
+  "F-1-036",
+  "F-1-039",
+  "F-1-042",
+  "F-1-045",
+  "F-1-048",
+  "F-1-051",
+  "F-1-054"
+ ],
+ "verdict": "NO-GO"
+}

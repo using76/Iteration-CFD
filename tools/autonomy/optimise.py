@@ -27,6 +27,11 @@ The refit (--refit) re-fits the same ensemble on the extra bundles' rows in
 front of the AM-14 training set and writes optimise/aml/ (the shipped model
 since 2026-10-03); a refit runs no refinement round, so the tuning ablation
 half is not measured and the optimiser ships DISABLED until G-OPT passes.
+Since AUT-11 the ship rule is gate-driven (prior.USER_SHIP): load_model enables
+the hook only from the G-OPT.json beside the model - PASS, non-vacuous (the
+ablation measured and beating the rules), its sha the one the model recorded, its
+model sha the model's (gate_status) - and otherwise records OPT-DISABLED with the
+reasons.
 
     python tools/autonomy/optimise.py --selftest
     python tools/autonomy/optimise.py --plan
@@ -138,6 +143,8 @@ TRAIN_SCHEMA = "autonomy-opt-train/1"
 CHECK_SCHEMA = "autonomy-opt-check/1"
 HEADER = baseline.HEADER                   # the "$comment" of every JSON it writes
 _MODEL = {"path": os.path.join(SHIP_DIR, MODEL_NAME), "v": None, "key": None}
+# the ship rule (AUT-11): the optimiser is enabled only by its gate file
+SHIP_RULE = prior.USER_SHIP["rule"]
 
 
 # --- (C2) the rebuild: every tuning attempt's config from its row ------------
@@ -225,6 +232,7 @@ def rows_from(bundle, source, mrows, gates, knobs):
     w21 = rules.win_2to1_of(bundle.get("records") or [])
     glb = rules.glb_of(bundle.get("records") or [])
     rsn = rules.r_snap_of(bundle.get("records") or [])
+    rec_on = rules.r_econ_of(bundle.get("records") or [])
     for gid in sorted(by_geom):
         att = by_geom[gid]
         if sorted(att) != list(range(1, max(att) + 1)):
@@ -237,7 +245,8 @@ def rows_from(bundle, source, mrows, gates, knobs):
         else:
             s = rules.setup(mrows[gid], fp, campaign.stl_rel(gid),
                             campaign.case_rel(gid), gid, gates=gates, knobs=knobs,
-                            ft_radius=ftr, win_2to1=w21, glb=glb, r_snap=rsn)
+                            ft_radius=ftr, win_2to1=w21, glb=glb, r_snap=rsn,
+                            r_econ=rec_on)
             if s["refused"]:
                 raise OptError("rules.setup refuses %s (%s): %s"
                                % (gid, source, ", ".join(s["refused"])))
@@ -556,11 +565,15 @@ def sobol(gid):
 
 
 def l1_of(ctx, gates, knobs):
-    """The L1 config the box is relative to, from the row-less facts only."""
+    """The L1 config the box is relative to, from the row-less facts only.  Its bands
+    are the rules' before R-ECON (AUT-07, r_econ=False): every row the surrogate was
+    fitted on was meshed under them, and the box scales the band distances, so a box
+    around R-ECON's 3-cell bands would sit outside the training rows until a refit on
+    R-ECON campaigns (AUT-12's L-run)."""
     gid = ctx["geometry_id"]
     s = rules.setup({"geometry_id": gid, "flow": ctx["flow"]}, ctx["fingerprint"],
                     campaign.stl_rel(gid), campaign.case_rel(gid), gid,
-                    flow=ctx["flow"], gates=gates, knobs=knobs)
+                    flow=ctx["flow"], gates=gates, knobs=knobs, r_econ=False)
     if s["refused"]:
         raise OptError("rules.setup refuses %s: %s" % (gid, ", ".join(s["refused"])))
     return s["config"]
@@ -806,24 +819,32 @@ def _pick_decision(candidates, pred, order, counts, ctx, gates, meta):
             "counts": counts, "pick": pk, "runners_up": runners}
 
 
-def disabled_decision(gate):
-    """The OPT-DISABLED abstain a disabled hook returns on every geometry."""
+def disabled_decision(gate, status=None):
+    """The OPT-DISABLED abstain a disabled hook returns on every geometry;
+    `status` (gate_status, AUT-11) records why the gate file keeps it off."""
     g = gate or {}
+    inputs = [{"name": "verdict", "value": g.get("verdict"), "unit": ""},
+              {"name": "auc", "value": g.get("auc"), "unit": "1"},
+              {"name": "blc8_rmse", "value": g.get("blc8_rmse"), "unit": "1"},
+              {"name": "beats_rules", "value": g.get("beats_rules"), "unit": ""},
+              {"name": "model_sha256", "value": g.get("model_sha256"),
+               "unit": ""}]
+    tail = ""
+    if status is not None:
+        why = "; ".join(status["reasons"])
+        inputs.append({"name": "ship_rule", "value": SHIP_RULE, "unit": ""})
+        inputs.append({"name": "gate_reasons", "value": why, "unit": ""})
+        tail = " by its gate file (%s: %s)" % (SHIP_RULE, why)
     auc, rmse = g.get("auc"), g.get("blc8_rmse")
     beats, verdict = g.get("beats_rules"), g.get("verdict")
     rec = _record(
         "OPT-DISABLED", "abstain",
         {"observable": "optimiser.enabled", "value": False, "threshold": False,
          "op": "==", "source": "optimise/aml/G-OPT.json (docs/15 §F G-OPT)"},
-        [{"name": "verdict", "value": verdict, "unit": ""},
-         {"name": "auc", "value": auc, "unit": "1"},
-         {"name": "blc8_rmse", "value": rmse, "unit": "1"},
-         {"name": "beats_rules", "value": beats, "unit": ""},
-         {"name": "model_sha256", "value": g.get("model_sha256"), "unit": ""}],
-        FORMULA, [], CITE,
-        "OPT-DISABLED: the optimiser ships disabled (G-OPT %s: CV AUC %s, BLC_8 "
+        inputs, FORMULA, [], CITE,
+        "OPT-DISABLED: the optimiser ships disabled%s (G-OPT %s: CV AUC %s, BLC_8 "
         "RMSE %s, beats the rules %s); the remedies' terminal stands"
-        % (explain.fmt(verdict), explain.fmt(auc), explain.fmt(rmse),
+        % (tail, explain.fmt(verdict), explain.fmt(auc), explain.fmt(rmse),
            explain.fmt(beats)), 0.0)
     return _abstain("OPT-DISABLED", rec, None)
 
@@ -837,14 +858,15 @@ def model_sha(model):
                                     if k not in ("enabled", "gate")})
 
 
-def make_hook(ens_of, *, model_sha256, importances=(), enabled=True, gate=None):
+def make_hook(ens_of, *, model_sha256, importances=(), enabled=True, gate=None,
+              status=None):
     """hook(ctx, history) for campaign.py; gates and knobs load once."""
     gates = schema.load_gates()
     knobs = schema.load_knobs()
 
     def hook(ctx, history):
         if not enabled:
-            return disabled_decision(gate)
+            return disabled_decision(gate, status)
         try:
             ens, fold = ens_of(ctx["geometry_id"])
         except KeyError as e:
@@ -904,12 +926,73 @@ def load_model(path=None):
             raise OptError("refit drift: row %d predicts %r, the model says %r"
                            % (i, got, want))
     msha = model_sha(model)
+    st = gate_status(model, os.path.join(os.path.dirname(os.path.abspath(path)),
+                                         REPORT_NAME))
     v = {"path": path, "model": model, "ensemble": ens, "sha": msha,
+         "ship": st,
          "hook": make_hook(lambda gid: (ens, None), model_sha256=msha,
                            importances=model.get("importances") or (),
-                           enabled=model["enabled"], gate=model["gate"])}
+                           enabled=st["enabled"], gate=model["gate"],
+                           status=st)}
     _MODEL["v"], _MODEL["key"] = v, key
     return v
+
+
+def gate_status(model, gate_path):
+    """The gate-driven ship rule (AUT-11, prior.USER_SHIP's): {"enabled",
+    "reasons", "path", "gate_sha256"} of an optimiser model from the G-OPT.json
+    beside it.  Enabled only when the file's verdict is PASS and non-vacuous
+    (its tuning ablation was measured and beats the rules: a CV-only PASS of a
+    refit or the hurdle is vacuous), its canonical sha256 is the one the model's
+    gate record holds, its model_sha256 is this model's (and the gate record's),
+    and the model's own enabled flag is set; every check that fails is a
+    reason."""
+    rel = prior._rel_here(gate_path)
+    rep = _read_json_or_none(gate_path)
+    if not isinstance(rep, dict):
+        return {"enabled": False, "path": rel, "gate_sha256": None,
+                "reasons": ["no readable gate file at %s" % rel]}
+    reasons = []
+    g = model.get("gate") if isinstance(model.get("gate"), dict) else {}
+    gsha = schema.canonical_sha256(rep)
+    want = g.get("report_sha256")
+    if want is None:
+        reasons.append("the model records no sha of its gate file (gated "
+                       "before AUT-11)")
+    elif want != gsha:
+        reasons.append("the gate file is sha %s but the model recorded %s (it "
+                       "was edited or replaced after the gate)"
+                       % (gsha[:12], str(want)[:12]))
+    if rep.get("verdict") != "PASS":
+        reasons.append("the gate's verdict is %s" % rep.get("verdict"))
+    beats = (rep.get("conditions") or {}).get("beats_rules")
+    if beats is None:
+        reasons.append("the pass is vacuous: the tuning ablation was not "
+                       "measured (beats the rules: none)")
+    elif beats is not True:
+        reasons.append("the optimiser does not beat the rules on the tuning "
+                       "split")
+    msha = model_sha(model)
+    if rep.get("model_sha256") != msha:
+        reasons.append("the gate file is for model %s, this model is %s"
+                       % (str(rep.get("model_sha256"))[:12], msha[:12]))
+    elif g.get("model_sha256") != msha:
+        reasons.append("the model's gate record names model %s, this model is %s"
+                       % (str(g.get("model_sha256"))[:12], msha[:12]))
+    if not model.get("enabled"):
+        reasons.append("the model's enabled flag is false")
+    return {"enabled": not reasons, "path": rel, "gate_sha256": gsha,
+            "reasons": reasons}
+
+
+def _dump_gate(report_dir, model_obj, rep):
+    """G-OPT.json, then the model with its gate record holding that file's
+    canonical sha256 as written (AUT-11)."""
+    rp = os.path.join(report_dir, REPORT_NAME)
+    _dump_json(rp, rep)
+    model_obj["gate"]["report_sha256"] = schema.canonical_sha256(
+        _read_json_or_none(rp))
+    _dump_json(os.path.join(report_dir, MODEL_NAME), model_obj)
 
 
 def propose(ctx, history):
@@ -1228,7 +1311,8 @@ def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
                 {"manifest": "tuning", "mode": "rules+opt", "ids": R, "out": out,
                  "run_id": "opt-refine-r%d" % j, "streams": streams,
                  "audit_mod": AUDIT_OFF,
-                 "binary": binary or campaign.BINARY_DEFAULT, "quiet": quiet},
+                 "binary": binary or campaign.BINARY_DEFAULT, "quiet": quiet,
+                 "r_te": rules.r_te_of(rules_bundle["records"])},
                 attempt_fn=A, probe_fn=P, snap_fn=S,
                 hooks={"optimiser": make_hook(
                     lambda gid: (folds[fold_of(gid)], fold_of(gid)),
@@ -1379,8 +1463,7 @@ def refine(work, *, sources=None, rounds=ROUNDS, streams=6,
         else:
             with open(train_path, "wb") as f:
                 f.write(train_bytes)
-        _dump_json(os.path.join(report_dir, MODEL_NAME), model_obj)
-        _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
+        _dump_gate(report_dir, model_obj, rep)
         _write_text(os.path.join(report_dir, REPORT_MD), report_md(rep))
     else:
         for i, r in enumerate(rounds_out):
@@ -1901,8 +1984,7 @@ def refit(extra, *, base=None, report_dir=SHIP_DIR, write=True, quiet=False):
         else:
             with open(train_path, "wb") as f:
                 f.write(train_bytes)
-        _dump_json(os.path.join(report_dir, MODEL_NAME), model_obj)
-        _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
+        _dump_gate(report_dir, model_obj, rep)
         _write_text(os.path.join(report_dir, REPORT_MD), refit_md(rep))
     if not quiet:
         print("G-OPT %s (refit): rows %d (%d new), AUC %.6f (>= %.2f %s), "
@@ -2077,8 +2159,7 @@ def hurdle(extra, *, base=None, report_dir=HURDLE_DIR, write=True,
         else:
             with open(train_path, "wb") as f:
                 f.write(train_bytes)
-        _dump_json(os.path.join(report_dir, MODEL_NAME), model_obj)
-        _dump_json(os.path.join(report_dir, REPORT_NAME), rep)
+        _dump_gate(report_dir, model_obj, rep)
         _write_text(os.path.join(report_dir, REPORT_MD), hurdle_md(rep))
     if not quiet:
         print("G-OPT %s (hurdle): rows %d train, %d hold-out, AUC %.6f, "
@@ -2261,10 +2342,25 @@ IDS16 = prior.IDS8 + ("D-1-001", "D-1-027", "E-1-003", "E-1-011", "F-1-025",
                       "G-1-052", "E-1-014", "D-1-073")
 
 
+def _before_econ(fn, *args, **kw):
+    """fn with rules.setup on the rules before R-ECON (AUT-07, r_econ=False): the
+    oracle campaigns' counts and predictions were written against §B's bands, which
+    the surrogate reads, and campaign.py takes no rule-set flag."""
+    setup0 = rules.setup
+    rules.setup = functools.partial(setup0, r_econ=False)
+    try:
+        return fn(*args, **kw)
+    finally:
+        rules.setup = setup0
+
+
 def _oracle_run(out, ids, mode, attempt_fn):
-    return campaign.run_campaign(
+    # r_te False: the wall oracle models G-PILOT's cure (one wall level coarser), the
+    # remedy table before AUT-04's RM-TE that these selftest counts were written against
+    return _before_econ(
+        campaign.run_campaign,
         {"manifest": "tuning", "ids": list(ids), "out": out, "mode": mode,
-         "streams": 2, "quiet": True}, attempt_fn=attempt_fn,
+         "streams": 2, "quiet": True, "r_te": False}, attempt_fn=attempt_fn,
         probe_fn=campaign._fake_probe(1000), snap_fn=campaign._fake_snap)
 
 
@@ -2423,7 +2519,8 @@ def _g3_pool(H):
                     knobs=H["knobs"], ft_radius=rules.ft_radius_of(H["rb"]["records"]),
                     win_2to1=rules.win_2to1_of(H["rb"]["records"]),
                     glb=rules.glb_of(H["rb"]["records"]),
-                    r_snap=rules.r_snap_of(H["rb"]["records"]))
+                    r_snap=rules.r_snap_of(H["rb"]["records"]),
+                    r_econ=rules.r_econ_of(H["rb"]["records"]))
     assert not s["refused"], s["refused"]
     l1 = s["config"]
     assert schema.canonical_sha256(l1).startswith("e31caabef618")
@@ -2633,10 +2730,10 @@ def _g8_refine(H):
     tmp = H["tmp"]
     w8 = os.path.join(tmp, "w8")
     rep8 = os.path.join(tmp, "rep8")
-    rep = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                 attempt_fn=prior._wall_oracle,
-                 probe_fn=campaign._fake_probe(1000),
-                 snap_fn=campaign._fake_snap, quiet=True)
+    rep = _before_econ(refine, w8, sources=H["osrc"], rounds=2, streams=2,
+                       report_dir=rep8, attempt_fn=prior._wall_oracle,
+                       probe_fn=campaign._fake_probe(1000),
+                       snap_fn=campaign._fake_snap, quiet=True)
     # GLB-CONFIG: F-1-009 is banked again on the margin's level 4, and D-1-073 and
     # F-1-025 pass the wall oracle on their margined attempt 1, so the set is three
     assert rep["refinement_set"]["geometry_ids"] == \
@@ -2684,10 +2781,10 @@ def _g8_refine(H):
     H["rep8"] = rep8
     m1 = os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns
     m2 = os.stat(os.path.join(w8, "round_2", "campaign.json")).st_mtime_ns
-    rep2 = refine(w8, sources=H["osrc"], rounds=2, streams=2, report_dir=rep8,
-                  attempt_fn=prior._wall_oracle,
-                  probe_fn=campaign._fake_probe(1000),
-                  snap_fn=campaign._fake_snap, quiet=True)
+    rep2 = _before_econ(refine, w8, sources=H["osrc"], rounds=2, streams=2,
+                        report_dir=rep8, attempt_fn=prior._wall_oracle,
+                        probe_fn=campaign._fake_probe(1000),
+                        snap_fn=campaign._fake_snap, quiet=True)
     assert os.stat(os.path.join(w8, "round_1", "campaign.json")).st_mtime_ns == m1
     assert os.stat(os.path.join(w8, "round_2", "campaign.json")).st_mtime_ns == m2
     a = _read_json_or_none(os.path.join(rep8, "G-OPT.json"))
@@ -2720,6 +2817,15 @@ def _g8_refine(H):
                  "rule_id": None}]
         d = om.propose(ctx, hist)
         assert schema.errors(d["record"], "DecisionRecord") == []
+        # AUT-11: rep8's gate file (PASS, beats the rules, sha and model sha
+        # matching) enables the model; the property cases keep it off
+        assert om.load_model()["ship"] == {
+            "enabled": True, "reasons": [], "path": prior._rel_here(
+                os.path.join(rep8, REPORT_NAME)),
+            "gate_sha256": schema.canonical_sha256(
+                _read_json_or_none(os.path.join(rep8, REPORT_NAME)))}
+        assert d["rule_id"] != "OPT-DISABLED", d["rule_id"]
+        ship = _g8_ship(H, rep8, ctx, hist)
     finally:
         om._MODEL.clear()
         om._MODEL.update(saved)
@@ -2727,7 +2833,85 @@ def _g8_refine(H):
           "sharp bodies and D-1-027's proposal comes at attempt 4 (index 0, p_fail "
           "0.098546) and passes, round 0 rescues D-1-027, MFR 0.1875, the CV half "
           "PASSes and beats_rules holds so the optimiser ships enabled; a re-run "
-          "reuses both rounds and gives an equal report; check PASS")
+          "reuses both rounds and gives an equal report; check PASS; %s" % ship)
+
+
+def _g8_ship(H, rep8, ctx, hist):
+    """AUT-11's property cases on copies of rep8: a FAIL, a vacuous PASS, a
+    tampered gate file, a missing one and a model sha mismatch each keep the
+    optimiser off and OPT-DISABLED carries the reason."""
+    def case(name, edit_rep=None, rerecord=True, drop=False):
+        d = os.path.join(H["tmp"], "ship8-" + name)
+        shutil.copytree(rep8, d)
+        rp, mp = os.path.join(d, REPORT_NAME), os.path.join(d, MODEL_NAME)
+        r, m = _read_json_or_none(rp), _read_json_or_none(mp)
+        if edit_rep:
+            edit_rep(r)
+            _dump_json(rp, r)
+        if rerecord and not drop:
+            m["gate"]["report_sha256"] = schema.canonical_sha256(
+                _read_json_or_none(rp))
+        _dump_json(mp, m)
+        if drop:
+            os.remove(rp)
+        return mp, m
+
+    def fail(r):
+        r["verdict"], r["enabled"] = "FAIL", False
+
+    def vacuous(r):        # a CV-only PASS: the ablation was not measured
+        r["conditions"]["beats_rules"] = None
+
+    def tamper(r):
+        r["cv"]["auc"] = 0.5
+
+    def other(r):
+        r["model_sha256"] = "0" * 64
+
+    m8 = _read_json_or_none(os.path.join(rep8, MODEL_NAME))
+    msha = model_sha(m8)
+    miss = os.path.join(H["tmp"], "ship8-missing", REPORT_NAME)
+    want = {
+        "fail": (case("fail", fail), ["the gate's verdict is FAIL"]),
+        "vacuous": (case("vacuous", vacuous),
+                    ["the pass is vacuous: the tuning ablation was not "
+                     "measured (beats the rules: none)"]),
+        "tampered": (case("tampered", tamper, rerecord=False), None),
+        "missing": (case("missing", drop=True),
+                    ["no readable gate file at %s" % prior._rel_here(miss)]),
+        "model": (case("model", other),
+                  ["the gate file is for model 000000000000, this model is %s"
+                   % msha[:12]]),
+    }
+    for name, ((mp, m), reasons) in want.items():
+        st = gate_status(m, os.path.join(os.path.dirname(mp), REPORT_NAME))
+        if name == "tampered":
+            assert len(st["reasons"]) == 1 and st["reasons"][0].startswith(
+                "the gate file is sha ") and "edited or replaced" \
+                in st["reasons"][0], st["reasons"]
+        else:
+            assert st["reasons"] == reasons, (name, st["reasons"])
+        assert st["enabled"] is False, (name, st)
+        rec = disabled_decision(m["gate"], st)["record"]
+        assert rec["rule_id"] == "OPT-DISABLED" and rec["inputs"][-1] == \
+            {"name": "gate_reasons", "value": "; ".join(st["reasons"]),
+             "unit": ""}, rec["inputs"][-1]
+        assert explain.ungrounded(explain.card(rec)["line"], [rec]) == []
+    # through load_model's hook: the tampered copy abstains with its reason
+    v = load_model(want["tampered"][0][0])
+    d = v["hook"](ctx, hist)
+    assert d["rule_id"] == "OPT-DISABLED" and "edited or replaced" in \
+        d["record"]["message"], d["record"]["message"]
+    # the committed gates stay off under the rule
+    for sub in ("aml", "aml2"):
+        mp = os.path.join(REPORT_DIR, sub, MODEL_NAME)
+        st = gate_status(_read_json_or_none(mp),
+                         os.path.join(REPORT_DIR, sub, REPORT_NAME))
+        assert st["enabled"] is False and "the gate's verdict is FAIL" in \
+            st["reasons"], (sub, st["reasons"])
+    return ("AUT-11: a FAIL, a vacuous PASS, a tampered gate file, a missing one "
+            "and a model sha mismatch keep it off with the reason in OPT-DISABLED, "
+            "and the committed optimise/aml and aml2 stay off")
 
 
 def _g9_refine_a(H):
@@ -2744,12 +2928,12 @@ def _g9_refine_a(H):
         baseline.write_bundle(baseline.bundle_dir(out),
                               os.path.join(srcA, name + ".json.gz"))
     rep9 = os.path.join(tmp, "rep9")
-    rep = refine(os.path.join(tmp, "w9"),
-                 sources=[os.path.join(srcA, n + ".json.gz")
-                          for n in ("rules", "tmpl", "lhs")],
-                 rounds=1, streams=2, report_dir=rep9, attempt_fn=a_oracle,
-                 probe_fn=campaign._fake_probe(1000),
-                 snap_fn=campaign._fake_snap, quiet=True)
+    rep = _before_econ(refine, os.path.join(tmp, "w9"),
+                       sources=[os.path.join(srcA, n + ".json.gz")
+                                for n in ("rules", "tmpl", "lhs")],
+                       rounds=1, streams=2, report_dir=rep9, attempt_fn=a_oracle,
+                       probe_fn=campaign._fake_probe(1000),
+                       snap_fn=campaign._fake_snap, quiet=True)
     assert rep["refinement_set"]["geometry_ids"] == ["A-1-000"]
     r1 = baseline.read_bundle(os.path.join(rep9, "refine_r1.json.gz"))
     row4 = next(r for r in r1["attempts"]
@@ -2782,12 +2966,14 @@ def _g10_live(H):
         setup0, ft_radius=rules.ft_radius_of(H["rb"]["records"]),
         win_2to1=rules.win_2to1_of(H["rb"]["records"]),
         glb=rules.glb_of(H["rb"]["records"]),
-        r_snap=rules.r_snap_of(H["rb"]["records"]))
+        r_snap=rules.r_snap_of(H["rb"]["records"]),
+        r_econ=rules.r_econ_of(H["rb"]["records"]))
     try:
         end = campaign.run_campaign(
             {"manifest": "tuning", "ids": ["D-1-073"], "out": live,
              "mode": "rules+opt", "streams": 2, "audit_mod": AUDIT_OFF,
-             "quiet": True}, attempt_fn=A, probe_fn=P, snap_fn=S,
+             "quiet": True, "r_te": rules.r_te_of(H["rb"]["records"])},
+            attempt_fn=A, probe_fn=P, snap_fn=S,
             hooks={"optimiser": make_hook(lambda gid: (H["folds"][4], 4),
                                           model_sha256="selftest")})
         rows = [r for r in campaign.load_rows(live)

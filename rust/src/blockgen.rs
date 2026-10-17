@@ -1859,6 +1859,7 @@ fn write_flat_plate_impl(
         wall,
         roughness,
         thermal_wall,
+        false,
     )?;
 
     println!(
@@ -3235,6 +3236,7 @@ fn write_cutcell_case_impl(
     let wall_names: Vec<String> = summary.wall_faces.iter().map(|(n, _)| n.clone()).collect();
     let fields = build_cutcell_fields(
         kind, &c_out, &block, &wall_names, nu, u_ref, half_height, 1, wall, roughness, thermal_wall,
+        over.map_or(false, |o| o.uniform_inflow),
     )?;
     write_fields(case_dir, &fields)?;
 
@@ -3386,6 +3388,7 @@ fn build_cutcell_fields(
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
+    uniform_inflow: bool,
 ) -> Result<InMemoryFields> {
     let _ = nu; // carried for signature parity with `build_initial_fields`; unused here
     let n_cells = centroids.len();
@@ -3427,6 +3430,10 @@ fn build_cutcell_fields(
     for &centre in centroids {
         internal.push(if plume {
             Vec3::ZERO
+        } else if uniform_inflow {
+            // SPEC-LIT 110.3: the free stream everywhere, the inlet's value
+            // (the cut-cell inlet below is already that value).
+            Vec3::new(u_ref, 0.0, 0.0)
         } else {
             initial_velocity(cavity, centre, lo, lx, ly, u_ref, half_height, wall_normal)
         });
@@ -4065,19 +4072,37 @@ pub struct BlockOverride {
     /// even expressible - a second `-grading z=r` is refused at the command
     /// line before one of these is ever built.
     pub grading: [Option<Scalar>; 3],
+    /// SPEC-LIT 110.3: the step's inflow is the free stream `U_ref`, uniform,
+    /// at the inlet and through the interior - the whole point of
+    /// `ofgpu-generate-mesh step -inflow uniform`. `false` (the default)
+    /// leaves the preset's own 1/7 power-law profile untouched; `apply`
+    /// refuses `true` for every preset but [`CaseKind::Step`].
+    pub uniform_inflow: bool,
 }
 
 impl Default for BlockOverride {
     fn default() -> Self {
-        Self { extent: None, grading: [None; 3] }
+        Self { extent: None, grading: [None; 3], uniform_inflow: false }
     }
 }
 
 impl BlockOverride {
     /// Apply the extent and the grading to `b`, refusing what cannot be
-    /// honoured (see the field docs). `kind` is needed only for the
-    /// windowed-preset refusal, whose message names the preset.
+    /// honoured (see the field docs). `kind` is needed for the windowed-preset
+    /// refusal and for [`BlockOverride::uniform_inflow`]'s step-only one,
+    /// whose messages name the preset.
     pub fn apply(&self, b: &mut BlockSpec, kind: CaseKind) -> Result<()> {
+        // SPEC-LIT 110.3: the uniform free-stream inflow is the step's. Every
+        // other preset fills its inflow from its own profile (the cavity's
+        // recirculating cell, the plume's rest state), so a uniform one would
+        // silently overwrite a setting that preset exists to make.
+        if self.uniform_inflow && kind != CaseKind::Step {
+            return Err(Error::Config(format!(
+                "-inflow uniform: the uniform free-stream inflow (SPEC-LIT 110.3) is a \
+                 step-only setting - preset '{}' fills its inflow from its own profile",
+                kind.as_str()
+            )));
+        }
         if let Some([xlo, xhi, ylo, yhi, zlo, zhi]) = self.extent {
             // The plume's floor inlet and the room's door are `PatchWindow`s
             // snapped to cell centres of the preset's own nodes, and the dam
@@ -4298,6 +4323,7 @@ pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(Ho
             WallTreatment::Standard,
             None,
             false,
+            false,
         )?;
         return Ok((mesh, fields));
     }
@@ -4312,8 +4338,9 @@ pub fn build_case(kind: CaseKind, nx: usize, ny: usize, nz: usize) -> Result<(Ho
     }
 
     let (nu, u_ref, half_height) = case_run_params(kind, &b, &block);
-    let fields =
-        build_initial_fields(kind, &block, None, nu, u_ref, half_height, 1, WallTreatment::Standard, None, false)?;
+    let fields = build_initial_fields(
+        kind, &block, None, nu, u_ref, half_height, 1, WallTreatment::Standard, None, false, false,
+    )?;
     Ok((mesh, fields))
 }
 
@@ -4547,7 +4574,18 @@ fn write_case_impl(
     // oriented the way the geometry expects. `u_ref`/`half_height` came from
     // `case_run_params` above, together with `nu`.
     write_initial_fields(
-        case_dir, kind, &block, carve, nu, u_ref, half_height, 1, wall, roughness, thermal_wall,
+        case_dir,
+        kind,
+        &block,
+        carve,
+        nu,
+        u_ref,
+        half_height,
+        1,
+        wall,
+        roughness,
+        thermal_wall,
+        over.map_or(false, |o| o.uniform_inflow),
     )?;
 
     if let (Some(w), Some((fx, fy))) = (b.windows.first(), inlet) {
@@ -5285,9 +5323,11 @@ fn write_initial_fields(
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
+    uniform_inflow: bool,
 ) -> Result<()> {
     let fields = build_initial_fields(
         kind, block, carve, nu, u_ref, half_height, wall_normal, wall, roughness, thermal_wall,
+        uniform_inflow,
     )?;
     write_fields(case_dir, &fields)
 }
@@ -5304,6 +5344,7 @@ fn build_initial_fields(
     wall: WallTreatment,
     roughness: Option<Roughness>,
     thermal_wall: bool,
+    uniform_inflow: bool,
 ) -> Result<InMemoryFields> {
     let g = &block.g;
     let n_cells = carve.map_or(g.n_cells(), |cv| cv.fluid_old.len());
@@ -5349,8 +5390,11 @@ fn build_initial_fields(
 
         internal.push(if plume {
             Vec3::ZERO
-        } else if kind == CaseKind::FlatPlate {
+        } else if uniform_inflow || kind == CaseKind::FlatPlate {
             // SPEC-LIT §144.1: the free stream everywhere, the inlet's value.
+            // SPEC-LIT 110.3 gives the step the same treatment through
+            // `-inflow uniform`: the free stream `U_ref`, uniform, inlet and
+            // interior, not the preset's own 1/7 power law.
             Vec3::new(u_ref, 0.0, 0.0)
         } else {
             initial_velocity(cavity, centre, lo, lx, ly, u_ref, half_height, wall_normal)
@@ -7710,6 +7754,7 @@ mod tests {
         let ov = BlockOverride {
             extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
             grading: [None, None, Some(4.0)],
+            ..Default::default()
         };
         ov.apply(&mut b, CaseKind::Big).expect("apply");
 
@@ -7735,6 +7780,7 @@ mod tests {
             let ov = BlockOverride {
                 extent: Some([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
                 grading: [None; 3],
+                ..Default::default()
             };
             assert!(
                 ov.apply(&mut b, kind).is_err(),
@@ -7748,6 +7794,7 @@ mod tests {
             let ov = BlockOverride {
                 extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
                 grading: [None; 3],
+                ..Default::default()
             };
             ov.apply(&mut b, kind)
                 .unwrap_or_else(|e| panic!("{} must accept an -extent: {e}", kind.as_str()));
@@ -7757,7 +7804,7 @@ mod tests {
         // valid whatever the graded nodes do, so grading alone is accepted
         // even where the extent is not.
         let mut b = case_block_spec(CaseKind::Plume, 4, 4, 4);
-        let ov = BlockOverride { extent: None, grading: [None, None, Some(4.0)] };
+        let ov = BlockOverride { extent: None, grading: [None, None, Some(4.0)], ..Default::default() };
         ov.apply(&mut b, CaseKind::Plume).expect("grading-only on a windowed preset");
         assert_eq!(b.z.expansion, 4.0);
     }
@@ -7771,7 +7818,7 @@ mod tests {
             [1.0, 1.0, 0.0, 1.0, 0.0, 3.0],     // hi == lo is a zero-width axis
         ] {
             let mut b = case_block_spec(CaseKind::Big, 4, 4, 4);
-            let ov = BlockOverride { extent: Some(extent), grading: [None; 3] };
+            let ov = BlockOverride { extent: Some(extent), grading: [None; 3], ..Default::default() };
             assert!(ov.apply(&mut b, CaseKind::Big).is_err(), "extent {extent:?}");
         }
     }
@@ -7780,9 +7827,94 @@ mod tests {
     fn override_refuses_non_positive_grading() {
         for r in [0.0, -2.0, Scalar::NAN] {
             let mut b = case_block_spec(CaseKind::Big, 4, 4, 4);
-            let ov = BlockOverride { extent: None, grading: [None, Some(r), None] };
+            let ov = BlockOverride { extent: None, grading: [None, Some(r), None], ..Default::default() };
             assert!(ov.apply(&mut b, CaseKind::Big).is_err(), "ratio {r}");
         }
+    }
+
+    /// SPEC-LIT 110.3: the uniform free-stream inflow is the step's alone -
+    /// every other preset fills its inflow from its own profile, so `apply`
+    /// refuses the flag there, naming it.
+    #[test]
+    fn uniform_inflow_is_refused_for_every_other_preset() {
+        let ov = BlockOverride { uniform_inflow: true, ..Default::default() };
+        for kind in [
+            CaseKind::Channel,
+            CaseKind::Cavity,
+            CaseKind::Big,
+            CaseKind::Plume,
+            CaseKind::Room,
+            CaseKind::DamBreak,
+            CaseKind::FlatPlate,
+        ] {
+            let mut b = case_block_spec(kind, 4, 4, 4);
+            let e = ov
+                .apply(&mut b, kind)
+                .expect_err("uniform_inflow must be refused off the step");
+            assert!(
+                e.to_string().contains("-inflow uniform"),
+                "{} must be refused naming -inflow uniform: {e}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// SPEC-LIT 110.3: with the flag the step's whole `0/U` is the free
+    /// stream - the interior collapses to `uniform (10 0 0)` and the inlet
+    /// carries the same value (the plain path copies its owner cells, so no
+    /// separate inlet branch is needed).
+    #[test]
+    fn uniform_inflow_makes_the_step_inlet_and_interior_the_free_stream() {
+        let dir = temp_dir("step_uniform_inflow");
+        write_case_with_override(
+            &dir,
+            CaseKind::Step,
+            8,
+            4,
+            1,
+            Some(&BlockOverride { uniform_inflow: true, ..Default::default() }),
+            &[],
+            None,
+            None,
+        )
+        .expect("write");
+
+        let u = fs::read_to_string(dir.join("0").join("U")).expect("read U");
+        assert!(
+            u.contains("internalField   uniform (10 0 0);"),
+            "the interior must be the free stream U_ref = 10:\n{u}"
+        );
+        let start = u.find("inlet").expect("the step has an inlet patch");
+        let end = start + u[start..].find('}').expect("the inlet block's close");
+        let inlet = &u[start..end];
+        assert!(
+            inlet.contains("uniform (10 0 0)"),
+            "the inlet must carry the free stream too:\n{inlet}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Without the flag nothing changes: the step preset keeps its 1/7
+    /// power-law interior, which is what pins "no default moves" for every
+    /// preset the flag did not exist for.
+    #[test]
+    fn default_step_inflow_is_still_the_power_law() {
+        let dir = temp_dir("step_power_law");
+        write_case_with_override(&dir, CaseKind::Step, 8, 4, 1, None, &[], None, None)
+            .expect("write");
+
+        let u = fs::read_to_string(dir.join("0").join("U")).expect("read U");
+        assert!(
+            u.contains("internalField   nonuniform"),
+            "the default step interior must stay the power-law profile:\n{u}"
+        );
+        assert!(
+            !u.contains("internalField   uniform"),
+            "the default step interior must not be uniform:\n{u}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The whole cut-cell path with an override: the mesh on disk must span
@@ -7797,6 +7929,7 @@ mod tests {
         let ov = BlockOverride {
             extent: Some([-10.0, 20.0, -5.0, 5.0, 0.0, 3.0]),
             grading: [None, None, Some(4.0)],
+            ..Default::default()
         };
         let summary = write_cutcell_case_with_override(
             &dir, CaseKind::Big, 6, 6, 6, &s, Some(&ov), DEFAULT_SUPERSAMPLE, DEFAULT_THETA_MIN,

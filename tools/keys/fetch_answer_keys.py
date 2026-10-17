@@ -13,8 +13,9 @@ usage:
 rust/SPEC-LIT.md (110.3 Driver & Seegmiller, 110.4 McCaffrey) and writes them
 byte for byte under reference/. ``fetch`` downloads the keys that are not
 redistributed (so they are git-ignored) - the three MKM channel DNS files from
-turbulence.oden.utexas.edu and the ERCOFTAC T3A summary table t3ay.dat from
-the ERCOFTAC Classic Collection (SPEC-LIT 144.6, docs/17 decision D-VAL-2) -
+turbulence.oden.utexas.edu and the ERCOFTAC T3 summary tables t3ay.dat (T3A,
+SPEC-LIT 144.6), t3by.dat (T3B) and t3amy.dat (T3A-, SPEC-LIT 144.7) from the
+ERCOFTAC Classic Collection (docs/17 decision D-VAL-2, extended in VAL-35) -
 or takes them from a local copy with ``--from DIR``; a file whose SHA-256 is
 not the manifest's pinned digest is never kept. When a download fails, the
 manual placement is printed: the page to download the file from by hand and
@@ -46,6 +47,10 @@ KEYS = [
      "878bc951794516b6136912f8f098cd6f2f96c4bbe7f21a8cea657ffb270d419d", 12932),
     ("ercoftac-t3a", "ercoftac_t3a/t3ay.dat", "fetch",
      "61b15b27511fb940409bab20b67c4776c170f2a1679e4a369a6536ab9043e8cc", 2181),
+    ("ercoftac-t3b", "ercoftac_t3a/t3by.dat", "fetch",
+     "95e04aca4510ead26c80ede79182cbd8e97bda9f6f30dd8ca6ce8e1b1c21a394", 2086),
+    ("ercoftac-t3am", "ercoftac_t3a/t3amy.dat", "fetch",
+     "65aca3ecfc9349abe8b727d1ae15c38d62289e12c0691e78d9629998fcbd90a9", 2182),
 ]
 
 MKM_URL = "https://turbulence.oden.utexas.edu/data/MKM/chan{N}/profiles/chan{N}.means"
@@ -55,6 +60,10 @@ MKM_PAGE = "https://turbulence.oden.utexas.edu/MKM_1999.html"
 T3A_URL = ("http://cfd.mace.manchester.ac.uk/ercoftac/lib/exe/fetch.php"
            "?media=cdata:case020:t3ay.dat")
 T3A_PAGE = "http://cfd.mace.manchester.ac.uk/ercoftac/doku.php?id=cases:case020"
+T3B_URL = ("http://cfd.mace.manchester.ac.uk/ercoftac/lib/exe/fetch.php"
+           "?media=cdata:case020:t3by.dat")
+T3AM_URL = ("http://cfd.mace.manchester.ac.uk/ercoftac/lib/exe/fetch.php"
+            "?media=cdata:case020:t3amy.dat")
 
 
 def fetch_source(key_id, rel):
@@ -62,6 +71,10 @@ def fetch_source(key_id, rel):
     file names ``--from DIR`` looks for, relative to DIR) for a fetch key."""
     if key_id == "ercoftac-t3a":
         return T3A_URL, T3A_PAGE, [Path("t3ay.dat")]
+    if key_id == "ercoftac-t3b":
+        return T3B_URL, T3A_PAGE, [Path("t3by.dat")]
+    if key_id == "ercoftac-t3am":
+        return T3AM_URL, T3A_PAGE, [Path("t3amy.dat")]
     n = Path(rel).stem[len("chan"):]
     name = "chan{}.means".format(n)
     return (MKM_URL.format(N=n), MKM_PAGE,
@@ -239,8 +252,8 @@ def main():
     ap.add_argument("--check", action="store_const", dest="command",
                     const="check", help="alias of the check subcommand")
     ap.add_argument("--from", dest="from_dir", default=None, metavar="DIR",
-                    help="fetch: take chan<N>.means and t3ay.dat from DIR, "
-                    "not the host")
+                    help="fetch: take chan<N>.means, t3ay.dat, t3by.dat and "
+                    "t3amy.dat from DIR, not the host")
     args = ap.parse_args()
     if args.command == "write":
         return cmd_write()

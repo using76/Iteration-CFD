@@ -64,7 +64,7 @@ const StartSchema = z.object({
 export const runStart: ToolDef<typeof StartSchema> = {
   name: 'run_start',
   description:
-    'Start an ofgpu binary on a case and return immediately with a runId. Flags are validated against the registry (unknown flags are refused). JSONC cases run only with ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose; the others need an OpenFOAM case directory. Follow with run_wait. Do not start a second GPU solver while one is running.',
+    'Start an ofgpu binary on a case and return immediately with a runId. Flags are validated against the registry (unknown flags are refused). JSONC cases run only with ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-compressible (only a case that states physics.compressible, and only it reads one), ofgpu-cht, ofgpu-datacentre and ofgpu-decompose; the others need an OpenFOAM case directory. Follow with run_wait. Do not start a second GPU solver while one is running.',
   schema: StartSchema,
   refuse: refuseRunStart,
   async run(input, ctx) {

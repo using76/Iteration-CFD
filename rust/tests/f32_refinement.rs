@@ -7,7 +7,8 @@
 
 //! SPEC-LIT §118.4 — the mixed-precision iterative refinement of PCG and
 //! PBiCGStab under `single`. Eight tests, the SAME assertions in BOTH
-//! builds, over a system whose coefficients are EXACT in f32 (multiples of
+//! builds (a ninth, the last, checks §118.14's round-off tolerance),
+//! over a system whose coefficients are EXACT in f32 (multiples of
 //! 2^-12 and smaller dyadic rationals), so both builds hold the very same
 //! matrix and the f64 dense solve is the truth for both. The refinement
 //! itself is precision class P/A of docs/17 §5.1 rule 4: the answer is the
@@ -481,4 +482,18 @@ fn a_zero_right_hand_side_is_converged_at_once() {
     assert_eq!(perf.n_iterations, 0);
     #[cfg(feature = "single")]
     assert_eq!(ws.ir_outer_steps(), 0);
+}
+
+/// SPEC-LIT §118.14, D-F32-1: an R row's tolerance is (118.14.1)'s `tol32`
+/// under `single` and its own f64 tolerance in the f64 build. No card is
+/// needed: this is the one arm of `precision.rs` the library's own tests
+/// cannot reach, because they do not compile under `single`.
+#[test]
+fn the_round_off_tolerance_is_tol32_under_single_and_tol64_in_f64() {
+    use ofgpu::precision::{roundoff_tol, tol32, RowClass};
+    let want = if cfg!(feature = "single") { 1e-5 } else { 1e-12 };
+    assert_eq!(roundoff_tol(1e-12), want);
+    assert_eq!(RowClass::R.tol(1e-12), want);
+    assert_eq!(RowClass::A.tol(1e-12), 1e-12);
+    assert_eq!(tol32(1e-12), 1e-5);
 }

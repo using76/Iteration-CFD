@@ -24,3 +24,12 @@ mod dust {
 
     include!("../../tests/shared/compressible_dust_cases.rs");
 }
+
+/// SPEC-LIT §127.1.2's gate: the SA coupling of the module root, written
+/// once in `tests/shared/compressible_sa_cases.rs` and included here and by
+/// `tests/compressible_sa.rs`, which runs the same tests in both builds.
+mod sa {
+    use crate as ofgpu;
+
+    include!("../../tests/shared/compressible_sa_cases.rs");
+}

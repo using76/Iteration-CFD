@@ -9,6 +9,23 @@ ported stage for stage, with every number that script hard-coded made a config
 key. [`examples/nh3_site.json`](examples/nh3_site.json) is that site as a
 config.
 
+**Tetrahedra from STL need no gmsh.** A closed STL (or OBJ) surface is meshed
+with tetrahedra by `ofgpu-automesher` with `"kind": "tet"`, the native mesher of
+`rust/SPEC-LIT.md` §116 (`rust/src/tetmesh/`), with no gmsh, TetGen, Netgen or
+other GPL, LGPL or AGPL code anywhere on the path; see
+[`tools/automesher/README.md`](../automesher/README.md) and
+[`tools/automesher/examples/box_sphere_tet.json`](../automesher/examples/box_sphere_tet.json).
+
+**This directory is the optional external STEP route, and only that.**
+`step_mesh.py` is needed only when the input is a STEP file. It is a Python
+script outside the product: no Rust binary and no studio code links it or
+gmsh, and the studio runs it, when asked, as a separate program. The script
+itself does `import gmsh`. That loads gmsh (PyPI `gmsh`, GPL-2.0-or-later with
+its Netgen/METIS/OpenCASCADE/ParaView exception) and its OCC kernel into the
+script's own Python process, so this route is not GPL-free. Install gmsh with
+pip only if you use it. See `NOTICE` ("Not on crates.io"), `LICENSING.md` §2
+and the gmsh paragraph of `rust/PROVENANCE.md`.
+
 ```
 python tools/mesh/step_mesh.py <config.json> [--from-checkpoint] [--stop-after-checkpoint]
                      [--tag NAME] [--run-id ID] [--dry-run]

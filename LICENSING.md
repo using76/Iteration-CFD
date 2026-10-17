@@ -166,6 +166,33 @@ manifold-3d is pinned at 3.2.1, the last release with no npm dependencies. From 
 on, its command-line tools pull in `sharp`, whose `@img/sharp-libvips-*` binaries
 are LGPL-3.0-or-later (measured 2026-10-11 by installing 3.5.4).
 
+**The tetrahedral mesher has no GPL, LGPL or AGPL source or dependency**
+(docs/17 TET-16, re-checked 2026-10-15). Tetrahedra come from the native mesher
+of `rust/SPEC-LIT.md` §116, `rust/src/tetmesh/`, run by `ofgpu-automesher` with
+`"kind": "tet"`. It is written from the papers that its file headers and
+`rust/PROVENANCE.md` rows cite (Bowyer, Watson, Shewchuk, Amenta-Choi-Rote,
+Botsch-Kobbelt, Aubry-Lohner and others) and adds no crate: the graph above is
+the whole of it. Neither gmsh nor TetGen nor Netgen is called, linked or read,
+and `grep -rni gmsh rust/src/tetmesh` finds nothing. A closed STL therefore
+reaches a tetrahedral polyMesh with no GPL-family code anywhere on the path.
+
+Gmsh (GPL-2.0-or-later, with an exception for Netgen, METIS, OpenCASCADE and
+ParaView) appears only on the **optional STEP route**, outside the Cargo graph
+and outside `gui/package-lock.json`. It is installed by pip, not vendored:
+
+| Python package (not in either lock file) | Licence | Where | MIT-compatible |
+|---|---|---|---|
+| gmsh 4.14.1 (PyPI) | GPL-2.0-or-later with the exception above | imported in-process by `tools/mesh/step_mesh.py`, `tools/geom/geom_tool.py`, `tools/geom/geom_edit.py`, their selftests, `tools/mesh/diag/` and several CAD-loop scripts under `tools/cad/`; the studio server runs these scripts as separate child processes | **no**, kept out of the product |
+
+So the earlier wording that these scripts run gmsh "as an external process" was
+wrong. Each of them imports gmsh's Python API into its own Python process, and
+`rust/PROVENANCE.md` now says so. Only the studio's spawn of the script is a
+process boundary. What stays true is that no Rust or studio code links or
+imports gmsh and that no gmsh source was read or copied. Plan §11 item 6 keeps
+the STEP route as an optional external path outside the product. Retiring it,
+or relicensing those scripts as `tools/promo/`'s Blender scripts were relicensed,
+is a CAD-scope decision for the owner.
+
 The one entry that IS a problem is OpenFOAM, and it was never linked against
 — it was copied from. That is worse, and it was fixed: the derived numerical
 core is gone (§"What phase 0 actually removed"), and every one of the 105

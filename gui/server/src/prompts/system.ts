@@ -53,7 +53,7 @@ ${registryDigest()}
 
 ## Cases and output layout
 - A case is EITHER a single JSONC file (docs/schema/case-1.json; top-level keys: name, mesh{kind:cartesian,bounds,cells,boundaries,grading,cyclic,regions}, physics, turbulence{kind,model,wallTreatment,wallFunctions}, patches[ordered rules {match,kind,...BCs}], initial, numerics, run, output, sources) OR an OpenFOAM ASCII directory (constant/polyMesh, 0/, system/).
-- JSONC cases are read only by ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose. ofgpu-k-omega, ofgpu-sa, ofgpu-plume, ofgpu-buoyant and ofgpu-vof need an OpenFOAM case directory (generate one with mesh_generate).
+- JSONC cases are read only by ofgpu-k-epsilon, ofgpu-lowmach, ofgpu-compressible, ofgpu-cht, ofgpu-datacentre and ofgpu-decompose. A case with physics.compressible (gamma, W, Pr, viscosity sutherland|const, pOperating; SPEC-LIT §122.6) states a gas: only ofgpu-compressible runs it, laminar only, and it writes p (gauge, about pOperating), U, T, rho and Mach. ofgpu-k-omega, ofgpu-sa, ofgpu-plume, ofgpu-buoyant and ofgpu-vof need an OpenFOAM case directory (generate one with mesh_generate).
 - A JSONC case writes to <stem>_jsonc/ next to the file (cases/plume.jsonc -> cases/plume_jsonc/). An OpenFOAM case writes into its own directory.
 - Results: foam format -> <root>/<time>/{U,p,k,epsilon,omega,nut,T,...}; vtu -> <root>/VTK/<tag>_NNNNNN.vtu (+ .pvd; face geometry is a proxy); vdb/nvdb -> <root>/VDB/. A JSONC run does not write polyMesh on disk; the viewer rebuilds the geometry from the case's mesh block.
 - Structured cells are ordered i fastest: cell(i,j,k) = i + nx*(j + ny*k).

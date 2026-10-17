@@ -7,8 +7,10 @@
 
 //! The automesher (SPEC-LIT §92): this crate's own mesher, built so that the
 //! mesh it emits has already passed its own quality gate. Tranche 1 is the
-//! hex-dominant path - octree levels, castellation, snapping, layers; the
-//! tetrahedral path of §92.4 is specified there and deliberately not built.
+//! hex-dominant path - octree levels, castellation, snapping, layers. The
+//! tetrahedral path is SPEC-LIT §116's native mesher (`crate::tetmesh`),
+//! selected by the config's `kind: "tet"` and run by `driver::run_tet`
+//! (TET-12).
 //!
 //! This unit ships only the gate. §92.3's seven checks - positive volume,
 //! closure, one cell region, non-orthogonality, thickness, gradient
@@ -63,6 +65,42 @@ pub struct AutomeshConfig {
     #[serde(default)]
     pub quality: QualitySpec,
     pub output: OutputSpec,
+    /// Which mesher runs: SPEC-LIT §116.3's `kind`. Absent is
+    /// `hexDominant`, and the default is not written back, so every config
+    /// and summary written before TET-12 reads and re-serialises unchanged.
+    #[serde(default, skip_serializing_if = "MeshKind::is_hex_dominant")]
+    pub kind: MeshKind,
+    /// The tet path's own block (§116.3), [`crate::tetmesh::TetSpec`]. Only
+    /// `kind: "tet"` takes it; absent there is `"tet": {}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tet: Option<crate::tetmesh::TetSpec>,
+}
+
+/// [`AutomeshConfig::kind`]'s two meshers - SPEC-LIT §116.3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub enum MeshKind {
+    /// §92's octree, castellation, snap and layers (the default).
+    #[default]
+    #[serde(rename = "hexDominant")]
+    HexDominant,
+    /// §116's native tetrahedral mesher.
+    #[serde(rename = "tet")]
+    Tet,
+}
+
+impl MeshKind {
+    /// `true` for the default, so `kind` is not serialised for it.
+    pub fn is_hex_dominant(&self) -> bool {
+        *self == MeshKind::HexDominant
+    }
+
+    /// The config's spelling.
+    pub fn name(self) -> &'static str {
+        match self {
+            MeshKind::HexDominant => "hexDominant",
+            MeshKind::Tet => "tet",
+        }
+    }
 }
 
 /// `input` - SPEC-LIT §92.2: the surfaces the mesher casts against
@@ -784,7 +822,88 @@ impl AutomeshConfig {
                 )));
             }
         }
-        Ok(())
+        self.validate_kind()
+    }
+
+    /// SPEC-LIT §116.3's kind rules: a `tet` block belongs to `kind: "tet"`
+    /// only, and a `kind: "tet"` config is refused, naming the key, when it
+    /// sets anything the tet path would otherwise silently ignore - the
+    /// hex-only `snap` block, `domain.grading` and `castellation.min_faces`
+    /// - or what the tet path does not build yet: declared bodies (TET-19)
+    /// and prism layers (TET-13b). Then `tet` itself is checked by
+    /// [`crate::tetmesh::TetSpec::validate`].
+    fn validate_kind(&self) -> crate::error::Result<()> {
+        let kind = self.kind.name();
+        match self.kind {
+            MeshKind::HexDominant => {
+                if self.tet.is_some() {
+                    return Err(Error::Mesh(format!(
+                        "tet: the block configures kind \"tet\", and this config's kind is \"{kind}\" \
+                         (SPEC-LIT §116.3) - set \"kind\": \"tet\" or remove the block"
+                    )));
+                }
+                Ok(())
+            }
+            MeshKind::Tet => {
+                if self.snap != SnapSpec::default() {
+                    return Err(Error::Mesh(format!(
+                        "snap: kind \"{kind}\" has no snap stage, and this block differs from the \
+                         defaults (SPEC-LIT §116.3) - remove it"
+                    )));
+                }
+                if self.domain.grading != grading_one() {
+                    let g = &self.domain.grading;
+                    return Err(Error::Mesh(format!(
+                        "domain.grading: kind \"{kind}\" takes its sizes from the size field of \
+                         SPEC-LIT §116.8, not a graded block - got [{}, {}, {}], want [1, 1, 1]",
+                        g[0], g[1], g[2]
+                    )));
+                }
+                if self.castellation.min_faces != d_min_faces() {
+                    return Err(Error::Mesh(format!(
+                        "castellation.min_faces: kind \"{kind}\" has no castellated cells, and {} is \
+                         not the default {} (SPEC-LIT §116.3) - remove the key",
+                        self.castellation.min_faces,
+                        d_min_faces()
+                    )));
+                }
+                if !self.castellation.bodies.is_empty() {
+                    return Err(Error::Mesh(format!(
+                        "castellation.bodies: kind \"{kind}\" does not carve declared bodies yet \
+                         (docs/17 TET-19); {} declared",
+                        self.castellation.bodies.len()
+                    )));
+                }
+                // The tet path reads layers.patches, n, first_thickness and
+                // growth (SPEC-LIT §116.15's stack); every other key it does
+                // not read is refused by name (§116.3's rule).
+                let d = LayerSpec::default();
+                let l = &self.layers;
+                for (key, differs) in [
+                    ("min_thickness", l.min_thickness != d.min_thickness),
+                    ("medial_frac", l.medial_frac != d.medial_frac),
+                    ("normal_passes", l.normal_passes != d.normal_passes),
+                    ("cell_frac", l.cell_frac != d.cell_frac),
+                    ("smoothing", l.smoothing != d.smoothing),
+                    ("smoothing_passes", l.smoothing_passes != d.smoothing_passes),
+                    ("retreat_limit", l.retreat_limit != d.retreat_limit),
+                    ("terminate", l.terminate != d.terminate),
+                    ("junction_angle_deg", l.junction_angle_deg != d.junction_angle_deg),
+                ] {
+                    if differs {
+                        return Err(Error::Mesh(format!(
+                            "layers.{key}: kind \"{kind}\" does not read it (the tet path's \
+                             layers are patches, n, first_thickness and growth, SPEC-LIT \
+                             §116.15) - remove the key"
+                        )));
+                    }
+                }
+                match &self.tet {
+                    Some(t) => t.validate(),
+                    None => Ok(()),
+                }
+            }
+        }
     }
 
     /// `(lo, hi)` of `domain.extent` as two points.
@@ -829,6 +948,8 @@ mod config_tests {
                 name: "site".to_string(),
                 patch_names: std::collections::BTreeMap::new(),
             },
+            kind: MeshKind::HexDominant,
+            tet: None,
         }
     }
 
@@ -1076,5 +1197,102 @@ mod config_tests {
         cfg.refinement.boxes = vec![box6([1.0, 1.0, 1.0], [2.0, 2.0, 2.0], 9)];
         cfg.refinement.max_level = 2;
         cfg.validate().expect("a deep level is capped, not refused");
+    }
+
+    /// SPEC-LIT §116.3 (TET-12): `kind` absent is `hexDominant` with no
+    /// `tet` block, and neither key is written back - every config and
+    /// summary from before TET-12 re-serialises unchanged.
+    #[test]
+    fn kind_defaults_to_hex_dominant_and_is_not_written() {
+        let cfg = read_config_str(&minimal_text(), "defaults").unwrap();
+        assert_eq!(cfg.kind, MeshKind::HexDominant);
+        assert_eq!(cfg.tet, None);
+        cfg.validate().unwrap();
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert!(v.get("kind").is_none() && v.get("tet").is_none(), "{v}");
+        let explicit = minimal_text().replace("\"output\"", "\"kind\": \"hexDominant\", \"output\"");
+        assert_eq!(read_config_str(&explicit, "explicit").unwrap(), cfg);
+    }
+
+    /// `kind: "tet"` with `"tet": {}` is a complete config, the block is
+    /// `TetSpec::default()`, and both keys round-trip.
+    #[test]
+    fn a_tet_config_parses_validates_and_round_trips() {
+        let text = minimal_text().replace("\"output\"", "\"kind\": \"tet\", \"tet\": {}, \"output\"");
+        let cfg = read_config_str(&text, "tet").unwrap();
+        assert_eq!(cfg.kind, MeshKind::Tet);
+        assert_eq!(cfg.tet, Some(crate::tetmesh::TetSpec::default()));
+        cfg.validate().unwrap();
+        let v = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("tet"));
+        let back: AutomeshConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back, cfg);
+        // No block at all is the same as an empty one.
+        let bare = minimal_text().replace("\"output\"", "\"kind\": \"tet\", \"output\"");
+        read_config_str(&bare, "bare").unwrap().validate().unwrap();
+    }
+
+    /// TET-12's unknown-key gate: a mistyped key anywhere in the tet path's
+    /// config, and a kind that does not exist, are refused by name.
+    #[test]
+    fn unknown_tet_keys_and_kinds_are_refused_by_name() {
+        let with = |body: &str| minimal_text().replace("\"output\"", &format!("{body}, \"output\""));
+        for (body, name) in [
+            ("\"kind\": \"tet\", \"tet\": {\"size\": {\"gradatoin\": 1.3}}", "gradatoin"),
+            ("\"kind\": \"tet\", \"tet\": {\"refine\": {\"radius_edges\": 2}}", "radius_edges"),
+            ("\"kind\": \"tet\", \"tet\": {\"optimize\": {}}", "optimize"),
+            ("\"kind\": \"tetra\"", "tetra"),
+            ("\"knid\": \"tet\"", "knid"),
+        ] {
+            let err = read_config_str(&with(body), "typo").unwrap_err();
+            assert!(err.to_string().contains(name), "{body}: {err}");
+        }
+    }
+
+    /// TET-12's kind-mismatch gate: a `tet` block on a hex config, and on a
+    /// tet config each hex-only key and each part the tet path does not
+    /// build yet, are refused naming the key; so is a bad `tet` value.
+    #[test]
+    fn kind_mismatches_are_refused_by_name() {
+        let mut hex = minimal();
+        hex.tet = Some(crate::tetmesh::TetSpec::default());
+        let err = hex.validate().unwrap_err().to_string();
+        assert!(err.contains("tet: the block configures kind \"tet\""), "{err}");
+
+        let tet = || {
+            let mut c = minimal();
+            c.kind = MeshKind::Tet;
+            c
+        };
+        tet().validate().unwrap();
+        let cases: Vec<(AutomeshConfig, &str)> = vec![
+            ({ let mut c = tet(); c.snap.iterations += 1; c }, "snap: kind \"tet\" has no snap stage"),
+            ({ let mut c = tet(); c.domain.grading = [1.0, 2.0, 1.0]; c }, "domain.grading: kind \"tet\""),
+            ({ let mut c = tet(); c.castellation.min_faces = 6; c }, "castellation.min_faces: kind \"tet\""),
+            (
+                {
+                    let mut c = tet();
+                    c.castellation.bodies =
+                        vec![BodySpec { name: "b".to_string(), patches: vec!["site".to_string()] }];
+                    c
+                },
+                "castellation.bodies: kind \"tet\"",
+            ),
+            ({ let mut c = tet(); c.layers.min_thickness = 0.2; c }, "layers.min_thickness: kind \"tet\""),
+            (
+                {
+                    let mut c = tet();
+                    let mut t = crate::tetmesh::TetSpec::default();
+                    t.refine.radius_edge = 1.5;
+                    c.tet = Some(t);
+                    c
+                },
+                "tet.refine.radius_edge",
+            ),
+        ];
+        for (cfg, want) in cases {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(want), "want {want:?}, got {err}");
+        }
     }
 }

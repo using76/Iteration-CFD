@@ -82,7 +82,7 @@ describe('api routes', () => {
     expect(hello.gpu.state).toBe('demo')
     const reg = await json('/api/registry')
     expect(reg.binaries.map((b: { name: string }) => b.name)).toContain('ofgpu-k-epsilon')
-    expect(reg.pickLists.patchKinds).toEqual(['wall', 'inlet', 'open', 'empty', 'symmetry'])
+    expect(reg.pickLists.patchKinds).toEqual(['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'])
     expect(reg.meshPresets.length).toBe(7)
     const schema = await get('/api/schema/case-1.json')
     expect(schema.headers.get('content-type')).toContain('json')

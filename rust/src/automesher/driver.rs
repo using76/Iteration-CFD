@@ -26,7 +26,7 @@ use crate::surface::Surface;
 use crate::Scalar;
 
 use super::quality::QualityReport;
-use super::{AutomeshConfig, LayerSpec};
+use super::{AutomeshConfig, KeepRegion, LayerSpec, MeshKind};
 
 // ==========================================================================
 //  The stages - (92.55)
@@ -547,6 +547,13 @@ pub fn run(
     stop_after: Option<Stage>,
     progress: &mut dyn FnMut(&str),
 ) -> Result<PipelineOutput> {
+    if cfg.kind != MeshKind::HexDominant {
+        return Err(Error::Config(format!(
+            "driver::run: this config's kind is \"{}\"; it runs through driver::run_tet \
+             (SPEC-LIT §116.3), and driver::run is the hex-dominant path of §92.14",
+            cfg.kind.name()
+        )));
+    }
     let t0 = Instant::now();
     let thr = cfg.quality.thresholds();
     let names = super::octree::patch_names();
@@ -897,6 +904,526 @@ pub fn rename_patches(
 }
 
 // ==========================================================================
+//  The tet path - SPEC-LIT §116.3's pipeline and §116.16's summary (TET-12)
+// ==========================================================================
+
+/// §116.3's stages of a `kind: "tet"` run, in order: the names of its
+/// banners and of the summary's `stages` rows.
+pub const TET_STAGES: [&str; 7] =
+    ["surfprep", "sizefield", "remesh", "recover", "refine", "optimise", "emit"];
+
+/// The patch the carve's hull faces carry until [`run_tet`] puts each on
+/// its box side.
+const HULL_PATCH: u32 = u32::MAX;
+
+/// One row of the tet summary's `stages` array: the stage, its wall time
+/// and its own counts.
+#[derive(Debug, Clone)]
+pub struct TetStageTiming {
+    pub stage: &'static str,
+    pub seconds: f64,
+    /// Spliced at the top level of the row, as (92.57) does for the hex
+    /// stages.
+    pub counts: serde_json::Value,
+}
+
+/// What a `kind: "tet"` run produced (SPEC-LIT §116.16).
+#[derive(Debug, Clone)]
+pub struct TetOutput {
+    /// The emitted mesh, with (92.56) applied: the six domain patches
+    /// (`xMin` .. `zMax`, type `patch`), then the surface's patches (type
+    /// `wall`), in the surface's order.
+    pub mesh: PolyMeshRaw,
+    /// §92.3's report on it; `emit` refuses a mesh that fails it.
+    pub quality: QualityReport,
+    /// One row per stage of [`TET_STAGES`].
+    pub stages: Vec<TetStageTiming>,
+    pub n_tets: usize,
+    /// The prism count of §116.15 (TET-13b), 0 without layers.
+    pub n_prisms: usize,
+    /// The smallest and the largest dihedral angle of the emitted cells,
+    /// degrees, evaluated in f64 (§116.2).
+    pub min_dihedral_deg: f64,
+    pub max_dihedral_deg: f64,
+    /// The Steiner counts: `recover`, `refine` and `total`.
+    pub steiner: serde_json::Value,
+    pub total_seconds: f64,
+}
+
+/// The box side `2 axis + (0 low, 1 high)` that holds all three points of
+/// a hull face exactly, by coordinate equality. Box points are created on
+/// their face's plane exactly (§116.13) and move only within it (116.21c),
+/// so a hull face of the kept region names exactly one side.
+fn box_side(f: [u32; 3], pts: &[crate::tetmesh::Point], lo: &[f64; 3], hi: &[f64; 3]) -> Option<u32> {
+    for a in 0..3 {
+        for (s, b) in [(0u32, lo[a]), (1u32, hi[a])] {
+            if f.iter().all(|&v| pts[v as usize][a] == b) {
+                return Some(2 * a as u32 + s);
+            }
+        }
+    }
+    None
+}
+
+/// §92.14's banner for tet stage `i` (zero-based): `=== stage 3/7  remesh ===`.
+fn tet_begin(progress: &mut dyn FnMut(&str), i: usize) -> Instant {
+    progress(&format!("=== stage {}/{}  {} ===", i + 1, TET_STAGES.len(), TET_STAGES[i]));
+    Instant::now()
+}
+
+/// Tet stage `i`'s report lines, §92.14's elapsed line, and its row.
+fn tet_end(
+    progress: &mut dyn FnMut(&str),
+    stages: &mut Vec<TetStageTiming>,
+    i: usize,
+    started: Instant,
+    report: String,
+    counts: serde_json::Value,
+) {
+    let seconds = started.elapsed().as_secs_f64();
+    report_lines(progress, &report);
+    progress(&format!("--- {}: {:.1} s", TET_STAGES[i], seconds));
+    stages.push(TetStageTiming { stage: TET_STAGES[i], seconds, counts });
+}
+
+/// SPEC-LIT §116.3's pipeline for a `kind: "tet"` config, end to end:
+/// surface preparation (§116.9), the size field (§116.8, from `domain`,
+/// `refinement` and `tet.size`), the surface remesh (§116.10), conforming
+/// recovery inside the domain box (§116.11), Delaunay refinement and the
+/// carve (§116.13, §116.12: `keep_region` `largest` keeps the hull's
+/// region, `seed` the seed's), optimisation (§116.14), then the emission,
+/// the f32 rounding check and §92.3's gate (§116.16), and (92.56)'s rename.
+/// Every stage prints its banner before it runs, as §92.14's do. Refuses a
+/// config whose kind is not `tet`, a surface point not strictly inside
+/// `domain.extent`, a surface patch named like a domain patch, and whatever
+/// a stage refuses, by that stage's name.
+pub fn run_tet(
+    cfg: &AutomeshConfig,
+    surf: &Surface,
+    progress: &mut dyn FnMut(&str),
+) -> Result<TetOutput> {
+    use crate::tetmesh::carve::CarveStart;
+    use crate::tetmesh::emit::{carved_boundary, emit, emit_mixed, EmitPatch};
+    use crate::tetmesh::inflate::{inflate, LayerStack};
+    use crate::tetmesh::optimise::{dihedral_extremes, freedoms, optimise};
+    use crate::tetmesh::recover::recover_faces;
+    use crate::tetmesh::refine::refine;
+    use crate::tetmesh::remesh::{remesh, RemeshOptions};
+    use crate::tetmesh::sizefield::{
+        sources_from_refinement, surface_sources, GapSide, OctreeOptions, PatchTris, SizeField,
+        SizeParams,
+    };
+    use crate::tetmesh::surfprep::{prepare_with, Cavity, TetSurface};
+    use crate::tetmesh::Point;
+
+    if cfg.kind != MeshKind::Tet {
+        return Err(Error::Config(format!(
+            "driver::run_tet: this config's kind is \"{}\"; the tet path runs kind \"tet\" only \
+             (SPEC-LIT §116.3)",
+            cfg.kind.name()
+        )));
+    }
+    cfg.validate()?;
+    let t0 = Instant::now();
+    let spec = cfg.tet.clone().unwrap_or_default();
+    let thr = cfg.quality.thresholds();
+    let e = cfg.domain.extent;
+    let lo: Point = [e[0], e[2], e[4]];
+    let hi: Point = [e[1], e[3], e[5]];
+    let feature = cfg.refinement.feature_angle_deg;
+    let mut stages: Vec<TetStageTiming> = Vec::with_capacity(TET_STAGES.len());
+
+    // ---- the input, before any stage: inside the box, no name collision.
+    let ts = TetSurface::from_surface(surf);
+    if let Some((k, p)) = ts
+        .points
+        .iter()
+        .enumerate()
+        .find(|(_, p)| (0..3).any(|a| !(p[a] > lo[a] && p[a] < hi[a])))
+    {
+        return Err(Error::Mesh(format!(
+            "tet/domain: surface point {k} at ({}, {}, {}) is not strictly inside domain.extent \
+             {:?} - the tet path meshes the box around the surface (SPEC-LIT §116.16)",
+            p[0], p[1], p[2], e
+        )));
+    }
+    let domain_names = super::octree::patch_names();
+    if let Some(name) = ts.patch_names.iter().find(|s| domain_names.contains(s)) {
+        return Err(Error::Mesh(format!(
+            "tet/patches: the surface patch \"{name}\" has the name of a domain patch \
+             ({}) - rename the solid (SPEC-LIT §116.16)",
+            domain_names.join(", ")
+        )));
+    }
+    // The prism layers (§116.15, TET-13b): the layered patches are the
+    // surface patches named in layers.patches, and the stack is layers.n,
+    // layers.first_thickness and layers.growth. A name that is no surface
+    // patch is refused before any stage runs.
+    let layers_on = cfg.layers.n > 0 && !cfg.layers.patches.is_empty();
+    let mut layered_surf: Vec<bool> = Vec::new();
+    if layers_on {
+        for name in &cfg.layers.patches {
+            if !ts.patch_names.contains(name) {
+                return Err(Error::Mesh(format!(
+                    "tet/layers: layers.patches names \"{name}\", which is no surface patch ({})",
+                    ts.patch_names.join(", ")
+                )));
+            }
+        }
+        layered_surf = ts
+            .patch_names
+            .iter()
+            .map(|n| cfg.layers.patches.contains(n))
+            .collect();
+    }
+
+    // ---- stage 1: surface preparation (§116.9). With a seed carve
+    // (TET-14) a cavity shell holds the fluid of an internal flow, so the
+    // order-5 refusal is lifted for `V_s < 0`; the hull start keeps it.
+    let started = tet_begin(progress, 0);
+    let cavity = match cfg.castellation.keep_region {
+        KeepRegion::Seed => Cavity::Allow,
+        KeepRegion::Largest => Cavity::Refuse,
+    };
+    let prep = prepare_with(&ts, feature, cavity)?;
+    let r = &prep.report;
+    let counts = json!({
+        "n_points": r.n_points, "n_tris": r.n_tris, "n_shells": r.n_shells,
+        "n_feature_edges": r.n_feature_edges, "n_seam_edges": r.n_seam_edges,
+        "n_corners": r.n_corners,
+    });
+    tet_end(progress, &mut stages, 0, started, r.summary(), counts);
+
+    // ---- stage 2: the size field (§116.8). GapSide is DESIGN: the hull's
+    // region is the fluid between closed bodies (`Outward`); with a seed the
+    // fluid side is not known before the carve (`Both`).
+    let started = tet_begin(progress, 1);
+    let params = SizeParams::from_spec(cfg.domain.base_size, &spec.size)?;
+    let ps = &prep.surface;
+    let patch_tris: Vec<PatchTris> = (0..ps.patch_names.len())
+        .map(|k| PatchTris {
+            name: ps.patch_names[k].clone(),
+            tris: ps
+                .tris
+                .iter()
+                .zip(&ps.tri_patch)
+                .filter(|(_, &p)| p as usize == k)
+                .map(|(t, _)| t.map(|v| ps.points[v as usize]))
+                .collect(),
+        })
+        .collect();
+    let mut sources = sources_from_refinement(&cfg.refinement, cfg.domain.base_size, &patch_tris)?;
+    let n_refinement = sources.len();
+    let side = match cfg.castellation.keep_region {
+        KeepRegion::Largest => GapSide::Outward,
+        KeepRegion::Seed => GapSide::Both,
+    };
+    sources.extend(surface_sources(ps, &params, &spec.size, feature, side)?);
+    let field = SizeField::build(params, &sources, lo, hi, OctreeOptions::default())?;
+    let st = field.stats();
+    let line = format!(
+        "sizefield: H {} m, g {}, h_min {} m; {} refinement and {} surface sources, \
+         {} leaves, depth {}",
+        params.base_size,
+        params.gradation,
+        params.min_size,
+        n_refinement,
+        sources.len() - n_refinement,
+        st.leaves,
+        st.depth
+    );
+    let counts = json!({
+        "base_size": params.base_size, "gradation": params.gradation,
+        "min_size": params.min_size, "n_refinement_sources": n_refinement,
+        "n_surface_sources": sources.len() - n_refinement, "n_leaves": st.leaves,
+        "depth": st.depth,
+    });
+    tet_end(progress, &mut stages, 1, started, line, counts);
+    let h = |x: Point| field.h(x);
+
+    // ---- stage 3: the surface remesh (§116.10).
+    let started = tet_begin(progress, 2);
+    let rm = remesh(&prep, &h, &RemeshOptions::default())?;
+    let s = &rm.stats;
+    let line = format!(
+        "remesh: {} points, {} triangles; {} splits, {} collapses, {} flips in {} iterations",
+        s.n_points, s.n_tris, s.splits, s.collapses, s.flips, s.iterations
+    );
+    let counts = json!({
+        "n_points": s.n_points, "n_tris": s.n_tris, "iterations": s.iterations,
+        "splits": s.splits, "collapses": s.collapses, "flips": s.flips,
+        "n_feature_edges": rm.feature_edges.len(), "n_corners": rm.corners.len(),
+    });
+    tet_end(progress, &mut stages, 2, started, line, counts);
+
+    // ---- stage 4: recovery in the domain box (§116.11). The box's eight
+    // corners join the points, so the hull is the domain box.
+    let started = tet_begin(progress, 3);
+    let mut surf2 = rm.surface.clone();
+    for k in 0..8u32 {
+        let c = |a: u32| if (k >> a) & 1 == 1 { hi[a as usize] } else { lo[a as usize] };
+        surf2.points.push([c(0), c(1), c(2)]);
+    }
+    let fr = recover_faces(&surf2, &rm.feature_edges, &spec.recover)?;
+    let recover_json = json!({
+        "ball": fr.ball_steiner, "split": fr.split_steiner,
+        "encroach_split": fr.encroach_split_steiner, "facet": fr.facet_steiner,
+        "facet_centroids": fr.centroid_steiner, "total": fr.sites.len(),
+    });
+    let n_recover = fr.sites.len();
+    let line = format!(
+        "recover: {} Steiner points ({} ball, {} split, {} encroach split, {} facet), {} passes, \
+         {} subtriangles",
+        n_recover,
+        fr.ball_steiner,
+        fr.split_steiner,
+        fr.encroach_split_steiner,
+        fr.facet_steiner,
+        fr.passes,
+        fr.subtris.len()
+    );
+    let counts = json!({
+        "steiner": recover_json, "passes": fr.passes, "n_subtris": fr.subtris.len(),
+        "encroached": fr.encroached, "encroached_faces": fr.encroached_faces,
+    });
+    tet_end(progress, &mut stages, 3, started, line, counts);
+
+    // ---- stage 5: refinement and the carve (§116.13, §116.12).
+    let started = tet_begin(progress, 4);
+    let start = match cfg.castellation.keep_region {
+        KeepRegion::Largest => CarveStart::Hull,
+        KeepRegion::Seed => {
+            let p = cfg.castellation.seed_point.ok_or_else(|| {
+                Error::Mesh("castellation.seed_point: keep_region = \"seed\" needs a seed_point, got none".to_string())
+            })?;
+            CarveStart::Seed(p)
+        }
+    };
+    let refined = refine(&surf2, fr, &start, &spec.refine, &h)?;
+    let rs = &refined.stats;
+    let refine_json = json!({
+        "interior": rs.interior, "segment_splits": rs.segment_splits,
+        "facet_splits": rs.facet_splits, "facet_centroids": rs.facet_centroids,
+        "box_face_splits": rs.box_face_splits, "box_edge_splits": rs.box_edge_splits,
+        "total": rs.inserted(),
+    });
+    let line = format!(
+        "refine: {} points inserted in {} passes ({} interior), {} kept tetrahedra of volume {}, \
+         {} exempt next to protected angles",
+        rs.inserted(),
+        rs.passes,
+        rs.interior,
+        refined.carved.tets.len(),
+        refined.carved.volume,
+        refined.exempt.len()
+    );
+    let counts = json!({
+        "steiner": refine_json, "passes": rs.passes, "rejected": rs.rejected,
+        "deferred": rs.deferred, "n_kept_tets": refined.carved.tets.len(),
+        "kept_volume": refined.carved.volume, "n_exempt": refined.exempt.len(),
+        "n_dropped_regions": refined.carved.dropped().len(),
+    });
+    tet_end(progress, &mut stages, 4, started, line, counts);
+
+    // ---- stage 6: optimisation (§116.14).
+    let started = tet_begin(progress, 5);
+    let tri_patch = surf2.tri_patch.clone();
+    let free = freedoms(&refined.recovery, &tri_patch, &refined.carved.tets);
+    let o = optimise(
+        &refined.recovery.points,
+        &refined.carved.tets,
+        &refined.recovery.subtris,
+        &free,
+        &spec.optimise,
+    )?;
+    let os = &o.stats;
+    let (dmin, dmax) = dihedral_extremes(&o.points, &o.tets);
+    let (dmin, dmax) = (dmin.to_degrees(), dmax.to_degrees());
+    let line = format!(
+        "optimise: {} rounds, {} 2-3 and {} 3-2 flips, {} edge removals, {} smoothing and {} \
+         perturbation moves; {} tetrahedra, dihedral {:.4} .. {:.4} degrees",
+        os.rounds,
+        os.flips23,
+        os.flips32,
+        os.edge_removals,
+        os.smoothed,
+        os.perturbed,
+        o.tets.len(),
+        dmin,
+        dmax
+    );
+    let counts = json!({
+        "rounds": os.rounds, "flips23": os.flips23, "flips32": os.flips32,
+        "edge_removals": os.edge_removals, "smoothed": os.smoothed, "perturbed": os.perturbed,
+        "worst_deg": os.worst, "largest_deg": os.largest, "n_tets": o.tets.len(),
+    });
+    tet_end(progress, &mut stages, 5, started, line, counts);
+
+    // ---- stage 7: emission, (116.26) and §92.3 (§116.16), then (92.56).
+    let started = tet_begin(progress, 6);
+    let n_domain = domain_names.len() as u32;
+    let shifted: Vec<u32> = tri_patch.iter().map(|&p| p + n_domain).collect();
+    let mut bnd = carved_boundary(&refined.carved, &refined.recovery, &shifted, HULL_PATCH)?;
+    for (f, p) in bnd.iter_mut() {
+        if *p == HULL_PATCH {
+            *p = box_side(*f, &o.points, &lo, &hi).ok_or_else(|| {
+                Error::Mesh(format!(
+                    "tet/patches: hull face {:?} lies on no side of domain.extent {:?}",
+                    f, e
+                ))
+            })?;
+        }
+    }
+    let mut patches: Vec<EmitPatch> = domain_names
+        .iter()
+        .map(|name| EmitPatch { name: name.clone(), type_name: "patch".to_string() })
+        .collect();
+    patches.extend(
+        surf2
+            .patch_names
+            .iter()
+            .map(|name| EmitPatch { name: name.clone(), type_name: "wall".to_string() }),
+    );
+    // The inflation of §116.15 runs here, before the emission, when
+    // layers.n > 0 and layers.patches is not empty.
+    let (mesh, quality, n_prisms, n_layer_points, inflate_rounds, n_cut, n_collapsed, n_tapered, coverage) =
+        if layers_on {
+            let mut layered = vec![false; domain_names.len()];
+            layered.extend(layered_surf.iter().copied());
+            let stack = LayerStack {
+                n: cfg.layers.n,
+                first_thickness: cfg.layers.first_thickness,
+                growth: cfg.layers.growth,
+            };
+            let inf = inflate(&o.points, &o.tets, &bnd, &layered, &stack, &spec.layers, feature)?;
+            let (emitted, quality) =
+                emit_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (
+                mesh,
+                quality,
+                inf.prisms.len(),
+                inf.points.len() - o.points.len(),
+                inf.rounds,
+                inf.n_cut,
+                inf.collapsed.len(),
+                inf.tapered.len(),
+                inf.coverage(),
+            )
+        } else {
+            let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (mesh, quality, 0usize, 0usize, 1usize, 0usize, 0usize, 0usize, 1.0f64)
+        };
+    let line = quality.summary();
+    let counts = json!({
+        "n_cells": quality.n_cells, "n_points": mesh.points.len(),
+        "n_internal_faces": mesh.neighbour.len(),
+        "n_boundary_faces": mesh.faces.len() - mesh.neighbour.len(),
+        "gate_passed": quality.passed(),
+        "n_prisms": n_prisms, "n_layer_points": n_layer_points,
+        "inflate_rounds": inflate_rounds, "n_cut": n_cut,
+        "n_collapsed": n_collapsed, "n_tapered": n_tapered, "coverage": coverage,
+    });
+    tet_end(progress, &mut stages, 6, started, line, counts);
+
+    let steiner = json!({
+        "recover": recover_json,
+        "refine": refine_json,
+        "total": n_recover + rs.inserted(),
+    });
+    Ok(TetOutput {
+        mesh,
+        quality,
+        stages,
+        n_tets: o.tets.len(),
+        n_prisms,
+        min_dihedral_deg: dmin,
+        max_dihedral_deg: dmax,
+        steiner,
+        total_seconds: t0.elapsed().as_secs_f64(),
+    })
+}
+
+/// SPEC-LIT §116.16's summary of a `kind: "tet"` run: (92.57)'s keys, with
+/// `kind: "tet"`, the seven stage rows of [`TET_STAGES`], and the `tet`
+/// block - the tetrahedron and prism counts, the dihedral extremes, the
+/// Steiner counts and the timings. `stopped_after` and `layout` are always
+/// `null`: the tet path has no stop rule and no split yet.
+pub fn tet_summary_json(
+    cfg: &AutomeshConfig,
+    config_path: &str,
+    surf: &Surface,
+    out: &TetOutput,
+    ident: &crate::automesher::identity::MeshIdentity,
+) -> serde_json::Value {
+    let stages: Vec<serde_json::Value> = out
+        .stages
+        .iter()
+        .map(|s| {
+            let mut o = serde_json::Map::new();
+            o.insert("stage".to_string(), json!(s.stage));
+            o.insert("seconds".to_string(), json!(s.seconds));
+            if let serde_json::Value::Object(extra) = &s.counts {
+                for (k, v) in extra {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
+    let (lo, hi) = surf.bbox;
+    let mesh_patches: Vec<serde_json::Value> = out
+        .mesh
+        .patches
+        .iter()
+        .map(|p| json!({ "name": p.name, "kind": p.type_name, "size": p.size }))
+        .collect();
+    let seconds: serde_json::Map<String, serde_json::Value> =
+        out.stages.iter().map(|s| (s.stage.to_string(), json!(s.seconds))).collect();
+    json!({
+        "tool": "ofgpu-automesher",
+        "kind": MeshKind::Tet.name(),
+        "config_path": config_path,
+        "name": cfg.output.name,
+        "case_dir": cfg.output.case_dir,
+        "stopped_after": serde_json::Value::Null,
+        "surface": {
+            "n_triangles": surf.tris.len(),
+            "n_points": surf.points.len(),
+            "bbox": [
+                lo.x as f64, lo.y as f64, lo.z as f64,
+                hi.x as f64, hi.y as f64, hi.z as f64,
+            ],
+            "patches": surf.patch_names,
+        },
+        "stages": stages,
+        "tet": {
+            "n_tets": out.n_tets,
+            "n_prisms": out.n_prisms,
+            "min_dihedral_deg": out.min_dihedral_deg,
+            "max_dihedral_deg": out.max_dihedral_deg,
+            "steiner": out.steiner,
+            "seconds": seconds,
+        },
+        "mesh": {
+            "n_points": out.mesh.points.len(),
+            "n_cells": out.quality.n_cells,
+            "n_internal_faces": out.mesh.neighbour.len(),
+            "n_boundary_faces": out.mesh.faces.len() - out.mesh.neighbour.len(),
+            "patches": mesh_patches,
+        },
+        "quality": quality_json(&out.quality),
+        "layout": serde_json::Value::Null,
+        "total_seconds": out.total_seconds,
+        "config": serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
+        "identity": ident.to_json(),
+    })
+}
+
+// ==========================================================================
 //  (92.57) - the summary the run leaves
 // ==========================================================================
 
@@ -1107,6 +1634,8 @@ mod tests {
                 name: "cube".to_string(),
                 patch_names: BTreeMap::new(),
             },
+            kind: crate::automesher::MeshKind::HexDominant,
+            tet: None,
         }
     }
 
@@ -1198,6 +1727,8 @@ mod tests {
                 name: "cube".to_string(),
                 patch_names: BTreeMap::new(),
             },
+            kind: crate::automesher::MeshKind::HexDominant,
+            tet: None,
         }
     }
 
@@ -1959,6 +2490,35 @@ mod tests {
         let got = crate::automesher::layers::tests::castellated_goldens::mesh_sha256(&out.mesh);
         eprintln!("golden cube_config_end_to_end = {got}");
         assert_eq!(got, GOLDEN);
+    }
+
+    /// TET-12's hex gate: `kind` absent and `kind: "hexDominant"` written
+    /// out are the same config, neither re-serialises a `kind` or `tet`
+    /// key, and both runs emit the cube golden of
+    /// `the_cube_config_run_is_golden` bit for bit. (The stage-level L1a
+    /// goldens, `layers::tests::castellated_goldens`, never read the kind.)
+    #[test]
+    fn hex_goldens_unchanged() {
+        const GOLDEN: &str = "3b257be84dc343e6b66432eca0ead5d7e150203a2c5984001e28a4b3fd95d5e3";
+        let cfg = cube_config();
+        let mut v = serde_json::to_value(&cfg).unwrap();
+        assert!(v.get("kind").is_none() && v.get("tet").is_none(), "{v}");
+        v["kind"] = json!("hexDominant");
+        let explicit: AutomeshConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(explicit, cfg);
+        for c in [&cfg, &explicit] {
+            c.validate().unwrap();
+            let (out, _) = run_recording(c, &cube_surface(), None);
+            let got = crate::automesher::layers::tests::castellated_goldens::mesh_sha256(&out.mesh);
+            assert_eq!(got, GOLDEN);
+        }
+    }
+
+    /// TET-12's end-to-end gate and the tet driver's refusals, shared with
+    /// tests/automesher_tet.rs so the `single` build runs them too.
+    mod tet_cases {
+        use crate as ofgpu;
+        include!("../../tests/shared/automesher_tet_cases.rs");
     }
 
     /// The snap row carries (92.62)'s capture of the mesh the stage returns:

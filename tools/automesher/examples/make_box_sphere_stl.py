@@ -2,7 +2,7 @@
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
 #
-# make_box_sphere_stl.py [out.stl] [radius] [cx cy cz] [n_lat]
+# make_box_sphere_stl.py [out.stl] [radius] [cx cy cz] [n_lat] [--outward]
 #
 # Writes the ONE closed surface box_sphere.json meshes: an icosphere-free
 # latitude/longitude sphere, ASCII STL, solid name `sphere`. A generator rather
@@ -10,9 +10,17 @@
 # carries no opaque file. Default: radius 1 m at (5, 5, 5), 48 latitude bands
 # (9024 triangles), which is fine enough that a level-3 leaf (0.125 m at
 # base_size 1.0) never spans two of its triangles.
+#
+# Winding: by default every triangle is wound INWARD (it encloses volume
+# -4/3 pi r^3). The hex path classifies by parity and accepts it, and
+# tools/autonomy's probe fixtures record that surface, so the default stays.
+# `--outward` reverses every triangle, which the tet path needs: SPEC-LIT
+# §116.9 refuses an inward shell by name (TET-12, box_sphere_tet.json).
 import math
 import sys
 
+OUTWARD = "--outward" in sys.argv[1:]
+sys.argv = [a for a in sys.argv if a != "--outward"]
 out = sys.argv[1] if len(sys.argv) > 1 else "box_sphere.stl"
 r = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 cx = float(sys.argv[3]) if len(sys.argv) > 3 else 5.0
@@ -32,7 +40,10 @@ def p(i, j):
 
 
 def tri(f, a, b, c):
-    """One facet, wound so the normal points OUT of the sphere."""
+    """One facet (a, b, c), or (a, c, b) with --outward; the facet normal
+    is the right-hand normal of the order written."""
+    if OUTWARD:
+        b, c = c, b
     ux, uy, uz = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
     vx, vy, vz = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
     nx, ny, nz = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)

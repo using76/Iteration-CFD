@@ -26,7 +26,8 @@
 //!   Rumsey & Spalart, *AIAA J.* 47 (2009) 982-993 - why the free-stream
 //!     `nu~/nu` matters
 //!   Patankar, *Numerical Heat Transfer and Fluid Flow* (1980) §4.2
-//!   ofgpu `SPEC-LIT.md` §56, and §57 for the one length scale DES replaces
+//!   ofgpu `SPEC-LIT.md` §56, §57 for the one length scale DES replaces, and
+//!   §127.1 for the conservative rho-weighted form ([`SaConservative`])
 //! No GPL-licensed source was consulted. OpenFOAM and SU2 were not opened,
 //! searched or quoted.
 //!
@@ -384,6 +385,11 @@ pub struct SaKernels {
     gamma_boundary: CudaFunction,
     bound: CudaFunction,
     log_layer_terms: CudaFunction,
+    // SPEC-LIT §127.1's conservative twins, used by `conservative.rs` only.
+    nut_rho: CudaFunction,
+    sources_rho: CudaFunction,
+    gamma_internal_rho: CudaFunction,
+    gamma_boundary_rho: CudaFunction,
 }
 
 impl SaKernels {
@@ -396,6 +402,10 @@ impl SaKernels {
             gamma_boundary: k.func("saGammaBoundary")?,
             bound: k.func("saBoundNuTilda")?,
             log_layer_terms: k.func("saLogLayerTerms")?,
+            nut_rho: k.func("saNutRho")?,
+            sources_rho: k.func("saSourcesRho")?,
+            gamma_internal_rho: k.func("saGammaInternalRho")?,
+            gamma_boundary_rho: k.func("saGammaBoundaryRho")?,
         })
     }
 }
@@ -685,6 +695,17 @@ pub struct SpalartAllmaras<'m> {
     grad_frob: DevBuf<Scalar>,
     grad_nu_tilda: DevBuf<Vec3>,
 
+    // SPEC-LIT §127.1's conservative form. Scratch the `correct_conservative`
+    // assembly writes and reads; nothing here allocates at run time. `gamma_c`
+    // / `b_gamma_c` and `wts_c` / `b_wts_c` are the model's own face buffers
+    // because the shared ones in `RasCore` are private to it, and `grad_rho`
+    // carries the cross term's `grad rho`.
+    grad_rho: DevBuf<Vec3>,
+    gamma_c: DevBuf<Scalar>,
+    b_gamma_c: DevBuf<Scalar>,
+    wts_c: DevBuf<Scalar>,
+    b_wts_c: DevBuf<Scalar>,
+
     des: Option<DesLengthScale>,
 }
 
@@ -718,6 +739,8 @@ impl<'m> SpalartAllmaras<'m> {
             )));
         }
         let nc = mesh.n_cells.max(1);
+        let nif = mesh.n_internal_faces.max(1);
+        let nbf = mesh.n_boundary_faces.max(1);
         let fld = crate::field_ops::FieldKernels::new(gpu)?;
         let mut y_own: DevBuf<Scalar> = gpu.zeros(nc)?;
         crate::field_ops::copy_field(gpu, &fld, &mut y_own, y, mesh.n_cells)?;
@@ -730,6 +753,11 @@ impl<'m> SpalartAllmaras<'m> {
             omega: gpu.zeros(nc)?,
             grad_frob: gpu.zeros(nc)?,
             grad_nu_tilda: gpu.zeros(nc)?,
+            grad_rho: gpu.zeros(nc)?,
+            gamma_c: gpu.zeros(nif)?,
+            b_gamma_c: gpu.zeros(nbf)?,
+            wts_c: gpu.zeros(nif)?,
+            b_wts_c: gpu.zeros(nbf)?,
             des: None,
         })
     }
@@ -1005,3 +1033,6 @@ impl<'m> SpalartAllmaras<'m> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+mod conservative;
+pub use conservative::SaConservative;

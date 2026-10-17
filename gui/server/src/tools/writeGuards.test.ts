@@ -157,6 +157,8 @@ describe('write guards on run_start, file_write and case_edit', () => {
     }
     expect(isMeshConfig(CONFIG)).toBe(true)
     expect(isMeshConfig({ title: 'x', mesh_quality: { a: 1 } })).toBe(false)
+    expect(isMeshConfig({ kind: 'tet', title: 'x' })).toBe(false)
+    expect(isMeshConfig({ tet: {} })).toBe(true)
     expect(isMeshConfig([CONFIG])).toBe(false)
     expect(jsonDoc('{"a": 1, // c\n "b": [1, 2,],}')).toEqual({ a: 1, b: [1, 2] })
     expect(jsonDoc(JSON.stringify(JSON.stringify({ a: 1 })))).toEqual({ a: 1 })

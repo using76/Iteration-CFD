@@ -171,7 +171,7 @@ def _read_jsonl(path):
 
 def load_manifest(source, mode, ids=None, limit=None):
     """The manifest rows, split-sealed and equal to the official corpus rows."""
-    if source in ("tuning", "test", "test2"):
+    if source in ("tuning", "test") or split.fresh_seed_of(source):
         rows = split.load(source, mode)
     else:
         with open(source, "r", encoding="utf-8") as f:
@@ -204,12 +204,12 @@ def load_manifest(source, mode, ids=None, limit=None):
 
 
 def manifest_sha(source):
-    """The lock's sha for tuning/test/test2, the file bytes' sha for a FILE."""
+    """The lock's sha for tuning/test/testN, the file bytes' sha for a FILE."""
     if source in ("tuning", "test"):
         lock = split.read_lock(os.path.join(split.MANIFEST_DIR, "split.lock"))
         return lock[source].split(" ")[-1]
-    if source == "test2":
-        lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS[source]),
+    if split.fresh_seed_of(source):
+        lock_path = os.path.join(split.fresh_dir(split.fresh_seed_of(source)),
                                  "split.lock")
         if not os.path.isfile(lock_path):
             raise split.SplitError("no split.lock in %s" % lock_path)
@@ -355,6 +355,7 @@ class Campaign:
         self.probe_timeout_s = probe_timeout_s
         self.audit_mod = audit_mod
         self.quiet = quiet
+        self.r_te = True      # remedies.propose's table: False is the one before AUT-04
         self.layers = tuple(l for l in LAYERS[system] if l not in ablate)
         self.gates = gates if gates is not None else schema.load_gates()
         self.knobs = knobs if knobs is not None else schema.load_knobs()
@@ -1090,7 +1091,7 @@ def _run_system(c, gctx, mrow):
         gctx["pending_pass"] = []
         veto = make_veto(c, gctx, a + 1) if "preflight" in c.layers else None
         prop = remedies.propose(ctx, history, k=k, gates=c.gates, knobs=c.knobs,
-                                veto=veto)
+                                veto=veto, r_te=c.r_te)
         nxt = None
         op = None
         rm_written = False
@@ -1140,7 +1141,7 @@ _RUN_OPTS = {"system": None, "ablate": (), "run_id": None, "tag": None,
              "streams": MAX_STREAMS, "timeout_s": TIMEOUT_S,
              "probe_timeout_s": PROBE_TIMEOUT_S, "audit_mod": AUDIT_MOD,
              "ids": None, "limit": None, "binary": BINARY_DEFAULT,
-             "resume": False, "quiet": False}
+             "resume": False, "quiet": False, "r_te": True}
 
 
 def _check_opts(o):
@@ -1209,7 +1210,8 @@ def run_campaign(opts, *, attempt_fn=None, probe_fn=None, snap_fn=None, hooks=No
               "tag": o["tag"], "mode": o["mode"], "system": o["system"],
               "ablate": sorted(o["ablate"]), "split_mode": split_mode,
               "manifest": {"source": o["manifest"] if o["manifest"] in ("tuning",
-                           "test", "test2") else os.path.abspath(
+                           "test") or split.fresh_seed_of(o["manifest"])
+                           else os.path.abspath(
                                o["manifest"]).replace(os.sep, "/"),
                            "sha256": manifest_sha(o["manifest"]), "n": len(rows)},
               "geometry_ids": [r["geometry_id"] for r in rows],
@@ -1258,6 +1260,7 @@ def run_campaign(opts, *, attempt_fn=None, probe_fn=None, snap_fn=None, hooks=No
                  probe_timeout_s=o["probe_timeout_s"], audit_mod=o["audit_mod"],
                  attempt_fn=attempt_fn, probe_fn=probe_fn, snap_fn=snap_fn,
                  hooks=hook_fns, gates=gates, knobs=knobs, quiet=o["quiet"])
+    c.r_te = bool(o["r_te"])
     c.n_total = len(rows)
     c.n_done = len(ended)
     t0 = time.perf_counter()
@@ -1431,7 +1434,9 @@ def replay(cdir, hooks=None):
     knobs = schema.load_knobs()
     layers = tuple(l for l in LAYERS[header["system"]] if l not in header["ablate"])
     k = 1 if "remedies" in header["ablate"] else gates["attempts_k"]
-    st = {"decisions": 0, "hook_decisions": 0, "mismatches": []}
+    # the remedy table the campaign was recorded under (AUT-04's RM-TE or the one before)
+    st = {"decisions": 0, "hook_decisions": 0, "mismatches": [],
+          "r_te": rules.r_te_of([x for v in load_records(cdir).values() for x in v])}
 
     def bad(gid, attempt, why):
         st["mismatches"].append({"geometry_id": gid, "attempt": attempt,
@@ -1551,7 +1556,8 @@ def _replay_one(gid, header, layers, k, rows_by, end, mrow, cdir, gates, knobs,
 
         try:
             res = remedies.propose(ctx, hist, k=k, gates=gates, knobs=knobs,
-                                   veto=veto if "preflight" in layers else None)
+                                   veto=veto if "preflight" in layers else None,
+                                   r_te=st["r_te"])
         except _ReplayStop:
             bad(gid, r["attempt"] + 1,
                 "a veto for an unrecorded candidate %s at attempt %d"
@@ -2703,25 +2709,28 @@ def _child_env():
 
 
 def _g14_fresh_split(H):
-    for mode in ("tuning", "rules"):
-        try:
-            load_manifest("test2", mode)
-        except split.SplitSealed as e:
-            assert "sealed" in str(e) and mode in str(e), e
+    for name in ("test2", "test3"):     # any fresh seed N (AUT-13)
+        for mode in ("tuning", "rules"):
+            try:
+                load_manifest(name, mode)
+            except split.SplitSealed as e:
+                assert "sealed" in str(e) and mode in str(e), e
+            else:
+                raise AssertionError("mode %r read the fresh split %s"
+                                     % (mode, name))
+        lock_path = os.path.join(split.fresh_dir(split.fresh_seed_of(name)),
+                                 "split.lock")
+        if os.path.isfile(lock_path):
+            want = split.read_lock(lock_path)["test"].split(" ")[-1]
+            assert manifest_sha(name) == want, (manifest_sha(name), want)
         else:
-            raise AssertionError("mode %r read the fresh split" % mode)
-    lock_path = os.path.join(split.fresh_dir(split.FRESH_SPLITS["test2"]),
-                             "split.lock")
-    if os.path.isfile(lock_path):
-        want = split.read_lock(lock_path)["test"].split(" ")[-1]
-        assert manifest_sha("test2") == want, (manifest_sha("test2"), want)
-    else:
-        try:
-            manifest_sha("test2")
-        except split.SplitError as e:
-            assert str(lock_path) in str(e), e
-        else:
-            raise AssertionError("manifest_sha('test2') without a lock passed")
+            try:
+                manifest_sha(name)
+            except split.SplitError as e:
+                assert str(lock_path) in str(e), e
+            else:
+                raise AssertionError("manifest_sha(%r) without a lock passed"
+                                     % name)
     return {}
 
 
@@ -2791,7 +2800,7 @@ def selftest():
                "replay {d} decisions, {a} audited reruns equal, no polyMesh left, "
                "peak {peak} MiB; the CLI refuses the sealed test manifest and "
                "7 streams", _g13_live, H)
-        _group("fresh split: test2 sealed outside evaluate, manifest_sha reads "
+        _group("fresh splits: test2 and test3 sealed outside evaluate, manifest_sha reads "
                "the fresh lock or is refused naming its path", _g14_fresh_split, H)
         print("SELFTEST PASS", flush=True)
         return 0

@@ -56,6 +56,11 @@
 //!   and prints and does not write: exit 0, or the refusal and exit 1.
 //!   A gate failure is not a crash; its text is the report §92.3 fixed the
 //!   format of.
+//! - `kind: "tet"` in the config (SPEC-LIT §116.3): after the surface
+//!   summary and stage 0's margin check, `driver::run_tet` runs §116's seven
+//!   stages and the run writes `constant/polyMesh` and the tet summary of
+//!   §116.16, again only once every stage returned Ok. `-stopAfter` is
+//!   refused there; `-check`, `-tag`, `-runId` and `-dryRun` work as below.
 //! - `-dryRun`: everything up to the surface summary with exit 0 - what a
 //!   config check wants before a long run is queued.
 //! - `-schema`: the JSON Schema of the config, generated from the SAME
@@ -324,7 +329,20 @@ fn meshing_mode(
     stop_after: Option<&String>,
     run_id: Option<String>,
 ) -> Result<()> {
-    println!("ofgpu-automesher (SPEC-LIT §92, hex-dominant path)");
+    let tet = cfg.kind == automesher::MeshKind::Tet;
+    if tet {
+        println!("ofgpu-automesher (SPEC-LIT §116, tet path)");
+        // (92.55)'s stop rule names the hex stages; the tet path has none,
+        // so a stop point is refused before any work rather than ignored.
+        if let Some(s) = stop_after {
+            return Err(Error::Config(format!(
+                "-stopAfter {s}: kind \"tet\" has no stop rule - its stages run as one \
+                 (SPEC-LIT §116.16); drop the flag"
+            )));
+        }
+    } else {
+        println!("ofgpu-automesher (SPEC-LIT §92, hex-dominant path)");
+    }
 
     let surf = read_input_surface(cfg)?;
     print_surface_summary(&surf);
@@ -339,6 +357,9 @@ fn meshing_mode(
     // Stage 0 (§92.2): the domain must hold the surface with a margin before
     // any work is done, and the plan is what stage 1 inherits.
     check_domain(cfg, &surf)?;
+    if tet {
+        return tet_mode(cfg, config_path, &surf, run_id);
+    }
     print_plan(cfg);
 
     // (92.55)'s stop rule. `Stage::parse`'s error message is already the
@@ -413,6 +434,43 @@ fn meshing_mode(
             out.quality.n_cells
         );
     }
+    let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
+    let text = serde_json::to_string_pretty(&summary).map_err(|e| {
+        Error::Config(format!("summary {}: {e}", summary_path.display()))
+    })?;
+    std::fs::write(&summary_path, text).path(&summary_path)?;
+    println!("ofgpu-automesher: wrote {}", summary_path.display());
+    println!("ofgpu-automesher: total {:.1} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// The `kind: "tet"` path (SPEC-LIT §116.16): `driver::run_tet` end to
+/// end, then, only once it returned Ok, `constant/polyMesh` and the tet
+/// summary beside it - a refusal writes nothing, as §92.14.4 has it.
+fn tet_mode(
+    cfg: &AutomeshConfig,
+    config_path: &str,
+    surf: &Surface,
+    run_id: Option<String>,
+) -> Result<()> {
+    let t0 = Instant::now();
+    let out = driver::run_tet(cfg, surf, &mut |line| {
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    })?;
+    let case_dir = Path::new(&cfg.output.case_dir);
+    let ident = identity::MeshIdentity::new("ofgpu-automesher", case_dir, &cfg.output.name, run_id);
+    let summary = driver::tet_summary_json(cfg, config_path, surf, &out, &ident);
+    let poly_dir = case_dir.join("constant").join("polyMesh");
+    write_poly_mesh_raw(&poly_dir, &out.mesh)?;
+    println!(
+        "ofgpu-automesher: wrote {} ({} tetrahedra, {} prisms; dihedral {:.4} .. {:.4} degrees)",
+        poly_dir.display(),
+        out.n_tets,
+        out.n_prisms,
+        out.min_dihedral_deg,
+        out.max_dihedral_deg
+    );
     let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
     let text = serde_json::to_string_pretty(&summary).map_err(|e| {
         Error::Config(format!("summary {}: {e}", summary_path.display()))

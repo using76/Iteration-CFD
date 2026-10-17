@@ -123,6 +123,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("galerkin_replays_under_capture"),
     ),
     (
+        "src/amg/single.rs",
+        Stance::Gate("single_cycle_replays_under_capture"),
+    ),
+    (
         "src/amg/smooth.rs",
         Stance::Gate("smoothers_replay_under_capture"),
     ),
@@ -361,6 +365,10 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("the_spalart_allmaras_correction_replays_bitwise"),
     ),
     (
+        "src/models/spalart_allmaras/conservative.rs",
+        Stance::Via("src/models/spalart_allmaras.rs"),
+    ),
+    (
         "src/models/transition.rs",
         Stance::Gate("the_transition_correction_replays_bitwise"),
     ),
@@ -456,6 +464,21 @@ pub const REGISTRY: &[(&str, Stance)] = &[
         Stance::Gate("wsgg_p1_replays_under_capture"),
     ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
+    (
+        "src/rigid_body.rs",
+        Stance::Refused(
+            "the rigid body is loosely coupled through the HOST: every time \
+             step downloads the twelve numbers of the force reduction, \
+             integrates Euler's equations on the host, and writes the jets' \
+             world velocities with Gpu::write - a host round trip and a host \
+             write, both refused inside a capture by name (SPEC-LIT 81.3, \
+             SPEC-LIT 161.6). The point map and the wall condition are pure \
+             device maps and the step that moves the mesh is \
+             src/mesh/ale.rs's, which is gated. Alternative: integrate the \
+             body on the device from the resident force and pass the state \
+             through device memory; not implemented",
+        ),
+    ),
     (
         "src/s2s.rs",
         Stance::Gate("the_s2s_exchange_replays_bitwise"),

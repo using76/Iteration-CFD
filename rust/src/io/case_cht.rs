@@ -940,6 +940,12 @@ pub struct ChtSolidSolver {
     /// its controls (§109.8). Only with a single `material` (§96.3 row 22).
     #[serde(default)]
     pub coupled: bool,
+    /// The outer iteration around the map: `"anderson"` (the default) is
+    /// §95.3's Anderson of depth five; `"gmres"` is §142.2's restarted
+    /// GMRES(50) on the block map's state, only with `coupled: true`
+    /// (§96.3 row 23). Any other name is refused listing both.
+    #[serde(default = "default_solid_outer")]
+    pub outer: String,
     /// ALWAYS refused (§96.3 row 7): the outer loop is Aitken delta-squared
     /// on the increment and its first omega is 1 - a static relaxation
     /// factor is not offered.
@@ -957,10 +963,15 @@ impl Default for ChtSolidSolver {
             tolerance: default_solid_tolerance(),
             max_outer: default_solid_max_outer(),
             coupled: false,
+            outer: default_solid_outer(),
             relaxation: None,
             ddt_scheme: None,
         }
     }
+}
+
+fn default_solid_outer() -> String {
+    "anderson".to_string()
 }
 
 fn default_solid_tolerance() -> f64 {
@@ -1121,6 +1132,8 @@ pub struct SolidOuterControls {
     pub max_outer: usize,
     /// `true`: the block-coupled solve (§109.8).
     pub coupled: bool,
+    /// The outer iteration: Anderson of depth five, or GMRES(50) (§142.2).
+    pub outer: crate::solid::outer::Relaxation,
 }
 
 /// A region's `mechanics` block, everything resolved - what
@@ -2773,10 +2786,32 @@ fn lower_mechanics(
              built. Use one `material`, or `coupled: false` (SPEC-LIT 96.3 row 22)"
         )));
     }
+    // Row 23 and the name check: `outer` names the iteration around the map.
+    let outer = match mech.solver.outer.as_str() {
+        "anderson" => crate::solid::outer::Relaxation::Anderson(crate::solid::outer::ANDERSON_DEPTH),
+        "gmres" if mech.solver.coupled => {
+            crate::solid::outer::Relaxation::Gmres(crate::solid::outer::GMRES_RESTART)
+        }
+        "gmres" => {
+            return Err(Error::Config(format!(
+                "{path}/solver/outer: \"gmres\" is built for the block-coupled map only - \
+                 SPEC-LIT §142.2's GMRES(50) iterates the state of §109.6's block map. Set \
+                 `coupled: true`, or `outer: \"anderson\"` (SPEC-LIT 96.3 row 23)"
+            )));
+        }
+        other => {
+            return Err(Error::Config(format!(
+                "{path}/solver/outer: unknown outer iteration {other:?} - the names are \
+                 \"anderson\" (the default, Anderson of depth five, SPEC-LIT §95.3) and \
+                 \"gmres\" (GMRES(50) on the block-coupled map, SPEC-LIT §142.2)"
+            )));
+        }
+    };
     let solver = SolidOuterControls {
         tolerance: mech.solver.tolerance as Scalar,
         max_outer: mech.solver.max_outer as usize,
         coupled: mech.solver.coupled,
+        outer,
     };
 
     Ok(Some(LoweredMechanics {

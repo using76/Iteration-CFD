@@ -1,0 +1,90 @@
+// meteor-cfd - ofgpu-automesher example configuration, the tet path (SPEC-LIT §116).
+//
+// box_sphere.json's sphere and box, meshed with tetrahedra by the native mesher
+// of SPEC-LIT §116 instead of the hex-dominant octree: no gmsh, no TetGen, no
+// external program anywhere on the path. A 1 m sphere in the middle of a 10 m
+// box; it meshes in about 20 s on one core (20 309 tetrahedra).
+//
+// Make the geometry first (the repository carries no binary assets). The tet
+// path refuses an inward-wound shell by name (SPEC-LIT §116.9), and the
+// generator's default sphere is wound inward, so ask for the outward one:
+//
+//     cd tools/automesher/examples
+//     python make_box_sphere_stl.py box_sphere_outward.stl --outward
+//     ..\..\..\rust\target\release\ofgpu-automesher box_sphere_tet.json
+//     ..\..\..\rust\target\release\ofgpu-automesher box_sphere_tet.json -check
+//
+// JSONC: comments and trailing commas are allowed (io::case_json's reader).
+{
+  // SPEC-LIT §116.3: "hexDominant" (the default) or "tet".
+  "kind": "tet",
+
+  "input": {
+    "surfaces": [
+      { "path": "box_sphere_outward.stl" }
+    ]
+  },
+
+  "domain": {
+    // xlo xhi ylo yhi zlo zhi, metres. The box is the mesh's outer boundary,
+    // and the surface must lie strictly inside it.
+    "extent": [0.0, 10.0, 0.0, 10.0, 0.0, 10.0],
+    // H of SPEC-LIT (116.7b): the largest edge the size field asks for.
+    "base_size": 1.0
+  },
+
+  "refinement": {
+    // A band is a size here (SPEC-LIT §116.8): h = H / 2^level on the patch
+    // out to `distance`, growing at g - 1 per metre beyond. Level 2 puts
+    // 0.25 m on the sphere, a quarter of its radius. The hex example's
+    // 0.125 m does not finish refining yet (SPEC-LIT §116.18, TET-12's rows).
+    "levels": [
+      { "patch": "sphere", "bands": [{ "distance": 0.0, "level": 2 }] }
+    ],
+    // Also the surface preparation's feature angle (SPEC-LIT §116.9).
+    "feature_angle_deg": 30.0,
+    "max_level": 2
+  },
+
+  "castellation": {
+    // SPEC-LIT §116.12: "largest" keeps the region of the domain box's hull,
+    // the external flow; "seed" keeps the region of `seed_point`.
+    "keep_region": "largest"
+  },
+
+  // SPEC-LIT §116.3: every key has a default, so "tet": {} is complete. The
+  // values below are the defaults, written out so the example says what they
+  // are, except `curvature_cells`: the default 16 asks for h <= 2 pi R / 16 =
+  // 0.39 m on the sphere, which the band's 0.25 m already gives, and its one
+  // source per input triangle (9024 here) only slows the size field down.
+  "tet": {
+    "size": { "gradation": 1.2, "curvature_cells": 0, "gap_cells": 3 },
+    "recover": { "protect_angle_deg": 90.0, "max_passes": 64 },
+    "refine": { "radius_edge": 2.0, "size_factor": 0.8 },
+    "optimise": { "passes": 8, "perturb_slivers": true, "perturb_seed": 1 }
+  },
+
+  // SPEC-LIT §92.3's G1-G7, the same gate as the hex path.
+  "quality": {
+    "max_closure": 1e-10,
+    "max_non_orth_deg": 70.0,
+    "report_non_orth_deg": 60.0,
+    "min_thickness_ratio": 0.05,
+    "max_cond": 1e4
+  },
+
+  "output": {
+    "case_dir": "box_sphere_tet_case",
+    "name": "box_sphere_tet",
+    // (92.56): the domain box's six patches carry the octree's names, so the
+    // hex example's map applies unchanged.
+    "patch_names": {
+      "xMin": "inlet",
+      "xMax": "outlet",
+      "yMin": "side_y0",
+      "yMax": "side_y1",
+      "zMin": "ground",
+      "zMax": "top"
+    }
+  }
+}

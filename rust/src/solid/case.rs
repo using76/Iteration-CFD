@@ -302,8 +302,11 @@ pub fn run_stress(gpu: &Gpu, low: &LoweredChtCase, sol: &ChtSolution) -> Result<
         // The fallback is never read: every entry above carries `Some(t_ref)`,
         // and `set_temperature` writes `map.t_ref_per_cell` over it.
         d.set_temperature(gpu, &t_c, &bt, m.zones[0].t_ref)?;
+        // `mechanics.solver.outer` (SPEC-LIT 96.1, §142.2): Anderson of depth
+        // five unless the case says "gmres", which the lowering admits only
+        // with `coupled: true`.
         let ctrl = OuterControls {
-            relaxation: Relaxation::Anderson(outer::ANDERSON_DEPTH),
+            relaxation: m.solver.outer,
             decades: -m.solver.tolerance.log10(),
             max_outer: m.solver.max_outer,
             boundary_passes: 3,
@@ -423,7 +426,13 @@ pub fn banner_lines(low: &LoweredChtCase) -> Vec<String> {
         // the map the outer loop will iterate - once per mechanical region.
         let s = crate::solid::slenderness(&low.meshes[r]);
         let edge = crate::solid::SLENDERNESS_MAX;
-        if m.solver.coupled {
+        if m.solver.coupled && matches!(m.solver.outer, Relaxation::Gmres(_)) {
+            out.push(format!(
+                "    slenderness {s:.2} (SPEC-LIT 95.5): block-coupled solve \
+                 (SPEC-LIT 109), PBiCGStab with block-DILU inside GMRES(50) on \
+                 the block map's state (SPEC-LIT 142.2)"
+            ));
+        } else if m.solver.coupled {
             out.push(format!(
                 "    slenderness {s:.2} (SPEC-LIT 95.5): block-coupled solve \
                  (SPEC-LIT 109), PBiCGStab with block-DILU inside the outer \
@@ -455,7 +464,9 @@ pub fn summary_lines(low: &LoweredChtCase, stress: &[RegionStress]) -> Vec<Strin
         let method = low.mechanics[s.region]
             .as_ref()
             .map_or("segregated", |m| {
-                if m.solver.coupled {
+                if m.solver.coupled && matches!(m.solver.outer, Relaxation::Gmres(_)) {
+                    "block-coupled, GMRES(50)"
+                } else if m.solver.coupled {
                     "block-coupled"
                 } else {
                     "segregated"

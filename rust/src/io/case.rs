@@ -182,6 +182,11 @@ pub struct GamgControls {
     /// matrix is bit for bit the one it was built from, `false` rebuilds
     /// it on every solve. Default `true`.
     pub cache_agglomeration: bool,
+    /// `precision` (SPEC-LIT 141.12): the device copy of the hierarchy in
+    /// the solve's own precision (`native`, the default) or in `f32`
+    /// under an f64 solve (`single`; under `--features single` the two
+    /// are one).
+    pub precision: crate::amg::GamgPrecision,
 }
 
 impl Default for GamgControls {
@@ -189,7 +194,25 @@ impl Default for GamgControls {
         Self {
             cycle: crate::amg::GamgConfig::default(),
             cache_agglomeration: true,
+            precision: crate::amg::GamgPrecision::Native,
         }
+    }
+}
+
+/// `solvers/<var>/precision` of a GAMG block (SPEC-LIT 141.12): `native`
+/// or `single`. Anything else is refused naming `setting`, with both as
+/// the menu; `-permissive` does not downgrade it, because a precision
+/// silently defaulted is a hierarchy the case did not ask for.
+pub fn gamg_precision_from_name(setting: &str, s: &str) -> Result<crate::amg::GamgPrecision> {
+    use crate::amg::GamgPrecision;
+    match s {
+        "native" => Ok(GamgPrecision::Native),
+        "single" => Ok(GamgPrecision::Single),
+        other => Err(Error::Config(format!(
+            "{setting} is `{other}`: the GAMG hierarchy is held in `native` \
+             (the solve's own precision) or `single` (f32 levels under an f64 \
+             solve) (SPEC-LIT 141.12)"
+        ))),
     }
 }
 
@@ -284,6 +307,11 @@ pub fn read_gamg_controls(g: &mut GamgControls, d: &FoamDict, p: &str) -> Result
     }
     if let Some(v) = gamg_count(d, &format!("{p}maxLevels"), 1)? {
         g.cycle.hierarchy.max_levels = v;
+    }
+    let precision_key = format!("{p}precision");
+    if let Some(raw) = d.get(&precision_key) {
+        let tok = raw.split_whitespace().next().unwrap_or("");
+        g.precision = gamg_precision_from_name(&precision_key, tok)?;
     }
     let cache_key = format!("{p}cacheAgglomeration");
     if let Some(raw) = d.get(&cache_key) {

@@ -1,0 +1,363 @@
+{
+  "case_dir": "box_sphere_tet_case",
+  "config": {
+    "castellation": {
+      "keep_region": "largest",
+      "min_faces": 4,
+      "seed_point": null
+    },
+    "domain": {
+      "base_size": 1.0,
+      "extent": [
+        0.0,
+        10.0,
+        0.0,
+        10.0,
+        0.0,
+        10.0
+      ],
+      "grading": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "input": {
+      "surfaces": [
+        {
+          "name": null,
+          "path": "box_sphere_outward.stl"
+        }
+      ]
+    },
+    "kind": "tet",
+    "layers": {
+      "cell_frac": 0.5,
+      "first_thickness": 0.05,
+      "growth": 1.3,
+      "medial_frac": 0.5,
+      "min_thickness": 0.1,
+      "n": 0,
+      "normal_passes": 3,
+      "patches": [],
+      "retreat_limit": 4,
+      "smoothing": 0.5,
+      "smoothing_passes": 4
+    },
+    "output": {
+      "case_dir": "box_sphere_tet_case",
+      "name": "box_sphere_tet",
+      "patch_names": {
+        "xMax": "outlet",
+        "xMin": "inlet",
+        "yMax": "side_y1",
+        "yMin": "side_y0",
+        "zMax": "top",
+        "zMin": "ground"
+      }
+    },
+    "quality": {
+      "max_closure": 1e-10,
+      "max_cond": 10000.0,
+      "max_non_orth_deg": 70.0,
+      "min_thickness_ratio": 0.05,
+      "report_non_orth_deg": 60.0
+    },
+    "refinement": {
+      "feature_angle_deg": 30.0,
+      "levels": [
+        {
+          "bands": [
+            {
+              "distance": 0.0,
+              "level": 2
+            }
+          ],
+          "feature_level": 0,
+          "patch": "sphere"
+        }
+      ],
+      "max_level": 2
+    },
+    "snap": {
+      "feature_tolerance": 0.5,
+      "iterations": 30,
+      "max_area_ratio": 4.0,
+      "smoothing": 0.5,
+      "smoothing_passes": 3,
+      "tolerance": 0.001,
+      "undo_limit": 4
+    },
+    "tet": {
+      "layers": {
+        "concave_fraction": 0.5,
+        "gap_fraction": 0.5,
+        "max_neighbour_ratio": 1.5
+      },
+      "optimise": {
+        "passes": 8,
+        "perturb_seed": 1,
+        "perturb_slivers": true,
+        "target_max_dihedral_deg": 165.0,
+        "target_min_dihedral_deg": 10.0
+      },
+      "recover": {
+        "max_passes": 64,
+        "protect_angle_deg": 90.0
+      },
+      "refine": {
+        "max_inserted_points": 50000000,
+        "radius_edge": 2.0,
+        "size_factor": 0.8
+      },
+      "size": {
+        "curvature_cells": 0,
+        "gap_cells": 3,
+        "gradation": 1.2
+      }
+    }
+  },
+  "config_path": "box_sphere_tet.json",
+  "identity": {
+    "host": null,
+    "mesh_id": "m_9326fcbc14ba4c34",
+    "run_id": null,
+    "schema": 1,
+    "tool": "ofgpu-automesher",
+    "written_at": "2026-10-15T15:00:53Z"
+  },
+  "kind": "tet",
+  "layout": null,
+  "mesh": {
+    "n_boundary_faces": 3070,
+    "n_cells": 20309,
+    "n_internal_faces": 39083,
+    "n_points": 4207,
+    "patches": [
+      {
+        "kind": "patch",
+        "name": "inlet",
+        "size": 298
+      },
+      {
+        "kind": "patch",
+        "name": "outlet",
+        "size": 312
+      },
+      {
+        "kind": "patch",
+        "name": "side_y0",
+        "size": 328
+      },
+      {
+        "kind": "patch",
+        "name": "side_y1",
+        "size": 336
+      },
+      {
+        "kind": "patch",
+        "name": "ground",
+        "size": 318
+      },
+      {
+        "kind": "patch",
+        "name": "top",
+        "size": 338
+      },
+      {
+        "kind": "wall",
+        "name": "sphere",
+        "size": 1140
+      }
+    ]
+  },
+  "name": "box_sphere_tet",
+  "note": "A real ofgpu-automesher <name>_summary.json of the tet path (SPEC-LIT 116.16, TET-12): tools/automesher/examples/box_sphere_tet.json on make_box_sphere_stl.py --outward, lane-G tree release binary (feat/t17 at eba6d47). Only identity.host was rewritten; every number is as the binary wrote it. Named *.automesher.json, not *_summary.json, so the ontology importer never folds it.",
+  "quality": {
+    "ldu_ordered": true,
+    "max_closure": 1.1507316726912804e-15,
+    "max_closure_cell": 18954,
+    "max_cond": 47.9775640665261,
+    "max_cond_cell": 17114,
+    "max_non_orth_deg": 61.25954556458814,
+    "mean_non_orth_deg": 18.594719417997357,
+    "min_thickness_cell": 13451,
+    "min_thickness_ratio": 0.28815169338717506,
+    "min_volume": 0.00011783156521939806,
+    "min_volume_cell": 7941,
+    "n_cells": 20309,
+    "n_duplicate_faces": 0,
+    "n_non_orth_over_report": 2,
+    "n_regions": 1,
+    "passed": true,
+    "region_sizes": [
+      20309
+    ]
+  },
+  "stages": [
+    {
+      "n_corners": 0,
+      "n_feature_edges": 0,
+      "n_points": 4514,
+      "n_seam_edges": 0,
+      "n_shells": 1,
+      "n_tris": 9024,
+      "seconds": 0.0102426,
+      "stage": "surfprep"
+    },
+    {
+      "base_size": 1.0,
+      "depth": 6,
+      "gradation": 1.2,
+      "min_size": 0.015625,
+      "n_leaves": 11880,
+      "n_refinement_sources": 1,
+      "n_surface_sources": 0,
+      "seconds": 0.1027997,
+      "stage": "sizefield"
+    },
+    {
+      "collapses": 4308,
+      "flips": 207,
+      "iterations": 10,
+      "n_corners": 0,
+      "n_feature_edges": 0,
+      "n_points": 215,
+      "n_tris": 426,
+      "seconds": 0.3377992,
+      "splits": 9,
+      "stage": "remesh"
+    },
+    {
+      "encroached": 0,
+      "encroached_faces": 0,
+      "n_subtris": 426,
+      "passes": 1,
+      "seconds": 0.0022079,
+      "stage": "recover",
+      "steiner": {
+        "ball": 0,
+        "encroach_split": 0,
+        "facet": 0,
+        "facet_centroids": 0,
+        "split": 0,
+        "total": 0
+      }
+    },
+    {
+      "deferred": 104908,
+      "kept_volume": 995.9262399603122,
+      "n_dropped_regions": 0,
+      "n_exempt": 0,
+      "n_kept_tets": 21793,
+      "passes": 114,
+      "rejected": 3196,
+      "seconds": 6.0594897,
+      "stage": "refine",
+      "steiner": {
+        "box_edge_splits": 84,
+        "box_face_splits": 875,
+        "facet_centroids": 0,
+        "facet_splits": 0,
+        "interior": 2668,
+        "segment_splits": 357,
+        "total": 3984
+      }
+    },
+    {
+      "edge_removals": 1988,
+      "flips23": 1,
+      "flips32": 1500,
+      "largest_deg": [
+        179.34636823002162,
+        152.62716526537048,
+        148.94718297688775,
+        153.03530044563473,
+        152.5007101726148,
+        153.49923227514137,
+        153.0902710970875,
+        152.52733855348262,
+        152.34372986010993
+      ],
+      "n_tets": 20309,
+      "perturbed": 0,
+      "rounds": 8,
+      "seconds": 5.1387508,
+      "smoothed": 29745,
+      "stage": "optimise",
+      "worst_deg": [
+        0.25742751799161173,
+        19.66158578837608,
+        25.14191971634788,
+        27.702496361917916,
+        28.307444444505762,
+        28.307444444505762,
+        28.557936135384086,
+        29.158167278221256,
+        29.168549739297372
+      ]
+    },
+    {
+      "gate_passed": true,
+      "n_boundary_faces": 3070,
+      "n_cells": 20309,
+      "n_internal_faces": 39083,
+      "n_points": 4207,
+      "seconds": 0.0365445,
+      "stage": "emit"
+    }
+  ],
+  "stopped_after": null,
+  "surface": {
+    "bbox": [
+      4.0,
+      4.0,
+      4.0,
+      6.0,
+      6.0,
+      6.0
+    ],
+    "n_points": 4514,
+    "n_triangles": 9024,
+    "patches": [
+      "sphere"
+    ]
+  },
+  "tet": {
+    "max_dihedral_deg": 152.34372986010993,
+    "min_dihedral_deg": 29.168549739297372,
+    "n_prisms": 0,
+    "n_tets": 20309,
+    "seconds": {
+      "emit": 0.0365445,
+      "optimise": 5.1387508,
+      "recover": 0.0022079,
+      "refine": 6.0594897,
+      "remesh": 0.3377992,
+      "sizefield": 0.1027997,
+      "surfprep": 0.0102426
+    },
+    "steiner": {
+      "recover": {
+        "ball": 0,
+        "encroach_split": 0,
+        "facet": 0,
+        "facet_centroids": 0,
+        "split": 0,
+        "total": 0
+      },
+      "refine": {
+        "box_edge_splits": 84,
+        "box_face_splits": 875,
+        "facet_centroids": 0,
+        "facet_splits": 0,
+        "interior": 2668,
+        "segment_splits": 357,
+        "total": 3984
+      },
+      "total": 3984
+    }
+  },
+  "tool": "ofgpu-automesher",
+  "total_seconds": 11.6885858
+}

@@ -25,6 +25,74 @@ pub(crate) mod splash;
 /// SPEC-LIT §144.2, Gate 132-L: the laminar flat plate against Blasius.
 pub(crate) mod blasius_plate;
 
+/// SPEC-LIT §144.3: the T3A plate on the flat-plate harness, leg 1 in 2-D
+/// (recorded runs, replayed).
+pub(crate) mod t3a;
+
+/// SPEC-LIT §144.5, Gate 132-Z: the TMR zero-pressure-gradient plate with SA
+/// and SST against Karman-Schoenherr and Coles (recorded runs, replayed).
+pub(crate) mod zpg;
+
+/// SPEC-LIT §143.5, Gate 131-P: TG0's turbulent pipe with kOmegaSST on the
+/// true wedge against its four bands (recorded ofgpu-lowmach runs, replayed).
+pub(crate) mod pipe;
+
+/// SPEC-LIT §116.17, Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms,
+/// the L1 pipe at Re 100 (recorded ofgpu-lowmach run, replayed).
+pub(crate) mod pipe_tet;
+
+/// SPEC-LIT §110.2/§110.5, Gate 110-A: the plane channel's recorded runs at
+/// three `Re_tau` (data replayed by `validate.rs`'s channel gate).
+pub(crate) mod channel_dns;
+
+/// SPEC-LIT §110.4/§110.5, Gate 110-C: the hot-gas plume's recorded runs at
+/// three levels (data replayed by `validate.rs`'s plume gate).
+pub(crate) mod plume;
+
+/// SPEC-LIT §110.3/§110.5, Gate 110-B: the backward-facing step's recorded
+/// runs at three `dx/H` levels and three single builds (data replayed by
+/// `validate.rs`'s step gate).
+pub(crate) mod backstep;
+
+/// SPEC-LIT §127.6, Gate CMP-SOD: Sod's shock tube on three meshes against the
+/// exact Riemann solution (CMP-19).
+pub(crate) mod sod;
+
+/// SPEC-LIT §127.6, Gate CMP-AC: a small acoustic pulse's speed against
+/// (122.4)'s `c_0` (CMP-20).
+pub(crate) mod acoustic;
+
+/// SPEC-LIT §127.6, Gate CMP-LM: the lid-driven cavity at lid Mach 0.05
+/// against Ghia, Ghia & Shin (1982) with Gate 94-D's tolerance (CMP-20).
+pub(crate) mod cavity_lm;
+
+/// SPEC-LIT §127.6, Gate CMP-COU: compressible Couette with viscous
+/// heating against (127.12) (CMP-22).
+pub(crate) mod couette;
+
+/// SPEC-LIT §127.6, Gate CMP-NOZ: the quasi-1-D nozzle, subsonic,
+/// supersonic started and shocked, against (127.23)-(127.25) (CMP-21).
+pub(crate) mod nozzle;
+
+/// SPEC-LIT §127.6, Gate CMP-OBL: the oblique shock on a 2-D compression
+/// ramp at M 2, 10 degrees, against (127.4)'s theta-beta-M (CMP-23).
+pub(crate) mod oblique;
+
+/// SPEC-LIT §127.6, Gate CMP-RING: Ringleb's transonic smooth flow on
+/// three meshes, h, h/2, h/4, the observed order of the L2 entropy error
+/// against the isentropic key (CMP-24).
+pub(crate) mod ringleb;
+
+/// SPEC-LIT §127.6, Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras
+/// against AGARD AR-138's measured Cp (NPARC's corrected conditions), a
+/// live coarse smoke and the three recorded C-meshes, replayed (CMP-27).
+pub(crate) mod rae2822;
+
+/// SPEC-LIT §144.7, Gates 88-T and 90-T leg 3: T3B and T3A- (and T3A
+/// refitted) on §144.3's harness with a per-case inflow omega fitted to
+/// ERCOFTAC's measured free-stream Tu(x), onset ordering and spread held
+/// against Roach & Brierley (docs/17 VAL-35).
+pub(crate) mod t3_fitted;
 /// SPEC-LIT §157.5, Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb,
 /// four live runs of `ofgpu-lowmach`, against Bradley, Chen & Swithenbank
 /// (1989) via Huang et al. (2020) Fig. 9.

@@ -18,7 +18,12 @@
 //!   H. F. Walker, P. Ni, *SIAM J. Numer. Anal.* 49 (2011) 1715-1735, DOI
 //!     10.1137/10078356X - Anderson acceleration of a fixed-point iteration,
 //!     Algorithm 2 with `beta = 1`, which is what [`Relaxation::Anderson`]
-//!     runs; the original is D. G. Anderson, *J. ACM* 12 (1965) 547
+//!     runs; the original is D. G. Anderson, *J. ACM* 12 (1965) 547; their
+//!     result that on a linear map Anderson with no column dropped is
+//!     essentially GMRES is why [`Relaxation::Gmres`] is the comparison §142.2 draws
+//!   Y. Saad, M. H. Schultz, *SIAM J. Sci. Stat. Comput.* 7 (1986) 856-869,
+//!     DOI 10.1137/0907058 - GMRES: the Arnoldi basis, the Givens rotations
+//!     and the restart [`gmres_fixed_point`] runs (SPEC-LIT §142.2)
 //!   J. Degroote, K.-J. Bathe, J. Vierendeels, *Comput. Struct.* 87 (2009)
 //!     793-801, DOI 10.1016/j.compstruc.2008.11.013 - IQN-ILS: the same
 //!     least-squares mixing over an interface displacement, which is why the
@@ -135,7 +140,19 @@ pub enum Relaxation {
     /// (2009) 793-801, DOI 10.1016/j.compstruc.2008.11.013), so this is also
     /// the accelerator a partitioned coupling would reach for.
     Anderson(usize),
+    /// Restarted GMRES(`m`) on the fixed point of the affine map, over the
+    /// loop's whole carried state - the cell displacement AND the boundary
+    /// values (SPEC-LIT §142.2; Y. Saad & M. H. Schultz, *SIAM J. Sci.
+    /// Stat. Comput.* 7 (1986) 856-869, DOI 10.1137/0907058). One outer
+    /// iteration is one application of the map. Built and measured for the
+    /// block-coupled map only ([`crate::solid::coupled::solve`]); the
+    /// segregated loop refuses it by name.
+    Gmres(usize),
 }
+
+/// The restart length `mechanics.solver.outer: "gmres"` runs: GMRES(50),
+/// the length SPEC-LIT §142.2's gate names.
+pub const GMRES_RESTART: usize = 50;
 
 /// The depth the measurement chose: `docs/09-thermal-structural-plan.md`
 /// §F.1b's sweep, on the host prototype, six decades of the fixed-point
@@ -327,6 +344,190 @@ pub(crate) fn anderson_gamma(cols: &[Vec<Vec3>], rhs: &[Vec3]) -> Vec<Scalar> {
 }
 
 // ==========================================================================
+//  Restarted GMRES on the fixed point of an affine map (SPEC-LIT §142.2)
+// ==========================================================================
+
+/// `sum_i a_i . b_i`, accumulated in `f64` whatever `Scalar` is - the
+/// Arnoldi basis is orthogonalised against it.
+fn dot64(a: &[Vec3], b: &[Vec3]) -> f64 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| x.x as f64 * y.x as f64 + x.y as f64 * y.y as f64 + x.z as f64 * y.z as f64)
+        .sum()
+}
+
+/// `||a||_2`, accumulated in `f64`.
+fn norm64(a: &[Vec3]) -> f64 {
+    dot64(a, a).sqrt()
+}
+
+/// `y += alpha x`.
+fn axpy64(y: &mut [Vec3], alpha: f64, x: &[Vec3]) {
+    let a = alpha as Scalar;
+    for (yc, xc) in y.iter_mut().zip(x.iter()) {
+        *yc += *xc * a;
+    }
+}
+
+/// One application's residual norm into the report: `norms`, the ratio to
+/// the one before it, and the application count.
+fn record_norm(report: &mut OuterReport, norm: f64, k: usize) {
+    let norm = norm as Scalar;
+    if let Some(&prev) = report.norms.last() {
+        report.ratios.push(if prev > 0.0 { norm / prev } else { 0.0 });
+    }
+    report.norms.push(norm);
+    report.iterations = k;
+}
+
+/// Restarted GMRES(`restart`) on the fixed point `x = Phi(x)` of an affine
+/// map, SPEC-LIT (142.5)-(142.7): Saad & Schultz (1986) on
+/// `(I - J) x = c`, the Arnoldi basis by modified Gram-Schmidt, the
+/// least-squares problem by Givens rotations, and every product
+/// `(I - J) v` taken as the difference (142.6) of two applications, so
+/// `phi` is the only operator there is. `phi(x)` returns `Phi(x)` and the
+/// linear iterations it cost.
+///
+/// One outer iteration is one application: each cycle opens with `Phi(x)`
+/// at its start, which gives the TRUE residual `r = Phi(x) - x` - the only
+/// norm the stop and the divergence refusal read - and each Arnoldi step
+/// costs one more. `norms` holds the true norm at a cycle's opening
+/// application and the least-squares estimate `|g_(j+1)|` at an Arnoldi
+/// step. A cycle ends after `restart` steps, when the estimate reaches the
+/// target, or at a breakdown. Converged when a true norm is at most
+/// `10^-decades` of the first; the accepted state is then `Phi(x)`, as the
+/// Anderson loop accepts `F(u)`. At the cap the state is the last
+/// opening application's `Phi(x)`, or, when the cap falls inside a cycle,
+/// that cycle's least-squares update, and `converged` stays false. Returns
+/// the number of Arnoldi cycles.
+pub(crate) fn gmres_fixed_point<F>(
+    x: &mut [Vec3],
+    restart: usize,
+    decades: Scalar,
+    max_outer: usize,
+    report: &mut OuterReport,
+    diverged: impl Fn(Scalar, Scalar) -> String,
+    mut phi: F,
+) -> Result<usize>
+where
+    F: FnMut(&[Vec3]) -> Result<(Vec<Vec3>, usize)>,
+{
+    let n = x.len();
+    let m = restart.max(1);
+    let mut first = 0.0f64;
+    let mut cycles = 0usize;
+    let mut k = 0usize;
+
+    while k < max_outer {
+        // The cycle's opening application: the true residual of (142.5).
+        let (g0, lin) = phi(x)?;
+        k += 1;
+        report.linear_iterations += lin;
+        let r0: Vec<Vec3> = g0.iter().zip(x.iter()).map(|(g, a)| *g - *a).collect();
+        let beta = norm64(&r0);
+        record_norm(report, beta, k);
+        if !beta.is_finite() || (k > 1 && beta > first * 1.0e6) {
+            return Err(Error::Diverged {
+                iteration: k,
+                what: diverged(first as Scalar, beta as Scalar),
+            });
+        }
+        if k == 1 {
+            first = beta;
+        }
+        let target = first * 10f64.powf(-(decades as f64));
+        if beta <= target {
+            report.converged = true;
+            x.copy_from_slice(&g0);
+            break;
+        }
+        if k >= max_outer {
+            x.copy_from_slice(&g0);
+            break;
+        }
+
+        cycles += 1;
+        // (142.6)'s step: the size of the state, so the inner solve's own
+        // relative error stays relative in every difference.
+        let s = norm64(x).max(beta);
+        let inv_s = (1.0 / s) as Scalar;
+        let mut v: Vec<Vec<Vec3>> = Vec::with_capacity(m + 1);
+        v.push(r0.iter().map(|a| *a * ((1.0 / beta) as Scalar)).collect());
+        let mut h = vec![vec![0.0f64; m]; m + 1];
+        let mut cs = vec![0.0f64; m];
+        let mut sn = vec![0.0f64; m];
+        let mut g = vec![0.0f64; m + 1];
+        g[0] = beta;
+        let mut steps = 0usize;
+
+        for j in 0..m {
+            if k >= max_outer {
+                break;
+            }
+            let probe: Vec<Vec3> =
+                x.iter().zip(v[j].iter()).map(|(a, b)| *a + *b * (s as Scalar)).collect();
+            let (gp, lin) = phi(&probe)?;
+            k += 1;
+            report.linear_iterations += lin;
+            // w = (I - J) v_j = v_j - (Phi(x + s v_j) - Phi(x)) / s   (142.6)
+            let mut w: Vec<Vec3> = (0..n).map(|c| v[j][c] - (gp[c] - g0[c]) * inv_s).collect();
+            for (i, vi) in v.iter().enumerate().take(j + 1) {
+                let hij = dot64(&w, vi);
+                h[i][j] = hij;
+                axpy64(&mut w, -hij, vi);
+            }
+            let h_next = norm64(&w);
+            h[j + 1][j] = h_next;
+            // The rotations of the earlier columns, then this column's own.
+            for i in 0..j {
+                let t = cs[i] * h[i][j] + sn[i] * h[i + 1][j];
+                h[i + 1][j] = -sn[i] * h[i][j] + cs[i] * h[i + 1][j];
+                h[i][j] = t;
+            }
+            let den = h[j][j].hypot(h[j + 1][j]);
+            if den > 0.0 {
+                cs[j] = h[j][j] / den;
+                sn[j] = h[j + 1][j] / den;
+            } else {
+                cs[j] = 1.0;
+                sn[j] = 0.0;
+            }
+            h[j][j] = den;
+            h[j + 1][j] = 0.0;
+            g[j + 1] = -sn[j] * g[j];
+            g[j] *= cs[j];
+            steps = j + 1;
+            let est = g[j + 1].abs();
+            record_norm(report, est, k);
+            if !est.is_finite() || !h_next.is_finite() {
+                return Err(Error::Diverged {
+                    iteration: k,
+                    what: diverged(first as Scalar, est as Scalar),
+                });
+            }
+            if est <= target || h_next <= f64::EPSILON * beta {
+                break;
+            }
+            v.push(w.iter().map(|a| *a * ((1.0 / h_next) as Scalar)).collect());
+        }
+
+        // y = H^-1 g on the `steps` columns, then x += V y.
+        let mut y = vec![0.0f64; steps];
+        for i in (0..steps).rev() {
+            let mut acc = g[i];
+            for l in (i + 1)..steps {
+                acc -= h[i][l] * y[l];
+            }
+            y[i] = if h[i][i] != 0.0 { acc / h[i][i] } else { 0.0 };
+        }
+        for (i, yi) in y.iter().enumerate() {
+            axpy64(x, *yi, &v[i]);
+        }
+    }
+    Ok(cycles)
+}
+
+// ==========================================================================
 //  The loop
 // ==========================================================================
 
@@ -337,6 +538,13 @@ pub(crate) fn anderson_gamma(cols: &[Vec<Vec3>], rhs: &[Vec3]) -> Vec<Scalar> {
 /// `correct_boundary`, so the gradient the caller reads stress from belongs
 /// to the accepted `d.u`. Divergence is [`Error::Diverged`], by name.
 pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Result<OuterReport> {
+    if let Relaxation::Gmres(m) = ctrl.relaxation {
+        return Err(Error::Config(format!(
+            "solid outer: relaxation Gmres({m}) is built and measured for the block-coupled \
+             map only (SPEC-LIT §142.2); the segregated loop runs §95.3's three \
+             relaxations - use the block-coupled solve, or Anderson"
+        )));
+    }
     d.passes = ctrl.boundary_passes;
     let n_c = d.mesh().n_cells;
 
@@ -685,6 +893,88 @@ mod tests {
                 r.iterations
             ),
             Err(e) => panic!("bare Picard failed some other way: {e}"),
+        }
+    }
+
+    /// SPEC-LIT §142.2 on the host: GMRES(50) finds the fixed point of an
+    /// affine map on two cells (six unknowns) whose Picard iteration
+    /// diverges - `M` upper triangular with eigenvalues 2, -1.5, 0.5, 3, 0.9
+    /// and -0.2 - in at most eight applications: one to open, six Arnoldi
+    /// steps (the Krylov space is at most six-dimensional) and one to check.
+    /// The answer is `(I - M)^-1 c` by back-substitution.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gmres_finds_the_fixed_point_of_an_affine_map_picard_cannot() {
+        const N: usize = 6;
+        let diag = [2.0, -1.5, 0.5, 3.0, 0.9, -0.2];
+        let mut mat = [[0.0 as Scalar; N]; N];
+        for i in 0..N {
+            mat[i][i] = diag[i];
+            if i + 1 < N {
+                mat[i][i + 1] = 0.3;
+            }
+        }
+        let c = [1.0, -2.0, 0.5, 0.25, 3.0, -1.0];
+        let flat = |x: &[Vec3]| -> Vec<Scalar> { x.iter().flat_map(|a| [a.x, a.y, a.z]).collect() };
+        let unflat = |v: &[Scalar]| -> Vec<Vec3> {
+            v.chunks(3).map(|w| Vec3::new(w[0], w[1], w[2])).collect()
+        };
+        let phi = |x: &[Vec3]| -> Result<(Vec<Vec3>, usize)> {
+            let xs = flat(x);
+            let y: Vec<Scalar> = (0..N)
+                .map(|i| (0..N).map(|j| mat[i][j] * xs[j]).sum::<Scalar>() + c[i])
+                .collect();
+            Ok((unflat(&y), 1))
+        };
+        // (I - M) x* = c, upper triangular.
+        let mut want = [0.0 as Scalar; N];
+        for i in (0..N).rev() {
+            let mut acc = c[i];
+            for j in (i + 1)..N {
+                acc += mat[i][j] * want[j];
+            }
+            want[i] = acc / (1.0 - mat[i][i]);
+        }
+        let mut x = vec![Vec3::ZERO; 2];
+        let mut report = OuterReport::default();
+        let cycles = gmres_fixed_point(
+            &mut x,
+            GMRES_RESTART,
+            12.0,
+            50,
+            &mut report,
+            |a, b| format!("grew from {a:e} to {b:e}"),
+            phi,
+        )
+        .expect("an affine map with I - M regular has a fixed point GMRES reaches");
+        let got = flat(&x);
+        let scale = want.iter().fold(0.0 as Scalar, |m, v| m.max(v.abs()));
+        let err = got.iter().zip(want.iter()).map(|(g, w)| (g - w).abs()).fold(0.0, Scalar::max) / scale;
+        println!(
+            "142.2 host: applications = {}, cycles = {cycles}, err = {err:e}, norms = {:?}",
+            report.iterations, report.norms
+        );
+        assert!(report.converged, "GMRES did not converge: {:?}", report.norms);
+        assert!(report.iterations <= 8, "{} applications, more than 1 + 6 + 1", report.iterations);
+        assert_eq!(report.linear_iterations, report.iterations, "one count per application");
+        assert_eq!(report.ratios.len(), report.iterations - 1);
+        assert!(err <= 1e-9, "GMRES's state is not (I - M)^-1 c: {err:e}");
+    }
+
+    /// The segregated loop refuses GMRES by name, before anything launches.
+    #[test]
+    fn the_segregated_loop_refuses_gmres_by_name() {
+        let Some(gpu) = gpu() else { return };
+        let hm = prototype::block(4).expect("block");
+        let gm = GpuMesh::upload(&gpu, &hm).expect("upload");
+        let mut d = device_displacement(&gpu, &gm, &hm, 0.3);
+        let ctrl = OuterControls { relaxation: Relaxation::Gmres(GMRES_RESTART), ..Default::default() };
+        match solve(&gpu, &mut d, &ctrl) {
+            Err(Error::Config(m)) => assert!(
+                m.contains("Gmres(50)") && m.contains("block-coupled") && m.contains("142.2"),
+                "{m}"
+            ),
+            other => panic!("the segregated loop ran GMRES: {other:?}"),
         }
     }
 }

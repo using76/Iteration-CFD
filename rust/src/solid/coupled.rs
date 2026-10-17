@@ -642,7 +642,8 @@ use crate::solid::block::BlockOperator;
 use crate::solid::displacement::Displacement;
 use crate::solid::motion_ratio_of;
 use crate::solid::outer::{
-    aitken_omega, anderson_gamma, observed_contraction, OuterControls, OuterReport, Relaxation,
+    aitken_omega, anderson_gamma, gmres_fixed_point, observed_contraction, OuterControls,
+    OuterReport, Relaxation,
 };
 use crate::Vec3;
 
@@ -773,6 +774,9 @@ pub fn apply_block(
 /// print the same columns; the observed contraction of THIS loop is what
 /// a slender body separates them on.
 pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Result<OuterReport> {
+    if let Relaxation::Gmres(m) = ctrl.relaxation {
+        return solve_gmres(gpu, d, ctrl, m);
+    }
     d.passes = ctrl.boundary_passes;
     let n_c = d.mesh().n_cells;
 
@@ -896,6 +900,80 @@ pub fn solve(gpu: &Gpu, d: &mut Displacement<'_>, ctrl: &OuterControls) -> Resul
         report.observed_contraction,
         report.predicted_contraction,
         report.omegas.last().copied().unwrap_or(omega),
+        report.linear_iterations,
+        report.motion_ratio
+    );
+    Ok(report)
+}
+
+/// SPEC-LIT §142.2: restarted GMRES(`restart`) on the block map's fixed
+/// point, over the loop's whole carried state `x = (u, ub)` - the cell
+/// displacement and the boundary values one application starts from
+/// (142.5). `Phi(x)` writes `x` into `d.u.f` and `d.u.bf`, runs one
+/// [`apply_block`] and reads back `(F(u), ub')`, so `Phi` is (109.12) with
+/// the boundary values it carries made explicit, and its fixed point is
+/// §142.1's `u*`. The host side is [`crate::solid::outer`]'s
+/// `gmres_fixed_point`; the report has the Anderson loop's fields, with
+/// `omegas` left empty, and the same closing boundary correction.
+fn solve_gmres(
+    gpu: &Gpu,
+    d: &mut Displacement<'_>,
+    ctrl: &OuterControls,
+    restart: usize,
+) -> Result<OuterReport> {
+    d.passes = ctrl.boundary_passes;
+    let n_c = d.mesh().n_cells;
+    let vols: Vec<Scalar> = gpu.download(&d.mesh().v)?;
+    let mut cs = CoupledSolid::new(gpu, d)?;
+    let mut report = OuterReport {
+        predicted_contraction: d.material.predicted_contraction(),
+        ..Default::default()
+    };
+    let mut x: Vec<Vec3> = gpu.download(&d.u.f)?;
+    x.extend(gpu.download(&d.u.bf)?);
+    let mut next = gpu.zeros(n_c)?;
+    let nu = d.material.nu;
+    let passes = ctrl.boundary_passes;
+    let cycles = gmres_fixed_point(
+        &mut x,
+        restart,
+        ctrl.decades,
+        ctrl.max_outer,
+        &mut report,
+        |first, norm| {
+            format!(
+                "the block-coupled displacement fixed point grew from {first:.3e} to \
+                 {norm:.3e} at nu = {nu:.2} (a million-fold, or not finite): GMRES({restart}) \
+                 on SPEC-LIT §142.2's state does not converge here; boundary_passes = {passes}"
+            )
+        },
+        |state: &[Vec3]| {
+            gpu.write(&mut d.u.f, &state[..n_c])?;
+            gpu.write(&mut d.u.bf, &state[n_c..])?;
+            let perf = apply_block(gpu, d, &mut cs, &mut next)?;
+            let mut out: Vec<Vec3> = gpu.download(&next)?;
+            out.extend(gpu.download(&d.u.bf)?);
+            Ok((out, perf.n_iterations))
+        },
+    )?;
+    gpu.write(&mut d.u.f, &x[..n_c])?;
+    gpu.write(&mut d.u.bf, &x[n_c..])?;
+
+    // The boundary values and the gradient the caller will read stress from
+    // have to belong to the displacement that was just accepted.
+    d.correct_boundary(gpu)?;
+    report.observed_contraction = observed_contraction(&report.ratios, 10);
+    report.motion_ratio = motion_ratio_of(&x[..n_c], &vols);
+    println!(
+        "solid coupled: nu={:.3} relaxation={:?} outer={} cycles={} converged={} observed={:.4} \
+         predicted={:.4} linear_iters={} motion_ratio={:.3e}",
+        d.material.nu,
+        ctrl.relaxation,
+        report.iterations,
+        cycles,
+        report.converged,
+        report.observed_contraction,
+        report.predicted_contraction,
         report.linear_iterations,
         report.motion_ratio
     );
@@ -1633,7 +1711,7 @@ mod tests {
     }
 
     use crate::solid::fixtures;
-    use crate::solid::outer::{ANDERSON_DEPTH, OuterControls, Relaxation};
+    use crate::solid::outer::{ANDERSON_DEPTH, GMRES_RESTART, OuterControls, Relaxation};
     use crate::solid::tests::{graded_block, linear_state};
     // VAL-10's probe: the stress read-out and the residual scale it judges
     // the device residual against. Only the ignored probe uses them, so
@@ -1796,6 +1874,129 @@ mod tests {
         );
     }
 
+    /// The largest cell error of `d.u.f` against Gate 95-B's `alpha dT x`,
+    /// relative to the largest exact displacement.
+    fn free_expansion_error(gpu: &Gpu, hm: &HostMesh, d: &Displacement<'_>) -> Scalar {
+        let a = Material::steel(0.3).alpha * DT;
+        let u = gpu.download(&d.u.f).expect("u");
+        let u_exact: Vec<Vec3> = hm.c.iter().map(|x| *x * a).collect();
+        let scale = u_exact.iter().map(|v| v.mag()).fold(0.0 as Scalar, |m, v| m.max(v));
+        u.iter()
+            .zip(&u_exact)
+            .map(|(g, w)| (*g - *w).mag())
+            .fold(0.0 as Scalar, |m, v| m.max(v))
+            / scale
+    }
+
+    /// SPEC-LIT §142.2's gate: from rest on the `6^3` block, GMRES(50) on
+    /// the block map's state `(u, ub)` drops the true residual eight decades
+    /// in at most 20 outer iterations (applications of the map) and lands on
+    /// the free-expansion state. The Anderson loop on the same problem runs
+    /// beside it, its count printed, not held.
+    #[test]
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    fn gmres_reaches_eight_decades_on_the_free_expansion_block_in_twenty() {
+        let Some(gpu) = gpu() else { return };
+        let hm = prototype::block(6).expect("block");
+        let gm = upload(&gpu, &hm);
+        let zeros: Vec<Vec3> = vec![Vec3::ZERO; hm.n_cells];
+        let zeros_b: Vec<Vec3> = vec![Vec3::ZERO; hm.n_boundary_faces];
+        let ctrl = |relaxation| OuterControls { relaxation, decades: 8.0, max_outer: 200, boundary_passes: 3 };
+        let mut d = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+            .expect("displacement");
+        let rep = solve(&gpu, &mut d, &ctrl(Relaxation::Gmres(GMRES_RESTART))).expect("GMRES solve");
+        let err = free_expansion_error(&gpu, &hm, &d);
+        let mut d_aa = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+            .expect("displacement");
+        let aa = solve(&gpu, &mut d_aa, &ctrl(Relaxation::Anderson(ANDERSON_DEPTH))).expect("Anderson");
+        let last = rep.norms.last().copied().unwrap_or(0.0);
+        println!(
+            "  142.2: block(6) free expansion, GMRES(50) outer = {} (decades {:.2}, linear {}), \
+             Anderson(5) outer = {} (linear {}); err = {err:e}",
+            rep.iterations,
+            (rep.norms[0] / last).log10(),
+            rep.linear_iterations,
+            aa.iterations,
+            aa.linear_iterations
+        );
+        assert!(rep.converged, "GMRES(50) did not reach eight decades: {:?}", rep.norms);
+        assert!(rep.iterations <= 20, "GMRES(50) took {} outer iterations, more than 20", rep.iterations);
+        assert!(rep.omegas.is_empty(), "GMRES records no relaxation factor");
+        assert!(err <= 1e-8, "GMRES's state is not the free-expansion one: {err:e}");
+    }
+
+    /// The GMRES loop is deterministic: two runs from rest capped at the
+    /// same six outer iterations leave the same displacement bit for bit
+    /// (the host sums run in one order, the device kernels replay).
+    #[test]
+    fn gmres_runs_of_a_fixed_count_are_bitwise_identical() {
+        let Some(gpu) = gpu() else { return };
+        let hm = prototype::block(6).expect("block");
+        let gm = upload(&gpu, &hm);
+        let zeros: Vec<Vec3> = vec![Vec3::ZERO; hm.n_cells];
+        let zeros_b: Vec<Vec3> = vec![Vec3::ZERO; hm.n_boundary_faces];
+        let ctrl = OuterControls {
+            relaxation: Relaxation::Gmres(GMRES_RESTART),
+            decades: 30.0,
+            max_outer: 6,
+            boundary_passes: 3,
+        };
+        let run = || {
+            let mut d = free_expansion_state(&gpu, &hm, &gm, &zeros, &zeros_b, block_tight())
+                .expect("displacement");
+            let rep = solve(&gpu, &mut d, &ctrl).expect("GMRES solve");
+            assert_eq!(rep.iterations, 6, "the cap is six applications");
+            assert!(!rep.converged);
+            (gpu.download(&d.u.f).expect("u"), gpu.download(&d.u.bf).expect("ub"), rep.norms)
+        };
+        let (u1, b1, n1) = run();
+        let (u2, b2, n2) = run();
+        let bits = |v: &[Vec3]| -> Vec<u64> { v.iter().flat_map(|a| [a.x, a.y, a.z]).map(|s| s.to_bits() as u64).collect() };
+        assert_eq!(bits(&u1), bits(&u2), "u differs between two identical GMRES runs");
+        assert_eq!(bits(&b1), bits(&b2), "ub differs between two identical GMRES runs");
+        assert_eq!(n1, n2, "the norm histories differ");
+    }
+
+    /// SPEC-LIT 81.7 for the GMRES matvec: the device work of one outer
+    /// iteration is one `apply_block` from a written state, and with a
+    /// fixed-iteration block solve it captures and replays bitwise.
+    #[test]
+    fn the_gmres_matvec_replays_bitwise() {
+        let Some(gpu) = gpu() else { return };
+        let hm = prototype::block(6).expect("block");
+        let gm = upload(&gpu, &hm);
+        let n = hm.n_cells;
+        let a = Material::steel(0.3).alpha * DT;
+        let u0: Vec<Vec3> = hm.c.iter().map(|x| *x * (0.5 * a)).collect();
+        let ub0: Vec<Vec3> = vec![Vec3::ZERO; hm.n_boundary_faces];
+        let mut ctrl = block_tight();
+        ctrl.fixed_iters = true;
+        ctrl.max_iter = 4;
+        ctrl.report_residuals = false;
+        let report = crate::capture::capture_replays_bitwise(
+            &gpu,
+            "solid block-coupled GMRES matvec, one apply_block at a fixed-iteration solve",
+            || {
+                let mut d = free_expansion_state(&gpu, &hm, &gm, &u0, &ub0, ctrl)?;
+                d.passes = 3;
+                let cs = CoupledSolid::new(&gpu, &d)?;
+                let out = gpu.zeros(n)?;
+                Ok((d, cs, out))
+            },
+            |(d, cs, out)| apply_block(&gpu, d, cs, out).map(|_| ()),
+            |(d, cs, out)| {
+                Ok(vec![
+                    ("out", flat3(&gpu.download(out)?)),
+                    ("ub", flat3(&gpu.download(&d.u.bf)?)),
+                    ("x", gpu.download(&cs.cw.x)?),
+                    ("r", gpu.download(&cs.cw.w.r)?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT 81.7: the GMRES matvec must capture and replay bitwise");
+        println!("  GMRES matvec: {report}");
+    }
+
     /// A wrong-length output is refused by name, before anything launches.
     #[test]
     fn the_block_map_refuses_a_wrong_output_by_name() {
@@ -1909,6 +2110,85 @@ mod tests {
                     );
                 }
                 Err(e) => println!("  95-A {label} segregated:    {e}"),
+            }
+        }
+    }
+
+    /// SPEC-LIT §142.2's probe: how far each loop's eight-decade answer on
+    /// Gate 95-A's finer slender beams is from the fixed point. Each beam is
+    /// solved three times - Anderson(5) and GMRES(50) at the gate's controls
+    /// (eight decades, the block solve at 1e-12), and GMRES(50) at twelve
+    /// decades with the block solve at 1e-14 as the reference - and the
+    /// distances and `e_u` are printed, with `p_u` on 16 -> 32 per loop.
+    #[test]
+    #[cfg(not(feature = "single"))]
+    #[ignore = "the VAL-11 probe; the supervisor runs it with --ignored --nocapture"]
+    fn gate_95a_probe_how_far_eight_decades_lands_from_the_fixed_point() {
+        let Some(gpu) = gpu() else { return };
+        let gate_linear = |tol: Scalar| SolverControls {
+            tolerance: tol,
+            max_iter: 20000,
+            ..block_tight()
+        };
+        let outer = |relaxation, decades| OuterControls {
+            relaxation,
+            decades,
+            max_outer: 1000,
+            boundary_passes: 3,
+        };
+        let runs = [
+            ("anderson-8", Relaxation::Anderson(ANDERSON_DEPTH), 8.0, 1e-12),
+            ("gmres-8", Relaxation::Gmres(GMRES_RESTART), 8.0, 1e-12),
+            ("gmres-12", Relaxation::Gmres(GMRES_RESTART), 12.0, 1e-14),
+        ];
+        for (l, label) in [(1.0 as Scalar, "5:1"), (2.0 as Scalar, "10:1")] {
+            let mut e_u = [[0.0 as Scalar; 2]; 3];
+            for (k, n_y) in [16usize, 32].into_iter().enumerate() {
+                let n_x = (l * n_y as Scalar / 0.2).round() as usize;
+                let hm = fixtures::cantilever_mesh(n_x, n_y, l, fixtures::CANTILEVER_C).expect("mesh");
+                let exact = fixtures::CantileverExact::new(
+                    fixtures::CANTILEVER_E,
+                    fixtures::CANTILEVER_NU,
+                    l,
+                    fixtures::CANTILEVER_C,
+                    fixtures::CANTILEVER_P,
+                );
+                let (tr, fv) = fixtures::cantilever_face_values(&hm, &exact);
+                let gm = upload(&gpu, &hm);
+                let mut states: Vec<Vec<Vec3>> = Vec::new();
+                for (j, (name, relaxation, decades, tol)) in runs.iter().enumerate() {
+                    let mut d = cantilever_state(&gpu, &hm, &gm, &tr, &fv, gate_linear(*tol))
+                        .expect("displacement");
+                    let rep = solve(&gpu, &mut d, &outer(*relaxation, *decades)).expect("solve");
+                    let u = gpu.download(&d.u.f).expect("u");
+                    let mut sf = StressFields::new(&gpu, hm.n_cells).expect("stress");
+                    sf.compute(&gpu, &d.material, &d.grad, &d.u.f, &d.t, d.t_ref).expect("compute");
+                    let h = sf.download(&gpu).expect("download");
+                    e_u[j][k] = fixtures::cantilever_errors(&hm, &u, &h.sigma, &exact).e_u;
+                    println!(
+                        "  142.2 probe {label} n_y={n_y} {name}: outer={} converged={} e_u={:.4e}",
+                        rep.iterations, rep.converged, e_u[j][k]
+                    );
+                    states.push(u);
+                }
+                let reference = &states[2];
+                let scale = reference.iter().map(|v| v.mag()).fold(0.0 as Scalar, Scalar::max);
+                for j in 0..2 {
+                    let dist = states[j]
+                        .iter()
+                        .zip(reference)
+                        .map(|(a, b)| (*a - *b).mag())
+                        .fold(0.0 as Scalar, Scalar::max)
+                        / scale;
+                    println!(
+                        "  142.2 probe {label} n_y={n_y} {} from gmres-12: max|du|/max|u| = {dist:.3e}",
+                        runs[j].0
+                    );
+                }
+            }
+            for (j, run) in runs.iter().enumerate() {
+                let p_u = (e_u[j][0] / e_u[j][1]).ln() / (2.0 as Scalar).ln();
+                println!("  142.2 probe {label} {}: p_u 16 -> 32 = {p_u:.3}", run.0);
             }
         }
     }

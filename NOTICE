@@ -32,7 +32,7 @@ Provenance
 The numerical core of meteor-cfd is implemented from published literature.
 Every formulation is specified and cited in `rust/SPEC-LIT.md`, and every
 source file carries a header naming the papers it was written from and the
-line "No GPL-licensed source was consulted." All 490 source files under
+line "No GPL-licensed source was consulted." All 529 source files under
 `rust/` (`src/`, `cuda/`, `tests/`, `build.rs`) carry both that line and the
 copyright header, and every one of them is classified in `rust/PROVENANCE.md`
 — checked in both directions.
@@ -103,7 +103,7 @@ itoa                     1.0.18     MIT OR Apache-2.0
 jsonc-parser             0.33.1     MIT
 libloading               0.9.0      ISC
 memchr                   2.8.3      Unlicense OR MIT
-ofgpu                    0.1.0      see ../LICENSE
+ofgpu                    2.0.0      see ../LICENSE
 proc-macro2              1.0.107    MIT OR Apache-2.0
 quote                    1.0.47     MIT OR Apache-2.0
 ref-cast                 1.0.27     MIT OR Apache-2.0
@@ -158,6 +158,21 @@ NVIDIA CUDA Toolkit, cuFFT, cuBLAS
   Used under the NVIDIA CUDA Toolkit End User License Agreement, which permits
   linking and redistribution of applications built against it. Not redistributed
   here; the toolkit must be installed separately.
+
+Gmsh (PyPI `gmsh`, https://gmsh.info) - OPTIONAL, the STEP route only
+  GNU General Public License, version 2 or later, with the exception in Gmsh's
+  own LICENSE.txt for Netgen, METIS, OpenCASCADE and ParaView.
+  Not a dependency of the solver, the automesher or the studio: no Cargo or npm
+  package is gmsh, and nothing under `rust/` or `gui/` links or imports it.
+  Tetrahedral meshes come from the native mesher of `rust/SPEC-LIT.md` §116
+  (`rust/src/tetmesh/`, run by `ofgpu-automesher` with `"kind": "tet"`), which
+  contains, calls and links no gmsh, TetGen, Netgen or other GPL, LGPL or AGPL
+  code. Only the optional STEP route uses gmsh: `tools/mesh/step_mesh.py`,
+  `tools/geom/geom_tool.py`, `tools/geom/geom_edit.py` and several CAD-loop
+  scripts under `tools/cad/` import its Python API into their own
+  Python process, and the studio runs those scripts as separate programs.
+  gmsh is installed by pip, not vendored; no gmsh source is copied into this
+  repository or was read. See `rust/PROVENANCE.md` and `LICENSING.md` §2.
 
 --------------------------------------------------------------------------------
 Apache-2.0 text reproduced in this repository

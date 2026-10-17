@@ -905,6 +905,12 @@ impl GpuLevelRows {
         })
     }
 
+    /// The device bytes of the row map (SPEC-LIT (141.47)).
+    pub fn device_bytes(&self) -> crate::amg::single::DeviceBytes {
+        use crate::amg::single::DeviceBytes as B;
+        B::of_label(&self.offset) + B::of_label(&self.face) + B::of_label(&self.flags)
+    }
+
     /// `amgAmul`: the level's product through the row map. Only a launch
     /// - no allocation, no copy, no sync, so it captures into a graph
     /// (SPEC-LIT §81, §141.3). `y` and `x` are at least `n_cells` long;
@@ -1009,6 +1015,12 @@ impl GpuSmoother {
     /// The cells the smoother was set up for.
     pub fn n_cells(&self) -> usize {
         self.n_cells
+    }
+
+    /// The device bytes of the smoother (SPEC-LIT (141.47)).
+    pub fn device_bytes(&self) -> crate::amg::single::DeviceBytes {
+        use crate::amg::single::DeviceBytes as B;
+        B::of_float(&self.m) + B::of_float(&self.y) + B::of_float(&self.d)
     }
 
     /// The shape and length checks the sweeps share: the setup's

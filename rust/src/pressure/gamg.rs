@@ -187,7 +187,14 @@ impl GamgBackend {
                 return Err(e);
             }
         } else {
-            let g = crate::amg::Gamg::new(gpu, hm, &host, &self.run.gamg.cycle, permissive)?;
+            let g = crate::amg::Gamg::new_with_precision(
+                gpu,
+                hm,
+                &host,
+                &self.run.gamg.cycle,
+                self.run.gamg.precision,
+                permissive,
+            )?;
             w.set_gamg(g)?;
         }
         gpu.sync()?;

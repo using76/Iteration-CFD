@@ -145,13 +145,15 @@ export function extractFacts(messages: BetaMessageParam[]): Facts {
 // The script
 // ---------------------------------------------------------------------------
 
-type Scenario = 'refuse' | 'long' | 'error' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'cad' | 'run' | 'default'
+type Scenario = 'refuse' | 'long' | 'error' | 'control' | 'split' | 'ontology' | 'shell' | 'mesh' | 'explain' | 'edit' | 'gui' | 'viewer' | 'propose' | 'campaign' | 'cad' | 'run' | 'default'
 
 export function detectScenario(text: string): Scenario {
   const t = text.toLowerCase()
   if (t.includes('refuse-test')) return 'refuse'
   if (t.includes('long-test')) return 'long'
   if (t.includes('error-test')) return 'error'
+  // the command walk carries a JSON command whose words (mesh, case, run) later arms claim
+  if (/control-walk[^:{]*:/.test(t)) return 'control'
   if (t.includes('split-test')) return 'split'
   // the autonomy scenarios name their tool, so they answer before any word a later arm claims
   if (t.includes('autonomy_propose_edit')) return 'propose'
@@ -331,6 +333,33 @@ function scenarioSplit(f: Facts): MockPlan {
   if (type === 'split_view') return useTools([tool('gui_control', { type: 'open_result_in_view', view: 'B', path: SPLIT_DEMO_RESULT, timeIndex: null })])
   if (type === 'open_result_in_view') return useTools([tool('gui_control', { type: 'link_cameras', on: true })])
   return done([text(ko ? '뷰포트를 나누고 오른쪽 화면에 결과를 연 뒤 카메라를 연동했습니다.' : 'The viewport is split, the second result is open in the right half and the two cameras are linked.')])
+}
+
+/**
+ * The command walk (docs/17 STU-19): "control-walk[ tag]: {json}" makes exactly one
+ * gui_control call with that command, then one line naming the outcome:
+ * "control-walk <type>: applied" or "control-walk <type>: refused <CODE>: <message>".
+ * It exists so e2e/studio-control.e2e.ts can drive every UiCommand type through the
+ * real tool, approval and window path; demo mode only, and a real model never sees it.
+ */
+function scenarioControl(f: Facts): MockPlan {
+  // the tag between the word and the colon is the walk's own step label, never parsed
+  const head = /control-walk[^:{]*:/.exec(f.userText)
+  const body = head ? f.userText.slice(head.index + head[0].length).trim() : ''
+  let cmd: Record<string, unknown> | null = null
+  try {
+    const v: unknown = JSON.parse(body)
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) cmd = v as Record<string, unknown>
+  } catch {
+    cmd = null
+  }
+  if (cmd === null) return done([text('control-walk: the text after "control-walk:" is not one JSON command object')])
+  const last = f.lastResult
+  if (!last) return useTools([tool('gui_control', cmd)])
+  const type = String(cmd.type ?? '?')
+  if (last.ok) return done([text(`control-walk ${type}: applied`)])
+  const err = (last.data.error ?? {}) as { code?: unknown; message?: unknown }
+  return done([text(`control-walk ${type}: refused ${String(err.code ?? 'UNKNOWN')}: ${String(err.message ?? '')}`)])
 }
 
 /**
@@ -669,6 +698,8 @@ export function planResponse(messages: BetaMessageParam[], state: MockState): Mo
         return { blocks: [], stopReason: 'end_turn', throwError: new Anthropic.RateLimitError(429, { type: 'error', error: { type: 'rate_limit_error', message: 'mock rate limit' } }, 'mock rate limit', new Headers()) }
       }
       return done([text(f.korean ? '재시도 후 정상적으로 응답했습니다.' : 'Recovered after the retry; this is the normal answer.')])
+    case 'control':
+      return scenarioControl(f)
     case 'split':
       return scenarioSplit(f)
     case 'ontology':

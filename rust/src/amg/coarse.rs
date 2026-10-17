@@ -623,6 +623,15 @@ impl GpuCoarse {
         self.method
     }
 
+    /// The device bytes of the factor, its work vector and the fallback
+    /// smoother (SPEC-LIT (141.47)).
+    pub fn device_bytes(&self) -> crate::amg::single::DeviceBytes {
+        use crate::amg::single::DeviceBytes as B;
+        B::of_acc(&self.l)
+            + B::of_acc(&self.w)
+            + self.fallback.as_ref().map(GpuSmoother::device_bytes).unwrap_or_default()
+    }
+
     /// The cells the setup was built for.
     pub fn n_cells(&self) -> usize {
         self.n

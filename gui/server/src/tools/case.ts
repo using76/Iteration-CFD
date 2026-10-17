@@ -4,7 +4,7 @@
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { applyEdits, findNodeAtLocation, modify, parseTree, type JSONPath, type Node } from 'jsonc-parser'
-import { driversFor, getModel, isJsonCase, MESH_PRESETS, MODELS, PICK_LISTS, type CaseFormat, type Problem } from '@cfd/shared'
+import { driversFor, getModel, isJsonCase, MESH_PRESETS, MODELS, PICK_LISTS, statesCompressible, type CaseFormat, type Problem } from '@cfd/shared'
 import { z } from 'zod'
 import { caseInfoFromText, type CaseJsoncInfo } from '../formats/casejsonc.js'
 import { getChtSchema, schemaFileFor, type CaseSchemaFile } from '../registry/schema.js'
@@ -326,7 +326,7 @@ export async function validateCaseText(text: string, relPath: string, workspaceR
   }
   const errors = [...parseErrors, ...schemaErrors, ...sem.errors]
   const format: CaseFormat = 'jsonc'
-  const suggestedDrivers = info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, format)
+  const suggestedDrivers = info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, format, statesCompressible(info.json))
   const problems = [...toProblems(relPath, text, 'schema', 'error', [...parseErrors, ...schemaErrors]), ...toProblems(relPath, text, 'semantic', 'error', sem.errors), ...toProblems(relPath, text, 'semantic', 'warning', warnings)]
   return { ok: errors.length === 0, format, errors, warnings, suggestedDrivers, problems, model: info.model }
 }
@@ -398,6 +398,7 @@ async function readFoamDir(abs: string, rel: string) {
   const endTime = controlDict?.match(/^\s*endTime\s+([-+\d.eE]+);/m)
   const deltaT = controlDict?.match(/^\s*deltaT\s+([-+\d.eE]+);/m)
   const zeroFields = await listIfDir(path.join(abs, '0'))
+  const constantFiles = await listIfDir(path.join(abs, 'constant'))
   const summary = {
     name: path.basename(rel),
     cells: nCells ? Number(nCells[1]) : null,
@@ -409,8 +410,11 @@ async function readFoamDir(abs: string, rel: string) {
     output: null,
     initialFields: zeroFields,
   }
-  const text = [`OpenFOAM case directory ${rel}`, `0/: ${zeroFields.join(', ') || '(none)'}`, `constant/: ${(await listIfDir(path.join(abs, 'constant'))).join(', ') || '(none)'}`, `system/: ${(await listIfDir(path.join(abs, 'system'))).join(', ') || '(none)'}`, `polyMesh: ${boundary ? 'present' : 'missing'}`].join('\n')
-  return { format: 'foamDir' as const, text, summary, outputDir: rel, suggestedDrivers: driversFor(summary.model && getModel(summary.model) ? summary.model : null, 'foamDir') }
+  const text = [`OpenFOAM case directory ${rel}`, `0/: ${zeroFields.join(', ') || '(none)'}`, `constant/: ${constantFiles.join(', ') || '(none)'}`, `system/: ${(await listIfDir(path.join(abs, 'system'))).join(', ') || '(none)'}`, `polyMesh: ${boundary ? 'present' : 'missing'}`].join('\n')
+  // Without constant/thermophysicalProperties the gas drivers refuse the case; with it, the
+  // file alone cannot say which family it is for, so nothing is filtered.
+  const gas = constantFiles.includes('thermophysicalProperties') ? undefined : false
+  return { format: 'foamDir' as const, text, summary, outputDir: rel, suggestedDrivers: driversFor(summary.model && getModel(summary.model) ? summary.model : null, 'foamDir', gas) }
 }
 
 const ReadSchema = z.object({ path: z.string().describe('Workspace-relative case: a .jsonc file or an OpenFOAM case directory') })
@@ -435,7 +439,7 @@ export const caseRead: ToolDef<typeof ReadSchema> = {
       summary: jsoncSummary(info),
       outputDir: info.outputDir,
       parseErrors: info.errors.map((e) => `${e.line}:${e.col} ${e.message}`),
-      suggestedDrivers: info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, 'jsonc'),
+      suggestedDrivers: info.regions.length > 0 ? ['ofgpu-cht'] : driversFor(info.model && getModel(info.model) ? info.model : null, 'jsonc', statesCompressible(info.json)),
     })
   },
 }
