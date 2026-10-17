@@ -2393,7 +2393,7 @@ mod tests {
                 "region \"{}\" layer rows sum to {sum:.9} (STL area {a_stl:.9})",
                 r["name"].as_str().unwrap()
             );
-            assert!(((sum - a_stl) / a_stl).abs() <= 1e-12, "{sum} vs {a_stl}");
+            assert!(((sum - a_stl as f64) / a_stl as f64).abs() <= 1e-12, "{sum} vs {a_stl}");
         }
     }
 

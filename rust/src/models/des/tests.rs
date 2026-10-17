@@ -56,7 +56,6 @@ fn solver_controls() -> SolverControls {
 /// characterise the log layer (`r_dt = 1`)" - which is independent published
 /// corroboration of a derivation done here from scratch.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn r_d_is_one_plus_one_over_kappa_y_plus_in_the_log_layer() {
     let c = DesCoeffs::sa();
     let (u_tau, nu) = (0.37 as Scalar, 1.5e-5 as Scalar);
@@ -67,7 +66,8 @@ fn r_d_is_one_plus_one_over_kappa_y_plus_in_the_log_layer() {
         let got = r_d(nut, nu, c.kappa, y, f);
         let want = 1.0 + 1.0 / (c.kappa * y_plus);
         assert!(
-            (got - want).abs() <= 1e-13 * want,
+            ((got - want).abs() as f64)
+                <= crate::precision::roundoff_tol(1e-13) * want as f64,
             "r_d at y+ = {y_plus}: {got} vs {want}"
         );
         // The nu_t-only marker is exactly 1 there.
@@ -82,6 +82,7 @@ fn r_d_is_one_plus_one_over_kappa_y_plus_in_the_log_layer() {
 /// passes `18.714`, so `f_d` is exactly `0.0` for every `r_d` above
 /// `0.33206`, and the whole of an attached boundary layer has `r_d >= 1`.
 #[test]
+// f32 (F32-16): bisection endpoint one ulp from sat in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn f_d_is_exactly_zero_above_a_threshold_this_test_locates() {
     let c = DesCoeffs::sa();
@@ -180,6 +181,7 @@ fn r_d_carries_the_molecular_viscosity_and_r_dt_does_not() {
 
 /// **The RANS inner layer of the WMLES branch is `d_w < 0.5275183 h_max`.**
 #[test]
+// f32 (F32-16): f_B bits one ulp under 1.0 at thr-1e-9 in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_f_b_unity_threshold_is_where_the_closed_form_says() {
     let thr = f_b_unity_threshold();
@@ -258,6 +260,7 @@ fn f_e_lives_in_the_same_band_f_b_does() {
 /// `c_t = 1.63` gives `1.63^6 = 18.75`, within `0.04` of that point - a
 /// floating-point question, and the answer here is the measurement.
 #[test]
+// f32 (F32-16): SA tanh argument crosses saturation one ulp early in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn f_e_at_r_dt_one_is_exactly_zero_on_sst_and_measured_on_sa() {
     let sst = DesCoeffs::sst();
@@ -372,6 +375,7 @@ fn the_two_iddes_widths_part_company_only_on_a_nearly_isotropic_cell() {
 ///
 /// Measured on a block graded 10:1: `h_wn` is the exact cell height.
 #[test]
+// f32 (F32-16): off-axis normal component 1.2e-6, not exact zero
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn h_wn_is_the_exact_cell_height_on_a_graded_block() -> Result<()> {
     let Some(gpu) = gpu() else {
@@ -996,6 +1000,7 @@ fn must_differ(a: &[Scalar], b: &[Scalar], what: &str) {
 /// The rig-level §13.4.1 pairs of SPEC-LIT §58.4: `Cdt1`, `Cw`, `ct`, the
 /// filter width, and the branch itself. Each REQUIRED to differ.
 #[test]
+// f32 (F32-16): setting's effect below f32 round-off, runs identical
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_des_settings_each_change_the_answer() -> Result<()> {
     let Some(gpu) = gpu() else {

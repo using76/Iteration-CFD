@@ -788,7 +788,6 @@ mod tests {
     /// over-predicts the face conductance by the two-material factor of
     /// SPEC-LIT 46.2's argument, which is what the last check measures.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_bond_coefficient_is_s46_2_and_conduction_agrees() {
         let hm = prototype::block(6).expect("block");
         let a = Material::steel(0.3);
@@ -807,7 +806,8 @@ mod tests {
         for f in 0..hm.n_internal_faces {
             let want = cond.gamma_mag_sf[f];
             assert!(
-                ((gamma_mag_sf[f] - want) / want.abs().max(1e-300)).abs() <= 1e-12,
+                (((gamma_mag_sf[f] - want) / want.abs().max(1e-300)).abs() as f64)
+                    <= crate::precision::roundoff_tol(1e-12),
                 "internal face {f}: {} vs {}",
                 gamma_mag_sf[f],
                 want
@@ -835,7 +835,8 @@ mod tests {
             let r = gn / gp;
             let factor = (1.0 + r) * (1.0 + r) / (4.0 * r);
             assert!(
-                ((linear / series - factor) / factor).abs() <= 1e-12,
+                ((linear / series - factor) / factor).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-12),
                 "bond face {f}: linear/series = {} vs {factor}",
                 linear / series
             );
@@ -846,7 +847,6 @@ mod tests {
     /// neighbour side of the same face agree: that is what the face
     /// displacement was solved for.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_bond_traction_is_the_same_from_both_sides() {
         let mut rng = Lcg::new(0x5EED);
         for case in 0..20 {
@@ -874,7 +874,7 @@ mod tests {
             let t_p = side_traction(mp, bf.g_t, g_p_side, bf.theta_p, bf.n);
             let t_n = side_traction(mn, bf.g_t, g_n_side, bf.theta_n, bf.n);
             let rel = (t_p - t_n).mag() / t_p.mag().max(1e-300);
-            assert!(rel <= 1e-12, "case {case}: {rel:e}");
+            assert!((rel as f64) <= crate::precision::roundoff_tol(1e-12), "case {case}: {rel:e}");
         }
     }
 
@@ -883,7 +883,6 @@ mod tests {
     /// the mesh weights, so the bond face adds nothing a plain face would
     /// not say.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn equal_materials_make_the_bond_face_the_linear_interpolate() {
         let mut rng = Lcg::new(0x5EED + 1);
         for case in 0..20 {
@@ -907,7 +906,7 @@ mod tests {
             );
             let linear = fs.u_p * fs.w + fs.u_n * (1.0 - fs.w);
             let rel = (bf.u_f - linear).mag() / linear.mag().max(1e-300);
-            assert!(rel <= 1e-14, "case {case}: {rel:e}");
+            assert!((rel as f64) <= crate::precision::roundoff_tol(1e-14), "case {case}: {rel:e}");
         }
     }
 
@@ -918,7 +917,6 @@ mod tests {
     /// the linear side, and the solved face displacement carries the
     /// resistance-weighted balance.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn equal_moduli_and_a_linear_field_make_series_and_linear_agree() {
         let mut rng = Lcg::new(0x5EED + 2);
         for case in 0..20 {
@@ -965,18 +963,19 @@ mod tests {
                 fs.u_p, u_n_a, fs.g_p, fs.g_n, fs.t_p, fs.t_n, mp, mn,
             );
             let rel_a = (s_a.t_f - l_a.t_f).mag() / s_a.t_f.mag().max(1e-300);
-            assert!(rel_a <= 1e-12, "case {case} (a): {rel_a:e}");
+            assert!((rel_a as f64) <= crate::precision::roundoff_tol(1e-12), "case {case} (a): {rel_a:e}");
 
             // (b) unequal distances: tangential parts equal, normal parts
             // differing by exactly the weighted-thrust difference.
             let tang = |v: Vec3, n: Vec3| v - n * v.dot(n);
             let rel_t = (tang(series.t_f, series.n) - tang(linear.t_f, linear.n)).mag()
                 / scale;
-            assert!(rel_t <= 1e-12, "case {case} (b) tangential: {rel_t:e}");
+            assert!((rel_t as f64) <= crate::precision::roundoff_tol(1e-12), "case {case} (b) tangential: {rel_t:e}");
             let d_norm = series.t_f.dot(series.n) - linear.t_f.dot(series.n);
             let want = (2.0 * fs.w - 1.0) * (series.theta_p - series.theta_n);
             assert!(
-                ((d_norm - want) / scale).abs() <= 1e-12,
+                ((d_norm - want) / scale).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-12),
                 "case {case} (b) normal: {d_norm} vs {want}"
             );
 
@@ -989,7 +988,8 @@ mod tests {
             let want = -(series.theta_n - series.theta_p) / (a_p + a_n);
             let u_scale = series.u_f.mag().max(1e-300);
             assert!(
-                ((lhs - want) / u_scale).abs() <= 1e-12,
+                ((lhs - want) / u_scale).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-12),
                 "case {case} (c): {lhs} vs {want}"
             );
         }

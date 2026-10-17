@@ -535,7 +535,7 @@ mod tests {
                 * r.base_d.y
                 * r.base_d.z;
             assert!(
-                (rep.total_volume - want).abs() < 1e-12 * want,
+                (rep.total_volume - want as f64).abs() < 1e-12 * want as f64,
                 "total volume {} vs {want}",
                 rep.total_volume
             );

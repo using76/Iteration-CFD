@@ -964,7 +964,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn block_mesh_passes_every_gate() {
         let raw = cube_block_mesh();
         let rep = check(&raw, &QualityThresholds::default())
@@ -984,7 +983,11 @@ mod tests {
             "min tau {}",
             rep.min_thickness_ratio
         );
-        assert!(rep.max_cond < 1.0 + 1e-9, "max cond {}", rep.max_cond);
+        assert!(
+            (rep.max_cond as f64) < 1.0 + crate::precision::roundoff_tol(1e-9),
+            "max cond {}",
+            rep.max_cond
+        );
         assert!(rep.ldu_ordered);
         assert_eq!(rep.n_duplicate_faces, 0);
     }
@@ -998,7 +1001,6 @@ mod tests {
     ///
     /// Written by the supervising session, not by the coding agent.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_non_cubic_block_passes_and_its_cond_is_exactly_two() {
         use crate::blockgen::{BlockSpec, GradedAxis};
         let ax = |hi: Scalar, n: usize| GradedAxis {
@@ -1042,7 +1044,7 @@ mod tests {
             .iter()
             .position(|p| p.x == 0.0 && p.y == 0.0 && p.z == 0.0)
             .expect("the block mesh has a point at the origin");
-        raw.points[i] = Vec3::new(10.0, 0.0, 0.0);
+        raw.points[i] = crate::types::to_dvec3(Vec3::new(10.0, 0.0, 0.0));
 
         let err = check(&raw, &QualityThresholds::default()).unwrap_err();
         let msg = err.to_string();
@@ -1147,7 +1149,7 @@ mod tests {
             }
         }
         let raw = PolyMeshRaw {
-            points,
+            points: points.iter().map(|&p| crate::types::to_dvec3(p)).collect(),
             faces,
             owner,
             neighbour: Vec::new(),
@@ -1282,7 +1284,7 @@ mod tests {
         q.push([at(0, 0, false), at(0, 0, true), at(0, 2, true), at(0, 2, false)]);
         q.push([at(2, 0, false), at(2, 2, false), at(2, 2, true), at(2, 0, true)]);
         let raw = PolyMeshRaw {
-            points,
+            points: points.iter().map(|&p| crate::types::to_dvec3(p)).collect(),
             faces: q.iter().map(|k| k.to_vec()).collect(),
             owner: vec![0; q.len()],
             neighbour: Vec::new(),
@@ -1315,7 +1317,6 @@ mod tests {
     /// atan(3) = 71.565 deg, past G4's 70. G4's subject is the FACE, and the
     /// block's two internal faces both fail.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_sheared_block_fails_g4_naming_the_face() {
         let mut raw = block(1.0, 1, 1.0, 1, 1.0, 3);
         for p in &mut raw.points {
@@ -1343,7 +1344,6 @@ mod tests {
     /// still counts both faces. Without it the test above could pass because
     /// the shear broke something else.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_shear_below_seventy_is_reported_not_refused() {
         let mut raw = block(1.0, 1, 1.0, 1, 1.0, 3);
         for p in &mut raw.points {
@@ -1408,14 +1408,14 @@ mod tests {
     /// G6's 1e4 is 167 times looser and can never fire first on a box. This
     /// records what G6 is actually for: the shapes G5 cannot see.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn on_a_slab_tau_times_cond_is_exactly_three() {
         for t in [1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4] {
             let raw = block(1.0, 1, 1.0, 1, t, 1);
             let rep = measure(&raw, &QualityThresholds::default()).unwrap();
             let prod = rep.min_thickness_ratio * rep.max_cond;
             assert!(
-                (prod - 3.0).abs() < 1e-9,
+                ((prod - 3.0).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-9),
                 "t = {t}: tau {} * cond {} = {}",
                 rep.min_thickness_ratio,
                 rep.max_cond,

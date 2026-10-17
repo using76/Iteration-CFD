@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::capture::capture_replays_bitwise;
+use crate::mesh::gpugeom::{GeoVec3, geo_points};
 use crate::solver::{LinearSolverKind, Preconditioner};
+use crate::types::DVec3;
 
 fn gpu() -> Option<Gpu> {
     Gpu::new(0).ok()
@@ -445,7 +447,7 @@ fn a_moving_step_replays_bitwise() {
     // through the shared borrow, so every build starts where the last ended.
     let gm = GpuMesh::upload(&g, hm).expect("mesh");
 
-    let build = || -> Result<(Simple, PbicgstabBackend, crate::DevBuf<Vec3>)> {
+    let build = || -> Result<(Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)> {
         let mut reset = AleMesh::new(&g, hm, &gm, &rig.rb.points, &rig.csr)?;
         reset.recompute_in_place(&g, &gm)?;
         drop(reset);
@@ -455,7 +457,7 @@ fn a_moving_step_replays_bitwise() {
         s.attach_motion(&g, ale, &[])?;
         let mut backend = PbicgstabBackend::new(ctrl.p_solver);
         backend.setup(&g, hm, &gm, &SystemProbe::default())?;
-        let spare = g.upload(&rig.motion.points_at(0.125))?;
+        let spare = g.upload(&geo_points(&rig.motion.points_at(0.125), DVec3::ZERO))?;
         Ok((s, backend, spare))
     };
 
@@ -464,7 +466,7 @@ fn a_moving_step_replays_bitwise() {
     // The points alternate moved, rest, moved, ... with FIXED device
     // pointers: a device copy moves them, a device copy backs the old level
     // up, and `advance` does the rest - no host write anywhere in the step.
-    let iterate = |(s, b, spare): &mut (Simple, PbicgstabBackend, crate::DevBuf<Vec3>)| {
+    let iterate = |(s, b, spare): &mut (Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)| {
         {
             let ale = s.motion_mut().expect("attached");
             g.stream().memcpy_dtod(&*spare, &mut ale.points)?;
@@ -507,7 +509,7 @@ fn a_moving_step_replays_bitwise() {
         "moving step: move_mesh plus outer corrector (SPEC-LIT 105.10)",
         build,
         iterate,
-        |(s, _, _): &(Simple, PbicgstabBackend, crate::DevBuf<Vec3>)| {
+        |(s, _, _): &(Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)| {
             let u = g.download(&s.u().f)?;
             let mut flat = Vec::with_capacity(u.len() * 3);
             for c in &u {

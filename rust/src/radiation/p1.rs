@@ -705,8 +705,8 @@ mod tests {
     /// 0 K - the closed-form slab of SPEC-LIT §135.5 at tau = 1.
     fn slab(gpu: &Gpu) -> Result<(HostMesh, GpuMesh, GpuScalarField)> {
         let axis = |lo: f64, hi: f64, n: usize| GradedAxis {
-            lo,
-            hi,
+            lo: lo as Scalar,
+            hi: hi as Scalar,
             n,
             expansion: 1.0,
             two_sided: false,

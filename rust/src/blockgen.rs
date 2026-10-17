@@ -7515,11 +7515,11 @@ mod tests {
         assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
 
         let expect = 1.0 - 4.0 / 3.0 * pi * r * r * r;
-        let err = (rep.total_volume - expect).abs();
+        let err = (rep.total_volume - expect as f64).abs();
         let h: Scalar = 1.0 / 40.0;
         let bound = 4.0 * pi * r * r * h; // area * h
         assert!(
-            err < bound,
+            err < bound as f64,
             "volume error {err} exceeds the O(h) bound {bound} \
              (got {}, expected {expect})",
             rep.total_volume
@@ -7607,7 +7607,7 @@ mod tests {
         assert!(rep.max_closure_error < 1e-10, "closure {}", rep.max_closure_error);
 
         let expect = 1.0 - 4.0 / 3.0 * pi * r * r * r;
-        let err_cut = (rep.total_volume - expect).abs();
+        let err_cut = (rep.total_volume - expect as f64).abs();
         let h: Scalar = 1.0 / 40.0;
         let err_castellated_bound = 4.0 * pi * r * r * h; // O(h), §23.5's own bound
         println!(
@@ -7616,7 +7616,7 @@ mod tests {
             rep.total_volume
         );
         assert!(
-            err_cut < 0.2 * err_castellated_bound,
+            err_cut < 0.2 * err_castellated_bound as f64,
             "cut-cell error {err_cut} is not much smaller than castellation's O(h) bound \
              {err_castellated_bound}"
         );
@@ -7643,7 +7643,7 @@ mod tests {
         assert!(rep.min_volume > 0.0, "a merged mesh must have no non-positive cell");
         let h3 = (1.0 / 30.0 as Scalar).powi(3);
         assert!(
-            rep.min_volume >= DEFAULT_THETA_MIN * h3 * 0.999,
+            rep.min_volume >= DEFAULT_THETA_MIN as f64 * h3 as f64 * 0.999,
             "smallest surviving cell {} is below theta_min * V_full = {}",
             rep.min_volume,
             DEFAULT_THETA_MIN * h3
@@ -7958,7 +7958,7 @@ mod tests {
         for (axis, lo, hi) in [(0usize, xlo, xhi), (1, ylo, yhi), (2, zlo, zhi)] {
             for want in [lo, hi] {
                 assert!(
-                    raw.points.iter().any(|p| on_plane(axis, want, *p)),
+                    raw.points.iter().any(|p| on_plane(axis, want as Scalar, crate::types::to_vec3(*p))),
                     "no point on the {} = {} extent face",
                     ["x", "y", "z"][axis],
                     want

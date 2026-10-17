@@ -1516,7 +1516,7 @@ pub(crate) mod tests {
             .expect("geometry");
         let total = host.check().total_volume;
         let want = 512.0 - 4.0 / 3.0 * std::f64::consts::PI as Scalar * 27.0;
-        let rel = (total - want).abs() / want;
+        let rel = (total - want as f64).abs() / want as f64;
         assert!(
             rel < 0.05,
             "kept volume {total} vs the analytic {want} ({:.1} % off)",
@@ -1730,8 +1730,8 @@ pub(crate) mod tests {
                     let q = full.points[p as usize];
                     let xyz = [q.x, q.y, q.z];
                     for a in 0..3 {
-                        lo[c][a] = lo[c][a].min(xyz[a]);
-                        hi[c][a] = hi[c][a].max(xyz[a]);
+                        lo[c][a] = lo[c][a].min(xyz[a] as Scalar);
+                        hi[c][a] = hi[c][a].max(xyz[a] as Scalar);
                     }
                 }
             }
@@ -1761,7 +1761,7 @@ pub(crate) mod tests {
                     .filter(|&c| {
                         keep[c]
                             && (0..3).all(|a| {
-                                probe[a] >= lo[c][a] - SLACK && probe[a] <= hi[c][a] + SLACK
+                                probe[a] >= (lo[c][a] - SLACK) as f64 && probe[a] <= (hi[c][a] + SLACK) as f64
                             })
                     })
                     .collect();
@@ -1791,7 +1791,7 @@ pub(crate) mod tests {
                     }
                 }
                 if n_seen < star.len() {
-                    found.push(Vec3::new(probe[0], probe[1], probe[2]));
+                    found.push(Vec3::new(probe[0] as Scalar, probe[1] as Scalar, probe[2] as Scalar));
                 }
             }
         }

@@ -59,7 +59,7 @@ fn the_swept_volume_kernel_is_its_host_twin_bitwise() {
         ale.advance(&gpu, &gm, DdtScheme::Euler.coeffs(0.01, 0.01, 0).expect("euler coeffs"))
             .expect("advance");
         gpu.sync().expect("sync");
-        let swept: Vec<Scalar> =
+        let swept: Vec<Geo> =
             gpu.download(&ale.swept).expect("swept").into_iter().take(n_if + n_bf).collect();
         let host = host_swept_volumes(&last, &moved, &csr);
         for (f, (d, h)) in swept.iter().zip(host.iter()).enumerate() {
@@ -72,7 +72,7 @@ fn the_swept_volume_kernel_is_its_host_twin_bitwise() {
         for bf in 0..n_bf {
             assert_eq!(
                 swept[n_if + bf].to_bits(),
-                (0.0 as Scalar).to_bits(),
+                (0.0 as Scalar as f64).to_bits(),
                 "boundary face {bf} moved: swept volume is not exactly zero"
             );
         }
@@ -100,7 +100,7 @@ fn the_swept_volume_kernel_is_its_host_twin_bitwise() {
         ale.advance(&gpu, &gm, DdtScheme::Euler.coeffs(0.01, 0.01, 0).expect("euler coeffs"))
             .expect("advance");
         gpu.sync().expect("sync");
-        let swept: Vec<Scalar> = gpu.download(&ale.swept).expect("swept").into_iter().take(csr.offset.len() - 1).collect();
+        let swept: Vec<Geo> = gpu.download(&ale.swept).expect("swept").into_iter().take(csr.offset.len() - 1).collect();
         let host = host_swept_volumes(&points, &moved, &csr);
         for (f, (d, h)) in swept.iter().zip(host.iter()).enumerate() {
             assert_eq!(d.to_bits(), h.to_bits(), "{name} face {f}: not the host twin's bits");
@@ -138,9 +138,9 @@ fn the_contraction_the_ale_unit_turns_off_is_real() {
             .expect("advance");
         gpu.sync().expect("sync");
         let n_faces = rest.n_internal_faces + rest.n_boundary_faces;
-        let unfused: Vec<Scalar> =
+        let unfused: Vec<Geo> =
             gpu.download(&ale.swept).expect("swept").into_iter().take(n_faces).collect();
-        let got: Vec<Scalar> =
+        let got: Vec<Geo> =
             gpu.download(&fused.swept).expect("swept").into_iter().take(n_faces).collect();
         let host = host_swept_volumes(&last, &moved, &csr);
         for (f, ((u, g), h)) in unfused.iter().zip(got.iter()).zip(host.iter()).enumerate() {
@@ -522,10 +522,10 @@ fn the_ale_step_replays_bitwise() {
                 .iter()
                 .map(|p| interior_sinusoid(*p, lo, hi, 0.04, 0.5, 0.125))
                 .collect();
-            let spare = gpu.upload(&b_points)?;
+            let spare = gpu.upload(&geo_points(&b_points, DVec3::ZERO))?;
             Ok((gm, ale, spare))
         },
-        |(gm, ale, spare): &mut (GpuMesh, AleMesh, DevBuf<Vec3>)| {
+        |(gm, ale, spare): &mut (GpuMesh, AleMesh, DevBuf<GeoVec3>)| {
             // The points alternate rest, moved, rest, ... with FIXED device
             // pointers, so every replayed step really moves.
             let c = DdtScheme::Backward.coeffs(0.01, 0.01, 1)?;
@@ -533,7 +533,7 @@ fn the_ale_step_replays_bitwise() {
             gpu.stream().memcpy_dtod(&ale.points_old, spare)?;
             ale.advance(&gpu, gm, c)
         },
-        |(gm, ale, _): &(GpuMesh, AleMesh, DevBuf<Vec3>)| {
+        |(gm, ale, _): &(GpuMesh, AleMesh, DevBuf<GeoVec3>)| {
             Ok(vec![
                 ("v", gpu.download(&gm.v)?),
                 ("c", flat(&gpu.download(&gm.c)?)),
@@ -545,12 +545,12 @@ fn the_ale_step_replays_bitwise() {
                 ("b_y", gpu.download(&gm.b_y)?),
                 ("v0", gpu.download(&ale.v0)?),
                 ("v00", gpu.download(&ale.v00)?),
-                ("swept", gpu.download(&ale.swept)?),
-                ("swept0", gpu.download(&ale.swept0)?),
+                ("swept", gpu.download(&ale.swept)?.into_iter().map(|v| v as Scalar).collect()),
+                ("swept0", gpu.download(&ale.swept0)?.into_iter().map(|v| v as Scalar).collect()),
                 ("phi_mesh", gpu.download(&ale.phi_mesh.f)?),
                 ("phi_mesh_b", gpu.download(&ale.phi_mesh.bf)?),
-                ("points", flat(&gpu.download(&ale.points)?)),
-                ("points_old", flat(&gpu.download(&ale.points_old)?)),
+                ("points", flat(&gpu.download(&ale.points)?.iter().map(|p| Vec3::new(p.x as Scalar, p.y as Scalar, p.z as Scalar)).collect::<Vec<_>>())),
+                ("points_old", flat(&gpu.download(&ale.points_old)?.iter().map(|p| Vec3::new(p.x as Scalar, p.y as Scalar, p.z as Scalar)).collect::<Vec<_>>())),
             ])
         },
     )

@@ -115,6 +115,7 @@ fn blasius(eta_max: Scalar, n: usize) -> Vec<(Scalar, Scalar, Scalar, Scalar)> {
 /// criterion is not the published one**, and no amount of agreement on the
 /// correlations would tell you.
 #[test]
+// f32 (F32-16): Blasius shooting converges to 1e-4 in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_point_one_nine_three_is_a_property_of_the_blasius_profile() {
     let sol = blasius(10.0, 200_000);
@@ -185,7 +186,6 @@ fn the_two_point_one_nine_three_is_a_property_of_the_blasius_profile() {
 /// rather than merely bounded, because it is the size of the only difference
 /// between following the paper and following the documentation.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_forms_of_re_thetac_agree() {
     let mut worst = 0.0 as Scalar;
     let mut worst_at = 0.0 as Scalar;
@@ -202,7 +202,7 @@ fn the_two_forms_of_re_thetac_agree() {
     }
     println!("  Re_thetac expanded vs nested: worst {worst:.3e} relative, at Re_theta~ = {worst_at}");
     assert!(
-        worst < 1e-12,
+        (worst as f64) < crate::precision::roundoff_tol(1e-12),
         "the two published forms of Re_thetac disagree by {worst:.3e} at \
          Re_theta~ = {worst_at}, which is far more than a rearrangement costs"
     );
@@ -256,6 +256,7 @@ fn re_thetac_is_below_re_thetat_and_positive_over_the_fitted_range() {
 /// one IS asserted, because it is the breakpoint whose two pieces were
 /// written to meet.
 #[test]
+// f32 (F32-16): f_length 596 jump lost to f32 rounding
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_published_f_length_is_discontinuous_and_this_measures_it() {
     let eps = 1e-9 as Scalar;
@@ -483,7 +484,6 @@ fn the_intermittency_has_the_two_fixed_points_the_constants_imply() {
 /// check that the split actually chosen never puts a negative number on the
 /// diagonal.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gamma_source_split_never_makes_the_diagonal_negative() {
     let c = LmCoeffs::default();
     for gamma in [0.0 as Scalar, 1e-12, 0.02, 0.5, 1.0] {
@@ -497,7 +497,8 @@ fn the_gamma_source_split_never_makes_the_diagonal_negative() {
                 let lhs = su - sp * gamma - susp * gamma;
                 let rhs = a * (1.0 - c.ce1 * gamma) + b * gamma - b * c.ce2 * gamma * gamma;
                 assert!(
-                    (lhs - rhs).abs() <= 1e-9 * rhs.abs().max(1.0),
+                    ((lhs - rhs).abs() as f64)
+                        <= crate::precision::roundoff_tol(1e-9) * rhs.abs().max(1.0) as f64,
                     "the split does not reconstruct the source: {lhs} vs {rhs}"
                 );
             }
@@ -949,6 +950,7 @@ fn gate_88_r_a_frozen_intermittency_reproduces_plain_sst_bitwise() {
 /// not to this: a digit dropped in one of them is only visible by measuring
 /// them against each other.
 #[test]
+// f32 (F32-16): F_length host-device 7.4e-5 rel, over cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_host_and_device_correlations_agree() {
     let Some(gpu) = gpu() else { return };

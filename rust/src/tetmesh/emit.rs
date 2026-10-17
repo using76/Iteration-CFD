@@ -646,7 +646,7 @@ mod tests {
         assert_eq!(e.raw.patches.iter().map(|p| (p.start, p.size)).collect::<Vec<_>>(), vec![(0, 3), (3, 3)]);
         let m = build_host_mesh(&e.raw).unwrap();
         assert!(m.sf[0].dot(m.c[1] - m.c[0]) > 0.0);
-        let v: f64 = m.v.iter().sum();
+        let v: f64 = m.v.iter().map(|&x| x as f64).sum();
         assert!((v - volume(&pts, &tets)).abs() <= 1e-15, "{v}");
         assert!(q.passed(), "{}", q.refusal_text());
     }
@@ -711,7 +711,7 @@ mod tests {
             assert_eq!([x.x, x.y, x.z], p, "{name}: point {k}");
         }
         let moved = (0..o.points.len()).filter(|&v| o.points[v] != r.recovery.points[v]).count();
-        let (v0, v1) = (volume(&o.points, &o.tets), m.v.iter().sum::<f64>());
+        let (v0, v1) = (volume(&o.points, &o.tets), m.v.iter().map(|&x| x as f64).sum::<f64>());
         let rv = (v1 - v0).abs() / v0;
         assert!(rv <= 1e-12, "{name}: volume rel {rv:e}");
         // TET-08's own count, from a surface that carries only the patches.

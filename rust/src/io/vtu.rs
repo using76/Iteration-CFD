@@ -1054,7 +1054,6 @@ mod tests {
     /// The CellData path is byte-for-byte what it was before this unit: same
     /// 2x1x1 mesh, same scalar+vector fields, same time, same bytes.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_cell_data_path_writes_the_same_bytes_as_before_s2() {
         let m = mesh_2x1x1();
         let p_vals: Vec<Scalar> = (0..m.n_cells).map(|i| 1.5 * (i as Scalar) + 0.25).collect();

@@ -34586,7 +34586,7 @@ eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from
 `#[cfg(not(feature = "single"))]` and a plain `#[ignore]` measurement, and moves neither count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **489** library
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **303** library
 tests and **17** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
@@ -34597,7 +34597,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, and F32-16 (below) took 186 away. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
 105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's), §105.18 one (the `backward`
 stroke's regression test) and §144.3 one (`ofgpu-validate`'s 10:1 cantilever mesh test, which first compiled under
 the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`).
@@ -34632,6 +34632,58 @@ s2s 25, automesher 23, fv 16, fan 13, wallfunctions 11, pressure 11, mesh 10, rh
 blockgen 9, and 84 across 22 more modules. The 13 binary tests are: `ofgpu-lowmach` 4,
 `ofgpu-datacentre` 2, `ofgpu-sample` 2, `ofgpu-validate` 2, and one each in `ofgpu-bench`,
 `ofgpu-buoyant` and `ofgpu-regions`.
+
+**F32-16 (2026-10-17): the single library test target compiles, and the marked tests of seven modules are sorted.**
+Until this unit, `cargo test --release --lib --features single` did not compile. It stopped on 202 type
+errors, and every one was in test code. Most were tests that mixed an f32 `Scalar` with the f64 `MeshReport`
+and `PolyMeshRaw` points of §118.2. Two handed a `DevBuf<Vec3>` to `memcpy_dtod` where §118.8's `GeoVec3`
+buffer is expected. Each error was fixed in the test itself, with a conversion that is the identity in the
+f64 build, and nothing outside `#[cfg(test)]` changed. The 322 marked tests in io, models, cht, parcels,
+solid, s2s and the automesher were then run under the feature. Each was given one of four outcomes.
+
+* **Pass (71).** These pass as they stand, and their attribute is removed.
+* **R (111).** These fail only by round-off, and their subject is round-off: a device kernel against its host
+  twin, two algebraically equal forms, an identity or closed form evaluated in floating point, or a
+  conservation ledger. Their tolerance is now `precision::roundoff_tol(tol64)`. Under (118.14.1) the f64 build
+  keeps `tol64` bit for bit, and `single` takes `max(tol64, min(tol64·2^29, 1e-5))`. The measure is relative,
+  or the compared values are of order one, so the cap is never an absolute bar on a small quantity. They pass,
+  and their attribute is removed.
+* **f64 subject (4).** These are `#[cfg(not(feature = "single"))]` and carry no attribute:
+  `models::menter_gamma::tests::the_reference_re_thetac_rows_reproduce` and
+  `models::menter_gamma::tests::the_reference_tu_l_and_lambda_rows_reproduce_bit_for_bit` (§90's reference
+  digits, at 1e-15 and bit for bit); `models::menter_gamma::tests::f3_is_the_blending_floor_written_against_ry`
+  (a bound of 1e-100, below f32's range); and `io::fields::tests::number_format_matches_printf_g` (a 12-digit
+  `%g`, which an f32 cannot carry). The single target therefore lists 2782 tests, against 2786 before.
+* **Kept (136).** These keep the attribute, with a `// f32 (F32-16): <cause>` line above it. None was made to pass.
+  They are the single-build defects that F32-17 and docs/17-review-later.md inherit, in six groups:
+  - 14 automesher layer and snap tests fail through §92.3's f32 closure refusal (docs/17 A28);
+  - in 6 s2s tests, the box enclosure's coarse rows sum to 1.16 under `single`, and the closure check refuses;
+  - 11 tests meet a NaN: Spalart–Allmaras's log-layer terms, the realizability number at k/ε = 1e-6, and three
+    io fluid runs that diverge;
+  - in 34 tests an iteration stalls or stops at its cap: the stress-mode thermal loop of the io pair tests, the
+    externalSlab loop against §100.7's 1e-10, solid's outer, Anderson and GMRES loops, and the Blasius shooting;
+  - in 25 tests the error lies past the 84-ulp cap or a published band, at 1.06e-5 to 3.3e-2 relative;
+  - 46 tests assert an exact value or zero, a threshold one ulp wide, a central difference that cancels in f32,
+    or a discrete answer, such as a sweep count, or a voxel size of 0.1 under `assert_eq`.
+
+| module | listed | pass | R | f64 subject | kept |
+|---|---|---|---|---|---|
+| io | 85 | 31 | 6 | 1 | 47 |
+| models | 52 | 2 | 17 | 3 | 30 |
+| cht | 48 | 26 | 14 | 0 | 8 |
+| solid | 47 | 5 | 30 | 0 | 12 |
+| parcels | 42 | 3 | 25 | 0 | 14 |
+| s2s | 25 | 1 | 14 | 0 | 10 |
+| automesher | 23 | 3 | 5 | 0 | 15 |
+| **total** | 322 | 71 | 111 | 4 | 136 |
+
+The count is taken by `grep -rc 'ignore = "fails at f32: SPEC-LIT 112.3"' src`. It reads 489 library tests and 17 binary
+tests before this unit, and 303 and 17 after it: 489 − 71 − 111 − 4 = 303. The plan asked for a drop of at least
+270. The drop is 186, and the 136 kept tests are the rest. Under the feature, the 182 tests whose attribute is gone
+pass in one filtered run per module: io 37 in 442 s, solid 35 in 593 s, models 19 in 130 s, and cht, parcels, s2s and the
+automesher in under 10 s each. Two of solid's tests take nearly all of solid's time. They are F32-15's
+`gate_95_e_the_bimetal_curvature_is_timoshenko_s` and `the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`,
+which now finish and pass as they stand, with the GPU shared by three lanes.
 
 ### 112.4 `ofgpu-validate` at f32, section by section
 

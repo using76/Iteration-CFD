@@ -17,6 +17,7 @@ use crate::field::BcKind;
 use crate::io::case::{LinearSolverKind, Preconditioner};
 use crate::io::polymesh::build_host_mesh;
 use crate::mesh::topology::tests::box_mesh;
+use crate::types::to_dvec3;
 
 fn gpu() -> Option<Gpu> {
     Gpu::new(0).ok()
@@ -166,7 +167,6 @@ fn a_non_positive_conductivity_or_capacity_is_refused() {
 /// (S47.12). `h_c ~ P^0.95` exactly, and the prefactor is checked against a
 /// hand computation.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_cmy_correlation_matches_hand_arithmetic_and_scales_as_p_to_the_0_95() {
     let (k1, k2) = (50.0 as Scalar, 100.0 as Scalar);
     let (s1, s2) = (1e-6 as Scalar, 1e-6 as Scalar);
@@ -180,7 +180,7 @@ fn the_cmy_correlation_matches_hand_arithmetic_and_scales_as_p_to_the_0_95() {
     // so m_a/sigma = 1e5 exactly, and (P/H_c)^0.95 = (1e-3)^0.95.
     let want = 1.25 * (200.0 / 3.0) * 1.0e5 * (1.0e-3 as Scalar).powf(0.95);
     assert!(
-        (got - want).abs() <= 1e-9 * want,
+        (got - want).abs() as f64 <= crate::precision::roundoff_tol(1e-9) * want as f64,
         "{got} vs the hand value {want}"
     );
 
@@ -189,7 +189,8 @@ fn the_cmy_correlation_matches_hand_arithmetic_and_scales_as_p_to_the_0_95() {
     let hi = cmy_contact_conductance(k1, k2, s1, s2, m1, m2, 2.0 * p, hardness).expect("cmy");
     let ratio = hi / got;
     assert!(
-        (ratio - (2.0 as Scalar).powf(0.95)).abs() < 1e-12,
+        ((ratio - (2.0 as Scalar).powf(0.95)).abs() as f64)
+            < crate::precision::roundoff_tol(1e-12),
         "P^0.95 scaling: {ratio}"
     );
 
@@ -202,14 +203,17 @@ fn the_cmy_correlation_matches_hand_arithmetic_and_scales_as_p_to_the_0_95() {
 /// (S47.11) is exactly the line ASTM D5470 measures: `R_total` is affine in
 /// the TIM thickness with slope `1/k` and intercept `R_c1 + R_c2`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_tim_resistance_is_the_astm_d5470_line() {
     let (rc1, rc2, k) = (2.0e-5 as Scalar, 3.0e-5 as Scalar, 3.0 as Scalar);
     let r0 = tim_resistance(rc1, 0.0, k, rc2).expect("r");
     assert!((r0 - (rc1 + rc2)).abs() < 1e-18, "intercept {r0}");
     for t in [1e-5 as Scalar, 5e-5, 2e-4] {
         let r = tim_resistance(rc1, t, k, rc2).expect("r");
-        assert!(((r - r0) - t / k).abs() <= 1e-15 * r, "slope at t = {t}");
+        assert!(
+            ((r - r0) - t / k).abs() as f64
+                <= crate::precision::roundoff_tol(1e-15) * r as f64,
+            "slope at t = {t}"
+        );
     }
     assert!(tim_resistance(rc1, 1e-5, 0.0, rc2).is_err());
     assert!(tim_resistance(-1.0, 1e-5, k, rc2).is_err());
@@ -408,7 +412,6 @@ fn one_region(m: &HostMesh) -> ThermalMesh {
 /// upper-triangular with no re-sort. The builder checks it; this checks the
 /// builder.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_concatenated_mesh_stays_upper_triangular() {
     let (a, b) = two_slabs(7, 0.01, 5, 0.02);
     let tm = couple(&a, &b, 0.0);
@@ -438,7 +441,9 @@ fn the_concatenated_mesh_stays_upper_triangular() {
     );
     // Volumes add, which is the cheapest possible check that nothing was lost.
     let want: Scalar = a.v.iter().sum::<Scalar>() + b.v.iter().sum::<Scalar>();
-    assert!((r.total_volume - want).abs() < 1e-15 * want);
+    assert!(
+        (r.total_volume - want as f64).abs() < crate::precision::roundoff_tol(1e-15) * want as f64
+    );
 }
 
 /// The pairing is a bijection, it points both ways, and it names the cell on
@@ -479,7 +484,6 @@ fn the_pairing_is_a_bijection_that_points_both_ways() {
 /// would have given the full cell-to-cell span instead, and `C_A` would have
 /// been roughly half what it should be.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn an_interface_face_keeps_its_one_sided_delta_and_a_zero_correction() {
     let n1 = 8;
     let l1 = 0.01 as Scalar;
@@ -493,7 +497,7 @@ fn an_interface_face_keeps_its_one_sided_delta_and_a_zero_correction() {
     let cell_to_cell = 1.0 / (h1 / 2.0 + 0.02 / 2.0 / 4.0);
     let got = tm.host.b_delta_coeffs[bfa];
     assert!(
-        (got - want).abs() <= 1e-12 * want,
+        (got - want).abs() as f64 <= crate::precision::roundoff_tol(1e-12) * want as f64,
         "b_delta_coeffs {got}, one-sided {want}, cell-to-cell would be {cell_to_cell}"
     );
     assert_eq!(tm.host.b_non_orth_corr[bfa], Vec3::ZERO);
@@ -647,7 +651,6 @@ fn the_fluid_region_must_be_region_zero() {
 /// different orders and pretending otherwise would be the kind of "bitwise"
 /// claim this project has had to correct before.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_tensor_path_reproduces_the_scalar_one_for_an_isotropic_solid() {
     let d = Vec3::new(0.002, 0.003, 0.004);
     let m = block([6, 5, 4], d, Vec3::ZERO);
@@ -677,7 +680,7 @@ fn the_tensor_path_reproduces_the_scalar_one_for_an_isotropic_solid() {
         worst_ulp = worst_ulp.max((got.to_bits() as i64 - want.to_bits() as i64).abs());
     }
     assert!(
-        worst_rel < 1e-14,
+        (worst_rel as f64) < crate::precision::roundoff_tol(1e-14),
         "isotropic limit differs by {worst_rel} relative ({worst_ulp} ulp)"
     );
 
@@ -687,7 +690,7 @@ fn the_tensor_path_reproduces_the_scalar_one_for_an_isotropic_solid() {
     // measured, not assumed - is why ANISOTROPY_RESIDUAL_LIMIT is 1e-10 rather
     // than 0.
     assert!(
-        c.worst_residual < 1e-14,
+        (c.worst_residual as f64) < crate::precision::roundoff_tol(1e-14),
         "isotropic anisotropy residual {} (exact arithmetic gives 0)",
         c.worst_residual
     );
@@ -700,7 +703,6 @@ fn the_tensor_path_reproduces_the_scalar_one_for_an_isotropic_solid() {
 /// refinement, so the test asserts the gap as well as the value - a
 /// regression to linear cannot pass by making the mesh finer.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_face_conductivity_is_harmonic_and_the_linear_one_is_measurably_wrong() {
     let (k_p, k_n) = (1.0 as Scalar, 100.0 as Scalar);
     let m = block([2, 1, 1], Vec3::new(0.005, 0.02, 0.02), Vec3::ZERO);
@@ -754,7 +756,6 @@ fn the_face_conductivity_is_harmonic_and_the_linear_one_is_measurably_wrong() {
 /// mesh has `K Sf` parallel to `Sf`, so the residual is IDENTICALLY zero -
 /// not small, zero - which is exactly why that configuration is tier A.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn an_axis_aligned_diagonal_tensor_has_exactly_zero_anisotropy_residual() {
     let m = block([5, 4, 3], Vec3::new(0.002, 0.003, 0.004), Vec3::ZERO);
     let tm = one_region(&m);
@@ -769,7 +770,7 @@ fn an_axis_aligned_diagonal_tensor_has_exactly_zero_anisotropy_residual() {
     // face - and a few ulp in f64. Eleven orders of magnitude below the
     // refusal threshold, and thirteen below a one-degree rotation of K.
     assert!(
-        c.worst_residual < 1e-14,
+        (c.worst_residual as f64) < crate::precision::roundoff_tol(1e-14),
         "axis-aligned diagonal residual {}",
         c.worst_residual
     );
@@ -783,11 +784,17 @@ fn an_axis_aligned_diagonal_tensor_has_exactly_zero_anisotropy_residual() {
         let nf = tm.host.sf[f].normalised();
         let got = c.gamma_mag_sf[f] / tm.host.mag_sf[f];
         if nf.x.abs() > 0.99 {
-            assert!((got - 120.0).abs() < 1e-9, "x face: {got}");
+            assert!(
+                ((got - 120.0).abs() as f64) < crate::precision::roundoff_tol(1e-9),
+                "x face: {got}"
+            );
             seen_x = true;
         }
         if nf.z.abs() > 0.99 {
-            assert!((got - 1.4).abs() < 1e-10, "z face: {got}");
+            assert!(
+                ((got - 1.4).abs() as f64) < crate::precision::roundoff_tol(1e-10),
+                "z face: {got}"
+            );
             seen_z = true;
         }
     }
@@ -810,7 +817,6 @@ fn an_axis_aligned_diagonal_tensor_has_exactly_zero_anisotropy_residual() {
 ///   **refused**, naming the number and the two schemes that would be needed
 ///   instead.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn an_anisotropic_conductivity_on_a_sheared_mesh_is_refused_naming_mpfa() {
     // Sheared in x by 0.5 per unit y, so the x-normal faces tilt into the
     // x-y plane and the y- and z-normal faces stay axis-aligned.
@@ -870,6 +876,7 @@ fn an_anisotropic_conductivity_on_a_sheared_mesh_is_refused_naming_mpfa() {
 
 /// A steady solid between two fixed temperatures is a straight line, exactly.
 #[test]
+// f32 (F32-16): linear-profile departure 6.1e-5 K is 2 ulps at 350 K
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_steady_isotropic_solid_is_exactly_linear() {
     let Some(gpu) = gpu() else { return };
@@ -945,7 +952,6 @@ fn slab_solver<'m>(
 /// iteration to converge: that is the claim §47.3 makes and this is what
 /// measures it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate1_a_two_layer_slab_with_contact_resistance_is_exact() {
     let Some(gpu) = gpu() else { return };
 
@@ -970,14 +976,15 @@ fn gate1_a_two_layer_slab_with_contact_resistance_is_exact() {
         // minus what leaves it.
         let q_got = -flux.into_a / area;
         assert!(
-            (q_got / q_exact - 1.0).abs() < 1e-13,
+            ((q_got / q_exact - 1.0).abs() as f64)
+                < crate::precision::roundoff_tol(1e-13),
             "Rc = {r_c}: q = {q_got}, exact {q_exact}, relative {}",
             q_got / q_exact - 1.0
         );
 
         // Gate 4, on the same run: the two sides cancel to round-off.
         assert!(
-            flux.imbalance() < 1e-12,
+            (flux.imbalance() as f64) < crate::precision::roundoff_tol(1e-12),
             "Rc = {r_c}: interface imbalance {}",
             flux.imbalance()
         );
@@ -987,7 +994,8 @@ fn gate1_a_two_layer_slab_with_contact_resistance_is_exact() {
         let p = tm.pairs[0];
         let jump = bt[p.bf_a as usize] - bt[p.bf_b as usize];
         assert!(
-            (jump - q_got * r_c).abs() <= 1e-10 * (t_hot - t_cold),
+            (jump - q_got * r_c).abs() as f64
+                <= crate::precision::roundoff_tol(1e-10) * (t_hot - t_cold) as f64,
             "Rc = {r_c}: jump {jump}, q Rc {}",
             q_got * r_c
         );
@@ -998,7 +1006,6 @@ fn gate1_a_two_layer_slab_with_contact_resistance_is_exact() {
 /// cannot satisfy.** Flux continuity holds on an UNCONVERGED field, at the
 /// very first iterate, because both sides read one `h_G` and one `|Sf|`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate1_flux_continuity_holds_on_an_unconverged_field() {
     let Some(gpu) = gpu() else { return };
 
@@ -1031,7 +1038,6 @@ fn gate1_flux_continuity_holds_on_an_unconverged_field() {
 /// one `h_G` and one `|Sf|`, so the two coupled matrix entries are **bitwise**
 /// equal and a pure conduction problem is exactly symmetric.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_two_coupled_matrix_entries_are_bitwise_equal() {
     let Some(gpu) = gpu() else { return };
 
@@ -1061,7 +1067,6 @@ fn the_two_coupled_matrix_entries_are_bitwise_equal() {
 /// **The §13.4.1 pair test for `Rc`.** Two runs identical in every byte but
 /// the contact resistance, REQUIRED to produce different output.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_case_that_says_rc_gets_rc() {
     let Some(gpu) = gpu() else { return };
 
@@ -1094,7 +1099,6 @@ fn a_case_that_says_rc_gets_rc() {
 
 /// **The §13.4.1 pair test for `kappaSolid`.**
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_case_that_says_kappa_solid_gets_kappa_solid() {
     let Some(gpu) = gpu() else { return };
 
@@ -1118,7 +1122,6 @@ fn a_case_that_says_kappa_solid_gets_kappa_solid() {
 /// `[1 10 1]` are two different materials and must give two different
 /// answers - on a mesh where the second direction actually carries heat.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_case_that_says_an_anisotropic_kappa_gets_one() {
     let Some(gpu) = gpu() else { return };
 
@@ -1161,7 +1164,6 @@ fn a_case_that_says_an_anisotropic_kappa_gets_one() {
 /// what a `fixedFluxTemperature` with `q = 0` contributes. Both halves are
 /// asserted: the triple, and the assembled coefficients.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate2_a_zero_conductivity_solid_contributes_bitwise_nothing() {
     let Some(gpu) = gpu() else { return };
 
@@ -1203,6 +1205,7 @@ fn gate2_a_zero_conductivity_solid_contributes_bitwise_nothing() {
 /// tolerance, because the two runs are different-sized linear systems and
 /// their Krylov iterates are not the same numbers.
 #[test]
+// f32 (F32-16): wall T sits 1 ulp of 380 K; the bar is absolute
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate2_a_zero_conductivity_solid_is_an_adiabatic_wall() {
     let Some(gpu) = gpu() else { return };
@@ -1268,6 +1271,7 @@ fn gate2_a_zero_conductivity_solid_is_an_adiabatic_wall() {
 /// the solid's temperature, and the fluid-side field must reproduce the one a
 /// plain `fixedValue` wall gives.
 #[test]
+// f32 (F32-16): face value sits 1 ulp of 380 K; the bar is absolute
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate2_an_infinitely_conductive_solid_is_a_fixed_value_wall() {
     let Some(gpu) = gpu() else { return };
@@ -1329,7 +1333,6 @@ fn gate2_an_infinitely_conductive_solid_is_a_fixed_value_wall() {
 /// contact resistance. Nothing downstream that assumes `fr in [0,1]` can
 /// break.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn fr_stays_a_convex_combination_across_twelve_decades() {
     let Some(gpu) = gpu() else { return };
 
@@ -1361,6 +1364,7 @@ fn fr_stays_a_convex_combination_across_twelve_decades() {
 /// `boundary_coeffs`, i.e. out of the matrix the solver actually gets, so the
 /// trap cannot be reintroduced silently.
 #[test]
+// f32 (F32-16): dirichlet-neumann cancellation leaves 1.8e-5 relative, past the cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn ref_grad_under_delivers_an_interface_source_by_exactly_one_minus_fr() {
     let Some(gpu) = gpu() else { return };
@@ -1432,7 +1436,6 @@ fn ref_grad_under_delivers_an_interface_source_by_exactly_one_minus_fr() {
 /// explicit or lagged coupling gets the early time wrong and drifts; the
 /// implicit one does not.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate3_the_transient_interface_sits_at_the_effusivity_weighted_mean() {
     let Some(gpu) = gpu() else { return };
 
@@ -1546,6 +1549,7 @@ fn gate3_the_transient_interface_sits_at_the_effusivity_weighted_mean() {
 /// `alpha = k/(rho c)`. Two materials with the same diffusivity and a
 /// thousandfold different heat capacity give the same transient.
 #[test]
+// f32 (F32-16): two rho-c scalings round 1.5e-4 K apart, past the cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_transient_solid_depends_only_on_the_diffusivity() {
     let Some(gpu) = gpu() else { return };
@@ -1590,7 +1594,6 @@ fn a_transient_solid_depends_only_on_the_diffusivity() {
 /// the new would move an answer this crate has recorded - so this is what
 /// keeps them from drifting.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_wall_conductance_and_the_wall_ref_grad_are_the_same_law() {
     use crate::wallfunctions::{thermal_wall_conductance, thermal_wall_ref_grad};
 
@@ -1616,7 +1619,10 @@ fn the_wall_conductance_and_the_wall_ref_grad_are_the_same_law() {
             }
         }
     }
-    assert!(worst < 1e-14, "the two forms of the same law differ by {worst}");
+    assert!(
+        (worst as f64) < crate::precision::roundoff_tol(1e-14),
+        "the two forms of the same law differ by {worst}"
+    );
 
     // The guards agree too.
     assert!(
@@ -1635,7 +1641,6 @@ fn the_wall_conductance_and_the_wall_ref_grad_are_the_same_law() {
 /// This is the check that the coupled condition CONTAINS the wall function
 /// rather than sitting beside it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_coupled_condition_delivers_the_wall_function_flux() {
     let Some(gpu) = gpu() else { return };
     use crate::wallfunctions::{thermal_wall_conductance, thermal_wall_ref_grad};
@@ -1725,7 +1730,6 @@ fn the_coupled_condition_delivers_the_wall_function_flux() {
 /// many faces and a non-uniform field - so the reduction, not just one face,
 /// is what is being checked.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate4_conservation_holds_over_a_many_faced_interface() {
     let Some(gpu) = gpu() else { return };
 
@@ -1818,7 +1822,6 @@ fn gate4_conservation_holds_over_a_many_faced_interface() {
 /// representability. A rotated `K` that happened to be representable would be
 /// built; these are not, and are refused.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_anisotropy_residual_follows_its_closed_form_in_the_misalignment_angle() {
     let m = block([4, 4, 2], Vec3::new(0.002, 0.002, 0.002), Vec3::ZERO);
     let tm = one_region(&m);
@@ -1848,7 +1851,8 @@ fn the_anisotropy_residual_follows_its_closed_form_in_the_misalignment_angle() {
     )
     .expect("an axis-aligned K is representable");
     assert!(
-        aligned.worst_residual < 1e-14,
+        (aligned.worst_residual as f64)
+            < crate::precision::roundoff_tol(1e-14),
         "aligned residual {}",
         aligned.worst_residual
     );
@@ -1868,7 +1872,7 @@ fn the_anisotropy_residual_follows_its_closed_form_in_the_misalignment_angle() {
         let ss = sn * sn * k_par + cs * cs * k_perp;
         let want = q.abs() / (ss * ss + q * q).sqrt();
         assert!(
-            (got - want).abs() <= 1e-12 * want,
+            (got - want).abs() as f64 <= crate::precision::roundoff_tol(1e-12) * want as f64,
             "{deg} deg: residual {got}, closed form {want}"
         );
         measured.push(got);
@@ -1882,7 +1886,7 @@ fn the_anisotropy_residual_follows_its_closed_form_in_the_misalignment_angle() {
     );
     // Even a thousandth of a degree is seven orders above the threshold.
     assert!(
-        measured[0] > 1e5 * ANISOTROPY_RESIDUAL_LIMIT,
+        measured[0] as f64 > 1e5 * ANISOTROPY_RESIDUAL_LIMIT,
         "0.001 deg gives {}, which must still be far above the \
          {ANISOTROPY_RESIDUAL_LIMIT} threshold",
         measured[0]
@@ -1897,9 +1901,9 @@ fn worst_residual_of(tm: &ThermalMesh, k: Tensor) -> Scalar {
     let mut worst: Scalar = 0.0;
     for f in 0..h.n_internal_faces {
         let (o, n) = (h.owner[f] as usize, h.neighbour[f] as usize);
-        let (_, _, rp) = super::one_sided_conductance(k, h.sf[f], h.cf[f] - h.c[o]);
-        let (_, _, rn) = super::one_sided_conductance(k, h.sf[f], h.c[n] - h.cf[f]);
-        worst = worst.max(rp.max(rn));
+        let (_, _, rp) = super::one_sided_conductance(k, to_dvec3(h.sf[f]), to_dvec3(h.cf[f] - h.c[o]));
+        let (_, _, rn) = super::one_sided_conductance(k, to_dvec3(h.sf[f]), to_dvec3(h.c[n] - h.cf[f]));
+        worst = worst.max((rp.max(rn)) as Scalar);
     }
     worst
 }
@@ -1911,7 +1915,6 @@ fn worst_residual_of(tm: &ThermalMesh, k: Tensor) -> Scalar {
 /// SPEC-LIT 81: one solid-side conduction iteration captures and replays
 /// bitwise.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_solid_side_iteration_replays_bitwise() {
     let Some(gpu) = gpu() else { return };
     let n = 8usize;
@@ -1987,7 +1990,6 @@ fn host_ldu(gpu: &Gpu, cht: &ConjugateHeat<'_>) -> crate::reference::CpuLdu {
 /// region's `converged` is its own criterion, and both regions see the same
 /// iteration count - there is one solve.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_per_region_residuals_partition_the_global_residual() {
     let Some(gpu) = gpu() else { return };
     let (a, b) = two_slabs(12, 0.010, 9, 0.020);
@@ -2014,7 +2016,10 @@ fn the_per_region_residuals_partition_the_global_residual() {
 
     let lhs = r_g * n_g;
     let err = if lhs > 0.0 { (lhs - sum).abs() / lhs } else { sum };
-    assert!(err <= 1e-10, "partition error {err:e}");
+    assert!(
+        err <= crate::precision::roundoff_tol(1e-10),
+        "partition error {err:e}"
+    );
 
     for (k, rp) in perf.regions.iter().enumerate() {
         assert_eq!(
@@ -2039,7 +2044,6 @@ fn the_per_region_residuals_partition_the_global_residual() {
 /// residual, not the row scale - and "not looked at" is not "converged".
 /// The capture gate's controls: this is the configuration a CUDA graph runs.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn no_region_residual_is_measured_when_residuals_are_not_reported() {
     let Some(gpu) = gpu() else { return };
     let (a, b) = two_slabs(12, 0.010, 9, 0.020);
@@ -2071,7 +2075,6 @@ fn no_region_residual_is_measured_when_residuals_are_not_reported() {
 /// ratio against silicon's 148 is EXACTLY 200 - the number the gate wants,
 /// not a datasheet value.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_row_scale_ratio_is_the_conductivity_ratio() {
     let Some(gpu) = gpu() else { return };
     let (a, b) = two_slabs(20, 0.001, 40, 0.002);
@@ -2094,7 +2097,6 @@ fn the_row_scale_ratio_is_the_conductivity_ratio() {
 /// `the_ranged_norm_over_the_full_range_is_the_global_norm_to_the_bit` does
 /// not: over the full range, the ranged norm is the global norm, to the bit.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_full_range_norm_is_bitwise_the_global_one_on_a_conjugate_matrix() {
     let Some(gpu) = gpu() else { return };
     let (a, b) = two_slabs(12, 0.010, 9, 0.020);
@@ -2253,7 +2255,6 @@ fn the_attached_points_rebuild_the_concatenated_geometry_and_write_one_vtu() {
 /// the coupling marked `PatchKind::Interface` on that region's side - zero of
 /// them on a mesh built with no interface at all.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn region_rows_have_the_region_s_own_lengths() {
     let Some(gpu) = gpu() else { return };
 
@@ -2332,7 +2333,6 @@ fn region_rows_have_the_region_s_own_lengths() {
 /// union, an ordinary patch alone. The gate is stated for the steady,
 /// correction-free assembly, and asserts the two control values.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_93a_a_region_s_rows_are_bitwise_the_region_alone() {
     let Some(gpu) = gpu() else { return };
 
