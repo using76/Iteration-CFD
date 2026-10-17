@@ -58514,7 +58514,7 @@ from the host map, so a reader that understands a moving polyMesh shows the body
 ### 161.7 Refusals
 
 Refused by name before a field exists: a steady run (no `-endTime`); any turbulence model other
-than laminar; the case's own `motion` block; `-restartFrom`, `-restartWrite`; `-heaterPower`;
+than laminar (since §161.16: any model §161.16 does not list); the case's own `motion` block; `-restartFrom`, `-restartWrite`; `-heaterPower`;
 `-sealed`; a case `sources` block or `output` block; any `-output` but `foam`; a cyclic pair.
 `Simple::attach_motion` refuses a ddt other than `Euler`/`backward`, fan and porous-jump patches
 (§105.7); `AleMesh` refuses a moving cyclic AMI. A body patch that is cyclic, empty or symmetry,
@@ -58538,7 +58538,8 @@ malformed key of §161.1 are refused by name. A non-finite body state stops the 
 ### 161.9 Known limits
 
 * **Laminar only.** A turbulence model's wall distance and old levels are the static mesh's
-  (§105.12's refusal, kept).
+  (§105.12's refusal, kept). Lifted by §161.16 for the models it audited: under a rigid motion of the
+  whole mesh neither reason holds.
 * **Loose coupling.** The body sees the force one step late, extrapolated; there is no
   sub-iteration. It is stable where the body is heavy against the fluid it displaces
   (`m >> rho V_body`, a car in air); a light body in a dense fluid can go unstable through the
@@ -58555,3 +58556,354 @@ malformed key of §161.1 are refused by name. A non-finite body state stops the 
   supported one.
 * **The written fields** are the solver's; the moved points are written beside them per time
   directory. No restart.
+
+### 161.10 Version 2 - the nozzle
+
+`No GPL-licensed source was consulted.` §161.10-§161.18 are the roadster contract's version 2
+(2026-10-17), written for `src/rigid_body.rs`, `src/rigid_body/thrust.rs`,
+`src/rigid_body/control.rs`, `src/rigid_body/tests_v2.rs`, `cuda/rigidbody.cu`, `AleMesh::reseat` in
+`src/mesh/ale.rs` and the `-rigidBody` hook of `src/bin/lowmach.rs`. The gas dynamics is textbook:
+**J. D. Anderson, *Modern Compressible Flow*, 3rd ed. (McGraw-Hill, 2003), ch. 3 and 5** (the
+isentropic relations and the area-Mach relation) and **G. P. Sutton, O. Biblarz, *Rocket Propulsion
+Elements*, 8th ed. (Wiley, 2010), ch. 3** (the thrust of a nozzle). No nozzle, 6-DOF, controller or
+dynamic-mesh code was opened.
+
+A version-2 thruster carries a `nozzle` instead of a `speed`: a cold-gas nozzle on a perfect gas
+(`gamma` default 1.4, `R` default 287.05 J/(kg K)) whose chamber is regulated to the stagnation state
+`p0`, `T0`, with exit area `exitArea` (`A_e`), expanding to the file's `pAmbient` (`p_a`, default
+101325 Pa). One-dimensional isentropic flow, ideally expanded unless `areaRatio` (`A_e/A*`) is given:
+
+```
+ideally expanded:  M_e = sqrt( 2/(g-1) ((p0/p_a)^((g-1)/g) - 1) ),   p_e = p_a
+areaRatio given:   A_e/A* = (1/M) [2/(g+1) (1 + (g-1)/2 M^2)]^((g+1)/(2(g-1))),  M_e its root > 1,
+                   p_e = p0 (1 + (g-1)/2 M_e^2)^(-g/(g-1))
+T_e = T0/(1 + (g-1)/2 M_e^2),  U_e = M_e sqrt(g R T_e),  rho_e = p_e/(R T_e)
+mdot_max = rho_e U_e A_e,      F_max = mdot_max U_e + (p_e - p_a) A_e
+```
+
+The supersonic root is Newton's iteration from above the root, kept inside a bisection bracket on
+`[1, M_hi]`. Refused by name: a non-positive `p0`, `T0`, `exitArea`, `R` or `pAmbient`; `gamma <= 1`;
+`p0 <= p_a` for the ideal nozzle (nothing flows out); `areaRatio < 1`; a full-valve thrust that is not
+positive (a nozzle over-expanded that far is not this model's).
+
+**The throttle is a model choice.** The valve command `u` in `[0, 1]` scales the chamber pressure,
+and the simple form `F = u F_max`, `mdot = u mdot_max` is taken: both linear in `u`, as they are
+exactly for an ideally expanded nozzle whose `p0` scales with `u` at a fixed exit pressure ratio, and
+approximately otherwise. A thruster with an `on` schedule is at full valve inside its intervals
+(evaluated at the step's middle, as §161.4's jets are) and shut outside; a nozzle with no `on` is
+valved by the controller of §161.14, which the file must then carry.
+
+At 40 bar, 300 K, ideally expanded to 101325 Pa: `M_e = 3.0481`, `T_e = 104.960 K`,
+`U_e = 626.02 m/s`, `rho_e = 3.3631 kg/m3`, `A_e/A* = 4.4332`; with `A_e = 0.01 m2`,
+`mdot_max = 21.054 kg/s` and `F_max = 13180.0 N`.
+
+### 161.11 The plume on the exit patch, its refusal and its inflow scalars
+
+The low-Mach solver cannot carry the supersonic jet, so the meshed exit patch (area `A`, the sum of
+its rest-frame face areas) blows the momentum-equivalent ("notional nozzle") subsonic plume: at the
+ambient pressure, with the nozzle's momentum flux and its total enthalpy,
+
+```
+rho_j U_eq^2 A = F,   T_j = T0 - U_eq^2/(2 c_p),   c_p = g R/(g-1),   rho_j = p_a/(R T_j)
+=> U_eq^2 = (F/A) R T0 / (p_a + (F/A) R/(2 c_p))
+M_eq^2 = U_eq^2/(g R T_j) = F/(g p_a A)                (fixed by force and area alone)
+```
+
+`U_eq` replaces §161.4's `speed` in the wall condition, along `R(q) d_body`; a shut nozzle (`F = 0`)
+is `U_eq = 0`, a wall moving with the body (zero relative flux). Because `M_eq` does not depend on
+temperature, the patch must satisfy `A >= F_max/(g p_a maxMach^2)`; a thruster whose patch is
+smaller is refused by name (`thrust::check_patch_area`), and `-permissive` turns the same sentence
+into a warning.
+
+The plume's temperature `T_j` is written into `T`'s fixed value on the nozzle's faces through the
+energy equation's boundary condition, exactly as §161.4 writes `U`; under a RAS model the plume also
+carries turbulence in (Launder & Spalding 1974's length-scale relations, `C_mu = 0.09`):
+
+```
+L = mixingLengthFraction D_h,  D_h = 4 A / P   (P: the patch's outer edges, those one of its faces owns)
+U = max(U_eq, 1e-3 U_eq,full)                  (the floor: a shut valve writes finite values)
+k = 3/2 (I U)^2,  omega = k^(1/2)/(C_mu^(1/4) L),  epsilon = C_mu^(3/4) k^(3/2)/L,  nuTilda = (3/2)^(1/2) I U L
+```
+
+with `I = turbulenceIntensity` (default 0.05) and `mixingLengthFraction` default 0.07; a version-1 jet
+in a RAS run carries the same `k` and dissipation with `U = speed` while it is on. The values are
+staged per thruster (`5 n_jets` numbers uploaded a step) and written by `rbJetScalar` into the fixed
+values of the faces; a NaN staged for a version-1 jet's `T` leaves the case's value. The binding,
+`RigidBodyCoupling::bind_jet_fields`, refuses by name a nozzle patch whose `T` is not a fixed value and,
+under a RAS model, a thruster patch whose `k` or dissipation variable is not.
+
+**What the notional nozzle gets right and wrong.** The far plume's momentum is the nozzle's - it is
+the one quantity the model fixes. The near field is not resolved: the shock cells and the
+under-expansion of a real exit are absent, and the plume starts at ambient pressure, subsonic and
+wide. The equivalent plume carries `mdot_eq = F/U_eq` against the nozzle's `F/U_e` (ideally
+expanded): `U_e/U_eq` times the real mass flux - 3.6 at `M_eq = 0.515` (40 bar, 300 K, 0.35 m2), 3.4
+for the roadster case's patches at `M_eq = 0.539`, and the 6-8 of the contract's estimate where a
+larger patch brings `M_eq` down to 0.30-0.23. The jet's density is the plume's `rho_j` at the
+exit; inside the domain the momentum equation is the low-Mach solver's, whose momentum carries the
+reference density (§161.5), so the plume's momentum in the fluid is `rho_ref U_eq^2 A`, within
+`rho_j/rho_ref - 1` (a few per cent) of `F`.
+
+### 161.12 The force with nozzle thrusters, and with a turbulence model
+
+With any nozzle thruster the force on the body is split. The THRUST is the nozzle model's, exactly:
+`F_i = u_i F_max,i` along `-R(q) d_i`, applied at the patch's rest-frame centroid `c_i` (its moment
+`R (c_i - c0) x F_i` about the centre of mass), so the body sees the nozzle's pressure thrust and not
+the CFD plume's. The FLUID's load is §161.5's pressure, viscous and jet terms summed over the body
+faces that are NOT a nozzle's exit patch (`face_aero` 0 there): the exit patch's CFD pressure is not
+added again. A version-1 jet keeps §161.5's jet reaction on its faces.
+
+Under a RAS model the wall shear carries the eddy viscosity the momentum equation itself uses on the
+face, `rho (nu + nu_t,b) |Sf| deltaCoeff dU_par` with `nu_t,b` the wall function's `nu_t,w` on a
+wall-function face. Both changes live in a second kernel, `rbForceMomentV2`; `rbForceMoment` is left
+as it was, so a laminar version-1 file runs the identical arithmetic (§161.17 measures it bitwise).
+
+### 161.13 The version-2 file: pose, plane, release, tensor
+
+New keys of §161.1, each optional, every one refused by name when malformed:
+
+| key | meaning |
+|---|---|
+| `inertia` | three principal moments, or six tensor COMPONENTS `[xx, yy, zz, xy, xz, yz]` (`J_xy = -∫ x y dm`), positive definite, diagonal obeying the triangle inequality |
+| `position`, `orientation` | the world centre of mass at `t = 0` (default `centreOfMass`) and `[roll, pitch, yaw]` degrees, `R0 = Rz(yaw) Ry(pitch) Rx(roll)` body to world about the centre of mass |
+| `angularVelocity` | WORLD axes at `t = 0` (stored as `R0^T w`; with no orientation that is §161.1's body axes) |
+| `dof` | adds `planarYZ`: y, z translation and rotation about x |
+| `pAmbient` | Pa, §161.10 |
+| `release` | s: until then the body moves kinematically at its `t = 0` velocity and angular velocity, no force integrated, every jet shut; the flow develops around it |
+| `thrusters[].nozzle`, `plume`, `control`, `propellant`, `ground` | §161.10, §161.11, §161.14, §161.15 |
+
+`centreOfMass` and `ground.contactPoints` are in the REST mesh's frame (the body frame's origin is the
+rest mesh's). The point map of §161.2 is unchanged, `x = X + R(q)(x0 - c0)`, and starts at `X0`,
+`q0`: the device map writes the rest points placed at the initial pose into `AleMesh::points` once,
+and `AleMesh::reseat` makes that the mesh's starting position - geometry recomputed in place, history
+restarted there (`points_old <- points`, `V^n = V^{n-1} = V`, no swept volume, no mesh flux), so the
+placement is not a motion over a step. The flux is then rebuilt from `U` on the DEVICE geometry
+(`interpolate_vector_flux`): the host mesh holds the rest geometry. Without `position` and
+`orientation` none of this runs and the seed is §161.4's.
+
+`planarYZ` removes `F_x`, the world moment's y and z components, `a_x` and the y, z components of
+`dw/dt`. Its turning axis must start on the world's (`R0 e_x = e_x`, the orientation a pure roll) and,
+with six inertia values, be principal (`J_xy = J_xz = 0`); `planarXZ` likewise about y. Then §161.3's
+argument holds: the axis stays on the world's and the gyroscopic term vanishes. With products of
+inertia the integrator uses the full tensor, `dw/dt = J^-1 (M - w x J w)`; three values keep §161.3's
+principal-axes arithmetic.
+
+The release step: a step is kinematic when its middle time is before `release`; the body advances by
+`x += V dt`, `q <- normalise(q exp(w dt))`, and the force extrapolation of §161.3 restarts after it.
+
+### 161.14 The controller
+
+`control.rs`, host, f64, evaluated once per step at the step's start from the state the integrator
+already holds. Sources: **T. Flash, N. Hogan, J. Neurosci. 5 (1985) 1688-1703** (the minimum-jerk
+profile), **J. Diebel (2006)** (the quaternion algebra), **B. Wie, *Space Vehicle Dynamics and
+Control*, 2nd ed. (AIAA, 2008), ch. 7** (quaternion-error feedback with rate feedback and the
+gyroscopic term), **P. B. Stark, R. L. Parker, Comput. Stat. 10 (1995) 129-141** (bounded-variable
+least squares) and **G. H. Golub, C. F. Van Loan, *Matrix Computations*, 4th ed. (2013), sec.
+5.2-5.3** (Householder QR).
+
+**The attitude reference.** Waypoints `(t_k, rpy_k)`, `t` increasing, held before the first and after
+the last. On `[t_k, t_{k+1}]`, `T = t_{k+1} - t_k`, `tau = (t - t_k)/T`:
+
+```
+phi   = rotation vector of q_k^-1 q_{k+1}, taken with w >= 0 (negated only when w < 0): the shortest turn
+s     = 10 tau^3 - 15 tau^4 + 6 tau^5
+q_ref = q_k exp(phi s),   w_ref = phi s'(tau)/T,   a_ref = phi s''(tau)/T^2    (reference axes)
+```
+
+`phi` is the same vector in the reference's own axes all along the segment, because a rotation leaves
+its axis where it is; `s`, `s'` and `s''` vanish appropriately at both ends, so the reference starts and
+stops at rest. An exactly antipodal pair (180 degrees, `w = cos 90 deg = 6.1e-17 > 0`) turns about
+`-x` for `[180,0,0] -> [0,0,0]`, the contract's barrel roll.
+
+**The PD on the quaternion error**, with the reference's feed-forward and the gyroscopic term:
+
+```
+q_e = q_ref^-1 q (w >= 0),  phi_e its rotation vector,  R_e = R(q_e)
+w_e = w - R_e^T w_ref
+alpha = R_e^T a_ref - 2 zeta w_n w_e - w_n^2 phi_e
+M_cmd = J alpha + w x (J w)                                   (body axes)
+```
+
+with `w_n = naturalFrequency`, `zeta = damping`. The fluid's moment is not fed forward: it is a
+disturbance the PD rejects.
+
+**The descent law** (contract §3, with its §9 change of 2026-10-17). `h` is the height of the lowest
+contact point over `groundZ`, `uz = body z . world z`:
+
+```
+v_ref(h) = -sqrt(v_td^2 + 2 a_b h)
+braking  latches on the first time v_z < v_ref(h)
+a_ff     = clamp(a_b v_z/v_ref, 0, g + 1.3 a_b)                (= dv_ref/dt along the fall; a_b on v_ref)
+a_cmd    = clamp(g + a_ff + K (v_ref - v_z), 0, g + 1.3 a_b)
+F_z,body = m a_cmd/uz   while braking and uz >= minUpright,   else 0
+```
+
+The contract's first form had no `a_ff` and no latch (`a_cmd = clamp(g + K (v_ref - v_z), ...)` while
+`v_z < v_ref`). A proportional law trails a reference that decelerates at `a_b` by `a_b/K`, and near
+the ground the reference's deceleration `a_b v_z/v_ref` grows past the clamp: the host-only closed loop
+of §161.17 touched down at 6.84 m/s with the example's `K = 8`, `v_td = 1`. The feed-forward removes
+the lag; the latch keeps a body that tracks `v_ref` to round-off from switching the thrust off every
+other step. The onset - the braking height the case was sized on - is the same.
+
+**The allocation.** The wrench `[F_z, M_x, M_y]` (body axes) is asked of the closed-loop thrusters,
+less what the scheduled ones give. Thruster `i` (centroid `r_i` from the centre of mass, gas direction
+`d_i`, both body) gives `f = -T_i d_i` and `m = r_i x f`; its column is `[f_z, m_x, m_y]` per newton.
+The thrusts solve
+
+```
+min || W (A T - b) ||^2 + eps ||T||^2    over 0 <= T_i <= F_max,i
+W   = diag(1, 1000/L, 1000/L),  L the largest arm |r_i|   (the moment rows in newtons, then weighted 1000)
+eps = (1e-12 max_j |W A_j|)^2                              (the smallest thrusts among equal residuals)
+```
+
+by the active-set method of Stark & Parker on the augmented system `[W A; sqrt(eps) I] T = [W b; 0]`:
+from all thrusters at their lower bound, the free set's least-squares solution by Householder QR (never
+the normal equations, whose condition is the square), a step back to the first bound it crosses when it
+leaves the box, and the fixed variable whose multiplier has the wrong sign freed next. `eps > 0` makes
+the problem strictly convex, so the method ends, at the unique minimiser. The moment's priority is
+the weight: when the force cannot be met, the moment's error is `1/(W_m^2 L)` of the force's. General
+for N thrusters with any positions and directions; the yaw moment is not allocated (the contract's
+corner thrusters cannot give it).
+
+### 161.15 Propellant, the thrust in the integrator, the ground, the CSV
+
+**Propellant.** `propellant.mass` (part of `mass`) is drawn at `mdot = sum_i u_i mdot_max,i` over the
+step; the body's mass is `mass - used`, a point mass at the centre of mass, so the inertia is
+unchanged. A step that would overdraw the tank has every thrust scaled to empty it exactly; from then
+the thrust is zero, and one warning says when.
+
+**The thrust in the integrator.** `RigidBody::advance_thrust`: the fluid's force and moment are
+extrapolated as in §161.3; the thrust is not - the valves are set at the step's start and the nozzles
+turn with the body - so a valve that opens adds no jump to the extrapolation. Its moment, constant in
+body axes, enters Euler's equations as it is; its force turns with the body and is integrated by
+Simpson's rule on `R` at the step's start, middle and end:
+
+```
+a_T(s) = R(s) F_b/m,   V += dt/6 (a_T0 + 4 a_Tmid + a_T1),   X += dt^2/6 (a_T0 + 2 a_Tmid)
+```
+
+`R_mid` turns `q_n` by the trapezoidal mean of `w_n` and `w_{n+1/2}` over half a step. With zero
+thrust `advance_thrust` is §161.3's `advance` bit for bit; a body-fixed thrust on a body spinning about
+its symmetry axis meets the closed form `V = F/(m w) (sin wt, 1 - cos wt, 0)` (§161.17).
+
+**The ground.** `ground.contactPoints` (rest frame) and `ground.z`: after each step's solve the
+lowest point's height `h` is measured; with `stop` (default true) the run ends at `h <= 0` - the CSV
+row of that step, the final state written at that step's time, and
+
+```
+run ended: touchdown at t = ... s: velocity (...) m/s (|v_z| ...), attitude rpy (...) deg (body z . world z ...),
+peak load ... g (thrust alone ... g), propellant used ... kg of ... kg
+```
+
+then the driver's own `run ended:` line and exit 0. The ground exerts no force: the touchdown is
+where the run stops, not a contact model.
+
+**The CSV.** A version-2 file (any key of this section and §161.10-§161.14) appends, after §161.6's
+columns, per thruster `u_<patch>, F_<patch>` (N), `Ueq_<patch>` (m/s), `Meq_<patch>`, then
+`propellant` (kg left), `load_g` = `|F_thrust + F_fluid|/(m |g|)`, `h_contact` (m),
+`ref_roll_deg, ref_pitch_deg, ref_yaw_deg` (the reference at the step's end), `quat_w, quat_x,
+quat_y, quat_z`. A column that does not apply is `NaN`. A version-1 file writes §161.6's CSV unchanged.
+
+**The step**, §161.6 extended:
+
+```
+release hold, or: controller (161.14) -> valves -> propellant -> advance_thrust (161.15)
+rbRigidPoints, move_mesh, rbWallVelocity (U_eq along R d), U boundary, phi_b           161.2, 161.4
+rbJetScalar: T_j, k, omega/epsilon/nuTilda on the jet faces                             161.11
+turbulence fields' inletOutlet switched on the relative flux                            161.16
+turbulence correct, the low-Mach unit of work                                           unchanged
+rbForceMomentV2 (nut, exit patches out) -> F_{n+1}, M_{n+1}; load, h, touchdown          161.12, 161.15
+```
+
+### 161.16 Turbulence on the rigidly moving mesh
+
+§161.7 and §105.12 refused every turbulence model on a moving mesh, because a model's wall distance
+and time derivatives are the static mesh's. For a RIGID motion of the WHOLE mesh that reason does not
+hold, and this section lifts the refusal for the models it audited and tested.
+
+**What a rigid motion leaves alone.** Every scalar of the geometry - cell volumes, face areas, the
+interpolation weights, the delta coefficients, the boundary faces' wall distance `b_y` - is invariant
+under a rotation and a translation, and the wall distance a model computes once at setup is the
+distance to walls that move with it. Vectors - `Sf`, `Cf`, the cell centres, the non-orthogonal
+correction - turn with `R`. `rigid_motion_leaves_volumes_areas_and_the_wall_distance_invariant`
+measures it (§161.17). The cell volume being constant, the static `ddt` a turbulence equation uses is
+exact (`V^{n+1} = V^n` to round-off), and so is the energy equation's.
+
+**The audit** of every array the RAS models and the wall functions hold:
+
+| array | where | frame | verdict |
+|---|---|---|---|
+| the sixteen geometry arrays of §82 (`sf`, `mag_sf`, `cf`, `weights`, `delta_coeffs`, `non_orth_corr`, `skew_corr`, `v`, `c`, and the boundary set with `b_y`) | `GpuMesh`, read live by every kernel | moved | recomputed in place every step by `AleMesh::advance` (§105.2) - nothing to do |
+| `y` (wall distance), SST's copy | `KOmegaSst::y`, computed once at setup by `wall_distance` on the device geometry | scalar | invariant under the rigid motion; at the initial pose it is computed on the placed mesh |
+| `grad_y` (the wall-normal vector field) | `WallDistance::grad_y` | VECTOR, cached at setup | frame-dependent - read only by the LES van Driest damping and the SA driver's own binary, never by a model a `-rigidBody` run builds; LES and SA stay refused |
+| `WallData` CSR (`wall_cells`, `wf_offset`, `wf_face`, `nut_face`, the roughness arrays) | the wall functions | topology and per-face constants | frame-free |
+| `grad_u`, `grad_k`, `grad_omega`, `grad_psi`, `div_u`, `g`, `f1`, `f2`, the blended coefficients | `RasCore`, SST | per-iteration scratch | rebuilt each correct from the moved geometry (Gauss and least-squares gradients both read `gm` live; no least-squares matrix is cached) |
+| `Ddt` | `RasCore` | reads `gm.v` live | constant volume: exact |
+| the convective flux | `FlowState.phi` | relative | `Simple::convective_flux` hands out `phi - phi_mesh` (§105.7, §105.12) to the model and its `div(phi)` |
+| the wall-function velocity | `wfMagUParallel(U_P, U_b, ...)` | relative | `U_P - U_b`, with `U_b` the moving wall's velocity of §161.4: the velocity relative to the wall, as the law needs |
+| `inletOutlet` on `k`, `omega`, `epsilon`, `nuTilda` | the turbulence fields' `fr` | flux sign | NOT switched by `ofgpu-lowmach` on a static run (they keep their initial value); a `-rigidBody` RAS run now switches them every step on the RELATIVE flux, as `U` and `T` are - the outer boundary moves with the body |
+
+Nothing frame-dependent was found cached by the six models below. Langtry-Menter's transition model
+reads `|U|` (`cuda/lmtrans.cu`), the ABSOLUTE velocity's magnitude, which a moving frame changes - it
+stays refused, as do the other transition model, the hybrids, LES (its van Driest damping caches
+`grad_y`), the low-Reynolds k-epsilon and Spalart-Allmaras, none of which was verified:
+
+```
+honoured by -rigidBody:  laminar, kOmegaSST, kOmega, kEpsilon, realizableKE, RNGkEpsilon
+refused by name:         LaunderSharmaKE, kOmegaSSTLM, kOmegaSSTGamma, SpalartAllmaras, the two hybrids, LES
+```
+
+### 161.17 The tests of version 2
+
+`src/rigid_body/tests_v2.rs` and `src/bin/lowmach.rs`, each well under ten minutes:
+
+| | test | bar | measured |
+|---|---|---|---|
+| a | `ras_models_keep_a_free_stream_uniform_on_a_rigidly_moving_box` (6³ box, every face the same absolute `U`, 20 steps, translated and turned through 70.6°; kOmegaSST, kOmega, kEpsilon, realizableKE, RNGkEpsilon, each also run at rest) | `U`, `k`, `omega`/`epsilon`, `nu_t` uniform to 1e-9; their uniform values the box at rest's to 1e-9 | worst non-uniformity 7.8e-15 (realizableKE's `nu_t`); the means equal to every printed digit |
+| b | `a_translating_turbulent_plate_is_the_static_plate_in_a_moving_stream` (SST, wall functions, 20 x 10 cells, 20 steps, the mesh at V = (1, 0, 0) through still air against the plate at rest in -V) | `U - V`, `p`, `k`, `omega`, `nu_t` within 1e-8 of `max|static|` | `Ux` 8.9e-16, `Uy` 5.4e-16, `p` 3.3e-12, `k` 2.3e-15, `omega` 1.5e-15, `nu_t` 2.2e-15 |
+| c | `the_rigid_body_flag_parses_and_its_refusals_fire_by_name` | the six models run, the seven others refused naming the model and 161.16 | as stated |
+| d | `rigid_motion_leaves_volumes_areas_and_the_wall_distance_invariant` (5³ box, three wall patches, placed by a far translation and rpy (37, -61, 113)) | scalars 1e-12, vectors turned by `R` 1e-12, wall distance 1e-9 | `V` 1.3e-14, weights 5.2e-14, `b_y` 4.8e-14, `Sf` 9.4e-15, non-orthogonal correction 8.3e-13 of `|Sf|`, wall distance 1.9e-14 |
+| e | `the_nozzle_meets_its_hand_values` | `M_e` 2e-4, `U_e` 0.05 m/s, the identities 1e-12 | `M_e` 3.048144, `T_e` 104.9598 K, `U_e` 626.0223 m/s; `A/A* = 4` gives `M` 2.940179 |
+| f | `the_plume_and_its_refusal_meet_their_closed_forms` | the closed forms 1e-13; the refusal names the thruster; `-permissive` gives the same sentence | 13180 N on 0.35 m2: `U_eq` 174.33 m/s, `T_j` 284.875 K, `M_eq` 0.51523, `U_e/U_eq` 3.591 |
+| g | `the_min_jerk_reference_meets_its_endpoints` | waypoints 1e-9 deg; rate and acceleration against central differences 1e-6 and 1e-5; the PD's sign and feed-forward | as stated; the half-way roll 90.000000 deg at `15 theta/(8 T)` |
+| h | `the_allocation_is_exact_when_feasible_and_bounded_when_not` | feasible: wrench 1e-9 and the least-norm thrusts 1e-8; infeasible: bounds, the moment to 1e-4, first-stage KKT 1e-9, second stage keeps the wrench to 1e-9 | wrench error 5.0e-11, least-norm 6.7e-11; 100 kN asked of 80 kN: the moment 4999.90 of 5000 N m |
+| i | `a_free_body_with_four_corner_thrusters_rights_itself_and_lands_softly` (the contract's example file, no fluid, dt 1e-3) | `|v_z|` at touchdown below 1.5 `touchdownSpeed`, upright, propellant left | touchdown at 2.392 s, `|v_z|` 0.998 m/s, body z . world z 1.00000, righted (> 0.99) at 1.164 s, peak thrust load 3.32 g, 67.8 of 250 kg used; the P-only law of the contract's first form: 6.84 m/s |
+| j | `the_integrator_new_paths_meet_their_closed_forms` | zero thrust bitwise 161.3; the spinning thrust 1e-10; the full tensor's energy 1e-9 and momentum 1e-6; `planarYZ` in its plane exactly | `V` 1.1e-12, `X` 3.4e-14; energy 3.8e-15, momentum 5.8e-9 |
+| k | `a_nozzle_run_writes_its_columns_and_stops_at_touchdown` (lowmach, 6³ box, SST, one nozzle on the floor, falling at 3 m/s with 2 cm to go) | the version-2 columns in order; the run ends at the touchdown before its end time | 5 of 10 steps, `|v_z|` 1.976 m/s, `F_jet` 15.21 N, `U_eq` 10.78 m/s |
+
+The plate of (b) once had `inletOutlet` on all three open sides with `p = 0`; it differed by 1.4e-4 in
+`U` and 8.8e-2 of `max|p|`. With the free stream prescribed where it enters it agrees to round-off.
+The likely cause - not isolated - is the `inletOutlet` switch on faces whose flux is round-off small
+in both frames landing on opposite sides of zero; a property of that condition at rest too.
+
+The drop case of the roadster contract (709 260 cells, kOmegaSST with wall functions on the body,
+the four corner nozzles, `dt = 1.75e-4`, `-permissive`) ran 20 steps twice: as built (the release
+hold, jets shut) and with `release` 0 and every nozzle at full valve (`F_max` 14.50 kN, `U_eq`
+179.9 m/s, `M_eq` 0.539, `U_e/U_eq` 3.44). Both stayed finite and exited 0. The second's first step
+carries an impulsive fluid load of 7.6e5 N (49 g on 1700 kg) as four 180 m/s jets start into still
+air - §161.9's one-step transient at a jet switch - falling to 2.2e4 N by step 20; its largest
+Mach number, 0.75 at step 0, is the plume's near field.
+
+The v1 smoke: the roadster case of the backflip run (871 932 cells, laminar, the version-1 file of
+§161.1's example) for 20 steps at `dt = 2.5e-4` under this tree and under the 118ebf0 binary writes
+the CSV, `U`, `p`, `T`, `nut`, `rho` and the moved points byte for byte the same.
+
+### 161.18 Known limits of version 2
+
+* **The notional-nozzle plume** (§161.11): the far plume's momentum is right; the near field's shock
+  cells and under-expansion are not resolved; the plume carries `U_e/U_eq` (3.4-3.6 at `M_eq` 0.5-0.54,
+  6-8 at `M_eq` 0.30-0.23) times the real mass flux, at ambient pressure, and its momentum in the fluid
+  is within `rho_j/rho_ref - 1` of `F`. The plume runs above §93.6's Mach limit at full valve, so a run
+  needs `-permissive`.
+* **No ground effect.** The whole mesh moves with the body, outer boundary included, so the ground is
+  not in the domain: the jets' impingement, the cushion under the floor and the vapour cloud of the
+  touchdown are absent. The ground is a stop condition only.
+* **Loose coupling, the fluid's force one step late** (§161.3, §161.9): the body advances on the force
+  of the step before, extrapolated; the thrust is exact over the step. No sub-iteration.
+* **The controller sees the state at the step's start** and holds the valves over the step (a
+  zero-order hold of `dt`); it does not feed the fluid's moment forward; it allocates `F_z`, `M_x`,
+  `M_y` only - no yaw, no lateral force (the barrel roll's lateral drift is physics it does not fight).
+* **The descent law is the contract's**, with §161.14's feed-forward and latch; the touchdown is the
+  lowest contact point crossing the ground plane, with no wheel, tyre or suspension model.
+* **Propellant** is a point mass at the centre of mass; its loss changes the mass only.
+* **The throttle** is linear in `u` (§161.10).
+* **Verified turbulence models** only (§161.16).

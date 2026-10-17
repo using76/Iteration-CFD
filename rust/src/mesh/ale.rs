@@ -465,6 +465,32 @@ impl AleMesh {
         Ok(())
     }
 
+    /// Make the resident `points` the mesh's STARTING position - SPEC-LIT
+    /// 161.13. The geometry is recomputed from them in place, and the history
+    /// restarts there: `points_old <- points`, `V^n = V^{n-1} = V`, no swept
+    /// volume and no mesh flux. A mesh PLACED before its first step (a rigid
+    /// body's initial orientation and position) therefore sweeps nothing:
+    /// the placement is where the run begins, not a motion over a step.
+    /// Setup only - call it before the first [`Self::advance`].
+    pub fn reseat(&mut self, gpu: &Gpu, gm: &GpuMesh) -> Result<()> {
+        self.check_shape(gm, "AleMesh::reseat")?;
+        self.recompute_in_place(gpu, gm)?;
+        gpu.stream().memcpy_dtod(&self.points, &mut self.points_old)?;
+        gpu.stream().memcpy_dtod(&gm.v, &mut self.v0)?;
+        gpu.stream().memcpy_dtod(&gm.v, &mut self.v00)?;
+        #[cfg(feature = "single")]
+        {
+            gpu.stream().memcpy_dtod(&self.v64, &mut self.v64_0)?;
+            gpu.stream().memcpy_dtod(&self.v64, &mut self.v64_00)?;
+            gpu.fill_zero(&mut self.phi_mesh64)?;
+        }
+        gpu.fill_zero(&mut self.swept)?;
+        gpu.fill_zero(&mut self.swept0)?;
+        gpu.fill_zero(&mut self.phi_mesh.f)?;
+        gpu.fill_zero(&mut self.phi_mesh.bf)?;
+        Ok(())
+    }
+
     /// One ALE step, end to end, on the one stream.
     ///
     /// SPEC-LIT 105.4. Refuses a steady scheme - a moving mesh needs a
