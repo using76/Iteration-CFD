@@ -38691,6 +38691,7 @@ subsections, by unit:
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
 - 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13 sections 1-25, F32-14 sections 26-65)
+- 118.15 — the four tests that did not finish at f32, and the stroke's reference in f64 (F32-15)
 
 and, later, chemistry in
 double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
@@ -40496,6 +40497,82 @@ causes. Some are an iteration that stops short of its f64 criterion under `singl
 95-D, 95-G, 98-C, 100-A, 100-C and CMP-B. The others evaluate a closed form or a ledger in
 `Scalar`: S52, S56.4, S57.3, 76, 77-B and Buckingham-Reiner. 100-D and 105-B diverge or drift
 under `single`. A cure changes numerics or a criterion and is not built here.
+
+### 118.15 The four tests that did not finish at f32 - they finish now, and what each one costs
+
+§112.3 lists four library tests that were stopped after 95 minutes under `single`:
+`ale_flow::tests::gate_105b_the_stroking_outlet_has_the_scheme_time_order`,
+`models::k_omega_sst::tests::forcing_f1_to_zero_reproduces_the_transformed_k_epsilon`,
+`solid::tests::gate_95_e_the_bimetal_curvature_is_timoshenko_s` and
+`solid::tests::the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`. That was
+measured before §118.4. Each of them solves with PCG or PBiCGStab to a stop of `1e-13` or `1e-14`,
+below the float floor, so every solve ran to `maxIter`. §118.4's refinement now reaches those stops
+in double, and all four finish. The unit is F32-15. The plan expected the cause to be a stop below
+the f32 floor, removed by refinement and the delta form; the tree shows refinement alone was enough.
+
+**The timeout test.** The library test target does not compile under `single` in this tree, so
+`tests/f32_unfinished.rs` runs the four cases again as integration tests, with the library tests'
+own assertions in both builds. Each case runs on its own thread behind a cap of 10 times its f64
+wall time. Past the cap it "did not finish": a failure in the f64 build and a printed MISSED under
+`single`. A body that panics is a failure in both builds. The plan's budget is 3 times the f64 wall
+time. The test prints it as PASS or MISSED but does not assert it, because three lanes share one
+card and a wall time cannot be repeated. Under `single` a budget miss asserts its cause instead:
+more sweeps or outer iterations than the f64 run took. The f64 wall times are the library tests'
+own, on an idle card (2026-10-18, RTX 5070 Ti): 16.2 s, 5.3 s, 29.6 s and 39.8 s.
+
+**One reference defect, fixed in both builds.** `ale_flow::stroke_exact` summed its 20 000 Simpson
+terms in `Scalar`. Under `single` it returned 0.72244805098 against 0.72244723847, a relative error
+of 1.1e-6. That is larger than backward's real finest-step error (2.2e-7 in f64), so the reference
+failed the scheme it judged. It now evaluates in f64 and rounds once:
+
+    exact = fl(U0 + P0 * S_h[1 / (L0 + A sin(2 pi s / P))] over [0, T])          (118.15.1)
+
+`S_h` is composite Simpson with n = 20 000 and every constant widened from its stored `Scalar`.
+`stroke` forms its volume-weighted mean `sum V U_x / sum V` with f64 sums and rounds once, as
+§118.1 does for every reduction. In the f64 build both are the same operations in the same order:
+Gate 105-B's 90 rows of `ofgpu-validate -sections 55` are identical to the previous binary
+(`tools/f64_identity.py rows`). The test holds (118.15.1) against the closed form
+
+    int_0^T ds / (a + b sin(k s)) = (2 / (k r)) [atan((a tan(kT/2) + b) / r) - atan(b / r)],
+    r = sqrt(a^2 - b^2), a = L0, b = A, k = 2 pi / P                             (118.15.2)
+
+(Gradshteyn & Ryzhik 2.551.3; open: https://en.wikipedia.org/wiki/List_of_integrals_of_trigonometric_functions)
+to `max(1e-12, eps_Scalar)` relative, which is class D: one rounding of an f64 value. Under
+`single` (118.15.2) is 0.722447238112, with `A` widened from its float 0.200000003, and
+`stroke_exact` is 0.722447216511, 2.2e-8 away (under half a float ulp). Before the fix the gap was 1.1e-6.
+
+**What each case measures** (2026-10-18; two `single` runs, the second on a card shared with
+another lane; every physics row has the same tolerance as in f64):
+
+| case | f64 | `single` wall | ratio | rows under `single` |
+|---|---|---|---|---|
+| stroke, euler and backward | 16.2 s | 32.0 / 33.9 s | 1.97 / 2.09 | euler passes: p 1.0066, finest 9.03e-5 against 5e-4. Backward: finest 8.25e-8 against 5e-6 passes; **MISSED** p = 2.2854 against 2 +- 0.1, and the extrapolation is 4.13e-7 against the finest step's 8.25e-8 |
+| SST with F1 = 0 against k-epsilon | 5.3 s | 15.5 / 21.2 s | 2.92 / 3.99 | passes: 2.40e-3 against 5e-3, 1.74e-3 against 1e-2, 1.44e-3 against 0.02. The budget is **MISSED** on the shared card |
+| bimetal 192 x 32, series | 29.6 s | 111.3 / 123.0 s | 3.76 / 4.16 | passes: converged, kappa error 1.32e-2 against 0.02 (f64 5.9e-3). The budget is **MISSED** |
+| linear and series bond, 96 x 16 | 39.8 s | 66.3 / 77.5 s | 1.66 / 1.95 | passes: R_linear / R_series = 2.17 against 2 |
+
+**Causes.**
+- *Backward's order.* In exact arithmetic the 1-D stroke keeps `U_x` uniform, so the spread of the
+  cells is pure round-off. Under `single` the spread at the finest level is 1.79e-7, about three
+  float ulps at 0.72. The finest step difference `|v(160) - v(320)|` is only 4.77e-7. The finest
+  value sits 2.4e-7 (four ulps) from the f64 run's. The order and the extrapolation therefore read
+  the velocity's round-off, not the scheme. Euler's differences are a hundred times larger, and its
+  rows pass. The test asserts this cause: finest spread >= 0.1 |v(160) - v(320)| (f64: 1.6e-9
+  against 4.9e-7, so the f64 build cannot take this branch). The cure is the delta form of §118.5
+  in the SIMPLE step: f64 time levels for `U` and `p`. That changes the solver's numerics and is
+  not built here.
+- *SST.* Refinement reaches the `1e-14` stop in 7.83 inner sweeps per solve, on average over the
+  8000 solves. The f64 solve takes 3. Each pass also reads its residual back. The step costs about
+  three times f64's, so the ratio sits at the 3x budget and goes over it when the card is shared.
+- *Bimetal.* The outer loop needs 646 iterations against f64's 306 to reach its six decades, and
+  977 681 linear sweeps against 266 161 (1513 per outer iteration against 870). The wall time
+  follows the sweeps.
+
+A cure for the three budget rows is a stop the f32 build can meet without refinement: a criterion
+read in the class tolerance of §118.14, or an outer loop that stops at the float floor. Either
+changes a solver's numerics or criterion, so it is the user's decision and is not built. No
+library test changes its attribute here. The ALE test still fails under `single` and keeps
+`#[cfg_attr(feature = "single", ignore ...)]`; §112.3's counts do not move.
 
 ## 119. The true wedge: a rotational self-couple
 
