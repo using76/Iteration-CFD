@@ -53,6 +53,15 @@
 //! the version-1 arithmetic: every new path is behind a key it does not
 //! carry. Per step the host still downloads only the twelve force numbers
 //! and uploads only a few numbers per thruster.
+//!
+//! # Version 3 (SPEC-LIT 161.19-161.22)
+//!
+//! `control.lateral` adds a lateral velocity law and allocates the PD's yaw
+//! moment: the demanded wrench grows to six rows `[F_x, F_y, F_z, M_x, M_y,
+//! M_z]` (body axes), allocated with the priority moments > `F_z` >
+//! horizontal, and the CSV gains each nozzle's mass flow and the demanded and
+//! achieved wrench. A file without `control.lateral` runs version 2's
+//! arithmetic.
 
 pub mod control;
 pub mod thrust;
@@ -375,8 +384,32 @@ fn min_upright_default() -> f64 {
 fn allocation_default() -> String {
     "boundedLeastSquares".to_string()
 }
+fn lateral_gain_default() -> f64 {
+    2.0
+}
+fn lateral_max_accel_default() -> f64 {
+    4.0
+}
+fn lateral_weight_default() -> f64 {
+    0.3
+}
 
-/// `control` - SPEC-LIT 161.14.
+/// `control.lateral` - SPEC-LIT 161.19: the world horizontal velocity
+/// targets (`null` leaves an axis free), the law's gain (1/s) and bound
+/// (m/s^2), and the horizontal rows' weight in the six-row allocation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LateralSpec {
+    pub velocity: [Option<f64>; 2],
+    #[serde(default = "lateral_gain_default")]
+    pub gain: f64,
+    #[serde(default = "lateral_max_accel_default")]
+    pub max_accel: f64,
+    #[serde(default = "lateral_weight_default")]
+    pub weight: f64,
+}
+
+/// `control` - SPEC-LIT 161.14, and `lateral` 161.19.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ControlSpec {
@@ -384,6 +417,8 @@ pub struct ControlSpec {
     pub attitude: Option<AttitudeSpec>,
     #[serde(default)]
     pub descent: Option<DescentSpec>,
+    #[serde(default)]
+    pub lateral: Option<LateralSpec>,
     #[serde(default = "allocation_default")]
     pub allocation: String,
 }
@@ -702,6 +737,21 @@ impl RigidBodySpec {
                     );
                 }
             }
+            if let Some(l) = &c.lateral {
+                let ok = l.velocity.iter().all(|v| v.is_none_or(f64::is_finite))
+                    && l.gain > 0.0
+                    && l.gain.is_finite()
+                    && l.max_accel > 0.0
+                    && l.max_accel.is_finite()
+                    && l.weight > 0.0
+                    && l.weight.is_finite();
+                if !ok {
+                    return bad(format!(
+                        "control.lateral {l:?}: velocity two finite numbers or null, gain > 0, maxAccel > 0 and \
+                         weight > 0 (SPEC-LIT 161.19)"
+                    ));
+                }
+            }
         }
         if let Some(p) = &self.propellant {
             if !(p.mass >= 0.0 && p.mass < self.mass) {
@@ -748,7 +798,20 @@ impl RigidBodySpec {
             }),
             contact: self.ground.as_ref().map(|g| g.contact_points.clone()).unwrap_or_default(),
             braking: false,
+            lateral: c.lateral.as_ref().map(|l| control::LateralLaw {
+                velocity: l.velocity,
+                gain: l.gain,
+                max_accel: l.max_accel,
+                weight: l.weight,
+            }),
         }))
+    }
+
+    /// Does the file carry `control.lateral`? Then the controller allocates
+    /// six rows (SPEC-LIT 161.20) and the CSV carries the version-3 columns
+    /// of SPEC-LIT 161.21.
+    pub fn has_lateral(&self) -> bool {
+        self.control.as_ref().is_some_and(|c| c.lateral.is_some())
     }
 
     /// The ambient pressure, `pAmbient` or 101325 Pa.
@@ -1707,6 +1770,12 @@ pub struct RigidBodyCoupling {
     peak_load_g: f64,
     peak_thrust_g: f64,
     h_contact: Option<f64>,
+    /// `control.lateral` (SPEC-LIT 161.19-161.21): the CSV carries the
+    /// version-3 columns.
+    csv_v3: bool,
+    /// The demanded body wrench of this step's command (SPEC-LIT 161.19);
+    /// `None` when no command was taken (the release hold).
+    demand: Option<[f64; 6]>,
     /// Which of `T`, `k`, `omega`, `epsilon`, `nuTilda` the jets write.
     jet_fields: [bool; JET_SCALAR_FIELDS],
     face_jet: Vec<Label>,
@@ -1969,6 +2038,18 @@ impl RigidBodyCoupling {
                 ",propellant,load_g,h_contact,ref_roll_deg,ref_pitch_deg,ref_yaw_deg,quat_w,quat_x,quat_y,quat_z",
             );
         }
+        // SPEC-LIT 161.21: the version-3 columns, after the version-2 ones.
+        let csv_v3 = spec.has_lateral();
+        if csv_v3 {
+            for t in spec.thrusters.iter().filter(|t| t.nozzle.is_some()) {
+                header.push_str(&format!(",mdot_{}", t.patch));
+            }
+            for w in ["cmd", "ach"] {
+                for c in ["Fx", "Fy", "Fz", "Mx", "My", "Mz"] {
+                    header.push_str(&format!(",{w}_{c}_body"));
+                }
+            }
+        }
         writeln!(csv, "{header}").map_err(csv_err(csv_path))?;
 
         println!(
@@ -2013,6 +2094,18 @@ impl RigidBodyCoupling {
         }
         if release > 0.0 {
             println!("  release at t = {release} s: until then the body moves at its t = 0 velocity, jets shut");
+        }
+        if let Some(l) = spec.control.as_ref().and_then(|c| c.lateral.as_ref()) {
+            let axis = |v: Option<f64>| v.map_or("free".to_string(), |v| format!("{v} m/s"));
+            println!(
+                "  lateral control (SPEC-LIT 161.19): world v_x {}, v_y {}, gain {} 1/s, maxAccel {} m/s2; the \
+                 six-row allocation of [F_x F_y F_z M_x M_y M_z] body, horizontal weight {} (SPEC-LIT 161.20)",
+                axis(l.velocity[0]),
+                axis(l.velocity[1]),
+                l.gain,
+                l.max_accel,
+                l.weight
+            );
         }
         for ((t, nz), (pg, g)) in spec.thrusters.iter().zip(&nozzles).zip(patches.iter().zip(&geoms)) {
             match nz {
@@ -2120,6 +2213,8 @@ impl RigidBodyCoupling {
             peak_load_g: 0.0,
             peak_thrust_g: 0.0,
             h_contact,
+            csv_v3,
+            demand: None,
             jet_fields: [false; JET_SCALAR_FIELDS],
             face_jet,
             face_ids: faces.clone(),
@@ -2272,7 +2367,11 @@ impl RigidBodyCoupling {
             })
             .collect();
         let mut thrust = match self.controller.as_mut() {
-            Some(c) => c.command(&self.body, &self.geoms, &open, t_start).thrust,
+            Some(c) => {
+                let cmd = c.command(&self.body, &self.geoms, &open, t_start);
+                self.demand = cmd.demand;
+                cmd.thrust
+            }
             None => open,
         };
         for (i, f) in thrust.iter_mut().enumerate() {
@@ -2326,6 +2425,7 @@ impl RigidBodyCoupling {
             self.body.advance_kinematic(dt);
             self.thrust.iter_mut().for_each(|f| *f = 0.0);
             self.thrust_body = ([0.0; 3], [0.0; 3]);
+            self.demand = None;
         } else if self.nozzle_mode {
             let thrust = self.command_thrust(t_start, t_mid, dt);
             let (fb, mb) = control::thrust_wrench_body(&self.geoms, &thrust);
@@ -2597,6 +2697,20 @@ impl RigidBodyCoupling {
                 self.load_g, rr[0], rr[1], rr[2], q[0], q[1], q[2], q[3]
             ));
         }
+        if self.csv_v3 {
+            // SPEC-LIT 161.21: each nozzle's mass flow over the step, the
+            // demanded and the achieved body wrench.
+            for (f, nz) in self.thrust.iter().zip(&self.nozzles) {
+                if let Some(d) = nz {
+                    extra.push_str(&format!(",{:.9e}", f / d.f_max * d.mdot_max));
+                }
+            }
+            let cmd = self.demand.unwrap_or([f64::NAN; 6]);
+            let (fb, mb) = self.thrust_body;
+            for v in cmd.iter().chain(fb.iter()).chain(mb.iter()) {
+                extra.push_str(&format!(",{v:.9e}"));
+            }
+        }
         writeln!(
             self.csv,
             "{},{:.9e},{:.12e},{:.12e},{:.12e},{:.9e},{:.9e},{:.9e},{:.6},{:.6},{:.6},{:.6},{:.9e},{:.9e},{:.9e},\
@@ -2662,3 +2776,5 @@ impl RigidBodyCoupling {
 mod tests;
 #[cfg(test)]
 mod tests_v2;
+#[cfg(test)]
+mod tests_v3;

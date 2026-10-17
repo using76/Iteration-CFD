@@ -37,8 +37,8 @@
 //!                     (SPEC-LIT §25.2/§31.2)
 //!                     a steady checkpoint's time is its iteration count (§44.9)
 //!   -rigidBody FILE   the whole mesh moves as one rigid body, driven by the
-//!                     flow and by jet thrusters (SPEC-LIT §161); transient
-//!                     and laminar only
+//!                     flow and by jet thrusters (SPEC-LIT §161); transient,
+//!                     laminar or a RAS model verified there (§161.16)
 //! ```
 //!
 //! Written from `ofgpu SPEC-LIT.md` sections 25 (the low-Mach formulation)
@@ -2982,6 +2982,13 @@ fn run(o: &Options) -> Result<RunEnd> {
     // below runs.
     let dust_is_sst = dust_case.is_some() && selection.model == RasModel::KOmegaSST;
 
+    // SPEC-LIT 161.16: the kernels the turbulence fields' `inletOutlet`
+    // switch uses on a -rigidBody RAS run, built once.
+    let rigid_turb_fk = if rigid.is_some() && selection.model != RasModel::Laminar {
+        Some(FieldKernels::new(&gpu)?)
+    } else {
+        None
+    };
     let mut steps_done = n_steps;
     for step in 0..n_steps {
         if transient {
@@ -3040,11 +3047,10 @@ fn run(o: &Options) -> Result<RunEnd> {
             // switch on the RELATIVE flux, as U's and T's do (SPEC-LIT 105.12) - the
             // outer boundary moves with the body, and which of its faces
             // takes air in changes as the body turns.
-            if selection.model != RasModel::Laminar {
-                let fk = FieldKernels::new(&gpu)?;
+            if let Some(fk) = &rigid_turb_fk {
                 for (name, f) in turb.output_fields_mut() {
                     if name != "nut" {
-                        update_inlet_outlet_scalar(&gpu, &fk, f, s.convective_flux())?;
+                        update_inlet_outlet_scalar(&gpu, fk, f, s.convective_flux())?;
                     }
                 }
             }
@@ -7435,17 +7441,9 @@ mod lowmach_tests {
         assert!(worst <= tol, "the moving plate is not the static plate in the moving frame: {worst:e}");
     }
 
-    /// SPEC-LIT 161.10-161.15 end to end: a box whose floor is the body and
-    /// carries one nozzle thruster, k-omega SST, falling onto the ground with
-    /// a propellant tank. The run binds the jet's T, k and omega, writes the
-    /// version-2 CSV columns, and stops at the touchdown with exit 0 before
-    /// its end time.
-    #[test]
-    fn a_nozzle_run_writes_its_columns_and_stops_at_touchdown() {
-        if Gpu::new(0).is_err() {
-            return;
-        }
-        let case = r#"{
+    /// The 6^3 box of the nozzle tests (SPEC-LIT 161.17 (k), 161.22): its floor
+    /// is the body and carries one nozzle exit, k-omega SST.
+    const NOZZLE_BOX_CASE: &str = r#"{
   "name": "nozzleBox",
   "mesh": {
     "kind": "cartesian",
@@ -7501,6 +7499,18 @@ mod lowmach_tests {
   },
   "run": { "endTime": 0.02, "deltaT": 0.002 }
 }"#;
+
+    /// SPEC-LIT 161.10-161.15 end to end: a box whose floor is the body and
+    /// carries one nozzle thruster, k-omega SST, falling onto the ground with
+    /// a propellant tank. The run binds the jet's T, k and omega, writes the
+    /// version-2 CSV columns, and stops at the touchdown with exit 0 before
+    /// its end time.
+    #[test]
+    fn a_nozzle_run_writes_its_columns_and_stops_at_touchdown() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let case = NOZZLE_BOX_CASE;
         let dir = scratch_dir("rb_nozzle_box");
         let path = dir.join("case.jsonc");
         std::fs::write(&path, case).expect("write case");
@@ -7573,5 +7583,98 @@ mod lowmach_tests {
         assert!(col("h_contact") <= 0.0);
         assert_eq!(col("u_jet"), 1.0);
         assert!(col("F_jet") > 10.0 && col("propellant") < 0.1);
+    }
+
+    /// SPEC-LIT 161.21 end to end: the nozzle box of
+    /// `a_nozzle_run_writes_its_columns_and_stops_at_touchdown` with a
+    /// `control.lateral` block (target v_x = 0 while the body moves at 0.5
+    /// m/s; y free) writes, after the version-2 columns, the nozzle's mass
+    /// flow and the demanded and achieved body wrench.
+    #[test]
+    fn a_rigid_body_lateral_run_writes_the_version_3_columns() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = scratch_dir("rb_lateral_box");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, NOZZLE_BOX_CASE).expect("write case");
+        let body = dir.join("body.json");
+        std::fs::write(
+            &body,
+            r#"{ "mass": 1.0, "inertia": [0.2, 0.2, 0.2], "centreOfMass": [0.5, 0.5, 0.5], "velocity": [0.5, 0, -3.0],
+                 "gravity": [0, 0, -9.81], "rho": 1.2, "pAmbient": 101325,
+                 "bodyPatches": ["floor", "jet"],
+                 "thrusters": [ { "patch": "jet", "direction": [0, 0, -1], "on": [[0, 1]],
+                                  "nozzle": { "p0": 2.0e5, "T0": 300, "exitArea": 1.0e-4 } } ],
+                 "plume": { "maxMach": 0.3 },
+                 "control": { "lateral": { "velocity": [0.0, null], "gain": 2.0, "maxAccel": 4.0, "weight": 0.3 } },
+                 "propellant": { "mass": 0.1 },
+                 "ground": { "z": -0.02, "contactPoints": [[0.5, 0.5, 0.0]] },
+                 "write": { "every": 1, "file": "rb.csv" } }"#,
+        )
+        .expect("write the body file");
+        let a: Vec<String> = [
+            "ofgpu-lowmach",
+            path.to_str().expect("path"),
+            "-endTime",
+            "0.02",
+            "-deltaT",
+            "0.002",
+            "-check",
+            "1000",
+            "-rigidBody",
+            body.to_str().expect("body"),
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let o = parse(&a).expect("parse");
+        let end = run(&o).expect("the lateral box must run and stop at touchdown");
+        let root = common::json_case_output_dir(&path);
+        let csv = std::fs::read_to_string(root.join("rb.csv")).expect("the CSV");
+        let lines: Vec<&str> = csv.lines().collect();
+        println!("{}\n{}", lines[0], lines.last().expect("a row"));
+        let header: Vec<&str> = lines[0].split(',').collect();
+        let want = [
+            "quat_z",
+            "mdot_jet",
+            "cmd_Fx_body",
+            "cmd_Fy_body",
+            "cmd_Fz_body",
+            "cmd_Mx_body",
+            "cmd_My_body",
+            "cmd_Mz_body",
+            "ach_Fx_body",
+            "ach_Fy_body",
+            "ach_Fz_body",
+            "ach_Mx_body",
+            "ach_My_body",
+            "ach_Mz_body",
+        ];
+        assert_eq!(&header[header.len() - want.len()..], &want[..], "the version-3 columns follow the version-2 ones");
+        let last: Vec<&str> = lines.last().expect("row").split(',').collect();
+        assert_eq!(last.len(), header.len());
+        let col = |n: &str| -> f64 { last[header.iter().position(|h| *h == n).expect(n)].parse().expect(n) };
+        let d = ofgpu::rigid_body::thrust::nozzle("jet", 2.0e5, 300.0, 1.0e-4, 1.4, 287.05, 101325.0, None).expect("nozzle");
+        let mass = 1.0 - (0.1 - col("propellant"));
+        println!(
+            "steps {}; F_jet {} N, mdot_jet {} kg/s (F/U_e {}), cmd_Fx {} N (-2 m v_x {}), ach_Fz {} N",
+            end.steps,
+            col("F_jet"),
+            col("mdot_jet"),
+            col("F_jet") / d.u_exit,
+            col("cmd_Fx_body"),
+            -2.0 * mass * col("Vx"),
+            col("ach_Fz_body")
+        );
+        assert!(end.steps < 10, "the touchdown must end the run early: {} steps", end.steps);
+        assert!(col("mdot_jet") > 0.0);
+        assert!((col("mdot_jet") * d.u_exit / col("F_jet") - 1.0).abs() <= 1e-6, "mdot = F/U_e for the ideal nozzle");
+        assert!((col("ach_Fz_body") / col("F_jet") - 1.0).abs() <= 1e-8, "the floor jet pushes along body +z");
+        assert!(col("ach_Fx_body").abs() + col("ach_Fy_body").abs() <= 1e-9 * col("F_jet"));
+        // The demand was taken at the step's start; v_x hardly changes in a step.
+        assert!((col("cmd_Fx_body") + 2.0 * mass * col("Vx")).abs() <= 0.05, "the lateral law's demand");
+        assert!(col("cmd_Fy_body").abs() <= 0.05 && col("cmd_Fz_body").abs() <= 0.05, "y is free; no descent law");
+        assert!(col("cmd_Mx_body") == 0.0 && col("cmd_My_body") == 0.0 && col("cmd_Mz_body") == 0.0, "no attitude block");
     }
 }

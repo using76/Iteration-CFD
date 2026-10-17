@@ -6,11 +6,15 @@
 
 //! The thruster controller of SPEC-LIT 161.14: the attitude reference, the
 //! PD on the quaternion error, the descent law and the bounded
-//! least-squares allocation of the commanded wrench to the thrusters.
+//! least-squares allocation of the commanded wrench to the thrusters - and,
+//! with `control.lateral` (SPEC-LIT 161.19-161.20), the lateral velocity
+//! law and the six-row allocation that also gives the yaw moment.
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md 161.14 (the reference, the law, the allocation and
 //!     their stated limits)
+//!   ofgpu SPEC-LIT.md 161.19-161.20 (the lateral law, the demanded body
+//!     wrench and the six-row allocation with its priorities)
 //!   T. Flash, N. Hogan, "The coordination of arm movements: an
 //!     experimentally confirmed mathematical model", J. Neurosci. 5 (1985)
 //!     1688-1703 - the minimum-jerk profile s = 10 tau^3 - 15 tau^4 + 6 tau^5
@@ -249,6 +253,54 @@ impl ThrusterGeom {
         let (f, m) = self.unit_wrench();
         [f[2], m[0], m[1]]
     }
+
+    /// `[F_x, F_y, F_z, M_x, M_y, M_z]` per newton of thrust - one column of
+    /// the six-row allocation (SPEC-LIT 161.20).
+    pub fn column6(&self) -> [f64; 6] {
+        let (f, m) = self.unit_wrench();
+        [f[0], f[1], f[2], m[0], m[1], m[2]]
+    }
+}
+
+/// The lateral velocity law of SPEC-LIT 161.19 (`control.lateral`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LateralLaw {
+    /// The world horizontal velocity targets `[v_x, v_y]` (m/s); `None` is
+    /// an axis the law leaves free.
+    pub velocity: [Option<f64>; 2],
+    /// 1/s.
+    pub gain: f64,
+    /// m/s^2, the bound on `|a_h|`.
+    pub max_accel: f64,
+    /// The `F_x`, `F_y` rows' weight against `F_z`'s in the allocation.
+    pub weight: f64,
+}
+
+impl LateralLaw {
+    /// The world horizontal acceleration `a_h = [a_x, a_y]` the law asks for:
+    /// `gain (v_target - v)` on each controlled axis, zero on a free one, the
+    /// vector scaled back to `maxAccel` when it is longer (its direction
+    /// kept).
+    pub fn accel(&self, v: V3) -> [f64; 2] {
+        let mut a = [0.0; 2];
+        for k in 0..2 {
+            if let Some(vt) = self.velocity[k] {
+                a[k] = self.gain * (vt - v[k]);
+            }
+        }
+        let mag = (a[0] * a[0] + a[1] * a[1]).sqrt();
+        if mag > self.max_accel {
+            let s = self.max_accel / mag;
+            a = [a[0] * s, a[1] * s];
+        }
+        a
+    }
+
+    /// `F_h = m a_h`, world axes, zero vertical component.
+    pub fn force_world(&self, m: f64, v: V3) -> V3 {
+        let a = self.accel(v);
+        [m * a[0], m * a[1], 0.0]
+    }
 }
 
 /// The weight of the two moment rows against the force row, after both are
@@ -286,34 +338,78 @@ pub fn allocate(cols: &[[f64; 3]], b: [f64; 3], arm: f64, lo: &[f64], hi: &[f64]
     bounded_least_squares(cols, got, w2, lo, hi, LEAST_NORM_RIDGE)
 }
 
-/// `min ||W (A x - b)||^2 + eps ||x||^2` over `lo <= x <= hi`, `A`'s columns
-/// `cols` - the bounded least squares of SPEC-LIT 161.14, by the active-set
-/// method of Stark & Parker on the augmented system `[W A; sqrt(eps) I] x =
-/// [W b; 0]`, each free-set solve a Householder QR (never the normal
-/// equations, whose condition is the square). `eps > 0` makes the problem
-/// strictly convex, so the method ends, at the unique minimiser.
-pub fn bounded_least_squares(cols: &[[f64; 3]], b: [f64; 3], w: [f64; 3], lo: &[f64], hi: &[f64], ridge: f64) -> Vec<f64> {
-    let n = cols.len();
-    if n == 0 {
-        return Vec::new();
+/// The six-row allocation of SPEC-LIT 161.20: [`allocate`]'s two stages on
+/// the rows `[F_x, F_y, F_z, M_x, M_y, M_z]` (body axes). Stage one weighs
+/// the moment rows as version 2 does (newtons by the largest arm `arm`,
+/// then [`MOMENT_PRIORITY`]), `F_z` by 1 and `F_x`, `F_y` by `weight`: the
+/// priority moments > `F_z` > horizontal. Stage two is version 2's: the
+/// smallest thrusts that give the first stage's wrench, every row in
+/// newtons and unweighted.
+pub fn allocate_six(cols: &[[f64; 6]], b: [f64; 6], arm: f64, weight: f64, lo: &[f64], hi: &[f64]) -> Vec<f64> {
+    let arm = if arm > 0.0 { arm } else { 1.0 };
+    let wm = MOMENT_PRIORITY / arm;
+    let w1 = [weight, weight, 1.0, wm, wm, wm];
+    let x1 = bounded_least_squares(cols, b, w1, lo, hi, ALLOCATION_RIDGE);
+    let got = wrench_of(cols, &x1);
+    let w2 = [1.0, 1.0, 1.0, 1.0 / arm, 1.0 / arm, 1.0 / arm];
+    bounded_least_squares(cols, got, w2, lo, hi, LEAST_NORM_RIDGE)
+}
+
+/// `A x`: the wrench the thrusts `x` give, column by column.
+pub fn wrench_of<const R: usize>(cols: &[[f64; R]], x: &[f64]) -> [f64; R] {
+    let mut got = [0.0; R];
+    for (c, xj) in cols.iter().zip(x) {
+        for k in 0..R {
+            got[k] += c[k] * xj;
+        }
     }
-    let rows = 3 + n;
+    got
+}
+
+/// `min ||W (A x - b)||^2 + eps ||x||^2` over `lo <= x <= hi`, `A`'s columns
+/// `cols` (each `R` rows) - the bounded least squares of SPEC-LIT 161.14, by
+/// the active-set method of Stark & Parker on the augmented system
+/// `[W A; sqrt(eps) I] x = [W b; 0]`, each free-set solve a Householder QR
+/// (never the normal equations, whose condition is the square). `eps > 0`
+/// makes the problem strictly convex, so the method ends, at the unique
+/// minimiser. Version 2 calls it with three rows, the six-row allocation of
+/// SPEC-LIT 161.20 with six; the arithmetic for three rows is version 2's,
+/// operation for operation.
+pub fn bounded_least_squares<const R: usize>(
+    cols: &[[f64; R]],
+    b: [f64; R],
+    w: [f64; R],
+    lo: &[f64],
+    hi: &[f64],
+    ridge: f64,
+) -> Vec<f64> {
+    let n = cols.len();
+    if n == 0 || R == 0 {
+        return vec![0.0; n];
+    }
+    let rows = R + n;
     let colmax = cols
         .iter()
-        .map(|c| ((w[0] * c[0]).powi(2) + (w[1] * c[1]).powi(2) + (w[2] * c[2]).powi(2)).sqrt())
+        .map(|c| {
+            let mut s = (w[0] * c[0]).powi(2);
+            for k in 1..R {
+                s += (w[k] * c[k]).powi(2);
+            }
+            s.sqrt()
+        })
         .fold(0.0f64, f64::max)
         .max(f64::MIN_POSITIVE);
     let se = ridge * colmax;
     // C, row major, and d.
     let mut c = vec![vec![0.0; n]; rows];
     for (j, col) in cols.iter().enumerate() {
-        for r in 0..3 {
+        for r in 0..R {
             c[r][j] = w[r] * col[r];
         }
-        c[3 + j][j] = se;
+        c[R + j][j] = se;
     }
     let mut d = vec![0.0; rows];
-    for r in 0..3 {
+    for r in 0..R {
         d[r] = w[r] * b[r];
     }
 
@@ -458,6 +554,9 @@ pub struct Controller {
     pub contact: Vec<V3>,
     /// The descent law's latch: braking has begun.
     pub braking: bool,
+    /// `control.lateral` (SPEC-LIT 161.19): with it the six-row allocation
+    /// of SPEC-LIT 161.20 runs; without it the controller is version 2's.
+    pub lateral: Option<LateralLaw>,
 }
 
 /// What the controller decided for one step.
@@ -470,6 +569,10 @@ pub struct Command {
     pub wrench: [f64; 3],
     /// The height of the lowest contact point over the descent law's ground.
     pub h: Option<f64>,
+    /// With `control.lateral`: the whole demanded body wrench `[F_x, F_y,
+    /// F_z, M_x, M_y, M_z]` of SPEC-LIT 161.19 (open-loop thrusters' share
+    /// included); `None` for version 2.
+    pub demand: Option<[f64; 6]>,
 }
 
 /// The lowest world z of `contact` (rest frame) on `body` - `None` without
@@ -500,6 +603,35 @@ impl Controller {
             let uz = r[2][2];
             fz = d.force_z_body(body.mass, norm(body.gravity), h, st.v[2], uz, &mut self.braking);
         }
+        if let Some(lat) = &self.lateral {
+            // SPEC-LIT 161.19-161.20: F_b = R^T F_h + F_desc z_b, M_b the
+            // PD's three moments, allocated on six rows.
+            let fl = mat_t_vec(&r, lat.force_world(body.mass, st.v));
+            let demand = [fl[0], fl[1], fl[2] + fz, moment[0], moment[1], moment[2]];
+            let mut want = demand;
+            for (i, th) in thr.iter().enumerate() {
+                if !th.closed_loop {
+                    let c = th.column6();
+                    for k in 0..6 {
+                        want[k] -= c[k] * open_thrust[i];
+                    }
+                }
+            }
+            let idx: Vec<usize> = (0..thr.len()).filter(|&i| thr[i].closed_loop).collect();
+            let mut thrust: Vec<f64> =
+                thr.iter().enumerate().map(|(i, t)| if t.closed_loop { 0.0 } else { open_thrust[i] }).collect();
+            if !idx.is_empty() {
+                let arm = idx.iter().map(|&i| norm(thr[i].r_body)).fold(0.0f64, f64::max);
+                let cols: Vec<[f64; 6]> = idx.iter().map(|&i| thr[i].column6()).collect();
+                let lo = vec![0.0; idx.len()];
+                let hi: Vec<f64> = idx.iter().map(|&i| thr[i].f_max).collect();
+                let x = allocate_six(&cols, want, arm, lat.weight, &lo, &hi);
+                for (k, &i) in idx.iter().enumerate() {
+                    thrust[i] = x[k];
+                }
+            }
+            return Command { thrust, reference, wrench: [want[2], want[3], want[4]], h, demand: Some(demand) };
+        }
         let mut want = [fz, moment[0], moment[1]];
         for (i, th) in thr.iter().enumerate() {
             if !th.closed_loop {
@@ -521,7 +653,7 @@ impl Controller {
                 thrust[i] = x[k];
             }
         }
-        Command { thrust, reference, wrench: want, h }
+        Command { thrust, reference, wrench: want, h, demand: None }
     }
 }
 
