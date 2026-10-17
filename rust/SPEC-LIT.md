@@ -49429,7 +49429,90 @@ both builds and carries one tolerance (docs/17 §5.1.4). The device path
 | `edc_cap_is_counted` | `Re_T < C_γ^4` cells | count equals the cells with `γ_λ > gammaMax` | D |
 | `edc_refuses_batch_variant` | `variant "batch"` | refused with §134.3's reason | D |
 
-Labels: (134.1)-(134.13).
+### 134.6 EDM and PaSR as built (CHR-14)
+
+`src/chem/tci.rs` builds EDM (§134.2) and PaSR's frozen-mean form (§134.4)
+as f64 host twins and as two device kernels in `cuda/chem.cu`
+(`chemEdmSource`, `chemPasrScale`), which compute in `double` in both
+builds, as the rest of `chem.cu` does (§132.6, §118.10). Their inputs and
+outputs are ofscalar. The tests are in `tests/chem_tci.rs`, an integration
+test, so every row runs in both builds. EDC is §134.3's and CHR-15's. Until
+CHR-15 lands, the selector refuses it by name. `ofgpu-lowmach` still refuses
+every closure (§137.7). Wiring a closure into the split step is not part of
+CHR-14's row.
+The two kernels capture into one CUDA graph and replay bitwise
+(`chem::tci::tests::tci_replays_under_capture`, §81.6's registry row).
+
+**Selection.** `tci::select(combustion, MixingKind, k_present)` applies
+§134.1's refusals in this order. `laminar` is always accepted. Any closure
+with `MixingRate::None` is refused, naming the model and the arm. EDM or EDC
+with `MixingRate::Strain` is refused. EDC is refused as not built. For PaSR,
+`tauMix strain` is refused under a RANS arm, and any other `tauMix` under
+`Strain`. `kolmogorov` and `geometric` under `Omega` without the model's `k`
+field are refused, naming `k`. `integral` without `Cmix` is refused.
+`select_for(combustion, &MixingRate, Option<&k>)` reads the arm from the
+running model and calls `select`.
+
+**The mixing time, by arm** (DESIGN: the arms of §134.1 written out with
+the Wilcox identity `ε = β* k ω` that `MixingRate::Omega`'s doc states):
+
+```
+Epsilon { k, ε }:   τ_I = k / ε,          ε = ε
+Omega { ω, β* }:    τ_I = 1 / (β* ω),     ε = β* k ω   (needs the model's k)
+τ_m = C_mix τ_I  |  (ν/ε)^(1/2)  |  (τ_I (ν/ε)^(1/2))^(1/2)  |  1/|S|          (134.14)
+      integral       kolmogorov       geometric                 strain
+```
+
+EDM reads the rate `r = ε/k` (Epsilon) or `r = β* ω` (Omega). `ν` is a
+per-cell buffer, filled by the caller (the laminar kinematic viscosity).
+
+**The reacting fraction, at its edges** (DESIGN, decided by
+recommendation):
+
+```
+κ = 1                     if τ_m = 0, or if every species is dormant
+κ = τ_c / (τ_c + τ_m)     otherwise                                               (134.15)
+```
+
+The first line is the limit `τ_m → 0` of (134.12), taken before `τ_c` is
+read. It is needed because `ffr` and `gfr` give `τ_c = 0` whenever a
+non-dormant species has `Y_i = 0`. That is a product being formed from
+nothing, and then (134.12) would be `0/0`. With `τ_m > 0`, the same species
+gives `κ = 0`, so `ffr` and `gfr` stop a reaction until its products exist.
+That is a property of Piscopo et al.'s eqs. (6)-(7) as written. It is not
+cured here. `τ_m = +∞` (`ε = 0`) gives `κ = 0`.
+
+**The mean rate's order of operations** (host and device alike). EDM:
+`q_r = ((A r) ρ) lim_r`. `lim_r` is the minimum over the reactants in list
+order, then `min(lim_r, B (Σ_P Ỹ_β) / (Σ_P ν''_β W_β))`, with both sums in
+list order from 0. `W_m ω̄_m = W_m acc_m`, where `acc_m` starts at 0 and
+takes `-ν' q_r` from each reactant entry and `+ν'' q_r` from each product
+entry, reaction by reaction. That is §130.7's accumulation. PaSR:
+`ẏ_i = (W_i ω_i)/ρ`, and `W_i ω̄_i = κ (W_i ω_i)`. So `κ = 1` returns the
+laminar `W_i ω_i` bitwise.
+`Ỹ` enters (134.2) as given, with no clipping. A negative mass fraction
+gives a negative rate of progress, as the formula is written.
+
+**Cell statuses** (they extend §132.9's codes and never reuse them). A
+refused cell writes NaN to every output and its code: 3 for a non-finite
+`Y`, 11 (`BAD_MIXING`) for a mixing input that gives a non-finite or
+negative rate or a NaN or negative `τ_m`, 12 (`BAD_DENSITY`) for `ρ ≤ 0` or
+non-finite, and 13 (`BAD_RATE`) for a non-finite laminar `ω` handed to PaSR.
+
+**The rows CHR-14 makes true** (§134.5's EDM and PaSR rows, plus the device
+twin):
+
+| row | as built |
+|---|---|
+| `edm_box_closed_form` | `2H2 + O2 => 2H2O` over H2, O2, H2O, N2, `Y = (0.01, 0.23, 0, 0.76)`, `A = 4`, `k = 1`, `ε = 10`, `B` absent, `ρ` frozen. The host twin is integrated by §132's `rosenbrock::integrate` and compared with (134.3) at t = 0.01, 0.05 and 0.1 s: 0.006703200460356393, 0.0013533528323661271 and 0.00018315638888734178, to 1e-10 relative (P). It also checks one product-limited point with `B = 0.5` against the reduction in §134.2, to 1e-14 (P) |
+| `edm_two_step_conserves_elements` | a two-step global mechanism, `CH4 + 1.5O2 => CO + 2H2O` and `CO + 0.5O2 => CO2`. Element production per cell is within 1e-14 of `Σ\|q_r\|` (A) |
+| `edm_requires_a_and_b` | the lowered case without `A` is refused, naming `combustion.A` and Magnussen & Hjertager (D) |
+| `pasr_limit_is_laminar` | `τ_m = 0` gives the laminar `W ω` bitwise, on the host and on the device (D) |
+| `pasr_linear_kappa_exact` | `FUEL => PROD` at `k_r = 1000 1/s`, `tauChem sfr`, `tauMix integral` with `C_mix = 1`, `k = 1`, `ε = 1000`: `κ = 0.5`, and `W_F ω̄_F/ρ = -25` at `Y_F = 0.05`, to 1e-12 relative (P) |
+| `tci_refuses_no_mixing_rate` | EDM, EDC and PaSR under `MixingRate::None` are refused, naming the combination (D) |
+| `tci_device_matches_host` | 4096 random cells: `chemEdmSource` and `chemPasrScale` against the host twins. The tolerance is 1e-13 relative to the cell's largest `\|W ω̄\|` in f64. In f32 it is 1e-6, with the host fed the f32-rounded inputs (R) |
+
+Labels: (134.1)-(134.15).
 
 ---
 

@@ -86,6 +86,19 @@
     [46]     h_max (+inf allowed)
     [47]     max_steps
   ------------------------------------------------------------------------
+
+  CHR-14 adds the TCI closures of SPEC-LIT 134.6, still one thread per
+  cell in ofchem double in both builds: chemEdmSource evaluates (134.2)'s
+  rate of progress per global reaction and the per-species EDM source
+  W_m omega-bar_m, and chemPasrScale the PaSR frozen-mean scale (134.13)
+  with (134.14)'s mixing times and (134.15)'s reacting-fraction edges.
+  Their flat EDM layout (ef, ei) is stated in the chemEdmSource comment
+  below; the Rust twin of that layout is src/chem/tci.rs
+  EdmMechanism::flatten, and the two field lists must stay identical.
+  Their statuses extend 132.9's codes and never reuse them: 3 a non-finite
+  Y, 11 BAD_MIXING, 12 BAD_DENSITY, 13 BAD_RATE; a refused cell writes
+  NaN to every one of its wdot entries.
+  ------------------------------------------------------------------------
 */
 
 #include "ofgpu_device.cuh"
@@ -1077,5 +1090,239 @@ extern "C" __global__ void chemLewisDiffusivity
         d[k * n + c] = (ofscalar)((ofchem)lam[c]
             / (((ofchem)rho[c] * (ofchem)cp[c]) * le[k]));
     }
+}
+
+//- chemEdmSource: the EDM source of SPEC-LIT 134.6 - (134.2)'s rates of
+//  progress q_r = ((A r) rho) lim_r, lim_r the reactant minimum in list
+//  order and then B's product-limiting argument, and the per-species
+//  accumulation W_m acc_m - exactly the host twin
+//  src/chem/tci.rs EdmMechanism::progress/source in the same order.
+//  arm: 0 Epsilon (m0 = k, m1 = epsilon, r = eps/k), 1 Omega (m0 = omega,
+//  r = beta_star*omega). The flat layout, whose Rust twin is
+//  EdmMechanism::flatten (the two field lists must stay identical):
+//    ei: [0] K, [1] R (1 or 2), then 4 ints per reaction j at 2+4j -
+//        re_begin, re_end, pr_begin, pr_end (half-open entry indices, the
+//        reactant entries of j then its product entries, reactions in
+//        order), then at 2+4R one species index per entry.
+//    ef: [0..K) W_k (kg/mol), then at K+e the coefficient (nu' or nu'')
+//        of entry e.
+//  Statuses: 3 a non-finite Y, 12 rho not finite or <= 0, 11 a rate that
+//  is not finite or is negative; a refused cell writes NaN to every wdot. -
+extern "C" __global__ void chemEdmSource
+(
+    const int arm,
+    const ofscalar* __restrict__ m0,
+    const ofscalar* __restrict__ m1,
+    const double beta_star,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ y,
+    ofscalar* __restrict__ wdot,
+    int* __restrict__ status,
+    const double* __restrict__ ef,
+    const int* __restrict__ ei,
+    const double a,
+    const double b,
+    const int has_b,
+    const int n
+)
+{
+    const int c = OFGPU_TID;
+    if (c >= n) return;
+    const int K = ei[0];
+    const int R = ei[1];
+    int st = 0;
+    for (int k = 0; k < K; ++k)
+    {
+        if (!isfinite((ofchem)y[k * n + c])) { st = 3; break; }
+    }
+    ofchem rho_c = 0.0;
+    if (st == 0)
+    {
+        rho_c = (ofchem)rho[c];
+        if (!isfinite(rho_c) || rho_c <= 0.0) st = 12;
+    }
+    ofchem q[2];
+    if (st == 0)
+    {
+        ofchem r = 0.0;
+        if (arm == 0) r = (ofchem)m1[c] / (ofchem)m0[c];
+        else r = beta_star * (ofchem)m0[c];
+        if (!isfinite(r) || r < 0.0) st = 11;
+        for (int j = 0; j < R && st == 0; ++j)
+        {
+            const int re0 = ei[2 + 4 * j];
+            const int re1 = ei[3 + 4 * j];
+            const int pr0 = ei[4 + 4 * j];
+            const int pr1 = ei[5 + 4 * j];
+            const int s0 = ei[2 + 4 * R + re0];
+            ofchem lim = (ofchem)y[s0 * n + c] / (ef[K + re0] * ef[s0]);
+            for (int e = re0 + 1; e < re1; ++e)
+            {
+                const int s = ei[2 + 4 * R + e];
+                lim = fmin(lim, (ofchem)y[s * n + c] / (ef[K + e] * ef[s]));
+            }
+            if (has_b != 0)
+            {
+                ofchem sy = 0.0;
+                ofchem sw = 0.0;
+                for (int e = pr0; e < pr1; ++e)
+                {
+                    const int s = ei[2 + 4 * R + e];
+                    sy += (ofchem)y[s * n + c];
+                    sw += ef[K + e] * ef[s];
+                }
+                lim = fmin(lim, b * sy / sw);
+            }
+            q[j] = ((a * r) * rho_c) * lim;
+        }
+    }
+    if (st == 0)
+    {
+        for (int m = 0; m < K; ++m)
+        {
+            ofchem acc = 0.0;
+            for (int j = 0; j < R; ++j)
+            {
+                for (int e = ei[2 + 4 * j]; e < ei[3 + 4 * j]; ++e)
+                {
+                    if (ei[2 + 4 * R + e] == m) acc -= ef[K + e] * q[j];
+                }
+                for (int e = ei[4 + 4 * j]; e < ei[5 + 4 * j]; ++e)
+                {
+                    if (ei[2 + 4 * R + e] == m) acc += ef[K + e] * q[j];
+                }
+            }
+            wdot[m * n + c] = (ofscalar)(ef[m] * acc);
+        }
+    }
+    if (st != 0)
+    {
+        for (int m = 0; m < K; ++m) wdot[m * n + c] = (ofscalar)nan("");
+    }
+    status[c] = st;
+}
+
+//- chemPasrScale: PaSR's frozen-mean rate of SPEC-LIT 134.6,
+//  W_i omega-bar_i = kappa (W_i omega_i) - (134.14)'s mixing time
+//  (tau_mix 0 integral c_mix tau_i, 1 kolmogorov sqrt(nu/eps),
+//  2 geometric sqrt(tau_i sqrt(nu/eps)), 3 strain 1/|S|) and (134.15)'s
+//  edges, tau_c from Piscopo eqs. (5)-(7) over the species with
+//  |ydot| >= 1e-8, exactly the host twin src/chem/tci.rs's
+//  tau_mix/tau_chem/kappa/pasr_source in the same order. arm: 0 Epsilon
+//  (m0 = k, m1 = epsilon), 1 Omega (m0 = omega, kf = k), 2 Strain
+//  (m0 = |S|). Statuses: 3 a non-finite Y, 12 rho not finite or <= 0,
+//  11 a tau_m that is NaN or negative (tau_m = +inf is allowed and gives
+//  kappa 0), 13 a non-finite omega; a refused cell writes NaN to every
+//  wdot. -
+extern "C" __global__ void chemPasrScale
+(
+    const int arm,
+    const ofscalar* __restrict__ m0,
+    const ofscalar* __restrict__ m1,
+    const ofscalar* __restrict__ kf,
+    const double beta_star,
+    const ofscalar* __restrict__ nu,
+    const int tau_mix,
+    const double c_mix,
+    const int tau_chem,
+    const double* __restrict__ w,
+    const ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ y,
+    const ofscalar* __restrict__ omega,
+    ofscalar* __restrict__ wdot,
+    int* __restrict__ status,
+    const int K,
+    const int n
+)
+{
+    const int c = OFGPU_TID;
+    if (c >= n) return;
+    int st = 0;
+    for (int k = 0; k < K; ++k)
+    {
+        if (!isfinite((ofchem)y[k * n + c])) { st = 3; break; }
+    }
+    ofchem rho_c = 0.0;
+    if (st == 0)
+    {
+        rho_c = (ofchem)rho[c];
+        if (!isfinite(rho_c) || rho_c <= 0.0) st = 12;
+    }
+    ofchem tau_m = 0.0;
+    if (st == 0)
+    {
+        //- (134.14) by arm: tau_i and eps, then the named mixing time -
+        ofchem tau_i = 0.0;
+        ofchem eps = 0.0;
+        if (arm == 0)
+        {
+            tau_i = (ofchem)m0[c] / (ofchem)m1[c];
+            eps = (ofchem)m1[c];
+        }
+        else if (arm == 1)
+        {
+            tau_i = 1.0 / (beta_star * (ofchem)m0[c]);
+            eps = (beta_star * (ofchem)kf[c]) * (ofchem)m0[c];
+        }
+        if (tau_mix == 0) tau_m = c_mix * tau_i;
+        else if (tau_mix == 1) tau_m = sqrt((ofchem)nu[c] / eps);
+        else if (tau_mix == 2) tau_m = sqrt(tau_i * sqrt((ofchem)nu[c] / eps));
+        else tau_m = 1.0 / (ofchem)m0[c];
+        if (isnan(tau_m) || tau_m < 0.0) st = 11;
+    }
+    if (st == 0)
+    {
+        for (int k = 0; k < K; ++k)
+        {
+            if (!isfinite((ofchem)omega[k * n + c])) { st = 13; break; }
+        }
+    }
+    ofchem kap = 1.0;
+    if (st == 0)
+    {
+        //- Piscopo eqs. (5)-(7): the chemical time from the ratios -
+        ofchem sfr = 0.0;
+        ofchem ffr = 0.0;
+        int present = 0;
+        for (int k = 0; k < K; ++k)
+        {
+            const ofchem wl = w[k] * (ofchem)omega[k * n + c];
+            const ofchem yd = wl / rho_c;
+            if (fabs(yd) < 1.0e-8) continue;
+            const ofchem ratio = (ofchem)y[k * n + c] / fabs(yd);
+            if (present == 0)
+            {
+                sfr = ratio;
+                ffr = ratio;
+                present = 1;
+            }
+            else
+            {
+                if (ratio > sfr) sfr = ratio;
+                if (ratio < ffr) ffr = ratio;
+            }
+        }
+        //- (134.15) at its edges -
+        if (tau_m == 0.0 || present == 0)
+        {
+            kap = 1.0;
+        }
+        else
+        {
+            const ofchem tau_c = tau_chem == 0 ? sfr
+                : (tau_chem == 1 ? ffr : sqrt(sfr * ffr));
+            kap = tau_c / (tau_c + tau_m);
+        }
+        for (int k = 0; k < K; ++k)
+        {
+            const ofchem wl = w[k] * (ofchem)omega[k * n + c];
+            wdot[k * n + c] = (ofscalar)(kap * wl);
+        }
+    }
+    if (st != 0)
+    {
+        for (int k = 0; k < K; ++k) wdot[k * n + c] = (ofscalar)nan("");
+    }
+    status[c] = st;
 }
 
