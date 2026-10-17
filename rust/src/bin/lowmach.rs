@@ -4195,6 +4195,10 @@ fn main() -> ExitCode {
 // ==========================================================================
 
 #[cfg(test)]
+#[path = "lowmach_val41/mod.rs"]
+mod lowmach_val41;
+
+#[cfg(test)]
 mod lowmach_tests {
     use super::*;
     use ofgpu::io::case::SolverControls;

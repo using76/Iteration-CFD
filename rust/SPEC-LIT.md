@@ -3828,6 +3828,71 @@ sink) and −16.5 % on the wall-function leg (viscous form) or −27.9 %
 this gate in its own right, on both meshes, and it is a MOMENTUM finding
 — §33.3's territory, not §29.3's.
 
+##### 32.5.3.1 Addendum (VAL-41): why the wall-function leg's realised `f` is −28 % of the pipe `f`
+
+The wall-function leg realises `f` = 0.0171402 in the `rho u_tau^2` form
+against Petukhov's pipe `f` = 0.0238816 at its own `Re` — −28.2 %, the
+finding §32.5.3 left open on the table. This addendum measures why, and it
+measures by INPUT alone: a diagnosis probe (`src/bin/lowmach_val41/mod.rs`,
+tests only — no solver code is touched) runs `cases/channelPeriodicFluxWF.jsonc`
+and three input variants of it through the whole `ofgpu-lowmach` driver at
+10 000 steady iterations each (about 70 s per run; 10 000 reproduces the
+40 000-iteration record digit for digit), reads the written fields back, and
+decomposes the realised friction factor as an exact identity. Three tests,
+each printing every number before it asserts:
+`val41_probe_the_shipped_leg_decomposes_and_its_seam_is_a_wall`,
+`val41_probe_a_seam_that_is_not_a_wall_closes_half_of_it`,
+`val41_probe_the_first_cell_y_plus_sweep_with_the_seam_not_a_wall`, run as
+`cargo test --release --bin ofgpu-lowmach val41_probe -- --ignored
+--nocapture --test-threads=1`.
+
+The decomposition, an identity the probe asserts to 1e-12 relative on every
+leg:
+
+```text
+F1 = mean(rho_f sqrt(Cmu) k_P) / (rho_w u_tau^2)   the u_tau form: k_P against equilibrium
+F2 = rho_w / rho_b                                 the density convention of a kinematic momentum equation (§32.5.2)
+F3 = f_kin / f_pipe,   f_kin = 8 u_tau^2 / U_b^2   the kinematic friction against the pipe
+f_k / f_pipe = F1 · F2 · F3
+```
+
+Shipped: 0.71771 = 0.86640 × 0.92246 × 0.89803. Every candidate below is
+ruled in or out by what one input edit does to that product; the shares are
+log shares of the shipped total, ln(0.71771) = −0.332, with the three factors
+taken at the seam-free state the variants isolate.
+
+| Candidate | How measured | Measured | Verdict |
+|---|---|---|---|
+| the seam: the two cyclic patches carry the catch-all rule's wall-function types (`epsilonWallFunction`, `kqRWallFunction`) in the lowered fields, and `field_setup::faces_where` (called by `WallFaces::from_case`) flags faces by the raw patch type without the `topology_override` that makes them cyclic, so the epsilon pin of the two seam wall cells averages the cyclic face in as a wall face at `y = dx/2` | input: the catch-all rule becomes `"kind": "symmetry"`, which reaches only the two cyclic patches (the mesh still couples them cyclically) | interior wall cells pinned to 1e-5 (probe 6.3e-6); seam cells 13.35 % below `epsilon_wall(k_P, y_P)` and equal to the area-weighted mix to 3e-6; the flow then NOT streamwise-invariant (`k_P` spread 6.06 %, `U_y` up to 0.031 m/s at the seam). Seam-free: x-invariant (`k_P` spread 0, `U_y` 2e-10), `f_k/f_pipe` 0.84473 | RULED IN — ln share −0.163 of the total −0.332 (49 %) |
+| the density convention F2 = `rho_w/rho_b` (a kinematic momentum equation reported in Pa at the wall density and divided by `rho(T_b)`, §32.5.2) | read off the same decomposition at the seam-free state | 0.92578 | RULED IN — a convention of the report, not a defect of the solve; share −0.077 (23 %) |
+| the u_tau form F1: `k_P` below the equilibrium `u_tau^2/sqrt(Cmu)` | the seam-free decomposition, plus the wall cell's own k budget | 0.93245; the budget `G − eps + D` closes to 2.4e-7 of `G`, with `G/eps` = 1.069 — the surplus production diffuses into the three-cell half-channel core | RULED IN — share −0.070 (21 %) |
+| first-cell y+ ~ 60 against the log-law constants (`kappa` 0.41, `E` 9.8) | input: the wall-normal cell count, seam-free, `ny` 4/6/10 — `y+_k` 89.3/59.9/36.2 | the wall function reproduces its own law (`U_P+ = (u_tau/u_k) u+(y+_k)` to 1e-4), so `U_P+` 16.066 against `u+(62.06)` = 15.603 is F1's deficit seen through the law, not the constants'. The sweep moves F1 0.921/0.932/0.944 and F3 0.961/0.979/0.997: the kinematic friction approaches the pipe value as the first cell moves in | RULED IN as a resolution effect of F1's mechanism — F3's share at the shipped mesh −0.022 (7 %) |
+| the `bounded` correction on `k` and `epsilon` | input: `div(phi,k)` and `div(phi,epsilon)` unbounded, shipped and seam-free | `f_k` moves −5.7e-5 relative on the shipped case and is BIT-IDENTICAL seam-free (`contErr` 2.8e-14) | RULED OUT (the momentum one was retired by §32.5.5) |
+
+**The seam-free leg's own driver readout** (`ofgpu-lowmach`'s own report of the
+seam-free run at 10 000 iterations; the supervisor's 20 000-iteration run
+reproduces every printed digit): `Nu` 67.8038, Gnielinski at
+the pipe `f` **+2.7 %** (shipped −5.9 %), Reynolds analogy at its own
+measured `f` **+23.2 %** (still OPEN), Dittus–Boelter **−4.7 %**, thermostat
+balance 4.67e-8 W (shipped −5.57e-4 W). Removing the seam therefore does not
+close the Reynolds-analogy verdict — F2 and F1 remain — but it moves the
+absolute-prediction verdict from −5.9 % to +2.7 %, and it is the largest
+single share of the friction finding.
+
+**Options, NOT built** — the numerics and the gate records are the user's
+decision, and this addendum measures without either:
+
+- (a) code — `faces_where` (or `WallFaces::from_case`) skips faces of a
+  `PatchKind::Cyclic` patch; it changes every JSONC cyclic wall-function run.
+- (b) input — the catch-all of `channelPeriodicFluxWF.jsonc` becomes
+  `"kind": "symmetry"`; it moves this gate's record (§32.4.1's wall-function
+  rows). Whether the seam faces also receive a `nu_t` wall value (the `nut`
+  set is flagged by the same `faces_where`) was not measured separately. The resolved leg (`nutLowRe`, no epsilon pin) is
+  not affected by this path.
+
+No citation beyond Launder & Spalding and Kader, both already carried by
+§6.4.
+
 #### 32.5.4 What must hold
 
 | Check | Expected |
