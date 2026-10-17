@@ -59674,3 +59674,218 @@ and shared suites green at today's counts (one known failure allowed by name onl
 `import.test.ts` 221-runs test). ≤ 5 min.
 
 ---
+
+## 161. Rigid-body motion of the whole mesh — six degrees of freedom, the flow's force, and jet thrusters
+
+`No GPL-licensed source was consulted.` Written for `src/rigid_body.rs`, `cuda/rigidbody.cu` and
+the `-rigidBody` hook of `src/bin/lowmach.rs` (2026-10-17). The mechanics are textbook:
+**Goldstein, Poole & Safko, *Classical Mechanics*, 3rd ed. (2002), ch. 4-5** (the rigid
+displacement, the velocity field of a rigid body, Euler's equations in principal axes);
+**J. Diebel, *Representing Attitude: Euler Angles, Unit Quaternions, and Rotation Vectors*,
+Stanford technical report (2006)** (the unit quaternion, its rotation matrix, its kinematics, the
+z-y-x Euler angles); **Butcher, *Numerical Methods for Ordinary Differential Equations* (2003)**
+(classical RK4). The moving mesh underneath is §105's `AleMesh`, unchanged; the wall traction is
+§32.5.1's viscous row. No OpenFOAM source was opened.
+
+The WHOLE mesh moves as one rigid body: every point, the outer boundary included, follows the
+body. The body is driven by the force the flow exerts on its patches and by jet thrusters -
+patches of the body that blow fluid out at a set speed relative to the body, switched by a
+schedule. Laminar, transient, `ofgpu-lowmach` only.
+
+### 161.1 The body file
+
+`ofgpu-lowmach <case> -endTime T -deltaT dt -rigidBody body.json`. The file is strict JSON
+(unknown keys refused by name):
+
+| key | meaning |
+|---|---|
+| `mass` | kg, > 0 |
+| `inertia` | principal moments about the centre of mass in BODY axes, kg m², > 0 and obeying the triangle inequality; the body axes are the mesh axes at t = 0 |
+| `centreOfMass` | m, world, at t = 0 (`c0`) |
+| `velocity`, `angularVelocity` | initial V (world) and w (body axes, = world at t = 0); default zero |
+| `gravity` | m/s², acts on the body; default zero |
+| `dof` | `free` (six) or `planarXZ` (x, z translation and rotation about y); default `free` |
+| `bodyPatches` | the patches whose faces carry the force and move as the body's wall; must exist, each once |
+| `rho` | kg/m³, converts the kinematic pressure and viscosity into newtons (§161.5) |
+| `thrusters[]` | `patch` (one of `bodyPatches`, one thruster per patch), `direction` (exit-velocity direction in BODY axes, normalised), `speed` (m/s relative to the body, ≥ 0), `on` (intervals `[t0, t1)`, `t0 < t1`) |
+| `write` | `every` (steps, ≥ 1, default 1), `file` (CSV path relative to the output root, default `rigidBody.csv`) |
+
+`planarXZ` refuses an initial `velocity[1] ≠ 0` and an initial `angularVelocity` with an x or z
+component, rather than projecting them away in silence.
+
+### 161.2 The point map and the rigid velocity
+
+With `q = (w, x, y, z)` the unit quaternion of the body, scalar first, body to world,
+
+```
+R(q) = | 1-2(y²+z²)   2(xy-wz)     2(xz+wy)   |
+       | 2(xy+wz)     1-2(x²+z²)   2(yz-wx)   |
+       | 2(xz-wy)     2(yz+wx)     1-2(x²+y²) |
+
+x(t)     = X(t) + R(q(t)) (x0 - c0)          every mesh point, x0 its rest position
+u_rig(x) = V + omega x (x - X),   omega = R w  (w in body axes)
+```
+
+The kernel `rbRigidPoints` writes, in double and in the mesh's local frame of §118.7-§118.8,
+`(X - O) + R ((x0 - O) - (c0 - O))`, from the rest points uploaded ONCE; a time step uploads no
+point. It writes straight into `AleMesh::points`, and `Simple::move_mesh` (§105.7) then sweeps
+the swept volumes, recomputes the geometry and forms the mesh flux exactly as for any other
+motion - so the space conservation law of §105.4 holds for the rigid motion as for every other.
+
+### 161.3 The integrator and the degrees of freedom
+
+```
+m dV/dt = F + m g                     dX/dt = V
+I dw/dt + w x (I w) = M_b,            M_b = R^T M        (Euler, principal body axes)
+dq/dt   = q (0, w) / 2                                   (Diebel's kinematics, body-frame w)
+```
+
+**Loose coupling.** The force `F_n`, `M_n` is measured after the solve of step n, on the state at
+`t_n`; step n+1 advances the body with it before the flow is solved. Over the step the
+acceleration and the body moment are extrapolated LINEARLY from this step's and the last step's
+values, and integrated:
+
+```
+a(s) = a_n + (a_n - a_{n-1}) s/dt,  0 <= s <= dt,  a = F/m + g
+X_{n+1} = X_n + V_n dt + a_n dt²/2 + (a_n - a_{n-1}) dt²/6      exact integral of a(s)
+V_{n+1} = V_n + a_n dt + (a_n - a_{n-1}) dt/2                   the AB2 velocity
+```
+
+On the first step `a_{n-1} = a_n`. Euler's equations are integrated by two classical RK4 half
+steps with `M_b(s)` linear the same way, giving `w_{n+1/2}` and `w_{n+1}`; the orientation turns
+by the exact rotation of the Simpson mean `wbar = (w_n + 4 w_{n+1/2} + w_{n+1})/6`:
+
+```
+q_{n+1} = normalise( q_n  exp(wbar dt / 2) ),   exp(phi/2) = (cos(|phi|/2), sin(|phi|/2) phi/|phi|)
+```
+
+The rotation about world y is also accumulated, unwrapped, as `rot_y += (R_{n+1} wbar)_y dt`, so
+a flip reads 360° rather than folding at ±90° as the z-y-x pitch does. All of it is f64 in both
+builds. Free fall and a constant torque from rest are reproduced to round-off (the acceleration
+is constant and `w` linear in time, which the extrapolation, RK4 and Simpson integrate exactly);
+a torque-free top keeps `|w|` and the kinetic energy to RK4's fourth order and its world angular
+momentum to the second order of the Simpson-mean rotation (§161.8).
+
+**Degrees of freedom.** `planarXZ` removes `F_y`, the world moment's x and z components, `a_y`
+and the x and z components of `dw/dt`. Because the body's y axis starts on the world's and only
+turns about it, the body y axis IS the world y axis for the whole run and the gyroscopic term
+`w x (I w)` vanishes identically (w lies on a principal axis), so the constraint is exact, not a
+projection error.
+
+### 161.4 The body wall and the jets
+
+Every body face carries a `fixedValue` U, refused by name otherwise (`type fixedValue; value
+uniform (0 0 0);` in `0/U` - the value is overwritten). After `move_mesh` has written §105.8's
+normal mesh velocity, `rbWallVelocity` rewrites the body faces' value:
+
+```
+n = Sf/|Sf|,  u_rig = V + omega x (Cf - X)
+U_b = (u_rig - (u_rig . n) n)  +  Sf phi_mesh,b/|Sf|²  +  u_jet
+u_jet = speed R(q) d_body   while the thruster is on at the step's mid time, else 0
+phi_b = phi_mesh,b + u_jet . Sf
+```
+
+The tangential part is the rigid velocity (no-slip on a turning body); the normal part is the one
+whose flux is the mesh flux, so the relative flux `phi_b - phi_mesh,b` through a wall face is
+zero and through a jet face is the jet's own `u_jet . Sf` - negative, an inflow into the fluid.
+`phi_b` is written at once so the step's first relative flux already carries the jets. At
+`t = 0`, before the mesh has a mesh flux, the seed is `U_b = u_rig + u_jet(0)` and `phi` is
+rebuilt from that `U` before the motion is attached. The jet's density is the file's `rho`
+(§161.5); the mass it adds to the fluid is not removed from the body (§161.9).
+
+### 161.5 The force and the moment
+
+**What `p` is.** `ofgpu-lowmach`'s momentum equation carries no density (§25.3; `src/energy.rs`,
+DESIGN choice 1): its `p` is the KINEMATIC perturbation pressure, m²/s², the pressure divided by
+the reference density, with the hydrostatic part `rho_inf g.x` taken out by the density-ratio
+buoyancy form (`(rho - rho_inf) g / rho_inf` on the right). It is converted with the file's
+`rho`, which the driver prints beside the gas's own `p0/(R_s TRef)` and flags when the two differ
+by more than 2 %; the case's own gravity `g` (`constant/g` or `physics.gravity`) restores the
+hydrostatic part. `nu` is the case's laminar kinematic viscosity. Per body face, with `Sf`
+pointing OUT of the fluid - into the body - and `r = Cf - X`:
+
+```
+F_p = sum rho (p_b + g . r) Sf                                       pressure
+F_v = sum rho nu |Sf| deltaCoeffs_b (dU - (dU . n) n),  dU = U_P - U_b   wall shear, 32.5.1's viscous row
+F_j = sum rho phi_rel,b (U_b - u_rig(Cf))                           jet reaction
+M   = sum r x (F_p + F_v + F_j)_face                                about the current centre of mass
+```
+
+`p_b` is the face's evaluated boundary value (the owner cell's on a `zeroGradient` wall), the
+value the momentum equation saw. On a closed body surface a uniform `p` sums to zero and
+`p = g.x` to `-rho g V_body`, Archimedes' force (on the closed boundary of a box of fluid, whose
+`Sf` points the other way, `+rho g V`). `F_j` is the momentum the relative flux carries across
+the face: `phi_rel < 0` where a jet blows into the fluid, so `F_j` points against the jet, with
+magnitude `mdot |u_jet|`, `mdot = rho |phi_rel|`; the jet face's pressure is in `F_p` as for any
+face. `rbForceMoment` is ONE block of 256 threads: each thread folds a fixed stride of faces in
+double, a fixed shared-memory tree folds the threads, and the twelve numbers `F_p, F_v, F_j, M`
+are downloaded - the one host round trip of the step besides the jets' world velocities, and the
+reason the capture registry lists `src/rigid_body.rs` as refused (§81.3).
+
+### 161.6 The step
+
+At attach (once `U`, `p`, `phi` are seated and `Simple` is initialised): the body faces from
+`bodyPatches`, the fixed-value check, the t = 0 seed of §161.4, the `AleMesh` built from the
+case's OWN polyMesh points and faces (an OpenFOAM directory's `constant/polyMesh`, or a JSONC
+case's lowering) and attached with every body face as a moving wall (§105.7), and the force of
+the initial state. Then every step, after the time step is opened:
+
+```
+body.advance(dt, F_n, M_n)          161.3
+rbRigidPoints -> AleMesh::points     161.2
+Simple::move_mesh                    105.7 (the mesh flux, 105.8's wall value, phi_rel)
+rbWallVelocity, U boundary, phi_b    161.4
+solve                                the low-Mach unit of work, unchanged
+rbForceMoment -> F_{n+1}, M_{n+1}    161.5
+```
+
+Every `write.every` steps (and the last) it appends a CSV row - `step, time, X Y Z, Vx Vy Vz,
+roll pitch yaw (deg, z-y-x), rotY (deg, unwrapped), w (body), F, M, F_p, F_v, F_j, thrusters
+on` - and prints one progress line with the percent of `endTime`, the state and the seconds per
+step. Every time directory the run writes also gets `<time>/polyMesh/points`, the moved points
+from the host map, so a reader that understands a moving polyMesh shows the body where it was.
+
+### 161.7 Refusals
+
+Refused by name before a field exists: a steady run (no `-endTime`); any turbulence model other
+than laminar; the case's own `motion` block; `-restartFrom`, `-restartWrite`; `-heaterPower`;
+`-sealed`; a case `sources` block or `output` block; any `-output` but `foam`; a cyclic pair.
+`Simple::attach_motion` refuses a ddt other than `Euler`/`backward`, fan and porous-jump patches
+(§105.7); `AleMesh` refuses a moving cyclic AMI. A body patch that is cyclic, empty or symmetry,
+a body face without a fixed-value U, a thruster on a patch `bodyPatches` does not list, and every
+malformed key of §161.1 are refused by name. A non-finite body state stops the run as diverged.
+
+### 161.8 The tests
+
+`src/rigid_body/tests.rs` and `src/bin/lowmach.rs`, each under a minute:
+
+| | test | bar |
+|---|---|---|
+| a | `free_fall_is_exact` (free and planar, 2000 steps) | X, V within 1e-12 relative |
+| b | `a_constant_torque_spins_up_as_m_t2_over_2i` (past two turns) | w and the unwrapped angle within 1e-12, q within 1e-10 |
+| c | `a_torque_free_symmetric_top_keeps_its_energy_and_spin` (10 s, dt 1e-3) | `|w|`, kinetic energy 1e-10; w against the closed-form precession 1e-9; world angular momentum 1e-6 (measured 1.9e-7) |
+| d | `the_device_point_map_is_the_host_map` (a far local origin) | 1e-12 relative |
+| e | `the_force_reduction_meets_its_closed_forms` (uniform p, p = g.x, the hydrostatic term, a sliding lid, a jet) | 1e-12 relative (f64), 1e-5 (single) |
+| f | `a_rigidly_moving_box_preserves_a_free_stream` (6³ box, every face prescribing the same absolute U, translated and turned through more than 57°) | max `|u - u0|/|u0|` 1e-9 (f64), 1e-4 (single) |
+| g | `the_rigid_body_flag_parses_and_its_refusals_fire_by_name`, `a_rigid_body_run_translates_the_whole_mesh_and_writes_its_trajectory` (lowmach, the piston duct translating with its own fluid) | refusals named; X, Vx and the written points within 1e-9, mean Ux within 1e-6 |
+
+### 161.9 Known limits
+
+* **Laminar only.** A turbulence model's wall distance and old levels are the static mesh's
+  (§105.12's refusal, kept).
+* **Loose coupling.** The body sees the force one step late, extrapolated; there is no
+  sub-iteration. It is stable where the body is heavy against the fluid it displaces
+  (`m >> rho V_body`, a car in air); a light body in a dense fluid can go unstable through the
+  added mass, and the remedy - a strong coupling - is not implemented.
+* **The jets add mass.** The fluid a jet blows out enters the domain at the file's `rho`; the body
+  keeps its mass and inertia.
+* **The outer boundary moves with the body.** The whole box translates and turns. For a body in
+  still air the outer patches should be open in every direction: `U` `inletOutlet` with
+  `inletValue uniform (0 0 0)` (the switch reads the RELATIVE flux, so the face the box moves
+  into is an inflow of still air) and `p` `fixedValue 0`.
+* **The Mach check reads the absolute velocity**, jets included (§93.6): at 293 K the limit 0.3
+  is about 103 m/s for `|V + u_jet|`; `-permissive` warns instead of refusing.
+* **The energy equation** keeps its own ddt on the moving mesh; an isothermal case is the
+  supported one.
+* **The written fields** are the solver's; the moved points are written beside them per time
+  directory. No restart.
