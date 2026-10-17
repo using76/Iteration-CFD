@@ -76,6 +76,7 @@ pub mod models;
 pub mod parcels;
 pub mod potential_flow;
 pub mod restart;
+pub mod rigid_body;
 pub mod rheology;
 pub mod cht;
 pub mod chem;

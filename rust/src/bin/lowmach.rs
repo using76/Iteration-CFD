@@ -36,6 +36,9 @@
 //!   -restartFrom FILE resume from a checkpoint - p0 and dp0dt included
 //!                     (SPEC-LIT §25.2/§31.2)
 //!                     a steady checkpoint's time is its iteration count (§44.9)
+//!   -rigidBody FILE   the whole mesh moves as one rigid body, driven by the
+//!                     flow and by jet thrusters (SPEC-LIT §161); transient
+//!                     and laminar only
 //! ```
 //!
 //! Written from `ofgpu SPEC-LIT.md` sections 25 (the low-Mach formulation)
@@ -250,6 +253,9 @@ struct Options {
     /// potential-flow-equivalent `phi` seed, and every field's own initial
     /// condition).
     restart_from: Option<PathBuf>,
+    /// `-rigidBody FILE` - SPEC-LIT 161: the whole mesh moves as one rigid
+    /// body; the file is the body, its patches and its thrusters.
+    rigid_body: Option<PathBuf>,
     /// Which of `-output`, `-writeInterval`, `-writeEvery`, `-restartWrite`
     /// this command line actually NAMED - SPEC-LIT §44.6.
     ///
@@ -266,7 +272,7 @@ fn usage() {
     eprintln!(
         "usage: ofgpu-lowmach <case> [-iters N] [-check N] [-endTime T] [-deltaT dt]\n       \
          [-sealed] [-p0 PA] [-heaterPower W] [-output LIST]\n       \
-         [-writeInterval W] [-writeEvery N] [-restartWrite N] [-restartFrom FILE] [-permissive]"
+         [-writeInterval W] [-writeEvery N] [-restartWrite N] [-restartFrom FILE] [-rigidBody FILE] [-permissive]"
     );
 }
 
@@ -299,6 +305,7 @@ fn parse(args: &[String]) -> Result<Options> {
         write_every: None,
         restart_write: None,
         restart_from: None,
+        rigid_body: None,
         output_flags: Vec::new(),
     };
 
@@ -353,6 +360,7 @@ fn parse(args: &[String]) -> Result<Options> {
                 o.output_flags.push("-restartWrite");
             }
             "-restartFrom" => o.restart_from = Some(PathBuf::from(next_arg(args, &mut i)?)),
+            "-rigidBody" => o.rigid_body = Some(PathBuf::from(next_arg(args, &mut i)?)),
             "-permissive" => {
                 ofgpu::io::contract::set_permissive(true);
             }
@@ -1229,6 +1237,64 @@ fn check_motion_walls(l: &LoweredCase) -> Result<()> {
     Ok(())
 }
 
+/// SPEC-LIT 161.7: what a `-rigidBody` run of this driver cannot honour,
+/// refused by name before a single field is set up - SPEC-LIT 105.12's list
+/// for a moving mesh, plus the case's own `motion` block.
+fn refuse_rigid_body_combinations(
+    o: &Options,
+    lowered: Option<&LoweredCase>,
+    model: RasModel,
+    hm: &HostMesh,
+) -> Result<()> {
+    if o.rigid_body.is_none() {
+        return Ok(());
+    }
+    let refuse = |what: &str, why: &str| -> Result<()> {
+        Err(Error::Config(format!("-rigidBody: {what} - {why} (SPEC-LIT 161.7)")))
+    };
+    let writers = "the volume writers take the rest points; a rigid-body run writes -output foam, with the moved points in each time directory";
+    let checkpoint = "a checkpoint carries no body state, no mesh points and no volume history";
+    if let Some(l) = lowered {
+        if l.motion.is_some() {
+            return refuse("the case's motion block", "one mesh moves one way; -rigidBody moves the whole mesh");
+        }
+        if !l.sources.is_empty() {
+            return refuse("sources", "a source's volume integral is the rest mesh's");
+        }
+        if l.output.is_some() {
+            return refuse("the case's output block", writers);
+        }
+    }
+    if !(o.end_time > 0.0) {
+        return refuse("a steady run", "a body moves in time; give -endTime and -deltaT");
+    }
+    if o.restart_from.is_some() {
+        return refuse("-restartFrom", checkpoint);
+    }
+    if o.restart_write.is_some() {
+        return refuse("-restartWrite", checkpoint);
+    }
+    if o.heater_power != 0.0 {
+        return refuse("-heaterPower", "the heater is spread over the rest volume, and the volume moves");
+    }
+    if o.sealed {
+        return refuse("-sealed", "the sealed p0 equation holds the domain volume fixed");
+    }
+    if model != RasModel::Laminar {
+        return refuse(
+            model.name(),
+            "a turbulence model's wall distance and time derivatives are the static mesh's; a moving mesh runs laminar",
+        );
+    }
+    if let Some(f) = o.output.iter().find(|f| !matches!(f, OutputFormat::Foam)) {
+        return refuse(&format!("-output {}", f.name()), writers);
+    }
+    if hm.patches.iter().any(|p| p.kind == PatchKind::Cyclic) {
+        return refuse("a cyclic pair", "a moving mesh carries no periodic pair (SPEC-LIT 105.12)");
+    }
+    Ok(())
+}
+
 /// SPEC-LIT 105.12: build the case's motion on its own block mesh and attach
 /// it to `s`. Returns the motion the loop moves the points with.
 fn attach_case_motion(
@@ -1901,6 +1967,13 @@ fn run(o: &Options) -> Result<RunEnd> {
         refuse_motion_combinations(o, l, selection.model, &hm)?;
         check_motion_walls(l)?;
     }
+    // SPEC-LIT 161.7: the rigid body's refusals and its file, before a field
+    // exists.
+    refuse_rigid_body_combinations(o, lowered.as_ref(), selection.model, &hm)?;
+    let rigid_spec = match &o.rigid_body {
+        Some(p) => Some(ofgpu::rigid_body::RigidBodySpec::read(p)?),
+        None => None,
+    };
 
     // SPEC-LIT §44: the `output` block, which used to be part of the refusal
     // above. Resolved here, before a single field is set up, so a case that
@@ -1987,7 +2060,7 @@ fn run(o: &Options) -> Result<RunEnd> {
                 restart: o.restart_from.is_some()
                     || o.restart_write.is_some()
                     || output_plan.as_ref().is_some_and(|p| p.restart.is_some()),
-                motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()),
+                motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()) || o.rigid_body.is_some(),
                 reserved: &reserved,
             },
         )?;
@@ -2094,6 +2167,35 @@ fn run(o: &Options) -> Result<RunEnd> {
             Some(lm) => Some(attach_case_motion(&gpu, &hm, &mesh, &mut s, l, lm)?),
             None => None,
         },
+        None => None,
+    };
+    // SPEC-LIT 161.6: the rigid body, built on the case's own polyMesh and
+    // attached once U, p and phi are seated.
+    let mut rigid: Option<ofgpu::rigid_body::RigidBodyCoupling> = match &rigid_spec {
+        Some(spec) => {
+            let raw = common::case_raw_mesh(&o.case_path, lowered.as_ref())?;
+            let csv = output_root(&o.case_path).join(&spec.write.file);
+            let grav = cc.buoyancy.g;
+            let rb = ofgpu::rigid_body::RigidBodyCoupling::attach(
+                &gpu,
+                &hm,
+                &mesh,
+                &raw,
+                spec,
+                &mut s,
+                f64::from(cc.nu),
+                [f64::from(grav.x), f64::from(grav.y), f64::from(grav.z)],
+                &csv,
+            )?;
+            let rho_gas = f64::from(o.p0) / (f64::from(gas_props.r_s()) * f64::from(cc.buoyancy.t_ref));
+            println!(
+                "  rho: the file's {} kg/m3 converts p and nu; the gas at p0 and TRef is {} kg/m3{}",
+                g(spec.rho),
+                g(rho_gas),
+                if (spec.rho - rho_gas).abs() > 0.02 * rho_gas { " - NOTE: they differ by more than 2 %" } else { "" }
+            );
+            Some(rb)
+        }
         None => None,
     };
 
@@ -2698,6 +2800,11 @@ fn run(o: &Options) -> Result<RunEnd> {
                 .set_points(&gpu, &pts)?;
             s.move_mesh(&gpu)?;
         }
+        // SPEC-LIT 161.6: the body over this step on the last step's force,
+        // its points, the mesh advance, and the walls' and jets' velocity.
+        if let Some(rb) = rigid.as_mut() {
+            rb.pre_step(&gpu, &mesh, &mut s, t_phys, f64::from(dt))?;
+        }
 
         let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
         // SPEC-LIT §17/§30.2: `g`/`Prt` feed `G_b`; `self.buoy` (built once
@@ -2755,6 +2862,10 @@ fn run(o: &Options) -> Result<RunEnd> {
         // (or warns, under -permissive) the step it leaves the regime.
         refuse_above_low_mach(&report.mach, &format!("step {step}"))?;
         last_mach = report.mach;
+        // SPEC-LIT 161.6: the force the next step's body advance uses.
+        if let Some(rb) = rigid.as_mut() {
+            rb.post_step(&gpu, &mesh, &s, step, n_steps, o.end_time)?;
+        }
 
         if step % o.check_every.max(1) as usize == 0 || step + 1 == n_steps {
             print_report(step, &report);
@@ -2789,6 +2900,10 @@ fn run(o: &Options) -> Result<RunEnd> {
                 volume.as_ref(),
                 reacting.as_ref(),
             )?;
+            // SPEC-LIT 161.6: the moved points beside the fields.
+            if let Some(rb) = &rigid {
+                rb.write_points(&output_root(&o.case_path).join(format_time_name(t_phys as Scalar)))?;
+            }
         }
 
         // The command-line checkpoint counts STEPS; the case's counts
@@ -2864,6 +2979,10 @@ fn run(o: &Options) -> Result<RunEnd> {
         volume.as_ref(),
         reacting.as_ref(),
     )?;
+    // SPEC-LIT 161.6: the final state's moved points.
+    if let Some(rb) = &rigid {
+        rb.write_points(&output_root(&o.case_path).join(format_time_name(t_phys as Scalar)))?;
+    }
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.
     if pipeline.has_restart() {
@@ -6747,5 +6866,94 @@ mod lowmach_tests {
             "tg0 probe: run b's Ux mean is off the recorded 4.023841: {:.9e}",
             b.ux_mean
         );
+    }
+
+    // ----------------------------------------------------------------------
+    //  SPEC-LIT 161 - the rigid body
+    // ----------------------------------------------------------------------
+
+    /// SPEC-LIT 161.7: `-rigidBody` parses, and every combination a
+    /// rigid-body run cannot honour is refused by name before a field exists.
+    #[test]
+    fn the_rigid_body_flag_parses_and_its_refusals_fire_by_name() {
+        let hm = HostMesh::default();
+        let base = ["case", "-rigidBody", "body.json", "-endTime", "1", "-deltaT", "0.01"];
+        let o = parse(&argv(&base)).expect("parses");
+        assert_eq!(o.rigid_body, Some(PathBuf::from("body.json")));
+        assert!(refuse_rigid_body_combinations(&o, None, RasModel::Laminar, &hm).is_ok());
+        let refused = |args: &[&str], model: RasModel, l: Option<&LoweredCase>| -> String {
+            let o = parse(&argv(args)).expect("parses");
+            refuse_rigid_body_combinations(&o, l, model, &hm).expect_err("must be refused").to_string()
+        };
+        let with = |extra: &[&'static str]| -> Vec<&'static str> {
+            let mut a: Vec<&'static str> = base.to_vec();
+            a.extend_from_slice(extra);
+            a
+        };
+        let cases: Vec<(Vec<&str>, RasModel, &str)> = vec![
+            (vec!["case", "-rigidBody", "b.json"], RasModel::Laminar, "a steady run"),
+            (base.to_vec(), RasModel::KEpsilon, RasModel::KEpsilon.name()),
+            (with(&["-output", "foam,vtu"]), RasModel::Laminar, "-output vtu"),
+            (with(&["-restartWrite", "10"]), RasModel::Laminar, "-restartWrite"),
+            (with(&["-restartFrom", "r.mcr"]), RasModel::Laminar, "-restartFrom"),
+            (with(&["-sealed"]), RasModel::Laminar, "-sealed"),
+            (with(&["-heaterPower", "5"]), RasModel::Laminar, "-heaterPower"),
+        ];
+        for (args, model, needle) in &cases {
+            let e = refused(args, *model, None);
+            println!("refused: {e}");
+            assert!(e.contains("-rigidBody") && e.contains(needle) && e.contains("161.7"), "{needle}: {e}");
+        }
+        let l_moving = lower_text(&stroke_case_text(STROKE_MOTION, ""), "rb_refuse");
+        let e = refused(&base, RasModel::Laminar, Some(&l_moving));
+        assert!(e.contains("motion block"), "{e}");
+        // Without the flag nothing here is this function's business.
+        let o = parse(&argv(&["case"])).expect("parses");
+        assert!(refuse_rigid_body_combinations(&o, Some(&l_moving), RasModel::KEpsilon, &hm).is_ok());
+    }
+
+    /// SPEC-LIT 161.8 g: the driver end to end. The piston duct, every face
+    /// moving with the body at the fluid's own velocity, is an exact solution:
+    /// the body keeps its velocity, the CSV has a row per step, and the final
+    /// time directory carries the points moved by `V t`.
+    #[test]
+    fn a_rigid_body_run_translates_the_whole_mesh_and_writes_its_trajectory() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = scratch_dir("rb_e2e");
+        let body = dir.join("body.json");
+        std::fs::write(
+            &body,
+            r#"{ "mass": 1.0e6, "inertia": [1.0, 1.0, 1.0], "centreOfMass": [0.5, 0.375, 0.375],
+                 "velocity": [-0.5, 0.0, 0.0], "dof": "free", "bodyPatches": ["piston"], "rho": 1.2,
+                 "write": { "every": 1, "file": "rb.csv" } }"#,
+        )
+        .expect("write the body file");
+        let body_s = body.to_string_lossy().to_string();
+        let mut args: Vec<&str> = PISTON_ARGS.to_vec();
+        args.extend(["-rigidBody", body_s.as_str()]);
+        let (root, end) = run_case_text_end(&piston_case_text("", "[-0.5, 0, 0]"), "rb_e2e_case", &args);
+        assert_eq!(end.steps, 10);
+        let csv = std::fs::read_to_string(root.join("rb.csv")).expect("the CSV");
+        let rows: Vec<&str> = csv.lines().collect();
+        assert_eq!(rows.len(), 11, "a header and a row per step:\n{csv}");
+        let last: Vec<f64> = rows[10].split(',').take(8).map(|v| v.parse().expect("a number")).collect();
+        println!("last CSV row: {}", rows[10]);
+        assert!((last[1] - 0.05).abs() <= 1e-12, "time {}", last[1]);
+        assert!((last[2] - 0.475).abs() <= 1e-9, "X {}", last[2]);
+        assert!((last[5] + 0.5).abs() <= 1e-9, "Vx {}", last[5]);
+        let pts = std::fs::read_to_string(root.join(format_time_name(0.05)).join("polyMesh").join("points"))
+            .expect("the moved points");
+        let xs: Vec<f64> = pts
+            .lines()
+            .filter(|l| l.starts_with('(') && l.ends_with(')') && l.len() > 2)
+            .map(|l| l[1..l.len() - 1].split_whitespace().next().expect("x").parse().expect("x"))
+            .collect();
+        let (lo, hi) = xs.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        println!("moved points: {} of them, x in [{lo}, {hi}]", xs.len());
+        assert!((lo + 0.025).abs() <= 1e-9 && (hi - 0.975).abs() <= 1e-9, "x in [{lo}, {hi}]");
+        let (ux, _) = mean_ux(&root, 0.05, 72);
+        assert!((ux + 0.5).abs() <= 1e-6, "mean Ux {ux}");
     }
 }

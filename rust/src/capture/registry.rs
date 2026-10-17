@@ -440,6 +440,21 @@ pub const REGISTRY: &[(&str, Stance)] = &[
     ),
     ("src/rheology.rs", Stance::Via("src/momentum.rs")),
     (
+        "src/rigid_body.rs",
+        Stance::Refused(
+            "the rigid body is loosely coupled through the HOST: every time \
+             step downloads the twelve numbers of the force reduction, \
+             integrates Euler's equations on the host, and writes the jets' \
+             world velocities with Gpu::write - a host round trip and a host \
+             write, both refused inside a capture by name (SPEC-LIT 81.3, \
+             SPEC-LIT 161.6). The point map and the wall condition are pure \
+             device maps and the step that moves the mesh is \
+             src/mesh/ale.rs's, which is gated. Alternative: integrate the \
+             body on the device from the resident force and pass the state \
+             through device memory; not implemented",
+        ),
+    ),
+    (
         "src/s2s.rs",
         Stance::Gate("the_s2s_exchange_replays_bitwise"),
     ),
