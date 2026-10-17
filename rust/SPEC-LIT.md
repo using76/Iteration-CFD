@@ -51429,6 +51429,213 @@ three blocks lowers, serialises and runs exactly as before.
 
 No labels.
 
+### 137.8 Radiation in `ofgpu-lowmach` as built (CHR-23)
+
+`src/io/case_rad.rs` reads §137.2's `radiation` table, and
+`src/bin/lowmach_rad/mod.rs` runs it in `ofgpu-lowmach`'s outer iteration on
+CHR-18's P1 (§135.7) and CHR-20/21's fvDOM (§136.7-§136.8). This subsection
+records what the table leaves open, as the code applies it. It is this
+project's own contract (ORIGINAL), built on (135.4), (137.1)-(137.3), §25,
+§26 and §4. It has no external source.
+
+**One lowering for both routes.** The JSONC block is written out as the
+entries of §137.2's dictionary table (`radiationModel`,
+`absorptionEmissionModel`, `absorptionCoefficient`, `wsggFile`,
+`wsggPressure`, `scatterModel`, `scatterCoefficient`, `A1`; each number in
+Rust's shortest round-trip form) and read by `ParticipatingConfig::from_dict`,
+so both routes share every refusal of §137.2. `LoweredRadiation` holds that
+config, the quadrature (fvDOM), the sweep tolerance and cap (fvDOM), `every`,
+and the stated `walls` and `open` entries. `JsonCase::lower` stores it in
+`LoweredCase::radiation`. The dictionary route reads
+`constant/radiationProperties`. Its entries beyond §137.2's table are
+`solverFreq` (`every`), `quadrature`, `scatterTol` and
+`maxScatterIterations`. The walls come from the radiation field file, `0/G`
+under P1 and `0/IDefault` under fvDOM, when it exists. `radiationModel none`
+on the dictionary route means no radiation. The JSONC route has no `none`:
+an absent block is no radiation.
+
+**The patches (DESIGN).** Every patch of the mesh gets one radiative
+condition, decided from its `PatchKind`:
+
+| patch | P1 (CHR-18) | fvDOM (CHR-20) |
+|---|---|---|
+| `wall`, named in `walls` | `MarshakPatch`, the stated `emissivity`; `T` stated -> `Fixed(T)`, absent -> `FromField` | `GreyDiffuse`, the same two entries |
+| `wall`, not named | `MarshakPatch`, emissivity 1, `FromField` (black at its own `T`) | `GreyDiffuse`, emissivity 1, `FromField` |
+| ordinary patch (`inlet`, `open`), named in `open` | `MarshakPatch`, emissivity 1, `Fixed(Tinf)` | `Open { t_inf: Tinf }` |
+| ordinary patch, not named in `open` | refused, naming the patch and `open` | refused, the same |
+| `symmetry` | nothing (`G` zero-gradient, §135.7) | `Symmetry` |
+| `empty`, or no faces | nothing | nothing |
+| cyclic, processor, conjugate interface | refused (§136.6's v1 rule, applied to both models) | refused |
+
+A `walls` entry on a patch that is not a wall, an `open` entry on a wall, a
+name that is no patch, and a patch named in both are refused by name.
+`emissivity` outside `[0, 1]` is refused by the lowering; `0` is then refused
+by `P1::new` and `DomRows::new`, which need `(0, 1]`.
+
+On the dictionary route the field file's `boundaryField` gives each patch a
+type. Four names are read here, and they are the four that BC-01's catalogue
+lists as CHR-23's. They are read only from the radiation field file, never
+as a condition of a solved field, so `BcKind::from_name` keeps refusing them
+by name (the catalogue keeps them `Owned { unit: "CHR-23" }`, as CHR-29 kept
+its species names):
+
+| type | model | on a wall | on an ordinary patch |
+|---|---|---|---|
+| `MarshakRadiation` | P1 | `emissivity` (default 1), `FromField` | refused (an open boundary needs a stated temperature) |
+| `MarshakRadiationFixedTemperature` | P1 | `Trad` (required), `emissivity` (default 1): `Fixed(Trad)` | black at `Trad`: `emissivity` other than 1 is refused |
+| `greyDiffusiveRadiation` | fvDOM | `emissivity` (default 1); a `T` entry that is a number -> `Fixed(T)`, absent -> `FromField` | `Open { t_inf: T }`: `T` required, `emissivity` other than 1 refused |
+| `wideBandDiffusiveRadiation` | — | refused: a banded medium is named, not built (§136.4) | refused |
+
+`symmetry`, `symmetryPlane` and `empty` read as in the table above. Any other
+type, a model mismatch (a P1 name in `0/IDefault` or the reverse), and an
+unknown entry inside a recognised type are refused by name. Without the field
+file every wall is black at its own `T`, and an ordinary patch is refused.
+
+**Refusals at the driver.** `ofgpu-lowmach` refuses, by name: `s2s` or
+`viewFactor` (CHR-24 builds it); `wsgg` and `wsggGrey` (CHR-22's three open
+items: per-cell `a_i(T, X)` and `kappa_i(T, X)`, the wall weight `a_i(T_w)`
+and the transparent window are named and not built); radiation with a
+`motion` block or `-rigidBody` (the radiation geometry is built once);
+`every > 1` with `-restartFrom` (the solve phase is not in the checkpoint);
+and a radiating wall whose `T` condition is not `fixedValue`,
+`zeroGradient` or `fixedFluxTemperature`. Every other driver refuses a JSONC
+`radiation` block through `LoweredCase::refuse_radiation`, called in
+`common::load_case_with` wherever it does not let chemistry through.
+`ofgpu-buoyant` keeps `refuse_enclosure`. Its `T` is a kinematic
+`ScalarTransport` with no implicit-sink registry and no `rho cp` to divide
+(137.2) by. Radiation there is named and not built, and the plan's row is
+narrowed accordingly.
+
+**The order of the outer iteration.** After `EnergySources::clear`, the
+chemistry's `before_flow`, the heater and the thermostat:
+
+1. Solve when due. The outer iterations are counted from 0 in each run, and
+   iteration `i` solves when `i mod every = 0`. P1 runs `P1::solve`. fvDOM
+   runs `DomSolve::solve`, which reports an unconverged sweep loop in one
+   line and never stops the run (§136.7). Between solves `G` is held.
+2. Register (137.2) at `T* =` the current `T`, every iteration, from the
+   held `G`. P1 uses `P1::register_energy_source`. fvDOM launches the same
+   kernel, `radSourcePair`, on `DomSolve::g()` with `σ` unweighted.
+3. Rewrite the balanced walls, (137.5).
+
+Then `update_target_divergence`, the flow, `energy.correct` and the sealed
+`p0` follow, as before.
+
+**The constraint's `Q`.** (137.2) puts `κ(G + 12σT*^4)` in the explicit
+half and `-16κσT*^3` in the implicit half. §25.1's constraint and §25.2's
+`p0` read only the explicit half, which alone is not the radiative source.
+Whenever an implicit sink has been registered since the last `clear`, the
+constraint reads instead
+
+```
+Q_c  =  q_c + sp_c T_c                                                           (137.4)
+```
+
+at the `T` the divergence is evaluated at, written `sp*T + q` in that order
+into a scratch buffer. `total_q` integrates the same buffer for the sealed
+`p0`, so the constraint and the ODE see one `Q` (§26.1's rule). A registry
+with no implicit sink in the iteration (every run before this unit, and
+every run without radiation) reads `q` itself, the same launches on the same
+buffer, so it is bitwise unchanged. `crate::cht::flow` registers a sink but
+never evaluates the constraint, so its `total_q` reads `q` as before.
+
+**The walls, balanced.** On a radiating wall face `b` whose `T` condition
+is `zeroGradient` (adiabatic) or `fixedFluxTemperature` (stated `q_in,b`,
+positive into the fluid), the stated flux carries the radiation the wall
+receives. With `(q_r·n)_b` the radiation solve's wall flux, positive out of
+the medium ((135.15) for P1, (136.4) for fvDOM):
+
+```
+q_in,b  <-  q_stated,b + (q_r·n)_b,        k_eff,b ∂T/∂n_out = q_in,b               (137.5)
+```
+
+This is §137.1's "the conductive flux is the stated flux minus `q_w·n`",
+with both fluxes measured out of the medium. At set-up, a `zeroGradient` face
+of a radiating wall becomes `fixedFluxTemperature` with `q_stated = 0`
+(`fr = 0`, `ref_grad = 0`, `ref_value = 0`, the same triple), and joins
+`Energy::set_fixed_flux_walls`. Every iteration, step 3 writes `ref_value`
+on the balanced faces only (host-side, one download and one upload of `T`'s
+`ref_value`). `Energy`'s own `update_fixed_flux` then turns it into
+`ref_grad`. Other faces keep whatever their own conditions wrote. A
+`fixedValue` wall is not balanced: its temperature is stated, and the
+conductive flux is whatever the solve gives.
+
+**The report and the outputs.** After the loop, one more radiation solve
+runs at the final `T`. It is not counted in `every`. Both sides of (137.3)
+are then formed on the host:
+
+```
+L = Σ_b (q_r·n)_b |S_b|,   R = Σ_P κ (4σT_P^4 - G_P) V_P,
+S = Σ_b |(q_r·n)_b| |S_b| + Σ_P κ (4σT_P^4 + G_P) V_P                           (137.6)
+```
+
+Each term is computed in f64 from the downloaded values, rounded once to
+`Scalar`, and each sum is `exactsum::host_exact_sum`. The faces are every
+boundary face of every patch, since the wall flux is 0 where nothing
+radiates. The gate tolerance is `|L - R| <= 8 ε S`, with `ε` the `Scalar`
+machine epsilon. Each term carries at most six roundings (the fourth power,
+the products and the difference), and the two exact sums add half an ulp
+each. The discrete identity behind (137.3) holds only to the radiation
+solve's linear residual `Σ_P r_P`: interior faces cancel exactly, and each
+cell row is `A G = b` up to `r_P`. The gate case therefore solves `G`
+(P1) or every `I^l` (fvDOM) to tolerance `1e-30`, relative tolerance 0. A miss
+is printed with `Σ r` as its cause. The wall heat-flux report prints the
+radiative column per wall patch, `Σ (q_r·n) |S|` in W beside the conductive
+one, and one line `radiation (137.3): walls L W | volume R W | gap L-R W |
+scale S W | solves n`. Every write time writes `G` (W/m2; boundary values:
+P1's `G` faces, the owner cell's under fvDOM) and `qr` (W/m2, the cell
+`q_r`; boundary values `(q_r·n)_b n̂_b`), both `calculated`.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_radiation_equals_library` | a P1 and an fvDOM JSONC case lowered and run through `lowmach_rad` for 3 iterations on a fixed non-uniform `T`, against `P1`/`DomSolve` built by hand from the same numbers: `G`, the registry's `q` and `sp`, the wall flux, and `T`'s `ref_value` on the balanced faces | bitwise | D |
+| `radiative_power_balance_closes` | the heated sealed box through the driver, P1 and fvDOM (S4): (137.6) | `8 ε S` | A |
+| `radiation_every_is_honoured` | `every 3` and `every 1` over 9 iterations: solves counted 3 and 9 | exact | D |
+| `radiative_walls_are_balanced` | after one iteration, `ref_value` on an adiabatic and on a fixed-flux radiating wall equals `q_stated + (q_r·n)` bitwise, and no other face's `ref_value` changed | bitwise | D |
+| `constraint_q_reads_the_sink` | a registry with a sink: the constraint's `Q` equals `sp*T + q` bitwise; without one it is `q` (the same buffer) | bitwise | D |
+| `case_radiation_refusals` | every refusal above and in §137.2, on both routes and at the driver | refused, naming the key | D |
+| `the_shipped_schema_is_the_generated_one` | `docs/schema/case-1.json` equals `emit_schema()` | exact | D |
+
+**As built and measured (CHR-23).** The rows run in both builds.
+
+* The power-balance case is a 6^3 box with all six walls stated
+  `fixedValue` 300 K. A stated wall is not balanced, so this case does not
+  depend on (137.5). The initial `T` is 600 K, and the run makes 30
+  transient steps of 0.01 s with `-sealed -heaterPower 500` (relaxation
+  `U` 0.7, `p` 0.3, `T` 0.5). A steady sealed run has no `p0` ODE to take
+  the heat. (137.3)'s row-sum identity holds at any state, so the gate reads
+  the final state of the march, not a converged steady state.
+* The f64 runs solve every linear system at tolerance `1e-30`, relative
+  tolerance 0. Under `single`, the case's `p`, `U`, `T`, `G` and `Ii` rows
+  run at `1e-6`. f32 PBiCGStab goes non-finite at `1e-13` on this case
+  with or without radiation, and the equals and `every` cases ride the same
+  number. Measured gap/(ε S): P1 2.04 and fvDOM 0.29 in f64; P1 2.04 and
+  fvDOM 0.00 under `single`. Both are inside 8.
+* `case_radiation_equals_library` has 0 differing bits in both builds,
+  for P1 and fvDOM. `radiative_walls_are_balanced` covers 80 balanced
+  faces, with 0 wrong values and 0 other faces moved. The `every` case
+  states all its walls and counts 3 and 9 solves.
+
+**The balanced walls through the driver (REVIEW-LATER).** (137.5) feeds
+the wall flux of the LAST radiation solve into the next `T` solve. That is
+an explicit lag, and it is unstable when the wall's radiative conductance
+is far above its conductive one. P1's Marshak wall linearises to
+`h_rad = a 16σT_w^3`, which is 98 W/(m2 K) at 600 K with `ε = 1`. A laminar
+gas's first-cell conductance is `k/δ`, about 0.31 W/(m2 K) for air at
+`δ = 1/12` m. The ratio is about 300. Measured: the power-balance case with
+its four side walls `zeroGradient` (balanced; P1, κ = 1, 6^3, the same
+march) drives `p0` to -2.2e6 Pa on its second step, and the run stops
+there with `GasState::advance_p0`'s refusal. The stated flux becomes a
+first-cell temperature jump of order 10^4 K, and `T_w`'s fourth power
+feeds it back. The cure is a numerics change, so it is not built: carry
+the wall emission implicitly in `T`'s triple. That is a mixed condition
+whose `h_rad` and reference come from (135.15) linearised about `T_w*`, as
+(137.2) linearises the volume source. Until then the balanced faces are
+exact to their contract (bitwise, `radiative_walls_are_balanced`), and a
+case that runs radiation through the driver states its walls' `T`.
+
+Labels: (137.4)-(137.6).
+
 ---
 
 ## 138. SPMD transports — the `Comm` trait, ThreadComm, and MPI

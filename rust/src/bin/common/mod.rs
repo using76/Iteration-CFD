@@ -104,9 +104,11 @@ pub fn load_case_with(
         // SPEC-LIT §137.6: a case's parcels are refused until CHR-26.
         lowered.refuse_parcels()?;
         // SPEC-LIT §137.7: a case's chemistry is refused by every driver but
-        // the one that asks for it (§133.11).
+        // the one that asks for it (§133.11) - and the same flag names
+        // radiation, which §137.8 hands to the same single driver.
         if !allow_chemistry {
             lowered.refuse_chemistry()?;
+            lowered.refuse_radiation()?;
         }
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below

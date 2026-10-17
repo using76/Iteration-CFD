@@ -86,6 +86,17 @@
     "physics": {
       "$ref": "#/$defs/JsonPhysics"
     },
+    "radiation": {
+      "description": "SPEC-LIT §137.2: the radiation block (`crate::io::case_rad`). Absent\n(the default) is every case this reader has ever built; present, it\nlowers to [`LoweredCase::radiation`], `ofgpu-lowmach` runs it (P1 or\nfvDOM, §137.8) and every other driver refuses the case.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonRadiation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "run": {
       "$ref": "#/$defs/JsonRun"
     },
@@ -1811,6 +1822,192 @@
         "gravity",
         "fluid",
         "buoyancy"
+      ]
+    },
+    "JsonRadAbsorption": {
+      "description": "`radiation.absorption` - SPEC-LIT §137.2's absorption table.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path to a Bordbar 2021 `.dat`; required with `wsgg`/`wsggGrey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kappa": {
+          "description": "The grey absorption coefficient, 1/m; required with `constant`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`constant` (default) | `wsgg` | `wsggGrey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pressure": {
+          "description": "atm, one of Bordbar 2021's ten; required with `wsgg`/`wsggGrey`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRadOpen": {
+      "description": "One entry of `radiation.open`.",
+      "type": "object",
+      "properties": {
+        "Tinf": {
+          "description": "The ambient temperature the boundary is black at, K.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Tinf"
+      ]
+    },
+    "JsonRadScatter": {
+      "description": "`radiation.scatter` - SPEC-LIT §137.2's scatter table.",
+      "type": "object",
+      "properties": {
+        "A1": {
+          "description": "The linear-anisotropic phase function's `A_1`; required with\n`linearAnisotropic`, `|A1| <= 1`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`none` (default) | `isotropic` | `linearAnisotropic`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sigma": {
+          "description": "The scattering coefficient, 1/m; required with the two scattering\nmodels.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRadWall": {
+      "description": "One entry of `radiation.walls`.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "The stated wall temperature, K; absent, the wall radiates at its own\n`T` patch value.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "emissivity": {
+          "description": "The grey diffuse emissivity, in `[0, 1]`; `0` is refused later, by\n`P1::new`/`DomRows::new`, which need `(0, 1]` (SPEC-LIT §137.8).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "emissivity"
+      ]
+    },
+    "JsonRadiation": {
+      "description": "The `radiation` block. An absent block is bitwise the current run; the\nJSONC route has no `none` - an absent block IS no radiation (SPEC-LIT\n§137.8).",
+      "type": "object",
+      "properties": {
+        "absorption": {
+          "description": "The absorption/emission the medium carries; `constant` by default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRadAbsorption"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "every": {
+          "description": "Solve when the outer-iteration count `i mod every = 0`; 1 by default.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "maxScatterIterations": {
+          "description": "fvDOM only: the sweep cap (§136.2's `maxScatterIterations`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "model": {
+          "description": "`P1` | `fvDOM` | `s2s` | `viewFactor`; the last two name CHR-24's\nenclosure model and are refused here by name.",
+          "type": "string"
+        },
+        "open": {
+          "description": "Open boundaries by patch name, each at its stated `Tinf`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonRadOpen"
+          }
+        },
+        "quadrature": {
+          "description": "fvDOM only: `S2` | `S4` | `S6` | `S8`; `S4` by default. Refused under\nP1, where it would be read and then ignored.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scatter": {
+          "description": "The scattering; `none` by default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRadScatter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scatterTol": {
+          "description": "fvDOM only: the sweep loop's tolerance on `change` (§136.7).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "walls": {
+          "description": "Radiating walls by patch name; a wall not named is black at its own\n`T` (SPEC-LIT §137.8).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonRadWall"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
       ]
     },
     "JsonRegion": {

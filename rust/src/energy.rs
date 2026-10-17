@@ -1453,6 +1453,16 @@ pub struct EnergySources {
     /// registry without meters runs exactly the launches it ran before.
     meters: Option<[DevBuf<Scalar>; 2]>,
 
+    /// **SPEC-LIT 137.4.** `[n_cells]` scratch for (137.4)'s
+    /// `Q_c = q_c + sp_c T_c`: `constraint_q` writes it when a sink is
+    /// live, so the target divergence and the power balance read the
+    /// sink-coupled source without overwriting `q` itself.
+    q_div: DevBuf<Scalar>,
+    /// `sp` carries a registered implicit sink (SPEC-LIT 137.4).
+    sink_live: bool,
+    /// `q_div` holds a current `sp*T + q` (SPEC-LIT 137.4).
+    q_div_valid: bool,
+
     n: usize,
 }
 
@@ -1481,6 +1491,9 @@ impl EnergySources {
             dot_out: gpu.zeros(1)?,
             partials: gpu.zeros(REDUCE_PARTIALS)?,
             meters: None,
+            q_div: gpu.zeros(one(n))?,
+            sink_live: false,
+            q_div_valid: false,
             n,
         })
     }
@@ -1497,6 +1510,10 @@ impl EnergySources {
                 field_ops::set_field(gpu, &self.fldk, m, 0.0, self.n)?;
             }
         }
+        // A cleared registry has no sink in `sp` and no current `q_div`
+        // (SPEC-LIT 137.4); the next `constraint_q` reads plain `q`.
+        self.sink_live = false;
+        self.q_div_valid = false;
         Ok(())
     }
 
@@ -1579,7 +1596,9 @@ impl EnergySources {
     /// against either.
     pub fn register_implicit_sink(&mut self, gpu: &Gpu, contribution: &DevBuf<Scalar>) -> Result<()> {
         self.check_len(contribution, "register_implicit_sink")?;
-        self.ek.accumulate(gpu, &mut self.sp, contribution, self.n)
+        self.ek.accumulate(gpu, &mut self.sp, contribution, self.n)?;
+        self.sink_live = true;
+        Ok(())
     }
 
     pub fn q(&self) -> &DevBuf<Scalar> {
@@ -1590,6 +1609,25 @@ impl EnergySources {
         &self.sp
     }
 
+    /// **SPEC-LIT 137.4.** The source term the energy constraint reads:
+    /// `q` alone while no implicit sink is registered - no launch, the
+    /// same buffer [`Self::q`] hands back - and (137.4)'s
+    /// `Q_c = q_c + sp_c T_c` in scratch once one is. A sink enters the
+    /// matrix through the `sp*T` diagonal and the right-hand side through
+    /// `q`, so the divergence that sizes the pressure equation and the
+    /// power balance must see both halves at the T they are coupled to,
+    /// not `q` alone. `clear` drops both halves.
+    pub fn constraint_q(&mut self, gpu: &Gpu, t: &DevBuf<Scalar>) -> Result<&DevBuf<Scalar>> {
+        if !self.sink_live {
+            return Ok(&self.q);
+        }
+        field_ops::copy_field(gpu, &self.fldk, &mut self.q_div, &self.sp, self.n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.q_div, t, self.n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.q_div, &self.q, self.n)?;
+        self.q_div_valid = true;
+        Ok(&self.q_div)
+    }
+
     /// `integral(Q) dV` over the whole domain, in watts - SPEC-LIT S25.2's
     /// `integral(Q) dV` and exactly what [`GasState::advance_p0`] wants for
     /// `total_q`. One reduction, one 8-byte transfer.
@@ -1597,7 +1635,10 @@ impl EnergySources {
         if self.n == 0 {
             return Ok(0.0);
         }
-        solver::device_dot(gpu, &self.solk, &mut self.dot_out, &self.q, &m.v, &mut self.partials, self.n)?;
+        // The same source the constraint reads (SPEC-LIT 137.4): with a
+        // sink live, the last `constraint_q`'s `q_div`, else plain `q`.
+        let q = if self.q_div_valid { &self.q_div } else { &self.q };
+        solver::device_dot(gpu, &self.solk, &mut self.dot_out, q, &m.v, &mut self.partials, self.n)?;
         Ok(gpu.download(&self.dot_out)?[0])
     }
 }
@@ -3760,10 +3801,12 @@ impl<'m> Energy<'m> {
             mx.nparts = 0;
         }
         let inv_gamma_p0 = 1.0 / (self.props.gamma * gas.p0());
+        // (137.4)'s `Q = q + sp*T` when a sink is live (SPEC-LIT 137.4).
+        let q = self.sources.constraint_q(gpu, &self.t.f)?;
         self.ek.target_divergence(
             gpu,
             &mut self.target_div,
-            self.sources.q(),
+            q,
             &self.cond_div,
             &gas.rho().f,
             &self.t.f,
@@ -3819,13 +3862,15 @@ impl<'m> Energy<'m> {
         let p0 = Acc::from(gas.p0());
         let dp0dt = Acc::from(gas.dp0dt());
         let nl = n as Label;
+        // (137.4)'s `Q = q + sp*T` when a sink is live (SPEC-LIT 137.4).
+        let q = sources.constraint_q(gpu, &t.f)?;
         unsafe {
             gpu.stream()
                 .launch_builder(&mx.constraint)
                 .arg(&mut *target_div)
                 .arg(&mut mx.part_d)
                 .arg(&mut mx.part_g)
-                .arg(sources.q())
+                .arg(q)
                 .arg(&*cond_div)
                 .arg(&t.f)
                 .arg(inv_w)
@@ -5612,6 +5657,45 @@ mod tests {
         let mut s = EnergySources::new(&g, &m)?;
         let too_short = g.upload(&vec![1.0 as Scalar; 1])?;
         assert!(s.register_explicit(&g, &too_short).is_err());
+        Ok(())
+    }
+
+    /// SPEC-LIT 137.4: with a sink live, `constraint_q` is (137.4)'s
+    /// `Q = q + sp*T` exactly - the buffer `total_q` integrates too - and
+    /// with no sink it is `q` itself, bitwise the same numbers.
+    #[test]
+    fn constraint_q_reads_the_sink() -> Result<()> {
+        let Some(g) = gpu() else { return Ok(()) };
+        let hm = slab(3, 0.1);
+        let m = crate::GpuMesh::upload(&g, &hm)?;
+        let mut s = EnergySources::new(&g, &m)?;
+        let q = g.upload(&vec![1.0 as Scalar, 2.0, 3.0])?;
+        let sp = g.upload(&vec![-1.0 as Scalar, -2.0, -0.5])?;
+        let t = g.upload(&vec![10.0 as Scalar, 20.0, 30.0])?;
+        s.register_explicit(&g, &q)?;
+        s.register_implicit_sink(&g, &sp)?;
+        let qc = g.download(s.constraint_q(&g, &t)?)?;
+        for (i, want) in [-9.0 as Scalar, -38.0, -12.0].into_iter().enumerate() {
+            assert_eq!(qc[i].to_bits(), want.to_bits(), "cell {i}");
+        }
+        // The power balance integrates the same buffer, over the cell
+        // volumes, to the same watts.
+        let v = g.download(&m.v)?;
+        let want: Scalar = qc.iter().zip(v).map(|(qv, vv)| qv * vv).sum();
+        let total = s.total_q(&g, &m)?;
+        assert!(
+            (total - want).abs() <= 1e-12 * want.abs(),
+            "total_q {total}, wanted {want}"
+        );
+
+        // A cleared registry: no sink, no launch, `q` itself bitwise.
+        s.clear(&g)?;
+        s.register_explicit(&g, &q)?;
+        let got = g.download(s.constraint_q(&g, &t)?)?;
+        let plain = g.download(s.q())?;
+        for (i, (a, b)) in got.iter().zip(plain).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "cell {i}");
+        }
         Ok(())
     }
 

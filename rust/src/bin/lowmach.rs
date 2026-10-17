@@ -212,6 +212,10 @@ mod common;
 mod lowmach_chem;
 use lowmach_chem::Reacting;
 
+#[path = "lowmach_rad/mod.rs"]
+mod lowmach_rad;
+use lowmach_rad::CaseRadiation;
+
 use common::{
     atoi, device_banner, find_restart_field, from_restart_scalars,
     from_restart_vectors, g, load_case_with, next_arg, output_root, parse_output_formats,
@@ -542,6 +546,9 @@ pub fn outer_iteration(
     is_final: bool,
     dt_for_p0: Option<Scalar>,
     mut chem: Option<&mut Reacting<'_>>,
+    // SPEC-LIT 137.8: the case's radiation, rules 1-3 running in this
+    // function between the thermostat and the target divergence.
+    mut rad: Option<&mut CaseRadiation>,
 ) -> Result<IterReport> {
     let fk = FieldKernels::new(gpu)?;
 
@@ -581,6 +588,17 @@ pub fn outer_iteration(
     if let Some(th) = thermostat {
         th.correct_with_flow(gpu, m, &energy.field().f, &gas.rho().f, &s.u().f)?;
         energy.sources_mut().register_explicit(gpu, th.source_buf())?;
+    }
+
+    // SPEC-LIT 137.8, rules 1-3: solve when due, register (137.2) at the
+    // current `T` from the held `G`, and rewrite the balanced walls,
+    // (137.5). Then the target divergence reads the constraint's `Q`,
+    // which (137.4) makes `q + sp*T` now that a sink is registered.
+    if let Some(r) = rad.as_deref_mut() {
+        r.step(gpu, m, energy.field())?;
+        let (t, sources) = energy.field_and_sources_mut();
+        r.register(gpu, t, sources)?;
+        r.balance_walls(gpu, energy.field_mut())?;
     }
 
     energy.update_target_divergence(gpu, gas, nut, k, nu)?;
@@ -750,6 +768,8 @@ fn write_time(
     volume: Option<&ofgpu::io::VolumeTarget>,
     // SPEC-LIT §133.11: a reacting run's mass fractions and heat release.
     chem: Option<&Reacting<'_>>,
+    // SPEC-LIT 137.8: the radiation fields `G` and `qr`, at every write.
+    rad: Option<&CaseRadiation>,
 ) -> Result<()> {
     let out_root = output_root(case_path);
     let name = format_time_name(t);
@@ -794,6 +814,18 @@ fn write_time(
     for (fname, out) in &out_chem {
         foam_fields.push(ofgpu::io::FoamField::scalar(fname, out));
     }
+    // SPEC-LIT 137.8: `G` and `qr` at every write time.
+    let out_rad = match rad {
+        Some(r) => {
+            let (g, qr) = r.output(gpu, hm)?;
+            Some((g, qr))
+        }
+        None => None,
+    };
+    if let Some((g, qr)) = &out_rad {
+        foam_fields.push(ofgpu::io::FoamField::scalar("G", g));
+        foam_fields.push(ofgpu::io::FoamField::vector("qr", qr));
+    }
 
     let mut vis_fields: Vec<ofgpu::io::OutputField> = vec![
         ofgpu::io::OutputField::vector("U", &out_u.internal),
@@ -806,6 +838,10 @@ fn write_time(
     }
     for (fname, out) in &out_chem {
         vis_fields.push(ofgpu::io::OutputField::scalar(fname, &out.internal));
+    }
+    if let Some((g, qr)) = &out_rad {
+        vis_fields.push(ofgpu::io::OutputField::scalar("G", &g.internal));
+        vis_fields.push(ofgpu::io::OutputField::vector("qr", &qr.internal));
     }
 
     let cart = ofgpu::pressure::cartesian::detect(hm)
@@ -847,11 +883,20 @@ fn write_time(
 /// the first write rather than as a silently wrong file - and
 /// `lowmach_tests::the_early_field_list_is_what_the_run_actually_writes` pins
 /// them together.
-fn output_field_names(turb: &dyn CoupledTurbulence, chem: Option<&Reacting<'_>>) -> Vec<String> {
+fn output_field_names(
+    turb: &dyn CoupledTurbulence,
+    chem: Option<&Reacting<'_>>,
+    rad: Option<&CaseRadiation>,
+) -> Vec<String> {
     let mut names: Vec<String> =
         ["U", "p", "T", "rho"].iter().map(|s| (*s).to_string()).collect();
     for (fname, _) in turb.output_fields() {
         names.push(fname.to_string());
+    }
+    if rad.is_some() {
+        // SPEC-LIT 137.8: every write time writes `G` and `qr`.
+        names.push("G".to_string());
+        names.push("qr".to_string());
     }
     if let Some(r) = chem {
         names.extend(r.field_names());
@@ -2307,7 +2352,34 @@ fn run(o: &Options) -> Result<RunEnd> {
     // patch type named `fixedFluxTemperature` - same §15.5 discipline as the
     // thermal wall function above. Harmless to call unconditionally, same
     // reasoning as that call: an empty face list is a no-op every iteration.
-    let t_fixed_flux_faces = faces_where(&fields.t, &hm, BcKind::is_fixed_flux_temperature)?;
+    // SPEC-LIT 137.8: the radiation is built FIRST, because its set-up
+    // rewrites a radiating wall's `zeroGradient` faces to
+    // `fixedFluxTemperature`, (137.5), and those faces join the list below.
+    let rad_block: Option<ofgpu::io::case_rad::LoweredRadiation> = match lowered.as_ref() {
+        Some(l) => l.radiation.clone(),
+        // The case-directory route: `constant/radiationProperties`, when the
+        // case has one (SPEC-LIT 137.8); `None` without it.
+        None => ofgpu::io::case_rad::read_radiation_dir(&o.case_path)?,
+    };
+    lowmach_rad::refuse_combinations(
+        rad_block.as_ref(),
+        lowered.as_ref().is_some_and(|l| l.motion.is_some()),
+        o.rigid_body.is_some(),
+        o.restart_from.is_some(),
+    )?;
+    let mut rad: Option<CaseRadiation> = match &rad_block {
+        Some(r) => {
+            let num = CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?;
+            let c = CaseRadiation::new(&gpu, &hm, &mesh, r, &num, energy.field_mut())?;
+            println!("{}", c.describe());
+            Some(c)
+        }
+        None => None,
+    };
+    let mut t_fixed_flux_faces = faces_where(&fields.t, &hm, BcKind::is_fixed_flux_temperature)?;
+    if let Some(r) = &rad {
+        r.fixed_flux_faces(&mut t_fixed_flux_faces);
+    }
     energy.set_fixed_flux_walls(&gpu, &t_fixed_flux_faces)?;
 
     // SPEC-LIT 120.8: the thermal family, out of T's OWN patch types -
@@ -2679,7 +2751,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     // it again there - two statements of one set, and the second is what
     // makes the first safe to trust.
     if let Some(plan) = &output_plan {
-        let available = output_field_names(&*turb, reacting.as_ref());
+        let available = output_field_names(&*turb, reacting.as_ref(), rad.as_ref());
         let refs: Vec<&str> = available.iter().map(String::as_str).collect();
         plan.check_fields(&refs)?;
     }
@@ -2846,6 +2918,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             is_final,
             if transient { Some(dt) } else { None },
             reacting.as_mut(),
+            rad.as_mut(),
         )?;
 
         if !report.finite {
@@ -2899,6 +2972,7 @@ fn run(o: &Options) -> Result<RunEnd> {
                 last_mach,
                 volume.as_ref(),
                 reacting.as_ref(),
+                rad.as_ref(),
             )?;
             // SPEC-LIT 161.6: the moved points beside the fields.
             if let Some(rb) = &rigid {
@@ -2945,6 +3019,12 @@ fn run(o: &Options) -> Result<RunEnd> {
         Some(r) => r.snapshot(&gpu, energy.field(), &gas)?,
         None => Vec::new(),
     };
+    // SPEC-LIT 137.8: after the loop, one more radiation solve at the final
+    // `T` - not counted in `every` - and (137.6)'s two sides on the host.
+    let radiation = match rad.as_mut() {
+        Some(r) => Some(r.finish(&gpu, &mesh, &hm, energy.field())?),
+        None => None,
+    };
     let run_end = RunEnd {
         steps: n_steps,
         transient,
@@ -2952,6 +3032,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         ux_mean,
         t_mean,
         final_state,
+        radiation,
     };
 
     mem.sample(&gpu)?;
@@ -2978,6 +3059,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         last_mach,
         volume.as_ref(),
         reacting.as_ref(),
+        rad.as_ref(),
     )?;
     // SPEC-LIT 161.6: the final state's moved points.
     if let Some(rb) = &rigid {
@@ -3316,6 +3398,13 @@ fn run(o: &Options) -> Result<RunEnd> {
                 "  {name}: mean flux {} W/m2 | mean T_P {} K | diagnosed T_w {} K | mean k_P {} m2/s2",
                 g(*qmean), g(*tp_mean), g(*tw_mean), g(*kp_mean)
             );
+        }
+        // SPEC-LIT 137.8: the radiative column beside the conductive one,
+        // `sum_b (q_r.n)_b |S_b|` in W per wall patch.
+        if let Some(r) = &rad {
+            for (name, w) in r.wall_report(&gpu, &hm)? {
+                println!("  {name}: radiative {} W", g(w));
+            }
         }
         if k_internal.is_none() {
             println!("  y+ not reported: {} carries no turbulence kinetic energy", turb.name());
@@ -3764,6 +3853,10 @@ struct RunEnd {
     /// no output.
     #[cfg_attr(not(test), allow(dead_code))]
     final_state: Vec<(String, Vec<Scalar>)>,
+    /// SPEC-LIT 137.8: the radiation report - the schedule's solves,
+    /// (137.6)'s two sides and scale, and the final `G` and wall flux.
+    #[cfg_attr(not(test), allow(dead_code))]
+    radiation: Option<lowmach_rad::RadiationEnd>,
 }
 
 /// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
@@ -4164,6 +4257,7 @@ mod lowmach_tests {
                 false,
                 None,
                 None,
+                None,
             )?;
             assert!(
                 last.finite,
@@ -4435,6 +4529,7 @@ mod lowmach_tests {
             None,
             true,
             Some(dt),
+            None,
             None,
         )
     }
@@ -5789,8 +5884,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5810,8 +5905,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),

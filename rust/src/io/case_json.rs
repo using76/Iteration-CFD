@@ -129,6 +129,12 @@ pub struct JsonCase {
     /// SPEC-LIT §137.2: the combustion closure (§134).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combustion: Option<crate::io::case_chem::JsonCombustion>,
+    /// SPEC-LIT §137.2: the radiation block (`crate::io::case_rad`). Absent
+    /// (the default) is every case this reader has ever built; present, it
+    /// lowers to [`LoweredCase::radiation`], `ofgpu-lowmach` runs it (P1 or
+    /// fvDOM, §137.8) and every other driver refuses the case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radiation: Option<crate::io::case_rad::JsonRadiation>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -1676,6 +1682,9 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `species`, `chemistry` and `combustion` blocks,
     /// lowered onto one config (§137.7). `None` for every case without them.
     pub chem: Option<crate::io::case_chem::LoweredChem>,
+    /// SPEC-LIT §137.2: the `radiation` block, lowered onto the library's
+    /// settings (§137.8). `None` for every case without the block.
+    pub radiation: Option<crate::io::case_rad::LoweredRadiation>,
 }
 
 impl LoweredCase {
@@ -1695,6 +1704,17 @@ impl LoweredCase {
     pub fn refuse_parcels(&self) -> Result<()> {
         match self.parcels {
             Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
+            None => Ok(()),
+        }
+    }
+
+    /// SPEC-LIT §137.8: a driver's refusal of a case that states radiation.
+    /// No driver but `ofgpu-lowmach` carries the P1/fvDOM solves its energy
+    /// equation is asking for, so a run elsewhere would ignore the block;
+    /// `Ok` for every case without it.
+    pub fn refuse_radiation(&self) -> Result<()> {
+        match self.radiation {
+            Some(_) => Err(crate::io::case_rad::refuse_radiation_case("radiation")),
             None => Ok(()),
         }
     }
@@ -3369,6 +3389,9 @@ impl JsonCase {
                 p.lower(chem.as_ref().map(|c| c.species.names.as_slice()), Some(self.physics.gravity))
             })
             .transpose()?;
+        // SPEC-LIT §137.2 and §137.8: the radiation block, the one lowering
+        // the JSONC and dictionary routes share.
+        let radiation = self.radiation.as_ref().map(|r| r.lower()).transpose()?;
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -3411,6 +3434,7 @@ impl JsonCase {
             compressible,
             parcels,
             chem,
+            radiation,
         })
     }
 }
