@@ -21,7 +21,11 @@ recovery, Delaunay refinement, carve, optimisation, emission behind the same
 external program: no GPL, LGPL or AGPL source or library is on it (§116.1).
 Prism layers on tet meshes (§116.15, TET-13b) grow by post-inflation from
 `layers` (`patches`, `n`, `first_thickness`, `growth`) and `tet.layers`.
-Declared bodies (TET-19) are not built yet and are refused by name. The polyhedral path is §92.5,
+Declared bodies on the tet path are built (TET-19): each body is its own
+region, written as mesh/regions.json; no prism layers with bodies. Mind the
+band: with a refined band on the body's wall the interior refinement may not
+terminate yet (`tet.refine.max_inserted_points` bounds it with a `refine/cap`
+refusal; SPEC-LIT §116.18, TET-19's rows). The polyhedral path is §92.5,
 specified and not implemented.
 
 ## Usage

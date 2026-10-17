@@ -829,9 +829,9 @@ impl AutomeshConfig {
     /// only, and a `kind: "tet"` config is refused, naming the key, when it
     /// sets anything the tet path would otherwise silently ignore - the
     /// hex-only `snap` block, `domain.grading` and `castellation.min_faces`
-    /// - or what the tet path does not build yet: declared bodies (TET-19)
-    /// and prism layers (TET-13b). Then `tet` itself is checked by
-    /// [`crate::tetmesh::TetSpec::validate`].
+    /// - or what the tet path does not build together: declared bodies
+    /// (TET-19) refuse prism layers (TET-13b) and the other way round.
+    /// Then `tet` itself is checked by [`crate::tetmesh::TetSpec::validate`].
     fn validate_kind(&self) -> crate::error::Result<()> {
         let kind = self.kind.name();
         match self.kind {
@@ -867,10 +867,20 @@ impl AutomeshConfig {
                         d_min_faces()
                     )));
                 }
-                if !self.castellation.bodies.is_empty() {
+                // Declared bodies are kept beside the fluid (docs/17
+                // TET-19, SPEC-LIT §116.12), but the tet path grows no
+                // prism layers on a body run: an interface subtriangle is
+                // internal to the union mesh, and inflating it would move
+                // one region's wall off the shared surface. Bodies and
+                // layers are refused together, naming both keys.
+                if !self.castellation.bodies.is_empty()
+                    && self.layers.n > 0
+                    && !self.layers.patches.is_empty()
+                {
                     return Err(Error::Mesh(format!(
-                        "castellation.bodies: kind \"{kind}\" does not carve declared bodies yet \
-                         (docs/17 TET-19); {} declared",
+                        "castellation.bodies: kind \"{kind}\" grows no prism layers when bodies \
+                         are declared (docs/17 TET-19, SPEC-LIT 116.12) - set layers.n to 0 or \
+                         empty layers.patches; {} declared",
                         self.castellation.bodies.len()
                     )));
                 }
@@ -1274,6 +1284,8 @@ mod config_tests {
                     let mut c = tet();
                     c.castellation.bodies =
                         vec![BodySpec { name: "b".to_string(), patches: vec!["site".to_string()] }];
+                    c.layers.n = 3;
+                    c.layers.patches = vec!["site".to_string()];
                     c
                 },
                 "castellation.bodies: kind \"tet\"",
@@ -1294,5 +1306,12 @@ mod config_tests {
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(want), "want {want:?}, got {err}");
         }
+
+        // TET-19: the same bodies WITHOUT prism layers validate - the tet
+        // path keeps each declared body's own region (SPEC-LIT §116.12).
+        let mut bodies = tet();
+        bodies.castellation.bodies =
+            vec![BodySpec { name: "b".to_string(), patches: vec!["site".to_string()] }];
+        bodies.validate().unwrap();
     }
 }

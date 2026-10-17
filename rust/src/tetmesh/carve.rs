@@ -48,7 +48,7 @@ use super::recover::FaceRecovery;
 use super::surfprep::TetSurface;
 use super::Point;
 use crate::error::{Error, Result};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 fn sub(a: Point, b: Point) -> Point {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -141,8 +141,31 @@ pub struct Carved {
     pub regions: Vec<CarveRegion>,
     /// The index of the kept region in `regions`.
     pub kept_region: usize,
-    /// The kept volume: `regions[kept_region].volume`.
+    /// The kept volume: the sum of `zone_volumes` in zone order, so with no
+    /// bodies exactly `regions[kept_region].volume`.
     pub volume: f64,
+    /// Beside `tets`/`kept_slots`: the tetrahedron's zone, 0 for the fluid
+    /// (the region `start` keeps), `k + 1` for body `k` (116.16c).
+    pub zone: Vec<u32>,
+    /// Beside `fr.subtris`: the subtriangle's body, `k + 1` when its parent
+    /// triangle's patch is in body `k`'s patches, else 0.
+    pub sub_zone: Vec<u32>,
+    /// Body `k`'s index into `regions`.
+    pub body_regions: Vec<usize>,
+    /// The volumes (116.2) per zone, summed in slot order; `[0]` is the
+    /// fluid's `regions[kept_region].volume`.
+    pub zone_volumes: Vec<f64>,
+    /// Per body `k`: how many subtriangles lie between the fluid and it.
+    pub interface_faces: Vec<usize>,
+}
+
+/// One declared body (SPEC-LIT §92.15.1 on the tet path, §116.12): its
+/// region name and the patch ids (indices into `surf.patch_names`) whose
+/// triangles form its one closed shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CarveBody {
+    pub name: String,
+    pub patches: Vec<u32>,
 }
 
 impl Carved {
@@ -156,6 +179,49 @@ impl Carved {
         let o = points[f0[0] as usize];
         let mut s = 0.0;
         for f in &self.faces {
+            let x0 = sub(points[f[0] as usize], o);
+            let x1 = sub(points[f[1] as usize], o);
+            let x2 = sub(points[f[2] as usize], o);
+            s += dot(x0, cross(x1, x2));
+        }
+        s / 6.0
+    }
+
+    /// (116.16d): zone `z`'s volume by the divergence theorem over the faces
+    /// of its tetrahedra that appear ONCE among them, wound by [`face_out`],
+    /// about the first such face's first point - the zone's own boundary,
+    /// its interface faces appearing twice and so dropping out.
+    pub fn zone_boundary_volume(&self, zone: u32, points: &[Point]) -> f64 {
+        // The faces appearing once, in first-appearance order: an ordered
+        // vec beside the count map, because a HashMap's iteration order is
+        // its own.
+        let mut order: Vec<[u32; 3]> = Vec::new();
+        let mut count: HashMap<[u32; 3], usize> = HashMap::new();
+        for (c, &zc) in self.zone.iter().enumerate() {
+            if zc != zone {
+                continue;
+            }
+            let v = self.tets[c];
+            for i in 0..4 {
+                let f = face_out(v, i);
+                let key = sorted3(f);
+                let e = count.entry(key).or_insert(0);
+                if *e == 0 {
+                    order.push(f);
+                }
+                *e += 1;
+            }
+        }
+        let Some(f0) = order.iter().find(|f| count[&sorted3(**f)] == 1) else {
+            return 0.0;
+        };
+        let o = points[f0[0] as usize];
+        let mut s = 0.0;
+        for f in &order {
+            if count[&sorted3(*f)] != 1 {
+                continue;
+            }
+            let f = *f;
             let x0 = sub(points[f[0] as usize], o);
             let x1 = sub(points[f[1] as usize], o);
             let x2 = sub(points[f[2] as usize], o);
@@ -215,6 +281,28 @@ fn name_sub(surf: &TetSurface, fr: &FaceRecovery, k: u32) -> String {
 /// (`carve/hull`), a kept region on both sides (`carve/side`) and a kept
 /// region with no finite tetrahedron (`carve/empty`).
 pub fn carve(surf: &TetSurface, fr: &FaceRecovery, start: &CarveStart) -> Result<Carved> {
+    carve_bodies(surf, fr, start, &[])
+}
+
+/// SPEC-LIT §116.12 as TET-19 builds it: [`carve`], keeping each declared
+/// body's solid region beside the fluid. Every kept tetrahedron carries its
+/// zone (116.16c), the subtriangles their body, and an interface
+/// subtriangle - one with the fluid on its front and its body behind it -
+/// is INTERNAL: it is a face of neither region's boundary, which is why the
+/// two sides of the emitted mesh share its points. Refuses, each naming the
+/// body in quotes (`carve/body`): a patch id past `surf.patch_names`; a
+/// body whose patches carry no subtriangle; a body whose subtriangles do
+/// not face one solid region and one only, or when another subtriangle
+/// faces that region too ("is not one closed region"); and a body
+/// subtriangle whose front is not the kept fluid ("does not face the kept
+/// fluid"). Everything else is [`carve`]'s contract, and with `bodies`
+/// empty the result is bit-identical to it.
+pub fn carve_bodies(
+    surf: &TetSurface,
+    fr: &FaceRecovery,
+    start: &CarveStart,
+    bodies: &[CarveBody],
+) -> Result<Carved> {
     let d: &Delaunay = &fr.delaunay;
     let pts = d.points();
     if surf.tris.len() != fr.tris.len()
@@ -296,6 +384,10 @@ pub fn carve(surf: &TetSurface, fr: &FaceRecovery, start: &CarveStart) -> Result
     }
     let mut first_front = vec![NONE; nr];
     let mut first_back = vec![NONE; nr];
+    // Each subtriangle's front and back regions, beside `first_front` /
+    // `first_back`: what a body's one-closed-region rule (116.16c) reads.
+    let mut front_of = vec![NONE; fr.subtris.len()];
+    let mut back_of = vec![NONE; fr.subtris.len()];
     for (k, on) in sides.iter().enumerate() {
         if on.len() != 2 {
             return Err(Error::Refused(format!(
@@ -328,6 +420,8 @@ pub fn carve(surf: &TetSurface, fr: &FaceRecovery, start: &CarveStart) -> Result
             )));
         };
         let (rf, rb) = (region[front as usize] as usize, region[back as usize] as usize);
+        front_of[k] = rf as u32;
+        back_of[k] = rb as u32;
         if first_front[rf] == NONE {
             first_front[rf] = k as u32;
         }
@@ -477,28 +571,146 @@ pub fn carve(surf: &TetSurface, fr: &FaceRecovery, start: &CarveStart) -> Result
     };
     regions[kept].kept = true;
 
-    // The kept tetrahedra and the region's outward-wound boundary.
+    // The bodies (116.16c): body k's region is the one its subtriangles
+    // face with their back, one solid region and no other subtriangle's.
+    let mut sub_zone = vec![0u32; fr.subtris.len()];
+    let mut body_regions: Vec<usize> = Vec::with_capacity(bodies.len());
+    let mut interface_faces: Vec<usize> = Vec::with_capacity(bodies.len());
+    for (k, b) in bodies.iter().enumerate() {
+        for &p in &b.patches {
+            if p as usize >= surf.patch_names.len() {
+                return Err(Error::Refused(format!(
+                    "carve/body: body \"{}\" names patch {p} of {} patches",
+                    b.name,
+                    surf.patch_names.len()
+                )));
+            }
+        }
+        let mine: Vec<u32> = (0..fr.subtris.len() as u32)
+            .filter(|&s| {
+                let parent = fr.sub_parent[s as usize] as usize;
+                b.patches.contains(&surf.tri_patch[parent])
+            })
+            .collect();
+        if mine.is_empty() {
+            return Err(Error::Refused(format!(
+                "carve/body: body \"{}\"'s patches {:?} carry no subtriangle of {}",
+                b.name,
+                b.patches,
+                fr.subtris.len()
+            )));
+        }
+        let backs: Vec<u32> = mine.iter().map(|&s| back_of[s as usize]).collect();
+        let r_k = backs[0] as usize;
+        if let Some(&s) = mine.iter().find(|&&s| back_of[s as usize] as usize != r_k) {
+            return Err(Error::Refused(format!(
+                "carve/body: body \"{}\" is not one closed region - {} faces region \
+                 {r_k} with its back while {} faces region {} with its back",
+                b.name,
+                name_sub(surf, fr, mine[0]),
+                name_sub(surf, fr, s),
+                back_of[s as usize]
+            )));
+        }
+        if regions[r_k].side != Side::Solid {
+            return Err(Error::Refused(format!(
+                "carve/body: body \"{}\" is not one closed region - its region {} is on \
+                 the {:?} side, not solid (behind {})",
+                b.name,
+                r_k,
+                regions[r_k].side,
+                name_sub(surf, fr, mine[0])
+            )));
+        }
+        let mine_set: HashSet<u32> = mine.iter().copied().collect();
+        if let Some(s) = (0..fr.subtris.len()).find(|&j| {
+            !mine_set.contains(&(j as u32))
+                && (front_of[j] as usize == r_k || back_of[j] as usize == r_k)
+        }) {
+            return Err(Error::Refused(format!(
+                "carve/body: body \"{}\" is not one closed region - {}, no patch of \
+                 the body, also faces region {r_k}",
+                b.name,
+                name_sub(surf, fr, s as u32)
+            )));
+        }
+        if let Some(&s) = mine.iter().find(|&&s| front_of[s as usize] as usize != kept) {
+            return Err(Error::Refused(format!(
+                "carve/body: body \"{}\" does not face the kept fluid - {}'s front is \
+                 region {}",
+                b.name,
+                name_sub(surf, fr, s),
+                front_of[s as usize]
+            )));
+        }
+        regions[r_k].kept = true;
+        body_regions.push(r_k);
+        for s in &mine {
+            if sub_zone[*s as usize] == 0 {
+                sub_zone[*s as usize] = k as u32 + 1;
+            }
+        }
+        interface_faces.push(
+            (0..fr.subtris.len())
+                .filter(|&j| {
+                    front_of[j] as usize == kept && back_of[j] as usize == r_k
+                })
+                .count(),
+        );
+    }
+    // Region -> zone (116.16c): the fluid 0, body k `k + 1`, NONE otherwise.
+    let none_zone = u32::MAX;
+    let mut zone_of_region = vec![none_zone; nr];
+    zone_of_region[kept] = 0;
+    for (k, &r) in body_regions.iter().enumerate() {
+        zone_of_region[r] = k as u32 + 1;
+    }
+
+    // The kept tetrahedra - the fluid's and every body's, each with its
+    // zone (116.16c) - and the union's outward-wound boundary: a face is
+    // boundary iff it is a subtriangle whose other tetrahedron is NOT kept
+    // (an interface subtriangle, kept on both sides, is internal), or it
+    // has no neighbour, or it is a hull face (the domain boundary).
     let mut kept_slots = Vec::with_capacity(regions[kept].n_tets);
     let mut tets = Vec::with_capacity(regions[kept].n_tets);
+    let mut zone: Vec<u32> = Vec::with_capacity(regions[kept].n_tets);
     let mut faces = Vec::new();
     let mut face_subs = Vec::new();
+    let mut six_zone = vec![0.0f64; 1 + bodies.len()];
     for t in 0..n_slots as u32 {
-        if !d.is_live(t) || d.is_hull(t) || region[t as usize] as usize != kept {
+        if !d.is_live(t) || d.is_hull(t) {
             continue;
         }
+        let z = zone_of_region[region[t as usize] as usize];
+        if z == none_zone {
+            continue;
+        }
+        let v = d.tet(t);
+        let p = [pts[v[0] as usize], pts[v[1] as usize], pts[v[2] as usize], pts[v[3] as usize]];
+        six_zone[z as usize] += orient3d(&p[0], &p[1], &p[2], &p[3]);
         kept_slots.push(t);
-        tets.push(d.tet(t));
+        tets.push(v);
+        zone.push(z);
         for (i, &n) in d.neighbours(t).iter().enumerate() {
             let k = face_sub(t, i);
+            let other_kept = k.is_some()
+                && n != NONE
+                && zone_of_region[region[n as usize] as usize] != none_zone;
             // A fluid region never meets itself across a subtriangle, so a
-            // boundary face is a subtriangle or a face onto a hull tetrahedron.
-            if k.is_some() || n == NONE || d.is_hull(n) {
-                faces.push(face_out(d.tet(t), i));
+            // boundary face is a subtriangle, or a face onto a hull
+            // tetrahedron.
+            let boundary = match k {
+                Some(_) => !other_kept,
+                None => n == NONE || d.is_hull(n),
+            };
+            if boundary {
+                faces.push(face_out(v, i));
                 face_subs.push(k);
             }
         }
     }
-    let volume = regions[kept].volume;
+    let zone_volumes: Vec<f64> = six_zone.iter().map(|s| s / 6.0).collect();
+    let volume = zone_volumes.iter().sum();
     Ok(Carved {
         kept_slots,
         tets,
@@ -507,7 +719,159 @@ pub fn carve(surf: &TetSurface, fr: &FaceRecovery, start: &CarveStart) -> Result
         regions,
         kept_region: kept,
         volume,
+        zone,
+        sub_zone,
+        body_regions,
+        zone_volumes,
+        interface_faces,
     })
+}
+
+/// SPEC-LIT §116.12 as TET-19 builds it: the zone (116.16c) of each
+/// tetrahedron of the OPTIMISED mesh, by a flood fill across the faces that
+/// are not subtriangles. The optimiser flips tetrahedra but never across a
+/// frozen subtriangle (116.21b), so a zone is one flood component; its zone
+/// is `sub_zone[s]` for any body subtriangle `s` bounding the component
+/// with its BACK (116.16a), else 0 - a body subtriangle faces its fluid
+/// with its front, so it votes only for the component it encloses. Refuses
+/// `carve/zones:` when a component gets two different nonzero zones, a body
+/// subtriangle is a face of not exactly two tetrahedra, or a body
+/// subtriangle has a nonzero zone on its FRONT side.
+pub fn zones_of(
+    points: &[Point],
+    tets: &[[u32; 4]],
+    subtris: &[[u32; 3]],
+    sub_zone: &[u32],
+) -> Result<Vec<u32>> {
+    if sub_zone.len() != subtris.len() {
+        return Err(Error::Refused(format!(
+            "carve/zones: {} zone ids beside {} subtriangles",
+            sub_zone.len(),
+            subtris.len()
+        )));
+    }
+    // Each face's tetrahedra, keyed by its sorted points; a face of the
+    // union is a face of one or two of them.
+    let mut on_face: HashMap<[u32; 3], Vec<u32>> = HashMap::with_capacity(tets.len() * 2);
+    for (c, t) in tets.iter().enumerate() {
+        for i in 0..4 {
+            let f = face_out(*t, i);
+            on_face.entry(sorted3(f)).or_default().push(c as u32);
+        }
+    }
+    let sub_face: HashSet<[u32; 3]> = subtris.iter().map(|&s| sorted3(s)).collect();
+    // The flood fill, in slot order. The component ids live in `comp`,
+    // BESIDE the zones they become: a component's id must not be confused
+    // with a zone already written, which it can equal.
+    let mut comp = vec![u32::MAX; tets.len()];
+    let mut zone = vec![0u32; tets.len()];
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    let mut n_components = 0u32;
+    let votes_of = |comp: &[u32], component: u32, out: &mut Vec<u32>| -> Result<()> {
+        out.clear();
+        for (k, &sz) in sub_zone.iter().enumerate() {
+            if sz == 0 {
+                continue;
+            }
+            let s = subtris[k];
+            let side = on_face.get(&sorted3(s)).ok_or_else(|| {
+                Error::Refused(format!(
+                    "carve/zones: body subtriangle {k} [{}, {}, {}] is a face of no \
+                     tetrahedron",
+                    s[0], s[1], s[2]
+                ))
+            })?;
+            if side.len() != 2 {
+                return Err(Error::Refused(format!(
+                    "carve/zones: body subtriangle {k} [{}, {}, {}] is a face of {} \
+                     tetrahedra, not 2",
+                    s[0],
+                    s[1],
+                    s[2],
+                    side.len()
+                )));
+            }
+            for &c in side {
+                let v = tets[c as usize];
+                let apex = *v.iter().find(|&&x| x != s[0] && x != s[1] && x != s[2]).unwrap();
+                let o = orient3d(
+                    &points[s[0] as usize],
+                    &points[s[1] as usize],
+                    &points[s[2] as usize],
+                    &points[apex as usize],
+                );
+                if o > 0.0 && comp[c as usize] == component {
+                    out.push(sz);
+                }
+            }
+        }
+        Ok(())
+    };
+    for c0 in 0..tets.len() as u32 {
+        if comp[c0 as usize] != u32::MAX {
+            continue;
+        }
+        let component = n_components;
+        n_components += 1;
+        comp[c0 as usize] = component;
+        queue.push_back(c0);
+        while let Some(c) = queue.pop_front() {
+            let t = tets[c as usize];
+            for i in 0..4 {
+                let key = sorted3(face_out(t, i));
+                if sub_face.contains(&key) {
+                    continue;
+                }
+                for &n in on_face.get(&key).into_iter().flatten() {
+                    if comp[n as usize] == u32::MAX {
+                        comp[n as usize] = component;
+                        queue.push_back(n);
+                    }
+                }
+            }
+        }
+        let mut votes: Vec<u32> = Vec::new();
+        votes_of(&comp, component, &mut votes)?;
+        let first = votes.first().copied().unwrap_or(0);
+        if let Some(&other) = votes.iter().find(|&&z| z != first) {
+            let n: usize = comp.iter().filter(|&&z| z == component).count();
+            return Err(Error::Refused(format!(
+                "carve/zones: flood component {component} of {n} tetrahedra gets two \
+                 different body zones, {first} and {other}"
+            )));
+        }
+        for c in 0..tets.len() {
+            if comp[c] == component {
+                zone[c] = first;
+            }
+        }
+    }
+    // A body subtriangle's FRONT side is the fluid: its component's zone is
+    // 0, or the body's subtriangles do not enclose one region of the mesh.
+    for (k, &sz) in sub_zone.iter().enumerate() {
+        if sz == 0 {
+            continue;
+        }
+        let s = subtris[k];
+        for &c in on_face.get(&sorted3(s)).into_iter().flatten() {
+            let v = tets[c as usize];
+            let apex = *v.iter().find(|&&x| x != s[0] && x != s[1] && x != s[2]).unwrap();
+            let o = orient3d(
+                &points[s[0] as usize],
+                &points[s[1] as usize],
+                &points[s[2] as usize],
+                &points[apex as usize],
+            );
+            if o < 0.0 && zone[c as usize] != 0 {
+                return Err(Error::Refused(format!(
+                    "carve/zones: body subtriangle {k} [{}, {}, {}] has the nonzero zone \
+                     {} on its front side",
+                    s[0], s[1], s[2], zone[c as usize]
+                )));
+            }
+        }
+    }
+    Ok(zone)
 }
 
 #[cfg(test)]
@@ -924,5 +1288,300 @@ mod tests {
             format!("{}", carve(&s, &fr, &CarveStart::Seed([0.75, 0.0, 0.0])).unwrap_err());
         println!("carve pocket seed in the shell: {err}");
         assert!(err.contains("carve/seed") && err.contains("wrong side"), "{err}");
+    }
+
+    /// TET-19's gate (docs/17, SPEC-LIT §116.12): two cubes in the box
+    /// [-2, 2]^3, each its own region with the fluid's - the interface
+    /// subtriangles internal to the union and paired face k to face k, the
+    /// per-zone volumes closing by (116.16d), and the layout loading
+    /// (R1-R6).
+    #[test]
+    fn two_regions() {
+        let mut s = TetSurface {
+            points: Vec::new(),
+            tris: Vec::new(),
+            tri_patch: Vec::new(),
+            patch_names: Vec::new(),
+        };
+        add_cube(&mut s, -1.5, -0.5, "a_", false);
+        add_cube(&mut s, 0.5, 1.5, "b_", false);
+        add_box(&mut s, -2.0, 2.0);
+        let fr = recover_faces(&s, &[], &spec()).unwrap();
+        let a = CarveBody { name: "a".to_string(), patches: (0..6).collect() };
+        let b = CarveBody { name: "b".to_string(), patches: (6..12).collect() };
+        let n_body = |p: std::ops::Range<u32>| -> usize {
+            fr.sub_parent.iter().filter(|&&t| p.contains(&s.tri_patch[t as usize])).count()
+        };
+        let (n_a, n_b) = (n_body(0..6), n_body(6..12));
+        let c = carve_bodies(&s, &fr, &CarveStart::Hull, &[a.clone(), b.clone()]).unwrap();
+        for (z, want) in c.zone_volumes.iter().zip([62.0, 1.0, 1.0]) {
+            assert!(rel(*z, want) <= 1e-12, "zone volume {z} vs {want}");
+        }
+        assert!(rel(c.volume, 64.0) <= 1e-12, "{}", c.volume);
+        for z in 0..3u32 {
+            let e = rel(c.zone_boundary_volume(z, &fr.points), c.zone_volumes[z as usize]);
+            assert!(e <= 1e-12, "(116.16d) zone {z}: {e:e}");
+        }
+        assert!(rel(c.boundary_volume(&fr.points), 64.0) <= 1e-12);
+        let plain = carve(&s, &fr, &CarveStart::Hull).unwrap();
+        let (_, hull_plain) = plain.patch_face_counts(&s, &fr);
+        assert!(c.face_sub.iter().all(|k| k.is_none()), "both cubes are interfaces");
+        assert_eq!(c.faces.len(), hull_plain, "the union's boundary is the box's");
+        assert_eq!(c.interface_faces, vec![n_a, n_b], "n_a {n_a}, n_b {n_b}");
+        assert!(n_a >= 12 && n_b >= 12);
+        let fluid_slots: Vec<u32> = c
+            .kept_slots
+            .iter()
+            .zip(&c.zone)
+            .filter(|(_, &z)| z == 0)
+            .map(|(&s, _)| s)
+            .collect();
+        assert_eq!(fluid_slots, plain.kept_slots, "the fluid keeps its tetrahedra");
+        for &r in &c.body_regions {
+            assert_eq!(c.regions[r].side, Side::Solid);
+        }
+        let zoned = zones_of(&fr.points, &c.tets, &fr.subtris, &c.sub_zone).unwrap();
+        assert_eq!(zoned, c.zone, "the flood recovers the carve's zones");
+        println!(
+            "carve two_regions: {} points, {} subtriangles, n_a {n_a}, n_b {n_b}, kept {} tets, \
+             zones {:?} (rel to 62/1/1 all <= 1e-12), {} boundary faces, (116.16d) <= 1e-12, \
+             union (116.16b) <= 1e-12",
+            fr.points.len(),
+            fr.subtris.len(),
+            c.tets.len(),
+            c.zone_volumes,
+            c.faces.len()
+        );
+
+        // Internal and paired: the emitted union mesh carries each body
+        // subtriangle as an INTERNAL face of zones {0, k + 1}, and the
+        // split's two interface patches hold the same faces in opposite
+        // windings, coordinate for coordinate.
+        use crate::tetmesh::emit::{carved_boundary, to_poly_mesh, EmitPatch};
+        let shifted: Vec<u32> = s.tri_patch.iter().map(|&p| p + 1).collect();
+        let bnd = carved_boundary(&c, &fr, &shifted, 0).unwrap();
+        let mut eps =
+            vec![EmitPatch { name: "box".to_string(), type_name: "patch".to_string() }];
+        eps.extend(s.patch_names.iter().map(|n| EmitPatch {
+            name: n.clone(),
+            type_name: "wall".to_string(),
+        }));
+        let em = to_poly_mesh(&fr.points, &c.tets, &bnd, &eps).unwrap();
+        let raw = &em.raw;
+        let mut face_of: HashMap<[u32; 3], usize> = HashMap::new();
+        for (j, f) in raw.faces.iter().enumerate() {
+            let input: Vec<u32> = f.iter().map(|&v| em.point_of[v as usize]).collect();
+            face_of.insert(sorted3(input.try_into().unwrap()), j);
+        }
+        for (k, &sz) in c.sub_zone.iter().enumerate() {
+            if sz == 0 {
+                continue;
+            }
+            let j = face_of[&sorted3(fr.subtris[k])];
+            assert!(j < raw.neighbour.len(), "subtriangle {k} is internal");
+            let mut z =
+                [c.zone[raw.owner[j] as usize], c.zone[raw.neighbour[j] as usize]];
+            z.sort_unstable();
+            assert_eq!(z, [0, sz], "subtriangle {k} separates the fluid from body {}", sz - 1);
+        }
+        let mut zones: Vec<(String, Vec<crate::Label>)> = vec![(
+            "fluid".to_string(),
+            (0..c.zone.len() as crate::Label).filter(|&i| c.zone[i as usize] == 0).collect(),
+        )];
+        for (name, z) in [("a", 1u32), ("b", 2u32)] {
+            zones.push((
+                name.to_string(),
+                (0..c.zone.len() as crate::Label).filter(|&i| c.zone[i as usize] == z).collect(),
+            ));
+        }
+        let (parts, ifaces) = crate::io::regions::split_by_zones(raw, &zones).unwrap();
+        assert_eq!(
+            parts.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["fluid", "a", "b"]
+        );
+        assert_eq!(ifaces.len(), 2, "one interface per body");
+        for (i, (n_want, b_want, name_a, name_b)) in
+            [(n_a, 0usize, "fluid_to_a", "a_to_fluid"), (n_b, 1usize, "fluid_to_b", "b_to_fluid")]
+                .into_iter()
+                .enumerate()
+        {
+            let iface = &ifaces[i];
+            assert_eq!(iface.region_a, 0);
+            assert_eq!(iface.region_b, b_want + 1);
+            assert_eq!(iface.patch_a, name_a);
+            assert_eq!(iface.patch_b, name_b);
+            assert_eq!(iface.n_faces, n_want);
+        }
+        for fi in 1..parts.len() {
+            let (_, fa) = &parts[0];
+            let (_, fb) = &parts[fi];
+            let body = &parts[fi].0;
+            let pa = fa.patches.iter().find(|p| p.name == format!("fluid_to_{body}")).unwrap();
+            let pb = fb.patches.iter().find(|p| p.name == format!("{body}_to_fluid")).unwrap();
+            let ra = pa.start..pa.start + pa.size;
+            let rb = pb.start..pb.start + pb.size;
+            for (ja, jb) in ra.zip(rb) {
+                let loop_a = &fa.faces[fa.neighbour.len() + ja];
+                let loop_b = &fb.faces[fb.neighbour.len() + jb];
+                let rev: Vec<crate::DVec3> = crate::io::regions::reverse_face(loop_a)
+                    .iter()
+                    .map(|&v| fa.points[v as usize])
+                    .collect();
+                let cb: Vec<crate::DVec3> = loop_b.iter().map(|&v| fb.points[v as usize]).collect();
+                assert_eq!(rev, cb, "face {ja} of {} paired", pa.name);
+            }
+        }
+
+        // R1-R6 in Rust: the layout writes and loads, and in f64 the three
+        // pairing worsts are at the same 1e-12 bar as the volumes.
+        let dir = std::env::temp_dir()
+            .join(format!("ofgpu_tet19_carve_{}", std::process::id()));
+        let kinds = vec![
+            crate::cht::RegionKind::Fluid,
+            crate::cht::RegionKind::Solid,
+            crate::cht::RegionKind::Solid,
+        ];
+        crate::io::regions::write_layout(&dir, &parts, &kinds, &ifaces, None).unwrap();
+        match crate::io::regions::load(&dir.join("regions.json")) {
+            Ok(back) => {
+                for p in &back.pairing {
+                    println!(
+                        "carve two_regions regions_check {}: {} faces, worst centroid {:.3e}, \
+                         area {:.3e}, normal {:.3e}",
+                        p.name, p.n_faces, p.worst_centroid, p.worst_area, p.worst_normal
+                    );
+                    if std::mem::size_of::<crate::Scalar>() == 8 {
+                        assert!(p.worst_centroid <= 1e-12, "{}", p.worst_centroid);
+                        assert!(p.worst_area <= 1e-12, "{}", p.worst_area);
+                        assert!(p.worst_normal <= 1e-12, "{}", p.worst_normal);
+                    }
+                }
+            }
+            Err(err) => {
+                let text = err.to_string();
+                assert!(
+                    std::mem::size_of::<crate::Scalar>() == 4 && text.contains("R2"),
+                    "{text}"
+                );
+                println!("MISSED under single: {text}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Only body "a" declared: body b stays a dropped solid region, its
+        // subtriangles boundary faces of the fluid again.
+        let ca = carve_bodies(&s, &fr, &CarveStart::Hull, &[a]).unwrap();
+        assert!(rel(ca.zone_volumes[0], 62.0) <= 1e-12, "{}", ca.zone_volumes[0]);
+        assert!(rel(ca.zone_volumes[1], 1.0) <= 1e-12, "{}", ca.zone_volumes[1]);
+        assert!(rel(ca.volume, 63.0) <= 1e-12, "{}", ca.volume);
+        assert_eq!(ca.interface_faces, vec![n_a]);
+        let (per, _) = ca.patch_face_counts(&s, &fr);
+        assert_eq!((6..12).map(|p| per[p as usize]).sum::<usize>(), n_b, "b is boundary");
+        println!(
+            "carve one_body: zones {:?} (62 / 1), volume {:.15} vs 63, interface faces {n_a}, \
+             b's {n_b} subtriangles boundary",
+            ca.zone_volumes,
+            ca.volume
+        );
+
+        // With bodies empty, `carve_bodies` IS `carve`, field for field.
+        let ce = carve_bodies(&s, &fr, &CarveStart::Hull, &[]).unwrap();
+        assert_eq!(ce.kept_slots, plain.kept_slots);
+        assert_eq!(ce.tets, plain.tets);
+        assert_eq!(ce.faces, plain.faces);
+        assert_eq!(ce.face_sub, plain.face_sub);
+        assert_eq!(ce.regions, plain.regions);
+        assert_eq!(ce.kept_region, plain.kept_region);
+        assert_eq!(ce.volume.to_bits(), plain.volume.to_bits());
+        assert!(ce.zone.iter().all(|&z| z == 0));
+        assert!(ce.sub_zone.iter().all(|&z| z == 0));
+        assert!(ce.body_regions.is_empty() && ce.interface_faces.is_empty());
+        assert_eq!(ce.zone_volumes, vec![plain.volume]);
+    }
+
+    /// TET-19's refusals (SPEC-LIT §116.12's (c) and (d)), each naming the
+    /// body in quotes: a patch id past the surface's, a body whose patches
+    /// carry no subtriangle, a body that is not one closed region (another
+    /// subtriangle faces its region too) and a body subtriangle that does
+    /// not face the kept fluid.
+    #[test]
+    fn body_refusals() {
+        let mut s = TetSurface {
+            points: Vec::new(),
+            tris: Vec::new(),
+            tri_patch: Vec::new(),
+            patch_names: Vec::new(),
+        };
+        add_cube(&mut s, -1.5, -0.5, "a_", false);
+        add_cube(&mut s, 0.5, 1.5, "b_", false);
+        add_box(&mut s, -2.0, 2.0);
+        let fr = recover_faces(&s, &[], &spec()).unwrap();
+        let err = format!(
+            "{}",
+            carve_bodies(
+                &s,
+                &fr,
+                &CarveStart::Hull,
+                &[CarveBody { name: "x".to_string(), patches: vec![99] }]
+            )
+            .unwrap_err()
+        );
+        println!("carve body patch id: {err}");
+        assert!(err.contains("carve/body") && err.contains("\"x\""), "{err}");
+
+        // A 13th patch name over no triangle: its body has no subtriangles.
+        let mut s = s;
+        s.patch_names.push("empty".to_string());
+        let err = format!(
+            "{}",
+            carve_bodies(
+                &s,
+                &fr,
+                &CarveStart::Hull,
+                &[CarveBody { name: "e".to_string(), patches: vec![12] }]
+            )
+            .unwrap_err()
+        );
+        println!("carve body no subtriangle: {err}");
+        assert!(err.contains("carve/body") && err.contains("\"e\""), "{err}");
+        assert!(err.contains("carry no subtriangle"), "{err}");
+
+        // The pocket fixture: the outer shell alone is not one closed
+        // region - its region is also behind the inner shell's subtriangles
+        // - and the whole two-shell surface does not face the kept fluid
+        // (the inner shell's front is the dropped pocket).
+        let mut s = TetSurface {
+            points: Vec::new(),
+            tris: Vec::new(),
+            tri_patch: Vec::new(),
+            patch_names: Vec::new(),
+        };
+        add_cube(&mut s, -1.0, 1.0, "out_", false);
+        add_cube(&mut s, -0.5, 0.5, "in_", true);
+        add_box(&mut s, -2.0, 2.0);
+        let fr = recover_faces(&s, &[], &spec()).unwrap();
+        let shell = |patches: Vec<u32>| CarveBody { name: "shell".to_string(), patches };
+        let err = format!(
+            "{}",
+            carve_bodies(&s, &fr, &CarveStart::Hull, &[shell((0..6).collect())]).unwrap_err()
+        );
+        println!("carve body outer shell only: {err}");
+        assert!(
+            err.contains("carve/body")
+                && err.contains("\"shell\"")
+                && err.contains("is not one closed region"),
+            "{err}"
+        );
+        let err = format!(
+            "{}",
+            carve_bodies(&s, &fr, &CarveStart::Hull, &[shell((0..12).collect())]).unwrap_err()
+        );
+        println!("carve body both shells: {err}");
+        assert!(
+            err.contains("carve/body")
+                && err.contains("\"shell\"")
+                && err.contains("does not face the kept fluid"),
+            "{err}"
+        );
     }
 }

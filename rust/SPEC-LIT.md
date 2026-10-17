@@ -35967,12 +35967,16 @@ key:
   other than its default `4`;
 - with `kind: "tet"`, a `layers` key other than `patches`, `n`, `first_thickness` and `growth`
   that differs from its default (the tet path's limiters are `tet.layers`, §116.15);
-- with `kind: "tet"`, the part of the list above that the tet path does not build yet:
-  `castellation.bodies` (TET-19).
+- with `kind: "tet"`, `castellation.bodies` together with prism layers: `layers.n > 0` with
+  `layers.patches` not empty and at least one body declared is refused by name -
+  `castellation.bodies: kind "tet" grows no prism layers when bodies are declared (docs/17
+  TET-19, SPEC-LIT 116.12) - set layers.n to 0 or empty layers.patches; N declared`. Bodies
+  alone are built since TET-19 (§116.12): each declared body keeps its own region beside the
+  fluid.
 
-*Tree against the list above.* `bodies` is reused by the design, but until TET-19 lands it is
-refused rather than ignored. `layers.patches` was refused the same way until TET-13b built the
-prism layers (§116.15). `driver::run` (the hex path) refuses a
+*Tree against the list above.* `bodies` is built since TET-19; what is refused is bodies
+together with prism layers, with the message above. `layers.patches` was refused the same way
+until TET-13b built the prism layers (§116.15). `driver::run` (the hex path) refuses a
 `tet` config, `driver::run_tet` a hex one, and `ofgpu-automesher` refuses `-stopAfter` on a tet
 config: (92.55)'s stop rule names the hex stages.
 
@@ -37267,6 +37271,80 @@ The gate definitions (TET-08):
 - **seed**: a seed in the fluid keeps the same tetrahedra bit for bit as the hull start, and a
   seed inside the sphere is the `carve/seed` wrong-side refusal that names the patch.
 
+**The bodies, as TET-19 builds them.** `carve::carve_bodies(surface, recovery, start, bodies)`
+takes one [`CarveBody`](tetmesh/carve.rs) per `castellation.bodies` entry: its region name and
+the patch ids (indices into `surf.patch_names`) whose triangles form its one closed shell. A
+kept tetrahedron carries its zone,
+
+```
+zone(T) = k + 1 when T's region is body k's region, 0 when it is the kept fluid region   (116.16c)
+```
+
+and body `k`'s region `R_k` is the one its subtriangles face with their BACK (116.16a:
+`orient3d(a, b, c, d) > 0` for the apex `d` of the tetrahedron on that side). The refusals,
+each `carve/body` and each naming the body in quotes:
+
+- (a) a patch id past `surf.patch_names`;
+- (b) a body whose patches carry no subtriangle;
+- (c) body `k`'s subtriangles face more than one region with their back, or `R_k` is not
+  solid, or some subtriangle NOT of body `k` faces `R_k` on either side - "is not one closed
+  region", naming one offending subtriangle;
+- (d) a subtriangle of body `k` whose FRONT region is not the kept fluid - "does not face the
+  kept fluid".
+
+The kept set is the fluid and every body's region; the union's boundary face is a subtriangle
+whose other tetrahedron is not kept, a hull face, or a face with no neighbour - so an
+INTERFACE subtriangle, the fluid on its front and its body behind it, is INTERNAL, and that is
+why the interface is conformal by construction: both sides share its points (docs/10
+fsi-solid-mesh-plan.md section C R2). Each zone closes on its own by the divergence theorem,
+
+```
+V(Z) = (1/6) sum_{f in dZ} (x_0(f) - o) . ((x_1(f) - o) x (x_2(f) - o))   = sum_{T in Z} V(T)   relative 1e-12   (116.16d)
+```
+
+with `dZ` the faces appearing once among zone `Z`'s tetrahedra, wound by §116.4's table, about
+the first such face's first point. `carve::zones_of` recovers the zones on the OPTIMISED
+tetrahedra: a flood fill across the faces that are not subtriangles, each component's zone
+voted by the body subtriangles that bound it with their back - the optimiser flips tetrahedra
+but never across a frozen subtriangle, so a zone is one flood component.
+
+The driver (§116.3): `refine::refine_bodies` refines the bodies' tetrahedra to the size field
+like the fluid's; on a run with declared bodies only, a kept tetrahedron whose circumcentre is a point of the triangulation
+already, or the one another bad tetrahedron of the same pass has, is exempt and reported with
+the protected ones - inserting it would be refused as a duplicate, and the bodies refine the
+inside of a closed body, where a lat/lon sphere's cospherical rings plan one centre twice.
+On the example's band the with-bodies refinement does not terminate - TET-13c's
+non-termination fed from the kept interior (§116.18's measured rows); bounded by
+`refine.max_inserted_points` it refuses `refine/cap` (in f64; under `single`, whose surface is the STL's f32-parsed coordinates widened
+exactly by §116.9, the passes terminate and the run misses §92.3's G2 on the union instead, A28),
+and the gate records the miss instead of changing the mesher.
+`emit` runs §92.3 on the UNION, whose interface subtriangles are internal;
+then §92.15.4's `io::regions::split_by_zones` turns the one polyMesh into the layout, the
+fluid first and the bodies in `castellation.bodies` order, the interface patches named
+`fluid_to_<b>` / `<b>_to_fluid` (R3); §92.3 gates each region on its own; and
+`ofgpu-automesher` writes ONLY the layout - `mesh/regions.json` and one polyMesh per region,
+through `io::regions::write_layout`, as §92.15.6 does. No prism layers on a body run: refused
+by name (§116.3). The summary's `layout` block is §92.15.6's. The plan and its rules are
+docs/10-fsi-solid-mesh-plan.md section C (R1-R7); SPEC-LIT §92.15 and §97 are open, in-tree.
+
+The gate definitions (TET-19):
+
+- **two_regions** (`tetmesh::carve::tests::two_regions`, both builds, every carve number f64
+  by §116.2): the two-cube fixture keeps zones of 62 / 1 / 1 at relative 1e-12, each against
+  (116.16d); the interface subtriangles are internal to the union, paired face k to face k
+  through the split, and the layout loads (R1-R6) with its pairing worsts at 1e-12;
+- **tet_bodies_end_to_end** (`automesher::driver::tests::tet_cases::tet_bodies_end_to_end`,
+  also `tests/automesher_tet.rs`): `box_sphere_tet.json` with the sphere a body, two arms.
+  The example's band misses (TET-13c's non-termination, fed from the kept interior):
+  bounded, the run refuses `refine/cap` after the five stage banners, and the miss is
+  recorded (§116.18's measured rows); under `single` (the STL's f32-parsed points) the
+  passes terminate and the run refuses §92.3's G2 on the union mesh instead (A28). With the bands
+  emptied the run completes: two regions
+  through the seven stages, the interface `fluid_to_ball` / `ball_to_fluid`, §92.3 per
+  region, each region's volumes closing on the divergence sum at relative 1e-12 and summing
+  to the 1000 m^3 box, and the summary's `layout` block carrying the written manifest. Under
+  `single` the completing arm may refuse §92.3's G2 on the union mesh (A28) and is recorded.
+
 ### 116.13 Delaunay refinement
 
 **Implemented by TET-09** (`tetmesh/refine.rs`).
@@ -38067,6 +38145,7 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-14 | (116.27) within 2 % (f64); f32 within §112.1's floor, read as the same 2 % (class P); the solve takes 3 min or less; the L1 mesh passes §92.3; `tests/tetmesh_pipe.rs`: a cavity shell is taken with a seed and refused with the hull start, its volume to 1e-12 (class R, 1e-5 under single) | P, D, R |
 | TET-15 | a 1 M-tet sphere in a box end to end in 120 s or less; bit-identical across 1, 4 and 8 threads | measured, D |
 | TET-18 | the drone surface passes §92.3; dihedral bounds and wall time recorded | measured |
+| TET-19 | two cubes in a box: per-zone (116.16d) and the volumes 62 / 1 / 1 at relative 1e-12; the interface subtriangles internal and paired face k to face k; the layout loads (R1-R6) | A, D |
 
 **Measured** (each unit appends its own rows):
 
@@ -38223,6 +38302,10 @@ never a widened band. Every gate is evaluated in f64 in both builds (§116.2).
 | TET-15 | the same at `base_size` 0.27 m (about 1.0 M) and at 0.5 m with the sphere at 0.25 m (about 160 k) | **not finished**: stages 1-4 in 0.3 s, then the refinement was still running when it was stopped, after 10 min (0.27 m) and 19.8 min (0.5 m). At 1 m the same stage takes 6.2 s. The time is in refinement and optimisation, which TET-15 does not thread | the TET-15 commit |
 | TET-18 | the drone surface (the PX4 x500 sim surface of `tools/drone/sim_geom.py`, about 251k triangles, BSD-3-Clause) through the tet path with prism layers: §92.3, the dihedral minimum and maximum, the wall time | **NOT RUN**: the input is not on disk. `sim_geom.py` writes its STLs under `--out`, outside the repository, and the drone tranche's `--out` was a session scratchpad that no longer exists. A search of every file on both drives (C: and I:, 2026-10-17) for `x500*`, `sim_surface.stl`, `motors.stl`, `skids.stl` and `rotors.json` finds none, as VIO-06's search found no `x500_assembled.blend` or `rotors.json` (§117.13's measured rows). The tree does not record where the source GLB was obtained, and fetching a third-party model was not authorised for this unit. With no surface there is no price, so no card or CPU time was spent. The gate stays open, and so does §116.3's plan B question, which this run was to answer | the TET-18 commit |
 | TET-18 | the run, once the GLB is back (the recipe, not yet measured) | `blender -b --factory-startup --python tools/drone/sim_geom.py -- --glb <x500 GLB> --out <dir>` writes `body.stl`, `arms.stl`, `motors.stl` and `skids.stl`. The tet config is `tools/drone/tunnel_mesh.py`'s `build_config` with `"kind": "tet"` and a `tet` block, its `layers` on the four patches, its seed `keep_region` and no `snap` key (the tet path refuses hex-only keys by name, TET-12's rows); `ofgpu-automesher <config>` then leaves the `.meshSummary.json` tet block (TET-17: dihedral bounds and seven stage times). Expected risks, from the fixtures: §116.13's refinement does not terminate on sharp-edged bodies (TET-13c's rows) and stops on a non-finite circumcentre (TET-15's rows); either is recorded with its stage, point count and time, as **MISSED**, without changing the mesher. Under `single`, §92.3's G2 refusal of tet meshes (TET-11's rows) is recorded as **MISSED** too. Budget: about 3 h of card time; the tet path itself runs on the CPU | the TET-18 commit |
+| TET-19 | `carve::tests::two_regions` and `body_refusals` (f64, release; every carve number f64 by §116.2) | the two-cube fixture: 36 points, 48 subtriangles, n_a 24, n_b 24, 144 kept tetrahedra, zones [62, 1, 1] each within 1e-12 of (116.16d), the union within 1e-12 of (116.16b), 12 union-boundary faces, `interface_faces` [24, 24]; one body only: zones [62, 1], V 63, 24 interface faces, the body's subtriangles the boundary; the four `carve/body` refusals fire as named; empty `bodies` equals the plain carve field by field, `volume.to_bits()` included | the TET-19 commit |
+| TET-19 | `tet_bodies_end_to_end`'s completing arm, the bands emptied (f64 release, about 2.7 s of the test's 12.65 s) | the ball a body: fluid 9192 cells, V 9.976513391e2, closure rel 1.37e-15; ball 61 cells, V 2.348660895e0, rel 3.78e-16; the sum 1.000000000e3 against the 1000 m box; the interface `fluid_to_ball` / `ball_to_fluid` of 58 faces, §92.3 passed per region; regions.json written and read back with the pairing worsts centroid 5.839e-15, area 1.982e-16, normal 2.220e-16. The supervisor ran `ofgpu-automesher` on the same config (2.7 s): it writes `mesh/regions.json` with `fluid` and `ball`, `-check` passes both regions and prints the same three worsts, and `tools/mesh/regions_check.py` reports `OK: R1 R2 R3 R6 hold for 2 regions, 1 interface` (worst centroid 5.8e-15, area 3.5e-16, normal 2.2e-16) | the TET-19 commit |
+| TET-19 | `tet_bodies_end_to_end`'s band arm, the example's level-2 band with the body kept | **MISSED**: §116.13's refinement does not terminate with the ball's interior kept - TET-13c's non-termination fed from the kept interior. At a 300 000-point budget: 291 888 points in 136 passes, 1 027 967 kept tetrahedra, the next pass asking 71 767 more, about 8.5 min release; every bad tetrahedron's h is the band's 0.25 m or more (the size field is satisfied throughout), 84 867 of 84 867 bad circumcentres at pass 130 fall outside the sphere, and l_min collapses to 1e-5 - the rho-driven sliver cascade, not a size demand. The gate arm bounds the budget and asserts the `refine/cap` refusal after the five stage banners (cap 10 000: 8 876 points in 118 passes, 40 687 kept tetrahedra, 9.9 s) and the gate stays open, without changing the mesher | the TET-19 commit |
+| TET-19 | the f32 arm | `carve`'s gates and `tet_bodies_end_to_end` under `--features single`: the carve numbers and the two-cube gate pass as in f64; both band arms reach `emit` and refuse §92.3's G2 on the union mesh (A28) - the example's band on 20817 cells, the bands-emptied completing arm on 8346 cells - recorded, 16.9 s | the TET-19 commit |
 
 ### 116.19 References
 
