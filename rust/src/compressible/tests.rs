@@ -15,3 +15,12 @@
 use crate as ofgpu;
 
 include!("../../tests/shared/compressible_solver_cases.rs");
+
+/// DST-10's rows of SPEC-LIT §158.6 (the dust model in this solver),
+/// written once in `tests/shared/compressible_dust_cases.rs` and run in both
+/// builds by `tests/compressible_dust.rs`.
+mod dust {
+    use crate as ofgpu;
+
+    include!("../../tests/shared/compressible_dust_cases.rs");
+}

@@ -439,8 +439,9 @@ fn dust_refusals() {
         )),
         "dust.sst",
     );
-    // 14. the rho-weighted SST carries no buoyancy production; 15. the
-    // compressible coupling is DST-10.
+    // 14. the rho-weighted SST carries no buoyancy production; 15. a dust
+    // case may state the mixture gas, and both blocks lower (SPEC-LIT
+    // §158.6): `ofgpu-compressible` runs the pair.
     let compressible = r#", "compressible": { "gamma": 1.4, "W": 0.0289647,
         "cp": 1004.692579691832, "viscosity": { "model": "sutherland", "As": 1.458e-6, "Ts": 110.4 },
         "pOperating": 1e5 }"#;
@@ -449,7 +450,10 @@ fn dust_refusals() {
     refuses(lowers(&grav_case), "physics.gravity");
     lowers(&sst_case_text("[0,0,0]", "", sst_dust))
         .expect("the rho-weighted SST case with no gravity lowers");
-    refuses(lowers(&sst_case_text("[0,0,0]", &compressible, sst_dust)), "physics.compressible");
+    let with_gas = lowers(&sst_case_text("[0,0,0]", &compressible, sst_dust))
+        .expect("a dust case with a gas block lowers (SPEC-LIT §158.6)");
+    assert!(with_gas.dust.is_some(), "the dust block lowers beside the gas");
+    assert!(with_gas.compressible.is_some(), "the gas block lowers beside the dust");
     // 16. T_u is the case's initial T.
     let pair = format!("{FSC_MIN}{FORMULA_MIN}");
     let cold = duct_case_text(

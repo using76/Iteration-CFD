@@ -21,8 +21,10 @@
 //! limit (155.9), the thermo mode and `T_u` (the case's `initial.T`), the
 //! laminar burning velocity (152.13), the ρ-weighted SST settings (§156.3,
 //! §156.4) and the `c` field's boundary conditions. The kernels, the
-//! driver and the coupling are DST-06's later parts, and every other
-//! driver refuses the case by name ([`refuse_dust_case`]).
+//! driver and the coupling are DST-06's later parts, and every driver but
+//! the two that run the model refuses the case by name
+//! ([`refuse_dust_case`]): `ofgpu-lowmach` the sealed one (§157.4),
+//! `ofgpu-compressible` the mixture-gas one (§158.6).
 //!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §157.4 - the case blocks and their §13.4 refusals
@@ -283,7 +285,8 @@ fn positive(key: &str, v: f64) -> Result<f64> {
 pub fn refuse_dust_case(source: &str) -> Error {
     Error::Refused(format!(
         "{source}: this case states the dust model (combustion.model FSC or TFC with a dust \
-         block), which this driver does not run; ofgpu-lowmach runs it (DST-06, SPEC-LIT §157.4)"
+         block), which this driver does not run; ofgpu-lowmach runs it (DST-06, SPEC-LIT §157.4), \
+         and ofgpu-compressible with a gas block (DST-10, SPEC-LIT §158.6)"
     ))
 }
 
@@ -579,13 +582,11 @@ pub fn lower_dust(
             ))
         }
     };
-    if cx.compressible {
-        return Err(refused(
-            "physics.compressible",
-            "the dust model on ofgpu-compressible is DST-10; this unit is the sealed \
-             low-Mach one",
-        ));
-    }
+    // SPEC-LIT §158.6: a dust case MAY state `physics.compressible` - the
+    // mixture gas law's own air (§122.6) - and `ofgpu-compressible` is the
+    // driver that runs the pair; the lowered dust block is the same either
+    // way. Every other driver refuses the case whole (`refuse_dust_case`),
+    // and `ofgpu-lowmach` refuses the gas beside the model by name.
     let Some(t_u) = cx.initial_t else {
         return Err(refused(
             "initial.T",
@@ -616,8 +617,9 @@ pub fn lower_dust(
                 return Err(refused(
                     "dust",
                     &format!(
-                        "patch \"{pname}\" is a compressible preset; the dust model of this \
-                         unit is a low-Mach one, and the compressible coupling is DST-10"
+                        "patch \"{pname}\" is a compressible preset; the dust model runs on \
+                         fixedValue/zeroGradient/inletOutlet patches only, and the §126 rules \
+                         are not carried by the mixture gas law (SPEC-LIT §158.6)"
                     ),
                 ))
             }

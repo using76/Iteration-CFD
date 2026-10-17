@@ -56468,7 +56468,7 @@ without FSC/TFC, FSC/TFC without one, `species` or `chemistry` beside it, a key 
 EDM/EDC/PaSR, a missing `PrT`, `tFlacc` with TFC, a number that is not finite and positive, a
 thermo key of the other mode, a turbulence model other than laminar or `kOmegaSST` (with
 `dust.sst` only beside `kOmegaSST`, and `kOmegaSST` only with zero gravity, §156.7),
-`physics.compressible` (DST-10), and a missing `initial.T`. Every driver but `ofgpu-lowmach`
+`physics.compressible` (lifted by DST-10, §158.9), and a missing `initial.T`. Every driver but `ofgpu-lowmach`
 refuses a dust case through `LoweredCase::refuse_dust`, `ofgpu-par` and `ofgpu-decompose`
 included, which is how decomposition is refused by name.
 
@@ -56919,7 +56919,7 @@ split mesh, so there is no face mask and no kernel change; the rows below hold a
 
 ### 158.6 What DST-10 must make true
 
-`ofgpu-compressible` runs the Phase A model: the `c~` equation (155.3) with the FSC source on the
+As built in §158.9, with the derived relations (158.5)-(158.7). `ofgpu-compressible` runs the Phase A model: the `c~` equation (155.3) with the FSC source on the
 compressible mass flux, the heat release (158.4), R_mix(c~), the local ρ_u(p), the ρ-weighted SST
 of §156 (this lifts CMP-15's "non-SA turbulence" refusal for kOmegaSST only), and the flame-Courant
 check (155.9). f64 and f32 rows, ≤ 8 min per build:
@@ -57055,6 +57055,140 @@ One run of the seven took 99-192 s (f64 lib tests, the card shared with two lane
 `the_permanent_refusals_name_their_reason` and `the_spec_lit_120_table_is_the_catalogue` (131
 names, 11 refused).
 
+
+### 158.9 The compressible coupling as built (DST-10)
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Equations from §152-§156 and
+§158.1-§158.4 only; the three relations below are derived here.
+
+`src/compressible/thermo.rs` (`DustHConst`, `MixKernels`), `src/compressible/energy.rs` (the
+mixture mode), `src/compressible/mod.rs` (`Compressible::attach_dust`), `src/dust/source.rs`
+(`CompressibleDust`), three kernels appended to `cuda/compressible.cu` (`cmpGasStateMix`,
+`cmpScaleCp`, `cmpDustRhoURatio`), `src/io/case_dust.rs` and `src/bin/common/mod.rs` (the case
+reaches the driver), `src/bin/compressible.rs` (the driver), and the tests
+`tests/shared/compressible_dust_cases.rs`, run as `compressible::tests::dust` and, in both builds,
+as `tests/compressible_dust.rs`. No existing kernel changed; without a dust coupling every line of
+the solver runs as before (`no_dust_no_change`, a hash pinned before the unit).
+
+**[derived] The constant-c_p pair.** §158.4 asks for one constant c_p per pseudo-species. The
+formula gas of §152.4 is NASA-7, so the pair is fitted to keep its isobaric burned state:
+
+```
+  cp_U = c_p,U(T_u) ,   cp_B = (h_B(T_b) − h_B(T_u)) / (T_b − T_u) ,   T_b of (152.10)
+  h_X(T) = a_X + cp_X T ,   a_X = h_X(T_u) − cp_X T_u                                           (158.5)
+```
+
+so `h_B(T_b) = h_U(T_u)` holds for the pair as for the NASA-7 gas. The prescribed mode is already
+constant-c_p and the pair reproduces it (`dust_hconst_matches_gas`: the AICC ratio and T_b to 0 in
+f64). REMBE at T_u = 273 K: cp_U 1039.1, cp_B 1218.21 J/(kg K), Δh_c = a_U − a_B 1.8841e6 J/kg,
+T_b 1779.51 K, hConst AICC T_v 2238.74 K and P_max/p_0 8.859252 (the NASA-7 value of §152.6 is
+8.6006; the compressible rows compare with the hConst value, as §158.4 states).
+
+**[derived from (158.4)] The energy equation in energy units.** With h_s = cp(c~) T (a 0 K
+datum) the total enthalpy is `h_s + (1 − c~) a_U + c~ a_B`; subtracting (a_B − a_U) times (155.3)
+from the enthalpy equation leaves (158.4) with `q̇ = Δh_c ω̇_c`, `Δh_c = a_U − a_B`, and Le = 1
+((157.6), Γ = κ + D_t with the LOCAL κ = k/(ρ c_p) of the gas's own transport law) splits the
+diffusion of h_s:
+
+```
+  d(ρ cp(c~) T)/dt + ∇·(ṁ cp(c~_f) T_f) − ∇·(λ ∇T)
+        = dp/dt − [d(ρK)/dt + ∇·(ṁ K)] + ∇·(τ·u) + ρ g·u + Δh_c ω̇_c + ∇·(ρ Γ T (cp_B − cp_U) ∇c~)
+  λ = ρ Γ cp(c~) = k + ρ cp(c~) D_t                                                               (158.6)
+```
+
+`RhoEnergy::enable_mixture` assembles exactly the old matrix with three substitutions: the time
+term's weights are `ρ cp(c~)` at the three levels (c~'s own levels), the convection runs on the
+face flux `ṁ cp(c~_f)` (c~_f linear; the weights of T are still formed on ṁ), and nothing is
+divided by c_p (every `rcp` is 1). The last two terms enter as one cell source in W/m3 through
+`fvm_su`; the divergence is the Gauss sum of `ρ_f Γ_f T_f (cp_B − cp_U) |S_f| snGrad c~`. In a
+sealed box (158.6) telescopes: `ρ cv(c~) T` changes by Δh_c times the burned mass, which is
+(152.11) for the pair:
+
+```
+  T_v = (a_U − a_B + cv_U T_0) / cv_B ,   cv_X = cp_X − R0/W_X ,   P_max/p_0 = T_v W_U / (T_0 W_B)   (158.7)
+```
+
+**The gas law and ρ_u(p).** `psi = 1/(r(c~) T)`, `r(c~) = R0/W_U + c~ (R0/W_B − R0/W_U)`
+((152.8)-(152.9)) on the cells and the boundary faces, in the order `cmpGasState` uses, so c~ = 0
+gives its bits. (155.10) is local: the propagation term reads `ρ_u0 U_t'` with
+`U_t' = U_t ((p + p_op)/p_init)^{1/γ_u}` formed per cell in double (one scalar ρ_u reaches the
+DST-04 kernel, so the pressure factor rides the speed); the measured flame-Courant number reads the
+same pair.
+
+**The loop.** `Compressible::step` with a coupling attached: the c~ old level once per step; in
+every outer iteration `mu_eff = mu + ρ ν_t` for the momentum predictor (with a turbulence model),
+then before the energy solve the closures at the step's end time, U_t', the ignition bracket, Γ,
+one solve of (155.3) on the solver's own mass flux ṁ and density levels, ω̇_c, and the energy
+equation's mixture state and λ; the energy solve; the mixture gas law wherever the solver formed
+psi and rho; and at step 7 the ρ-weighted SST of §156 (`correct_rho` on ṁ with `ρ_f` linear and
+the volume flux ṁ/ρ_f, ν the fresh gas's μ(T_u)/ρ_u0), frozen before 2 t_0 as §157.7's D6.
+Refused by name: a steady or localEuler run, a ddt other than Euler, any §126 rule (the mixture
+gas law forms each boundary face from its own c~, which a rewritten face has none of), a
+prescribed U_t law with α or β ≠ 0, and a mixture state asked of an equation with a local step.
+
+**The case and the driver.** `physics.compressible` beside the dust blocks now lowers (§157.7's
+refusal is lifted); the compressible presets `farfield` and `supersonicInlet` stay refused.
+`ofgpu-compressible`'s loader lets the dust case through and `ofgpu-lowmach`'s refuses it when it
+also states the gas (`physics.compressible`, the gas would be ignored). The driver accepts
+`kOmegaSST` only beside a dust block (its refusal otherwise names §158.6), builds the coupling on
+the case's `c`, `k`, `omega`, `nut` and `dust.sst` with `p_init = pOperating + initial.p`
+(refused when `initial.p` is not uniform) and `k_mol = κ(T_u)`, prints one `dust (SPEC-LIT
+§158.6)` line with the pair's values, refuses a predicted Co_f above `maxFlameCourant` and prints
+the measured one and the c~ bounds count at every report, and writes `c`, `Ut` (U_t'), `Cof`
+(per cell) and `HRR` (q̇) beside the five fields, with `Mach` from the mixture (`a² = γ(c~) r(c~) T`,
+`γ = cp/(cp − r)`). A vent beside a dust block is refused: the hand-over of c~ and the closures
+on opening is DST-11's.
+
+**Gates, measured 2026-10-17** (`tests/compressible_dust.rs` and the lib module, both builds;
+`ofgpu-compressible` bin tests f64).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `no_dust_no_change` | viscous Sod tube, 100 cells, 40 steps, FNV-1a 64 of every state array | the pin taken on 8b13cb2 | D | 0xac0f1e9c5966b505 holds | 0x534040adc523b30a holds |
+| `dust_hconst_matches_gas` | the pair against the prescribed gas and the REMBE T_b; (158.7) against its definition | 1e-12 | A | 0, 2.6e-16 | same (host f64) |
+| `dust_box_ends_at_aicc` | sealed 2³ cube of 1 cm, TFC uniform W_0 1000 1/s, 273 K, 0.02 s at dt 1e-4 and 5e-5, 5 outer | p_end/p_init within 0.5 % of (158.7); error ratio in [1.8, 2.2] | P | e 6.783e-4, 6.811e-4; **ratio 0.996 MISSED** | e 6.734e-4, 7.289e-4; **ratio 0.924 MISSED** |
+| `deflagration_jump_conditions` | 800-cell closed tube of 1 mm, prescribed U_t = S_L 0.24111 m/s, smooth flame at 300 K, 1.5 ms at dt 1e-6, 10 outer; P = [0.06, 0.25] m, B = [0.002, 0.015] m | u_u within 1 % of (σ−1)S_L; p_u − p_b within 2 % of ρ_u S_L²(σ−1) | P | σ 6.4828, u_u 1.3135 against 1.3219 (0.64 %); **p_u − p_b 0.4658 Pa against 0.4146 Pa (12.4 %) MISSED** | σ 6.4827, u_u 1.3169 (0.38 %); **0.5981 Pa (44 %) MISSED** |
+| `acoustic_precursor` | the same run: mean gauge p over P | within 2 % of ρ_u0 c_u0 (σ−1) S_L | P | 549.59 against 551.82 Pa (0.40 %) | 550.90 Pa (0.17 %) |
+| `sst_rho_one_bitwise` | 36 cells, 3 steps: `compressible_sst_inputs` at ρ ≡ 1 into `correct_rho` against the kinematic `correct` | bitwise k, ω, ν_t | D | holds | holds |
+| driver: `a_dust_box_runs_and_writes_c`, `a_dust_sst_box_runs`, `dust_refusals_name_the_setting` | the JSONC box on `ofgpu-compressible`, 20 and 5 steps; seven refusals by their keys | runs, writes c/Ut/Cof/HRR, gauge p rises; finite; refused by name | D | hold | — |
+
+The tube run's burning rate dM_c/dt is 0.31130 (single 0.31162) against ρ_u0 S_L 0.31232 kg/(m² s);
+its mass is conserved to the last printed digit in f64 (3.3e-7 relative in single). c~ leaves
+[0, 1] by at most 8e-5 in single and by less than 5e-7 in f64 on the burned side of the brush, where
+the explicit propagation term of (155.3) lifts it: 7716 and 16677 cell-steps are counted, and the
+tube rows record them instead of failing. The six tests take 110 s in f64 and 154 s in single on
+the shared card.
+
+**The recorded misses.** (i) *The box's order in Δt.* (158.6) telescopes, so the box has no
+first-order time error to measure: its error is the outer loop's lag (the energy equation reads
+dp/dt from the previous outer iteration's p). Measured: e = 6.783e-4 and 6.811e-4 at 5 outer
+iterations, and 4.2e-9 and 2.7e-9 at 20 (T_end 2238.7401 K against T_v 2238.7401 K). The row's
+0.5 % holds at 5; the ratio says nothing about the order. Under single the box also drifts in mass
+(8.3e-5 relative, the f32 density levels), which moves e by 5e-5 between the two steps. (ii) *The momentum jump.*
+The predicted p_u − p_b is 0.41 Pa, so the 2 % bar is 0.008 Pa; the measured difference of the
+two zone means is +0.466 Pa (f64) and +0.598 Pa (single), while p varies by about ±10 Pa cell to
+cell inside the flame brush and by about 1 Pa along P on the ~550 Pa plateau. The relation is
+below the pressure noise of the run: the zone means move by tenths of a pascal with the outer
+iterations (−0.52 Pa at 20, +0.47 Pa at 10), and on the zone that reached into the spread front
+they differed by −23.5 Pa. The cure (a quieter pressure field across the brush, or a much longer
+quasi-steady run) is not an input of the gate row and is not built.
+**Inputs, measured before they were fixed.** The tube runs 10 outer iterations: at 3 the
+expansion is 9 % short (u_u 1.20 m/s on the plateau, dp 509 Pa) because the c~ and energy
+updates of an outer iteration precede its pressure correction; 10 and 20 agree (dp 540.3 and
+540.1 Pa on the zone that reached into the front). c~ is convected with van Leer, as T; upwind
+gave the same u_u at 3 outer iterations. The acoustic front spreads over about 0.2 m by 1.5 ms,
+so P ends at 0.25 m and the run asserts the front's 50 % point has passed 0.45 m.
+
+**Decisions (TAKEN, by recommendation).** D1: the constant-c_p pair (158.5) keeps the NASA-7 T_b
+of each case. D2: h_s = cp(c~) T on a 0 K datum and the energy equation in energy units (158.6),
+conservative, so the sealed box telescopes to (158.7). D3: Le = 1 on the gas's own local κ, as
+§157.7's D1. D4: the local ρ_u(p) rides U_t' (no change to DST-04's kernel). D5: kOmegaSST only
+beside a dust block; ν of the SST is μ(T_u)/ρ_u0; frozen before 2 t_0. D6: a dust case with a §126
+rule, a vent, or a non-Euler ddt is refused (DST-11 joins the vent). D7: `Mach` of a dust case is
+the mixture's.
+
+Labels: (158.5)-(158.7).
 ---
 
 ## 159. Phase B — reacting parcels, char, the cloud, two-way coupling, particle radiation, and its gates

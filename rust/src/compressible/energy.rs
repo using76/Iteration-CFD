@@ -157,6 +157,27 @@ pub struct EnergyInputs<'a> {
 }
 
 // ==========================================================================
+//  The mixture mode (SPEC-LIT §158.4, off by default)
+// ==========================================================================
+
+/// The energy equation's MIXTURE state: the equation then runs in ENERGY
+/// units - `d(rho cp(c~) T)/dt + div(mdot cp(c~_f) T_f) - div(lambda grad T)
+/// = ... + S_dust` - instead of divided by the gas's constant `c_p`. `w`,
+/// `w0` and `w00` are `rho cp(c~)` at the three time levels on the cells
+/// (the time term's weights), `flux` the face flux `mdot cp(c~_f)` (the
+/// convection), and `source` S_dust = `Δh_c wdot_c` plus the
+/// `div(rho_f Gamma_f T_f (cp_b - cp_u) snGrad c~)` enthalpy-of-mixture
+/// transport, in W/m3 on the cells. Attached by
+/// [`RhoEnergy::enable_mixture`]; every launcher below fills it.
+pub struct EnergyMixture {
+    pub w: DevBuf<Scalar>,
+    pub w0: DevBuf<Scalar>,
+    pub w00: DevBuf<Scalar>,
+    pub flux: GpuSurfaceScalarField,
+    pub source: DevBuf<Scalar>,
+}
+
+// ==========================================================================
 //  Kernels
 // ==========================================================================
 
@@ -236,6 +257,10 @@ pub struct RhoEnergy<'m> {
 
     au: DevBuf<Scalar>,
     residual: DevBuf<Scalar>,
+
+    /// §158.4's mixture mode, off by default: `Some` puts the equation in
+    /// energy units on the dust model's `rho cp(c~)`.
+    mixture: Option<EnergyMixture>,
 }
 
 impl<'m> RhoEnergy<'m> {
@@ -370,6 +395,8 @@ impl<'m> RhoEnergy<'m> {
 
             au: gpu.zeros(one(n))?,
             residual: gpu.zeros(one(n))?,
+
+            mixture: None,
         })
     }
 
@@ -406,6 +433,14 @@ impl<'m> RhoEnergy<'m> {
                 self.ddt.scheme
             )));
         }
+        if self.mixture.is_some() {
+            return Err(Error::Refused(
+                "compressible::energy::attach_local_step: the mixture energy \
+                 equation (SPEC-LIT §158.4) is attached, and it is built for Euler \
+                 transient runs, not for a localEuler step"
+                    .to_string(),
+            ));
+        }
         self.local = Some(LocalStep::new(gpu, self.m)?);
         Ok(())
     }
@@ -418,6 +453,48 @@ impl<'m> RhoEnergy<'m> {
     /// The attached local step, for the outer loop to fill.
     pub fn local_step_mut(&mut self) -> Option<&mut LocalStep> {
         self.local.as_mut()
+    }
+
+    /// §158.4: put the equation in ENERGY units on `rho cp(c~)` - the dust
+    /// model's mixture mode. Allocates, so call it before a captured region.
+    /// From then on every `rcp` use in the assembly is 1 (the equation is
+    /// not divided by `c_p`), the time term weights on `rho cp(c~)`, the
+    /// convection on `mdot cp(c~_f)`, and S_dust enters by `fvm_su`.
+    /// Refused by name while a `localEuler` local step is attached: the
+    /// mixture equation is built for Euler transient runs (§158.6).
+    pub fn enable_mixture(&mut self, gpu: &Gpu) -> Result<()> {
+        if self.local.is_some() {
+            return Err(Error::Refused(
+                "compressible::energy::enable_mixture: a localEuler local step is \
+                 attached, and the mixture energy equation (SPEC-LIT §158.4) is \
+                 built for Euler transient runs. Alternative: the dust model on an \
+                 Euler run (§158.6)"
+                    .to_string(),
+            ));
+        }
+        if self.mixture.is_some() {
+            return Ok(());
+        }
+        let one = |k: usize| k.max(1);
+        let n = self.m.n_cells;
+        self.mixture = Some(EnergyMixture {
+            w: gpu.zeros(one(n))?,
+            w0: gpu.zeros(one(n))?,
+            w00: gpu.zeros(one(n))?,
+            flux: GpuSurfaceScalarField::zeros(gpu, self.m, "dustEnergyFlux")?,
+            source: gpu.zeros(one(n))?,
+        });
+        Ok(())
+    }
+
+    /// The mixture state, when the mode is on.
+    pub fn mixture(&self) -> Option<&EnergyMixture> {
+        self.mixture.as_ref()
+    }
+
+    /// The mixture state, for the coupling to fill each outer iteration.
+    pub fn mixture_mut(&mut self) -> Option<&mut EnergyMixture> {
+        self.mixture.as_mut()
     }
 
     /// The matrix the last assembly left behind.
@@ -469,6 +546,16 @@ impl<'m> RhoEnergy<'m> {
         Ok(())
     }
 
+    /// The scalar every explicit term carries: `fl(1/c_p)` in the divided
+    /// (125.1) form, 1 in the mixture mode's energy units (§158.4).
+    fn asm_rcp(&self) -> Scalar {
+        if self.mixture.is_some() {
+            1.0 as Scalar
+        } else {
+            self.rcp
+        }
+    }
+
     // ---- the preparation --------------------------------------------------
 
     /// The weights of `T` on `mdot`, the laplacian's coefficient
@@ -493,14 +580,15 @@ impl<'m> RhoEnergy<'m> {
         }
 
         // rcp kappa_f |Sf|: the linear kappa_f, the product with |Sf|, then
-        // the one scaling by fl(1/c_p).
+        // the one scaling by fl(1/c_p) - by 1 in the mixture mode (§158.4).
         fv::interpolate_linear(gpu, &self.fvk, &mut self.kappa_face, inp.kappa_eff, m)?;
         {
-            let Self { k, kappa_face, gamma, fldk, rcp, .. } = self;
+            let rcp = self.asm_rcp();
+            let Self { k, kappa_face, gamma, fldk, .. } = self;
             Self::launch_mul(gpu, &k.mul, &mut gamma.f, &kappa_face.f, &m.mag_sf, nif)?;
             Self::launch_mul(gpu, &k.mul, &mut gamma.bf, &kappa_face.bf, &m.b_mag_sf, nbf)?;
-            field_ops::scale_field(gpu, fldk, &mut gamma.f, *rcp, nif)?;
-            field_ops::scale_field(gpu, fldk, &mut gamma.bf, *rcp, nbf)?;
+            field_ops::scale_field(gpu, fldk, &mut gamma.f, rcp, nif)?;
+            field_ops::scale_field(gpu, fldk, &mut gamma.bf, rcp, nbf)?;
         }
 
         // The viscous work's face viscosity and cell gradient.
@@ -512,7 +600,7 @@ impl<'m> RhoEnergy<'m> {
         }
 
         // e_f of (125.4), internal and boundary faces.
-        let rcp = self.rcp;
+        let rcp = self.asm_rcp();
         if nif > 0 {
             let nl = nif as Label;
             let f = self.k.face_flux.clone();
@@ -573,18 +661,27 @@ impl<'m> RhoEnergy<'m> {
 
         self.a.zero(gpu)?;
 
-        // §86.3: d(rho T)/dt on T's two old levels with rho at its three.
+        // §86.3: d(rho T)/dt on T's two old levels with rho at its three -
+        // on rho cp(c~) in the mixture mode (§158.4's energy units).
         {
-            let Self { ddt, local, a, .. } = self;
+            let Self { ddt, local, a, mixture, .. } = self;
             match local {
                 Some(ls) => ls.add_ddt_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &t.f0, 1.0)?,
-                None => ddt.add_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &inp.rho.f00, &t.f0, &t.f00, 1.0)?,
+                None => match mixture {
+                    Some(mx) => ddt.add_rho(gpu, a, m, &mx.w, &mx.w0, &mx.w00, &t.f0, &t.f00, 1.0)?,
+                    None => ddt.add_rho(gpu, a, m, &inp.rho.f, &inp.rho.f0, &inp.rho.f00, &t.f0, &t.f00, 1.0)?,
+                },
             }
         }
 
+        // div(mdot T) - on mdot cp(c~_f) in the mixture mode (§158.4); the
+        // weights w, bw of T are still `prepare`'s, formed on inp.mdot.
         {
-            let Self { fvk, a, w, bw, .. } = self;
-            fv::fvm_div_gauss(gpu, fvk, a, m, inp.mdot, w, bw, t, 1.0)?;
+            let Self { fvk, a, w, bw, mixture, .. } = self;
+            match mixture {
+                Some(mx) => fv::fvm_div_gauss(gpu, fvk, a, m, &mx.flux, w, bw, t, 1.0)?,
+                None => fv::fvm_div_gauss(gpu, fvk, a, m, inp.mdot, w, bw, t, 1.0)?,
+            }
         }
 
         {
@@ -652,7 +749,7 @@ impl<'m> RhoEnergy<'m> {
             )?;
         } else if (timed || gravity) && n > 0 {
             let nl = n as Label;
-            let rcp = self.rcp;
+            let rcp = self.asm_rcp();
             let f = self.k.source.clone();
             unsafe {
                 gpu.stream()
@@ -678,6 +775,12 @@ impl<'m> RhoEnergy<'m> {
                     .arg(&nl)
                     .launch(cfg_for(n))?;
             }
+        }
+
+        // §158.4: S_dust = Δh_c wdot_c + div(rho_f Gamma_f T_f (cp_b - cp_u)
+        // snGrad c~) in W/m3, a SOURCE of energy - the mixture mode only.
+        if let Some(mx) = &self.mixture {
+            fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &mx.source, 1.0)?;
         }
 
         // Relaxation BEFORE the boundary fold, always, as the momentum

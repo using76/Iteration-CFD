@@ -32,7 +32,14 @@
 //! here reads a case file: the driver (DST-06 part 3) lowers, builds the
 //! [`crate::energy::GasState`] on [`DustSource::mixture`], and drives.
 //!
+//! DST-10 adds [`CompressibleDust`], the same model inside the compressible
+//! solver (SPEC-LIT §158.6): (155.3) on the solver's mass flux, the mixture
+//! gas law of the constant-c_p pseudo-species, the local rho_u(p), and the
+//! energy equation (158.4) in energy units on `rho cp(c~)`, with
+//! `h_s = cp(c~) T` and q = Δh_c wdot_c.
+//!
 //! Written from:
+//!   SPEC-LIT §158.4, §158.6 - the compressible coupling (DST-10)
 //!   SPEC-LIT §157.4 - the step and its order
 //!   SPEC-LIT (152.12), §152.5 - the heat release and the states
 //!   SPEC-LIT §153.2 - the reaction time (153.2) with Psi at n = 1
@@ -50,6 +57,9 @@
 //! No GPL-licensed source was consulted.
 
 use crate::chem::thermo::R_GAS;
+use crate::compressible::energy::RhoEnergy;
+use crate::compressible::thermo::{DustHConst, MixKernels};
+use crate::compressible::CompressibleState;
 use crate::device::{DevBuf, Gpu};
 use crate::dust::device::{
     self as dev, FscFields, FscInputsDev, ProgressKernels, SourceKernels,
@@ -71,6 +81,9 @@ use crate::io::case::TurbulenceControls;
 use crate::io::case_dust::LoweredDust;
 use crate::io::fields::RawScalarField;
 use crate::mesh::{GpuMesh, HostMesh};
+use crate::models::coupled::CoupledTurbulence;
+use crate::models::k_omega_sst::SstDensity;
+use crate::turbulence::FlowState;
 use crate::{Acc, Scalar, Vec3};
 
 /// Everything of the dust model that is formed ONCE, on the host in f64,
@@ -838,6 +851,622 @@ impl<'m> DustSource<'m> {
     /// (152.12)'s heat release as `before_flow` last formed it, W/m3.
     pub fn heat_release(&self) -> &DevBuf<Scalar> {
         &self.q
+    }
+}
+
+// ==========================================================================
+//  The compressible coupling (SPEC-LIT §158.4-§158.6, DST-10 part 1)
+// ==========================================================================
+
+/// The Phase A dust model inside the COMPRESSIBLE solver (§158.6): the c~
+/// equation (155.3) on the solver's own mass flux `mdot`, the mixture gas
+/// law (152.8)-(152.9) about `p_op`, the local `rho_u(p)` of (155.10) as a
+/// scaled `U_t'`, and the energy equation's mixture mode - `w = rho
+/// cp(c~)`, the face flux `mdot cp(c~_f)` and S_dust in W/m3, with lambda =
+/// `kappa + rho cp(c~) D_t` the diffusion the energy equation runs on
+/// ((157.6) with the LOCAL `kappa` field). [`DustSource`] is untouched: the
+/// low-Mach coupling stays as it was.
+pub struct CompressibleDust<'m> {
+    setup: DustSetup,
+    hc: DustHConst,
+    progress: ProgressEquation<'m>,
+    turb: Option<Box<dyn CoupledTurbulence + 'm>>,
+    nu_ref: f64,
+
+    fk: crate::dust::device::FscKernels,
+    pk: ProgressKernels,
+    fvk: FvKernels,
+    fldk: field_ops::FieldKernels,
+
+    d_t: DevBuf<Scalar>,
+    u_t_raw: DevBuf<Scalar>,
+    u_t: DevBuf<Scalar>,
+    u_t_isp: DevBuf<Scalar>,
+    tau_l: DevBuf<Scalar>,
+    k_rate: DevBuf<Scalar>,
+    w_ign: DevBuf<Scalar>,
+    zero: DevBuf<Scalar>,
+    t_pred: DevBuf<Scalar>,
+    n_zero: DevBuf<u64>,
+    one_c: DevBuf<Scalar>,
+    one_f: DevBuf<Scalar>,
+    one_b: DevBuf<Scalar>,
+    tmp: DevBuf<Scalar>,
+    tmp_b: DevBuf<Scalar>,
+    cp_cells: DevBuf<Scalar>,
+    cp_faces: DevBuf<Scalar>,
+    cp_bfaces: DevBuf<Scalar>,
+    div_c: DevBuf<Scalar>,
+    wdot: DevBuf<Scalar>,
+    q: DevBuf<Scalar>,
+    co: DevBuf<Scalar>,
+
+    d_t_fld: GpuScalarField,
+    gamma: GpuScalarField,
+    lambda: GpuScalarField,
+    mu_eff: Option<GpuScalarField>,
+    c_face: GpuSurfaceScalarField,
+    t_face: GpuSurfaceScalarField,
+    rho_face: GpuSurfaceScalarField,
+    gamma_face: GpuSurfaceScalarField,
+    face_coeff: GpuSurfaceScalarField,
+    sn_grad: GpuSurfaceScalarField,
+    rho_face_t: GpuSurfaceScalarField,
+    phi_volume: GpuSurfaceScalarField,
+
+    p_local: Option<Vec3>,
+    last: Option<ProgressSolve>,
+    n: usize,
+    nf: usize,
+    nb: usize,
+}
+
+impl<'m> CompressibleDust<'m> {
+    /// The coupling on one mesh: the hConst pair of §158.4 from the setup's
+    /// gas at `T_u`, the c~ equation seeded with the case's `raw_c` then
+    /// initialised (as `DustSource::new` does), a Gamma field and a D_t
+    /// field with zeroGradient boundary faces, and every buffer
+    /// `before_energy` runs through. Refused by name (§158.6): a prescribed
+    /// `U_t` law with `alpha != 0` or `beta != 0` - the constant law only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        gpu: &Gpu,
+        hm: &HostMesh,
+        m: &'m GpuMesh,
+        setup: DustSetup,
+        raw_c: &RawScalarField,
+        ctrl: TurbulenceControls,
+        turb: Option<Box<dyn CoupledTurbulence + 'm>>,
+        nu_ref: f64,
+    ) -> Result<Self> {
+        if let Some(law) = setup.prescribed_ut {
+            if law.alpha != 0.0 || law.beta != 0.0 {
+                return Err(Error::Refused(format!(
+                    "dust::source::CompressibleDust::new: the prescribed U_t law has \
+                     alpha = {}, beta = {}; the compressible step (SPEC-LIT §158.6) \
+                     runs the constant law only. Alternative: alpha = beta = 0, or \
+                     the §154 closures",
+                    law.alpha, law.beta
+                )));
+            }
+        }
+        let hc = DustHConst::from_gas(&setup.gas, setup.t_u)?;
+        let (n, nf, nb) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
+        let cells = n.max(1);
+        let mut progress = ProgressEquation::new(gpu, hm, m, ctrl)?;
+        setup_scalar_field(gpu, progress.field_mut(), raw_c, hm)?;
+        progress.initialise(gpu)?;
+        let zg = |name: &str| -> Result<GpuScalarField> {
+            let mut f = GpuScalarField::zeros(gpu, m, name)?;
+            gpu.write(&mut f.bc_kind, &vec![BcKind::ZeroGradient as crate::Label; nb])?;
+            Ok(f)
+        };
+        let p_local = setup.ignition.map(|src| src.local_point(hm));
+
+        Ok(Self {
+            fk: crate::dust::device::FscKernels::new(gpu)?,
+            pk: ProgressKernels::new(gpu)?,
+            fvk: FvKernels::new(gpu)?,
+            fldk: field_ops::FieldKernels::new(gpu)?,
+            d_t: gpu.zeros(cells)?,
+            u_t_raw: gpu.zeros(cells)?,
+            u_t: gpu.zeros(cells)?,
+            u_t_isp: gpu.zeros(cells)?,
+            tau_l: gpu.zeros(cells)?,
+            k_rate: gpu.zeros(cells)?,
+            w_ign: gpu.zeros(cells)?,
+            zero: gpu.zeros(cells)?,
+            t_pred: gpu.zeros(cells)?,
+            n_zero: gpu.zeros(1)?,
+            one_c: gpu.upload(&vec![1.0 as Scalar; cells])?,
+            one_f: gpu.upload(&vec![1.0 as Scalar; nf.max(1)])?,
+            one_b: gpu.upload(&vec![1.0 as Scalar; nb.max(1)])?,
+            tmp: gpu.zeros(cells)?,
+            tmp_b: gpu.zeros(nb.max(1))?,
+            cp_cells: gpu.zeros(cells)?,
+            cp_faces: gpu.zeros(nf.max(1))?,
+            cp_bfaces: gpu.zeros(nb.max(1))?,
+            div_c: gpu.zeros(cells)?,
+            wdot: gpu.zeros(cells)?,
+            q: gpu.zeros(cells)?,
+            co: gpu.zeros(cells)?,
+            d_t_fld: zg("dustDt")?,
+            gamma: zg("dustMixGamma")?,
+            lambda: zg("dustLambda")?,
+            mu_eff: turb.is_some().then(|| GpuScalarField::zeros(gpu, m, "dustMuEff")).transpose()?,
+            c_face: GpuSurfaceScalarField::zeros(gpu, m, "dustMixCf")?,
+            t_face: GpuSurfaceScalarField::zeros(gpu, m, "dustMixTf")?,
+            rho_face: GpuSurfaceScalarField::zeros(gpu, m, "dustMixRhoF")?,
+            gamma_face: GpuSurfaceScalarField::zeros(gpu, m, "dustMixGamF")?,
+            face_coeff: GpuSurfaceScalarField::zeros(gpu, m, "dustMixCoeff")?,
+            sn_grad: GpuSurfaceScalarField::zeros(gpu, m, "dustMixSnGrad")?,
+            rho_face_t: GpuSurfaceScalarField::zeros(gpu, m, "dustSstRhoF")?,
+            phi_volume: GpuSurfaceScalarField::zeros(gpu, m, "dustSstPhiV")?,
+            progress,
+            setup,
+            hc,
+            turb,
+            nu_ref,
+            p_local,
+            last: None,
+            n,
+            nf,
+            nb,
+        })
+    }
+
+    /// The constants the step runs with.
+    pub fn setup(&self) -> &DustSetup {
+        &self.setup
+    }
+
+    /// §158.4's hConst pair the mixture gas law and the energy equation run
+    /// on.
+    pub fn hconst(&self) -> &DustHConst {
+        &self.hc
+    }
+
+    /// The progress variable c~ (Y_B = c~).
+    pub fn c(&self) -> &GpuScalarField {
+        self.progress.field()
+    }
+
+    /// `U_t'` - the propagation speed carried at the LOCAL pressure, as
+    /// `before_energy` last scaled it (155.10).
+    pub fn u_t_local(&self) -> &DevBuf<Scalar> {
+        &self.u_t
+    }
+
+    /// The per-cell flame-Courant number (155.9) as
+    /// [`Self::measured_courant`] last formed it; zeros before the first
+    /// measurement.
+    pub fn courant(&self) -> &DevBuf<Scalar> {
+        &self.co
+    }
+
+    /// The net rate `wdot_c = S_U - S_P' c~` (155.2) as `before_energy` last
+    /// formed it, kg/(m3 s).
+    pub fn wdot(&self) -> &DevBuf<Scalar> {
+        &self.wdot
+    }
+
+    /// §158.4's `q~ = Δh_c wdot_c` as `before_energy` last formed it, W/m3.
+    pub fn heat_release(&self) -> &DevBuf<Scalar> {
+        &self.q
+    }
+
+    /// The diffusion the energy equation's laplacian runs on,
+    /// `lambda = kappa + rho cp(c~) D_t` ((157.6) with the local kappa), as
+    /// `before_energy` last formed it - zeros before the first call.
+    pub fn lambda(&self) -> &GpuScalarField {
+        &self.lambda
+    }
+
+    /// The last [`ProgressEquation::solve`]'s report.
+    pub fn last_solve(&self) -> Option<ProgressSolve> {
+        self.last
+    }
+
+    /// The attached turbulence model, if any.
+    pub fn turbulence(&self) -> Option<&(dyn CoupledTurbulence + 'm)> {
+        self.turb.as_deref()
+    }
+
+    /// Starts a time step: the c~ equation's old level and its step-long
+    /// `|grad c~|` (§155.2).
+    pub fn open_step(&mut self, gpu: &Gpu) -> Result<()> {
+        self.progress.begin_step(gpu)
+    }
+
+    /// The MIXTURE gas law (152.8)-(152.9) on the cells and on the boundary
+    /// faces, about the gauge datum `p_op`: `psi = 1/(r(c~) T)` and
+    /// `rho = psi (p + p_op)`, with `r(c~) = r_u + c~ (r_b - r_u)` from
+    /// (152.8) per kg. `p`'s and `T`'s boundary values must be evaluated.
+    pub fn gas_state(
+        &self,
+        gpu: &Gpu,
+        k: &MixKernels,
+        s: &mut CompressibleState,
+        p_op: f64,
+    ) -> Result<()> {
+        crate::compressible::thermo::gas_state_mix(
+            gpu, k, &self.hc, &mut s.psi.f, &mut s.rho.f, &s.p.f, &s.t.f, &self.c().f, self.n,
+            p_op,
+        )?;
+        crate::compressible::thermo::gas_state_mix(
+            gpu, k, &self.hc, &mut s.psi.bf, &mut s.rho.bf, &s.p.bf, &s.t.bf, &self.c().bf, self.nb,
+            p_op,
+        )
+    }
+
+    /// `mu_eff = mu + rho nu_t` on the cells and the boundary faces (§158.6
+    /// lifts CMP-15's non-SA refusal for the SST), into the owned field
+    /// [`Self::mu_eff`] hands back. Nothing without a model: the loop then
+    /// passes `s.mu`.
+    pub fn update_mu_eff(&mut self, gpu: &Gpu, s: &CompressibleState) -> Result<()> {
+        let Some(t) = &self.turb else { return Ok(()) };
+        let Some(me) = &mut self.mu_eff else { return Ok(()) };
+        let nut = t.nut();
+        let (n, nb) = (self.n, self.nb);
+        field_ops::copy_field(gpu, &self.fldk, &mut self.tmp, &s.rho.f, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.tmp, &nut.f, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut me.f, &s.mu.f, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut me.f, &self.tmp, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.tmp_b, &s.rho.bf, nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.tmp_b, &nut.bf, nb)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut me.bf, &s.mu.bf, nb)?;
+        field_ops::add_field(gpu, &self.fldk, &mut me.bf, &self.tmp_b, nb)
+    }
+
+    /// The `mu_eff` the momentum predictor runs on; `None` without a model.
+    pub fn mu_eff(&self) -> Option<&GpuScalarField> {
+        self.mu_eff.as_ref()
+    }
+
+    /// One outer iteration of the dust model in the compressible loop, in
+    /// §158.6's order: the closures, `U_t'` at the local pressure, the
+    /// ignition bracket, `cp(c~)` and Gamma, `rho_f`, one solve of (155.3)
+    /// on the solver's own mass flux, `wdot_c` and `q~ = Δh_c wdot_c`, the
+    /// energy equation's mixture state (`w`, the flux, S_dust), and
+    /// `lambda`. `t_new` is the time at the END of the step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn before_energy(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        k: &MixKernels,
+        s: &CompressibleState,
+        energy: &mut RhoEnergy<'_>,
+        p_op: f64,
+        t_new: f64,
+    ) -> Result<()> {
+        let n = self.n;
+        if n == 0 {
+            return Ok(());
+        }
+        // (a) The closures of §154 at this step's clock, on the solver's T
+        //     and the model's frozen k, omega, nu_t (zeros when laminar).
+        let fields;
+        let (k_b, o_b, n_b): (&DevBuf<Scalar>, &DevBuf<Scalar>, &DevBuf<Scalar>) = match &self.turb
+        {
+            Some(t) => {
+                fields = t.output_fields();
+                let pick = |name: &str| -> Result<&DevBuf<Scalar>> {
+                    fields.iter().find(|(nm, _)| *nm == name).map(|(_, f)| &f.f).ok_or_else(|| {
+                        Error::Refused(format!(
+                            "dust::source::CompressibleDust::before_energy: the turbulence \
+                             model carries no field {name}; the closures read k and omega of \
+                             the rho-weighted kOmegaSST (SPEC-LIT §158.6)"
+                        ))
+                    })
+                };
+                (pick("k")?, pick("omega")?, &t.nut().f)
+            }
+            None => (&self.zero, &self.zero, &self.zero),
+        };
+        dev::fsc(
+            gpu,
+            &self.fk,
+            &self.setup.fsc,
+            FscFields {
+                d_t: &mut self.d_t,
+                u_t: &mut self.u_t_raw,
+                u_t_isp: &mut self.u_t_isp,
+                tau_l: &mut self.tau_l,
+                k_rate: &mut self.k_rate,
+            },
+            &mut self.n_zero,
+            FscInputsDev { t: &s.t.f, k: k_b, omega: o_b, nu_t: n_b },
+            development_time(t_new, self.setup.t_fd_origin),
+            t_new,
+            n,
+        )?;
+        //     Gate DST-VES's prescribed constant U_t, as `DustSource` does.
+        if let Some(law) = self.setup.prescribed_ut {
+            field_ops::set_field(
+                gpu,
+                &self.fldk,
+                &mut self.u_t_raw,
+                law.s_u(self.setup.p_init, self.setup.p_init, self.setup.gamma_u) as Scalar,
+                n,
+            )?;
+        }
+        // (b) U_t' = U_t ((p + p_op)/p_init)^(1/gamma_u), the LOCAL rho_u(p)
+        //     of (155.10) folded into the speed.
+        crate::compressible::thermo::rho_u_ratio(
+            gpu,
+            k,
+            &mut self.u_t,
+            &self.u_t_raw,
+            &s.p.f,
+            n,
+            p_op,
+            self.setup.p_init,
+            self.setup.gamma_u,
+        )?;
+        // (c) The ignition bracket (155.4), or nothing without a source.
+        if let (Some(src), Some(p)) = (&self.setup.ignition, self.p_local) {
+            dev::ignition(gpu, &self.pk, &mut self.w_ign, &m.c, src, p, t_new, n)?;
+        }
+        // (d) cp(c~) on the cells, then Gamma = kappa/(rho cp) + D_t - Le = 1
+        //     with the LOCAL kappa field (157.6) - zeroGradient boundary.
+        let (cp_u, dcp) = (self.hc.cp_u, self.hc.cp_b - self.hc.cp_u);
+        let c_all = self.progress.field();
+        crate::compressible::thermo::scale_cp(
+            gpu, k, &mut self.cp_cells, &self.one_c, &c_all.f, n, cp_u, dcp,
+        )?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.tmp, &s.rho.f, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.tmp, &self.cp_cells, n)?;
+        field_ops::set_field(gpu, &self.fldk, &mut self.gamma.f, 1.0 as Scalar, n)?;
+        field_ops::divide_field(gpu, &self.fldk, &mut self.gamma.f, &self.tmp, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.gamma.f, &s.kappa.f, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.gamma.f, &self.d_t, n)?;
+        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.gamma, m)?;
+        // (e) rho_f, linear.
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, &s.rho, m)?;
+        // (f) One solve of (155.3) on the solver's own mass flux, rho_u held
+        //     at rho_u0: the pressure dependence rides U_t' of (b).
+        let has_ign = self.setup.ignition.is_some();
+        let solve = self.progress.solve(
+            gpu,
+            &ProgressCoupling {
+                rho: &s.rho,
+                rho_face: &self.rho_face,
+                phi_mass: &s.mdot,
+                u: &s.u,
+                diffusivity: &self.gamma,
+                u_t: &self.u_t,
+                k_rate: &self.k_rate,
+                w_ign: has_ign.then_some(&self.w_ign),
+                rho_u: self.setup.rho_u0,
+            },
+        )?;
+        self.last = Some(solve);
+        // (g) wdot_c = S_U - S_P' c~ (155.2), and q~ = Δh_c wdot_c of
+        //     (158.4), W/m3.
+        let (su, sp) = self.progress.source_terms();
+        field_ops::copy_field(gpu, &self.fldk, &mut self.wdot, sp, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.wdot, &self.progress.field().f, n)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut self.wdot, -1.0, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.wdot, su, n)?;
+        field_ops::set_field(gpu, &self.fldk, &mut self.q, self.hc.delta_h_c() as Scalar, n)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.q, &self.wdot, n)?;
+        // (h) The energy equation's mixture state: rho cp(c~) at the three
+        //     levels (c~'s OLD level on both old weights), the face flux
+        //     mdot cp(c~_f), and S_dust = q~ + div(rho_f Gamma_f T_f
+        //     (cp_b - cp_u) |Sf| snGrad c~) - the enthalpy-of-mixture
+        //     transport the h_s = cp(c~) T datum moves to the source side.
+        let Some(mx) = energy.mixture_mut() else {
+            return Err(Error::Refused(
+                "dust::source::CompressibleDust::before_energy: the energy equation \
+                 runs no mixture state; RhoEnergy::enable_mixture must come first \
+                 (SPEC-LIT §158.4)"
+                    .into(),
+            ));
+        };
+        crate::compressible::thermo::scale_cp(gpu, k, &mut mx.w, &s.rho.f, &self.c().f, n, cp_u, dcp)?;
+        crate::compressible::thermo::scale_cp(gpu, k, &mut mx.w0, &s.rho.f0, &self.c().f0, n, cp_u, dcp)?;
+        crate::compressible::thermo::scale_cp(gpu, k, &mut mx.w00, &s.rho.f00, &self.c().f0, n, cp_u, dcp)?;
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.c_face, self.progress.field(), m)?;
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.t_face, &s.t, m)?;
+        crate::compressible::thermo::scale_cp(
+            gpu, k, &mut self.cp_faces, &self.one_f, &self.c_face.f, self.nf, cp_u, dcp,
+        )?;
+        crate::compressible::thermo::scale_cp(
+            gpu, k, &mut self.cp_bfaces, &self.one_b, &self.c_face.bf, self.nb, cp_u, dcp,
+        )?;
+        field_ops::copy_field(gpu, &self.fldk, &mut mx.flux.f, &s.mdot.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut mx.flux.f, &self.cp_faces, self.nf)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut mx.flux.bf, &s.mdot.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut mx.flux.bf, &self.cp_bfaces, self.nb)?;
+        fv::interpolate_linear(gpu, &self.fvk, &mut self.gamma_face, &self.gamma, m)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.face_coeff.f, &self.rho_face.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.f, &self.gamma_face.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.f, &self.t_face.f, self.nf)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.f, &m.mag_sf, self.nf)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut self.face_coeff.f, dcp as Scalar, self.nf)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.face_coeff.bf, &self.rho_face.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.bf, &self.gamma_face.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.bf, &self.t_face.bf, self.nb)?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.face_coeff.bf, &m.b_mag_sf, self.nb)?;
+        field_ops::scale_field(gpu, &self.fldk, &mut self.face_coeff.bf, dcp as Scalar, self.nb)?;
+        fv::sn_grad_flux(gpu, &self.fvk, &mut self.sn_grad, self.progress.field(), &self.face_coeff.f, &self.face_coeff.bf, m)?;
+        fv::fvc_div_surface(gpu, &self.fvk, &mut self.div_c, &self.sn_grad, m)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut mx.source, &self.q, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut mx.source, &self.div_c, n)?;
+        // (i) lambda = kappa + rho cp(c~) D_t (152.7 with §158.4's kappa),
+        //     cells and boundary faces; D_t's boundary value from its owner,
+        //     rho and c~ their boundary values.
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.tmp, &self.d_t, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.lambda.f, &s.kappa.f, n)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.lambda.f, &self.tmp, n)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.d_t_fld.f, &self.d_t, n)?;
+        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.d_t_fld, m)?;
+        let c_all = self.progress.field();
+        crate::compressible::thermo::scale_cp(
+            gpu, k, &mut self.cp_bfaces, &s.rho.bf, &c_all.bf, self.nb, cp_u, dcp,
+        )?;
+        field_ops::multiply_field(gpu, &self.fldk, &mut self.cp_bfaces, &self.d_t_fld.bf, self.nb)?;
+        field_ops::copy_field(gpu, &self.fldk, &mut self.lambda.bf, &s.kappa.bf, self.nb)?;
+        field_ops::add_field(gpu, &self.fldk, &mut self.lambda.bf, &self.cp_bfaces, self.nb)
+    }
+
+    /// Step 7: the rho-weighted SST correction (§156) on the solver's own
+    /// density and mass flux. Nothing without a model, and the model stays
+    /// FROZEN while `t_new < 2 t_fd_origin` (§157.7 decision D6).
+    pub fn correct_turbulence(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        s: &CompressibleState,
+        t_new: f64,
+    ) -> Result<()> {
+        if self.turb.is_none() || t_new < 2.0 * self.setup.t_fd_origin {
+            return Ok(());
+        }
+        {
+            let (fvk, fldk) = (&self.fvk, &self.fldk);
+            compressible_sst_inputs(
+                gpu,
+                fvk,
+                fldk,
+                m,
+                &s.rho,
+                &s.mdot,
+                &mut self.rho_face_t,
+                &mut self.phi_volume,
+            )?;
+        }
+        let nu_ref = self.nu_ref;
+        let flow = FlowState::new(&s.u, &s.mdot, nu_ref as Scalar);
+        let dens = SstDensity {
+            rho: &s.rho.f,
+            rho0: &s.rho.f0,
+            rho00: &s.rho.f00,
+            rho_face: &self.rho_face_t,
+            phi_volume: &self.phi_volume,
+        };
+        self.turb.as_mut().expect("turbulence").correct_rho(gpu, &flow, &dens)?;
+        Ok(())
+    }
+}
+
+/// The `SstDensity` inputs the rho-weighted SST correction reads from the
+/// compressible state (§158.6): `rho_face` the linear interpolation of rho,
+/// `phi_volume = mdot / rho_face` on the internal and the boundary faces -
+/// the MASS flux `mdot` is (155.3)'s and §86.3's contract, the correction
+/// runs on the volume flux.
+pub fn compressible_sst_inputs(
+    gpu: &Gpu,
+    fvk: &FvKernels,
+    fldk: &field_ops::FieldKernels,
+    m: &GpuMesh,
+    rho: &GpuScalarField,
+    mdot: &GpuSurfaceScalarField,
+    rho_face: &mut GpuSurfaceScalarField,
+    phi_volume: &mut GpuSurfaceScalarField,
+) -> Result<()> {
+    let (nif, nb) = (m.n_internal_faces, m.n_boundary_faces);
+    fv::interpolate_linear(gpu, fvk, rho_face, rho, m)?;
+    field_ops::copy_field(gpu, fldk, &mut phi_volume.f, &mdot.f, nif)?;
+    field_ops::divide_field(gpu, fldk, &mut phi_volume.f, &rho_face.f, nif)?;
+    field_ops::copy_field(gpu, fldk, &mut phi_volume.bf, &mdot.bf, nb)?;
+    field_ops::divide_field(gpu, fldk, &mut phi_volume.bf, &rho_face.bf, nb)
+}
+
+impl<'m> CompressibleDust<'m> {
+    /// The PREDICTED flame-Courant number of a fixed `dt` (155.9), as
+    /// `DustSource`'s: the closures run ONCE on the fields as they stand at
+    /// t_fd = 1e30, `u_max` the largest |u| and `dx_min` the smallest
+    /// `V^(1/3)` on the host in f64 - at `p_init`, where the prediction is
+    /// formed. Refuses, naming `maxFlameCourant`, a step above the bound.
+    pub fn predicted_courant(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        u: &GpuVectorField,
+        dt: f64,
+    ) -> Result<f64> {
+        let n = self.n;
+        dev::fsc(
+            gpu,
+            &self.fk,
+            &self.setup.fsc,
+            FscFields {
+                d_t: &mut self.d_t,
+                u_t: &mut self.u_t_raw,
+                u_t_isp: &mut self.u_t_isp,
+                tau_l: &mut self.tau_l,
+                k_rate: &mut self.k_rate,
+            },
+            &mut self.n_zero,
+            FscInputsDev { t: &self.t_pred, k: &self.zero, omega: &self.zero, nu_t: &self.zero },
+            1.0e30,
+            1.0e30,
+            n,
+        )?;
+        let isp_max = gpu
+            .download(&self.u_t_isp)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, &v| a.max(f64::from(v)));
+        // The prescribed law at BOTH ends of the pressure range, as
+        // `DustSource` reads it; the prediction itself forms at p_init.
+        let isp_max = match self.setup.prescribed_ut {
+            Some(law) => {
+                let p_e =
+                    self.setup.p_init * self.setup.gas.aicc(self.setup.t_u)?.p_ratio;
+                let s0 = law.s_u(self.setup.p_init, self.setup.p_init, self.setup.gamma_u);
+                let s_e = law.s_u(p_e, self.setup.p_init, self.setup.gamma_u);
+                f64::max(s0, s_e)
+            }
+            None => isp_max,
+        };
+        let u_max = gpu
+            .download(&u.f)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, v| {
+                a.max((f64::from(v.x) * f64::from(v.x)
+                    + f64::from(v.y) * f64::from(v.y)
+                    + f64::from(v.z) * f64::from(v.z))
+                    .sqrt())
+            });
+        let dx_min =
+            hm.v.iter().map(|v| f64::from(*v).cbrt()).fold(f64::INFINITY, f64::min);
+        let predicted =
+            crate::dust::courant::predicted(dt, dx_min, u_max, self.setup.sigma, isp_max);
+        crate::dust::courant::check_fixed_step(dt, predicted, self.setup.max_flame_courant)
+    }
+
+    /// The MEASURED flame-Courant number (155.9) of the step just taken, on
+    /// `U_t'` and `rho_u0` - the pressure dependence rides the speed - its
+    /// max returned in f64.
+    pub fn measured_courant(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        s: &CompressibleState,
+        dt: f64,
+    ) -> Result<f64> {
+        let n = self.n;
+        dev::flame_courant(
+            gpu,
+            &self.pk,
+            &mut self.co,
+            &s.u.f,
+            &s.rho.f,
+            &self.u_t,
+            &m.v,
+            self.setup.rho_u0,
+            dt,
+            n,
+        )?;
+        Ok(gpu
+            .download(&self.co)?
+            .iter()
+            .take(n)
+            .fold(0.0f64, |a, &v| a.max(f64::from(v))))
     }
 }
 
