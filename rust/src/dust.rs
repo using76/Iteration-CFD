@@ -58,6 +58,7 @@ pub mod psi;
 pub mod source;
 pub mod thermo;
 pub mod tube1d;
+pub mod vent;
 pub mod vessel0d;
 
 pub use fsc::{CombustionModel, FscConstants, FscInputs, FscOut, FscState};

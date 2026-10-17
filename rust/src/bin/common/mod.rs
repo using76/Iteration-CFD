@@ -98,6 +98,24 @@ pub fn load_case_with(
     case_path: &Path,
     allow_chemistry: bool,
 ) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    load_case_inner(case_path, allow_chemistry, false)
+}
+
+/// [`load_case`], with a JSONC case's `vent` block let through - SPEC-LIT
+/// §158.8: `ofgpu-compressible` is its one caller, and every other driver
+/// keeps [`LoweredCase::refuse_vent`]'s refusal through [`load_case`].
+pub fn load_case_vented(
+    case_path: &Path,
+) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    load_case_inner(case_path, false, true)
+}
+
+/// [`load_case_with`]'s body, with the vent refusal of its own key.
+fn load_case_inner(
+    case_path: &Path,
+    allow_chemistry: bool,
+    allow_vent: bool,
+) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
@@ -113,6 +131,11 @@ pub fn load_case_with(
         // driver runs it.
         if !allow_chemistry {
             lowered.refuse_dust()?;
+        }
+        // SPEC-LIT §158.8: a case's vent block is refused the same way -
+        // DST-09's part 3 wires it into ofgpu-compressible only.
+        if !allow_vent {
+            lowered.refuse_vent()?;
         }
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below

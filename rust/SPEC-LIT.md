@@ -1511,7 +1511,7 @@ that no reader asks for are listed as owed rather than hidden.
 | `gradSchemes`, `snGradSchemes`, `laplacianSchemes`, `interpolationSchemes` | `GRAD_AVAILABLE` (Gauss linear, leastSquares, cell/faceLimited with Barth–Jespersen or Venkatakrishnan); `SNGRAD_AVAILABLE` (corrected, skewCorrected, uncorrected, limited <α>); `Gauss linear <snGrad>`; `linear` | `orthogonal` → uncorrected; bare `cellLimited` = Barth–Jespersen (DESIGN) | `GRAD_KNOWN_UNIMPLEMENTED`, `SNGRAD_KNOWN_UNIMPLEMENTED`, a non-`linear` laplacian interpolation, anything else | `Gauss linear`; `corrected`; `linear` | `io::schemes::tests::{grad_schemes_parse, sn_grad_schemes_parse, laplacian_yields_its_sn_grad_half, interpolation_is_read_rather_than_discarded}` |
 | `momentumTransport/simulationType`, `RAS/model`, `LES/model`, `DES/model`, `delta` (`src/models/registry.rs`) | `laminar`, `RAS`, `LES`, `DES`/`DDES`/`IDDES`; the models of `REGISTRY`, `HYBRID_REGISTRY`, `LES_REGISTRY`; the deltas of `DELTA_NAMES` and `HYBRID_DELTA_NAMES` | `RASModel`; case variants of every model name (`KEpsilon`, `RNGKEpsilon`, `KOmegaSST`, `SpalartAllmarras`, `smagorinsky`, `Wale`) | `kOmegaSSTSAS`, `kEpsilonPhitF`, `v2f`, `LRR`, `SSG` (each with its reason); `kEqn`, `dynamicKEqn`, `dynamicLagrangian`, `DeardorffDiffStress`, `Vreman`; an LES model under `RAS`, a hybrid model whose `simulationType` disagrees, a stray `LES {}`/`RAS {}` block; a delta not in the list; anything else | laminar (`nu_t = 0`) | `models::registry::tests` (seventy-five); every driver's `RAS/model` knob |
 | `RAS/wallTreatment` (`src/io/case.rs`, `WallTreatment::from_name`) | `standard`, `spalding`, `rough`, `lowRe` (with `LaunderSharmaKE` only, §33) | empty → standard | `rough` under LES; `lowRe` under any other model; anything else | standard | `io::case::tests` (§29, §33 rows); the wall-treatment knobs of the drivers that own one |
-| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `cyclicAMI` → cyclic, its two patches imprinted conformal as the polyMesh is read (§120.13); `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity` | calculated (a fixed value at the file's `value`) | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::cyclic_ami_is_the_conformal_cyclic_its_imprint_makes`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
+| `boundaryField/<patch>/type` (`src/field.rs`, `BcKind::from_name`) | `IMPLEMENTED_BC_NAMES` | `noSlip` → fixedValue (zero); `freestream`, `freestreamVelocity` → mixed; `slip`, `symmetryPlane` → symmetry; `wedge` → the rotational self-couple of §119.2, on a patch the mesh types `wedge` only; `cyclicSlip`, `processor` → cyclic; `cyclicAMI` → cyclic, its two patches imprinted conformal as the polyMesh is read (§120.13); `freestreamPressure` → inletOutlet; `uniformFixedGradient` → fixedGradient; `uniformFixedValue`, `fixedProfile` → fixedValue, `uniformInletOutlet` → inletOutlet, `uniformTotalPressure` → totalPressure, each reading its Function1 entry (§120.1); `compressible::alphatJayatillekeWallFunction` → thermalWallFunction (announced once, §29.3) | `outletInlet` (the reverse switch — **was silent**, mapped to inletOutlet), `nutkAtmRoughWallFunction`, anything else; permanently, with a reason (§120): `coded*`, `#codeStream`, `cyclicACMI`, `cyclicRepeatAMI`, `nonConformal*`, `v2WallFunction`, `fWallFunction`, `wave*` (not `waveTransmissive`), `activeBaffleVelocity`, `activePressureForceBaffleVelocity` (§158.8) | calculated (a fixed value at the file's `value`) | `field_setup::tests::every_bc_name_round_trips_to_the_condition_it_names`; `field::tests::cyclic_ami_is_the_conformal_cyclic_its_imprint_makes`; `field_setup::tests::nutk_atm_rough_wall_function_is_an_error_naming_the_two`; `field::tests::every_catalogue_name_has_a_status`; `field::tests::the_permanent_refusals_name_their_reason` |
 | `-output` (`src/io/output_plan.rs`, `parse_output_formats`); JSONC `output` block | `foam`, `vtu`, `nvdb`, `vdb`, `usda`; JSONC `vis` = `vdb`/`nvdb`, `exact` = `vtu`/`openfoam`/`foam`, precision `fp32`/`fp16` | `openfoam` → foam (JSONC) | anything else; a format in the wrong column (with a note) | NOT downgradable: `-output` is a plain error outside the contract — stated, not changed | `io::output_plan::tests::{a_format_from_the_wrong_column_is_refused_naming_the_right_one, an_unrecognised_format_names_that_sub_blocks_menu}` |
 | `controlDict/adjustTimeStep` | `yes` in `ofgpu-vof` only (with `maxCo`, `maxDeltaT`) | — | `yes` under every other driver | a fixed `deltaT` | `io::case::tests` (§20.2 row); `ofgpu-vof`'s pair test |
 | polyMesh `boundary` `type` (`src/mesh.rs`, `PatchKind::from_type`) | `wall`, `empty`, `symmetry`, `cyclic`, `processor`, `patch` | `mappedWall` → wall; `symmetryPlane` → symmetry; `wedge` is its own kind (§119.1); `cyclicAMI`, `cyclicSlip` → cyclic; `processorCyclic` → processor; unknown → generic | none — a mesh's patch type is a fact about the mesh, not a setting; a `cyclicAMI` pair is imprinted into a conformal one by `io::polymesh` first (§120.13) | — | no test of its own: `from_type` is total, and `io::polymesh` refuses a `cyclic` without a `neighbourPatch` |
@@ -40604,7 +40604,8 @@ row, row for row.
 | refused | `v2WallFunction` | refused | — | — | belongs to the v2-f model, which the registry refuses by name |
 | refused | `fWallFunction` | refused | — | — | belongs to the v2-f model, which the registry refuses by name |
 | refused | `wave*` | refused | — | — | generates or absorbs free-surface waves through a wave model |
-| refused | `activeBaffleVelocity` | refused | — | — | opens a baffle mid-run - mesh topology changing under the solver |
+| refused | `activeBaffleVelocity` | refused | — | — | opens a baffle mid-run - mesh topology changing under the solver; the case's `vent` block instead (§158.8) |
+| refused | `activePressureForceBaffleVelocity` | refused | — | — | opens a baffle by the pressure force on it - the case's `vent` block instead (§158.8) |
 | refused | `compressible::turbulentTemperatureRadCoupledMixed` | refused | — | — | asks conjugate AND radiative coupling on one face; never both (§50.8) |
 
 `codedFixedValue`/`codedMixed` and `#codeStream` compile C++ written INTO
@@ -40645,8 +40646,17 @@ condition with no wave model behind it, and it is CMP-17's to implement.
 
 `activeBaffleVelocity` opens a baffle during the run by turning its wall
 faces into coupled ones when a field crosses a threshold - a change of mesh
-topology this solver never makes while a case runs. Mesh the baffle open or
-mesh it closed; do not ask the solver to change its mind.
+topology this solver never makes inside a boundary condition. Mesh the baffle
+open or mesh it closed; do not ask a boundary condition to change its mind.
+`activePressureForceBaffleVelocity` does the same when the pressure force on
+the baffle crosses a threshold, and is refused for the same reason (DST-09).
+A membrane that opens once, irreversibly, when the area-weighted pressure
+difference across it reaches a static activation pressure is the case's
+`vent` block, which `ofgpu-compressible` runs as a one-domain vent: a wall
+pair on a split mesh until the opening, then interior faces of the case's own
+mesh (§158.1, as built in §158.8). Both refusals print the `vent` block as the
+route that exists. Membrane inertia, an opening time and partial or petal
+opening are not modelled.
 
 `compressible::turbulentTemperatureRadCoupledMixed` asks one face to carry
 the conjugate interface of §47 AND the radiating wall of §50 at once; the two
@@ -56892,7 +56902,8 @@ not the NASA-7 value. ρ_u(p) of (155.10) is local.
 
 `src/dust/vent.rs`, the face-mask hook in `src/compressible/bc.rs`, the masked face flux in
 `cuda/compressible.cu`, `src/bin/compressible.rs`, `src/field/catalogue.rs` (the two names).
-f64 and f32 rows, ≤ 6 min per build:
+f64 and f32 rows, ≤ 6 min per build. As built (§158.8), the closed membrane is the wall pair of a
+split mesh, so there is no face mask and no kernel change; the rows below hold as written:
 
 * `dust::vent::tests::closed_membrane_is_a_wall`: the mass, normal-momentum and energy fluxes
   through M are exactly 0, and each side evolves bitwise as the same run with a wall there (D).
@@ -56947,6 +56958,102 @@ labelled and never compared: finite fields, the membrane opens exactly once, a p
 exists (D), and the mass budget closes to 1e−10 relative (A). `src/bin/validate_gates/dst_rembe.rs`,
 `src/dust/gatemesh.rs` (the vessel and box STL), `cases/dust/rembeVented.jsonc`, and
 `reference/huang2022-rembe/geometry.json` once obtained.
+
+### 158.8 The vent as built (DST-09)
+
+`src/dust/vent.rs` (the library), `src/compressible/mod.rs` (one setter,
+`Compressible::set_steps_taken`), `src/io/case_json.rs` (the JSONC `vent` block),
+`src/bin/common/mod.rs` (`load_case_vented`), `src/bin/compressible.rs` (the driver),
+`src/field/catalogue.rs` and `src/field.rs` (the two refused names, §120), and the tests
+`tests/shared/dust_vent_cases.rs`, run as `dust::vent::tests` and, in both builds, as
+`tests/dust_vent.rs`. No kernel was added or changed; f64 results of every existing path are
+unchanged.
+
+**The design, and why the tree differs from §158.5's file list.** §158.5 names a face-mask hook
+and a masked face flux in `cuda/compressible.cu`. A mask cannot give the gate's bitwise wall:
+every operator the compressible solver applies (`fv`'s Green-Gauss gradients, the Laplacians,
+the convection weights, Rhie-Chow, the retarded density, the energy flux) gathers a cell's
+interior faces in one loop with ONE face value, while a wall face supplies each side's own
+boundary value in the boundary loop. A masked interior face would need per-side wall values in
+every one of those kernels. Instead the closed membrane IS a wall pair of a second mesh, and
+(158.1) is met without touching a kernel:
+
+* **The split mesh.** `split_raw` takes the case's raw mesh (the merged mesh) and M: the internal
+  faces not in M keep their order, every original boundary face keeps its place, and M's faces
+  are appended twice, as the wall patch `ventIn` (each face as seen from its in-side cell) and
+  the wall patch `ventOut` (as seen from its out-side cell). A face whose new owner is the merged
+  neighbour is reversed, keeping its first vertex: `[v0, v1, ..., vk-1] -> [v0, vk-1, ..., v1]`.
+  The cells, their order and the points are the merged mesh's, and the merged boundary arrays
+  are a PREFIX of the split ones, so every patch's `start` and every rule's face range is the
+  same on both meshes.
+* **Closed:** the run steps on the split mesh, the membrane patches carrying `U` `noSlip` (or
+  `slip`, `vent.wall`) and `p`, `T` `zeroGradient`: zero mass flux through M, hence zero
+  normal-momentum and energy flux, by the wall condition itself.
+* **The trigger (158.1).** `p‾_in` and `p‾_out` are the area-weighted means of the gauge `p` of
+  the cells on either side of M's faces (the face-neighbour pressure), `p‾ = Σ a_f p_f / Σ a_f`,
+  both sums in f64 in M's face order, from f64 face areas of the raw points; the datum cancels in
+  `Δp = p‾_in − p‾_out`. The cells are gathered on the device by `presGather` and the sums are
+  formed on the host. The check runs on the initial state (n = 0) and after every step n; the
+  first n with `Δp ≥ p_stat` opens the membrane, irreversibly, and step n + 1 is the first on the
+  merged mesh.
+* **The opening (`open_onto`).** A state and a solver are built on the merged mesh from the
+  case's own lowering. Opened on the initial state, the merged solver is initialised and nothing
+  is carried: the membrane never existed, so the run is the run without one bit for bit. Opened
+  after step n ≥ 1, the closed state is carried by host round trip: every cell array of `U`, `p`,
+  `T`, `rho`, `psi`, `mu`, `kappa` (the current and both old levels) bit for bit, the first
+  `n_b` entries of each boundary array (`bf`, `fr`, `ref_value`, `ref_grad`), and `mdot` through
+  the face map, M's faces starting at exactly 0; the solver is initialised on the carried fields,
+  the carried values are restored (initialise re-seeds `mdot` and the old levels), and the step
+  count and both ddt clocks are handed over, so step n + 1 advances them as an uninterrupted run
+  would. The cells are the same cells holding the same values, so the opening itself moves no
+  mass, momentum or energy.
+
+**The block.** JSONC only (an OpenFOAM case has no route to it):
+`vent { normal: [x, y, z], pStat, centre: [x, y, z], radius }` (the disc route) or
+`vent { normal, pStat, faces: [ids] }` (the face-set route, internal face ids of the case's mesh),
+with an optional `wall` (`noSlip`, the default, or `slip`). `normal` points from the inside to the
+outside and is normalised in f64. The disc selects every internal face whose area vector is
+parallel to `normal` (`|S·n|/|S| ≥ 1 − 1e-6`), whose vertex-average centre lies within
+`1e-6 L` of the plane through `centre` (L the bounding-box diagonal of the points) and within
+`radius` of `centre` in the plane. A face's owner is on the inside when `S·n > 0`. Refused by
+name, each with its key and `(SPEC-LIT §158.8)`: a zero or non-finite `normal`; a negative or
+non-finite `pStat`; `radius` without `centre` and the reverse; a non-positive `radius`; both
+routes or neither; an empty or out-of-range or repeated `faces` list; a listed face edge-on to
+`normal`; an M that selects no face; `wall` other than the two words; a mesh that already has a
+patch or a field entry named `ventIn`/`ventOut`; a vent beside `mesh.wedge` or `mesh.sector`; a
+steady run (no opening time); and every driver but `ofgpu-compressible` (`refuse_vent`).
+`ofgpu-compressible` prints M (faces, area, `pStat`, the wall), the opening (step, time, `Δp`,
+`p‾_in`, `p‾_out`) or, at the end of a run in which it stayed closed, the last `Δp`; it writes
+the case's own mesh in both phases (the prefix makes each patch's slice the same).
+
+**Not modelled** (as §158.1 names): membrane inertia, an opening time, partial or petal opening.
+`activeBaffleVelocity` and `activePressureForceBaffleVelocity` are refused by name, their notes
+naming the `vent` block (§120).
+
+**The tests** (Sod's tube is §127.2's problem in dimensional air, `p_L = 1e5` Pa, `rho_L = 1`
+kg/m³, inviscid, van Leer on `U`, `T` and the retarded density, Euler, PBiCGStab with DILU at
+`1e-12`, acoustic CFL 0.5, one cell across with `symmetry` sides and walls at the ends, run to
+`t = 0.2`; the coupling is PIMPLE with 5 outer iterations, 2 correctors and `alpha_p = 1`, an
+input the gate row does not fix; CMP-19 (lane G) measured the same tube without a membrane under
+PISO missing the bars and under this PIMPLE meeting them). Measured in both builds:
+
+| test | row | f64 | f32 (`single`) |
+|---|---|---|---|
+| `closed_membrane_is_a_wall` | 200 cells, a Sod problem in each chamber, 176 steps: `mdot` on both membrane patches `== 0` after every step, and U, p, T, rho and every `mdot` bitwise against a hand-built mesh with a wall pair there (D) | holds; the reflected shock moved `p` of the in-side cell by 96713.6 Pa | holds; 96055.1 Pa |
+| `open_membrane_is_interior_bitwise` | 200 cells, Sod, `pStat = 0`: opened at n = 0, then 176 steps bitwise against the run without a membrane (D) | holds (`Δp = 90000` exactly) | holds (`Δp` one f64 ulp above 90000: the f32 tube's face area makes `(a p)/a` round; held bitwise to the host formula) |
+| `sod_through_membrane` | 800 cells, 702 steps: plateaus ≤ 1 %, shock ≤ 0.5 % of the length (P) | ρ*_L 0.251 %, ρ*_R 0.310 %, u* 0.291 %, p* 0.230 %, shock 0.132 % | 0.226, 0.304, 0.287, 0.221 %, shock 0.131 % |
+| `opens_at_first_step_over_p_stat` | three membrane faces of different areas: the reading bitwise to the host formula; a ramp of 1e5 Pa/s at Δt = 7e-4 s against `pStat = 1e4` Pa opens at the first step over the bar, n = 143, t = 0.1001 s, within one step of 0.1 s (D) | holds | holds |
+| `split_keeps_the_mesh` | the split mesh's counts, patches, owners, face map, `±S` of the membrane patches and volumes (R) | holds | holds |
+| `hand_over_keeps_every_cell_bitwise` | 100 cells, opened by hand after 30 steps: every carried array bitwise, M's `mdot` 0, the clocks equal; 30 more steps finite (D); the cell mass Σ ρ V from the opening to 30 steps after it, in the closed tube (printed) | 7.2e-13 relative | 8.7e-7 relative |
+| `vent_refusals` | every refusal above by its key (D) | holds | holds |
+| `ofgpu-compressible`: `a_vented_tube_opens_once_and_reports` | the CMP-15 50-cell tube (50 m/s inflow, a fixed-p outlet) with a vent at x = 0.5 and `pStat` 5000 Pa: opens once, after step 1, Δp = 9667.8 Pa, and runs its 20 steps (D) | holds | — |
+| `ofgpu-compressible`: `a_closed_vent_never_opens`, `a_vent_is_refused_where_it_cannot_run` | `pStat` 1e9: closed after 3 steps (the last Δp 27080 Pa); a steady run and `load_case` refuse the vent by name (D) | holds | — |
+| `io::case_json::tests::the_vent_block_lowers_and_is_refused_beside_a_sector` and the schema pair | the block lowers (`wall` defaulting to `noSlip`), `refuse_vent` names the driver, and `docs/schema/case-1.json` is regenerated (D) | holds | — |
+
+One run of the seven took 99-192 s (f64 lib tests, the card shared with two lanes) and 37 s
+(f32). The two catalogue names are held by `field::tests::every_catalogue_name_has_a_status`,
+`the_permanent_refusals_name_their_reason` and `the_spec_lit_120_table_is_the_catalogue` (131
+names, 11 refused).
 
 ---
 

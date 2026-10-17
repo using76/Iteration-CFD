@@ -136,6 +136,12 @@ pub struct JsonCase {
     /// `ofgpu-lowmach` refuses the case by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dust: Option<crate::io::case_dust::JsonDust>,
+    /// SPEC-LIT §158.8: the one-domain opening vent (DST-09). Absent is every
+    /// case this reader has built; present, it lowers to
+    /// [`LoweredCase::vent`] and every driver but `ofgpu-compressible`
+    /// refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vent: Option<crate::dust::vent::JsonVent>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -1760,6 +1766,9 @@ pub struct LoweredCase {
     /// TFC, lowered onto the DST-06 config. `None` for every case that is
     /// not a dust one - then [`Self::chem`] is exactly what it always was.
     pub dust: Option<crate::io::case_dust::LoweredDust>,
+    /// SPEC-LIT §158.8: the `vent` block, lowered onto the one-domain vent's
+    /// spec. `None` for every case without the block.
+    pub vent: Option<crate::dust::vent::VentSpec>,
 }
 
 impl LoweredCase {
@@ -1779,6 +1788,20 @@ impl LoweredCase {
     pub fn refuse_dust(&self) -> Result<()> {
         match self.dust {
             Some(_) => Err(crate::io::case_dust::refuse_dust_case("dust")),
+            None => Ok(()),
+        }
+    }
+
+    /// SPEC-LIT §158.8: a driver's refusal of a case that states the
+    /// one-domain vent (DST-09). Every driver but `ofgpu-compressible` would
+    /// ignore it; `Ok` for every case without the block.
+    pub fn refuse_vent(&self) -> Result<()> {
+        match self.vent {
+            Some(_) => Err(Error::Refused(
+                "vent: the vent block is run by ofgpu-compressible only; this driver \
+                 would ignore it (SPEC-LIT §158.8)"
+                    .into(),
+            )),
             None => Ok(()),
         }
     }
@@ -3646,6 +3669,17 @@ impl JsonCase {
                 p.lower(chem.as_ref().map(|c| c.species.names.as_slice()), Some(self.physics.gravity))
             })
             .transpose()?;
+        // SPEC-LIT §158.8: the one-domain vent (DST-09) lowers beside nothing
+        // that already owns the mesh - the vent splits a BLOCK mesh, and a
+        // wedge or a sector is another mesh builder's.
+        let vent = self.vent.as_ref().map(|v| v.lower()).transpose()?;
+        if vent.is_some() && (wedge.is_some() || sector.is_some()) {
+            return Err(Error::Refused(
+                "vent: a vent beside mesh.wedge or mesh.sector is not built - the one-domain \
+                 vent splits a block mesh (SPEC-LIT §158.8)"
+                    .into(),
+            ));
+        }
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -3690,6 +3724,7 @@ impl JsonCase {
             parcels,
             chem,
             dust,
+            vent,
         })
     }
 }
@@ -6389,5 +6424,27 @@ mod tests {
                 .to_string();
             assert!(e.contains(needle) && e.contains("numerics.solvers"), "{block}: {e}");
         }
+    }
+
+    /// SPEC-LIT §158.8: a minimal case's `vent` block lowers onto the
+    /// [`crate::dust::vent::VentSpec`] (`wall` defaulting to `noSlip`), and
+    /// [`LoweredCase::refuse_vent`] names the one driver that runs it.
+    #[test]
+    fn the_vent_block_lowers_and_is_refused_beside_a_sector() {
+        let mut case = minimal_case_with_mesh("");
+        case.vent = Some(crate::dust::vent::JsonVent {
+            normal: [1.0, 0.0, 0.0],
+            p_stat: 1.0e4,
+            centre: Some([0.5, 0.5, 0.5]),
+            radius: Some(0.2),
+            faces: None,
+            wall: None,
+        });
+        let low = case.lower().expect("a vent case on a box lowers");
+        let v = low.vent.as_ref().expect("the block lowers onto a spec");
+        assert_eq!(v.p_stat, 1.0e4);
+        assert_eq!(v.wall, crate::dust::vent::MembraneWall::NoSlip);
+        let e = low.refuse_vent().err().expect("the vent is refused");
+        assert!(e.to_string().contains("ofgpu-compressible"), "{e}");
     }
 }

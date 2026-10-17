@@ -639,6 +639,13 @@ impl<'m> Compressible<'m> {
         self.steps
     }
 
+    /// SPEC-LIT §158.8: a run handed over from another mesh (DST-09's vent)
+    /// continues its step count, so the first step after the opening advances
+    /// both ddt clocks as an uninterrupted run would.
+    pub fn set_steps_taken(&mut self, steps: u64) {
+        self.steps = steps;
+    }
+
     /// §125.7: the per-cell reciprocal step `r_P = 1/dt_P` of the pseudo
     /// step last taken (the momentum equation's; the energy equation holds
     /// a copy). `None` unless the run names `localEuler`.

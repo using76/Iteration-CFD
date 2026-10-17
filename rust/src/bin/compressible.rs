@@ -33,7 +33,15 @@
 //! not have (§122.4), and writes `p` (gauge, about `pOperating`), `U`, `T`,
 //! `rho` and `Mach` through the one output pipeline of SPEC-LIT §44.
 //!
+//! SPEC-LIT §158.8 (DST-09): a JSONC case's `vent` block runs the one-domain
+//! vent here and nowhere else. The run starts on the mesh split at the
+//! membrane, reads the membrane's pressure difference after every step, and
+//! on opening hands the state over to a solver on the case's own mesh; a
+//! steady run with a vent is refused, and every other driver refuses the
+//! case by name (`LoweredCase::refuse_vent`).
+//!
 //! Written from:
+//!   ofgpu SPEC-LIT.md §158.1, §158.8 - the membrane and the vent as built
 //!   ofgpu SPEC-LIT.md §122.4 - v1's scope, and that everything else is
 //!     refused by name here
 //!   ofgpu SPEC-LIT.md §122.2, §122.6 - the gauge pressure and the two
@@ -61,9 +69,8 @@ use ofgpu::compressible::{
     Compressible, CompressibleControls, CompressibleState, OuterReport,
     ResidualControl as CmpResidualControl,
 };
-use ofgpu::field_setup::{
-    harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_vector_field,
-};
+use ofgpu::dust::vent;
+use ofgpu::field_setup::{harvest_scalar_field, harvest_vector_field};
 use ofgpu::fv::DivScheme;
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
 use ofgpu::io::case_json::LoweredCase;
@@ -75,14 +82,14 @@ use ofgpu::io::{DivEntry, FoamDict};
 use ofgpu::models::registry::{select_turbulence_model, RasModel};
 use ofgpu::momentum::BuoyancyForm;
 use ofgpu::timescheme::DdtScheme;
-use ofgpu::{Error, Gpu, GpuMesh, GpuScalarField, GpuVectorField, HostMesh, Result, Scalar};
+use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar};
 
 #[path = "common/mod.rs"]
 mod common;
 
 use common::{
-    device_banner, g, load_case, next_arg, output_root, parse_output_formats, sci, CaseNumerics,
-    OutputFormat,
+    device_banner, g, load_case_vented, next_arg, output_root, parse_output_formats, sci,
+    CaseNumerics, OutputFormat,
 };
 
 /// The binary's name, in every refusal it makes.
@@ -702,6 +709,11 @@ const OUTPUT_FIELDS: [&str; 5] = ["U", "p", "T", "rho", "Mach"];
 
 /// Write the five fields at time label `t` (seconds, or the iteration count
 /// of a steady run), through the one pipeline.
+///
+/// `hm` is the CASE'S own mesh in both phases of a vented run: the split
+/// mesh's boundary arrays start with the case's boundary faces in the same
+/// order (its cells are the same), so the harvest's per-patch slices read
+/// the right values of either state (SPEC-LIT §158.1).
 #[allow(clippy::too_many_arguments)]
 fn write_time(
     gpu: &Gpu,
@@ -794,6 +806,62 @@ struct RunEnd {
     converged: bool,
     last: Option<OuterReport>,
     seconds: f64,
+    /// The membrane's state at the end of a run with a `vent` block; `None`
+    /// without one (SPEC-LIT §158.8).
+    vent: Option<ofgpu::dust::vent::VentState>,
+}
+
+/// Everything a case's `vent` block adds to a run (SPEC-LIT §158.8): the
+/// lowered block, the mesh split at the membrane, the host mesh built from
+/// the split one, and the closed-stage lowered fields with the two membrane
+/// patches. `None` for every case without the block.
+struct VentRun {
+    spec: ofgpu::dust::vent::VentSpec,
+    split: ofgpu::dust::vent::VentSplit,
+    hm_split: HostMesh,
+    closed: ofgpu::compressible::bc::Lowered,
+}
+
+/// One opening check of the membrane (SPEC-LIT §158.1), run at n = 0 (after
+/// `initialise`) and after every step n (t = `t` s) while it is closed: read
+/// the area-weighted pressure difference from the solved gauge `p`, and when
+/// it has reached `pStat`, print the opening and hand the run over to the
+/// merged-mesh solver [`vent::open_onto`] builds. Returns the handed-over
+/// (solver, state) when the membrane opened - the caller replaces its own -
+/// and the reading either way.
+#[allow(clippy::too_many_arguments)]
+fn check_membrane<'m>(
+    gpu: &Gpu,
+    v: &VentRun,
+    trigger: &mut vent::VentTrigger,
+    membrane: &mut vent::Membrane,
+    n: u64,
+    t: f64,
+    solver: &Compressible<'_>,
+    s: &CompressibleState,
+    mesh: &'m GpuMesh,
+    hm: &HostMesh,
+    ctrl: CompressibleControls,
+    inlets: &ofgpu::compressible::bc::Lowered,
+) -> Result<(Option<(Compressible<'m>, CompressibleState)>, vent::VentReading)> {
+    let r = trigger.read(gpu, &s.p.f)?;
+    if membrane.check(n, t, &r) {
+        println!(
+            "vent: opened after step {n} (t = {} s): dp = {} Pa >= pStat {} Pa \
+             (p_in {} Pa, p_out {} Pa); the {} faces are interior faces from \
+             step {} on, SPEC-LIT 158.1",
+            g(t),
+            g(r.dp),
+            g(v.spec.p_stat),
+            g(r.p_in),
+            g(r.p_out),
+            v.split.faces.len(),
+            n + 1
+        );
+        let handed = vent::open_onto(gpu, &v.split, solver, s, mesh, hm, ctrl, inlets)?;
+        return Ok((Some(handed), r));
+    }
+    Ok((None, r))
 }
 
 fn run(o: &Options) -> Result<RunEnd> {
@@ -801,7 +869,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     let gpu = Gpu::new(0)?;
     println!("{}", device_banner(&gpu, "compressible")?);
 
-    let (hm, cc, lowered) = load_case(&o.case_path)?;
+    let (hm, cc, lowered) = load_case_vented(&o.case_path)?;
     refuse_out_of_scope(&o.case_path, &cc, lowered.as_ref())?;
     hm.print_report();
 
@@ -856,6 +924,36 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     let dc = driver_controls(&o.case_path, &cc, lowered.as_ref(), gas, o.iters)?;
     print_controls(&dc);
+
+    // ---- the vent (SPEC-LIT §158.8), before the output pipeline: it owns
+    // which mesh the run starts on -----------------------------------------
+    let vented = match lowered.as_ref().and_then(|l| l.vent.as_ref()) {
+        Some(spec) => {
+            if !dc.transient {
+                return Err(refuse(
+                    "vent",
+                    "a steady run has no opening time: the vent needs a transient ddt, \
+                     Euler or backward (SPEC-LIT §158.8)",
+                ));
+            }
+            let raw = common::case_raw_mesh(&o.case_path, lowered.as_ref())?;
+            let split = vent::split_raw(&raw, vent::select_faces(&raw, spec)?)?;
+            let hm_split = ofgpu::io::polymesh::build_host_mesh(&split.raw)?;
+            let closed = vent::closed_lowered(&inlets, spec.wall)?;
+            println!(
+                "vent: {} membrane face(s), area {} m^2, pStat {} Pa, wall {}; closed, \
+                 the run starts on the split mesh ({} + {} boundary faces), SPEC-LIT §158.8",
+                split.faces.len(),
+                g(split.area),
+                g(spec.p_stat),
+                if spec.wall == vent::MembraneWall::NoSlip { "noSlip" } else { "slip" },
+                split.n_boundary_merged,
+                2 * split.faces.len(),
+            );
+            Some(VentRun { spec: spec.clone(), split, hm_split, closed })
+        }
+        None => None,
+    };
 
     // ---- the output pipeline (SPEC-LIT §44), resolved before any kernel --
     let mut output_plan = common::output_plan(lowered.as_ref())?;
@@ -959,22 +1057,52 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     // ---- the solver --------------------------------------------------------
     let mesh = GpuMesh::upload(&gpu, &hm)?;
-    let mut u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
-    let mut p = GpuScalarField::zeros(&gpu, &mesh, "p")?;
-    let mut t = GpuScalarField::zeros(&gpu, &mesh, "T")?;
-    setup_vector_field(&gpu, &mut u, &inlets.u, &hm)?;
-    setup_scalar_field(&gpu, &mut p, &inlets.p, &hm)?;
-    setup_scalar_field(&gpu, &mut t, &inlets.t, &hm)?;
-    let mut s = CompressibleState::new(&gpu, &mesh, u, p, t)?;
-    let mut solver = Compressible::new(&gpu, &mesh, dc.ctrl)?;
-    solver.set_boundary_rules(&gpu, inlets.rules)?;
-    solver.set_outlet_rules(&gpu, inlets.outlets)?;
-    solver.set_farfield_rules(&gpu, inlets.farfields)?;
-    solver.set_freestream_rules(&gpu, inlets.freestreams)?;
+    // The run's first mesh: the split one when there is a vent, else the
+    // case's own - which `mesh` already is.
+    let split_mesh = match &vented {
+        Some(v) => Some(GpuMesh::upload(&gpu, &v.hm_split)?),
+        None => None,
+    };
+    // `vent::setup_state` and `vent::build_solver` make exactly the calls
+    // this section made before DST-09, in the same order - on the split mesh
+    // with the closed-stage fields when there is a vent, else on the case's
+    // own mesh with its inlets.
+    let ctrl = dc.ctrl;
+    let (mut solver, mut s) = match (&vented, &split_mesh) {
+        (Some(v), Some(gm)) => {
+            let s = vent::setup_state(&gpu, gm, &v.hm_split, &v.closed)?;
+            let solver = vent::build_solver(&gpu, gm, ctrl, &v.closed)?;
+            (solver, s)
+        }
+        _ => {
+            let s = vent::setup_state(&gpu, &mesh, &hm, &inlets)?;
+            let solver = vent::build_solver(&gpu, &mesh, ctrl, &inlets)?;
+            (solver, s)
+        }
+    };
     solver.initialise(&gpu, &mut s)?;
 
+    // SPEC-LIT §158.1: the trigger and the membrane exist only with a vent.
+    let mut membrane = vented
+        .as_ref()
+        .map(|v| vent::VentTrigger::new(&gpu, &v.split).map(|t| (t, vent::Membrane::new(v.spec.p_stat))))
+        .transpose()?;
+
+    // The opening check also runs at n = 0, straight after `initialise` - a
+    // membrane whose initial state already meets pStat opens before any step.
+    let mut last_dp = 0.0;
+    if let (Some((trigger, mem)), Some(v)) = (membrane.as_mut(), vented.as_ref()) {
+        let (handed, r) =
+            check_membrane(&gpu, v, trigger, mem, 0, 0.0, &solver, &s, &mesh, &hm, ctrl, &inlets)?;
+        last_dp = r.dp;
+        if let Some((ns, nst)) = handed {
+            solver = ns;
+            s = nst;
+        }
+    }
+
     let dt = f64::from(dc.ctrl.momentum.delta_t);
-    let mut end = RunEnd { steps: 0, converged: false, last: None, seconds: 0.0 };
+    let mut end = RunEnd { steps: 0, converged: false, last: None, seconds: 0.0, vent: None };
     for step in 1..=dc.n_steps {
         let r = solver.step(&gpu, &mut s)?;
         end.steps = step;
@@ -984,6 +1112,24 @@ fn run(o: &Options) -> Result<RunEnd> {
         if step == 1 || last_step || step % o.report_every == 0 {
             if let Some(l) = &end.last {
                 println!("{}", l.line());
+            }
+        }
+        // SPEC-LIT §158.1: while the membrane is closed, its check runs
+        // after every step n (t = n dt); the hand-over puts the run on the
+        // case's own mesh from the next step on. A check at the last step
+        // that opens still hands over - it is cheap, and the membrane's
+        // state is what the run reports. Once open, nothing is read.
+        if let (Some((trigger, mem)), Some(v)) = (membrane.as_mut(), vented.as_ref()) {
+            if !mem.is_open() {
+                let (handed, r) = check_membrane(
+                    &gpu, v, trigger, mem, step, step as f64 * dt, &solver, &s, &mesh, &hm, ctrl,
+                    &inlets,
+                )?;
+                last_dp = r.dp;
+                if let Some((ns, nst)) = handed {
+                    solver = ns;
+                    s = nst;
+                }
             }
         }
         let clock = if dc.transient { step as f64 * dt } else { step as f64 };
@@ -999,6 +1145,16 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
     end.seconds = t0.elapsed().as_secs_f64();
+    if let (Some((_, mem)), Some(v)) = (&membrane, vented.as_ref()) {
+        end.vent = Some(mem.state);
+        if !mem.is_open() {
+            println!(
+                "vent: closed for the whole run; the last dp = {} Pa < pStat {} Pa",
+                g(last_dp),
+                g(v.spec.p_stat)
+            );
+        }
+    }
     println!(
         "{DRIVER}: {} {}{} in {:.2} s",
         end.steps,
@@ -1029,6 +1185,9 @@ fn main() -> ExitCode {
 mod compressible {
     use super::*;
     use common::knobs::{apply, assert_none_inert, scratch_dir, written_state, Knob, NO_PRE};
+    // `load_case` is the other drivers' route: the tests below use it to
+    // show a vent case is refused there (SPEC-LIT §158.8).
+    use common::load_case;
 
     /// The 50-cell tube of SPEC-LIT §125.8: 1 m long, one cell across,
     /// air at 300 K moving at 50 m/s, a 320 K inlet, a fixed-`p` outlet and
@@ -1484,5 +1643,77 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         assert_eq!(end.steps, 5);
         assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
         five_fields(&dir.join("0.005"));
+    }
+
+    /// The tube's one `vent` line, inserted before its `numerics` block.
+    fn add_vent(case: &Path, p_stat: &str) {
+        edit(
+            case,
+            "  \"numerics\": {",
+            &format!(
+                "  \"vent\": {{ \"normal\": [1, 0, 0], \"centre\": [0.5, 0.01, 0.01], \
+                 \"radius\": 1.0, \"pStat\": {p_stat} }},\n  \"numerics\": {{"
+            ),
+        );
+    }
+
+    /// SPEC-LIT §158.8 (DST-09): the vented tube starts on the split mesh,
+    /// the membrane opens once when its pressure difference reaches pStat,
+    /// and the run reports the opening's step and reading.
+    #[test]
+    fn a_vented_tube_opens_once_and_reports() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_open");
+        edit(&case, r#""endTime": 0.00003"#, r#""endTime": 0.0002"#);
+        add_vent(&case, "5000");
+        let o = parse(&argv(&[case.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the vented tube runs");
+        println!("dst09: the membrane ended {:?}", end.vent);
+        assert_eq!(end.steps, 20);
+        match end.vent {
+            Some(vent::VentState::Open { step, dp, .. }) => {
+                assert!((1..=20).contains(&step), "opened at step {step}");
+                assert!(dp >= 5000.0, "dp {dp} Pa");
+            }
+            other => panic!("the membrane opened: {other:?}"),
+        }
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
+    }
+
+    /// The same vent at a pStat nothing in the run reaches: three steps, the
+    /// membrane still closed, and the run says so.
+    #[test]
+    fn a_closed_vent_never_opens() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_closed");
+        add_vent(&case, "1e9");
+        let o = parse(&argv(&[case.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the closed-vent tube runs");
+        assert_eq!(end.steps, 3);
+        assert_eq!(end.vent, Some(vent::VentState::Closed));
+    }
+
+    /// SPEC-LIT §158.8: a steady run has no opening time, so the driver
+    /// refuses the vent; every other driver refuses the case outright.
+    #[test]
+    fn a_vent_is_refused_where_it_cannot_run() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_steady");
+        add_vent(&case, "5000");
+        edit(&case, r#""ddt": "Euler""#, r#""ddt": "steadyState""#);
+        // A steady tube is a SIMPLE one - otherwise the algorithm check
+        // answers first and the vent never does.
+        edit(&case, r#""kind": "PIMPLE""#, r#""kind": "SIMPLE""#);
+        // ...and a steady run takes -iters, not endTime/deltaT.
+        let e = refusal(&case, &["-iters", "3"]);
+        assert!(e.contains("vent") && e.contains("§158.8"), "{e}");
+        let e = common::load_case(&case).err().expect("the vent case is refused");
+        assert!(e.to_string().contains("ofgpu-compressible"), "{e}");
     }
 }

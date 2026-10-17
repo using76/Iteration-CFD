@@ -193,6 +193,16 @@ pub const REGISTRY: &[(&str, Stance)] = &[
              dust_source_kernels_replay_under_capture",
         ),
     ),
+    (
+        "src/dust/vent.rs",
+        Stance::Refused(
+            "the one-domain vent's trigger (SPEC-LIT 158.1) gathers the \
+             membrane's cell pressures with presGather and DOWNLOADS them after \
+             every step, because the opening is a host decision that swaps the \
+             mesh the run steps on (SPEC-LIT §158.8); the opening itself is a host round \
+             trip of every field. Nothing in it belongs inside a captured step",
+        ),
+    ),
     // ---- physics with an iteration of its own -----------------------------
     (
         "src/cht.rs",
