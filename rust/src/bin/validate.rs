@@ -3963,6 +3963,19 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_ringleb", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-RAE: RAE 2822 Case 6 (AGARD AR-138, the
+    // NPARC archive's corrected conditions M 0.729, alpha 2.31 deg,
+    // Re 6.5e6) with Spalart-Allmaras on the three C-meshes of
+    // src/compressible/gatemesh.rs (SPEC-LIT 127.5.1), against the
+    // measured Cp key rae2822-cp-case6: a live coarse smoke and the
+    // recorded runs replayed, in src/bin/validate_gates/rae2822.rs
+    // (CMP-27).
+    if c.section("Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras against AR-138, a live coarse smoke and the three recorded C-meshes, replayed (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::rae2822::GATE);
+    let r = validate_gates::rae2822::check_rae2822(c, &gpu);
+    c.ran("check_rae2822", r)?;
+    c.leave_gate();
+    }
     // SPEC-LIT 116.17 - Gate 116-P: Hagen-Poiseuille on tetrahedra and
     // prisms, the L1 pipe at Re 100 (TET-14), the fitted dp/dx of
     // cases/pipe_tet_L1 against (116.27), replayed, in

@@ -83,6 +83,11 @@ pub(crate) mod oblique;
 /// against the isentropic key (CMP-24).
 pub(crate) mod ringleb;
 
+/// SPEC-LIT §127.6, Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras
+/// against AGARD AR-138's measured Cp (NPARC's corrected conditions), a
+/// live coarse smoke and the three recorded C-meshes, replayed (CMP-27).
+pub(crate) mod rae2822;
+
 /// SPEC-LIT §144.7, Gates 88-T and 90-T leg 3: T3B and T3A- (and T3A
 /// refitted) on §144.3's harness with a per-case inflow omega fitted to
 /// ERCOFTAC's measured free-stream Tu(x), onset ordering and spread held

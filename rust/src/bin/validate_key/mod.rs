@@ -1081,7 +1081,7 @@ mod tests {
         let distinct = seen.len();
         seen.dedup();
         assert_eq!(distinct, seen.len(), "a marker appears twice: {seen:?}");
-        assert_eq!(markers.len(), 47, "forty-seven markers, found {markers:?}");
+        assert_eq!(markers.len(), 48, "forty-eight markers, found {markers:?}");
         let m = Manifest::load().expect("reference/PROVENANCE.md parses");
         let mut row_ids: Vec<&str> = m.rows.iter().map(|r| r.id.as_str()).collect();
         row_ids.sort_unstable();
@@ -1113,6 +1113,7 @@ mod tests {
                 "martin-moyce-1952",
                 "riboux-gordillo-2014",
                 "rae2822-coordinates",
+                "rae2822-cp-case6",
                 "driver-seegmiller1985",
                 "mccaffrey1979-table1",
                 "huang2020-leeds-st-b",
@@ -2534,5 +2535,74 @@ mod tests {
         println!(
             "  [answer-key] rae2822-coordinates  65 stations, closed at both ends"
         );
+    }
+
+    /// SPEC-LIT section 127.6.8: the RAE 2822 Case 6 key holds the NPARC
+    /// archive's 103 measured Cp points at the corrected conditions - the
+    /// upper surface from the trailing edge, the leading edge once, then
+    /// the lower surface to the trailing edge - with the extremes Gate
+    /// CMP-RAE quotes.
+    #[test]
+    fn rae2822_cp_key_holds_103_points_of_case6() {
+        // answer-key: rae2822-cp-case6
+        let key =
+            load("rae2822-cp-case6").expect("load the answer key \"rae2822-cp-case6\"");
+        assert_eq!(
+            key.columns,
+            ["x_c", "minus_cp", "surface"],
+            "rae2822-cp-case6: the header row"
+        );
+        assert_eq!(key.rows.len(), 103, "rae2822-cp-case6: the row count");
+        let x = key.column("x_c").expect("the x_c column");
+        let mcp = key.column("minus_cp").expect("the minus_cp column");
+        let s = key.column("surface").expect("the surface column");
+        for (i, row) in s.iter().enumerate() {
+            let want = if i < 53 {
+                1.0
+            } else if i == 53 {
+                0.0
+            } else {
+                -1.0
+            };
+            assert_eq!(
+                *row, want,
+                "rae2822-cp-case6: row {i}: surface {} is not {want}",
+                row
+            );
+        }
+        assert_eq!(
+            (x[0], mcp[0], s[0]),
+            (0.9938, -0.1432, 1.0),
+            "rae2822-cp-case6: row 0, the upper trailing edge"
+        );
+        assert_eq!(
+            (x[53], mcp[53], s[53]),
+            (0.0, -0.8328, 0.0),
+            "rae2822-cp-case6: row 53, the leading edge"
+        );
+        assert_eq!(
+            (x[102], mcp[102], s[102]),
+            (0.9938, -0.2146, -1.0),
+            "rae2822-cp-case6: row 102, the lower trailing edge"
+        );
+        let (hi, lo) = (
+            mcp.iter().enumerate().fold((0usize, f64::NEG_INFINITY), |(a, m), (i, v)| {
+                if *v > m { (i, *v) } else { (a, m) }
+            }),
+            mcp.iter().enumerate().fold((0usize, f64::INFINITY), |(a, m), (i, v)| {
+                if *v < m { (i, *v) } else { (a, m) }
+            }),
+        );
+        assert_eq!(
+            (x[hi.0], mcp[hi.0], s[hi.0]),
+            (0.525, 1.2201, 1.0),
+            "rae2822-cp-case6: the largest minus_cp is the upper surface's peak"
+        );
+        assert_eq!(
+            (x[lo.0], mcp[lo.0], s[lo.0]),
+            (0.0016, -1.1338, -1.0),
+            "rae2822-cp-case6: the smallest minus_cp is the lower surface's stagnation"
+        );
+        println!("  [answer-key] rae2822-cp-case6  103 points of Case 6, upper, LE, lower");
     }
 }

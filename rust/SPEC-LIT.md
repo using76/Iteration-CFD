@@ -47069,6 +47069,15 @@ acoustics, Ghia and the AR-138 experiment.
 | CMP-24 | CMP-RING the three runs stop on no bound (class D) | f64 and f32: all three pass | CMP-24 |
 | CMP-24 | CMP-RING with `Gauss linear` energy (the first decision; printed by the run that measured it, not a row) | every mesh stops on a `T <= 0` bound, f64 at steps 811 / 584 / 654, f32 at 827 / 576 / 615: **MISSED** (§127.6.7) | CMP-24 |
 | CMP-24 | CMP-RING f32 error floor `E_min` on the finest mesh (printed, never checked) | f64 -, f32 4.396e-8 | CMP-24 |
+| CMP-27 | CMP-RAE upper-surface shock `x/c` (127.33), replayed (bar `+-0.04` of the experiment's 0.57786) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE lower-surface `Cp` RMS (127.33), replayed (bar `<= 0.05`) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE `Cl` (127.32), replayed (bar within 6 % of `Cl_exp` 0.74300) | f64 no field: every run stopped on a bound: **MISSED** (§127.6.8); f32 the same | CMP-27 |
+| CMP-27 | CMP-RAE f64 L0 (8 448 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 4 of step 5968 after 5800 iterations (`T <= 0` 1, `rho <= 0` 1; `T` at cell 6312, -5.441498878025827 K), f32 not attempted: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE f64 L1 (33 792 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 5 of step 5454 after 5400 iterations (`T` at cell 21072, -5.194727211491283 K), f32 (the single build's recorded L1) stopped on a bound, outer 4 of step 210 after 200 iterations (`T <= 0` 2, `p_abs <= 0` 2; `T` at cell 151, -47663.30078125 K): **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE f64 L2 (135 168 cells) reaches its cap or its field stop without a bound | f64 stopped on a bound, outer 5 of step 5376 after 5200 iterations (`T` at cell 75232, -4.433695285638386 K), f32 not attempted: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: the coarse run stops on no bound and every field is finite (class D) | f64 pass (2000 iterations, 65.2 s), f32 stops on a bound after 0 iterations, outer 3 of step 13 (`p_abs` at cell 151 -8763310.648889285 Pa): **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: the residual converges, the last chunk's `p` residual below a tenth of the first chunk's (bar 0.1) | f64 6.998e-6 against the first chunk's 2.701e-6, 2.6x not a tenth: **MISSED** (§127.6.8); f32 no field: **MISSED** (§127.6.8) | CMP-27 |
+| CMP-27 | CMP-RAE smoke: a shock present, the upper-surface `Cp` crosses `Cp*` past `x/c` 0.1 | f64 passes on the crossing at `x/c` 0.9794 (the wall `Cp` reads up to 2.1 elsewhere on the aerofoil (the lower surface at `x/c` 0.155), above the stagnation 1.14: an unconverged start, not a shock); f32 no field: **MISSED** (§127.6.8) | CMP-27 |
 
 #### 127.6.1 Gate CMP-SOD as built (CMP-19)
 
@@ -47596,6 +47605,199 @@ which no smooth second-order truncation error does; WHICH term carries it (the p
 walls' vertices, the total-pressure inlet's direction, the limiters at the extremum of `q`
 on each streamline, or the coupling's parked state) is NOT measured. Every candidate cure
 changes numerics or the gate's measure and is the user's; none was built.
+
+#### 127.6.8 Gate CMP-RAE as built (CMP-27)
+
+`src/bin/validate_gates/rae2822.rs`, one `ofgpu-validate` section right after Gate CMP-RING's,
+live in both builds. The gate's rows are REPLAYED from recorded runs (the `pipe_tet.rs`/
+`t3_fitted.rs` pattern, §110.1's split of recipe and verdict), and beside them the section
+runs a LIVE coarse smoke in both builds — what the plan's "beyond 10 min" looks like here
+(docs/17 5.3 rule 4).
+
+**Decisions TAKEN by the supervisor**, each with its reason:
+
+1. NPARC's data at M 0.729, alpha 2.31 deg, Re 6.5e6 is AR-138's **Case 6** (the corrected
+   conditions), not the plan's Case 9 — the plan's `cp_case9.csv` name follows the case it
+   named, and the key follows the data instead. The supervisor wrote the key from the NPARC
+   files and confirmed the conditions there: the archive's base page states Case 6 at M 0.725,
+   alpha 2.92 deg in the tunnel, and its Study #4 and `cp.exp.gen` state M 0.729, alpha 2.31
+   deg, Re 6.5e6 — the corrected conditions the key and this gate carry. The key:
+   `rae2822-cp-case6`, `reference/rae2822/cp_case6.csv`, its row in `reference/PROVENANCE.md` —
+   the archive's 103 measured `Cp` points in the archive's order (upper surface trailing edge
+   to leading edge, the leading edge `x/c = 0` once, then the lower surface to the trailing
+   edge), columns `x_c`, `minus_cp`, `surface` (1 upper, 0 the leading edge, -1 lower; the
+   archive's own second column is `-Cp`, so `Cp = -minus_cp`).
+2. §94's `vv::grid_study` refuses two levels (SPEC-LIT 94.2: "this crate never makes" a
+   two-level estimate), so the gate runs THREE C-meshes L0/L1/L2, L1 being CMP-26's default
+   gate mesh, every level's `CMeshSpec::span` and the smoke's at decision 6's `1e-5` m:
+
+   | level | `refine` | `n_wake` | `n_normal` | N x J | cells |
+   |---|---|---|---|---|---|
+   | L0 | 1 | 24 | 48 | 176 x 48 | 8 448 |
+   | L1 | 2 | 48 | 96 | 352 x 96 | 33 792 |
+   | L2 | 4 | 96 | 192 | 704 x 192 | 135 168 |
+   | smoke | 1 | 24 | 32 (`CMeshSpec::coarse()`) | 176 x 32 | 5 632 |
+
+   `N = 2 n_wake + 128 refine` (§127.5.1), so `(94.1)`'s `h` roughly halves per level.
+3. The rows run in `ofgpu-validate` from RECORDED runs (the `pipe_tet.rs`/`t3_fitted.rs`
+   replay pattern); the section also runs a LIVE coarse smoke (<= 10 min) in both builds.
+4. The experimental `Cl` is the key's own `Cp` integrated (derived): with `Cn = trapz(lower
+   Cp) - trapz(upper Cp)` over `x`, the leading-edge point in both surfaces,
+
+   ```
+   Cl_exp = Cn cos(alpha)                                                                     (derived)
+   ```
+
+   and the dropped `-Ca sin(alpha)` term is 8.3e-4 (0.11 %), measured once by the supervisor.
+5. The shock position is the sonic crossing, the SAME function for experiment and simulation:
+   on the upper surface sorted by `x`, the first pair of points with `x_k > 0.1` and
+   `Cp_k < Cp* <= Cp_(k+1)`, crossed linearly.
+6. LTS CFL **0.1** and the C-mesh span **1e-5** m — every level's `CMeshSpec::span` and the
+   smoke's — decision TAKEN, inputs only, measured on L0 before the recorded runs: §125.7's
+   local step is `CFL V^(1/3)/(|u| + c)`, so on a one-cell-thick mesh the span sets the step
+   of the `y+ = 1` wall cells. At span 1 the FIRST outer iteration of step 1 stops on a
+   `T <= 0` bound at CFL 1 (cell 70, `T = -10.98` K) and at CFL 0.1 (cell 70, `T = -8.46` K);
+   laminar and inviscid (`mu = 0`) runs stop the same way (cells 68 and 25, cell 25 the lower
+   wall cell at `x` 0.998). At span 1e-5 the first steps hold at CFL 0.1 and 0.3 and stop at
+   CFL 1 (cell 79) and 3 (cell 72).
+
+**The free stream** is host `f64` arithmetic in BOTH builds (device values cast once with the
+binary's `s()`), computed from Case 6's constants — `M_INF = 0.729`, `ALPHA_DEG = 2.31`,
+`RE_C = 6.5e6`, `CHORD = 1.0` m, `T_INF = 460.0/1.8` K (NPARC's 460 R) — never from
+`gas.mu()` (a `Scalar`). The gas is `PerfectGas::air(p_inf)`: Sutherland `a_s = 1.458e-6`,
+`t_s = 110.4`, `W = 0.0289647`, and the gauge datum `p_op = p_inf`, so the solver's `p` field
+IS `Cp q_inf` directly. In the order the relations chain, all derived:
+
+```
+R_s = R/W;   mu_inf = a_s T^1.5/(T + t_s);   U_inf = M sqrt(gamma R_s T)
+rho_inf = Re_c mu_inf/(U_inf CHORD);   p_inf = rho_inf R_s T_inf;   nu_inf = mu_inf/rho_inf
+nu_tilda_inf = 3 nu_inf (the TMR's fully turbulent free stream, §127.1);   q_inf = rho U^2/2
+U = U_inf (cos alpha, sin alpha, 0)                                                (127.30)
+```
+
+The free stream's oracle: `R_s` 287.0550227690948, `mu_inf` 1.627635558889652e-05,
+`U_inf` 233.62363914459755, `rho_inf` 0.45284934228058354, `p_inf` 33220.351110715754,
+`nu_inf` 3.594209832993809e-05, `nu_tilda_inf` 1.0782629498981425e-04, `q_inf`
+12358.259630240922. The sonic pressure coefficient, (derived) from NACA 1135 (44), the
+isentropic `p/p_t`, taken at `M = 1` and at `M_inf`, with `Cp = (p - p_inf)/q_inf` and
+`q_inf = gamma p_inf M_inf^2/2`:
+
+```
+Cp* = (2/(gamma M^2)) [ ((2 + (gamma-1) M^2)/(gamma+1))^(gamma/(gamma-1)) - 1 ]             (127.31)
+```
+
+The measures, derived (the face `Sf` points out of the fluid, INTO the aerofoil, so
+`sum p Sf` is the force ON the aerofoil; `Cp_f = p_gauge,f/q_inf` because the datum is
+`p_inf`):
+
+```
+F = sum_airfoil p_gauge,f Sf_f;   Cl = F . (-sin alpha, cos alpha, 0)/(q_inf CHORD span)
+                                                                              (127.32)
+x_s = x_k + (x_(k+1) - x_k)(Cp* - Cp_k)/(Cp_(k+1) - Cp_k), the first k (x ascending) with
+      x_k > 0.1 and Cp_k < Cp* <= Cp_(k+1)
+RMS = sqrt(mean over the key's lower points with x inside the simulated lower range of
+      (Cp_sim(x) - Cp_exp)^2), Cp_sim linear in x)                                 (127.33)
+```
+
+**BCs, start, SA inputs, controls.** `farfield` AND `outlet`: `characteristicFarfield` on all
+three fields — `U` at (127.30)'s vector, `p` at `0` gauge, `T` at `T_inf` (§126.10). `airfoil`
+(the wall): `U` `fixedValue` `(0,0,0)`, `p` `zeroGradient`, `T` `zeroGradient` (adiabatic).
+`frontAndBack`: `empty` on all three. **Start**: the uniform free stream in every cell —
+(127.30)'s `U`, gauge `p = 0`, `T = T_inf` — so the start carries no cell's answer. **SA**
+attaches exactly as `ofgpu-compressible` attaches it (§127.1.2): `walldistance::wall_distance`
+once at setup, `WallFaces::from_case` on nuTilda and nut, `NutRoughness::from_case` on nut,
+`SpalartAllmaras::new` with `SaCoeffs::default()` and `WallFunctionCoeffs::default()`,
+`setup_scalar_field` on `nu_tilda_mut`/`nut_mut`, then `set_turbulence` and — only then —
+`initialise`. `0/nuTilda`: internal `nu_tilda_inf`, `airfoil` `fixedValue` `0`, `farfield`
+`fixedValue` `nu_tilda_inf`, `outlet` `zeroGradient`, `frontAndBack` `empty`. `0/nut`:
+internal `0`, `airfoil` `nutLowReWallFunction` (value `0`), `farfield`/`outlet` `calculated`,
+`frontAndBack` `empty`. **Controls**, one `controls(gas)` the run and the smoke both read
+(decision 6's inputs sit in one place): the flow controls Gate CMP-OBL's exactly — PBiCGStab
++ DILU (`U` and `T` at `1e-9` relTol 0.01, `p` at `1e-10` relTol 0.001, maxIter 1000),
+`LocalEuler` on momentum and energy, LTS CFL **0.1** (decision 6), `u_relax 0.7`,
+`t_relax 0.7`, `p_relax 0.3`, five outer iterations, `residualControl` off, `vanLeer` on
+momentum, energy and the retarded density; SA: steady `true`, `ddt` `steadyState`,
+`div(phi,nuTilda)` `upwind` with NO `bounded` prefix (§127.1's refusal), `eps_relax 0.7`,
+`epsilon_solver` PBiCGStab + DILU `1e-9` relTol 0.01. **March** in chunks of 200 iterations
+until no cell's `M_i` moves by more than `1e-5` across a chunk, capped at 20000 a level;
+after each chunk the run takes the max cell-M change, the wall `Cp` and `Cl`; the last
+chunk's `p` residual is the last outer's `p[0].initial_residual`. An `Error::Refused` from
+`run` (a bound, §122.3) ends the run as an `Err` carrying the iterations reached. The wall
+`Cp` reads the OWNER cell's `p` (a `zeroGradient` wall), `x` the face centre's; airfoil face
+`m` (0-based in the patch) is LOWER iff `m < n_s/2` — the patch's `n_s` faces run lower
+TE->LE first, then upper LE->TE (§127.5.1) — and `h = sqrt(sum V/(span n_cells))` by (94.1).
+
+**The rows**, class P, the plan's bars: the upper-surface shock `x/c` within `+-0.04` of the
+experiment's; the lower-surface `Cp` RMS within `0.05`; `Cl` within 6 % of `Cl_exp`. The
+replay (`check_rae2822_replay`) reads the FINEST recorded f64 level — the `RaeRecord`
+literals the ignored `record_rae_l0/l1/l2` tests print and the file's constants hold — and
+the single build's L1 the same three rows; each row is taken inside `c.replaying` like Gate
+116-P's. A NaN shock fails its row (`!(err <= bar)` written out). The (94.9) studies of `Cl`,
+`x_s` and RMS run on all three f64 levels finest first when all three are recorded, each
+printed with `one_line()` or its refusal text; on fewer, a note says how many are recorded,
+and the verdict's uncertainty is `Uncertainty::Study` of the Cl study when it is Ok, else
+`Uncertainty::SingleMesh("no recorded C-mesh reached a field: every run stopped on a bound
+(SPEC-LIT 127.6.8)")`. **A recorded run that stopped on a bound** (§122.3) makes rows of its
+own: the refusal text in a note and one failed `require`, "the recorded run reaches its field
+stop or its cap without a bound (SPEC-LIT 127.6.8)", per run — and a build with stops but no
+record reads its three measure rows at NaN, which fail them: no field to compare. The gate's
+headline names every stop's level, step and first out-of-bounds cell. **The skip rule**: a
+build with NEITHER a record NOR a stop skips its three rows,
+`c.skip(label, "DEFERRED (docs/17 5.3 rule 4): NOT RUN - <the finest level's reason>")`; with
+no f64 level at all and nothing failed, the gate's one verdict is the Open one — "the three
+C-meshes are NOT RUN (DEFERRED, docs/17 5.3 rule 4); the live coarse smoke ran". No note
+spells a verdict word (§69.2): a failed row's note states its number "against the bar" and
+the registry's one report carries the verdict.
+
+**The live smoke** (the section's own, both builds): 2000 iterations (`SMOKE_ITERS`) on
+`CMeshSpec::coarse()` (5 632 cells), three rows — the coarse C-mesh run stops on no bound and
+every field is finite; the residual converges, the last chunk's `p` residual below a tenth of
+the first chunk's; a shock is present, the upper-surface `Cp` crosses `Cp*` past `x/c 0.1`.
+A refused march makes all three rows fail with the message in a note. The notes carry the
+cells, iterations, seconds, both residuals, the last change, `M_max`, `Cl`, the shock `x/c`
+and the RMS.
+
+**The experiment's own numbers**, read once from the key (the tests hold them): 53 upper
+points, 49 lower, the leading edge `(0.0, 0.8328)`; `Cp*` at `M = 0.729` is **-0.66578** by
+(127.31); the experiment's shock `x_s = ` **0.57786**; `Cn = ` **0.74360**; `Cl_exp =
+Cn cos(2.31 deg) = ` **0.74300**, the dropped `-Ca sin(alpha)` term 8.3e-4.
+
+**Measured: every recorded run stopped on a bound, and no run reached a field.** The price,
+200 timed iterations per level: L0 0.025 s, L1 0.042 s, L2 0.243 s per iteration (mesh 0.2 /
+2.4 / 36.2 s); the unit's card time, probes included, about 1 h 20 min. The four recorded
+runs (`record_rae_l0/l1/l2`, MAX_ITERS 20000, the shipped inputs) all stopped on a bound
+(§122.3), none reached a field:
+
+| run | stop | last progress line | wall s |
+|---|---|---|---|
+| f64 L0 (8 448) | after 5800 iterations, outer 4 of step 5968: `T <= 0` 1, `rho <= 0` 1; `T` at cell 6312, `T = -5.441498878025827` | iter 5800: dM 2.158e-1, p-res 8.459e-6, Cl 0.22186 | 200 |
+| f64 L1 (33 792) | after 5400 iterations, outer 5 of step 5454: `T <= 0` 1, `rho <= 0` 1; `T` at cell 21072, `T = -5.194727211491283` | iter 5400: dM 1.012e0, p-res 9.096e-6, Cl 0.18970 | 183 |
+| f64 L2 (135 168) | after 5200 iterations, outer 5 of step 5376: `T <= 0` 1, `rho <= 0` 1; `T` at cell 75232, `T = -4.433695285638386` | iter 5200: dM 2.925e0, p-res 5.353e-6, Cl 0.19236 | 385 (mesh 36) |
+| single L1 | after 200 iterations, outer 4 of step 210: `T <= 0` 2, `p_abs <= 0` 2; `T` at cell 151, `T = -47663.30078125` | iter 200: dM 7.253e-1, p-res 1.936e-6 | 9 |
+
+**What was measured about the cause** (supervisor, f64): every f64 stop is in the column of
+cells `i = N - n_wake`, the eta-line leaving the trailing edge upward — L0 cell 6312 is
+(i 152, j 35), centre (1.0003, 0.7640), area 1.49e-4 against 6.14e-3 for its neighbour
+(i 151): the trailing edge's surface spacing runs up that eta-line to the far field as a
+column about 40 times narrower than the next one. The single L1 stop is a lower-surface wall
+cell (i 151, j 0) at step 210; its cause was NOT measured. Two more probes on L0, printed
+only (no row): CFL 0.3 with 10 outer iterations stops at step 1030 (cell 5127 =
+(i 23, j 29), the column beside the trailing edge on the wake side); first-order `upwind` on
+momentum and energy at CFL 0.1 runs 10000 iterations with no bound, Cl 0.22265 and dM 9.8e-3
+at the end (`Cl_exp` 0.74300) — with span 1e-5 the far field's step is so small that the lift
+builds over far more iterations than the cap.
+
+The live smoke, both builds: f64 65.2 s on the coarse 5 632-cell mesh, no bound, `p`
+residual 2.701e-6 first chunk / 6.998e-6 last (the residual row fails), last cell-M change
+2.300e-1, `M_max` 0.9491, Cl 0.346150, a `Cp*` crossing at `x/c` 0.9794 — the shock row
+passes on it, but the wall `Cp` reads up to 2.1 elsewhere on the aerofoil (the lower surface at `x/c` 0.155), above the stagnation 1.14: an
+unconverged start, not a shock — lower-surface RMS 0.86212 over 48 points; single: the smoke
+stops on a bound after 0 iterations, outer 3 of step 13, `p_abs` at cell 151 =
+-8763310.648889285 (all three rows fail).
+
+**MISSED**: every row. The cure is a C-mesh whose trailing-edge eta-line widens away from
+the aerofoil (a change to §127.5.1's generator) or a solver change, and both are the user's;
+none was built.
 
 ## 128. Species thermochemistry — NASA seven-coefficient polynomials, the mixture, and the standard pressure they carry
 
