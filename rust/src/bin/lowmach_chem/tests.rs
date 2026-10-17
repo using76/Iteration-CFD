@@ -50,7 +50,7 @@ const CODES: &[(&str, &str, &[(&str, u32)])] = &[
 
 /// The ten records as a CHEMKIN THERMO file (SAND89-8009 Table III's
 /// columns), each coefficient written in the record's own E15.8 digits.
-fn thermo_text() -> String {
+pub(crate) fn thermo_text() -> String {
     let mut rows: Vec<(String, f64, [f64; 7])> = Vec::new();
     for line in TABLE_II.lines() {
         let line = line.trim();
@@ -87,7 +87,7 @@ fn thermo_text() -> String {
 }
 
 /// CHR-06's fifteen-reaction fixture of §130.7 (placeholder rates).
-const MECHANISM: &str = "ELEMENTS H O C N END
+pub(crate) const MECHANISM: &str = "ELEMENTS H O C N END
 SPECIES H2 O2 H2O OH O H CO CO2 CH4 N2 END
 REACTIONS
 H + O2 <=> O + OH                 1.0E+14  -0.5  15000.0
@@ -120,7 +120,7 @@ END
 ";
 
 /// The mechanism's species, in its own order; N2 is the inert one.
-const NAMES: [&str; 10] = ["H2", "O2", "H2O", "OH", "O", "H", "CO", "CO2", "CH4", "N2"];
+pub(crate) const NAMES: [&str; 10] = ["H2", "O2", "H2O", "OH", "O", "H", "CO", "CO2", "CH4", "N2"];
 
 /// The molar mass of `name`, kg/mol, from the table's record.
 fn molar_mass(name: &str) -> f64 {
@@ -185,7 +185,7 @@ fn chem_blocks(inlet: Option<&str>) -> String {
     )
 }
 
-const NUMERICS: &str = r#"
+pub(crate) const NUMERICS: &str = r#"
   "numerics": {
     "algorithm": { "kind": "PIMPLE", "correctors": 2 },
     "ddt": "Euler",
@@ -276,7 +276,7 @@ fn tube_case() -> String {
     )
 }
 
-fn scratch_dir(tag: &str) -> PathBuf {
+pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!(
         "ofgpu_lowmach_chem_{}_{}_{tag}",
@@ -289,7 +289,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 }
 
 /// Write `text` as `case.jsonc` beside the two chemistry files; its path.
-fn write_case(tag: &str, text: &str) -> PathBuf {
+pub(crate) fn write_case(tag: &str, text: &str) -> PathBuf {
     let dir = scratch_dir(tag);
     std::fs::write(dir.join("mech.ck"), MECHANISM).expect("mechanism");
     std::fs::write(dir.join("therm.dat"), thermo_text()).expect("thermo");
@@ -298,7 +298,7 @@ fn write_case(tag: &str, text: &str) -> PathBuf {
     path
 }
 
-fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
+pub(crate) fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
     let mut a = vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
     a.extend(args.iter().map(|s| (*s).to_string()));
     let o = crate::parse(&a)?;
@@ -306,7 +306,7 @@ fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
 }
 
 /// The one time directory the run wrote (its final state, no schedule).
-fn final_dir(case: &Path) -> PathBuf {
+pub(crate) fn final_dir(case: &Path) -> PathBuf {
     let root = crate::common::json_case_output_dir(case);
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
         .expect("the output root")
@@ -322,7 +322,7 @@ fn final_dir(case: &Path) -> PathBuf {
     dirs.pop().expect("one")
 }
 
-fn written(dir: &Path, name: &str, n: usize) -> Vec<Scalar> {
+pub(crate) fn written(dir: &Path, name: &str, n: usize) -> Vec<Scalar> {
     read_scalar_field(&dir.join(name), n)
         .unwrap_or_else(|e| panic!("{name} was not written: {e}"))
         .internal

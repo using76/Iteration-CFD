@@ -19,8 +19,8 @@
 //! (133.22). This module only orders them; the order is §133.11's, and the
 //! pair test below holds the driver to the same calls made by hand.
 //!
-//! Written from SPEC-LIT §132.5, §132.11, §133.4, §133.9, §133.10 and
-//! §133.11. No GPL-licensed source was consulted.
+//! Written from SPEC-LIT §132.5, §132.11, §133.4, §133.9, §133.10,
+//! §133.11 and §137.10. No GPL-licensed source was consulted.
 
 use std::path::Path;
 
@@ -41,6 +41,22 @@ use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar};
 
 /// The heat-release output field, W/m3: (133.16)'s `Q_chem`.
 pub const HRR: &str = "HRR";
+
+/// The evaporating pool's vapour source, handed to
+/// [`Reacting::before_flow_with`] - SPEC-LIT 137.10, equations (137.8) and
+/// (137.9). The mass the droplets lose enters the named species' equation
+/// through its reaction source, and the constraint's molar sum through the
+/// factor that makes (133.21)'s gain `mdot'''/W_v`, the mixture form of
+/// (77.9)'s `S_m/rho`.
+pub struct VapourSource<'a> {
+    /// The vapour's position among the SOLVED species, `Species::names()`
+    /// order.
+    pub index: usize,
+    /// (77.6) `mdot'''`, kg/(m3 s) - `ParcelCoupling::vapour_production()`.
+    pub mdot: &'a DevBuf<Scalar>,
+    /// (137.9) `factor = (1/W_N) / (1/W_v - 1/W_N)`.
+    pub factor: Scalar,
+}
 
 /// The run settings §133.11 refuses with a reacting case, by name, before a
 /// field is set up. `reserved` is every other field the run writes.
@@ -153,6 +169,9 @@ pub struct Reacting<'m> {
     /// Per solved species, the raw field it was set up from (its patch types).
     seeds: Vec<RawScalarField>,
     dt: f64,
+    /// `[n]`: the vapour's `mdot'''`, scaled by (137.9)'s factor - the
+    /// scratch the parcels' source is added to `net` through.
+    vap: DevBuf<Scalar>,
 }
 
 /// `calculated` for every patch whose type names a value rule, so a field
@@ -266,6 +285,7 @@ impl<'m> Reacting<'m> {
             species,
             fk,
             dt,
+            vap: z(n)?,
         })
     }
 
@@ -306,6 +326,7 @@ impl<'m> Reacting<'m> {
     /// the split step (132.10) at `p0`, the heat release (133.16) and the
     /// enthalpy diffusion (133.17) registered, and the molar change of
     /// (133.21) from `S_k = W_k omega_k - div Gamma_k` as (133.24) forms it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn before_flow(
         &mut self,
         gpu: &Gpu,
@@ -313,11 +334,45 @@ impl<'m> Reacting<'m> {
         energy: &mut Energy<'_>,
         gas: &mut GasState,
     ) -> Result<()> {
+        self.before_flow_with(gpu, m, energy, gas, None)
+    }
+
+    /// [`Self::before_flow`], with an evaporating pool's vapour when one is
+    /// passed (SPEC-LIT 137.10): (137.8) adds the pool's `mdot'''` to the
+    /// named solved species' reaction source - which (133.24)'s net source
+    /// below then carries into the constraint - and (137.9) adds
+    /// `factor * mdot'''` to that member's `net` again, with
+    /// `factor = (1/W_N)/(1/W_v - 1/W_N)`, so (133.21)'s molar sum gains
+    /// `(1/W_v - 1/W_N) S_v,mol - (..) S_v = mdot'''/W_v`, the mixture form
+    /// of (77.9)'s `S_m/rho`. `None` is exactly the old path, the same calls
+    /// [`Self::before_flow`] always made.
+    pub fn before_flow_with(
+        &mut self,
+        gpu: &Gpu,
+        m: &GpuMesh,
+        energy: &mut Energy<'_>,
+        gas: &mut GasState,
+        vapour: Option<VapourSource<'_>>,
+    ) -> Result<()> {
         let n = m.n_cells;
         self.enthalpy.mixture_cp(gpu, &self.species, energy.field(), &mut self.cp_c, &mut self.cp_b)?;
         energy.set_cp_field(gpu, &self.cp_c, &self.cp_b)?;
         field_ops::set_field(gpu, &self.fk, &mut self.p, gas.p0(), n)?;
         self.chem.step(gpu, &mut self.species, &energy.field().f, &self.p, Some(gas.rho()), self.dt)?;
+        // SPEC-LIT 137.10 (137.8): `su_v <- su_v + mdot'''`, kg/(m3 s), on
+        // the mass-weighted species equation's reaction source. The `net`
+        // loop below adds each member's `su` into its `net`, so (133.24)'s
+        // net source carries the vapour's mass too.
+        if let Some(v) = &vapour {
+            let su = self.species.reaction_source_mut(v.index).ok_or_else(|| {
+                Error::Config(format!(
+                    "parcels.coupling.vapour: solved species {} has no reaction source \
+                     for the split step's mdot''' (SPEC-LIT §137.10)",
+                    v.index
+                ))
+            })?;
+            field_ops::add_field(gpu, &self.fk, su, &v.mdot, n)?;
+        }
         let w = energy.heat_release_weight(gpu, gas)?;
         self.chem.heat_release(gpu, w, &mut self.q)?;
         self.enthalpy.diffusion_source(gpu, m, &self.species, energy.field(), &gas.rho().f, &mut self.qhd)?;
@@ -333,7 +388,7 @@ impl<'m> Reacting<'m> {
         let nb = m.n_boundary_faces;
         fv::interpolate_linear(gpu, &self.fvk, &mut self.rho_face, gas.rho(), m)?;
         for i in 0..self.species.n_solved() {
-            let Self { species, fk, fvk, rho_face, gamma, flux, net, d, .. } = self;
+            let Self { species, fk, fvk, rho_face, gamma, flux, net, d, vap, .. } = self;
             field_ops::copy_field(gpu, fk, &mut gamma.f, &rho_face.f, nf)?;
             field_ops::multiply_field(gpu, fk, &mut gamma.f, &m.mag_sf, nf)?;
             field_ops::scale_field(gpu, fk, &mut gamma.f, d[i], nf)?;
@@ -347,6 +402,18 @@ impl<'m> Reacting<'m> {
                 Error::Config("species: no reaction source after the split step (SPEC-LIT §132.11)".into())
             })?;
             field_ops::add_field(gpu, fk, &mut net[i], su, n)?;
+            // SPEC-LIT 137.10 (137.9): `S_v,mol = S_v + factor * mdot'''`,
+            // `factor = (1/W_N)/(1/W_v - 1/W_N)`, so (133.21)'s molar sum
+            // gains `(1/W_v - 1/W_N) S_v,mol - (..) S_v = mdot'''/W_v` - the
+            // mixture form of (77.9)'s `S_m/rho`, the volume the added mass
+            // occupies.
+            if let Some(v) = &vapour {
+                if i == v.index {
+                    field_ops::copy_field(gpu, fk, vap, &v.mdot, n)?;
+                    field_ops::scale_field(gpu, fk, vap, v.factor, n)?;
+                    field_ops::add_field(gpu, fk, &mut net[i], vap, n)?;
+                }
+            }
         }
         let refs: Vec<&DevBuf<Scalar>> = self.net.iter().collect();
         gas.set_molar_change(gpu, &refs)
@@ -445,4 +512,4 @@ impl<'m> Reacting<'m> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

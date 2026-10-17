@@ -621,8 +621,9 @@ impl<'m> Species<'m> {
         self.reaction.get(i)
     }
 
-    /// Solved species `i`'s reaction source, for the split step to write.
-    pub(crate) fn reaction_source_mut(&mut self, i: usize) -> Option<&mut DevBuf<Scalar>> {
+    /// Solved species `i`'s reaction source, for the split step to write;
+    /// the driver adds the parcels' vapour (SPEC-LIT 137.10).
+    pub fn reaction_source_mut(&mut self, i: usize) -> Option<&mut DevBuf<Scalar>> {
         self.reaction.get_mut(i)
     }
 

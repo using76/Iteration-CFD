@@ -51763,6 +51763,147 @@ tests were not run under `single`; there the tolerance column is `1e-5`
 
 Labels: (137.7).
 
+### 137.10 Parcels in `ofgpu-lowmach` as built (CHR-26, `src/bin/lowmach.rs`, `src/bin/lowmach_parcels/`)
+
+`No GPL-licensed source was consulted.` The parcel step, the deposit and
+the coupling are §66-§68 and §76-§77 unchanged. This subsection adds the
+order in which `ofgpu-lowmach` runs them, the refusals, and the mixture
+form of §77.6's volume term, (137.8)-(137.9). It is this project's own
+contract (ORIGINAL). The derivation uses Day & Bell's equation of state and
+species equations as §133.1-§133.2 write them, and the continuity equation
+with a mass source of (77.9).
+
+**What runs.** A JSONC case with a `parcels` block (§137.6) runs in
+`ofgpu-lowmach`. `common::load_case_with(path, true)` lets the block past
+§137.6's seam for this driver only. Every other driver keeps the refusal
+through `common::load_case`. A case directory with
+`constant/cloudProperties` is still refused by `read_case_controls`, in
+every driver. *DESIGN, decided by recommendation:* the dictionary route of
+the parcels block lowers (§137.6) but is not run, as CHR-12b decided for the
+chemistry blocks.
+
+**One step, in §68.7's order.** The pool is built once, for the run's `dt`
+and on its fixed mesh (`CaseParcels::new`: `Parcels::new`,
+`ParcelDeposition::new`, `ParcelCoupling::new`; their own refusals stand).
+In each time step, after the step is opened and before the turbulence and
+the unit of work:
+
+1. `Parcels::step` on the gas the last step left: `U`, `rho`, and `T` when
+   the physics is thermal. An evaporating pool also gets the vapour
+   member's `Y`.
+2. The sort and CSR, then the deposit (`ParcelDeposition::update`).
+3. The coupling gather (`ParcelCoupling::update`). It is handed `T` when the
+   energy coupling is on and `Y_v` when the mass coupling is on. The
+   library refuses the other pairings by name.
+4. Momentum, when its coupling is on: `MomentumSources` is cleared and
+   registered once per step, and every outer iteration's assembly reads it
+   (§68.7). With the coupling off nothing is cleared or registered, so the
+   matrix is §68.10's by construction.
+5. Energy, when its coupling is on: registered in `outer_iteration` after
+   `-heaterPower` and the thermostat, on each iteration's freshly cleared
+   `EnergySources`. The target divergence and the `p0` ODE then read it as
+   part of `Q` (§77.6, first bullet).
+6. On a reacting case with `coupling.mass evaporation`: the vapour enters the
+   split step's sources by (137.8)-(137.9), inside
+   `Reacting::before_flow_with`.
+
+**The vapour in a reacting mixture.** §77.3 writes the vapour source for the
+unit-density, non-conservative species equation of §19. §77.6 writes the
+volume term `S_m/rho` for one constant `W`. The reacting driver has neither.
+Its species equations are §86's mass-weighted, conservative form, and its
+constraint is (133.21), whose molar sum closes the inert member by
+`S_N = -Σ_k S_k`. That closure holds for reactions and diffusion, which
+conserve mass. It does not hold for a mass source. Continuity with the
+source, `Drho/Dt + rho div u = S_m`, and (133.3)'s equation of state give
+
+```
+div u = (1/T) DT/Dt - (1/p0) dp0/dt + (W/rho) Σ_m S_m^tot / W_m
+```
+
+summed over every member `m`, with `S_m^tot` the member's conservative
+source. The `S_m/rho` of continuity cancels against the dilution term of
+`D(1/W)/Dt`. The vapour `v` is a solved member, and the reactive and
+diffusive parts sum to zero over all members. So
+`Σ_m S_m^tot/W_m = Σ_k (1/W_k - 1/W_N) S_k + mdot'''/W_v`, where `S_k` is
+(133.24)'s net source without the vapour. The molar sum must therefore gain
+`mdot'''/W_v`. The vapour's net source carries `mdot'''` by (137.8), which
+brings `(1/W_v - 1/W_N) mdot'''`. The rest, `mdot'''/W_N`, is added by a
+scaling:
+
+```
+su_v  <-  su_v + mdot'''                                   (the mass-weighted Y_v equation, kg/(m3 s))   (137.8)
+S_v,mol = S_v + f mdot''',     f = (1/W_N) / (1/W_v - 1/W_N)                                              (137.9)
+```
+
+`S_v,mol` is what `GasState::set_molar_change` is handed for the vapour.
+With it, (133.21) gains `(1/W_v - 1/W_N)(1 + f) mdot''' = mdot'''/W_v`.
+Multiplied by `R T/p0 = W/rho`, that is `(W/W_v)(mdot'''/rho)`, the FDS
+Technical Reference Guide's `D_SOURCE` term `(W/W_a) mdot'''_a/rho`, which
+§77.6 cites. With one constant `W` it is (77.3). The sealed `p0` of (133.22)
+integrates the same `D`, so the added mass raises `p0` without a second
+path. The inert member is diluted through `Y_N = 1 - Σ_k Y_k`. `f` is formed
+in f64 from the mixture's own molar masses (`GasMixture::coefficient` and
+`inverse_molar_mass`) and rounded once to the build's scalar. (77.1)'s
+`vapour_source` and (77.3)'s `divergence_source` are not used in this driver.
+They belong to the constant-density species equation and the constant-`W`
+constraint. *DESIGN, stated:* (77.2)'s vapour enthalpy uses the coupling's
+own `cpGas`, not the mixture's `cp` field (133.18).
+
+**Refused by name, before a field is set up** (`lowmach_parcels::refuse_settings`):
+
+* a steady run, because the pool walks a physical `dt` and §66.8 fixes the
+  injection interval in whole steps;
+* a checkpoint, `-restartFrom`, `-restartWrite` or an output restart series,
+  because the `.mcr` format carries no parcels;
+* a motion block or `-rigidBody`, because the pool is built on a fixed mesh;
+* `physics evaporating` without `coupling.mass evaporation`, because the
+  vapour member's field is the only `Y_v` (76.7) can read in this driver;
+* a `coupling.vapour` on a case without the reacting blocks;
+* the inert member as the vapour, because it is closed by `1 - Σ` and takes
+  no source;
+* a vapour that is not a solved member;
+* a vapour with the inert member's molar mass, where `f` divides by zero
+  (`vapour_member`).
+
+§77.7's consistency rules stay in `ParcelCoupling::new`.
+
+**Written.** `parcels.vtp` (§66.13) goes into every time directory the run
+writes, the final one included. The periodic report prints the pool's
+counters. The last line before `done` gives the last step's momentum, given
+to the gas and lost by the live parcels. `RunEnd` holds the same (the
+`parcels` report). In test builds only, it also holds the final `U`, `p`,
+`T` and `rho` at full precision (`final_flow`).
+
+**What is not built, stated.** The dictionary route; steady, restarted and
+moving-mesh runs with parcels; evaporation into a non-reacting case, which
+has no species set; and the mixture `cp` in (77.2).
+
+**Tree against plan.** The row asks for "a §76 evaporation gate case through
+the driver equals the library path bitwise". As in §137.8's
+`case_radiation_equals_library`, the pair is made at the driver module.
+`CaseParcels`, built from the lowered case, is set against `Parcels`,
+`ParcelDeposition` and `ParcelCoupling` built from hand-written controls.
+Both take the same frozen gas, because the coupled flow solve is the
+driver's own code on both sides. The whole driver is held by Gate 68-B and
+the momentum row below. The flow fixtures solve `p` with PCG. On the sealed
+all-wall box, the `single` build's PBiCGStab stalled at a `p` residual of
+7.6e-2 and then diverged. The double build converged with PBiCGStab, and
+PCG converged in both builds. The fixture changed its input, not a
+tolerance.
+
+**Gates, measured 2026-10-18 (both builds, `lowmach_parcels::tests`, bin
+tests of `ofgpu-lowmach`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `lowmach_parcels_equal_library` | gate 76-A's shape (a 500 µm water droplet at 285 K in still 25 °C air at 30 % rh), 4^3 walled box, `evaporating`, Schiller-Naumann, momentum `semiImplicit`, energy `explicit`, mass `evaporation` into H2O, 25 steps of 1 ms: the lowering against the hand-written controls; every field of both pool snapshots (`x64` included), both coupling snapshots and both registries | bitwise | D | 0 bits differ in both builds; vapour 2.04e-3 kg/(m3 s) (f32 2.03e-3), max `|su|` 0.25 m/s2, max `q` 7.0e3 W/m3 |
+| `lowmach_parcels_vapour_enters_species` | the reacting step `run()` builds, twice, with and without `mdot''' = 1e-3 (1 + c/n)`: (137.8) on H2O's reaction source, every other member unmoved; (137.9) the target divergence moves by `R T mdot'''/(p0 W_v)`; `f` against its f64 form | bitwise; `1e-12` relative (`1e-5` f32) | D, R | bitwise; `1.6e-16` (f32 `9.6e-8`) |
+| `lowmach_no_parcels_no_change` | Gate 68-B through the driver: a sealed, heated 4^3 box with drifting gas, 10 steps, without a block (A), with the model and every parcel of zero weight (B), and with a 1e-4 kg/s spray (C): `final_flow` and the `U_x` and `T` means, A against B; C against A | bitwise; C differs | D | 0 bits; C differs in 383 values |
+| `lowmach_parcels_momentum_balance` | VAL-72a's row: on C with momentum `semiImplicit`, the momentum the last step gave the gas against what the live parcels lost, (68.4) | `1e-12` relative (`1e-5` f32) | R | `5.9e-18` (f32 0) |
+| `lowmach_parcels_refusals_name_the_setting` | each refusal above, `vapour_member` on equal molar masses, a steady run through the driver, and `common::load_case` naming §137.10 | refused, naming the key | D | all named |
+
+Labels: (137.8)-(137.9).
+
 ---
 
 ## 138. SPMD transports — the `Comm` trait, ThreadComm, and MPI

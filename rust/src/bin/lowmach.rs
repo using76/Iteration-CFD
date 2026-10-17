@@ -132,6 +132,13 @@
 //!   block and the EDM/EDC/PaSR closures are refused with one by name, and
 //!   the dictionary route keeps §137.7's refusal.
 //!
+//! * **Parcels (SPEC-LIT §137.10, `lowmach_parcels`).** A JSONC `parcels`
+//!   block runs the pool every time step in §68.7's order, its momentum
+//!   into `MomentumSources` once per step, its energy into `EnergySources`
+//!   every outer iteration, and an evaporating pool's vapour into the named
+//!   species of a reacting case; the dictionary route, steady runs,
+//!   restarts and moving meshes are refused by name.
+//!
 //! # Field output and restart (SPEC-LIT §31.2)
 //!
 //! `-output LIST`/`-writeInterval` write `U`, `p`, `T`, the turbulence
@@ -216,6 +223,9 @@ use lowmach_chem::Reacting;
 #[path = "lowmach_rad/mod.rs"]
 mod lowmach_rad;
 use lowmach_rad::CaseRadiation;
+
+#[path = "lowmach_parcels/mod.rs"]
+mod lowmach_parcels;
 
 use common::{
     atoi, device_banner, find_restart_field, from_restart_scalars,
@@ -531,6 +541,12 @@ fn open_time_step(
 /// step and registers its heat release (133.16) and the enthalpy diffusion
 /// (133.17) ahead of every other source, sets the molar change of (133.21),
 /// solves the species after `T`, and advances `p0` by (133.22).
+///
+/// `parcels` is SPEC-LIT §137.10's pool: with one present, its energy
+/// source registers every outer iteration, after the thermostat and ahead
+/// of the target divergence, and an evaporating pool's vapour rides the
+/// chem arm's `before_flow` into the named species' equation and the
+/// constraint's molar sum.
 #[allow(clippy::too_many_arguments)]
 pub fn outer_iteration(
     gpu: &Gpu,
@@ -553,6 +569,9 @@ pub fn outer_iteration(
     // SPEC-LIT 137.9: the enclosure's exchange, step 4c of §98.8 - after
     // the radiation block and before the target divergence reads its `Q`.
     mut encl: Option<&mut DriverEnclosure<'_>>,
+    // SPEC-LIT 137.10: the parcels' energy, after the thermostat; their
+    // vapour in the reacting step.
+    parcels: Option<&lowmach_parcels::CaseParcels<'_>>,
 ) -> Result<IterReport> {
     let fk = FieldKernels::new(gpu)?;
 
@@ -574,7 +593,7 @@ pub fn outer_iteration(
 
     energy.sources_mut().clear(gpu)?;
     if let Some(r) = chem.as_deref_mut() {
-        r.before_flow(gpu, m, energy, gas)?;
+        r.before_flow_with(gpu, m, energy, gas, parcels.and_then(|pc| pc.vapour()))?;
     }
     if let Some(h) = heater {
         energy.sources_mut().register_explicit(gpu, h)?;
@@ -592,6 +611,12 @@ pub fn outer_iteration(
     if let Some(th) = thermostat {
         th.correct_with_flow(gpu, m, &energy.field().f, &gas.rho().f, &s.u().f)?;
         energy.sources_mut().register_explicit(gpu, th.source_buf())?;
+    }
+    // SPEC-LIT §137.10: the parcels' energy - (68.9)'s convective exchange
+    // and (77.2)'s vapour enthalpy, gathered once per step - on every outer
+    // iteration's freshly cleared `Q`, so the constraint reads it too.
+    if let Some(pc) = parcels {
+        pc.register_energy(gpu, energy.sources_mut())?;
     }
 
     // SPEC-LIT 137.8, rules 1-3: solve when due, register (137.2) at the
@@ -2124,6 +2149,39 @@ fn run(o: &Options) -> Result<RunEnd> {
         )?;
     }
 
+    // SPEC-LIT §137.10 (CHR-26): a parcels case, refused by name where this
+    // driver cannot honour it, still before a field is set up. The species
+    // shape is the reacting case's, so an evaporating pool's vapour is
+    // checked against the solved set it must land in.
+    let parcels_case: Option<ofgpu::io::case_parcels::LoweredParcels> =
+        lowered.as_ref().and_then(|l| l.parcels.clone());
+    if let Some(lp) = &parcels_case {
+        let solved: Vec<String> = chem_case
+            .as_ref()
+            .map(|c| {
+                c.species
+                    .names
+                    .iter()
+                    .filter(|n| **n != c.species.inert)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        lowmach_parcels::refuse_settings(
+            lp,
+            &lowmach_parcels::ParcelRunShape {
+                transient,
+                restart: o.restart_from.is_some()
+                    || o.restart_write.is_some()
+                    || output_plan.as_ref().is_some_and(|p| p.restart.is_some()),
+                motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()) || o.rigid_body.is_some(),
+                species: chem_case
+                    .as_ref()
+                    .map(|c| (solved.as_slice(), c.species.inert.as_str())),
+            },
+        )?;
+    }
+
     // SPEC-LIT 117.6 / 117.3: what the volume writers sample onto, laid
     // ONCE, before the time loop, and only when vdb/nvdb are written.
     let (volume_formats, volume_spec) = match output_plan.as_ref().and_then(|p| p.vis.as_ref()) {
@@ -2548,6 +2606,32 @@ fn run(o: &Options) -> Result<RunEnd> {
         None
     };
 
+    // SPEC-LIT §137.10 (CHR-26): the case's parcels, in §68.7's order, from
+    // here to the end of the run. An evaporating pool's vapour is located in
+    // the reacting mixture now, so a disagreement between the mixture's
+    // member order and `Reacting`'s fails before any step runs.
+    let mut parcels: Option<lowmach_parcels::CaseParcels<'_>> = match &parcels_case {
+        Some(lp) => {
+            let vap = match (&lp.vapour, reacting.as_ref()) {
+                (Some(n), Some(r)) => {
+                    let (k, factor) = lowmach_parcels::vapour_member(&r.mixture, n)?;
+                    if r.species.names().get(k).map(|s| s.as_str()) != Some(n.as_str()) {
+                        return Err(Error::Config(format!(
+                            "parcels.coupling.vapour: \"{n}\" is solved species {k} in the \
+                             mixture but not in the species set (SPEC-LIT §137.10)"
+                        )));
+                    }
+                    Some((k, factor))
+                }
+                _ => None,
+            };
+            let c = lowmach_parcels::CaseParcels::new(&gpu, &hm, &mesh, lp, dt, vap)?;
+            println!("{}", c.describe());
+            Some(c)
+        }
+        None => None,
+    };
+
     // ---- volumetric sources (SPEC-LIT §18, §31.1) -------------------------
     //
     // Two routes into the SAME registry: a JSONC case's own `sources[]`
@@ -2935,6 +3019,19 @@ fn run(o: &Options) -> Result<RunEnd> {
             rb.pre_step(&gpu, &mesh, &mut s, t_phys, f64::from(dt))?;
         }
 
+        // SPEC-LIT §137.10: §68.7's steps 1-5, before the Eulerian step,
+        // which has learned nothing. The pool walks this step's dt once, and
+        // its momentum registry is filled once and read by every outer
+        // iteration; the energy half registers inside `outer_iteration`,
+        // which clears the registry first.
+        if let Some(pc) = parcels.as_mut() {
+            let yv = pc
+                .vapour_index()
+                .and_then(|i| reacting.as_ref().and_then(|r| r.species.get(i)).map(|st| &st.field().f));
+            pc.step(&gpu, s.u(), &gas.rho().f, &energy.field().f, yv, dt)?;
+            pc.register_momentum(&gpu, s.momentum_mut().field_sources_mut())?;
+        }
+
         let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
         // SPEC-LIT §17/§30.2: `g`/`Prt` feed `G_b`; `self.buoy` (built once
         // by `build_coupled` from `models::buoyancy_settings`) is `None`
@@ -2977,6 +3074,7 @@ fn run(o: &Options) -> Result<RunEnd> {
             reacting.as_mut(),
             rad.as_mut(),
             encl.as_mut(),
+            parcels.as_ref(),
         )?;
 
         if !report.finite {
@@ -3000,6 +3098,9 @@ fn run(o: &Options) -> Result<RunEnd> {
 
         if step % o.check_every.max(1) as usize == 0 || step + 1 == n_steps {
             print_report(step, &report);
+            if let Some(pc) = &parcels {
+                println!("  {}", pc.report_line(&gpu)?);
+            }
         }
 
         // The first step is where the linear solvers claim their workspaces
@@ -3035,6 +3136,15 @@ fn run(o: &Options) -> Result<RunEnd> {
             // SPEC-LIT 161.6: the moved points beside the fields.
             if let Some(rb) = &rigid {
                 rb.write_points(&output_root(&o.case_path).join(format_time_name(t_phys as Scalar)))?;
+            }
+            // SPEC-LIT §137.10: the live parcels beside them (66.13); the
+            // directory exists after write_time.
+            if let Some(pc) = &parcels {
+                pc.write_vtp(
+                    &gpu,
+                    &output_root(&o.case_path).join(format_time_name(t_phys as Scalar)),
+                    t_phys as Scalar,
+                )?;
             }
         }
 
@@ -3097,6 +3207,40 @@ fn run(o: &Options) -> Result<RunEnd> {
             rep.updates
         );
     }
+    // SPEC-LIT §137.10: the parcels' last step - (68.4)'s two sides on the
+    // host, one line for the report.
+    let parcels_end = match parcels.as_mut() {
+        Some(pc) => {
+            let end = pc.finish(&gpu)?;
+            println!(
+                "parcels (SPEC-LIT 137.10): momentum given ({}, {}, {}) N s, lost by the live \
+                 parcels ({}, {}, {}) N s",
+                g(f64::from(end.gained.x)),
+                g(f64::from(end.gained.y)),
+                g(f64::from(end.gained.z)),
+                g(f64::from(end.lost.x)),
+                g(f64::from(end.lost.y)),
+                g(f64::from(end.lost.z)),
+            );
+            Some(end)
+        }
+        None => None,
+    };
+    // Gate 68-B's readout, full precision, test builds only - it feeds no
+    // output.
+    let final_flow = if cfg!(test) {
+        let u = gpu.download(&s.u().f)?;
+        vec![
+            ("Ux".to_string(), u.iter().map(|v| v.x).collect()),
+            ("Uy".to_string(), u.iter().map(|v| v.y).collect()),
+            ("Uz".to_string(), u.iter().map(|v| v.z).collect()),
+            ("p".to_string(), gpu.download(&s.p().f)?),
+            ("T".to_string(), gpu.download(&energy.field().f)?),
+            ("rho".to_string(), gpu.download(&gas.rho().f)?),
+        ]
+    } else {
+        Vec::new()
+    };
     let run_end = RunEnd {
         steps: n_steps,
         transient,
@@ -3106,6 +3250,8 @@ fn run(o: &Options) -> Result<RunEnd> {
         final_state,
         radiation,
         enclosure,
+        parcels: parcels_end,
+        final_flow,
     };
 
     mem.sample(&gpu)?;
@@ -3137,6 +3283,14 @@ fn run(o: &Options) -> Result<RunEnd> {
     // SPEC-LIT 161.6: the final state's moved points.
     if let Some(rb) = &rigid {
         rb.write_points(&output_root(&o.case_path).join(format_time_name(t_phys as Scalar)))?;
+    }
+    // SPEC-LIT §137.10: the final state's live parcels, same rule.
+    if let Some(pc) = &parcels {
+        pc.write_vtp(
+            &gpu,
+            &output_root(&o.case_path).join(format_time_name(t_phys as Scalar)),
+            t_phys as Scalar,
+        )?;
     }
     // ... and a final checkpoint, for the same reason, when the case asked
     // for a series at all.
@@ -3935,6 +4089,15 @@ struct RunEnd {
     /// and the sweeps.
     #[cfg_attr(not(test), allow(dead_code))]
     enclosure: Option<ofgpu::cht::flow::EnclosureReport>,
+    /// SPEC-LIT 137.10's report: the last step's momentum given to the gas
+    /// and lost by the live parcels, and the pool's stats.
+    #[cfg_attr(not(test), allow(dead_code))]
+    parcels: Option<lowmach_parcels::ParcelsEnd>,
+    /// The final internal `Ux`, `Uy`, `Uz`, `p`, `T`, `rho` at full
+    /// precision, filled only in test builds (`cfg!(test)`, else empty) -
+    /// Gate 68-B's readout; it feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    final_flow: Vec<(String, Vec<Scalar>)>,
 }
 
 /// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
@@ -4337,6 +4500,7 @@ mod lowmach_tests {
                 None,
                 None,
                 None,
+                None,
             )?;
             assert!(
                 last.finite,
@@ -4608,6 +4772,7 @@ mod lowmach_tests {
             None,
             true,
             Some(dt),
+            None,
             None,
             None,
             None,
@@ -5964,8 +6129,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None, parcels: None, final_flow: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None, parcels: None, final_flow: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5985,8 +6150,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None, parcels: None, final_flow: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), radiation: None, enclosure: None, parcels: None, final_flow: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
