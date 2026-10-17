@@ -55,6 +55,7 @@ pub mod laminar;
 pub mod particle;
 pub mod progress;
 pub mod psi;
+pub mod seeding;
 pub mod source;
 pub mod thermo;
 pub mod tube1d;

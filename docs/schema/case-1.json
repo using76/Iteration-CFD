@@ -313,6 +313,47 @@
       },
       "additionalProperties": false
     },
+    "JsonCloudChar": {
+      "description": "`dust.cloud.char` - the char reaction (159.5)'s inputs.",
+      "type": "object",
+      "properties": {
+        "A": {
+          "description": "kg/(m2 s Pa), A of R_kin.",
+          "type": "number",
+          "format": "double"
+        },
+        "C0": {
+          "description": "kg/(m s Pa K^0.75), C_0 of R_diff.",
+          "type": "number",
+          "format": "double"
+        },
+        "Ea": {
+          "description": "J/mol, E_a of R_kin.",
+          "type": "number",
+          "format": "double"
+        },
+        "hc": {
+          "description": "J/kg, the heat per kg of carbon burnt; absent is ISL22's 32.9 MJ/kg\n(§159.1).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "hs": {
+          "description": "The retention factor h_s, in [0, 1] (ISL22: 0.3).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "C0",
+        "A",
+        "Ea",
+        "hs"
+      ]
+    },
     "JsonCombustion": {
       "description": "The `combustion` block (SPEC-LIT §137.2; the closures are §134).",
       "type": "object",
@@ -457,6 +498,39 @@
       },
       "additionalProperties": false
     },
+    "JsonComposition": {
+      "description": "`dust.cloud.composition` - the four stage fractions of one particle.",
+      "type": "object",
+      "properties": {
+        "ash": {
+          "description": "The ash's share.",
+          "type": "number",
+          "format": "double"
+        },
+        "char": {
+          "description": "The char's share (`char` is a legal field name).",
+          "type": "number",
+          "format": "double"
+        },
+        "moisture": {
+          "description": "The moisture's share.",
+          "type": "number",
+          "format": "double"
+        },
+        "volatile": {
+          "description": "The volatile's share.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "moisture",
+        "volatile",
+        "char",
+        "ash"
+      ]
+    },
     "JsonCompressible": {
       "description": "`physics.compressible` - SPEC-LIT §122.6, the JSONC statement of §122.1's\ngas: `gamma` and `W` state it, a stated `cp` must agree with (122.5) to\n`1e-6` relative, `Pr` defaults to 0.71, and `pOperating` (§122.2's\n`p_op`, Pa) has no default.",
       "type": "object",
@@ -557,6 +631,33 @@
         "transform"
       ]
     },
+    "JsonDevolatilisation": {
+      "description": "`dust.cloud.devolatilisation` - SFOM (159.4)'s rate and its heat.",
+      "type": "object",
+      "properties": {
+        "A": {
+          "description": "1/s.",
+          "type": "number",
+          "format": "double"
+        },
+        "Ea": {
+          "description": "J/mol.",
+          "type": "number",
+          "format": "double"
+        },
+        "dH": {
+          "description": "J/kg; positive is endothermic.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "A",
+        "Ea",
+        "dH"
+      ]
+    },
     "JsonDisplacement": {
       "description": "A displacement from the rest position, tagged on `kind`.",
       "oneOf": [
@@ -614,7 +715,7 @@
       ]
     },
     "JsonDust": {
-      "description": "The `dust` block (SPEC-LIT §157.4). `thermo` names one of §152.9's two\nmodes; the keys each mode reads are refused on the other.",
+      "description": "The `dust` block (SPEC-LIT §157.4). `thermo` names one of §152.9's two\nmodes; the keys each mode reads are refused on the other. Required in a\nPhase A case; a case stating a `cloud` states none of the Phase A keys,\n`thermo` included (§159.9).",
       "type": "object",
       "properties": {
         "SL": {
@@ -649,6 +750,17 @@
           ],
           "format": "double"
         },
+        "cloud": {
+          "description": "The reacting dust cloud (SPEC-LIT §159.9, DST-14); `None` for every\nPhase A case. Beside `combustion.model` FSC or TFC it is refused:\nPhase B burns the volatile on the finite-rate path, and Phase A's\nequivalent gas would count the same fuel twice.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonDustCloud"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cp": {
           "description": "J/(kg K), the one c_p both pseudo-species carry; prescribed only.",
           "type": [
@@ -677,13 +789,101 @@
           ]
         },
         "thermo": {
-          "description": "`formula` (the pseudo-species of (152.1)-(152.8) at phi) |\n`prescribed` (one constant c_p, §152.9). Required, no default.",
-          "type": "string"
+          "description": "`formula` (the pseudo-species of (152.1)-(152.8) at phi) |\n`prescribed` (one constant c_p, §152.9). Required in a Phase A case\n(refused by name when absent there) and refused beside a `cloud`;\noptional in the schema only so a cloud can stand without it\n(SPEC-LIT §159.9).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonDustCloud": {
+      "description": "`dust.cloud` (SPEC-LIT §159.9): the uniform reacting dust cloud DST-14\nstates and lowers, DST-15 runs. The size is exactly one of `diameter`\nand `rosinRammler`. The GAS side of [`ParticleInputs`] is not the\ncloud's - [`LoweredCloud::particle_inputs`] takes it from the caller,\nwhich in DST-15 is the gas.",
+      "type": "object",
+      "properties": {
+        "char": {
+          "description": "The char reaction (159.5); only with char > 0, absent is inert.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCloudChar"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "composition": {
+          "description": "The four stage fractions; each in [0, 1], the sum within 1e-9 of 1.",
+          "$ref": "#/$defs/JsonComposition"
+        },
+        "concentration": {
+          "description": "kg/m3, the cloud's mass per gas volume; finite and above zero.",
+          "type": "number",
+          "format": "double"
+        },
+        "cpP": {
+          "description": "J/(kg K), the one c_p of (159.1) for the whole particle.",
+          "type": "number",
+          "format": "double"
+        },
+        "devolatilisation": {
+          "description": "SFOM (159.4)'s rate; required with volatile > 0, refused with\nvolatile == 0.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonDevolatilisation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diameter": {
+          "description": "m, the one diameter of a monodisperse cloud; exactly one of this\nand `rosinRammler` states the size.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "emissivity": {
+          "description": "epsilon_0 of (159.1), in [0, 1].",
+          "type": "number",
+          "format": "double"
+        },
+        "parcelsPerCell": {
+          "description": "Parcels per cell, the K of (159.12); absent is 1.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "rhoP": {
+          "description": "kg/m3, the particle density.",
+          "type": "number",
+          "format": "double"
+        },
+        "rosinRammler": {
+          "description": "The Rosin-Rammler law of (147.1): `d` is d_bar, its size parameter\nX; `n` is the spread q.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRosinRammler"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
       "required": [
-        "thermo"
+        "concentration",
+        "composition",
+        "rhoP",
+        "cpP",
+        "emissivity"
       ]
     },
     "JsonDustSst": {
@@ -2344,6 +2544,27 @@
       "additionalProperties": false,
       "required": [
         "model"
+      ]
+    },
+    "JsonRosinRammler": {
+      "description": "`dust.cloud.rosinRammler` - (147.1)'s two constants.",
+      "type": "object",
+      "properties": {
+        "d": {
+          "description": "m, the size parameter X of (147.1).",
+          "type": "number",
+          "format": "double"
+        },
+        "n": {
+          "description": "The spread exponent q of (147.1).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "d",
+        "n"
       ]
     },
     "JsonRun": {

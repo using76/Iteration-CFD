@@ -1766,6 +1766,11 @@ pub struct LoweredCase {
     /// TFC, lowered onto the DST-06 config. `None` for every case that is
     /// not a dust one - then [`Self::chem`] is exactly what it always was.
     pub dust: Option<crate::io::case_dust::LoweredDust>,
+    /// SPEC-LIT §159.9: the `dust.cloud` block, lowered onto the cloud's
+    /// config (DST-14). `None` for every case without the block. No driver
+    /// runs it before DST-15, so [`Self::refuse_parcels`] refuses a case
+    /// that states one.
+    pub cloud: Option<crate::io::case_dust::LoweredCloud>,
     /// SPEC-LIT §158.8: the `vent` block, lowered onto the one-domain vent's
     /// spec. `None` for every case without the block.
     pub vent: Option<crate::dust::vent::VentSpec>,
@@ -1808,8 +1813,17 @@ impl LoweredCase {
 
     /// SPEC-LIT §137.6: a driver's refusal of a case that states parcels.
     /// No driver carries a case's parcels before CHR-26, so a run would
-    /// ignore them; `Ok` for every case without the block.
+    /// ignore them; `Ok` for every case without the block. A case stating a
+    /// dust cloud (§159.9) is refused too: no driver runs Phase B before
+    /// DST-15, so a run would ignore the cloud as well.
     pub fn refuse_parcels(&self) -> Result<()> {
+        if self.cloud.is_some() {
+            return Err(Error::Refused(
+                "dust.cloud: this case states a dust cloud; no driver runs Phase B before \
+                 DST-15 (SPEC-LIT §159.9)"
+                    .into(),
+            ));
+        }
         match self.parcels {
             Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
             None => Ok(()),
@@ -3627,21 +3641,22 @@ impl JsonCase {
         // its own two pseudo-species (§152.4), so a `Some` here means
         // `lower_blocks` is not called: the case states neither species nor
         // chemistry, and its combustion keys are the dust model's.
-        let dust = crate::io::case_dust::lower_dust(
-            self.combustion.as_ref(),
-            self.dust.as_ref(),
-            &crate::io::case_dust::DustContext {
-                species: self.species.is_some(),
-                chemistry: self.chemistry.is_some(),
-                turbulence_kind,
-                turbulence_model: turbulence_model.as_deref(),
-                compressible: compressible.is_some(),
-                gravity: self.physics.gravity,
-                initial_t: self.initial.t,
-                patch_names: &names,
-                rules: &self.patches,
-            },
-        )?;
+        let cx = crate::io::case_dust::DustContext {
+            species: self.species.is_some(),
+            chemistry: self.chemistry.is_some(),
+            turbulence_kind,
+            turbulence_model: turbulence_model.as_deref(),
+            compressible: compressible.is_some(),
+            gravity: self.physics.gravity,
+            initial_t: self.initial.t,
+            patch_names: &names,
+            rules: &self.patches,
+        };
+        let dust = crate::io::case_dust::lower_dust(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
+        // SPEC-LIT §159.9: the `dust.cloud` block, against the same context
+        // - `lower_dust` has already refused a cloud beside the FSC/TFC
+        // model, so what reaches here lowers to the DST-15 seeding.
+        let cloud = crate::io::case_dust::lower_cloud(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
         // SPEC-LIT §137.2 and §137.7: the three chemistry blocks, one
         // lowering; each solved species' field is built on the same patch
         // names and rules as `T`'s. A dust case skips it entirely.
@@ -3724,6 +3739,7 @@ impl JsonCase {
             parcels,
             chem,
             dust,
+            cloud,
             vent,
         })
     }

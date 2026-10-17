@@ -5,22 +5,30 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-// The DST-06 case-block gates (SPEC-LIT §157.4), written once and included
-// both by src/io/tests_case_dust.rs (as io::case_dust::tests) and by
-// tests/case_dust.rs, so both builds run the same eight cases. Host only:
-// no card is needed. No GPL-licensed source was consulted.
+// The DST-06 case-block gates (SPEC-LIT §157.4) and DST-14's cloud gates
+// (SPEC-LIT §159.9), written once and included both by
+// src/io/tests_case_dust.rs (as io::case_dust::tests) and by
+// tests/case_dust.rs, so both builds run the same cases. Host only: no card
+// is needed. No GPL-licensed source was consulted.
 
+use ofgpu::DVec3;
+use ofgpu::dust::char::CharInputs;
 use ofgpu::dust::courant::CO_F_MAX;
 use ofgpu::dust::fsc::{A_FSC, CombustionModel};
 use ofgpu::dust::laminar::LaminarSpeed;
+use ofgpu::dust::particle::Drying;
+use ofgpu::dust::seeding::{gamma, lower_gamma, mass_weighted_mean, rosin_rammler_bands, upper_gamma};
 use ofgpu::dust::vessel0d::{BurningLaw, UnburnedDensity};
 use ofgpu::error::Error;
 use ofgpu::io::case_chem::JsonCombustion;
 use ofgpu::io::case_dust::{
-    DustContext, DustThermo, JsonDust, LoweredDust, LoweredDustSst, decimal_fraction,
-    is_dust_model, lower_dust,
+    CHAR_HC_DEFAULT, CloudGas, CloudSize, DustContext, DustThermo, JsonDust, JsonDustCloud,
+    LoweredCloud, LoweredDust, LoweredDustSst, decimal_fraction, dust_cloud_of_dict, is_dust_model,
+    lower_cloud, lower_dust,
 };
 use ofgpu::io::case_json::{JsonCase, LoweredCase, read_case_jsonc, read_case_jsonc_str};
+use ofgpu::io::case_parcels::parcels_of_dict;
+use ofgpu::io::dict::FoamDict;
 
 /// The duct's six boundary names: an inlet at `xmin`, an open outlet at
 /// `xmax`, symmetry sides - the heated-duct shape of `src/bin/lowmach.rs`.
@@ -556,7 +564,7 @@ fn prescribed_ut_refusals_name_the_setting() {
         rules: &[],
     };
     let dust = JsonDust {
-        thermo: "prescribed".to_string(),
+        thermo: Some("prescribed".to_string()),
         phi: None,
         cp: Some(1000.0),
         w_u: Some(0.029),
@@ -564,6 +572,7 @@ fn prescribed_ut_refusals_name_the_setting() {
         t_b: Some(2100.0),
         s_l: Some(0.5),
         sst: None,
+        cloud: None,
     };
     let combustion = |u: ofgpu::io::case_chem::JsonPrescribedUt| JsonCombustion {
         model: Some("TFC".to_string()),
@@ -602,4 +611,409 @@ fn prescribed_ut_refusals_name_the_setting() {
         lowers(&dust_case("300", initial_bare, FORMULA_MIN)),
         "combustion.unburnedDensity",
     );
+}
+
+// ==========================================================================
+//  DST-14: the reacting dust cloud (SPEC-LIT §159.9)
+// ==========================================================================
+
+/// The every-key cloud, non-default throughout (SPEC-LIT §159.9's gate
+/// `cloud_lowers`): Rosin-Rammler at K = 4, every stage fraction stated,
+/// the SFOM rate and the char reaction with an explicit h_c.
+const CLOUD: &str = r#", "dust": { "cloud": {
+    "concentration": 0.5,
+    "rosinRammler": { "d": 5e-5, "n": 2.5 },
+    "parcelsPerCell": 4,
+    "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 },
+    "rhoP": 1500, "cpP": 1800, "emissivity": 0.9,
+    "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 },
+    "char": { "C0": 5e-12, "A": 2e-3, "Ea": 7.9e4, "hs": 0.3, "hc": 3e7 }
+} }"#;
+
+/// The four-stage composition the seeding tests share.
+const STAGES: &str =
+    r#""composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }"#;
+
+/// The SFOM rate those tests' clouds state beside it.
+const DEVOL: &str = r#""devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }"#;
+
+/// The JsonDustCloud a cloud JSON text lowers to.
+fn cloud_lowered(json: &str, t: f64) -> Result<LoweredCloud, Error> {
+    let jc: JsonDustCloud =
+        serde_json::from_str(json).map_err(|e| Error::Config(format!("the cloud JSON: {e}")))?;
+    jc.lower(t)
+}
+
+/// The 1000-cell mesh of the mass gates: V_i = 1e-6 (1 + 0.37 sin i),
+/// centroids on the x axis.
+fn mesh_1000() -> (Vec<DVec3>, Vec<f64>) {
+    let centroids = (0..1000)
+        .map(|i| DVec3::new(i as f64 * 1e-2, 0.0, 0.0))
+        .collect();
+    let volumes = (0..1000)
+        .map(|i| 1e-6 * (1.0 + 0.37 * (i as f64).sin()))
+        .collect();
+    (centroids, volumes)
+}
+
+/// The cloud's `JsonDust` wrapper, for `lower_cloud` on a built cloud.
+fn cloud_dust(cloud: &JsonDustCloud) -> JsonDust {
+    JsonDust {
+        thermo: None,
+        phi: None,
+        cp: None,
+        w_u: None,
+        w_b: None,
+        t_b: None,
+        s_l: None,
+        sst: None,
+        cloud: Some(cloud.clone()),
+    }
+}
+
+/// **SPEC-LIT §159.9 `cloud_lowers` (D).** The every-key cloud lowers to
+/// exactly those values, `particle_inputs` maps each onto `ParticleInputs`,
+/// the defaults are K = 1, inert char and hc = 32.9 MJ/kg, and the
+/// dictionary route gives the same `JsonDustCloud` and no `parcels` block.
+#[test]
+fn cloud_lowers() -> Result<(), Error> {
+    let c = lowers(&dust_case("300", "", CLOUD))?
+        .cloud
+        .expect("the case states a cloud");
+    assert_eq!(c.concentration, 0.5);
+    assert_eq!(c.size, CloudSize::RosinRammler { d_bar: 5e-5, n: 2.5 });
+    assert_eq!(c.parcels_per_cell, 4);
+    let sum = 0.1 + 0.6 + 0.25 + 0.05;
+    let close = |got: f64, want: f64| (got - want).abs() <= want.abs() * 1e-15;
+    assert!(close(c.composition.moisture, 0.1 / sum), "{:?}", c.composition);
+    assert!(close(c.composition.volatile, 0.6 / sum), "{:?}", c.composition);
+    assert!(close(c.composition.char, 0.25 / sum), "{:?}", c.composition);
+    assert!(close(c.composition.ash, 0.05 / sum), "{:?}", c.composition);
+    assert_eq!(c.rho_p, 1500.0);
+    assert_eq!(c.cp_p, 1800.0);
+    assert_eq!(c.emissivity, 0.9);
+    let dv = c.devol.as_ref().expect("the case states the SFOM rate");
+    assert_eq!((dv.a, dv.e_a, dv.dh), (1.5e5, 7.4e4, 1e5));
+    assert_eq!(
+        c.char_rate,
+        CharInputs { c0: 5e-12, a: 2e-3, e_a: 7.9e4, h_c: 3e7, h_s: 0.3 }
+    );
+    assert_eq!(c.t_init, 300.0);
+    assert_eq!(c.diameters, rosin_rammler_bands(5e-5, 2.5, 4)?);
+    let gas = CloudGas {
+        mu: 1.8e-5,
+        k_g: 0.026,
+        cp_g: 1005.0,
+        cp_volatile: 1500.0,
+        p_ambient: 101325.0,
+    };
+    let p = c.particle_inputs(&gas)?;
+    assert_eq!(p.cp, 1800.0);
+    assert_eq!(p.emissivity, 0.9);
+    assert_eq!((p.devol_a, p.devol_e_a, p.devol_dh), (1.5e5, 7.4e4, 1e5));
+    assert_eq!(p.cp_volatile, 1500.0);
+    assert_eq!((p.mu, p.k_g, p.cp_g), (1.8e-5, 0.026, 1005.0));
+    assert_eq!(p.char_rate, c.char_rate);
+    assert_eq!(p.drying, Drying::water(101325.0)?);
+
+    // The defaults: K 1, inert char, and hc = ISL22's 32.9 MJ/kg when the
+    // char reaction states everything but it (SPEC-LIT §159.1).
+    let minimal = r#", "dust": { "cloud": { "concentration": 0.3, "diameter": 4e-5,
+        "composition": { "moisture": 0, "volatile": 0, "char": 0.9, "ash": 0.1 },
+        "rhoP": 1400, "cpP": 1500, "emissivity": 1 } }"#;
+    let m = lowers(&dust_case("300", "", minimal))?
+        .cloud
+        .expect("the minimal cloud lowers");
+    assert_eq!(m.size, CloudSize::Monodisperse { d: 4e-5 });
+    assert_eq!(m.parcels_per_cell, 1);
+    assert_eq!(m.devol, None);
+    assert_eq!(m.char_rate, CharInputs::inert());
+    assert_eq!(m.diameters, vec![4e-5]);
+    let no_hc = r#", "dust": { "cloud": { "concentration": 0.3, "diameter": 4e-5,
+        "composition": { "moisture": 0, "volatile": 0, "char": 0.9, "ash": 0.1 },
+        "rhoP": 1400, "cpP": 1500, "emissivity": 1,
+        "char": { "C0": 1e-12, "A": 1e-3, "Ea": 8e4, "hs": 0.3 } } }"#;
+    let h = lowers(&dust_case("300", "", no_hc))?.cloud.expect("lowers");
+    assert_eq!(h.char_rate.h_c, CHAR_HC_DEFAULT);
+    assert_eq!(CHAR_HC_DEFAULT, 32.9e6);
+    // The dictionary route: `dustCloud` through the parcels' dictionary-to-
+    // JSON conversion reads as the SAME JsonDustCloud, and a file holding
+    // only `dustCloud` has no `parcels` block (SPEC-LIT §159.9).
+    let dict_text = "FoamFile { format ascii; class dictionary; object cloudProperties; }
+dustCloud { concentration 0.5; rosinRammler { d 5e-5; n 2.5; } parcelsPerCell 4;
+    composition { moisture 0.1; volatile 0.6; char 0.25; ash 0.05; }
+    rhoP 1500; cpP 1800; emissivity 0.9;
+    devolatilisation { A 1.5e5; Ea 7.4e4; dH 1e5; }
+    char { C0 5e-12; A 2e-3; Ea 7.9e4; hs 0.3; hc 3e7; } }
+";
+    let d = FoamDict::parse(dict_text, "cloudProperties")?;
+    let from_dict = dust_cloud_of_dict(&d, "cloudProperties")?.expect("dustCloud stated");
+    let from_jsonc = read_case_jsonc_str(&dust_case("300", "", CLOUD), "dustTest")?
+        .dust
+        .and_then(|d| d.cloud)
+        .expect("the JSONC case states the cloud");
+    assert_eq!(from_dict, from_jsonc);
+    assert!(parcels_of_dict(&d, "cloudProperties")?.is_none());
+    Ok(())
+}
+
+/// **SPEC-LIT §159.9 `cloud_mass_is_exact` (A).** On 1000 cells of unequal
+/// volume, monodisperse and Rosin-Rammler at K = 1, 4 and 16: the seeded
+/// mass per volume is C to 1e-12 relative, each particle's four stage
+/// masses add to rho_p pi d^3/6 to 1e-14, and the handoff rounds once.
+#[test]
+fn cloud_mass_is_exact() -> Result<(), Error> {
+    let (cents, vols) = mesh_1000();
+    let total_v: f64 = vols.iter().sum();
+    let monodisperse = |k: u32| {
+        cloud_lowered(
+            &format!(
+                r#"{{ "concentration": 0.5, "diameter": 4e-5, "parcelsPerCell": {k}, {STAGES},
+                    "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, {DEVOL} }}"#
+            ),
+            300.0,
+        )
+    };
+    let rosin = |k: u32| {
+        cloud_lowered(
+            &format!(
+                r#"{{ "concentration": 0.5, "rosinRammler": {{ "d": 5e-5, "n": 2.5 }},
+                    "parcelsPerCell": {k}, {STAGES},
+                    "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, {DEVOL} }}"#
+            ),
+            300.0,
+        )
+    };
+    for c in [monodisperse(1)?, monodisperse(4)?, rosin(1)?, rosin(4)?, rosin(16)?] {
+        let parcels = c.seed(&cents, &vols)?;
+        assert_eq!(parcels.len(), 1000 * c.parcels_per_cell as usize);
+        let mut seeded = 0.0;
+        for p in &parcels {
+            let m = c.rho_p * std::f64::consts::PI * p.particle.d * p.particle.d * p.particle.d
+                / 6.0;
+            let stages = p.particle.m_w + p.particle.m_v + p.particle.m_c + p.particle.m_a;
+            assert!(
+                (stages - m).abs() <= 1e-14 * m,
+                "stage masses {stages} vs particle mass {m}"
+            );
+            seeded += p.n_p * m;
+        }
+        let rel = (seeded / total_v - c.concentration).abs() / c.concentration;
+        assert!(rel <= 1e-12, "seeded C is off by {rel:e} relative");
+        let sp = parcels[0].seed_parcel();
+        assert_eq!(sp.diameter, parcels[0].particle.d as ofgpu::Scalar);
+        assert_eq!(sp.n_p, parcels[0].n_p as ofgpu::Scalar);
+        assert_eq!(sp.velocity, ofgpu::Vec3::ZERO);
+        assert_eq!(sp.uid, None);
+    }
+    Ok(())
+}
+
+/// **SPEC-LIT §159.9 `rosin_rammler_moments` (A).** Gamma(1 + 1/n) against
+/// its known values, gamma(a, x) against the closed forms on both sides of
+/// a + 1, the K = 7 band diameters against the supervisor's oracle, and the
+/// seeded set's mass-weighted mean diameter against (159.13) - one printed
+/// line per (n, K).
+#[test]
+fn rosin_rammler_moments() -> Result<(), Error> {
+    let rel = |got: f64, want: f64| (got - want).abs() / want.abs();
+    for (n, want) in [
+        (1.0, 1.0),
+        (2.0, std::f64::consts::PI.sqrt() / 2.0),
+        (3.0, 0.892979511569249211),
+        (4.0, 0.906402477055477078),
+        (2.5, 0.887263817503075289),
+    ] {
+        let got = gamma(1.0 + 1.0 / n);
+        assert!(rel(got, want) <= 1e-14, "gamma(1+1/{n}) = {got} vs {want}");
+    }
+    for a in [2.0, 3.0] {
+        let g = gamma(a);
+        for x in [0.1, 1.0, 2.9, 3.1, 3.9, 4.1, 10.0, 40.0] {
+            let got = if x < a + 1.0 {
+                lower_gamma(a, x)
+            } else {
+                g - upper_gamma(a, x)
+            };
+            let want = if a == 2.0 {
+                1.0 - (-x).exp() * (1.0 + x)
+            } else {
+                2.0 - (-x).exp() * (x * x + 2.0 * x + 2.0)
+            };
+            assert!((got - want).abs() <= 1e-14 * g, "gamma({a},{x}) = {got} vs {want}");
+        }
+    }
+    // The supervisor oracle's K = 7 bands, first and last of each.
+    let b1 = rosin_rammler_bands(5e-5, 1.0, 7)?;
+    assert!(rel(b1[0], 3.7547960518225077e-06) <= 1e-12, "{}", b1[0]);
+    assert!(rel(b1[6], 1.4729550745276577e-04) <= 1e-12, "{}", b1[6]);
+    let b2 = rosin_rammler_bands(5e-5, 2.0, 7)?;
+    assert!(rel(b2[0], 1.2884936209065723e-05) <= 1e-12, "{}", b2[0]);
+    assert!(rel(b2[6], 8.4798407702767e-05) <= 1e-12, "{}", b2[6]);
+    for bands in [&b1, &b2] {
+        for w in bands.windows(2) {
+            assert!(w[0] < w[1], "the bands must strictly increase: {bands:?}");
+        }
+    }
+    // (159.13) on the seeded set: the mass-weighted mean diameter is
+    // d_bar Gamma(1 + 1/n) for every n at K = 1, 7 and 64.
+    // Against the KNOWN Gamma(1 + 1/n), not this file's own `gamma`.
+    let (cents, vols) = mesh_1000();
+    for (n, g_known) in [
+        (1.0, 1.0),
+        (2.0, std::f64::consts::PI.sqrt() / 2.0),
+        (3.0, 0.892979511569249211),
+        (4.0, 0.906402477055477078),
+        (2.5, 0.887263817503075289),
+    ] {
+        let want = 5e-5 * g_known;
+        for k in [1u32, 7, 64] {
+            let c = cloud_lowered(
+                &format!(
+                    r#"{{ "concentration": 0.5, "rosinRammler": {{ "d": 5e-5, "n": {n} }},
+                        "parcelsPerCell": {k}, {STAGES},
+                        "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, {DEVOL} }}"#
+                ),
+                300.0,
+            )?;
+            let parcels = c.seed(&cents, &vols)?;
+            let masses: Vec<f64> = parcels
+                .iter()
+                .map(|p| {
+                    let d = p.particle.d;
+                    p.n_p * c.rho_p * std::f64::consts::PI * d * d * d / 6.0
+                })
+                .collect();
+            let ds: Vec<f64> = parcels.iter().map(|p| p.particle.d).collect();
+            let got = mass_weighted_mean(&masses, &ds);
+            let err = (got - want).abs() / want;
+            println!("n = {n}, K = {k}: relative error {err:.3e}");
+            assert!(err <= 1e-10, "n = {n}, K = {k}: mean {got} vs {want} rel {err:e}");
+        }
+    }
+    Ok(())
+}
+
+/// **SPEC-LIT §159.9 `cloud_refusals` (D).** Every refusal of the block -
+/// value ranges, both/neither size, the presence rules, each Phase A key
+/// beside a cloud, `initial.T`, the FSC/TFC seam, and the seeding's own -
+/// names its key; an unknown key is named by the deserialiser; and a cloud
+/// case is refused through `refuse_parcels`.
+#[test]
+fn cloud_refusals() {
+    let cloud_case = |cloud: &str| {
+        lowers(&dust_case("300", "", &format!(r#", "dust": {{ "cloud": {cloud} }}"#)))
+    };
+    for (cloud, key) in [
+        (r#"{ "concentration": 0, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.concentration"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "rosinRammler": { "d": 5e-5, "n": 2.5 }, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.diameter"),
+        (r#"{ "concentration": 0.5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.diameter"),
+        (r#"{ "concentration": 0.5, "rosinRammler": { "d": 0, "n": 2.5 }, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.rosinRammler.d"),
+        (r#"{ "concentration": 0.5, "rosinRammler": { "d": 5e-5, "n": -1 }, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.rosinRammler.n"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "parcelsPerCell": 0, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.parcelsPerCell"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 1.5, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.composition"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.0 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.composition"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 0, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.rhoP"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": -1, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.cpP"),
+    ] {
+        refuses(cloud_case(cloud), key);
+    }
+    for (cloud, key) in [
+        // emissivity outside [0, 1].
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 1.5, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.emissivity"),
+        // devolatilisation is required with a volatile and refused without one.
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9 }"#, "dust.cloud.devolatilisation"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0, "char": 0.85, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.devolatilisation"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": -1, "Ea": 7.4e4, "dH": 1e5 } }"#, "dust.cloud.devolatilisation.A"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": -1, "dH": 1e5 } }"#, "dust.cloud.devolatilisation.Ea"),
+        // The char reaction only beside a char, and each of its values.
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0, "ash": 0.3 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": 5e-12, "A": 2e-3, "Ea": 7.9e4, "hs": 0.3 } }"#, "dust.cloud.char"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": -1, "A": 2e-3, "Ea": 7.9e4, "hs": 0.3 } }"#, "dust.cloud.char.C0"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": 5e-12, "A": -1, "Ea": 7.9e4, "hs": 0.3 } }"#, "dust.cloud.char.A"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": 5e-12, "A": 2e-3, "Ea": -1, "hs": 0.3 } }"#, "dust.cloud.char.Ea"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": 5e-12, "A": 2e-3, "Ea": 7.9e4, "hs": 1.5 } }"#, "dust.cloud.char.hs"),
+        (r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }, "char": { "C0": 5e-12, "A": 2e-3, "Ea": 7.9e4, "hs": 0.3, "hc": -1 } }"#, "dust.cloud.char.hc"),
+    ] {
+        refuses(cloud_case(cloud), key);
+    }
+    // dH and hc not finite cannot ride through JSON; lowered directly off
+    // the every-key cloud.
+    let every: JsonDustCloud = read_case_jsonc_str(&dust_case("300", "", CLOUD), "dustTest")
+        .expect("the every-key case parses")
+        .dust
+        .and_then(|d| d.cloud)
+        .expect("the every-key case states the cloud");
+    let mut no_dh = every.clone();
+    no_dh.devolatilisation.as_mut().unwrap().dh = f64::NAN;
+    refuses(no_dh.lower(300.0), "dust.cloud.devolatilisation.dH");
+    let mut no_hc = every.clone();
+    no_hc.char_burn.as_mut().unwrap().hc = Some(f64::NAN);
+    refuses(no_hc.lower(300.0), "dust.cloud.char.hc");
+    // Each Phase A key beside a cloud, whatever the combustion block says.
+    let beside = |phase_a: &str| {
+        lowers(&dust_case(
+            "300",
+            "",
+            &format!(
+                r#", "dust": {{ {phase_a} "cloud": {{ "concentration": 0.5, "diameter": 4e-5,
+                    "composition": {{ "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }},
+                    "rhoP": 1500, "cpP": 1800, "emissivity": 0.9 }} }}"#
+            ),
+        ))
+    };
+    refuses(beside(r#""thermo": "formula", "phi": 0.62, "#), "dust.thermo");
+    refuses(beside(r#""phi": 0.62, "#), "dust.phi");
+    refuses(beside(r#""cp": 1000, "#), "dust.cp");
+    refuses(beside(r#""Wu": 0.0328, "#), "dust.Wu");
+    refuses(beside(r#""Wb": 0.0297, "#), "dust.Wb");
+    refuses(beside(r#""Tb": 1500, "#), "dust.Tb");
+    refuses(beside(r#""SL": 0.25, "#), "dust.SL");
+    refuses(beside(r#""sst": { "limitOmegaProduction": true }, "#), "dust.sst");
+    // `initial.T` is where the particles start: absent, refused.
+    let cx_names = vec!["vessel".to_string()];
+    let cx = DustContext {
+        species: false,
+        chemistry: false,
+        turbulence_kind: None,
+        turbulence_model: None,
+        compressible: false,
+        gravity: [0.0, 0.0, 0.0],
+        initial_t: None,
+        patch_names: &cx_names,
+        rules: &[],
+    };
+    refuses(lower_cloud(None, Some(&cloud_dust(&every)), &cx), "initial.T");
+    // A cloud beside the dust model is refused by its own key: Phase B
+    // burns the volatile on the finite-rate path.
+    refuses(lowers(&dust_case("300", FSC_MIN, CLOUD)), "dust.cloud");
+    refuses(lowers(&dust_case("300", TFC_CO, CLOUD)), "dust.cloud");
+    // The seeding's own refusals: unequal lengths and a zero volume.
+    let c = cloud_lowered(
+        r#"{ "concentration": 0.5, "diameter": 4e-5, "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 }, "rhoP": 1500, "cpP": 1800, "emissivity": 0.9, "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 } }"#,
+        300.0,
+    )
+    .expect("the cloud lowers");
+    refuses(c.seed(&[DVec3::new(1.0, 0.0, 0.0)], &[]), "dust.cloud");
+    refuses(
+        c.seed(&[DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0)], &[1e-6, 0.0]),
+        "dust.cloud",
+    );
+    // An unknown key is named, inside the cloud and inside its composition.
+    for text in [
+        r#", "dust": { "cloud": { "bogusKey": 1, "concentration": 0.5, "diameter": 4e-5,
+            "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 },
+            "rhoP": 1500, "cpP": 1800, "emissivity": 0.9 } }"#,
+        r#", "dust": { "cloud": { "concentration": 0.5, "diameter": 4e-5,
+            "composition": { "bogusKey": 1, "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 },
+            "rhoP": 1500, "cpP": 1800, "emissivity": 0.9 } }"#,
+    ] {
+        let e = read_case_jsonc_str(&dust_case("300", "", text), "dustTest")
+            .expect_err("an unknown key is refused")
+            .to_string();
+        assert!(e.contains("bogusKey"), "{e}");
+    }
+    // A cloud case lowers, and no driver runs it before DST-15.
+    let l = lowers(&dust_case("300", "", CLOUD)).expect("the cloud case lowers");
+    let e = l.refuse_parcels().expect_err("the cloud case is refused");
+    assert!(e.to_string().contains("dust.cloud"), "{e}");
 }

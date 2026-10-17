@@ -50133,6 +50133,9 @@ gravity)` is the only lowering. In the dictionary:
 * `addedMass` is a switch (`yes`/`no`, `true`/`false`, `on`/`off`).
 * `evaporation { liquid { } }`, `impact { }` and `coupling { }` are
   sub-dictionaries.
+* `dustCloud { }` is not the `parcels` table's: it is the dust cloud of
+  §159.9 (DST-14), read by its own deserialiser, and a file that states
+  only `dustCloud` has no `parcels` block.
 * `injectors { <name> { ... } }` holds one named sub-dictionary per
   injector. They are taken in name order, because an injector's index is
   part of every parcel it emits (§66.8).
@@ -57543,6 +57546,124 @@ the two heats (at DST-12's integrand plus `h_s m_c h_c`) are within 4 ulp in bot
 on Q_conv/Q_rad in f64 and Q_rad under `single`), and the O2, the CO2, the carbon times T_p and the
 gas's heat are the products of the carbon given bit for bit, on the device as on the host. DST-12's
 six rows print what they printed before.
+
+### 159.9 The cloud as built (DST-14)
+
+`No GPL-licensed source was consulted.` DST-14 states a reacting dust cloud in a case and lowers
+it, on the host only; DST-15 runs it. Files: `src/dust/seeding.rs` (new), `src/io/case_dust.rs`,
+`src/io/case_parcels.rs`, `src/io/case_json.rs`, `docs/schema/case-1.json` and
+`tests/shared/case_dust_cases.rs`. The specification was informed by a review of FSCDustFoam
+(Huang & Lipatnikov, GPL) and no code was copied; the equations below are (147.1), the open
+DLMF and the derivation given here.
+
+**The block.** JSONC `dust.cloud`, and on the dictionary route of §137.2 the sub-dictionary
+`dustCloud` of `constant/cloudProperties`. The dictionary is turned into the same JSON object and
+read by the same `deny_unknown_fields` deserialiser, so the two routes cannot drift; a file that
+states only `dustCloud` has no `parcels` block.
+
+```
+  cloud {
+    concentration C        kg/m3, > 0                                         required
+    diameter d             m, > 0                  exactly one of the two
+    rosinRammler { d, n }  m, > 0 ; n > 0          (d is d̄ = X of (147.1), n is its q)
+    parcelsPerCell K       integer >= 1                                       default 1
+    composition { moisture, volatile, char, ash }  each in [0, 1], sum within 1e-9 of 1, required
+    rhoP, cpP              kg/m3, J/(kg K), > 0                               required
+    emissivity             in [0, 1]                                          required
+    devolatilisation { A >= 0 1/s, Ea >= 0 J/mol, dH finite J/kg }      required iff volatile > 0
+    char { C0 >= 0, A >= 0, Ea >= 0, hs in [0, 1], hc >= 0 J/kg }        only with char > 0
+  }
+```
+
+`char` absent with char > 0 is an inert char (`CharInputs::inert`, as DST-12 left it), and `hc`
+absent is ISL22's 32.9 MJ/kg (§159.1); both are decisions taken by recommendation, since the plan
+row lists no `hc` and `CharInputs` needs one. The composition is divided by its own sum, so the
+stated fractions move by at most 1e-9 relative and the four stage masses of each particle add to
+its mass to round-off. The particles start at rest at the case's `initial.T`. The gas side of
+`ParticleInputs` (μ, k_g, c_p,g, the volatile's c_p and the drying pressure) is not the cloud's:
+`LoweredCloud::particle_inputs` takes it from the caller, which in DST-15 is the gas.
+
+**Refusals** (§13.4; each names its key). A cloud beside `combustion.model` FSC or TFC
+(`dust.cloud`): Phase B burns the volatile on the finite-rate path (§159.4), and Phase A's
+equivalent gas would count the same fuel twice. A Phase A key (`dust.thermo`, `phi`, `cp`, `Wu`,
+`Wb`, `Tb`, `SL`, `sst`) beside a cloud. Both or neither of `diameter` and `rosinRammler`. Every
+value outside its range above. `devolatilisation` without volatile, or volatile without it.
+`char` with no char. `initial.T` absent. An unknown key: the deserialiser names it. Every driver
+refuses a case that states a cloud through `LoweredCase::refuse_parcels` until DST-15 wires
+`ofgpu-lowmach`, and `io::case::read_case_controls` already refuses a case directory that holds
+`constant/cloudProperties`. A Phase A case (no cloud) now states `dust.thermo` as before; the key
+became optional in the schema only so that a cloud can stand without it, and its absence beside
+FSC/TFC is refused by name.
+
+**The seeding.** The plan row says the cloud lowers "to CHR-25's injectors". The tree's injector
+(§66.8) is a nozzle that emits per event, and a uniform cloud at t = 0 is `Parcels::seed`'s
+`SeedParcel` (§66), so the lowering targets that instead: the tree wins. Each cell c of volume
+V_c and centroid x_c receives K parcels at x_c, band j = 1..K, in cell-major order:
+
+```
+  a = 1 + 1/n ,   X_j = −ln(1 − j/K)   (X_0 = 0, X_K = ∞)
+  d_j = K d̄ [ γ(a, X_j) − γ(a, X_{j−1}) ]                                                     (159.12)
+  (1/K) Σ_j d_j = d̄ Γ(1 + 1/n)                                                               (159.13)
+  M_cj = C V_c / K ,   m_j = ρ_p π d_j³ / 6 ,   n_p,cj = M_cj / m_j                              (159.14)
+```
+
+A monodisperse cloud has d_j = d for every j.
+
+**[derived]** (159.12) is band j's mass-weighted mean diameter. With (147.1)'s volume (mass)
+fraction Q(d) = 1 − exp(−(d/d̄)^n) and x = (d/d̄)^n, d = d̄ x^{1/n} and dQ = e^{−x} dx. Band j holds
+the quantiles (j−1)/K to j/K, i.e. x from X_{j−1} to X_j, mass fraction 1/K, so its mean is
+K d̄ ∫ x^{1/n} e^{−x} dx over that interval, which is K d̄ [γ(a, X_j) − γ(a, X_{j−1})]. Summed over
+the K equal-mass bands it telescopes to d̄ γ(a, ∞) = d̄ Γ(a) for ANY K, the Rosin-Rammler
+mass-weighted mean (159.13); K = 1 gives the one parcel that mean. The seeded mass per volume,
+Σ n_p m / Σ V_c, is C by (159.14).
+
+γ(a, x) and Γ(a, x) are the lower and upper incomplete gamma functions (DLMF §8.2,
+https://dlmf.nist.gov/8.2, open), evaluated in f64 for a > 1:
+
+```
+  γ(a, x) = x^a e^{−x} Σ_{k≥0} x^k / ( a (a+1) ⋯ (a+k) ) ,                 x < a + 1
+  Γ(a, x) = x^a e^{−x} / ( b_0 + a_1/( b_1 + a_2/( b_2 + ⋯ ) ) ) ,          x ≥ a + 1
+            b_k = x + 2k + 1 − a ,   a_k = −k (k − a)
+  Γ(a) = γ(a, a + 1) + Γ(a, a + 1)                                                            (159.15)
+```
+
+The series is DLMF (8.7.1) with Γ(a)/Γ(a+k+1) written as the product. The fraction is the even
+contraction of DLMF (8.9.2) [derived], evaluated by the modified Lentz algorithm (Lentz, Appl.
+Opt. 15 (1976) 668-671; Thompson & Barnett, J. Comput. Phys. 64 (1986) 490-509). x^a e^{−x} is
+`exp(a ln x − x)`. Each band takes the form that does not cancel: γ differences when both ends
+are below a + 1, Γ(a, ·) differences when both are at or above it (Γ(a, ∞) = 0), and
+`(Γ(a) − γ(a, X_{j−1})) − Γ(a, X_j)` across the switch. A supervisor oracle of the same formulas
+gives Γ(1 + 1/n) within 9.6e−16 relative for n from 0.3 to 10 and (159.13) within 6.2e−16 for
+K = 1, 7, 64 and 1000.
+
+**Precision.** Every number above is f64 in both builds; `CloudParcel::seed_parcel` rounds the
+position, diameter, temperature and n_p to `Scalar` once, at the handoff. The gates are class A
+in both builds, and `tests/case_dust.rs` runs the same cases under `single`.
+
+**Gates** (`io::case_dust::tests`, and `tests/case_dust.rs` under `single`):
+
+* `cloud_lowers` (D): a JSONC case stating every cloud key at a non-default value lowers to those
+  values, `particle_inputs` maps each onto `ParticleInputs`, the defaults are K = 1, inert char
+  and hc = 32.9e6, and the dictionary route gives the same `JsonDustCloud` and the same lowering.
+* `cloud_mass_is_exact` (A): on 1000 cells of unequal volume, monodisperse and Rosin-Rammler with
+  K = 1, 4 and 16, Σ n_p m / Σ V equals C to 1e−12 relative, and each particle's four stage masses
+  add to ρ_p π d³/6 to 1e−14.
+* `rosin_rammler_moments` (A): Γ(1 + 1/n) for n = 1, 2, 3, 4, 2.5 within 1e−14 of its known value;
+  γ(2, x) and γ(3, x) within 1e−14 Γ(a) of their closed forms on both sides of a + 1; band
+  diameters within 1e−12 of the oracle's; and the seeded set's mass-weighted mean diameter within
+  1e−10 of d̄ Γ(1 + 1/n) for each n with K = 1, 7 and 64.
+* `cloud_refusals` (D): each refusal above names its key.
+* `the_shipped_schema_is_the_generated_one`: the regenerated schema.
+
+**Measured** (host only, 2026-10-17; the f64 build and `single` print the same digits, since every
+number is f64). The seeded set's mass-weighted mean diameter is within 9.9e−15 of d̄ Γ(1 + 1/n) at
+worst (n = 4, K = 64), 5.4e−16 at best (n = 1, K = 1), against the bar of 1e−10; the error grows
+with K only through the f64 sum over 1000 K parcels. The seeded mass per volume holds its 1e−12 bar
+on all five clouds, each particle's stage masses their 1e−14 bar, Γ(1 + 1/n) its 1e−14 bar against
+the known values, γ(2, x) and γ(3, x) theirs against the closed forms, and the K = 7 bands match the
+oracle to 1e−12. Tests: 4 new in `io::case_dust::tests` (f64) and the same 4 in
+`tests/case_dust.rs` (14 in that file, both builds); `io::case_parcels` and the schema test pass
+unchanged in count.
 
 ---
 
