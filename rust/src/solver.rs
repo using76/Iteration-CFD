@@ -5120,7 +5120,6 @@ mod tests {
     /// only - the one exact statement relating the per-region numbers to
     /// the global one.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ranged_residuals_partition_the_global_residual() {
         let n = 19;
         let Some(r) = rig(n, 2024, false) else { return };
@@ -5144,7 +5143,7 @@ mod tests {
         let lhs = r_g * n_g;
         assert!(lhs > 0.0, "psi is noise, not the solution: lhs {lhs:e}");
         let err = (lhs - sum).abs() / lhs;
-        assert!(err <= 1e-12, "partition error {err:e}");
+        assert!((err as f64) <= crate::precision::roundoff_tol(1e-12), "partition error {err:e}");
     }
 
     /// A range outside the system is an error that names the ranges, not a

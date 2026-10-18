@@ -5284,24 +5284,23 @@ mod lowmach_tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn relaxation_reaches_each_equation_by_its_own_name() {
         let b = controls_for(&Knobs::default());
-        assert!((f64::from(b.simple.momentum.u_relax) - 0.7).abs() < 1e-12);
-        assert!((f64::from(b.simple.p_relax) - 0.3).abs() < 1e-12);
-        assert!((f64::from(b.energy.t_relax) - 0.7).abs() < 1e-12);
+        assert!((f64::from(b.simple.momentum.u_relax) - 0.7).abs() < ofgpu::precision::roundoff_tol(1e-12));
+        assert!((f64::from(b.simple.p_relax) - 0.3).abs() < ofgpu::precision::roundoff_tol(1e-12));
+        assert!((f64::from(b.energy.t_relax) - 0.7).abs() < ofgpu::precision::roundoff_tol(1e-12));
 
         let u = controls_for(&Knobs { relax_u: 0.5, ..Knobs::default() });
-        assert!((f64::from(u.simple.momentum.u_relax) - 0.5).abs() < 1e-12);
+        assert!((f64::from(u.simple.momentum.u_relax) - 0.5).abs() < ofgpu::precision::roundoff_tol(1e-12));
         assert_eq!(u.simple.p_relax, b.simple.p_relax, "relaxation.U must not move p");
         assert_eq!(u.energy.t_relax, b.energy.t_relax, "relaxation.U must not move T");
 
         let p = controls_for(&Knobs { relax_p: 0.2, ..Knobs::default() });
-        assert!((f64::from(p.simple.p_relax) - 0.2).abs() < 1e-12);
+        assert!((f64::from(p.simple.p_relax) - 0.2).abs() < ofgpu::precision::roundoff_tol(1e-12));
         assert_eq!(p.simple.momentum.u_relax, b.simple.momentum.u_relax);
 
         let t = controls_for(&Knobs { relax_t: 0.4, ..Knobs::default() });
-        assert!((f64::from(t.energy.t_relax) - 0.4).abs() < 1e-12);
+        assert!((f64::from(t.energy.t_relax) - 0.4).abs() < ofgpu::precision::roundoff_tol(1e-12));
         assert_eq!(t.simple.momentum.u_relax, b.simple.momentum.u_relax);
     }
 
@@ -5379,12 +5378,11 @@ mod lowmach_tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn prt_reaches_the_gas_properties() {
         let a = controls_for(&Knobs::default());
         let b = controls_for(&Knobs { prt: 0.5, ..Knobs::default() });
-        assert!((f64::from(a.gas.pr_t) - 0.85).abs() < 1e-12);
-        assert!((f64::from(b.gas.pr_t) - 0.5).abs() < 1e-12);
+        assert!((f64::from(a.gas.pr_t) - 0.85).abs() < ofgpu::precision::roundoff_tol(1e-12));
+        assert!((f64::from(b.gas.pr_t) - 0.5).abs() < ofgpu::precision::roundoff_tol(1e-12));
     }
 
     /// `ddtSchemes` names a SCHEME. `run` used to write
@@ -5986,6 +5984,7 @@ mod lowmach_tests {
     /// The transient half of the same test: `numerics.ddt` is a SCHEME, and
     /// `Euler` and `backward` must not produce the same answer.
     #[test]
+    // f32 (F32-17): the f32 ddt coefficients trip the run's zero-sum refusal
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ddt_scheme_changes_what_the_run_writes() {
         if Gpu::new(0).is_err() {
@@ -6795,6 +6794,7 @@ mod lowmach_tests {
     /// static and on its sine law, under Euler and backward at 20, 40 and 80
     /// steps, read through `RunEnd::ux_mean`.
     #[test]
+    // f32 (F32-17): the observed order 2.76 against 2 is a physics band
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gate_105d_backward_starts_from_the_euler_row_and_the_stroke_is_second_order() {
         if Gpu::new(0).is_err() {
@@ -6877,6 +6877,7 @@ mod lowmach_tests {
     /// uniform in space, first order under `Euler` and second order under
     /// `backward`, read through `RunEnd::t_mean`.
     #[test]
+    // f32 (F32-17): the f32 run's t_mean misses the tabulated row by 1.1e-3 K
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gate_105e_a_uniformly_heated_duct_is_first_order_under_euler_and_second_order_under_backward() {
         if Gpu::new(0).is_err() {
@@ -6932,6 +6933,7 @@ mod lowmach_tests {
     /// runs past its old Mach refusals to 160 and 320 steps with `T` at
     /// round-off and `Ux` on the exact answer.
     #[test]
+    // f32 (F32-17): T drifts 1.6e-3 K over the 160 backward steps, past the cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_backward_stroke_runs_past_its_old_mach_refusal_with_t_at_round_off() {
         if Gpu::new(0).is_err() {
@@ -6965,7 +6967,6 @@ mod lowmach_tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_moving_wall_named_in_the_motion_block_carries_the_mesh_velocity() {
         if Gpu::new(0).is_err() {
             return;
@@ -6991,9 +6992,9 @@ mod lowmach_tests {
             "piston: moving max|Ux+0.5| {:.9e} max|Uy|+|Uz| {:.9e} max|p| {:.9e}; static max|Ux+0.5| {:.9e}",
             worst_ux, worst_trans, worst_p, worst_static
         );
-        assert!(worst_ux <= 1e-6, "the moving wall must keep U = -c: {worst_ux}");
-        assert!(worst_trans <= 1e-6, "transverse drift: {worst_trans}");
-        assert!(worst_p <= 1e-6, "the open piston stays at p = 0: {worst_p}");
+        assert!(worst_ux <= ofgpu::precision::roundoff_tol(1e-6), "the moving wall must keep U = -c: {worst_ux}");
+        assert!(worst_trans <= ofgpu::precision::roundoff_tol(1e-6), "transverse drift: {worst_trans}");
+        assert!(worst_p <= ofgpu::precision::roundoff_tol(1e-6), "the open piston stays at p = 0: {worst_p}");
         assert!(
             worst_static >= 0.1,
             "the fixed closed end stops the flow: {worst_static}"

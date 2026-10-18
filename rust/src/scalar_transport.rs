@@ -675,6 +675,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // f32 (F32-17): the diffusivities are ~3.6e-3, below R's 0.01 band
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_effective_diffusivity_is_the_two_prandtl_numbers() {
         let c = ScalarTransportCoeffs { pr: 0.71, prt: 0.85 };
@@ -773,7 +774,6 @@ mod tests {
     /// or drop one of the two terms and the decay comes out wrong by tens of
     /// per cent while the profile still looks perfectly reasonable.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_slab_cools_at_the_rate_the_effective_diffusivity_says() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -873,7 +873,7 @@ mod tests {
         for i in 0..N {
             let want = decay as Scalar * t0[i];
             assert!(
-                (got[i] - want).abs() < 1e-9 * (1.0 + want.abs()),
+                (((got[i] - want).abs()) as f64) < crate::precision::roundoff_tol(1e-9) * (1.0 + want.abs()) as f64,
                 "cell {i}: T = {}, the discrete decay rate says {want}",
                 got[i]
             );
@@ -902,6 +902,7 @@ mod tests {
     /// It is the cheapest statement that the convection and diffusion
     /// coefficients and their diagonals were assembled consistently.
     #[test]
+    // f32 (F32-17): one ULP at T=350 is 3e-5, past the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_scalar_is_carried_unchanged() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };

@@ -34591,8 +34591,8 @@ eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from
 `#[cfg(not(feature = "single"))]` and a plain `#[ignore]` measurement, and moves neither count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **303** library
-tests and **17** binary tests. So the second invocation of the house command reports
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **191** library
+tests and **7** binary tests. So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
@@ -34602,10 +34602,10 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, and F32-16 (below) took 186 away. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, F32-16 (below) took 186 away, and F32-17 (below) took 112 more. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
 105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's), §105.18 one (the `backward`
 stroke's regression test) and §144.3 one (`ofgpu-validate`'s 10:1 cantilever mesh test, which first compiled under
-the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`).
+the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`). F32-17 (below) took eleven away and added one (`ofgpu-compressible`'s `every_knob_changes_the_run`).
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -34728,6 +34728,88 @@ Every compressible row of `ofgpu-validate`, and Gate CMP-NR (a library test, §1
 | - CMP-NR | reflection, fixed `p` (`>= 0.9`) | P | 0.9776 | 0.9778 | holds in both |
 
 The two shipped compressible cases of §125.8.1 and §125.8.2 run in both builds (measured there). CMP-28's three library tests and five binary tests carry no attribute, so neither bold count moves: the library count stays 303 and the binary count 17. One binary test that predates CMP-28 fails under `single` and carries no attribute: `compressible::every_knob_changes_the_run`, whose `numerics.solvers U` and `numerics.solvers T` tolerance knobs write bit-identical fields in the f32 tube. It fails the same way on the tree before CMP-28. It is left for F32-17 and docs/17-review-later.md and is not marked here.
+
+**F32-17 (2026-10-18): the marked tests of the remaining 31 library modules and of the binaries are sorted.**
+F32-16's rule is applied unchanged (pass, R through `precision::roundoff_tol`, f64 subject, kept). The unit's tests
+are the 167 library tests outside F32-16's seven modules, the 17 marked binary tests, and `ofgpu-compressible`'s
+`every_knob_changes_the_run`, which CMP-28 left unmarked. Each was run under the feature, with ignored tests
+included, before and after the edits. Every edit is in test code, and the f64 build's tolerances are unchanged
+because `roundoff_tol` is the identity there. Two test-only type errors were also fixed: in `io::writer` and
+`io::voxelmap`, the plume fixtures built an f64 field into `Vec<Scalar>`; in `ofgpu-convert-mesh`, the fixtures
+built `Vec3` points where `PolyMeshRaw` holds the f64 `DVec3` of §118.2. Before this, the single library test
+target and that binary's single test target did not compile.
+
+* **Pass (29).** These pass as they stand, and their attribute is removed: 24 library tests and 5 binary tests.
+* **R (91).** 88 library tests and 3 `ofgpu-lowmach` tests. Each fails only by round-off of its own subject,
+  under a bar below `1e-5` that is relative or on values of order one. They pass at `roundoff_tol(tol64)`.
+* **f64 subject (3).** These are `#[cfg(not(feature = "single"))]`:
+  `datacentre::tests::the_ceiling_is_the_highest_swept_temperature_holding_exactly_one_hundred` (the fixture's
+  `99.999_999_9`, which f32 rounds to exactly 100), `datacentre::tests::continuity_is_one_computation_printed_and_serialised`
+  (`to_bits` of the serialised f64) and `bench::tests::the_kepsilon_case_costs_linear_bytes_per_cell` (§111.3's
+  f64 bytes per cell). The single build therefore lists three fewer binary tests.
+* **Kept (62).** These keep the attribute, with a `// f32 (F32-17): <cause>` line above it, and
+  `every_knob_changes_the_run` gains one. None was made to pass. They fall into five groups:
+  - 6 `simple` tests diverge to NaN by iteration 2 to 16 under `single`: the uniform body force, the
+    hydrostatic column, the lid-driven cavity against Ghia, PISO against SIMPLE, PIMPLE against PISO, and the
+    stored old level;
+  - 8 meet a production refusal whose threshold lies below f32 round-off. `turek_hron`'s `Wobble::new` refuses
+    a direction whose magnitude misses 1 by more than `1e-12` (4 tests). `DdtCoeffs::is_consistent` refuses BDF2
+    coefficients whose sum exceeds `1e-12` of their scale, which the f32 coefficients
+    `1499.9999, -1999.9999, 499.99997` do (2 `timescheme` tests and `ofgpu-lowmach`'s
+    `the_ddt_scheme_changes_what_the_run_writes`). The Cartesian backend refuses a rotated face for a
+    different reason (one test);
+  - 3 state an observed order: Gate 105-B's stroke (2.74 against 2), Gate 105-D's
+    (2.76 against 2) and the erf conduction refinement ratio (2.72);
+  - in 20 the error lies past the `1e-5` cap or a published band, at `6.3e-6` (past `roundoff_tol(1e-14)`) to
+    `3e-4` relative, or `1.1e-3` to `1.6e-3` K in two `ofgpu-lowmach` temperature rows;
+  - 25 assert an exact value or zero (`cos(pi/2)`, a one-ulp `assert_eq`, a strictly monotone sample that rounds
+    equal, an `assert_ne` between two association orders that f32 makes equal), compare values too small for an
+    absolute R bar (`3.6e-3` diffusivities, `7.7e-3` tanh values, `6.2e-3` kernel values), or give a discrete
+    answer (77 of 700 sigma values, a backend choice). `every_knob_changes_the_run` is here: its
+    `numerics.solvers U` and `T` tolerance knobs write bit-identical fields in the f32 tube.
+
+| module | listed | pass | R | f64 subject | kept |
+|---|---|---|---|---|---|
+| fv | 16 | 0 | 15 | 0 | 1 |
+| fan | 13 | 0 | 7 | 0 | 6 |
+| pressure | 11 | 5 | 4 | 0 | 2 |
+| wallfunctions | 11 | 3 | 8 | 0 | 0 |
+| mesh | 10 | 2 | 6 | 0 | 2 |
+| blockgen | 9 | 4 | 2 | 0 | 3 |
+| rheology | 9 | 0 | 4 | 0 | 5 |
+| energy | 8 | 2 | 3 | 0 | 3 |
+| reference | 7 | 0 | 7 | 0 | 0 |
+| simple | 7 | 1 | 0 | 0 | 6 |
+| les | 6 | 1 | 4 | 0 | 1 |
+| psychro | 6 | 0 | 3 | 0 | 3 |
+| adapt | 5 | 3 | 2 | 0 | 0 |
+| vv | 5 | 0 | 2 | 0 | 3 |
+| contact_angle, dcmetrics, timescheme, turek_hron | 16 | 1 | 7 | 0 | 8 |
+| ale_flow, field_ops, ldu_ops, scalar_transport, surface, vof | 18 | 1 | 8 | 0 | 9 |
+| marangoni, potential_flow, properties, distsolve, function1, solver, turbulence | 10 | 1 | 6 | 0 | 3 |
+| **library** | 167 | 24 | 88 | 0 | 55 |
+| `ofgpu-lowmach` | 7 | 0 | 3 | 0 | 4 |
+| `ofgpu-validate` | 3 | 2 | 0 | 0 | 1 |
+| `ofgpu-datacentre` | 2 | 0 | 0 | 2 | 0 |
+| `ofgpu-sample` | 2 | 2 | 0 | 0 | 0 |
+| `ofgpu-bench`, `ofgpu-buoyant`, `ofgpu-regions`, `ofgpu-compressible` | 4 | 1 | 0 | 1 | 2 |
+| **binaries** | 18 | 5 | 3 | 3 | 7 |
+
+The count, by F32-16's grep, reads 303 library and 17 binary tests before this unit and **191** and **7** after
+it: 303 − 24 − 88 = 191, and 17 − 5 − 3 − 3 + 1 = 7. Gate F32-17 asks for the count at 0 apart from the named
+f64-subject tests. It is **MISSED**: 191 + 7 tests remain, F32-16's 136 and this unit's 62, each a single-build
+defect or band named above or in F32-16's paragraph. `types::tests::the_f32_failure_count_is_the_one_spec_lit_states`
+prints the verdict with both counts. Under the feature, each module's listed tests run in one filtered run of at
+most 97 s (`ale_flow`; `energy` 63 s, the rest under 15 s). Every failure there is a kept test, and the other 112 pass.
+
+The plan's second bar is `--bins` 272/272 under `single`. This tree's 22 binaries list **495** tests under the
+feature (the 272 predates §125, §137 and the rigid body). 53 are ignored: the 7 kept above and 46 plain `#[ignore]`
+long runs that both builds skip. Of the 442 that run, **439** pass, so the bar is **MISSED** by three tests that this
+unit does not own. `ofgpu-lowmach`'s `a_rigid_body_run_translates_the_whole_mesh_and_writes_its_trajectory` reads its
+time as 0.04999999888, and `a_translating_turbulent_plate_is_the_static_plate_in_a_moving_stream` misses by
+4.9e-4. Both belong to the rigid body's version 2, which is being extended elsewhere and is left unmarked here.
+`ofgpu-datacentre`'s `the_shipped_dc_schema_is_the_generated_one` reads an empty file while a parallel test
+rewrites it, and passes alone. Each binary's suite takes at most 208 s (`ofgpu-lowmach`).
 
 ### 112.4 `ofgpu-validate` at f32, section by section
 

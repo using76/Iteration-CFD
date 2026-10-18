@@ -1810,7 +1810,6 @@ mod tests {
     /// SPEC-LIT section 10, row "Gradient": the Gauss gradient of a linear
     /// field is exact on a closed mesh.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_gauss_gradient_of_a_linear_field_is_exact() {
         let m = mesh("grad", [6, 5, 4], false, 3.0);
         let a = Vec3::new(1.7, -0.9, 0.35);
@@ -1823,13 +1822,12 @@ mod tests {
         fvc_grad_scalar(&mut g, &f, &bf, &m);
 
         let worst = g.iter().fold(0.0 as Scalar, |w, v| w.max((*v - a).mag()));
-        assert!(worst / a.mag() < 1e-12, "gradient error {worst:e}");
+        assert!(((worst / a.mag()) as f64) < crate::precision::roundoff_tol(1e-12), "gradient error {worst:e}");
     }
 
     /// SPEC-LIT section 10, row "Divergence": a uniform flux is solenoidal on
     /// any closed cell.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_divergence_of_a_uniform_flux_is_zero() {
         let m = mesh("div", [5, 4, 3], false, 1.0);
         let u = Vec3::new(0.83, -0.21, 0.44);
@@ -1840,14 +1838,13 @@ mod tests {
         let mut d = Vec::new();
         fvc_div_surface(&mut d, &phi, &bphi, &m);
 
-        assert!(inf_norm(&d) / u.mag() < 1e-10, "divergence {:e}", inf_norm(&d));
+        assert!(((inf_norm(&d) / u.mag()) as f64) < crate::precision::roundoff_tol(1e-10), "divergence {:e}", inf_norm(&d));
     }
 
     /// The laplacian of section 3.2 must annihilate a constant: a uniform
     /// `psi` with zero-gradient everywhere has no diffusive flux, so the
     /// folded matrix times a constant is zero.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_laplacian_annihilates_a_constant() {
         let m = mesh("lap", [5, 4, 3], false, 2.0);
 
@@ -1864,14 +1861,13 @@ mod tests {
         amul(&mut ap, &psi, &a, &m);
 
         let scale = inf_norm(&a.diag) * 2.75;
-        assert!(inf_norm(&ap) / scale < 1e-13, "A.const = {:e}", inf_norm(&ap));
+        assert!(((inf_norm(&ap) / scale) as f64) < crate::precision::roundoff_tol(1e-13), "A.const = {:e}", inf_norm(&ap));
     }
 
     /// Convection of a uniform field on a solenoidal flux is likewise zero -
     /// SPEC-LIT section 3.1's statement about the diagonal, checked rather
     /// than assumed.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn convection_of_a_uniform_field_on_a_closed_flux_is_zero() {
         let m = mesh("conv", [5, 4, 3], false, 1.0);
         let u = Vec3::new(0.4, 0.9, -0.3);
@@ -1896,13 +1892,12 @@ mod tests {
         amul(&mut ap, &psi, &a, &m);
 
         let scale = inf_norm(&a.diag).max(1e-30) * 1.3;
-        assert!(inf_norm(&ap) / scale < 1e-11, "div(phi, const) = {:e}", inf_norm(&ap));
+        assert!(((inf_norm(&ap) / scale) as f64) < crate::precision::roundoff_tol(1e-11), "div(phi, const) = {:e}", inf_norm(&ap));
     }
 
     /// The direct solve has to actually solve. Measured by its own residual,
     /// not against another solver.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_dense_direct_solve_leaves_no_residual() {
         let m = mesh("dense", [3, 3, 2], false, 1.0);
 
@@ -1920,7 +1915,7 @@ mod tests {
         let x = solve_dense(dense, &a.source).expect("non-singular");
         let r = residual(&x, &a, &m);
 
-        assert!(r < 1e-13, "residual {r:e}");
+        assert!((r as f64) < crate::precision::roundoff_tol(1e-13), "residual {r:e}");
     }
 
     /// Every limiter of the section 7 table must vanish for `r <= 0`, which is
@@ -2008,7 +2003,6 @@ mod tests {
     /// region residuals partition the global one - the host mirror of the
     /// device's ranged reduction.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_ranged_norm_over_every_row_is_the_norm_to_the_bit() {
         let m = mesh("ranged", [3, 3, 2], false, 1.0);
 
@@ -2037,7 +2031,7 @@ mod tests {
                 * norm_factor_ranged(&psi, &a, &m, rows);
         }
         let err = (lhs - sum).abs() / lhs;
-        assert!(err <= 1e-12, "host partition error {err:e}");
+        assert!((err as f64) <= crate::precision::roundoff_tol(1e-12), "host partition error {err:e}");
     }
 
     /// The safe reciprocal is mirrored in all THREE of its branches, on a
@@ -2082,7 +2076,6 @@ mod tests {
     /// `(Dt + U) y = Dt w`. Run on the matrix as assembled, and again with
     /// `lower` shrunk face by face, which makes it asymmetric.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_incomplete_factorisation_keeps_the_diagonal_and_its_sweeps_invert_it() {
         let m = mesh("dilu", [3, 3, 2], false, 1.0);
 
@@ -2150,7 +2143,7 @@ mod tests {
                 .map(|c| ((mm[c * n + c] - a.diag[c]) / a.diag[c]).abs())
                 .fold(0.0 as Scalar, |w, x| w.max(x));
             assert!(
-                diag_err <= 1e-12,
+                (diag_err as f64) <= crate::precision::roundoff_tol(1e-12),
                 "diag(M) != diag(A), symmetric={symmetric}: {diag_err:e}"
             );
 
@@ -2168,7 +2161,7 @@ mod tests {
                 .fold(0.0 as Scalar, |w, x| w.max(x))
                 / w_max;
             assert!(
-                sweep_err <= 1e-10,
+                (sweep_err as f64) <= crate::precision::roundoff_tol(1e-10),
                 "the sweeps do not invert M, symmetric={symmetric}: {sweep_err:e}"
             );
             println!(

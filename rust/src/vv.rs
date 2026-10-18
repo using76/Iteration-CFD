@@ -848,6 +848,7 @@ mod tests {
     /// `h = 0.25, 0.5, 1`: the fixed point of (94.3) converges in one iterate
     /// because `r21 = r32`, and the whole chain comes back exactly.
     #[test]
+    // f32 (F32-17): the exact fit's sigma is 1e-8, asserted exactly 0.0
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn an_exact_power_sequence_gives_its_order_back() {
         let hs = [0.25_f64, 0.5, 1.0];
@@ -875,17 +876,16 @@ mod tests {
     /// `r32 = 3/2`: no closed form, the fixed point iterates (about 22
     /// times) and still recovers the exact order.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn unequal_refinement_ratios_recover_a_non_integer_order() {
         let hs = [0.5_f64, 1.0 / 1.5, 1.0];
         let phi = |h: f64| 1.0 + 0.3 * h.powf(1.7);
         let levels = [lv(hs[0], phi(hs[0])), lv(hs[1], phi(hs[1])), lv(hs[2], phi(hs[2]))];
         let t = observed_order(&levels).expect("exact sequence");
         assert_eq!(t.behaviour, Behaviour::Monotone);
-        assert!((f64_of(t.r21) - 4.0 / 3.0).abs() < 1e-15);
-        assert!((f64_of(t.r32) - 1.5).abs() < 1e-15);
-        assert!((f64_of(t.p.unwrap()) - 1.7).abs() < 1e-10, "p = {:?}", t.p);
-        assert!((f64_of(t.phi_ext.unwrap()) - 1.0).abs() < 1e-10);
+        assert!((f64_of(t.r21) - 4.0 / 3.0).abs() < crate::precision::roundoff_tol(1e-15));
+        assert!((f64_of(t.r32) - 1.5).abs() < crate::precision::roundoff_tol(1e-15));
+        assert!((f64_of(t.p.unwrap()) - 1.7).abs() < crate::precision::roundoff_tol(1e-10), "p = {:?}", t.p);
+        assert!((f64_of(t.phi_ext.unwrap()) - 1.0).abs() < crate::precision::roundoff_tol(1e-10));
         assert!(t.iterations > 10 && t.iterations < 40, "iters = {}", t.iterations);
     }
 
@@ -894,6 +894,7 @@ mod tests {
     /// `None` and the fixed-exponent fits carry the uncertainty - and a
     /// finite `u_fine` comes out of them (Appendix A's third bullet).
     #[test]
+    // f32 (F32-17): the 5-digit table's ratio cancels in f32, past the 1e-4 band
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn an_oscillatory_triplet_has_no_order_and_a_safety_factor_of_three() {
         let hs = [1.0 / 80.0, 1.0 / 60.0, 1.0 / 40.0];
@@ -1015,7 +1016,6 @@ mod tests {
     /// the golden section lands on the exponent and the normal equations on
     /// the rest, weighted and unweighted alike.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_least_squares_fit_recovers_an_exact_power_series() {
         let hs = [1.0 / 8.0, 0.25, 0.5, 1.0];
         let phi = |h: f64| 2.0 + 0.7 * h.powf(1.5);
@@ -1023,9 +1023,9 @@ mod tests {
         for weighted in [false, true] {
             let fit = fit_power_series(&levels, weighted).expect("fit");
             assert_eq!(fit.estimator, Estimator::PowerSeries);
-            assert!((f64_of(fit.p.unwrap()) - 1.5).abs() < 1e-8, "p = {:?}", fit.p);
-            assert!((f64_of(fit.phi0) - 2.0).abs() < 1e-10);
-            assert!(f64_of(fit.sigma) < 1e-12, "sigma = {}", fit.sigma);
+            assert!((f64_of(fit.p.unwrap()) - 1.5).abs() < crate::precision::roundoff_tol(1e-8), "p = {:?}", fit.p);
+            assert!((f64_of(fit.phi0) - 2.0).abs() < crate::precision::roundoff_tol(1e-10));
+            assert!(f64_of(fit.sigma) < crate::precision::roundoff_tol(1e-12), "sigma = {}", fit.sigma);
         }
     }
 
@@ -1072,6 +1072,7 @@ mod tests {
     /// validation uncertainty exactly the root-sum-square; with no input or
     /// datum uncertainty declared, `u_val` is `u_num`.
     #[test]
+    // f32 (F32-17): assert_eq pins the f64 root-sum-square bits, f32 sqrt misses
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_validation_metric_is_the_difference_and_the_root_sum_square() {
         let (s, d, u_num, u_input, u_d) = (1.0_f64, 2.0, 1.5, 0.5, 0.25);

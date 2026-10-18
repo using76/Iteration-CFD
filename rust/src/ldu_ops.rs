@@ -854,6 +854,7 @@ pub(crate) mod tests {
     /// reason - which is a check on the coupled sign convention as much as on
     /// negSumDiag.
     #[test]
+    // f32 (F32-17): null-space residual ~2e-7 is an exact-zero check on tiny values
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_field_is_in_the_null_space_of_a_laplacian() {
         let Some((gpu, hm, m, k)) = ctx() else { return };
@@ -1270,7 +1271,6 @@ pub(crate) mod tests {
     /// the answer, only the path to it. `A'.psi - b'` equals `A.psi - b` at the
     /// psi that was passed in, exactly.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn relax_leaves_the_residual_at_the_current_iterate_unchanged() {
         let Some((gpu, _hm, m, k)) = ctx() else { return };
 
@@ -1298,7 +1298,7 @@ pub(crate) mod tests {
         for alpha in [0.3 as Scalar, 0.7, 1.0] {
             let relaxed = residual(Some(alpha));
             assert!(
-                max_diff(&plain, &relaxed) < 1e-12,
+                ((max_diff(&plain, &relaxed)) as f64) < crate::precision::roundoff_tol(1e-12),
                 "alpha = {alpha}: {relaxed:?} vs {plain:?}"
             );
         }
@@ -1457,7 +1457,6 @@ pub(crate) mod tests {
     /// it: cell 0's source must gain what its face and its cyclic couple to
     /// the fixed cells took away, or the answer changes.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn set_values_moves_the_eliminated_column_into_the_source() {
         let Some((gpu, hm, m, k)) = ctx() else { return };
 
@@ -1485,7 +1484,8 @@ pub(crate) mod tests {
         for r in [0usize, 2] {
             let moved = plain[r][3] * -3.25;
             assert!(
-                (pinned_b[r] - (plain_b[r] - moved)).abs() < 1e-13,
+                (((pinned_b[r] - (plain_b[r] - moved)).abs()) as f64)
+                    < crate::precision::roundoff_tol(1e-13),
                 "row {r}: source {} should be {} - {moved}",
                 pinned_b[r],
                 plain_b[r]

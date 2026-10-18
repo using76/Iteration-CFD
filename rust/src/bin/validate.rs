@@ -15674,7 +15674,6 @@ mod published_benchmarks {
         }
 
         #[test]
-        #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
         fn the_sampler_returns_walls_and_the_bilinear_centre() {
             let m = make_mesh(
                 &scratch_dir("sampler4"),
@@ -24258,7 +24257,6 @@ mod region_layout {
     /// it takes the three rows green; without one it passes vacuously, as
     /// the lib test does.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gate_97b_runs_green_on_this_machine() {
         let Ok(gpu) = Gpu::new(0) else { return };
         let mut c = Checks::new();
@@ -24980,6 +24978,7 @@ mod cantilever_refine {
     /// tip study takes the finest three, and the finest 10:1 beam - the
     /// largest mesh the gate runs - builds with cubic cells.
     #[test]
+    // f32 (F32-17): the f32 cell volume misses h^3 by 1.6e-5 relative, past the cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn cantilever_gate_runs_four_meshes_per_ratio() {
         assert_eq!(CANTILEVER_NY, [4, 8, 16, 32], "four meshes, n_y = 32 the fourth");

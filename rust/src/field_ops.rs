@@ -1831,7 +1831,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cyclic_face_interpolates_across_the_couple() {
         let hm = chain_mesh();
         let Some((gpu, m, k)) = ctx(&hm) else { return };
@@ -1862,7 +1861,11 @@ mod tests {
         let want2 = 0.35 * PSI[0] + 0.65 * PSI[3];
         let want3 = 0.65 * PSI[3] + 0.35 * PSI[0];
         assert!((got[2] - want2).abs() < 1e-14, "{} vs {want2}", got[2]);
-        assert!((got[3] - want3).abs() < 1e-14, "{} vs {want3}", got[3]);
+        assert!(
+            ((got[3] - want3).abs() as f64) < crate::precision::roundoff_tol(1e-14),
+            "{} vs {want3}",
+            got[3]
+        );
     }
 
     /// SPEC-LIT §31.1's advection test, at the mechanism `correctBcs` actually
@@ -1909,7 +1912,6 @@ mod tests {
     /// field must return to itself through both couples at once, not just
     /// whichever one an implementation happened to wire up first.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_field_survives_two_generated_cyclic_pairs() {
         let mut b = crate::blockgen::BlockSpec::default();
         b.x.hi = 2.0;
@@ -1997,6 +1999,7 @@ mod tests {
     // ----------------------------------------------------------------------
 
     #[test]
+    // f32 (F32-17): the exact-zero normal residual is ~1e-8, not R-eligible
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn vector_symmetry_removes_the_normal_component_and_keeps_the_rest() {
         let mut hm = chain_mesh();

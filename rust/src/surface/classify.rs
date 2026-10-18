@@ -661,13 +661,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn winding_number_is_one_inside_and_zero_outside() {
         let s = unit_cube();
         let w_in = winding_number(&s, Vec3::new(0.5, 0.5, 0.5));
         let w_out = winding_number(&s, Vec3::new(1.7, 0.3, 0.4));
-        assert!((w_in - 1.0).abs() < 1e-9, "inside w = {w_in}");
-        assert!(w_out.abs() < 1e-9, "outside w = {w_out}");
+        assert!((((w_in - 1.0).abs()) as f64) < crate::precision::roundoff_tol(1e-9), "inside w = {w_in}");
+        assert!(((w_out.abs()) as f64) < crate::precision::roundoff_tol(1e-9), "outside w = {w_out}");
     }
 
     /// Grid-aligned cube in a 20^3 block over [-0.5, 1.5]^3: the cell

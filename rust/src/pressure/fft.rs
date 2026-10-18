@@ -1424,7 +1424,6 @@ mod tests {
     /// The pairs really are inverses, to the factor 2n FFTW's conventions
     /// leave behind. If this fails, every scaling downstream is wrong.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn each_transform_pair_round_trips_to_two_n() {
         for n in 1..=9 {
             for p in PAIRS {
@@ -1432,7 +1431,7 @@ mod tests {
                 let back = transform_ref(p.inverse(), &transform_ref(p.forward(), &x));
                 let want: Vec<Scalar> = x.iter().map(|v| v * 2.0 * n as Scalar).collect();
                 assert!(
-                    max_diff(&back, &want) < 1e-11 * (n as Scalar),
+                    ((max_diff(&back, &want)) as f64) < crate::precision::roundoff_tol(1e-11) * n as f64,
                     "{p:?} n={n}: {back:?} vs {want:?}"
                 );
             }
@@ -1489,7 +1488,6 @@ mod tests {
     /// and compared; a continuous wavenumber would land at discretisation
     /// error instead, which for this `n` is percent-level.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_transform_solve_is_the_exact_inverse_of_the_matrix() {
         for n in [1usize, 2, 3, 8, 9, 16] {
             for p in PAIRS {
@@ -1514,7 +1512,7 @@ mod tests {
                 let scale = direct.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-12);
                 for i in 0..n {
                     assert!(
-                        (x[i] - direct[i]).abs() < 1e-10 * scale,
+                        (x[i] - direct[i]).abs() < crate::precision::roundoff_tol(1e-10) * scale,
                         "{p:?} n={n} i={i}: transform {} vs direct {}",
                         x[i],
                         direct[i]
@@ -1635,7 +1633,6 @@ mod tests {
     /// because a wrong transform produces a smooth, plausible, wrong pressure
     /// field.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn every_transform_matches_the_direct_reference() {
         let Some(gpu) = gpu() else { return };
         let k = match PressureKernels::new(&gpu) {
@@ -1655,7 +1652,7 @@ mod tests {
                         let want = transform_ref(t, line);
                         let scale = want.iter().fold(0.0 as Scalar, |m, v| m.max(v.abs())).max(1.0);
                         assert!(
-                            max_diff(&got[b], &want) < 1e-10 * scale,
+                            ((max_diff(&got[b], &want)) as f64) < crate::precision::roundoff_tol(1e-10) * scale as f64,
                             "{t:?} n={n} line {b}: got {:?} want {want:?}",
                             got[b]
                         );
@@ -1668,7 +1665,6 @@ mod tests {
     /// Forward then inverse on the device returns `2n` times the input, which
     /// is the property the `1/(8 nx ny nz)` in `presDivideEigen` relies on.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_pair_round_trips_to_two_n() {
         let Some(gpu) = gpu() else { return };
         let k = match PressureKernels::new(&gpu) {
@@ -1686,7 +1682,7 @@ mod tests {
                         line.iter().map(|v| v * 2.0 * n as Scalar).collect();
                     let scale = want.iter().fold(0.0 as Scalar, |m, v| m.max(v.abs())).max(1.0);
                     assert!(
-                        max_diff(&back[b], &want) < 1e-10 * scale,
+                        ((max_diff(&back[b], &want)) as f64) < crate::precision::roundoff_tol(1e-10) * scale as f64,
                         "{p:?} n={n} line {b}"
                     );
                 }

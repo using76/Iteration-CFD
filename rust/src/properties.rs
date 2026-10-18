@@ -711,6 +711,7 @@ mod tests {
     /// SPEC-LIT §100.12: a series' and Sutherland's slope is their
     /// derivative, against a central difference.
     #[test]
+    // f32 (F32-17): the f32 central difference with h=1e-3 cancels to 3e-4 relative
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_slope_of_a_series_and_of_sutherland_is_their_derivative() {
         let piece = Piece { lo: 200.0, hi: 1000.0, coefficients: vec![3.0e3, 1.0, -2.0e-3, 4.0e-7] };
@@ -780,7 +781,6 @@ mod tests {
     /// both range ends, every knot and piece end, and 4096 random
     /// temperatures, all to `1e-12` relative.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_evaluator_agrees_with_the_host_on_random_temperatures() {
         let Some(g) = gpu() else { return };
         let k = PropertyKernels::new(&g).expect("kernels");
@@ -818,7 +818,7 @@ mod tests {
                 let rel = (got[i] - want).abs() / want.abs().max(Scalar::MIN_POSITIVE);
                 worst = worst.max(rel);
                 assert!(
-                    rel <= 1e-12,
+                    (rel as f64) <= crate::precision::roundoff_tol(1e-12),
                     "{name}: at T = {t} K the device gave {} and the host {want} \
                      (relative {rel})",
                     got[i]

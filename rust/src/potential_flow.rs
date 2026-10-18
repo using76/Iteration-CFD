@@ -634,7 +634,6 @@ mod tests {
     /// anything else back means the boundary conditions, the flux or the
     /// reconstruction is wrong, and this pins all three at once.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_duct_reproduces_uniform_flow_exactly() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -651,22 +650,22 @@ mod tests {
         let r = solve_potential_flow(&g, &hm, &m, &mut phi, &mut u, &spec(U_IN), &controls())?;
 
         assert!(
-            (r.inlet_flux + 1.0).abs() < 1e-10,
+            (((r.inlet_flux + 1.0).abs()) as f64) < crate::precision::roundoff_tol(1e-10),
             "inlet flux {} is not -U_in*A",
             r.inlet_flux
         );
         assert!(
-            (r.outlet_flux - 1.0).abs() < 1e-10,
+            (((r.outlet_flux - 1.0).abs()) as f64) < crate::precision::roundoff_tol(1e-10),
             "outlet flux {} is not +U_in*A",
             r.outlet_flux
         );
-        assert!(r.imbalance().abs() < 1e-12, "imbalance {}", r.imbalance());
+        assert!(((r.imbalance().abs()) as f64) < crate::precision::roundoff_tol(1e-12), "imbalance {}", r.imbalance());
 
         // Uniform flow reconstructs exactly, in all three components.
         for (c, uc) in g.download(&u.f)?.iter().enumerate() {
-            assert!((uc.x - U_IN).abs() < 1e-10, "cell {c} Ux = {}", uc.x);
-            assert!(uc.y.abs() < 1e-10, "cell {c} Uy = {}", uc.y);
-            assert!(uc.z.abs() < 1e-10, "cell {c} Uz = {}", uc.z);
+            assert!((((uc.x - U_IN).abs()) as f64) < crate::precision::roundoff_tol(1e-10), "cell {c} Ux = {}", uc.x);
+            assert!(((uc.y.abs()) as f64) < crate::precision::roundoff_tol(1e-10), "cell {c} Uy = {}", uc.y);
+            assert!(((uc.z.abs()) as f64) < crate::precision::roundoff_tol(1e-10), "cell {c} Uz = {}", uc.z);
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -679,7 +678,6 @@ mod tests {
     /// flux has to be conservative to the solver's tolerance instead, and the
     /// two patch fluxes have to cancel.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_plume_flux_conserves_mass_where_an_interpolated_one_did_not() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -710,7 +708,7 @@ mod tests {
         // one opening, without the walls leaking.
         let scale = U_IN * area;
         assert!(
-            r.imbalance().abs() < 1e-9 * scale,
+            ((r.imbalance().abs()) as f64) < crate::precision::roundoff_tol(1e-9) * scale as f64,
             "imbalance {} against an inlet flux of {scale}",
             r.imbalance()
         );
@@ -719,7 +717,7 @@ mod tests {
         // here; anything remotely near that means the flux stopped being the
         // one the laplacian assembled.
         assert!(
-            r.max_div_phi < 1e-12 * scale,
+            (r.max_div_phi as f64) < crate::precision::roundoff_tol(1e-12) * scale as f64,
             "max |sum_f phi| = {} against an inlet flux of {scale}",
             r.max_div_phi
         );

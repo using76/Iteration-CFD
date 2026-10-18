@@ -4246,7 +4246,6 @@ mod tests {
     /// the free-stream value, approached FROM ABOVE at the rate S37.2
     /// derives - `Pr_t = Pr_t_inf (1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) + O(Pe_t^-2)`.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn kays_crawford_at_large_peclet_approaches_the_free_stream_value_from_above() {
         let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
         for pe_t in [1e3 as Scalar, 1e4, 1e5, 1e6] {
@@ -4256,7 +4255,7 @@ mod tests {
             // The next term is O(Pe_t^-2), so the first-order estimate has to
             // agree to better than that.
             assert!(
-                (got - want).abs() < 10.0 / (pe_t * pe_t),
+                ((got - want).abs() as f64) < crate::precision::roundoff_tol(10.0 / (pe_t * pe_t) as f64),
                 "Pe_t = {pe_t}: {got} against the asymptote {want}"
             );
         }
@@ -4267,6 +4266,7 @@ mod tests {
     /// SPEC-LIT S37.2. Checked against the literature form everywhere the
     /// literature form is still trustworthy.
     #[test]
+    // f32 (F32-17): the f32-evaluated form disagrees by 2.1e-4, past the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_rearranged_form_reproduces_the_literature_form() {
         let (c, p_inf) = (0.3_f64, 0.85_f64);
@@ -4392,6 +4392,7 @@ mod tests {
     /// unmodified for the low-Mach solver's velocity/pressure system (the
     /// module doc's first *DESIGN* note).
     #[test]
+    // f32 (F32-17): relative disagreement 1.14e-5 at T=294 exceeds the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn buoyancy_matches_the_density_ratio_at_any_deltat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -4790,7 +4791,6 @@ mod tests {
     /// asymmetry once (S26.1); this test is the guard against the second
     /// time.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -4873,7 +4873,8 @@ mod tests {
         for c in 0..N {
             let want = plain[c] + q[c] / (rho[c] * props.cp * t[c]);
             assert!(
-                (hot[c] - want).abs() <= 1e-12 * want.abs(),
+                (hot[c] - want).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-12) * want.abs() as f64,
                 "cell {c}: the registry's heat did not reach the divergence: {} vs {want}",
                 hot[c]
             );
@@ -4890,7 +4891,7 @@ mod tests {
         let cool = (plain[0] - hot[0]).abs();
         let want = H_V / (props.cp * t[0]);
         assert!(
-            (cool / d[0] - want).abs() <= 1e-9 * want,
+            ((cool / d[0] - want).abs() as f64) <= crate::precision::roundoff_tol(1e-9) * want as f64,
             "the contraction/expansion ratio is {} and h_v/(cp T) is {want}",
             cool / d[0]
         );
@@ -4913,7 +4914,6 @@ mod tests {
     /// `k_eff` cannot pass by accident. The second case also checks the field
     /// CELL BY CELL against the laplacian matrix's own operator.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_conduction_source_telescopes_to_the_boundary_heat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -4962,7 +4962,7 @@ mod tests {
             let flux = g.download(&e.cond_flux.f)?;
             let scale = flux.iter().map(|v| f64::from(*v).abs()).fold(1.0f64, f64::max);
             assert!(
-                q_cond.abs() < 1e-10 * scale,
+                q_cond.abs() < crate::precision::roundoff_tol(1e-10) * scale,
                 "adiabatic box: integral(div(k_eff grad T)) dV = {q_cond}, \
                  face-flux scale {scale}"
             );
@@ -5017,7 +5017,7 @@ mod tests {
             let want = f64::from(q_w) * area;
             let got = f64::from(e.total_conduction_q(&g)?);
             assert!(
-                (got - want).abs() < 1e-9 * want.abs(),
+                (got - want).abs() < crate::precision::roundoff_tol(1e-9) * want.abs(),
                 "fixed-flux wall: integral(div(k_eff grad T)) dV = {got}, want q_w*A = {want}"
             );
 
@@ -5050,7 +5050,8 @@ mod tests {
                 let from_matrix = -(f64::from(at_h[c]) - f64::from(b_h[c])) / f64::from(hm.v[c]);
                 let from_flux = f64::from(cond[c]);
                 assert!(
-                    (from_matrix - from_flux).abs() <= 1e-9 * (1.0 + from_matrix.abs()),
+                    (from_matrix - from_flux).abs()
+                        <= crate::precision::roundoff_tol(1e-9) * (1.0 + from_matrix.abs()),
                     "cell {c}: explicit div(k_eff grad T) {from_flux} against the \
                      laplacian matrix's own {from_matrix}"
                 );
@@ -5294,7 +5295,6 @@ mod tests {
     /// `-q_w/k_eff_wall`, with the turbulent `k_eff_wall` this test's
     /// nonzero `nut` implies, not the molecular `props.k` alone.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn fixed_flux_temperature_reproduces_q_through_the_assembled_equation() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -5359,6 +5359,7 @@ mod tests {
     /// better than the tolerance checked here - it stands in for the
     /// semi-infinite solid the closed form assumes.
     #[test]
+    // f32 (F32-17): the observed refinement ratio 2.72 vs 3 is an order statement
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn one_d_transient_conduction_matches_erf_at_second_order() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -5748,7 +5749,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
         fn a_flat_conductivity_curve_gives_the_constant_k_eff_and_the_constant_field() -> Result<()> {
             let Some(g) = gpu() else { return Ok(()) };
 

@@ -2836,7 +2836,7 @@ mod tests {
             }
             let scale = m.v[c].powf(2.0 / 3.0);
             assert!(
-                s.mag() / scale < 1e-12,
+                ((s.mag() / scale) as f64) < crate::precision::roundoff_tol(1e-12),
                 "cell {c} does not close: |sum Sf| = {}",
                 s.mag()
             );
@@ -3157,7 +3157,6 @@ mod tests {
 
     /// SPEC-LIT §10: "Gauss gradient of a linear field -> exact."
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gradient_of_a_linear_field_is_exact() -> Result<()> {
         let Some(fx) = fixture([5, 4, 3], Vec3::new(0.3, 0.7, 0.2), true) else {
             return Ok(());
@@ -3182,7 +3181,7 @@ mod tests {
         let worst = got.iter().fold(0.0 as Scalar, |w, v| w.max((*v - a).mag()));
 
         assert!(
-            worst / a.mag() < 1e-13,
+            ((worst / a.mag()) as f64) < crate::precision::roundoff_tol(1e-13),
             "grad(linear) is off by {worst} (relative {})",
             worst / a.mag()
         );
@@ -3192,7 +3191,6 @@ mod tests {
     /// The same for the tensor gradient, whose index convention is the thing
     /// most easily got backwards: `(i,j)` must be `dU_j/dx_i`.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn vector_gradient_of_a_linear_field_is_exact_and_correctly_indexed() -> Result<()> {
         let Some(fx) = fixture([4, 4, 3], Vec3::new(0.25, 0.4, 0.6), true) else {
             return Ok(());
@@ -3232,7 +3230,7 @@ mod tests {
                 worst = worst.max(c.abs());
             }
         }
-        assert!(worst < 1e-12, "grad(U) is off by {worst}");
+        assert!((worst as f64) < crate::precision::roundoff_tol(1e-12), "grad(U) is off by {worst}");
 
         // And the production term built on it, against the host expression.
         let nut_h = vec![0.013 as Scalar; hm.n_cells];
@@ -3245,7 +3243,7 @@ mod tests {
         for (c, p) in got_prod.iter().enumerate() {
             let want = nut_h[c] * got[c].g_by_nut();
             assert!(
-                (p - want).abs() <= 1e-12 * want.abs().max(1.0),
+                ((p - want).abs() as f64) <= crate::precision::roundoff_tol(1e-12) * want.abs().max(1.0) as f64,
                 "G at cell {c}: {p} vs {want}"
             );
         }
@@ -3255,7 +3253,6 @@ mod tests {
     /// SPEC-LIT §10: "`div(u)` of a uniform field -> zero." A uniform velocity
     /// gives `phi_f = u·Sf`, and a closed cell sums those to zero identically.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn divergence_of_a_uniform_flux_is_zero() -> Result<()> {
         let Some(fx) = fixture([4, 5, 3], Vec3::new(0.3, 0.2, 0.5), true) else {
             return Ok(());
@@ -3279,7 +3276,7 @@ mod tests {
 
         let got = gpu.download(&d)?;
         assert!(
-            max_abs(&got) / uc.mag() < 1e-12,
+            ((max_abs(&got) / uc.mag()) as f64) < crate::precision::roundoff_tol(1e-12),
             "div(uniform) = {}",
             max_abs(&got)
         );
@@ -3293,7 +3290,7 @@ mod tests {
 
         let got_u = gpu.download(&ur)?;
         let worst = got_u.iter().fold(0.0 as Scalar, |w, v| w.max((*v - uc).mag()));
-        assert!(worst / uc.mag() < 1e-12, "reconstruct is off by {worst}");
+        assert!(((worst / uc.mag()) as f64) < crate::precision::roundoff_tol(1e-12), "reconstruct is off by {worst}");
         Ok(())
     }
 
@@ -3310,7 +3307,6 @@ mod tests {
     /// subtract the first operator's contribution a second time and the three
     /// answers would differ.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn operators_do_not_couple_through_the_diagonal() -> Result<()> {
         let Some(fx) = fixture([4, 3, 3], Vec3::new(0.3, 0.4, 0.25), true) else {
             return Ok(());
@@ -3417,14 +3413,17 @@ mod tests {
             for j in 0..s1[i].len() {
                 let (a, b) = (s1[i][j], s2[i][j]);
                 assert!(
-                    (a - b).abs() <= TOL * a.abs().max(b.abs()).max(1.0),
+                    (a - b).abs() as f64
+                        <= crate::precision::roundoff_tol(TOL as f64)
+                            * a.abs().max(b.abs()).max(1.0) as f64,
                     "{name}[{j}] depends on the order the operators were \
                      applied: {a} vs {b}"
                 );
 
                 let sum = sd[i][j] + sl[i][j];
                 assert!(
-                    (a - sum).abs() <= TOL * sum.abs().max(1.0),
+                    (a - sum).abs() as f64
+                        <= crate::precision::roundoff_tol(TOL as f64) * sum.abs().max(1.0) as f64,
                     "{name}[{j}]: combined {a} != separate sum {sum}"
                 );
             }
@@ -3438,7 +3437,6 @@ mod tests {
     /// a uniform field is convected without change even when the flux is not
     /// solenoidal.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_bounded_correction_makes_a_uniform_field_stationary() -> Result<()> {
         let Some(fx) = fixture([4, 3, 3], Vec3::new(0.3, 0.4, 0.25), true) else {
             return Ok(());
@@ -3490,7 +3488,7 @@ mod tests {
 
         let scale = max_abs(&phi_h).max(max_abs(&bphi_h));
         assert!(
-            max_abs(&res) <= 1e-12 * scale,
+            max_abs(&res) as f64 <= crate::precision::roundoff_tol(1e-12) * scale as f64,
             "bounded convection leaves a residual of {} on a uniform field",
             max_abs(&res)
         );
@@ -3942,7 +3940,6 @@ mod tests {
     /// Least squares is exact for a linear field on any mesh - that is the
     /// whole reason SPEC-LIT §3.5 offers it beside Green-Gauss.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn least_squares_gradient_of_a_linear_field_is_exact() -> Result<()> {
         let hm = boxed([5, 4, 3], Vec3::new(0.3, 0.7, 0.2), true, (0.5, 0.3));
         let Some(gpu) = gpu() else { return Ok(()) };
@@ -3974,7 +3971,7 @@ mod tests {
         let got = gpu.download(&g)?;
         for c in 0..hm.n_cells {
             assert!(
-                (got[c] - a0).mag() < 1e-11,
+                ((got[c] - a0).mag() as f64) < crate::precision::roundoff_tol(1e-11),
                 "cell {c}: leastSquares gave {:?}, exact {:?}",
                 got[c],
                 a0
@@ -4102,7 +4099,6 @@ mod tests {
     /// A limited gradient must leave a linear field alone: there is no new
     /// extremum to prevent, so the limiter must be exactly 1 everywhere.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cell_limited_gradient_leaves_a_linear_field_alone() -> Result<()> {
         let Some(fx) = fixture([6, 5, 4], Vec3::new(0.2, 0.25, 0.3), true) else {
             return Ok(());
@@ -4133,7 +4129,7 @@ mod tests {
         let got = gpu.download(&g)?;
         for c in 0..hm.n_cells {
             assert!(
-                (got[c] - a0).mag() < 1e-11,
+                ((got[c] - a0).mag() as f64) < crate::precision::roundoff_tol(1e-11),
                 "cell {c}: the limiter scaled a linear field's gradient to {:?}",
                 got[c]
             );
@@ -4266,7 +4262,6 @@ mod tests {
     /// Run twice: once with the correction switched off, to show that it is
     /// doing something, and once with it iterated.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_non_orthogonal_correction_restores_second_order() -> Result<()> {
         let dims = |n: usize| Vec3::new(1.0 / n as Scalar, 0.7 / n as Scalar, 0.4 / n as Scalar);
         let shear = (0.35, 0.2); // 19.3 and 11.3 degrees of non-orthogonality
@@ -4393,7 +4388,6 @@ mod tests {
     /// the gradient is exact - which is the property every deferred correction
     /// in SPEC-LIT 3.2 assumes of the gradient it is handed.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_skew_correction_makes_green_gauss_exact_at_a_2to1_interface() -> Result<()> {
         let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
         let Some(fx) = refined_fixture(r.mesh.clone()) else {
@@ -4448,7 +4442,7 @@ mod tests {
             "the skew iteration is not contracting: {e_once:e} -> {e_twice:e}"
         );
         assert!(
-            e_fixed < 1e-11,
+            (e_fixed as f64) < crate::precision::roundoff_tol(1e-11),
             "the ITERATED skew-corrected gradient is still off by {e_fixed:e} on a \
              LINEAR field, whose face value it reconstructs exactly"
         );
@@ -4726,7 +4720,6 @@ mod tests {
     /// (SPEC-LIT 1), and Green-Gauss must reproduce it - which at a 2:1
     /// interface it does not until the skewness iteration has converged.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_vector_skew_correction_makes_green_gauss_exact_too() -> Result<()> {
         let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
         let Some(fx) = refined_fixture(r.mesh.clone()) else {
@@ -4795,7 +4788,7 @@ mod tests {
             "the uncorrected vector gradient was only off by {e_plain:e}"
         );
         assert!(
-            e_fixed < 1e-11,
+            (e_fixed as f64) < crate::precision::roundoff_tol(1e-11),
             "the converged vector skew correction is still off by {e_fixed:e} on a \
              LINEAR field"
         );
@@ -5015,7 +5008,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_cyclic_non_orthogonal_correction_improves_a_sheared_periodic_channel() -> Result<()> {
         let Some(gpu0) = gpu() else { return Ok(()) };
         drop(gpu0);
@@ -5065,6 +5057,7 @@ mod tests {
     /// factor, which is the part that is easy to get wrong and impossible to
     /// see in a converged answer.
     #[test]
+    // f32 (F32-17): kernel-vs-host values of 0.0062 sit below R's 0.01 band
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_non_orthogonal_correction_matches_the_written_sum() -> Result<()> {
         let hm = boxed([4, 3, 3], Vec3::new(0.3, 0.4, 0.25), true, (0.35, 0.2));
@@ -5174,7 +5167,6 @@ mod tests {
     /// whatever the discrepancy is, forever. It is checked on a SHEARED mesh
     /// so that both halves of the non-orthogonal correction are in play.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_flux_and_the_matrix_are_the_same_operator() -> Result<()> {
         let hm = boxed([4, 4, 3], Vec3::new(0.3, 0.4, 0.25), true, (0.35, 0.2));
         assert_closes(&hm);
@@ -5187,7 +5179,6 @@ mod tests {
     /// says the two are the same operator, and SIMPLE's flux correction leans
     /// on that being true for whatever scheme the case named.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_flux_and_the_matrix_agree_with_the_skewness_term_too() -> Result<()> {
         let r = crate::mesh::refined::refined_core([6, 6, 6], Vec3::new(0.2, 0.2, 0.2), 0.25, 1)?;
         assert!(r.mesh.skew_corr.iter().any(|v| v.mag() > 1e-3));
@@ -5300,7 +5291,7 @@ mod tests {
         }
 
         assert!(
-            worst <= 1e-11 * scale,
+            worst as f64 <= crate::precision::roundoff_tol(1e-11) * scale as f64,
             "the flux and the matrix disagree by {worst} (scale {scale})"
         );
         Ok(())
@@ -5318,7 +5309,6 @@ mod tests {
     /// drifting apart: the host mirror is used by the pure-host TVD tests
     /// above, and this ties the device to it.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn device_limiter_agrees_with_the_host() -> Result<()> {
         let Some(fx) = fixture([5, 4, 4], Vec3::new(0.3, 0.4, 0.25), true) else {
             return Ok(());
@@ -5393,7 +5383,7 @@ mod tests {
                 };
 
                 assert!(
-                    (got[i] - want).abs() < 1e-13,
+                    ((got[i] - want).abs() as f64) < crate::precision::roundoff_tol(1e-13),
                     "{l:?} face {i}: device {} vs host {want}",
                     got[i]
                 );
@@ -5589,7 +5579,6 @@ mod tests {
     /// discretely conservative: every cell's faces sum to zero. That is the
     /// property `potential_flow` relies on, stated as a test.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn sn_grad_flux_of_a_linear_field_is_conservative() -> Result<()> {
         let Some(fx) = fixture([4, 3, 3], Vec3::new(0.3, 0.4, 0.25), true) else {
             return Ok(());
@@ -5626,7 +5615,7 @@ mod tests {
 
         let scale = max_abs(&iphi).max(max_abs(&bphi));
         assert!(
-            worst <= 1e-12 * scale,
+            worst as f64 <= crate::precision::roundoff_tol(1e-12) * scale as f64,
             "snGrad flux of a linear field leaves {worst} of imbalance"
         );
         Ok(())

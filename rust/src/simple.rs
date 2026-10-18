@@ -1651,6 +1651,7 @@ mod tests {
     /// whether the body force and the pressure gradient are discretised
     /// consistently. They are, only because both live on faces.
     #[test]
+    // f32 (F32-17): the SIMPLE loop's residuals go NaN from iteration 3
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_body_force_is_absorbed_by_the_pressure() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -1751,6 +1752,7 @@ mod tests {
     /// which is what a face body force buys and what an interpolated one
     /// cannot deliver.
     #[test]
+    // f32 (F32-17): the SIMPLE loop's residuals go NaN from iteration 4
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_hydrostatic_column_has_no_checkerboard() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -2088,6 +2090,7 @@ mod tests {
     /// central differencing is bounded, and upwind on 64 cells would be too
     /// diffusive to say anything about a 129-point reference.
     #[test]
+    // f32 (F32-17): the cavity run's residuals go NaN by iteration 16
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn lid_driven_cavity_matches_ghia_ghia_and_shin() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -2649,6 +2652,7 @@ mod tests {
     /// - and the two flows must be the same flow, which the peak velocity
     ///   check says.
     #[test]
+    // f32 (F32-17): both loops' residuals go NaN before a steady answer
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn piso_and_simple_reach_the_same_steady_answer() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -2710,6 +2714,7 @@ mod tests {
     /// outer correctors, each re-linearising momentum, each running two
     /// pressure correctors, with relaxation switched off on the fourth.
     #[test]
+    // f32 (F32-17): both loops' residuals go NaN before a steady answer
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn pimple_and_piso_reach_the_same_steady_answer() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -2757,6 +2762,7 @@ mod tests {
     /// step STARTED from, bit for bit. `begin_time_step` is the only thing
     /// entitled to move it.
     #[test]
+    // f32 (F32-17): the corrector loop's p residual goes NaN by iteration 3
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_time_step_stores_one_old_level_however_many_correctors_it_takes() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -2830,7 +2836,6 @@ mod tests {
     /// correctors it is given - SPEC-LIT §14's note that relaxation is what
     /// replaces the time derivative there.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_steady_run_keeps_its_relaxation_on_every_iteration() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 

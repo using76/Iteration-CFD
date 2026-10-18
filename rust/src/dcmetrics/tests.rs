@@ -197,7 +197,6 @@ fn an_unknown_rci_sample_set_is_refused_by_name() {
 /// (S55.3): `RTI = mdot_IT/mdot_supply`, and halving the supply flow exactly
 /// doubles it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_55a_rti_is_the_flow_ratio_and_halving_the_supply_doubles_it() {
     // A closed heat balance: Q_IT watts, cp, and two flows.
     let (q_it, cp, rho) = (30_000.0 as Scalar, 1005.0 as Scalar, 1.2 as Scalar);
@@ -211,7 +210,7 @@ fn gate_55a_rti_is_the_flow_ratio_and_halving_the_supply_doubles_it() {
         let got = rti(t_return, t_supply, dt_eq);
         let want = rti_from_flows(q_rack, q_supply);
         assert!(
-            rel(got, want) < 1e-12,
+            (rel(got, want) as f64) < crate::precision::roundoff_tol(1e-12),
             "(S55.3) at Q_supply = {q_supply}: RTI = {got} but mdot_IT/mdot_supply \
              = {want}"
         );
@@ -316,7 +315,6 @@ fn the_report_offers_pue_inputs_and_not_a_pue() {
 /// W/(L/s) from one division, refuses a flow it did not measure by name, and
 /// prints LBNL's better-practice value as CONTEXT, never as a gate.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn airflow_efficiency_is_watts_per_cfm_and_refuses_a_flow_it_did_not_measure() {
     // The conversion is exact by definition: the international foot is 0.3048 m.
     // The literal and the arithmetic form are one ulp apart; 1e-12 catches a
@@ -325,7 +323,7 @@ fn airflow_efficiency_is_watts_per_cfm_and_refuses_a_flow_it_did_not_measure() {
 
     let a = airflow_efficiency(1000.0, 1.0).expect("one cubic metre a second");
     assert!(rel(a.q_cfm, 2118.880_003_289_315_5) < 1e-12);
-    assert!(rel(a.w_per_cfm, 0.4719474432) < 1e-12);
+    assert!((rel(a.w_per_cfm, 0.4719474432) as f64) < crate::precision::roundoff_tol(1e-12));
     assert_eq!(a.w_per_l_per_s, 1.0); // 1000 W over 1000 L/s, exactly
     // One ratio, two units: the readings cannot disagree.
     assert!(rel(a.w_per_cfm * CFM_PER_M3_S, a.w_per_l_per_s * 1000.0) < 1e-13);
@@ -334,7 +332,7 @@ fn airflow_efficiency_is_watts_per_cfm_and_refuses_a_flow_it_did_not_measure() {
     let b = airflow_efficiency(AE_BETTER_PRACTICE_W_PER_CFM * CFM_PER_M3_S, 1.0)
         .expect("lbnl");
     assert!(rel(b.w_per_cfm, 0.5) < 1e-15);
-    assert!(rel(b.w_per_l_per_s, 1.0594400016446577) < 1e-12);
+    assert!((rel(b.w_per_l_per_s, 1.0594400016446577) as f64) < crate::precision::roundoff_tol(1e-12));
 
     // A flow that was never measured is refused by name, not divided by.
     for (p, q) in [(1000.0 as Scalar, 0.0 as Scalar), (1000.0, -1.0), (-1.0, 1.0)] {
@@ -424,7 +422,6 @@ fn the_patch_mean_is_flux_weighted_and_not_an_area_mean() {
 
 /// (S55.1)'s two excess sums, on the device, against the host closed form.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_rci_excesses_match_the_closed_form() {
     let Some(gpu) = gpu() else { return };
     let mut r = rig(&gpu);
@@ -442,7 +439,7 @@ fn the_rci_excesses_match_the_closed_form() {
         let (_, lr, hr, _) = class.envelope();
         let want_hi: Scalar = tv.iter().map(|t| (t - (hr + 273.15)).max(0.0)).sum();
         let want_lo: Scalar = tv.iter().map(|t| ((lr + 273.15) - t).max(0.0)).sum();
-        assert!(rel(hi, want_hi) < 1e-13, "hi {hi} vs {want_hi}");
+        assert!((rel(hi, want_hi) as f64) < crate::precision::roundoff_tol(1e-13), "hi {hi} vs {want_hi}");
         assert!(rel(lo, want_lo) < 1e-13, "lo {lo} vs {want_lo}");
         assert!(want_hi > 0.0 && want_lo > 0.0, "the field must straddle both ends");
     }
@@ -491,7 +488,6 @@ fn pair_test_the_sample_set_changes_the_index_and_reports_its_own_n() {
 
 /// §18's zone heat total, on the device, against the host sum.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_zone_heat_total_is_the_sum_of_the_cell_releases() {
     let Some(gpu) = gpu() else { return };
     let r = rig(&gpu);
@@ -502,7 +498,7 @@ fn the_zone_heat_total_is_the_sum_of_the_cell_releases() {
     let mut mt = Metrics::new(&gpu, &r.dev, cells.len()).expect("metrics");
     let got = mt.zone_heat(&gpu, &r.m.v, &d_cells, cells.len(), q_vol).expect("heat");
     let want: Scalar = cells.iter().map(|c| r.hm.v[*c as usize] * q_vol).sum();
-    assert!(rel(got, want) < 1e-13, "{got} vs {want}");
+    assert!((rel(got, want) as f64) < crate::precision::roundoff_tol(1e-13), "{got} vs {want}");
     assert!(got > 0.0);
 }
 
