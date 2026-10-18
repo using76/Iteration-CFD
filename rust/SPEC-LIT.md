@@ -53792,6 +53792,97 @@ tests of `ofgpu-lowmach`).**
 
 Labels: (137.8)-(137.9).
 
+### 137.11 The CHEMRAD sections of `ofgpu-validate` (CHR-27, `src/bin/validate.rs`, `src/bin/validate_gates/chr_*.rs`)
+
+docs/17's row CHR-27 asks `ofgpu-validate` to carry the CHEMRAD sections in §69's
+gate registry: thermo, equilibrium, ODE, slab, cube, WSGG, EDM, the flame and Flame D,
+each within its 10-minute budget, in both builds. The f32 build reports each section in
+§112.4's words, and the run prints the total CHEMRAD runtime. Two of the nine sections
+already existed: CHR-13's flame (§133.12) and CHR-16's Flame D (§134.8), both replayed.
+They are only registered into the group. The other seven are new. Each is a live port of
+tests this repository already runs, one row per assertion, with the test's own
+tolerance, mesh and inputs. The tests stay where they are; the sections put the same
+assertions in a run's table and its JSON document, where §69's registry and §118.14's
+row classes see them.
+
+**Selecting them.** `-sections chr` selects the group, alone or beside numbers
+(`chr,1-5`). Membership is declared at the dispatch: `Checks::section_in(Some(CHEMRAD),
+title)` marks a section as a CHEMRAD section whether or not it is selected, so the group
+does not depend on run-order numbers that other lanes shift. Every other word is still
+refused with the old syntax message, so `CHR` and `chr-2` are refused. The tests
+`sections_flag_selects_the_chr_group` and `chemrad_sections_are_nine` hold the grammar,
+and they hold the member count to the source.
+
+**What a section prints.** One note at its end: `CHEMRAD <name>: <rows> rows, <pass>
+pass, <s> s of its 600 s budget`, plus `over its budget` past 600 s. Under `single` the
+note adds §112.4's word: **holds** when every row passes; **loosens** when every failing
+row's error is below `1e-5`, with the worst printed; **fails** otherwise, or when the
+section stopped. A row that misses in both builds (the recorded misses below) counts in
+the f32 word too, so the f64 column of the table says which failures the two builds
+share. The summary prints `CHEMRAD sections (docs/17 CHR-27): <run> of 9 run, total
+runtime <T> s`. The note's times are wall-clock times on a card shared with two other
+lanes. They are not rows, so a `-json` document does not change between two runs of the
+same build.
+
+**Measured 2026-10-18** (RTX 5070 Ti, shared; `-sections chr`, each build alone):
+
+| § at landing | gate | ported from | f64 rows (pass) | f64 s | f32 rows (pass) | f32 s | at f32 (§112.4) |
+|---|---|---|---|---|---|---|---|
+| 82 | CHR-13, flame REDUCED (replayed) | `validate_gates/flame1d.rs` | 3 (0) | 0.0 | 3 (0) | 0.0 | fails: the recorded run (§133.12) |
+| 83 | CHR-16, Flame D REDUCED (replayed) | `validate_gates/flame_d.rs` | 7 (1) | 0.0 | 7 (1) | 0.0 | fails: the recorded run (§134.8) |
+| 85 | CHR-THERMO, §128.7 | `src/chem/tests_thermo.rs` T2-T6 | 111 (111) | 0.0 | 111 (111) | 0.0 | holds |
+| 86 | CHR-EQ, §131.4 | `tests/chem_equilibrium.rs` (six tests) | 94 (94) | 0.0 | 94 (94) | 0.0 | holds |
+| 87 | CHR-ODE, §132.6, §132.8 | `tests/chem_rosenbrock.rs` (four), `tests/chem_reactor.rs` (three) | 48 (48) | 3.7 | 48 (48) | 3.7 | holds |
+| 88 | CHR-EDM, §134.5 | `tests/chem_tci.rs` (five) | 33 (33) | 0.0 | 33 (33) | 0.0 | holds |
+| 89 | CHR-SLAB, §135.5, §136.7 | `tests/radiation_p1.rs` `p1_slab_closed_form`, `tests/radiation_dom.rs` `dom_slab_exact` | 63 (61) | 199.0 | 41 (38) | 348.9 | fails: the f32 PBiCGStab breakdown at N = 256 (§136.7) |
+| 90 | CHR-CUBE, §136.8 | `tests/radiation_dom.rs` (scattering slab N = 32, cube 24^3) | 54 (53) | 125.3 | 54 (53) | 133.1 | fails: the recorded S8 kL 0.1 row, shared with f64 |
+| 91 | CHR-WSGG, §136.9 | `tests/radiation_wsgg.rs` (two) | 33 (33) | 40.3 | 33 (33) | 56.9 | holds |
+| | **total** | | 446 (434) | **368.3** | 424 (411) | **542.7** | |
+
+The run's own four §69 audit rows pass in both builds. Four gates register a verdict:
+CHR-13, CHR-16, CHR-SLAB and CHR-CUBE. Sections 82-84 compute the same rows as before
+this unit (`tools/f64_identity.py`'s row fields, f64). The only difference is the seven
+new skip rows a `-sections 82-84` run now prints.
+
+**The recorded misses, registered and not widened.**
+
+- CHR-SLAB, S8 `N = 256`, `tau = 0.1`: `e_256 = +2.171e-2` on both walls against 2 %.
+  The cause rows pass: S8's own angular limit, (136.13) of SPEC-LIT 136.7, is
+  `+2.219e-2`, and `e_32 = +1.839e-2 < e_256 <= e_limit`. This is §136.7's miss, which
+  the user accepted on 2026-10-14.
+- CHR-CUBE, S8, `kL = 0.1`, `24^3`: `e = -3.100e-2` against 3 %. The spatial error is
+  the cause: `32^3` gives `-2.633e-2`, and S8's own limit, (136.17) of SPEC-LIT 136.8,
+  is `+8.01e-3`. S4 at `kL = 0.1` passes its 6 % row only by cancellation, because
+  S4's own limit is `+6.45e-2`. This is §136.8's pair, and its gate decision is still
+  open with the user (CHR-21).
+- Under `single`, CHR-SLAB's `N = 256` solves are §136.7's f32 miss. In one sweep, 80
+  direction solves are unconverged at each of `tau = 0.1, 1, 10`: the float PBiCGStab
+  breaks down on the 256-cell upwind chain. The P1 rows and the E_3 oracle rows run and
+  pass in both builds.
+
+**EDM is a library and kernel gate, not a driver run.** EDM and PaSR are not wired into
+`ofgpu-lowmach`: `lowmach_chem::refuse_settings` still refuses them, and the wiring is a
+hand-off row of `docs/17-review-later.md`. Section 88 runs CHR-14's closed forms and its
+device kernels against their host twins (§134.5, §134.6). It says this in a note before
+its rows.
+
+**Classes.** The f32 R rows take §118.14's `tol32`. The EDM device twins' `tol64 =
+1e-13` becomes `1e-5` under `single`, where `tests/chem_tci.rs`'s own `tci_tol()` uses
+`1e-6`. The test keeps its tighter number. The validate row follows the class rule
+(docs/17 §5.1 rule 4) and does not invent an f32 tolerance. CHR-THERMO's molar-mass rows
+are class D, the "printed digits" of §128.7's table.
+
+**Not ported.** Each of these still runs in its own test suite:
+
+- `dom_error_falls_with_order`: three more S4 solves at `N = 256`, several minutes;
+- the GRI-Mech 3.0 tests: the mechanism is user-supplied (§129.6) and skips by name;
+- the device integrator twin of CHR-07b (`tests/chem_device_integrate.rs`);
+- CHR-15's EDC tests;
+- the readers' refusal tests (§129.7);
+- CHR-14's selector refusals (`edm_requires_a_and_b`, `tci_refuses_no_mixing_rate`).
+
+The section titles name what each one carries.
+
 ---
 
 ## 138. SPMD transports — the `Comm` trait, ThreadComm, and MPI

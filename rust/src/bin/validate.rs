@@ -62,7 +62,9 @@
 //! partial run and never a validation of the build; with no flag every
 //! section runs, exactly as the run has always printed. Sections are
 //! numbered from 1 in run order - the order of the `=== ... ===` banners -
-//! and a spec naming a section past the end aborts the run.
+//! and a spec naming a section past the end aborts the run. The item `chr`
+//! selects the CHEMRAD group (docs/17 CHR-27, SPEC-LIT 137.11) whatever its
+//! numbers, alone or beside them: `chr`, `chr,1-5`.
 
 use std::cell::RefCell;
 use std::f64::consts::PI;
@@ -215,6 +217,12 @@ struct GateReport {
     uncertainty: Option<Uncertainty>,
 }
 
+/// The one `-sections` group today (docs/17 CHR-27): `chr`, the CHEMRAD
+/// sections - the flame, Flame D and the thermo/equilibrium/ODE/EDM/SLAB/
+/// CUBE/WSGG gates behind them. Selected by writing `-sections chr`, alone
+/// or beside numbers, and answered by [`SectionFilter::selects_group`].
+const CHEMRAD: &str = "chr";
+
 /// The parsed `-sections` value: the text as it was given, and the ranges it
 /// names. `selects` answers for a 1-based run-order number; nothing here
 /// knows how many sections a run actually has - [`Checks::sections_in_range`]
@@ -223,6 +231,11 @@ struct GateReport {
 struct SectionFilter {
     spec: String,
     ranges: Vec<(usize, usize)>,
+    /// Named groups (docs/17 CHR-27), appended at the end. Today one: `chr`,
+    /// the CHEMRAD sections. A group item selects its sections by
+    /// registration, not by run-order number, so a group filter survives the
+    /// sections shifting.
+    groups: Vec<String>,
 }
 
 impl SectionFilter {
@@ -247,7 +260,15 @@ impl SectionFilter {
             text.parse::<usize>().ok()
         };
         let mut ranges = Vec::new();
+        let mut groups = Vec::new();
         for item in spec.split(',') {
+            // A group name is its own item: never a range, never a number.
+            // Anything else that is not digits and dashes still falls to the
+            // syntax refusal below, exactly as before.
+            if item == CHEMRAD {
+                groups.push(CHEMRAD.to_string());
+                continue;
+            }
             let (lo_text, hi_text) = match item.split_once('-') {
                 Some((lo, hi)) => (lo, Some(hi)),
                 None => (item, None),
@@ -268,12 +289,18 @@ impl SectionFilter {
         Ok(SectionFilter {
             spec: spec.to_string(),
             ranges,
+            groups,
         })
     }
 
     /// Whether the 1-based run-order section `n` is selected.
     fn selects(&self, n: usize) -> bool {
         self.ranges.iter().any(|&(lo, hi)| n >= lo && n <= hi)
+    }
+
+    /// Whether the named group is selected (docs/17 CHR-27).
+    fn selects_group(&self, g: &str) -> bool {
+        self.groups.iter().any(|name| name == g)
     }
 
     /// The largest section number named anywhere in the spec.
@@ -355,6 +382,25 @@ struct Checks {
     /// A plain [`Self::check`] is not counted here: `total` minus their sum
     /// is the rows that do not carry a class yet.
     classes: [usize; 4],
+    /// The CHEMRAD tally (docs/17 CHR-27). `declared`: how many
+    /// `CHEMRAD`-group sections the run's dispatch carries, selected or not.
+    /// `run`: how many of those actually ran. `secs`: their total runtime.
+    /// `worst`: the largest finite err of any FAILING row taken inside a
+    /// `chemrad_begin`/`chemrad_end` span, the SPEC-LIT 112.4 f32 verdict's
+    /// holds/loosens/fails input.
+    chemrad_declared: usize,
+    chemrad_run: usize,
+    chemrad_secs: f64,
+    chemrad_worst: f64,
+}
+
+/// The span of one CHEMRAD section's live run (docs/17 CHR-27): the tallies
+/// at its open, and when it opened. [`Checks::chemrad_end`] diffs it against
+/// the tallies at its close.
+struct ChemradMark {
+    t0: std::time::Instant,
+    total: usize,
+    failures: usize,
 }
 
 impl Checks {
@@ -376,6 +422,10 @@ impl Checks {
             section_count: 0,
             sections_run: 0,
             classes: [0; 4],
+            chemrad_declared: 0,
+            chemrad_run: 0,
+            chemrad_secs: 0.0,
+            chemrad_worst: 0.0,
         }
     }
 
@@ -412,11 +462,23 @@ impl Checks {
     /// there. Code with no banner of its own belongs to the section before
     /// it, which is why this is called in run order, once per banner.
     fn section(&mut self, title: &str) -> bool {
+        self.section_in(None, title)
+    }
+
+    /// [`Self::section`] with an optional group name (docs/17 CHR-27): a
+    /// `Some` group is selected not only by number - any `-sections` item
+    /// naming the group selects it, whatever its run-order number - and a
+    /// `CHEMRAD` section declares itself here whether or not it is selected,
+    /// so the summary's CHEMRAD line counts what the dispatch carries.
+    fn section_in(&mut self, group: Option<&'static str>, title: &str) -> bool {
         self.section_count += 1;
         let n = self.section_count;
+        if group == Some(CHEMRAD) {
+            self.chemrad_declared += 1;
+        }
         let selected = match &self.sections {
             None => true,
-            Some(f) => f.selects(n),
+            Some(f) => f.selects(n) || group.is_some_and(|g| f.selects_group(g)),
         };
         if selected {
             self.sections_run += 1;
@@ -467,6 +529,7 @@ impl Checks {
         let ok = err <= tol && err.is_finite();
         if !ok {
             self.failures += 1;
+            self.chemrad_worst = self.chemrad_worst.max(if err.is_finite() { f64::from(err) } else { f64::INFINITY });
         }
 
         self.emit(
@@ -555,6 +618,68 @@ impl Checks {
                 "their f64 tolerance"
             },
             self.total - classed
+        )
+    }
+
+    // ----------------------------------------------------------------------
+    //  CHEMRAD sections (docs/17 CHR-27)
+    // ----------------------------------------------------------------------
+
+    /// Open a CHEMRAD section's span. The worst-err slate is wiped here, so
+    /// the SPEC-LIT 112.4 f32 verdict reads only the rows of the section
+    /// being closed, never the rows before it.
+    fn chemrad_begin(&mut self) -> ChemradMark {
+        self.chemrad_worst = 0.0;
+        ChemradMark {
+            t0: std::time::Instant::now(),
+            total: self.total,
+            failures: self.failures,
+        }
+    }
+
+    /// Close a CHEMRAD section's span: count it, bank its runtime, and print
+    /// ONE note - its rows, its passes, its seconds against the 600 s
+    /// (10-minute) budget - and, under `single`, the SPEC-LIT 112.4 f32
+    /// verdict: holds when nothing failed; loosens when something failed an
+    /// f64 tolerance but the worst err is below f32 noise (1e-5); fails
+    /// otherwise, with the worst err. The words are lower-case on purpose:
+    /// they are notes, not registry verdicts (SPEC-LIT 69.2).
+    fn chemrad_end(&mut self, name: &str, m: ChemradMark) {
+        let rows = self.total - m.total;
+        let failed = self.failures - m.failures;
+        let secs = m.t0.elapsed().as_secs_f64();
+        self.chemrad_secs += secs;
+        self.chemrad_run += 1;
+        let mut line = format!(
+            "CHEMRAD {name}: {rows} rows, {} pass, {secs:.1} s of its 600 s budget",
+            rows - failed
+        );
+        if secs > 600.0 {
+            line.push_str(" - over its budget");
+        }
+        if cfg!(feature = "single") {
+            let w = self.chemrad_worst;
+            if failed == 0 {
+                line.push_str("; at f32 (SPEC-LIT 112.4): holds");
+            } else if w < 1.0e-5 {
+                line.push_str(&format!(
+                    "; at f32 (SPEC-LIT 112.4): loosens: {failed} rows fail an f64 tolerance, worst err {w:.1e}"
+                ));
+            } else {
+                line.push_str(&format!(
+                    "; at f32 (SPEC-LIT 112.4): fails: {failed} rows fail, worst err {w:.1e}"
+                ));
+            }
+        }
+        self.note(&line);
+    }
+
+    /// The summary's CHEMRAD line (docs/17 CHR-27): how many of the declared
+    /// sections ran and what they cost together.
+    fn chemrad_line(&self) -> String {
+        format!(
+            "CHEMRAD sections (docs/17 CHR-27): {} of {} run, total runtime {:.1} s",
+            self.chemrad_run, self.chemrad_declared, self.chemrad_secs
         )
     }
 
@@ -4009,21 +4134,25 @@ fn run(c: &mut Checks) -> Result<()> {
     // flame, BFER phi 1.0, S_L by the 1500 K isotherm on three meshes,
     // replayed from the recorded runs of src/bin/validate_gates/flame1d.rs
     // (CHR-13); the Konnov comparison is named and NOT RUN there.
-    if c.section("Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12)") {
+    if c.section_in(Some(CHEMRAD), "Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12)") {
+    let mark = c.chemrad_begin();
     c.enter_gate(validate_gates::flame1d::GATE);
     let r = validate_gates::flame1d::check_flame1d(c);
     c.ran("check_flame1d", r)?;
     c.leave_gate();
+    c.chemrad_end("flame REDUCED", mark);
     }
     // SPEC-LIT 134.8 - Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon
     // C1 1.6, REDUCED on the true wedge, replayed from the recorded run of
     // src/bin/validate_gates/flame_d.rs (CHR-16); the TNF band is named and
     // NOT RUN there.
-    if c.section("Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8)") {
+    if c.section_in(Some(CHEMRAD), "Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8)") {
+    let mark = c.chemrad_begin();
     c.enter_gate(validate_gates::flame_d::GATE);
     let r = validate_gates::flame_d::check_flame_d(c);
     c.ran("check_flame_d", r)?;
     c.leave_gate();
+    c.chemrad_end("Flame D REDUCED", mark);
     }
     // SPEC-LIT 110.4 leg 2 (docs/17 VAL-54) - Gate 110-C's second leg: the
     // same plume on cases/plumeMcCaffreyRad.jsonc with P1 grey radiation
@@ -4033,6 +4162,86 @@ fn run(c: &mut Checks) -> Result<()> {
     let r = validate_gates::plume_rad::check_plume_rad(c);
     c.ran("check_plume_rad", r)?;
     c.leave_gate();
+    }
+    // SPEC-LIT 128.7 - Gate CHR-THERMO (docs/17 CHR-27): the TM-4513 records'
+    // NASA-7 thermochemistry held against TP-2002 Table B1, run live, in
+    // src/bin/validate_gates/chr_thermo.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-THERMO: NASA-7 thermochemistry of the ten TM-4513 records against TP-2002 Table B1 (SPEC-LIT 128.7)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_thermo::GATE);
+    let r = validate_gates::chr_thermo::check_chr_thermo(c);
+    c.ran("check_chr_thermo", r)?;
+    c.leave_gate();
+    c.chemrad_end("thermo", mark);
+    }
+    // SPEC-LIT 131.4 - Gate CHR-EQ (docs/17 CHR-27): Gibbs equilibrium on the
+    // ten-species TM-4513 fixture against the supervisor's 40-digit oracle,
+    // run live, in src/bin/validate_gates/chr_equilibrium.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-EQ: gas-phase equilibrium by Gibbs minimisation on the TM-4513 fixture against the 40-digit oracle (SPEC-LIT 131.4)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_equilibrium::GATE);
+    let r = validate_gates::chr_equilibrium::check_chr_equilibrium(c);
+    c.ran("check_chr_equilibrium", r)?;
+    c.leave_gate();
+    c.chemrad_end("equilibrium", mark);
+    }
+    // SPEC-LIT 132.6 - Gate CHR-ODE (docs/17 CHR-27): RODAS3 and ROS3 on
+    // Robertson and HIRES and the observed order, then the constant-pressure
+    // reactor's landing on equilibrium and its ignition delay, run live, in
+    // src/bin/validate_gates/chr_ode.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-ODE: RODAS3 and ROS3 on Robertson and HIRES, and the constant-pressure reactor (SPEC-LIT 132.6, 132.8)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_ode::GATE);
+    let r = validate_gates::chr_ode::check_chr_ode(c);
+    c.ran("check_chr_ode", r)?;
+    c.leave_gate();
+    c.chemrad_end("ODE", mark);
+    }
+    // SPEC-LIT 134.5 - Gate CHR-EDM (docs/17 CHR-27): EDM's closed-form box,
+    // the two-step element balance, PaSR's limits and the device kernels
+    // against their host twins, run live, in
+    // src/bin/validate_gates/chr_edm.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-EDM: EDM and PaSR, the library and kernel gate of CHR-14, not a driver run (SPEC-LIT 134.5)") {
+    c.note("EDM and PaSR are not wired into ofgpu-lowmach (its refuse_settings still refuses them; a hand-off row of docs/17-review-later.md): this section is the library and kernel gate CHR-14 built, run live here, not a driver run");
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_edm::GATE);
+    let r = validate_gates::chr_edm::check_chr_edm(c, &gpu);
+    c.ran("check_chr_edm", r)?;
+    c.leave_gate();
+    c.chemrad_end("EDM", mark);
+    }
+    // SPEC-LIT 135.5, 136.7 - Gate CHR-SLAB (docs/17 CHR-27): the isothermal
+    // grey slab, P1 against its closed form and S8 fvDOM against 1 - 2 E_3,
+    // run live, in src/bin/validate_gates/chr_slab.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-SLAB: the isothermal grey slab, P1 against its closed form and S8 fvDOM against 1 - 2 E_3 (SPEC-LIT 135.5, 136.7)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_slab::GATE);
+    let r = validate_gates::chr_slab::check_chr_slab(c, &gpu);
+    c.ran("check_chr_slab", r)?;
+    c.leave_gate();
+    c.chemrad_end("slab", mark);
+    }
+    // SPEC-LIT 136.8 - Gate CHR-CUBE (docs/17 CHR-27): fvDOM with scattering
+    // on the slab, and the isothermal cube at 24^3, run live, in
+    // src/bin/validate_gates/chr_cube.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-CUBE: fvDOM with scattering on the slab, and the isothermal cube at 24^3 (SPEC-LIT 136.8)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_cube::GATE);
+    let r = validate_gates::chr_cube::check_chr_cube(c, &gpu);
+    c.ran("check_chr_cube", r)?;
+    c.leave_gate();
+    c.chemrad_end("cube", mark);
+    }
+    // SPEC-LIT 136.9 - Gate CHR-WSGG (docs/17 CHR-27): the weighted sum of
+    // grey gases on the slab, per-gas fvDOM and P1, and the grey mean, run
+    // live, in src/bin/validate_gates/chr_wsgg.rs.
+    if c.section_in(Some(CHEMRAD), "Gate CHR-WSGG: the weighted sum of grey gases on the slab, per-gas fvDOM and P1, and the grey mean (SPEC-LIT 136.9)") {
+    let mark = c.chemrad_begin();
+    c.enter_gate(validate_gates::chr_wsgg::GATE);
+    let r = validate_gates::chr_wsgg::check_chr_wsgg(c, &gpu);
+    c.ran("check_chr_wsgg", r)?;
+    c.leave_gate();
+    c.chemrad_end("WSGG", mark);
     }
 
     Ok(())
@@ -11305,6 +11514,9 @@ fn main() -> ExitCode {
             println!("{} checks skipped", c.skipped);
         }
         println!("{}", c.class_line());
+        if c.chemrad_declared > 0 {
+            println!("{}", c.chemrad_line());
+        }
         if let Some(f) = &c.sections {
             println!(
                 "-sections {}: {} of {} sections run; the other {} are skip rows, \
@@ -25722,6 +25934,58 @@ mod sections_flag {
         assert!(
             source.matches(&call).count() >= 60,
             "all 60 sections open with a c.section call"
+        );
+    }
+
+    /// The `chr` group (docs/17 CHR-27): parsing, the group item beside
+    /// numbers, the refusals that stay refusals, and a `Checks` behind a
+    /// `chr` filter running exactly its CHEMRAD sections.
+    #[test]
+    fn sections_flag_selects_the_chr_group() {
+        let f = SectionFilter::parse("chr").unwrap();
+        assert!(f.selects_group("chr"));
+        assert!(!f.selects(1));
+        assert_eq!(f.max(), 0, "a group names no run-order number");
+        let f = SectionFilter::parse("chr,3").unwrap();
+        assert!(f.selects_group("chr"));
+        assert!(f.selects(3));
+        assert!(!f.selects(2));
+        let syntax = |spec: &str| {
+            format!(
+                "-sections: '{spec}' is not a list of section numbers and ranges \
+                 (for example 7, 1-5 or 1-5,12)"
+            )
+        };
+        for spec in ["CHR", "chr-2"] {
+            assert_eq!(SectionFilter::parse(spec).unwrap_err(), syntax(spec), "{spec:?}");
+        }
+        let mut c = Checks::new();
+        c.sections = Some(SectionFilter::parse("chr").unwrap());
+        // Through a local binding, so this test's own call site does not
+        // join the CHEMRAD-dispatch count `chemrad_sections_are_registered`
+        // reads back out of this file.
+        let chemrad: Option<&'static str> = Some(CHEMRAD);
+        assert!(!c.section("a"), "an ungrouped section is not selected");
+        assert!(c.section_in(chemrad, "b"));
+        assert!(!c.section("c"));
+        assert_eq!(c.sections_run, 1);
+        assert_eq!(c.chemrad_declared, 1);
+        assert_eq!(c.sections_in_range(), Ok(()));
+    }
+
+    /// The CHEMRAD dispatch registers every `section_in(Some(CHEMRAD), ..)`
+    /// call this run carries: the count the source spells is the count the
+    /// summary line reports, by construction rather than by anyone counting.
+    /// docs/17 CHR-27 names nine: the flame, Flame D, thermo, equilibrium,
+    /// ODE, EDM, slab, cube and WSGG (SPEC-LIT 137.11).
+    #[test]
+    fn chemrad_sections_are_nine() {
+        let source = include_str!("validate.rs");
+        let call: String = concat!("c.section_in(Some(", "CHEMRAD), ").to_string();
+        assert_eq!(
+            source.matches(&call).count(),
+            9,
+            "the CHEMRAD group this run registers: 82, 83 and the seven new sections"
         );
     }
 }

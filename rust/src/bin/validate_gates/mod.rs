@@ -118,3 +118,51 @@ pub(crate) mod flame_d;
 /// cases/plumeMcCaffreyRad.jsonc at three levels, replayed through the same
 /// P1-P4 bands as leg 1 (docs/17 VAL-54).
 pub(crate) mod plume_rad;
+
+/// The CHEMRAD sections' shared fixture (docs/17 CHR-27): the TM-4513
+/// ThermoSet read from its tracked key, the ten-species mechanism over it,
+/// the two mole recipes, and the radiation and round-off helpers the
+/// chr_* gate files port their tests through. No gate of its own.
+pub(crate) mod chr_fixture;
+
+/// SPEC-LIT §128.7, Gate CHR-THERMO: the TM-4513 records' NASA-7
+/// thermochemistry - cp against TP-2002 Table B1, H against the heats of
+/// formation, the T_mid fit constraint, the range refusals, the molar
+/// masses (docs/17 CHR-27).
+pub(crate) mod chr_thermo;
+
+/// SPEC-LIT §131.4, Gate CHR-EQ: gas-phase equilibrium by Gibbs minimisation
+/// on the TM-4513 fixture - element conservation, the 40-digit oracle,
+/// detailed balance, the adiabatic flame temperature, the absent-element
+/// exact zeros (docs/17 CHR-27).
+pub(crate) mod chr_equilibrium;
+
+/// SPEC-LIT §132.6, Gate CHR-ODE: RODAS3 and ROS3 - the order conditions,
+/// Robertson and HIRES against the IVP test-set keys, the observed order -
+/// and the constant-pressure reactor on equilibrium and its ignition delay
+/// (docs/17 CHR-27).
+pub(crate) mod chr_ode;
+
+/// SPEC-LIT §134.5, Gate CHR-EDM: EDM's closed-form box and the two-step
+/// element balance, PaSR's two limits, and the device kernels
+/// `chemEdmSource` and `chemPasrScale` against their f64 host twins. The
+/// library and kernel gate of CHR-14, run live, not a driver run
+/// (docs/17 CHR-27).
+pub(crate) mod chr_edm;
+
+/// SPEC-LIT §135.5, §136.7, Gate CHR-SLAB: the isothermal grey slab - P1
+/// against its closed form (135.11) on §135.5's seven cases, the S8 fvDOM
+/// slab against 1 - 2 E_3 with tau 0.1's recorded miss, and the step
+/// recurrence (136.12) (docs/17 CHR-27).
+pub(crate) mod chr_slab;
+
+/// SPEC-LIT §136.8, Gate CHR-CUBE: fvDOM with scattering on the slab
+/// against (136.5) solved in the gate, the isothermal cube at 24^3 against
+/// (136.6) with the kL 0.1 misses, and Jamaluddin & Smith (1988) named and
+/// NOT RUN (docs/17 CHR-27).
+pub(crate) mod chr_cube;
+
+/// SPEC-LIT §136.9, Gate CHR-WSGG: the weighted sum of grey gases on the
+/// synthetic four-gas set - the per-gas fvDOM and P1 sums and the grey
+/// mean; Smith 1982 and Bordbar 2014 named and NOT RUN (docs/17 CHR-27).
+pub(crate) mod chr_wsgg;
