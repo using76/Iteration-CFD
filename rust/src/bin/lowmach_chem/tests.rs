@@ -602,3 +602,35 @@ fn lowmach_reacting_refusals_name_the_setting() {
     refuse("restart", &base, &["-endTime", "1e-5", "-deltaT", "1e-6", "-restartWrite", "2"], "restart");
     refuse("backward", &backward, &tr, "numerics.ddt");
 }
+
+// ==========================================================================
+//  lowmach_reacting_refused_cell_is_named
+// ==========================================================================
+
+/// **SPEC-LIT 133.11, row D (CHR-13).** A cell the reactor refuses ends the
+/// run NAMING it: the error holds `the reactor refused`, the count, the
+/// first cell, its status code and its name. The case is the 0-D box with
+/// an initial `T` of 150 K, below the thermo's 200 K floor, so every cell
+/// is refused on the first split step with OUTSIDE_THERMO_RANGE; before the
+/// diagnostic the cell's NaN surfaced later as a non-finite pressure
+/// residual and the run ended without naming the cause.
+#[test]
+fn lowmach_reacting_refused_cell_is_named() {
+    if Gpu::new(0).is_err() {
+        return;
+    }
+    let cold =
+        box_case(&chem_blocks(None), r#"{ "endTime": 1e-5, "deltaT": 1e-6 }"#)
+            .replace(r#""T": 1400.0"#, r#""T": 150.0"#);
+    let path = write_case("refused", &cold);
+    let err = run_case(&path, &["-endTime", "1e-5", "-deltaT", "1e-6"])
+        .expect_err("the cold box must be refused")
+        .to_string();
+    println!("  [133.11] cold box: run ended: {err}");
+    assert!(err.contains("the reactor refused"), "the error must name the reactor: {err}");
+    assert!(
+        err.contains("OUTSIDE_THERMO_RANGE"),
+        "the error must carry the status NAME: {err}"
+    );
+    assert!(err.contains("133.11"), "the error must name its section: {err}");
+}

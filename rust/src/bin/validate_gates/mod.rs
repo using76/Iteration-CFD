@@ -65,3 +65,8 @@ pub(crate) mod cavity_lm;
 /// SPEC-LIT §127.6, Gate CMP-COU: compressible Couette with viscous
 /// heating against (127.12) (CMP-22).
 pub(crate) mod couette;
+
+/// SPEC-LIT §133.12, Gate CHR-13: the 1-D freely propagating CH4-air flame,
+/// BFER phi 1.0, S_L by the 1500 K isotherm on three meshes, replayed from
+/// the recorded runs (CHR-13).
+pub(crate) mod flame1d;

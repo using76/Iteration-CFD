@@ -359,6 +359,21 @@ impl<'m> Reacting<'m> {
         energy.set_cp_field(gpu, &self.cp_c, &self.cp_b)?;
         field_ops::set_field(gpu, &self.fk, &mut self.p, gas.p0(), n)?;
         self.chem.step(gpu, &mut self.species, &energy.field().f, &self.p, Some(gas.rho()), self.dt)?;
+        // SPEC-LIT 133.11 (CHR-13): a cell the reactor refused carries NaN
+        // into its sources, which used to surface later as a non-finite
+        // pressure residual. Name it here instead: one status read-back, so
+        // a run where no cell is refused makes exactly the calls it made
+        // before plus this download, and every result stays bitwise.
+        let refused = self.chem.refused_cells(gpu)?;
+        if let Some((cell, code)) = refused.first() {
+            return Err(Error::Refused(format!(
+                "chemistry: the reactor refused {} cell{}; the first is cell {cell} with status \
+                 {code} ({}) (SPEC-LIT §133.11)",
+                refused.len(),
+                if refused.len() == 1 { "" } else { "s" },
+                status_name(*code),
+            )));
+        }
         // SPEC-LIT 137.10 (137.8): `su_v <- su_v + mdot'''`, kg/(m3 s), on
         // the mass-weighted species equation's reaction source. The `net`
         // loop below adds each member's `su` into its `net`, so (133.24)'s
@@ -508,6 +523,25 @@ impl<'m> Reacting<'m> {
             self.d.iter().fold(Scalar::INFINITY, |a, &b| a.min(b)),
             self.d.iter().fold(0.0 as Scalar, |a, &b| a.max(b)),
         )
+    }
+}
+
+/// The name of a reactor status code (`ofgpu::chem::device::status`), for
+/// the refused-cell diagnostic; an unknown code prints `unknown`.
+fn status_name(code: i32) -> &'static str {
+    match code {
+        ofgpu::chem::device::status::OK => "OK",
+        ofgpu::chem::device::status::BAD_PRESSURE => "BAD_PRESSURE",
+        ofgpu::chem::device::status::BAD_TEMPERATURE => "BAD_TEMPERATURE",
+        ofgpu::chem::device::status::BAD_MASS_FRACTION => "BAD_MASS_FRACTION",
+        ofgpu::chem::device::status::NO_SPECIES => "NO_SPECIES",
+        ofgpu::chem::device::status::OUTSIDE_THERMO_RANGE => "OUTSIDE_THERMO_RANGE",
+        ofgpu::chem::device::status::SINGULAR_MATRIX => "SINGULAR_MATRIX",
+        ofgpu::chem::device::status::MAX_STEPS => "MAX_STEPS",
+        ofgpu::chem::device::status::BELOW_NEGATIVE_ATOL => "BELOW_NEGATIVE_ATOL",
+        ofgpu::chem::device::status::BAD_STEP => "BAD_STEP",
+        ofgpu::chem::device::status::OUTSIDE_TRANSPORT_RANGE => "OUTSIDE_TRANSPORT_RANGE",
+        _ => "unknown",
     }
 }
 

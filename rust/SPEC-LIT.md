@@ -47362,6 +47362,9 @@ Dryer, *Combust. Sci. Technol.* 27 (1981) 31-43, DOI
 Gicquel & Poinsot, *Combust. Flame* 159 (2012) 621-637, DOI
 10.1016/j.combustflame.2011.08.004). All three DOIs were checked on Crossref.
 **All three papers are closed (OpenAlex), and none was read by this unit.**
+CHR-13 later read BFER2 from the authors' manuscript on CERFACS's site and
+wrote `cases/mech/bfer2_phi1.ck` from it (§133.12); WD1 and JL4 remain
+unread.
 
 A mechanism file's rate parameters are numbers from a paper. They are
 transcribed only from a read copy, with its table and page as provenance, and
@@ -48782,7 +48785,7 @@ Labels: (133.1)-(133.12).
 | Lindemann 1922 | 10.1039/TF9221700598 | closed | no | added |
 | Westbrook & Dryer 1981 | 10.1080/00102208108946970 | closed | no | DOI confirmed; parameters need a read copy |
 | Jones & Lindstedt 1988 | 10.1016/0010-2180(88)90021-1 | closed | no | DOI confirmed; parameters need a read copy |
-| Franzelli et al. 2012 (BFER) | 10.1016/j.combustflame.2011.08.004 | closed | no | DOI confirmed; parameters need a read copy |
+| Franzelli et al. 2012 (BFER) | 10.1016/j.combustflame.2011.08.004 | closed (an author manuscript is on CERFACS's site) | yes (CHR-13, §133.12) | Tables 3-4 and eqs. (6)-(7) read; §133.12 |
 | GRI-Mech 3.0, DRM19 | combustion.berkeley.edu (HTTP) | disclaimer, **no licence** | yes | **decision: user path, not vendored** (§129.6) |
 | Sandu et al. 1997 | 10.1016/S1352-2310(97)83212-8 | green OA (CWI) | yes | **ROS4 not printed there**: ROS4 named, ROS3 added |
 | Hairer & Wanner 1996 | 10.1007/978-3-642-05221-7 | book | no | — |
@@ -49207,7 +49210,10 @@ and the species keep one old level); a checkpoint, `-restartFrom`,
 `-restartWrite` or an output restart series (the `.mcr` format carries no
 mass fractions); a motion block; and a species named like another field the
 run writes. The dictionary route keeps §137.7's refusal: a case directory
-with chemistry is refused by every driver.
+with chemistry is refused by every driver. A reactor cell that the split
+step itself refuses ends the run naming the reactor, the count, the first
+cell and its status (CHR-13, §133.12); before, the cell's NaN surfaced later
+as a non-finite pressure residual.
 
 **What is not built, stated.** The dictionary route, Strang, `backward`, a
 restart of the mass fractions, the closures of §134, the turbulent part of
@@ -49238,6 +49244,166 @@ records, with the reactor at `rtol` 1e-6.
 | `lowmach_reacting_refusals_name_the_setting` | a steady run, Strang, `-restartWrite` and `backward`, each refused naming its key and §133.11 | refused | D | all four, both builds |
 
 Labels: (133.24).
+
+### 133.12 The 1-D freely propagating methane-air flame (CHR-13, `cases/flame1d_ch4_bfer.jsonc`, `src/bin/validate_gates/flame1d.rs`)
+
+`No GPL-licensed source was consulted.`
+
+**(a) The source, and what was read.** B. Franzelli, E. Riber,
+L. Y. M. Gicquel and T. Poinsot, "Large Eddy Simulation of combustion
+instabilities in a lean partially premixed swirled flame", *Combustion and
+Flame* 159 (2012) 621-637, DOI 10.1016/j.combustflame.2011.08.004 — read as
+the authors' manuscript hosted by CERFACS at
+`https://www.cerfacs.fr/cantera/docs/mechanisms/methane-air/DOCS/BFER/CF_Preccinsta.pdf`,
+52 pages, sha256
+`42c230d28d2e25382928f43489497d8c5d727b746d86225fbb1bb780bd77f982`, read
+2026-10-18. Read: §2.1 eqs. (1)-(7) (pp. 8-10) and Tables 3-4 (p. 28). The
+mechanism is the two-step reduced scheme of eqs. (2)-(3),
+`CH4 + 1.5 O2 => CO + 2 H2O` and `CO + 0.5 O2 <=> CO2`, with the rates of
+eqs. (4)-(5), `k_f,j = A_j f_j(phi) T^beta_j exp(-Ea,j/RT)` times the
+reactants' powers: Table 3 ("Units are: mol, s, cm3 and cal/mol") gives the
+CH4 oxidation Ea 3.55e4 cal/mol, beta 0.0, A1 4.9e9, nCH4 0.50, nO2 0.65,
+and the CO-CO2 equilibrium Ea 1.2e4 cal/mol, beta 0.8, A2 2e8, nCO 1.00,
+nO2 0.50. The phi corrections are the paper's eqs. (6)-(7).
+
+```
+f1(phi) = 2 / ( [1 + tanh((phi0,1 - phi)/sigma0,1)] + B1 [1 + tanh((phi - phi1,1)/sigma1,1)]
+                + C1 [1 + tanh((phi - phi2,1)/sigma2,1)] )
+
+f2(phi) = (1/2)[1 + tanh((phi0,2 - phi)/sigma0,2)] + (B2/2)[1 + tanh((phi - phi1,2)/sigma1,2)]
+          + (C2/2)[1 + tanh((phi - phi2,2)/sigma2,2)] x [1 + tanh((phi3,2 - phi)/sigma3,2)]
+```
+
+Table 4 (phi0, sigma0, B, phi1, sigma1, C, phi2, sigma2, phi3, sigma3):
+j = 1: 1.1, 0.09, 0.37, 1.13, 0.03, 6.7, 1.6, 0.22, -, -. j = 2: 0.95, 0.08,
+2.5e-5, 1.3, 0.04, 0.0087, 1.2, 0.04, 1.2, 0.05.
+
+**(b) Why the file carries constants.** Evaluated at phi = 1 in f64,
+f1(1) = 1.0743172004768002 and f2(1) = 0.22270092849097087, so
+`cases/mech/bfer2_phi1.ck` carries A1' = 4.9e9 f1(1) = 5.264154282E+09 and
+A2' = 2e8 f2(1) = 4.454018570E+07 (10 significant digits), with FORD
+/CH4 0.5/ and /O2 0.65/ on reaction 1; reaction 2 needs no FORD, its orders
+equal its coefficients. A constant is EXACT here, not an approximation: in this case
+every species has the same diffusivity (one Le for all, §133.11's Lewis
+route), so each element mass fraction obeys a source-free transport
+equation whose uniform inlet and initial values are both stoichiometric,
+and the local phi is 1 everywhere at all times.
+
+**(c) A recorded inconsistency, in the paper's favour.** CERFACS's own
+Cantera file `2S_CH4_BFER.cti` (sha256
+`a7bf7580673e7eb1f7b8d915e472e4a07c57aca3595ceb9e75ff95408845cea5`) carries
+beta2 = 0.7 and no f1/f2; the paper's Table 3 says 0.8. The paper is used.
+
+**(d) Thermo: TM-4513 Table II. DESIGN.** `cases/mech/tm4513_thermo.dat` is
+the ten TM-4513 Table II records (§128; a US-Government work, public
+domain, tracked digit for digit in
+`reference/mcbride-gordon-reno1993/table_II.csv`) as a CHEMKIN THERMO file
+at p_ref = 1 atm, 200/1000/6000 K — NOT Franzelli's species data, whose
+fits the read pages do not print as numbers.
+
+**(e) Transport: not BFER's, said plainly.** BFER's own transport
+(Franzelli eq. (1)) is `mu(T) = mu0 (T/T0)^0.6759` with mu0 = 1.8405e-5
+kg/(m s), T0 = 300 K, Pr 0.7 and unity Lewis numbers. `ofgpu-lowmach` has
+neither: its JSONC route fixes the molecular conductivity at
+`GasProperties::default().k` = 0.026 W/(m K) (no JSONC key), and §133.11's
+species diffusivity is `D_k = nu/(Pr Le_k)` with constant kinematic `nu`.
+The rule, fixed BEFORE any S_L was measured: `nu = Pr k / (rho cp)` of the
+complete-combustion products at T = 1500 K (the gate's isotherm) and
+p = 101325 Pa, so the species and thermal diffusivities are equal
+(Le_eff = 1) there. With TM-4513 cp: W_b 27.6332 g/mol, cp_b 1425.3
+J/(kg K), rho 0.224503 kg/m3, nu = 5.6878e-5 m2/s; the case writes 5.688e-5.
+This is NOT BFER's transport, so the measured S_L is this driver's, not
+BFER's.
+
+**(f) The case and the recipe.** `cases/flame1d_ch4_bfer.jsonc` is the
+50 µm level: a 1-D tube of 300 x 1 x 1 cells over 15 mm (`xmin inlet`,
+`xmax outlet` open, four symmetry sides), inlet U fixedValue 1 m/s at
+300 K carrying the stoichiometric fresh mixture CH4 + 2 (O2 + 3.76 N2) by
+mass — computed from the solver's own molar masses (§128.2): Y_CH4
+0.05518632456, Y_O2 0.2201486730, CO/H2O/CO2 0 — Euler at dt = 1e-6 s to
+6 ms. The other levels edit ONLY `cells`: [150,1,1] and [600,1,1]. THREE
+levels, not the plan's two, because §94.1 refuses a two-level study
+(`vv::grid_study` needs three); the plan's dx 50 and 25 µm are its finest
+two. The initial state is the complete-combustion products at 1600 K
+(CO2 + 2 H2O + 7.52 N2 by mass: Y_CO2 0.1513916001, Y_H2O 0.1239433974) —
+an ignition source, not a claim about T_ad. The reactor runs at `rtol`
+1e-6 and `atol` 1e-10 (the probes: below that atol the reactor refused
+cells early). The recipe, per level on a scratch copy:
+
+```
+ofgpu-lowmach <copy>/flame1d_ch4_bfer.jsonc -endTime 6e-3 -deltaT 1e-6 -check 500 -writeInterval 2e-4
+```
+
+**(g) The measurement.** `x_f(t)` is the first 1500 K crossing from the
+inlet, linear between the cell centres `x_i = (i + 1/2) dx`; and
+
+```
+S_L = U_in - dx_f/dt,  dx_f/dt the least-squares slope of x_f over t >= 3 ms of the 2e-4 s writes   (133.25)
+```
+
+**(h) Rows.** The gate is REPLAYED (`src/bin/validate_gates/flame1d.rs`,
+the pattern of §110.5's plume): a run changes DATA, not code — the ignored
+`record_flame1d` prints the `RUNS` literal the supervisor pastes. No
+comparison against a published value is made. A level that stopped before
+its end time registers the gate's MISSES verdict, replayed, through §69's
+registry (the per-level rows are replayed rows); with every level at its
+end and no reference, the gate registers none. (j) is the first case.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| R1: the ±10 % row | S_L against Konnov et al. 2018's recommended phi = 1.0 value | ±10 % | P | NOT RUN: Konnov et al. 2018 (DOI 10.1016/j.pecs.2018.05.003) is closed and no read copy exists (§133.6) |
+| per level, x3 | the {100, 50, 25} µm run reached its end time 6 ms with the driver's normal-end line; then S_L by (133.25) from the recorded fronts; a fit with fewer than 4 fronts after 3 ms fails its row | reached | D | **MISSED** at all three levels: each stopped at its 3rd write, t = 0.6 ms of 6 ms, with the reactor's BELOW_NEGATIVE_ATOL (status 8) at the flame (cells 13, 25, 48); see (j) |
+| the §94 study | `vv::grid_study` on the three S_L, finest first (§94.1 refused the plan's two) | - | note | NOT RUN: 0 of 3 levels gave an S_L |
+| T1 `bfer_corrections_at_phi_one` | f1(1), f2(1) against the f64 evaluation of (6)-(7) | `1e-14` relative | D | both |
+| T2 `bfer_mechanism_matches_franzelli_tables` | the two files through the crate's own readers: 6 species, 2 reactions, reaction 1 irreversible with the Table 3 numbers (A in the reader's stored units), FORD orders CH4 0.5 and O2 0.65, reaction 2 reversible; every TM-4513 coefficient equal to `table_II.csv` | `1e-9` relative on A; the rest exact | D | both |
+| T3 `flame1d_case_carries_the_record_inputs` | the case lowers to the record inputs: cells [300,1,1], length 15 mm, inlet U 1 m/s, dt 1e-6, end 6 ms, inlet and initial compositions from the solver's molar masses, phi = 1, and nu by the (e) rule with the crate's NASA-7 cp | `1e-9` (compositions, class R: D-F32-1's `1e-5` in f32); the scalars exact as `Scalar`, `1e-12` (phi), `2e-4` (nu) | D | both |
+| T4 `front_position_interpolates_linearly` | the locator's first crossing from the inlet, linear between centres; all-300 gives None; two crossings give the first | `1e-15` absolute | D | both |
+| T5 `fit_slope_recovers_a_line` | the OLS slope of an exact line, `flame_speed(1.0, 0.25)` = 0.75, and the four-pair floor | `1e-12`; exact | D | both |
+| T6 `three_levels_feed_the_94_study` | S(h) = 0.4 + 0.1 (h/1e-4)^2 at 25/50/100 µm through `grid_study`: p = 2, phi_ext = 0.4 | `1e-6` (p), `1e-9` (phi_ext); D-F32-1 `1e-5` in f32 | R | both |
+| T8 `flame1d_records_state_their_miss` | every recorded level stopped before 6 ms, its `ended` names BELOW_NEGATIVE_ATOL, and no front lies after 3 ms; prints each MISSED line | exact | D | both (asserts the miss of (j)) |
+| T7 `record_flame1d` | the recorder; ignored, reads `$CHR13_RUNS`, prints the `RUNS` literal | - | - | not part of any verification |
+
+**(i) What is not built, stated.** BFER's `mu(T)` and its conductivity
+curve in `ofgpu-lowmach` — the JSONC route has neither key — so S_L here is
+this driver's, not BFER's (see (e)). The plan's DEFERRED sweep (phi
+0.7-1.4, DRM19, GRI-3.0) is NOT RUN; (j) gives its price.
+
+**(j) The recorded runs, 2026-10-18 (supervisor; RTX 5070 Ti shared with two
+other lanes; built at 3a53be6 with this unit's working tree).** The recipe of
+(f) on three copies. Every level stopped, `run ended: refused | chemistry:
+the reactor refused 1 cell; the first is cell {13, 25, 48} with status 8
+(BELOW_NEGATIVE_ATOL)`, between steps 600 and 800, at the flame (x = 1.2-1.35
+mm). The fronts written before the stop, `(t, x_f)` in (s, m): 100 µm
+(2e-4, 5.2207e-4), (4e-4, 7.2132e-4), (6e-4, 8.1633e-4); 50 µm (2e-4,
+4.8292e-4), (4e-4, 7.0000e-4), (6e-4, 8.2918e-4); 25 µm (2e-4, 4.6800e-4),
+(4e-4, 6.8619e-4), (6e-4, 8.2211e-4) - the flame is still forming (the peak
+T is 1846-1871 K at step 500, below the burnt state), so no S_L is measured
+and the per-level rows are MISSED, asserted by
+`flame1d_records_state_their_miss`.
+**The cause, measured.** Status 8 is §132.10's guard: a mass fraction below
+`-atol` at the reactor's observer. The likely mechanism (not proven):
+reaction 1's forward orders are 0.5 and 0.65, so near CH4 burn-out
+`dY/dt ~ -Y^0.5` reaches Y = 0 in finite time (the rate is not Lipschitz at
+0) and an accepted Rosenbrock step lands below it. Measured on the 100 µm level to 2 ms, each a case input changed alone:
+`deltaT` 5e-7, `atol` 1e-6, `rtol` 1e-8, `rtol` 1e-4 and `integrator ros3`
+all stop the same way (status 8, cells 12-15). In an earlier probe of the same
+tube (nu 2.4e-4 and the reactor's default `atol`), the fractional orders
+stopped at step 9 while integer orders (FORD 1.0 and 1.0, a probe, not
+BFER) ran all 200 steps, and either fractional order alone ran its 40; that
+points at the two fractional orders together, without proving it. A cure changes the
+reactor's numerics (for example evaluating `max(c, 0)^n` inside every stage,
+or clipping at the observer) and is the user's decision (docs/17 §5.3 rule
+4); it is not built.
+**The DEFERRED sweep, priced.** Measured per step on the 300-cell tube at
+dt = 1e-6 s before ignition (setup subtracted): DRM19 (21 species, 84
+reactions; `drm19.dat` with GRI 1.2's `thermo12.dat`, user-supplied paths,
+§129.6) 0.70 s, so one phi at three levels (150/300/600 cells, 6000 steps
+each) is about 4 h and the eight phi of 0.7-1.4 about 32 h; GRI-3.0 (53
+species, 325 reactions) 2.35 s, about 13 h per phi and 100 h for the sweep.
+Both exceed this unit's 3 h of card time; both are recorded NOT RUN with
+these prices (docs/17 §11 item 7).
+
+Labels: (133.25).
 
 ---
 

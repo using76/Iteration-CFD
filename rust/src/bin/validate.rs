@@ -3932,6 +3932,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_couette", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 133.12 - Gate CHR-13: the 1-D freely propagating CH4-air
+    // flame, BFER phi 1.0, S_L by the 1500 K isotherm on three meshes,
+    // replayed from the recorded runs of src/bin/validate_gates/flame1d.rs
+    // (CHR-13); the Konnov comparison is named and NOT RUN there.
+    if c.section("Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12)") {
+    c.enter_gate(validate_gates::flame1d::GATE);
+    let r = validate_gates::flame1d::check_flame1d(c);
+    c.ran("check_flame1d", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
