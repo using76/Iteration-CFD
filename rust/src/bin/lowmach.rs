@@ -266,6 +266,11 @@ struct Options {
     /// an error naming both rather than a silent winner - which needs this
     /// list, not those values.
     output_flags: Vec<&'static str>,
+    /// Tests only, no flag sets it: hand the final cell values of `U`, `p`
+    /// and the turbulence fields back in [`RunEnd::snapshot`] at full
+    /// precision (SPEC-LIT 161.17's Galilean check; the written fields
+    /// carry six digits).
+    snapshot: bool,
 }
 
 fn usage() {
@@ -307,6 +312,7 @@ fn parse(args: &[String]) -> Result<Options> {
         restart_from: None,
         rigid_body: None,
         output_flags: Vec::new(),
+        snapshot: false,
     };
 
     let mut i = 2;
@@ -1280,10 +1286,15 @@ fn refuse_rigid_body_combinations(
     if o.sealed {
         return refuse("-sealed", "the sealed p0 equation holds the domain volume fixed");
     }
-    if model != RasModel::Laminar {
+    if !RIGID_BODY_VERIFIED_MODELS.contains(&model) {
+        let verified: Vec<&str> = RIGID_BODY_VERIFIED_MODELS.iter().map(|m| m.name()).collect();
         return refuse(
             model.name(),
-            "a turbulence model's wall distance and time derivatives are the static mesh's; a moving mesh runs laminar",
+            &format!(
+                "this turbulence model has not been verified on a rigidly moving mesh (SPEC-LIT 161.16); \
+                 the verified ones are {}",
+                verified.join(", ")
+            ),
         );
     }
     if let Some(f) = o.output.iter().find(|f| !matches!(f, OutputFormat::Foam)) {
@@ -1294,6 +1305,23 @@ fn refuse_rigid_body_combinations(
     }
     Ok(())
 }
+
+/// SPEC-LIT 161.16: the turbulence models a `-rigidBody` run honours - each
+/// audited for frame-dependent cached geometry and held by the uniform-state
+/// test on a rigidly translating and turning box
+/// (`rigid_body::tests_v2::ras_models_keep_a_free_stream_uniform_on_a_rigidly_moving_box`).
+/// Every other model is refused by name: Langtry-Menter's transition model
+/// reads the absolute velocity's magnitude (`cuda/lmtrans.cu`), which a
+/// moving frame changes; the other transition model, the hybrids, LES, the
+/// low-Reynolds k-epsilon and Spalart-Allmaras were not verified.
+const RIGID_BODY_VERIFIED_MODELS: [RasModel; 6] = [
+    RasModel::Laminar,
+    RasModel::KOmegaSST,
+    RasModel::KOmega,
+    RasModel::KEpsilon,
+    RasModel::RealizableKE,
+    RasModel::RNGkEpsilon,
+];
 
 /// SPEC-LIT 105.12: build the case's motion on its own block mesh and attach
 /// it to `s`. Returns the motion the loop moves the points with.
@@ -2186,6 +2214,10 @@ fn run(o: &Options) -> Result<RunEnd> {
                 f64::from(cc.nu),
                 [f64::from(grav.x), f64::from(grav.y), f64::from(grav.z)],
                 &csv,
+                ofgpu::rigid_body::AttachOptions {
+                    permissive: ofgpu::io::contract::permissive(),
+                    turbulent: selection.model != RasModel::Laminar,
+                },
             )?;
             let rho_gas = f64::from(o.p0) / (f64::from(gas_props.r_s()) * f64::from(cc.buoyancy.t_ref));
             println!(
@@ -2277,6 +2309,12 @@ fn run(o: &Options) -> Result<RunEnd> {
         },
     )?;
     energy.initialise(&gpu)?;
+    // SPEC-LIT 161.11: the jets' boundary scalars - the plume's T and its
+    // inflow turbulence - checked against the fields' own patch types and
+    // written at their t = 0 values.
+    if let Some(rb) = rigid.as_mut() {
+        rb.bind_jet_fields(&gpu, &mesh, energy.field_mut(), turb.output_fields_mut())?;
+    }
 
     // SPEC-LIT §29.3: the Jayatilleke thermal wall function, on whichever
     // faces T's OWN patch type named `thermalWallFunction` - §15.5's rule,
@@ -2762,6 +2800,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     refuse_above_low_mach(&m0, "the initial field")?;
     let mut last_mach = m0;
 
+    let mut steps_done = n_steps;
     for step in 0..n_steps {
         if transient {
             // SPEC-LIT 105.16 and 105.17: the FIRST step opens no time step,
@@ -2804,6 +2843,20 @@ fn run(o: &Options) -> Result<RunEnd> {
         // its points, the mesh advance, and the walls' and jets' velocity.
         if let Some(rb) = rigid.as_mut() {
             rb.pre_step(&gpu, &mesh, &mut s, t_phys, f64::from(dt))?;
+            // SPEC-LIT 161.11: the jets' T and inflow turbulence this step.
+            rb.write_jet_scalars(&gpu, &mesh, energy.field_mut(), turb.output_fields_mut())?;
+            // SPEC-LIT 161.16: a turbulence variable's `inletOutlet` faces
+            // switch on the RELATIVE flux, as U's and T's do (SPEC-LIT 105.12) - the
+            // outer boundary moves with the body, and which of its faces
+            // takes air in changes as the body turns.
+            if selection.model != RasModel::Laminar {
+                let fk = FieldKernels::new(&gpu)?;
+                for (name, f) in turb.output_fields_mut() {
+                    if name != "nut" {
+                        update_inlet_outlet_scalar(&gpu, &fk, f, s.convective_flux())?;
+                    }
+                }
+            }
         }
 
         let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
@@ -2862,9 +2915,13 @@ fn run(o: &Options) -> Result<RunEnd> {
         // (or warns, under -permissive) the step it leaves the regime.
         refuse_above_low_mach(&report.mach, &format!("step {step}"))?;
         last_mach = report.mach;
-        // SPEC-LIT 161.6: the force the next step's body advance uses.
+        // SPEC-LIT 161.6: the force the next step's body advance uses -
+        // with the eddy viscosity's wall values under a RAS model (SPEC-LIT 161.12).
+        // A touchdown ends the run after this step (SPEC-LIT 161.15).
+        let mut touched_down = false;
         if let Some(rb) = rigid.as_mut() {
-            rb.post_step(&gpu, &mesh, &s, step, n_steps, o.end_time)?;
+            let nut_b = if selection.model != RasModel::Laminar { Some(&turb.nut().bf) } else { None };
+            touched_down = rb.post_step(&gpu, &mesh, &s, nut_b, step, n_steps, o.end_time)?;
         }
 
         if step % o.check_every.max(1) as usize == 0 || step + 1 == n_steps {
@@ -2930,6 +2987,12 @@ fn run(o: &Options) -> Result<RunEnd> {
                 mesh_hash, t_phys as Scalar,
             )?;
         }
+        // SPEC-LIT 161.15: "run ended: touchdown" was printed by the body;
+        // the final state below is written at this step's time.
+        if touched_down {
+            steps_done = step + 1;
+            break;
+        }
     }
 
     let ux_mean = {
@@ -2945,13 +3008,25 @@ fn run(o: &Options) -> Result<RunEnd> {
         Some(r) => r.snapshot(&gpu, energy.field(), &gas)?,
         None => Vec::new(),
     };
+    let mut snapshot: Vec<(String, Vec<Scalar>)> = Vec::new();
+    if o.snapshot {
+        let u = gpu.download(&s.u().f)?;
+        snapshot.push(("Ux".to_string(), u.iter().map(|v| v.x).collect()));
+        snapshot.push(("Uy".to_string(), u.iter().map(|v| v.y).collect()));
+        snapshot.push(("Uz".to_string(), u.iter().map(|v| v.z).collect()));
+        snapshot.push(("p".to_string(), gpu.download(&s.p().f)?));
+        for (name, f) in turb.output_fields() {
+            snapshot.push((name.to_string(), gpu.download(&f.f)?));
+        }
+    }
     let run_end = RunEnd {
-        steps: n_steps,
+        steps: steps_done,
         transient,
         t_end: t_phys,
         ux_mean,
         t_mean,
         final_state,
+        snapshot,
     };
 
     mem.sample(&gpu)?;
@@ -3764,6 +3839,11 @@ struct RunEnd {
     /// no output.
     #[cfg_attr(not(test), allow(dead_code))]
     final_state: Vec<(String, Vec<Scalar>)>,
+    /// [`Options::snapshot`]'s readout: the final cell values of `Ux`, `Uy`,
+    /// `Uz`, `p` and every turbulence field, at full precision; empty
+    /// otherwise. It feeds no output.
+    #[cfg_attr(not(test), allow(dead_code))]
+    snapshot: Vec<(String, Vec<Scalar>)>,
 }
 
 /// One wall patch's first-cell y+ (SPEC-LIT §29.3: `y+ = C_mu^{1/4} y
@@ -5789,8 +5869,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the four ways a run ends map to exit codes 0/0/2/3/1.
     #[test]
     fn exit_codes_name_the_four_ways_a_run_ends() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), snapshot: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), snapshot: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -5810,8 +5890,8 @@ mod lowmach_tests {
     /// SPEC-LIT §31.4: the LAST line the driver writes names the reason.
     #[test]
     fn the_last_line_names_the_reason() {
-        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
-        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new() });
+        let steady = Ok(RunEnd { steps: 30, transient: false, t_end: 0.0, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), snapshot: Vec::new() });
+        let transient = Ok(RunEnd { steps: 30, transient: true, t_end: 0.03, ux_mean: 0.0, t_mean: 0.0, final_state: Vec::new(), snapshot: Vec::new() });
         let diverged = Err(Error::Diverged {
             iteration: 12,
             what: "a field went non-finite (NaN/Inf)".to_string(),
@@ -6890,9 +6970,27 @@ mod lowmach_tests {
             a.extend_from_slice(extra);
             a
         };
+        // SPEC-LIT 161.16: the RAS models a rigid-body run honours, and the
+        // ones it still refuses by name.
+        for model in RIGID_BODY_VERIFIED_MODELS {
+            assert!(refuse_rigid_body_combinations(&o, None, model, &hm).is_ok(), "{} must run", model.name());
+        }
+        for model in [
+            RasModel::LaunderSharmaKE,
+            RasModel::KOmegaSstLM,
+            RasModel::KOmegaSstGamma,
+            RasModel::SpalartAllmaras,
+            RasModel::HybridSa,
+            RasModel::HybridSst,
+            RasModel::Les,
+        ] {
+            let e = refuse_rigid_body_combinations(&o, None, model, &hm).expect_err("refused").to_string();
+            println!("refused: {e}");
+            assert!(e.contains(model.name()) && e.contains("161.16") && e.contains("kOmegaSST"), "{e}");
+        }
         let cases: Vec<(Vec<&str>, RasModel, &str)> = vec![
             (vec!["case", "-rigidBody", "b.json"], RasModel::Laminar, "a steady run"),
-            (base.to_vec(), RasModel::KEpsilon, RasModel::KEpsilon.name()),
+            (base.to_vec(), RasModel::Les, RasModel::Les.name()),
             (with(&["-output", "foam,vtu"]), RasModel::Laminar, "-output vtu"),
             (with(&["-restartWrite", "10"]), RasModel::Laminar, "-restartWrite"),
             (with(&["-restartFrom", "r.mcr"]), RasModel::Laminar, "-restartFrom"),
@@ -6955,5 +7053,266 @@ mod lowmach_tests {
         assert!((lo + 0.025).abs() <= 1e-9 && (hi - 0.975).abs() <= 1e-9, "x in [{lo}, {hi}]");
         let (ux, _) = mean_ux(&root, 0.05, 72);
         assert!((ux + 0.5).abs() <= 1e-6, "mean Ux {ux}");
+    }
+
+    /// SPEC-LIT 161.17 (b): Galilean invariance on the moving mesh. A flat
+    /// plate under k-omega SST with wall functions, 20 x 10 cells: once the
+    /// whole mesh translating at V = (1, 0, 0) through still air (the body
+    /// held at its velocity by `release`), once at rest under a free stream
+    /// of -V. The free stream enters through the right and the top as a
+    /// fixed value (still air, or -V) and leaves through the left at p = 0.
+    /// After the frame change `U - V`, `p`, `k`, `omega` and `nu_t` agree cell
+    /// by cell to the linear solvers' tolerance.
+    #[test]
+    fn a_translating_turbulent_plate_is_the_static_plate_in_a_moving_stream() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let case = |u_in: &str, u_wall: &str| -> String {
+            format!(
+                r#"{{
+  "name": "galileanPlate",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [1.0, 0.5, 0.05] }},
+    "cells": [20, 10, 1],
+    "boundaries": {{ "xmin": "left", "xmax": "right", "ymin": "plate", "ymax": "top", "zmin": "back", "zmax": "front" }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "turbulence": {{ "kind": "RAS", "model": "kOmegaSST", "wallFunctions": {{ "kappa": 0.41, "E": 9.8 }}, "wallTreatment": "standard" }},
+  "patches": [
+    {{ "match": "(back|front)", "kind": "empty" }},
+    {{
+      "match": "(right|top)", "kind": "inlet",
+      "U": {{ "type": "fixedValue", "value": {u_in} }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "fixedValue", "value": 293.15 }},
+      "k": {{ "type": "fixedValue", "value": 1e-3 }},
+      "omega": {{ "type": "fixedValue", "value": 10.0 }},
+      "nut": {{ "type": "calculated", "value": 0.0 }}
+    }},
+    {{
+      "match": "left", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "zeroGradient" }},
+      "k": {{ "type": "zeroGradient" }},
+      "omega": {{ "type": "zeroGradient" }},
+      "nut": {{ "type": "calculated", "value": 0.0 }}
+    }},
+    {{
+      "match": "plate", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": {u_wall} }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "zeroGradient" }}
+    }}
+  ],
+  "initial": {{ "U": {u_in}, "T": 293.15, "p": 0.0, "k": 1e-3, "omega": 10.0, "nut": 0 }},
+  "numerics": {{
+    "algorithm": {{ "kind": "PIMPLE", "correctors": 2 }},
+    "ddt": "Euler",
+    "div": {{
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss linearUpwind grad(U)",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,omega)": "bounded Gauss upwind",
+      "div(phi,T)": "bounded Gauss upwind"
+    }},
+    "grad": "Gauss linear",
+    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+    "relaxation": {{ "U": 1.0, "p": 1.0, "T": 1.0, "k": 1.0, "omega": 1.0 }},
+    "solvers": [
+      {{ "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 4000 }},
+      {{ "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 4000 }},
+      {{ "match": "(k|omega)", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 4000 }},
+      {{ "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 4000 }}
+    ]
+  }},
+  "run": {{ "endTime": 0.1, "deltaT": 0.005 }}
+}}"#
+            )
+        };
+        let args = ["-endTime", "0.1", "-deltaT", "0.005", "-check", "1000"];
+        let run_snap = |text: &str, tag: &str, body: Option<&str>| -> RunEnd {
+            let dir = scratch_dir(tag);
+            let path = dir.join("case.jsonc");
+            std::fs::write(&path, text).expect("write case");
+            let mut a: Vec<String> = vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
+            a.extend(args.iter().map(|s| (*s).to_string()));
+            if let Some(b) = body {
+                let bp = dir.join("body.json");
+                std::fs::write(&bp, b).expect("write body");
+                a.extend(["-rigidBody".to_string(), bp.to_string_lossy().to_string()]);
+            }
+            let mut o = parse(&a).expect("parse");
+            o.snapshot = true;
+            run(&o).expect("the plate must run")
+        };
+        let body = r#"{ "mass": 1.0, "inertia": [1, 1, 1], "centreOfMass": [0.5, 0.25, 0.025], "velocity": [1.0, 0.0, 0.0],
+                        "release": 1.0e6, "bodyPatches": ["plate"], "rho": 1.2, "write": { "every": 5, "file": "rb.csv" } }"#;
+        let moving = run_snap(&case("[0, 0, 0]", "[1, 0, 0]"), "rb_galilean_moving", Some(body));
+        let fixed = run_snap(&case("[-1, 0, 0]", "[0, 0, 0]"), "rb_galilean_static", None);
+        assert_eq!((moving.steps, fixed.steps), (20, 20));
+        let field = |e: &RunEnd, n: &str| -> Vec<f64> {
+            e.snapshot.iter().find(|(m, _)| m == n).map(|(_, v)| v.iter().map(|x| f64::from(*x)).collect()).expect(n)
+        };
+        let mut worst = 0.0f64;
+        for (name, shift) in [("Ux", 1.0), ("Uy", 0.0), ("Uz", 0.0), ("p", 0.0), ("k", 0.0), ("omega", 0.0), ("nut", 0.0)] {
+            let (a, b) = (field(&moving, name), field(&fixed, name));
+            let floor = if name.starts_with('U') { 1.0 } else { 1e-300 };
+            let scale = b.iter().map(|v| v.abs()).fold(0.0f64, f64::max).max(floor);
+            let e = a.iter().zip(&b).map(|(x, y)| (x - shift - y).abs()).fold(0.0f64, f64::max) / scale;
+            let spread = b.iter().map(|v| (v - b[0]).abs()).fold(0.0f64, f64::max) / scale;
+            println!(
+                "{name}: max |moving - V - static| / max|static| = {e:.3e} (the static field itself varies by {spread:.3e})"
+            );
+            worst = worst.max(e);
+        }
+        let tol = if cfg!(feature = "single") { 1e-4 } else { 1e-8 };
+        assert!(worst <= tol, "the moving plate is not the static plate in the moving frame: {worst:e}");
+    }
+
+    /// SPEC-LIT 161.10-161.15 end to end: a box whose floor is the body and
+    /// carries one nozzle thruster, k-omega SST, falling onto the ground with
+    /// a propellant tank. The run binds the jet's T, k and omega, writes the
+    /// version-2 CSV columns, and stops at the touchdown with exit 0 before
+    /// its end time.
+    #[test]
+    fn a_nozzle_run_writes_its_columns_and_stops_at_touchdown() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let case = r#"{
+  "name": "nozzleBox",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [1.0, 1.0, 1.0] },
+    "cells": [6, 6, 6],
+    "boundaries": { "xmin": "o1", "xmax": "o2", "ymin": "o3", "ymax": "o4", "zmin": "floor", "zmax": "o5" },
+    "regions": [ { "name": "jet", "on": "zmin", "shape": { "kind": "box", "min": [0.33, 0.33, -1], "max": [0.67, 0.67, 1] } } ]
+  },
+  "physics": {
+    "gravity": [0, 0, -9.81],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio"
+  },
+  "turbulence": { "kind": "RAS", "model": "kOmegaSST", "wallFunctions": { "kappa": 0.41, "E": 9.8 }, "wallTreatment": "standard" },
+  "patches": [
+    {
+      "match": "o[0-9]", "kind": "open",
+      "U": { "type": "inletOutlet", "inletValue": [0, 0, 0] },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 293.15 },
+      "k": { "type": "zeroGradient" },
+      "omega": { "type": "zeroGradient" },
+      "nut": { "type": "calculated", "value": 0.0 }
+    },
+    {
+      "match": "jet", "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 293.15 },
+      "k": { "type": "fixedValue", "value": 1e-4 },
+      "omega": { "type": "fixedValue", "value": 1.0 },
+      "nut": { "type": "calculated", "value": 0.0 }
+    },
+    {
+      "match": "floor", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" }
+    }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 293.15, "p": 0.0, "k": 1e-4, "omega": 1.0, "nut": 0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,k)": "bounded Gauss upwind", "div(phi,omega)": "bounded Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0, "k": 1.0, "omega": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-10, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "(U|k|omega|T)", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-10, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.02, "deltaT": 0.002 }
+}"#;
+        let dir = scratch_dir("rb_nozzle_box");
+        let path = dir.join("case.jsonc");
+        std::fs::write(&path, case).expect("write case");
+        let body = dir.join("body.json");
+        std::fs::write(
+            &body,
+            r#"{ "mass": 1.0, "inertia": [0.2, 0.2, 0.2], "centreOfMass": [0.5, 0.5, 0.5], "velocity": [0, 0, -3.0],
+                 "gravity": [0, 0, -9.81], "rho": 1.2, "pAmbient": 101325,
+                 "bodyPatches": ["floor", "jet"],
+                 "thrusters": [ { "patch": "jet", "direction": [0, 0, -1], "on": [[0, 1]],
+                                  "nozzle": { "p0": 2.0e5, "T0": 300, "exitArea": 1.0e-4 } } ],
+                 "plume": { "maxMach": 0.3 },
+                 "propellant": { "mass": 0.1 },
+                 "ground": { "z": -0.02, "contactPoints": [[0.5, 0.5, 0.0]] },
+                 "write": { "every": 1, "file": "rb.csv" } }"#,
+        )
+        .expect("write the body file");
+        let a: Vec<String> = [
+            "ofgpu-lowmach",
+            path.to_str().expect("path"),
+            "-endTime",
+            "0.02",
+            "-deltaT",
+            "0.002",
+            "-check",
+            "1000",
+            "-rigidBody",
+            body.to_str().expect("body"),
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        let o = parse(&a).expect("parse");
+        let end = run(&o).expect("the nozzle box must run and stop at touchdown");
+        let root = common::json_case_output_dir(&path);
+        let csv = std::fs::read_to_string(root.join("rb.csv")).expect("the CSV");
+        let lines: Vec<&str> = csv.lines().collect();
+        println!("{}\n{}", lines[0], lines.last().expect("a row"));
+        let header: Vec<&str> = lines[0].split(',').collect();
+        let want = [
+            "u_jet",
+            "F_jet",
+            "Ueq_jet",
+            "Meq_jet",
+            "propellant",
+            "load_g",
+            "h_contact",
+            "ref_roll_deg",
+            "ref_pitch_deg",
+            "ref_yaw_deg",
+            "quat_w",
+            "quat_x",
+            "quat_y",
+            "quat_z",
+        ];
+        assert_eq!(&header[header.len() - want.len()..], &want[..], "the version-2 columns follow the version-1 ones");
+        assert_eq!(header[0..3], ["step", "time", "X"]);
+        let last: Vec<&str> = lines.last().expect("row").split(',').collect();
+        let col = |n: &str| -> f64 { last[header.iter().position(|h| *h == n).expect(n)].parse().expect(n) };
+        println!(
+            "steps {} of 10; u_jet {} F_jet {} N, Ueq {} m/s, h {} m, propellant {} kg",
+            end.steps,
+            col("u_jet"),
+            col("F_jet"),
+            col("Ueq_jet"),
+            col("h_contact"),
+            col("propellant")
+        );
+        assert!(end.steps < 10, "the touchdown must end the run early: {} steps", end.steps);
+        assert!(col("h_contact") <= 0.0);
+        assert_eq!(col("u_jet"), 1.0);
+        assert!(col("F_jet") > 10.0 && col("propellant") < 0.1);
     }
 }
