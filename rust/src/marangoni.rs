@@ -507,6 +507,7 @@ mod tests {
     /// A guard justified by an assertion is a guard nobody will dare delete
     /// and nobody can check. This one is justified by a scan.
     #[test]
+    // f32 (F32-17): 77-of-700 is a count answer, not a tolerance
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_sigma_field_does_not_interpolate_to_itself() {
         // Weights a non-uniform mesh actually produces: a low-discrepancy
@@ -889,7 +890,6 @@ mod tests {
     ///   `epsN` normalisation makes `n̂` a zero vector there and the
     ///   `|grad alpha|` factor is zero as well.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_projector_annihilates_a_normal_sigma_gradient() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -944,7 +944,7 @@ mod tests {
         let residue = out[0].mag();
         let full = gs_par.mag() * mag;
         assert!(
-            residue / full < 1e-8,
+            ((residue / full) as f64) < crate::precision::roundoff_tol(1e-8),
             "a grad(sigma) parallel to n_hat left {residue:e} of {full:e} \
              ({:e} relative); the projector is not annihilating it",
             residue / full
@@ -954,7 +954,7 @@ mod tests {
         let expect = gs_perp.mag() * mag;
         let got = out[1].mag();
         assert!(
-            ((got - expect) / expect).abs() < 1e-12,
+            ((((got - expect) / expect).abs()) as f64) < crate::precision::roundoff_tol(1e-12),
             "a grad(sigma) orthogonal to n_hat came out {got:e} against \
              |grad sigma| |grad alpha| = {expect:e}"
         );
@@ -962,7 +962,7 @@ mod tests {
         let cosang = (out[1].x * gs_perp.x + out[1].y * gs_perp.y + out[1].z * gs_perp.z)
             / (got * gs_perp.mag());
         assert!(
-            (cosang - 1.0).abs() < 1e-12,
+            (((cosang - 1.0).abs()) as f64) < crate::precision::roundoff_tol(1e-12),
             "the tangential force is not along grad_s(sigma): cos = {cosang}"
         );
 

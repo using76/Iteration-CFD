@@ -8143,7 +8143,7 @@ mod tests {
 
         let want = tp.host_values(0.5);
         for i in 0..m.patches[0].size {
-            assert_eq!(b.ref_value[m.patches[0].start + i].to_bits(), 1.0f64.to_bits());
+            assert_eq!((b.ref_value[m.patches[0].start + i] as f64).to_bits(), 1.0f64.to_bits());
             assert_eq!(
                 b.ref_value[m.patches[0].start + i].to_bits(),
                 want[i].to_bits(),
@@ -8232,8 +8232,8 @@ mod tests {
         .unwrap();
         for i in 0..m.patches[0].size {
             assert_eq!(b.kind[i], BcKind::InletOutlet as Label);
-            assert_eq!(b.fr[i].to_bits(), 1.0f64.to_bits());
-            assert_eq!(b.ref_value[i].to_bits(), 4.0f64.to_bits());
+            assert_eq!((b.fr[i] as f64).to_bits(), 1.0f64.to_bits());
+            assert_eq!((b.ref_value[i] as f64).to_bits(), 4.0f64.to_bits());
         }
 
         let b = scalar_boundary(
@@ -8248,7 +8248,7 @@ mod tests {
         .unwrap();
         for i in 0..m.patches[0].size {
             assert_eq!(b.kind[i], BcKind::FixedGradient as Label);
-            assert_eq!(b.ref_grad[i].to_bits(), 0.5f64.to_bits());
+            assert_eq!((b.ref_grad[i] as f64).to_bits(), 0.5f64.to_bits());
         }
 
         // No `uniformGradient` entry: the static `gradient` path, unchanged.
@@ -8265,7 +8265,7 @@ mod tests {
         .unwrap();
         for i in 0..m.patches[0].size {
             assert_eq!(b.kind[i], BcKind::FixedGradient as Label);
-            assert_eq!(b.ref_grad[i].to_bits(), 0.25f64.to_bits());
+            assert_eq!((b.ref_grad[i] as f64).to_bits(), 0.25f64.to_bits());
         }
     }
 

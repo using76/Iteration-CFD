@@ -326,6 +326,19 @@ impl DeviceMechanism {
     }
 }
 
+impl DeviceMechanism {
+    /// The flat f64 mechanism array `chemRhs`, `chemIntegrate` and
+    /// `chemEdcIntegrate` read (SPEC-LIT §134.7).
+    pub(crate) fn flat_f(&self) -> &DevBuf<f64> {
+        &self.mf
+    }
+
+    /// The flat i32 mechanism array the same kernels index.
+    pub(crate) fn flat_i(&self) -> &DevBuf<i32> {
+        &self.mi
+    }
+}
+
 /// The f64 scratch of §132.9 the two kernels need, SoA with stride
 /// [`ChemWork::n_cells`]: `conc`, `g`, `omega` and `yp` carry K values per
 /// cell, `ypert` and `fpert` K+1. Everything computes in double in both
@@ -581,6 +594,14 @@ impl DeviceReactor {
     /// The options the reactor was built from.
     pub fn options(&self) -> &ReactorOptions {
         &self.opts
+    }
+}
+
+impl DeviceReactor {
+    /// The one f64 control array `chemIntegrate` and `chemEdcIntegrate`
+    /// read, in the layout its doc states (SPEC-LIT §134.7).
+    pub(crate) fn ctrl(&self) -> &DevBuf<f64> {
+        &self.ctrl
     }
 }
 

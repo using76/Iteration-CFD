@@ -884,6 +884,7 @@ mod tests {
     /// round-off on EVERY cut cell, by construction, whatever the fractions
     /// came out to be.
     #[test]
+    // f32 (F32-17): the cut-face closure sum is 2e-9 on face areas of 6e-4
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn cut_face_closes_every_cell_to_round_off() {
         let (xn, yn, zn) = unit_axes(40);

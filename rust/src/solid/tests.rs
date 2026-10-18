@@ -152,7 +152,6 @@ fn an_unsupported_patch_or_a_free_component_is_refused_by_name() {
 /// residual times the conditioning, which is the same reason the
 /// prototype's own free-expansion gate compares `u` at 1e-10.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn one_picard_application_matches_the_prototype() {
     let Some(gpu) = gpu() else { return };
     let mat = Material::steel(0.3);
@@ -184,21 +183,21 @@ fn one_picard_application_matches_the_prototype() {
 
     let r = rel_max(&flat3(&gpu.download(&d.u.bf).expect("ub")), &flat3(&p.ub));
     println!("  ub: rel = {r:e}");
-    assert!(r <= 1e-12, "ub: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "ub: {r:e}");
 
     let r = rel_max(
         &flat9(&gpu.download(&d.grad).expect("grad")),
         &flat9(&p.grad),
     );
     println!("  grad: rel = {r:e}");
-    assert!(r <= 1e-12, "grad: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "grad: {r:e}");
 
     let r = rel_max(
         &flat9(&gpu.download(&d.b_grad).expect("b_grad")),
         &flat9(p.boundary_gradient()),
     );
     println!("  b_grad: rel = {r:e}");
-    assert!(r <= 1e-12, "b_grad: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "b_grad: {r:e}");
 
     // The solved normal gradients, FREE faces only: the device leaves a
     // fixed component untouched, the host leaves it 0, so both sides are
@@ -217,7 +216,7 @@ fn one_picard_application_matches_the_prototype() {
         }
         let r = rel_max(&dev, &host);
         println!("  ref_grad[{i}]: rel = {r:e}");
-        assert!(r <= 1e-12, "ref_grad[{i}]: {r:e}");
+        assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "ref_grad[{i}]: {r:e}");
     }
 
     for i in 0..3usize {
@@ -232,7 +231,7 @@ fn one_picard_application_matches_the_prototype() {
         ] {
             let r = rel_max(&dev, host);
             println!("  {name}[{i}]: rel = {r:e}");
-            assert!(r <= 1e-12, "{name}[{i}]: {r:e}");
+            assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "{name}[{i}]: {r:e}");
         }
     }
 
@@ -241,7 +240,7 @@ fn one_picard_application_matches_the_prototype() {
         &flat3(&next_h),
     );
     println!("  u (solved): rel = {r:e}");
-    assert!(r <= 1e-10, "solved displacement: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-10), "solved displacement: {r:e}");
 }
 
 // ==========================================================================
@@ -347,7 +346,6 @@ pub(super) fn linear_state(hm: &HostMesh) -> (Vec<Vec3>, Vec<Vec3>) {
 /// state; here the exact `u = alpha dT x` - cells and boundary faces - goes
 /// in, the map is applied once, and the defect is the solve's alone.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_free_expansion_state_is_a_fixed_point_with_no_stress() {
     let Some(gpu) = gpu() else { return };
     let mat = Material::steel(0.3);
@@ -386,9 +384,9 @@ fn the_free_expansion_state_is_a_fixed_point_with_no_stress() {
         .fold(0.0 as Scalar, |m, v| m.max(v))
         / (mat.three_lambda_two_mu() * a);
     println!("  95-B: fixed point rel = {rel:e}  max|G - a I| = {dg:e}  rel|sigma| = {sig:e}");
-    assert!(rel <= 1e-10, "the free-expansion state is not a fixed point: {rel:e}");
-    assert!(dg <= 1e-14, "the cell gradient is not alpha dT I: {dg:e}");
-    assert!(sig <= 1e-12, "the free-expansion state carries stress: {sig:e}");
+    assert!((rel as f64) <= crate::precision::roundoff_tol(1e-10), "the free-expansion state is not a fixed point: {rel:e}");
+    assert!((dg as f64) <= crate::precision::roundoff_tol(1e-14), "the cell gradient is not alpha dT I: {dg:e}");
+    assert!((sig as f64) <= crate::precision::roundoff_tol(1e-12), "the free-expansion state carries stress: {sig:e}");
 }
 
 /// The patch test: a linear displacement prescribed on every face by value
@@ -401,7 +399,6 @@ fn the_free_expansion_state_is_a_fixed_point_with_no_stress() {
 /// defect beside the non-orthogonality and assert only that it is finite and
 /// falls with the amplitude - the numbers are later units' input.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_linear_displacement_is_reproduced_on_a_graded_block() {
     let Some(gpu) = gpu() else { return };
     fn defect(gpu: &Gpu, hm: &HostMesh) -> (Scalar, Scalar) {
@@ -417,7 +414,7 @@ fn a_linear_displacement_is_reproduced_on_a_graded_block() {
         let mut next = gpu.zeros(n).expect("zeros");
         d.apply(gpu, &mut next).expect("apply");
         let rel = rel_max(&flat3(&gpu.download(&next).expect("next")), &flat3(&u));
-        (rel, hm.check().max_non_orth_deg)
+        (rel, hm.check().max_non_orth_deg as Scalar)
     }
     let graded = defect(&gpu, &graded_block());
     let d25 = defect(&gpu, &prototype::jittered_block(12, 0.25).expect("jittered"));
@@ -427,7 +424,7 @@ fn a_linear_displacement_is_reproduced_on_a_graded_block() {
          jittered 0.125 rel = {:e} (non-orth {:.1} deg)",
         graded.0, d25.0, d25.1, d125.0, d125.1
     );
-    assert!(graded.0 <= 1e-12, "graded orthogonal block: {:e}", graded.0);
+    assert!((graded.0 as f64) <= crate::precision::roundoff_tol(1e-12), "graded orthogonal block: {:e}", graded.0);
     assert!(d25.0.is_finite() && d125.0.is_finite(), "the defect must be a number");
     if d25.0 <= 1e-12 {
         println!("  95-C: the plan's 1e-12 holds on the jittered block as written");
@@ -605,18 +602,17 @@ fn a_bending_dominated_slender_body_is_refused_naming_block_coupling() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
     let hm = prototype::block(10).expect("block");
     let n = hm.c.len();
     let small = vec![Vec3::new(0.005, 0.0, 0.0); n];
     let ratio = mesh_motion_ratio(&small, &hm);
-    assert!((ratio - 0.05).abs() <= 1.0e-12, "ratio = {ratio:.6}");
+    assert!(((ratio - 0.05).abs() as f64) <= crate::precision::roundoff_tol(1.0e-12), "ratio = {ratio:.6}");
     assert!(refuse_displacement_reaching_the_fluid(ratio).is_ok());
 
     let big = vec![Vec3::new(0.02, 0.0, 0.0); n];
     let ratio = mesh_motion_ratio(&big, &hm);
-    assert!((ratio - 0.2).abs() <= 1.0e-12, "ratio = {ratio:.6}");
+    assert!(((ratio - 0.2).abs() as f64) <= crate::precision::roundoff_tol(1.0e-12), "ratio = {ratio:.6}");
     let msg = refuse_displacement_reaching_the_fluid(ratio)
         .expect_err("a fifth of a cell is mesh motion")
         .to_string();
@@ -636,7 +632,6 @@ fn a_displacement_that_should_have_moved_the_mesh_is_refused() {
 /// match the host mirrors of the same algebra. One pass, so the host can
 /// replay the sub-pass sequence step by step.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_bond_kernels_match_the_host_mirrors() {
     use super::materials::{
         bond_face_values, bond_grad_correction, rhs_mirror, traction_ref_grad_mirror, CellMaterial,
@@ -741,7 +736,7 @@ fn the_bond_kernels_match_the_host_mirrors() {
         }
         let r = rel_max(&dev, &host);
         println!("  ref_grad[{i}]: rel = {r:e}");
-        assert!(r <= 1e-12, "ref_grad[{i}]: {r:e}");
+        assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "ref_grad[{i}]: {r:e}");
     }
 
     // The final sweep: the plain gradient from the RE-EVALUATED boundary
@@ -756,12 +751,12 @@ fn the_bond_kernels_match_the_host_mirrors() {
         &flat3(&bond_u_h),
     );
     println!("  bond_u: rel = {r:e}");
-    assert!(r <= 1e-12, "bond_u: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "bond_u: {r:e}");
 
     let bond_t_dev = gpu.download(&d.bond_t).expect("bond_t");
     let r = rel_max(&flat3(&bond_t_dev), &flat3(&bond_t_h));
     println!("  bond_t: rel = {r:e}");
-    assert!(r <= 1e-12, "bond_t: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "bond_t: {r:e}");
 
     bond_grad_correction(&mut g2, &bonds, &u, &bond_u_h, &hm);
     let r = rel_max(
@@ -769,7 +764,7 @@ fn the_bond_kernels_match_the_host_mirrors() {
         &flat9(&g2),
     );
     println!("  grad: rel = {r:e}");
-    assert!(r <= 1e-12, "grad: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "grad: {r:e}");
 
     let grad_dev = gpu.download(&d.grad).expect("grad");
     let b_grad_dev = gpu.download(&d.b_grad).expect("b_grad");
@@ -789,7 +784,7 @@ fn the_bond_kernels_match_the_host_mirrors() {
     );
     let r = rel_max(&flat3(&gpu.download(&d.rhs).expect("rhs")), &flat3(&rhs_h));
     println!("  rhs: rel = {r:e}");
-    assert!(r <= 1e-12, "rhs: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "rhs: {r:e}");
 
     let mut fields = StressFields::new(&gpu, n).expect("stress fields");
     fields
@@ -801,7 +796,7 @@ fn the_bond_kernels_match_the_host_mirrors() {
         .collect();
     let r = rel_max(&flat9(&sigma), &flat9(&sigma_h));
     println!("  sigma: rel = {r:e}");
-    assert!(r <= 1e-12, "sigma: {r:e}");
+    assert!((r as f64) <= crate::precision::roundoff_tol(1e-12), "sigma: {r:e}");
 }
 
 /// A one-material map is the one-material operator, to the bit: the
@@ -893,7 +888,6 @@ fn bimetal_case(
 /// finest mesh its measured curvature is the closed form (S95.19) to two
 /// percent, with the outer loop converged.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_95_e_the_bimetal_curvature_is_timoshenko_s() {
     let Some(gpu) = gpu() else { return };
     let (hm, gm, map, _bonds) = bimetal_case(&gpu, 192, 32, BondTreatment::Series).expect("case");
@@ -940,7 +934,6 @@ fn gate_95_e_the_bimetal_curvature_is_timoshenko_s() {
 /// - leaves an interface stress the traction-continuous series bond does
 /// not (S95.20), on the middle mesh of the gate's sequence.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_linear_bond_leaves_an_interface_stress_the_series_bond_removes() {
     let Some(gpu) = gpu() else { return };
     let mut ratio = [0.0 as Scalar; 2];
@@ -1006,7 +999,6 @@ fn block_nonlinear_state(
 /// the jittered cube and the graded block, on a non-linear state with a
 /// temperature gradient.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_block_assembly_matches_the_host_twin_on_three_meshes() {
     let Some(gpu) = gpu() else { return };
     let meshes = [
@@ -1076,11 +1068,11 @@ fn the_block_assembly_matches_the_host_twin_on_three_meshes() {
         let r_src = rel_max(&flat3(&gpu.download(&blk.matrix().source).expect("source")), &flat3(&ha.source));
         let r_au = rel_max(&flat3(&gpu.download(&y).expect("y")), &flat3(&hu));
         println!("  109-B {name}: diag {r_diag:e}  upper {r_up:e}  lower {r_lo:e}  source {r_src:e}  amul {r_au:e}");
-        assert!(r_diag <= 1e-12, "{name}: diag differs by {r_diag:e}");
-        assert!(r_up <= 1e-12, "{name}: upper differs by {r_up:e}");
-        assert!(r_lo <= 1e-12, "{name}: lower differs by {r_lo:e}");
-        assert!(r_src <= 1e-12, "{name}: source differs by {r_src:e}");
-        assert!(r_au <= 1e-12, "{name}: A u differs by {r_au:e}");
+        assert!((r_diag as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: diag differs by {r_diag:e}");
+        assert!((r_up as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: upper differs by {r_up:e}");
+        assert!((r_lo as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: lower differs by {r_lo:e}");
+        assert!((r_src as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: source differs by {r_src:e}");
+        assert!((r_au as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: A u differs by {r_au:e}");
     }
 }
 
@@ -1089,7 +1081,6 @@ fn the_block_assembly_matches_the_host_twin_on_three_meshes() {
 /// the patch test and on the free-expansion cube - the two states on which
 /// the two operators agree to round-off and nowhere else is claimed.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_block_residual_vanishes_where_the_segregated_one_does() {
     let Some(gpu) = gpu() else { return };
     use crate::ldu::HostLduMatrix;
@@ -1192,9 +1183,9 @@ fn the_block_residual_vanishes_where_the_segregated_one_does() {
         &vec![T_REF; n],
         &vec![T_REF; nbf],
     );
-    assert!(b <= 1e-12, "the block residual is {b:e} of the scale");
-    assert!(s <= 1e-12, "the segregated residual is {s:e} of the scale");
-    assert!(df <= 1e-12, "the two residuals differ by {df:e} of the scale");
+    assert!((b as f64) <= crate::precision::roundoff_tol(1e-12), "the block residual is {b:e} of the scale");
+    assert!((s as f64) <= crate::precision::roundoff_tol(1e-12), "the segregated residual is {s:e} of the scale");
+    assert!((df as f64) <= crate::precision::roundoff_tol(1e-12), "the two residuals differ by {df:e} of the scale");
 
     // The free-expansion cube of Gate 95-B.
     let hm = prototype::block(10).expect("block");
@@ -1213,9 +1204,9 @@ fn the_block_residual_vanishes_where_the_segregated_one_does() {
         &vec![T_REF + DT; n],
         &vec![T_REF + DT; nbf],
     );
-    assert!(b <= 1e-12, "the block residual is {b:e} of the scale");
-    assert!(s <= 1e-12, "the segregated residual is {s:e} of the scale");
-    assert!(df <= 1e-12, "the two residuals differ by {df:e} of the scale");
+    assert!((b as f64) <= crate::precision::roundoff_tol(1e-12), "the block residual is {b:e} of the scale");
+    assert!((s as f64) <= crate::precision::roundoff_tol(1e-12), "the segregated residual is {s:e} of the scale");
+    assert!((df as f64) <= crate::precision::roundoff_tol(1e-12), "the two residuals differ by {df:e} of the scale");
 }
 
 /// Gate 109-C: one boundary correction, one assembly and one product capture

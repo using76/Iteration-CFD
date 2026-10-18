@@ -238,7 +238,6 @@ fn the_device_modes_match_the_host() {
 /// it: one parcel, one sub-step, frozen gas, compared against
 /// [`drag_impulse`] evaluated on the host from the same `beta`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_accumulated_impulse_is_the_closed_form() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([1, 1, 8], [1.0, 1.0, 8.0], ["wall"; 6]);
@@ -268,7 +267,7 @@ fn the_accumulated_impulse_is_the_closed_form() {
     let got = s.impulse[0];
     let err = mag(sub(got, want)) / mag(want);
     assert!(
-        err < 1e-14,
+        (err as f64) < crate::precision::roundoff_tol(1e-14),
         "the accumulated impulse is ({} {} {}), the closed form ({} {} {}); relative {err:e}",
         got.x,
         got.y,
@@ -281,7 +280,8 @@ fn the_accumulated_impulse_is_the_closed_form() {
     // ... and the exchange rate is m_eff (1 - e^-beta)/dt, positive.
     let want_a = m_eff * (-(-beta).exp_m1()) / dt;
     assert!(
-        (s.exchange[0] - want_a).abs() <= 1e-14 * want_a,
+        (s.exchange[0] - want_a).abs() as f64
+            <= crate::precision::roundoff_tol(1e-14) * want_a as f64,
         "exchange rate {} against {want_a}",
         s.exchange[0]
     );
@@ -366,7 +366,6 @@ fn at_terminal_velocity_the_impulse_is_the_weight() {
 /// many, drag laws, added mass, parcels that cross cells, and weights that
 /// span four decades.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_68a_what_the_parcels_took_is_what_the_gas_is_given() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([6, 6, 6], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -423,7 +422,7 @@ fn gate_68a_what_the_parcels_took_is_what_the_gas_is_given() {
                 "{name}: nothing was exchanged at all, so the gate is vacuous"
             );
             assert!(
-                defect <= 1e-14 * scale,
+                defect as f64 <= crate::precision::roundoff_tol(1e-14) * scale as f64,
                 "{name}, step {step}: the gas gained ({:e} {:e} {:e}) and the parcels \
                  lost ({:e} {:e} {:e}); defect {defect:e} against {scale:e}",
                 gained.x,
@@ -444,7 +443,6 @@ fn gate_68a_what_the_parcels_took_is_what_the_gas_is_given() {
 /// difference between "all parcels" and "live parcels" is measured rather
 /// than defined away.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gate_holds_for_an_injected_spray_that_loses_parcels() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([8, 8, 8], [1.0, 1.0, 1.0], ["patch"; 6]);
@@ -480,7 +478,7 @@ fn the_gate_holds_for_an_injected_spray_that_loses_parcels() {
         let scale = mag(lost);
         if scale > 0.0 {
             assert!(
-                defect <= 1e-13 * scale,
+                defect as f64 <= crate::precision::roundoff_tol(1e-13) * scale as f64,
                 "step {step}: defect {defect:e} against {scale:e}"
             );
         }
@@ -701,7 +699,6 @@ fn the_registry_accumulates_and_clears() {
 /// exactly: `S_u + S_p u^n = f/rho`. The split changes what the matrix looks
 /// like, never what was exchanged.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_semi_implicit_split_is_the_explicit_source_at_the_linearisation_point() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -766,7 +763,7 @@ fn the_semi_implicit_split_is_the_explicit_source_at_the_linearisation_point() {
     }
     assert!(any_sink, "no cell had a sink, so the sign claim is vacuous");
     assert!(
-        worst <= 1e-12 * scale,
+        worst as f64 <= crate::precision::roundoff_tol(1e-12) * scale as f64,
         "the split is not the explicit source at u = u^n: {worst:e} against {scale:e}"
     );
 }
@@ -978,7 +975,6 @@ fn momentum_off_registers_nothing() {
 /// droplets gained, to round-off - the same claim as the momentum gate, on
 /// the same construction.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_68a_energy_is_conserved_between_the_phases() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([5, 5, 5], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1024,7 +1020,7 @@ fn gate_68a_energy_is_conserved_between_the_phases() {
         let taken = live_parcel_heat(&p.snapshot(&gpu).unwrap());
         assert!(taken > 0.0, "the droplets took no heat, so the gate is vacuous");
         assert!(
-            (given + taken).abs() <= 1e-13 * taken,
+            (given + taken).abs() as f64 <= crate::precision::roundoff_tol(1e-13) * taken as f64,
             "step {step}: the gas gave {given:e} J and the droplets took {taken:e} J"
         );
         // The gas is hotter than the droplets, so the gas must be LOSING
@@ -1051,7 +1047,6 @@ fn gate_68a_energy_is_conserved_between_the_phases() {
 /// closed form with no correlation left in it, and it is what (68.9) must
 /// reproduce.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_still_droplet_relaxes_at_the_lumped_capacity_rate() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([1, 1, 4], [1.0, 1.0, 4.0], ["wall"; 6]);
@@ -1094,7 +1089,8 @@ fn a_still_droplet_relaxes_at_the_lumped_capacity_rate() {
     let tau = ctrl.rho_liquid * ctrl.c_liquid * d * d / (6.0 * 2.0 * ctrl.k_gas);
     let want = t_g + (t0 - t_g) * (-(n as Scalar) * dt / tau).exp();
     assert!(
-        (got - want).abs() < 1e-9 * (t_g - t0),
+        ((got - want).abs() as f64)
+            < crate::precision::roundoff_tol(1e-9) * (t_g - t0) as f64,
         "after {n} steps the droplet is at {got} K, the closed form says {want} K \
          (tau_T = {tau} s)"
     );
@@ -1182,7 +1178,6 @@ fn every_heating_property_changes_what_is_deposited() {
 /// The energy split satisfies the same sign contract as the momentum one,
 /// and `EnergySources` takes it without complaint.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_energy_sink_is_non_positive_and_registers() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([3, 3, 3], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1230,7 +1225,7 @@ fn the_energy_sink_is_non_positive_and_registers() {
         worst = worst.max((s.energy_q[c] + s.energy_sp[c] * 800.0 - s.heat[c]).abs());
     }
     let scale = s.heat.iter().fold(0.0 as Scalar, |a, b| a.max(b.abs()));
-    assert!(worst <= 1e-12 * scale, "{worst:e} against {scale:e}");
+    assert!(worst as f64 <= crate::precision::roundoff_tol(1e-12) * scale as f64, "{worst:e} against {scale:e}");
 
     let mut es = EnergySources::new(&gpu, &gm).unwrap();
     es.clear(&gpu).unwrap();
@@ -1665,7 +1660,6 @@ fn wet_seeds(n: u64) -> Vec<SeedParcel> {
 /// it the other way round is the first mistake available here and this test
 /// is what would catch it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([5, 5, 5], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1693,12 +1687,13 @@ fn gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given() {
         // The reduction over cells is the same number the object reports.
         let reported = cp.total_vapour_mass(&gpu).unwrap();
         assert!(
-            (reported - given).abs() <= 1e-15 * given,
+            (reported - given).abs() as f64
+                <= crate::precision::roundoff_tol(1e-15) * given as f64,
             "step {step}: total_vapour_mass {reported:e} against the cell sum {given:e}"
         );
     }
     assert!(
-        worst <= 1e-13,
+        worst as f64 <= crate::precision::roundoff_tol(1e-13),
         "worst relative mass defect {worst:e} over {total:e} kg evaporated"
     );
 }
@@ -1715,7 +1710,6 @@ fn gate_77a_the_vapour_the_parcels_lost_is_the_vapour_the_gas_is_given() {
 /// already given up contains every joule the phase change consumed**. A
 /// second latent sink counts them twice.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1751,7 +1745,10 @@ fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
         let latent: Scalar = ps.live().iter().map(|&i| ps.n_p[i] * ps.latent[i]).sum();
         ratio = ratio.max(latent / conv);
     }
-    assert!(worst <= 1e-13, "worst relative deposit error {worst:e}");
+    assert!(
+        worst as f64 <= crate::precision::roundoff_tol(1e-13),
+        "worst relative deposit error {worst:e}"
+    );
     // The latent heat is a large fraction of the convective heat - 0.398
     // measured here, where the droplets are still warming towards their wet
     // bulb and so keep some of the heat, and approaching one once they are
@@ -1790,6 +1787,7 @@ fn the_energy_deposit_is_the_convective_heat_plus_the_vapour_enthalpy() {
 /// offset between two sensible pools whose enthalpy data are `c_l T` and
 /// `cp_g T`. S77.11 says what that means physically.
 #[test]
+// f32 (F32-16): energy ledger defect 8.3e-5 relative, past the 1e-5 cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_77b_the_energy_ledger_closes_across_the_phase_change() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1852,7 +1850,6 @@ fn gate_77b_the_energy_ledger_closes_across_the_phase_change() {
 /// rate. Getting `dSrc = mdot` instead of `mdot/rho` is off by three orders
 /// of magnitude and dimensionally wrong, and nothing downstream could tell.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_77c_the_divergence_and_species_sources_are_the_deposit_divided_through() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([4, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1873,12 +1870,14 @@ fn gate_77c_the_divergence_and_species_sources_are_the_deposit_divided_through()
         let want_d = s.vapour[c] / rho_g;
         let want_y = want_d * (1.0 - y_v);
         assert!(
-            (s.divergence[c] - want_d).abs() <= 1e-15 * want_d.abs().max(1e-30),
+            (s.divergence[c] - want_d).abs() as f64
+                <= crate::precision::roundoff_tol(1e-15) * want_d.abs().max(1e-30) as f64,
             "cell {c}: dSrc {} against mdot/rho {want_d}",
             s.divergence[c]
         );
         assert!(
-            (s.species_su[c] - want_y).abs() <= 1e-15 * want_y.abs().max(1e-30),
+            (s.species_su[c] - want_y).abs() as f64
+                <= crate::precision::roundoff_tol(1e-15) * want_y.abs().max(1e-30) as f64,
             "cell {c}: ySu {} against mdot(1-Y)/rho {want_y}",
             s.species_su[c]
         );
@@ -2386,7 +2385,6 @@ fn condensation_reverses_every_sign_and_is_why_the_sources_are_explicit() {
 /// it: ASHRAE's relation carries `1.006 + 1.86 W` kJ/(kg K) for the moist
 /// mixture where S26's energy equation has one constant `cp`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gas_moves_along_the_adiabatic_saturation_line() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([2, 2, 2], [0.5, 0.5, 0.5], ["wall"; 6]);
@@ -2495,7 +2493,6 @@ fn the_gas_moves_along_the_adiabatic_saturation_line() {
 /// registry being read at a different iteration from the one it was written
 /// in.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_vapour_source_reaches_the_species_field_it_is_handed_to() {
     use crate::io::case::TurbulenceControls as TCtrl;
     use crate::scalar_transport::{ScalarTransport, ScalarTransportCoeffs};
@@ -2590,7 +2587,10 @@ fn the_vapour_source_reaches_the_species_field_it_is_handed_to() {
         assert!(s.species_su[0] > 0.0, "step {step}: no vapour was sourced");
         y_now = got[0];
     }
-    assert!(worst <= 1e-11, "worst relative Y_v error {worst:e}");
+    assert!(
+        worst as f64 <= crate::precision::roundoff_tol(1e-11),
+        "worst relative Y_v error {worst:e}"
+    );
     assert!(y_now > y0, "Y_v did not rise: {y_now} from {y0}");
 
     // The vapour that arrived in the FIELD is the vapour the parcels lost,

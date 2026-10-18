@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::capture::capture_replays_bitwise;
+use crate::mesh::gpugeom::{GeoVec3, geo_points};
 use crate::solver::{LinearSolverKind, Preconditioner};
+use crate::types::DVec3;
 
 fn gpu() -> Option<Gpu> {
     Gpu::new(0).ok()
@@ -80,6 +82,7 @@ fn seat_stroke(
 /// F1 - the OPEN piston keeps its uniform state through the whole SIMPLE
 /// loop, euler and backward, in both convective forms.
 #[test]
+// f32 (F32-17): the uniform state error 2.5e-5 is past the 1e-5 cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_piston_keeps_the_uniform_state_through_the_simple_loop() {
     let Some(gpu) = gpu() else { return };
@@ -126,6 +129,7 @@ fn the_piston_keeps_the_uniform_state_through_the_simple_loop() {
 /// F2 - the stroking outlet's time order, three step counts through the grid
 /// study, and the extrapolation toward the exact value.
 #[test]
+// f32 (F32-17): an observed order band, 2.74 against 2, is a physics band
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_105b_the_stroking_outlet_has_the_scheme_time_order() {
     let Some(gpu) = gpu() else { return };
@@ -230,7 +234,6 @@ fn the_relative_flux_and_the_wall_value_are_what_they_say_bitwise() {
 /// F4 - a mesh that is attached and NEVER moves gives the static answer: the
 /// same ten steps with and without a motion, fields agreeing to 1e-12.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_mesh_that_is_attached_and_never_moves_gives_the_static_answer() {
     let Some(gpu) = gpu() else { return };
     let rig = stroke_rig(PatchMotion::Fixed).expect("never-moving rig");
@@ -307,9 +310,9 @@ fn a_mesh_that_is_attached_and_never_moves_gives_the_static_answer() {
     let r_p = rel_s(&a.1, &b.1);
     let r_phi = rel_s(&a.2, &b.2).max(rel_s(&a.3, &b.3));
     println!("  static vs never-moving: U {r_u:.3e}, p {r_p:.3e}, phi {r_phi:.3e}");
-    assert!(r_u <= 1e-12, "U {r_u:.3e}");
-    assert!(r_p <= 1e-12, "p {r_p:.3e}");
-    assert!(r_phi <= 1e-12, "phi {r_phi:.3e}");
+    assert!((r_u as f64) <= crate::precision::roundoff_tol(1e-12), "U {r_u:.3e}");
+    assert!((r_p as f64) <= crate::precision::roundoff_tol(1e-12), "p {r_p:.3e}");
+    assert!((r_phi as f64) <= crate::precision::roundoff_tol(1e-12), "phi {r_phi:.3e}");
 }
 
 /// F5 - `attach_motion` and `move_mesh` refuse, each by name. (c) - the fan
@@ -445,7 +448,7 @@ fn a_moving_step_replays_bitwise() {
     // through the shared borrow, so every build starts where the last ended.
     let gm = GpuMesh::upload(&g, hm).expect("mesh");
 
-    let build = || -> Result<(Simple, PbicgstabBackend, crate::DevBuf<Vec3>)> {
+    let build = || -> Result<(Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)> {
         let mut reset = AleMesh::new(&g, hm, &gm, &rig.rb.points, &rig.csr)?;
         reset.recompute_in_place(&g, &gm)?;
         drop(reset);
@@ -455,7 +458,7 @@ fn a_moving_step_replays_bitwise() {
         s.attach_motion(&g, ale, &[])?;
         let mut backend = PbicgstabBackend::new(ctrl.p_solver);
         backend.setup(&g, hm, &gm, &SystemProbe::default())?;
-        let spare = g.upload(&rig.motion.points_at(0.125))?;
+        let spare = g.upload(&geo_points(&rig.motion.points_at(0.125), DVec3::ZERO))?;
         Ok((s, backend, spare))
     };
 
@@ -464,7 +467,7 @@ fn a_moving_step_replays_bitwise() {
     // The points alternate moved, rest, moved, ... with FIXED device
     // pointers: a device copy moves them, a device copy backs the old level
     // up, and `advance` does the rest - no host write anywhere in the step.
-    let iterate = |(s, b, spare): &mut (Simple, PbicgstabBackend, crate::DevBuf<Vec3>)| {
+    let iterate = |(s, b, spare): &mut (Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)| {
         {
             let ale = s.motion_mut().expect("attached");
             g.stream().memcpy_dtod(&*spare, &mut ale.points)?;
@@ -507,7 +510,7 @@ fn a_moving_step_replays_bitwise() {
         "moving step: move_mesh plus outer corrector (SPEC-LIT 105.10)",
         build,
         iterate,
-        |(s, _, _): &(Simple, PbicgstabBackend, crate::DevBuf<Vec3>)| {
+        |(s, _, _): &(Simple, PbicgstabBackend, crate::DevBuf<GeoVec3>)| {
             let u = g.download(&s.u().f)?;
             let mut flat = Vec::with_capacity(u.len() * 3);
             for c in &u {

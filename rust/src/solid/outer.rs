@@ -728,6 +728,7 @@ mod tests {
     /// twin gap 1e-5, not the drafted 1e-6 (see the assertion); `omegas`'
     /// length is a transcription fact asserted so it stays one.
     #[test]
+    // f32 (F32-16): device outer 20 vs prototype 23 iterations in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_outer_loop_is_the_prototypes_twin() {
         let Some(gpu) = gpu() else { return };
@@ -809,6 +810,7 @@ mod tests {
     /// be an accelerator that is not working, and this is the assertion that
     /// says it is.
     #[test]
+    // f32 (F32-16): Anderson norm histories differ 1.8e-1 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_anderson_loop_is_the_prototypes_twin() {
         let Some(gpu) = gpu() else { return };
@@ -903,6 +905,7 @@ mod tests {
     /// steps (the Krylov space is at most six-dimensional) and one to check.
     /// The answer is `(I - M)^-1 c` by back-substitution.
     #[test]
+    // f32 (F32-16): GMRES stagnates in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gmres_finds_the_fixed_point_of_an_affine_map_picard_cannot() {
         const N: usize = 6;

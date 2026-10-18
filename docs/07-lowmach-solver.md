@@ -41,6 +41,8 @@ Rehm & Baum (1978), read from `reference/fds` for the shape of the
 bookkeeping and rebuilt entirely out of this crate's own, already-validated
 finite-volume operators (SPEC-LIT §3, §13).
 
+**Above M = 0.3, use the compressible solver.** `ofgpu-lowmach` refuses a run whose `M_max` exceeds 0.3 (`energy::LOW_MACH_LIMIT`, SPEC-LIT §93.5-§93.6), and `-permissive` only turns the refusal into a warning. The refusal names `ofgpu-compressible`, which solves the all-speed equations with acoustics kept (SPEC-LIT §122-§127; its gates and their misses are §127.6). Its shipped cases are `cases/sodShockTube.jsonc` and `cases/nozzle` (§125.8.1, §125.8.2).
+
 The pressure splits into a spatially uniform thermodynamic part and a
 hydrodynamic perturbation the momentum equation actually sees:
 

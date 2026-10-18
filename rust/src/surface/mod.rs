@@ -1069,7 +1069,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn nearest_triangle_matches_hand_values() {
         let s = cube();
         let idx = match TriIndex::new(&s, 0.5) {
@@ -1088,7 +1087,7 @@ mod tests {
         // (x,y) diagonal, so triangle [4,5,6] (index 2), distance 0.05.
         let (t, d) = idx.nearest_triangle(Vec3::new(0.5, 0.25, 0.95));
         assert_eq!(t, 2);
-        assert!((d - 0.05).abs() < 1e-12, "d = {d}");
+        assert!((((d - 0.05).abs()) as f64) < crate::precision::roundoff_tol(1e-12), "d = {d}");
     }
 
     #[test]

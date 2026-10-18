@@ -14,8 +14,12 @@
 //! resident device memory - the number that decides how large a mesh fits.
 //!
 //! ```text
-//! ofgpu-bench [nx ny nz] [-iters N] [-fixedIters N] [-model kEpsilon|kOmega|both]
+//! ofgpu-bench [nx ny nz] [-iters N] [-fixedIters N] [-model kEpsilon|kOmega|both|simpleCavity]
 //! ```
+//!
+//! `simpleCavity` times the crate's own steady SIMPLE loop on a 3-D
+//! lid-driven cavity instead of the frozen-flow turbulence models, for the
+//! f32 speed figure of SPEC-LIT §112.6.
 //!
 //! Carried across from this project's own earlier C++ benchmark driver.
 //!
@@ -32,10 +36,16 @@ use cudarc::driver::sys::CUdevice_attribute;
 use ofgpu::blockgen;
 use ofgpu::blockgen::{BlockSpec, GradedAxis};
 use ofgpu::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
-use ofgpu::field_ops::{correct_boundary_conditions_vector, FieldKernels};
+use ofgpu::field_ops::{
+    correct_boundary_conditions, correct_boundary_conditions_vector, FieldKernels,
+};
 use ofgpu::field_setup::max_div_phi;
+use ofgpu::io::case::SolverControls;
 use ofgpu::mesh::{HostMesh, PatchKind};
 use ofgpu::models::{KEpsilon, KEpsilonCoeffs, KOmega, KOmegaCoeffs};
+use ofgpu::momentum::{BuoyancyCoeffs, MomentumControls};
+use ofgpu::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
+use ofgpu::simple::{Simple, SimpleControls, SimplePerformance};
 use ofgpu::turbulence::{FlowState, TurbulenceControls};
 use ofgpu::wallfunctions::WallFunctionCoeffs;
 use ofgpu::{Gpu, GpuMesh, Label, Result, Scalar, Vec3};
@@ -367,6 +377,242 @@ fn kepsilon_for<'a>(gpu: &Gpu, b: &'a Bench, ctrl: TurbulenceControls) -> Result
 }
 
 // ==========================================================================
+//  The SIMPLE cavity, F32-18
+// ==========================================================================
+
+/// The +y patch of a blockgen box: the six patches come out in
+/// -x +x -y +y -z +z order, so the moving lid is the fourth.
+const LID_PATCH: usize = 3;
+
+/// What one timed SIMPLE cavity run measured.
+struct SimpleCavityTiming {
+    n_cells: usize,
+    /// `gpu.pool_usage()?.used` after `Simple::new` + `initialise` + the
+    /// pressure backend's `setup` and the `n_warm` untimed iterations.
+    pool_bytes: u64,
+    /// Wall seconds per timed `correct()`, `gpu.sync()` before and after the
+    /// timed loop.
+    secs_per_iter: f64,
+    /// Mean `SolverPerformance::n_iterations` of the three U components over
+    /// the timed iterations.
+    mean_u_iters: [f64; 3],
+    /// The same for p.
+    mean_p_iters: f64,
+    /// `SimplePerformance::continuity_error` of the last timed iteration.
+    continuity_error: Scalar,
+}
+
+/// Every boundary face's patch index - how this file says "this face is the
+/// lid's" without re-deriving the flattening.
+fn patch_of(hm: &HostMesh) -> Vec<usize> {
+    let mut v = vec![0usize; hm.n_boundary_faces];
+    for (p, pi) in hm.patches.iter().enumerate() {
+        for k in 0..pi.size {
+            v[pi.start + k] = p;
+        }
+    }
+    v
+}
+
+/// Zero-gradient on every wall, `empty` where the mesh says so - the
+/// boundary condition both p and T carry on this case.
+fn set_zero_gradient_bcs(gpu: &Gpu, f: &mut GpuScalarField, hm: &HostMesh) -> Result<()> {
+    let owner = patch_of(hm);
+    let nbf = hm.n_boundary_faces;
+
+    let mut kind = vec![BcKind::ZeroGradient as Label; nbf];
+    let fr = vec![0.0 as Scalar; nbf];
+    let rv = vec![0.0 as Scalar; nbf];
+    let rg = vec![0.0 as Scalar; nbf];
+
+    for i in 0..nbf {
+        if hm.patches[owner[i]].kind == PatchKind::Empty {
+            kind[i] = BcKind::Empty as Label;
+        }
+    }
+
+    gpu.write(&mut f.bc_kind, &kind)?;
+    gpu.write(&mut f.fr, &fr)?;
+    gpu.write(&mut f.ref_value, &rv)?;
+    gpu.write(&mut f.ref_grad, &rg)
+}
+
+/// Time the crate's own steady SIMPLE loop on a lid-driven cavity.
+///
+/// The case follows the library's Ghia-Ghia-Shin cavity test
+/// (`lid_driven_cavity_matches_ghia_ghia_and_shin`, 2-D, central
+/// differencing) on the bench's mesh, with `MomentumControls`' default
+/// schemes: the unit cube, laminar (`nu = 0.01`, `Re = U L / nu = 100`), the
+/// lid (+y) moving at (1, 0, 0) and every other wall stationary. It is
+/// modelled on the private test helpers of `src/simple.rs` and that test;
+/// they are `#[cfg(test)]`-private to the library, so these are small
+/// copies, not shared ones. `n_warm` untimed `correct()` calls come first
+/// (the first launch of every kernel pays for module loading), then
+/// `n_iters` timed ones.
+fn time_simple_cavity(
+    gpu: &Gpu,
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    n_warm: usize,
+    n_iters: usize,
+    fixed_iters: i64,
+) -> Result<SimpleCavityTiming> {
+    let spec = BlockSpec {
+        x: GradedAxis { lo: 0.0, hi: 1.0, n: nx, ..Default::default() },
+        y: GradedAxis { lo: 0.0, hi: 1.0, n: ny, ..Default::default() },
+        z: GradedAxis { lo: 0.0, hi: 1.0, n: nz, ..Default::default() },
+        windows: Vec::new(),
+        patch_name: ["xMin", "xMax", "yMin", "lid", "zMin", "zMax"].map(String::from),
+        patch_type: [
+            "wall",
+            "wall",
+            "wall",
+            "wall",
+            if nz == 1 { "empty" } else { "wall" },
+            if nz == 1 { "empty" } else { "wall" },
+        ]
+        .map(String::from),
+        cyclic: Vec::new(),
+    };
+
+    let hm = blockgen::build_mesh(&spec)?;
+    let mesh = GpuMesh::upload(gpu, &hm)?;
+
+    // Re = U L / nu = 1 * 1 / 0.01 = 100.
+    let nu: Scalar = 0.01;
+
+    let (u_solver, p_solver) = if fixed_iters > 0 {
+        // Zero host traffic per solve: the count is the control, not a
+        // measurement.
+        let both = SolverControls {
+            fixed_iters: true,
+            max_iter: fixed_iters as Label,
+            report_residuals: false,
+            ..SolverControls::default()
+        };
+        (both, both)
+    } else {
+        (
+            SolverControls {
+                tolerance: 1e-8,
+                rel_tol: 0.1,
+                max_iter: 200,
+                check_interval: 5,
+                ..SolverControls::default()
+            },
+            SolverControls {
+                tolerance: 1e-8,
+                rel_tol: 0.05,
+                max_iter: 1000,
+                check_interval: 5,
+                ..SolverControls::default()
+            },
+        )
+    };
+
+    let mut s = Simple::new(
+        gpu,
+        &hm,
+        &mesh,
+        SimpleControls {
+            momentum: MomentumControls {
+                nu,
+                u_solver,
+                u_relax: 0.7,
+                ..MomentumControls::default()
+            },
+            p_solver,
+            p_relax: 0.3,
+            ..SimpleControls::default()
+        },
+        BuoyancyCoeffs { g: Vec3::ZERO, ..BuoyancyCoeffs::default() },
+    )?;
+
+    // U: no slip on every stationary wall, the lid moving in +x; an `empty`
+    // patch stays `empty`. p: zero-gradient everywhere.
+    let owner = patch_of(&hm);
+    let nbf = hm.n_boundary_faces;
+    let lid = Vec3::new(1.0, 0.0, 0.0);
+
+    let mut kind = vec![BcKind::FixedValue as Label; nbf];
+    let mut fr = vec![1.0 as Scalar; nbf];
+    let mut rv = vec![Vec3::ZERO; nbf];
+    let rg = vec![Vec3::ZERO; nbf];
+    for i in 0..nbf {
+        if hm.patches[owner[i]].kind == PatchKind::Empty {
+            kind[i] = BcKind::Empty as Label;
+            fr[i] = 0.0;
+        } else if owner[i] == LID_PATCH {
+            rv[i] = lid;
+        }
+    }
+
+    {
+        let u = s.u_mut();
+        gpu.write(&mut u.bc_kind, &kind)?;
+        gpu.write(&mut u.fr, &fr)?;
+        gpu.write(&mut u.ref_value, &rv)?;
+        gpu.write(&mut u.ref_grad, &rg)?;
+    }
+    set_zero_gradient_bcs(gpu, s.p_mut(), &hm)?;
+    s.initialise(gpu)?;
+
+    // A zero eddy viscosity with calculated boundary values - laminar.
+    let mut nut = GpuScalarField::zeros(gpu, &mesh, "nut")?;
+    let calculated = vec![BcKind::Calculated as Label; nbf];
+    gpu.write(&mut nut.bc_kind, &calculated)?;
+
+    // A uniform temperature with the case's zero-gradient BCs, evaluated
+    // once: the momentum equation reads it whether or not g is zero.
+    let t_ref = BuoyancyCoeffs::default().t_ref;
+    let mut t = GpuScalarField::zeros(gpu, &mesh, "T")?;
+    let uniform = vec![t_ref; hm.n_cells];
+    gpu.write(&mut t.f, &uniform)?;
+    set_zero_gradient_bcs(gpu, &mut t, &hm)?;
+    correct_boundary_conditions(gpu, &FieldKernels::new(gpu)?, &mut t, &mesh)?;
+
+    let mut backend = PbicgstabBackend::new(p_solver);
+    backend.setup(gpu, &hm, &mesh, &SystemProbe::default())?;
+
+    for _ in 0..n_warm {
+        s.correct(gpu, &mut backend, &nut, &t)?;
+    }
+
+    // Read after the warm-up, not before it: a solve's workspace is
+    // allocated on first use, and the figure is the whole case's footprint.
+    gpu.sync()?;
+    let pool_bytes = gpu.pool_usage()?.used;
+
+    let mut sum_u = [0.0f64; 3];
+    let mut sum_p = 0.0f64;
+    let mut last = SimplePerformance::default();
+
+    gpu.sync()?;
+    let t0 = Instant::now();
+    for _ in 0..n_iters {
+        last = s.correct(gpu, &mut backend, &nut, &t)?;
+        for (sum, perf) in sum_u.iter_mut().zip(last.u) {
+            *sum += perf.n_iterations as f64;
+        }
+        sum_p += last.p.n_iterations as f64;
+    }
+    gpu.sync()?;
+    let wall = t0.elapsed().as_secs_f64();
+
+    let n = n_iters.max(1) as f64;
+
+    Ok(SimpleCavityTiming {
+        n_cells: hm.n_cells,
+        pool_bytes,
+        secs_per_iter: wall / n,
+        mean_u_iters: [sum_u[0] / n, sum_u[1] / n, sum_u[2] / n],
+        mean_p_iters: sum_p / n,
+        continuity_error: last.continuity_error,
+    })
+}
+
+// ==========================================================================
 //  Driver
 // ==========================================================================
 
@@ -451,6 +697,46 @@ fn run(o: &Options) -> Result<()> {
         o.nz,
         o.nx * o.ny * o.nz
     );
+
+    // The SIMPLE cavity does not touch the frozen flow: its case is the
+    // library's own lid-driven cavity, built inside `time_simple_cavity`.
+    if o.which == "simpleCavity" {
+        if o.fixed_iters > 0 {
+            println!(
+                "       fixed-iteration solver: {} sweeps, zero host transfers",
+                o.fixed_iters
+            );
+        }
+
+        let t = time_simple_cavity(&gpu, o.nx, o.ny, o.nz, 3, o.n_iters, o.fixed_iters)?;
+
+        println!(
+            "       simpleCavity: {} MiB in this process's pool, {:.1} B/cell",
+            t.pool_bytes >> 20,
+            t.pool_bytes as f64 / t.n_cells.max(1) as f64
+        );
+
+        let rate = if t.secs_per_iter > 0.0 {
+            t.n_cells as f64 / t.secs_per_iter / 1e6
+        } else {
+            0.0
+        };
+        println!(
+            "       simpleCavity  {:.4} s/iter    {:.1} Mcell-iter/s",
+            t.secs_per_iter, rate
+        );
+
+        println!(
+            "       inner iterations per outer iteration (mean): U {:.1} {:.1} {:.1}, p {:.1}; continuity error {}",
+            t.mean_u_iters[0],
+            t.mean_u_iters[1],
+            t.mean_u_iters[2],
+            t.mean_p_iters,
+            sci(f64::from(t.continuity_error), 1)
+        );
+
+        return Ok(());
+    }
 
     let fk = FieldKernels::new(&gpu)?;
     let b = build_flow(&gpu, &fk, o.nx, o.ny, o.nz)?;
@@ -554,7 +840,7 @@ mod tests {
     /// matches the constants of SPEC-LIT 111.3, so the "cells that fit"
     /// table stays an interpolation rather than a guess.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    #[cfg(not(feature = "single"))]
     fn the_kepsilon_case_costs_linear_bytes_per_cell() {
         let Some(gpu) = gpu() else {
             eprintln!("no CUDA device: the memory model was not measured");
@@ -636,5 +922,39 @@ mod tests {
             );
         }
         assert_eq!(fit_table_row(8), "| 8 GiB | 7.63 M cells |");
+    }
+
+    /// F32-18: the simpleCavity bench runs end to end and reports finite
+    /// figures on both builds, and a fixed-iteration pressure solve reports
+    /// exactly the sweeps its control names - the count is the control, not
+    /// a measurement (class D).
+    #[test]
+    fn the_simple_cavity_bench_runs_and_reports_finite_figures() {
+        let Some(g) = gpu() else {
+            eprintln!("no CUDA device: the simpleCavity bench was not exercised");
+            return;
+        };
+
+        let t = time_simple_cavity(&g, 12, 12, 12, 1, 4, 0).unwrap();
+        assert_eq!(t.n_cells, 1728, "n_cells = {}", t.n_cells);
+        assert!(t.pool_bytes > 0, "pool_bytes = {}", t.pool_bytes);
+        assert!(
+            t.secs_per_iter.is_finite() && t.secs_per_iter > 0.0,
+            "secs_per_iter = {}",
+            t.secs_per_iter
+        );
+        assert!(
+            t.continuity_error.is_finite(),
+            "continuity_error = {}",
+            t.continuity_error
+        );
+        assert!(t.mean_p_iters >= 1.0, "mean_p_iters = {}", t.mean_p_iters);
+
+        let fixed = time_simple_cavity(&g, 12, 12, 12, 1, 3, 7).unwrap();
+        assert_eq!(
+            fixed.mean_p_iters, 7.0,
+            "mean_p_iters = {}; a fixed-iteration solve runs exactly max_iter sweeps and must report them all",
+            fixed.mean_p_iters
+        );
     }
 }

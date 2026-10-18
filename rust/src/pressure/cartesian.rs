@@ -514,7 +514,6 @@ mod tests {
     /// bijection the geometry says, or the FFT solves a scrambled problem
     /// that still looks smooth.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_permutation_matches_the_cell_centres() {
         let d = Vec3::new(0.5, 0.25, 2.0);
         let m = built([4, 3, 2], d);
@@ -568,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    // f32 (F32-17): the rotated face is rejected as non-lattice, a different reason
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_rotated_face_is_rejected() {
         let mut m = built([3, 2, 2], Vec3::new(1.0, 1.0, 1.0));

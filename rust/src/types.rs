@@ -721,5 +721,16 @@ mod tests {
             spec.contains(&format!("**{bins}** binary tests")),
             "{bins} binary tests are marked as failing at f32, and SPEC-LIT 112.3 does not say so"
         );
+        println!(
+            "Gate F32-17 (f32-ignored count at 0): {}",
+            if lib + bins == 0 {
+                "holds".to_string()
+            } else {
+                format!(
+                    "MISSED - {lib} library and {bins} binary tests still carry the f32 attribute, \
+                     each a single-build defect named in SPEC-LIT 112.3 and docs/17-review-later.md"
+                )
+            }
+        );
     }
 }

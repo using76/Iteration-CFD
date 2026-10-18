@@ -1115,7 +1115,7 @@ mod tests {
         let plume: Vec<Scalar> = (0..hm.n_cells)
             .map(|c| {
                 let d = g.c[c] - centre;
-                (-(d.dot(d)) / 0.05).exp()
+                (-(d.dot(d)) / 0.05).exp() as Scalar
             })
             .collect();
         (vm, plume, hm)

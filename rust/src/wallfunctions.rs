@@ -3584,7 +3584,6 @@ mod tests {
     /// wall-parallel velocity driving the Newton on the device exactly as it
     /// does on the host.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn device_rough_nutu_agrees_with_the_host_law() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -3657,7 +3656,7 @@ mod tests {
                 nut_wall_rough_u(u_mag, y, nu, wc.kappa, wc.e, ks_vals[i], cs_val);
 
             assert!(
-                (got[bf] - want).abs() <= 1e-9 * want.abs().max(nu),
+                ((got[bf] - want).abs() as f64) <= crate::precision::roundoff_tol(1e-9) * want.abs().max(nu) as f64,
                 "face {bf} (Ks={}, |U|={u_mag}): device {}, host {want}",
                 ks_vals[i],
                 got[bf]
@@ -3667,7 +3666,8 @@ mod tests {
                 let u_tau = u_tau_newton(u_mag, y, nu, wc.kappa, wc.e, 0.0, cs_val);
                 let smooth = nut_wall_u(u_tau, y, nu, u_mag);
                 assert!(
-                    (got[bf] - smooth).abs() <= 1e-9 * smooth.abs().max(nu),
+                    (got[bf] - smooth).abs() as f64
+                        <= crate::precision::roundoff_tol(1e-9) * smooth.abs().max(nu) as f64,
                     "face {bf}: Ks=0 gave {} on the device, smooth nutU gives {smooth}",
                     got[bf]
                 );
@@ -3697,13 +3697,12 @@ mod tests {
     /// different expressions landing on the same number is evidence a typo'd
     /// exponent or a transposed term would not survive.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn nu_correlations_match_an_independently_written_derivation() {
         for (re, pr) in [(1.0e4, 0.71), (1.6e4, 0.71), (1.0e5, 7.0), (5.0e5, 0.6)] {
             let db = dittus_boelter_nu(re, pr);
             let db_mirror = 0.023 * (0.8 * re.ln()).exp() * (0.4 * pr.ln()).exp();
             assert!(
-                (db - db_mirror).abs() <= 1e-9 * db_mirror,
+                (db - db_mirror).abs() as f64 <= crate::precision::roundoff_tol(1e-9) * db_mirror as f64,
                 "Re {re} Pr {pr}: dittus_boelter_nu {db}, mirror {db_mirror}"
             );
 
@@ -3734,7 +3733,6 @@ mod tests {
     /// change to either formula is caught here rather than only downstream in
     /// the two-mesh comparison.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn nu_correlations_at_the_channel_operating_point() {
         let re: Scalar = 1.6e4;
         let pr: Scalar = 0.71;
@@ -3744,7 +3742,7 @@ mod tests {
             dittus_boelter_nu(re, pr)
         );
         assert!(
-            (gnielinski_f(re) - 0.027_708_723_8).abs() < 1e-9,
+            ((gnielinski_f(re) - 0.027_708_723_8).abs() as f64) < crate::precision::roundoff_tol(1e-9),
             "f = {}",
             gnielinski_f(re)
         );
@@ -3759,7 +3757,6 @@ mod tests {
     /// to `Pr_t · u+` because `t_vis = Pr_t·y+ `, `t_log = Pr_t·u_log` and
     /// both share `u_plus`'s own blend weights exactly.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn t_plus_reduces_to_prt_times_u_plus_when_pr_equals_prt() {
         let prt: Scalar = 0.85;
         let p = jayatilleke_p(prt, prt);
@@ -3769,7 +3766,8 @@ mod tests {
             let tp = t_plus(y_plus, prt, prt, KAPPA, E, p);
             let want = prt * u_plus(y_plus, KAPPA, E);
             assert!(
-                (tp - want).abs() <= 1e-9 * want.abs().max(1.0),
+                (tp - want).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-9) * want.abs().max(1.0) as f64,
                 "y+ {y_plus}: T+ {tp}, Pr_t*u+ {want}"
             );
         }
@@ -4040,7 +4038,6 @@ mod tests {
     /// Inverting the integrated power law reproduces a manufactured `tau_w`
     /// to round-off - SPEC-LIT §30.3's own wording for this gate.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn ww_power_branch_inverts_a_manufactured_tau_w_to_round_off() {
         let nu: Scalar = 1.5e-5;
         let h: Scalar = 0.01;
@@ -4062,7 +4059,8 @@ mod tests {
 
             let got = tau_w_werner_wengle(u_p, h, nu);
             assert!(
-                (got - tau_w_target).abs() < 1e-9 * tau_w_target,
+                ((got - tau_w_target).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-9) * tau_w_target as f64,
                 "tau_w = {tau_w_target}: inverting and reapplying the power law gave {got}"
             );
         }
@@ -4314,7 +4312,6 @@ mod tests {
     /// magnitude mean is `mu S`. That the totals differ is the whole point of
     /// reporting both.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wall_shear_viscous_form_is_exact_on_a_linear_profile() {
         let (ny, h): (usize, Scalar) = (4, 1.0);
         let m = channel_mesh(ny, h);
@@ -4447,7 +4444,6 @@ mod tests {
     /// gradient, which is reported alongside it as `tau_w_other` and never
     /// averaged in.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wall_shear_wall_function_form_uses_u_tau_of_k() {
         let (ny, h): (usize, Scalar) = (4, 1.0);
         let m = channel_mesh(ny, h);
@@ -4474,7 +4470,7 @@ mod tests {
         let u_tau = u_tau_of(k0, cmu);
         let want = rho * u_tau * u_tau;
         assert!(
-            (ws.tau_w_mag - want).abs() < 1e-12 * want,
+            ((ws.tau_w_mag - want).abs() as f64) < crate::precision::roundoff_tol(1e-12) * want as f64,
             "wall-function tau_w {} against rho (Cmu^1/4 sqrt(k))^2 = {want}",
             ws.tau_w_mag
         );
@@ -4762,7 +4758,6 @@ mod tests {
     /// Each wall here is one `1 x 1` face, so its force is exactly
     /// `rho nu S` along `x` - the wall-function form has nothing to read.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn couette_force_vector_is_mu_s_times_area_on_each_wall_to_round_off() {
         let (ny, h): (usize, Scalar) = (4, 1.0);
         let m = channel_mesh(ny, h);
@@ -4808,7 +4803,6 @@ mod tests {
     /// same closed form `ofgpu-validate`'s own live check uses - so the
     /// ratio is asserted exactly, and the 1 % bound with it.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn poiseuille_viscous_force_is_within_one_percent_of_the_closed_form() {
         let (ny, h): (usize, Scalar) = (64, 1.0);
         let m = channel_mesh(ny, h);
@@ -4844,7 +4838,7 @@ mod tests {
             );
             let ratio = fx / f64::from(want);
             assert!(
-                (ratio - exact_ratio).abs() <= 1e-12,
+                (ratio - exact_ratio).abs() <= crate::precision::roundoff_tol(1e-12),
                 "{}: ratio {ratio} against 1 - 1/(2 n_y) = {exact_ratio}",
                 m.patches[r.patch].name
             );
@@ -4856,7 +4850,6 @@ mod tests {
     /// `a V e_x` (divergence theorem - the face-centre rule is exact for a
     /// linear field on a hexahedron), and the wall density scales it.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn pressure_force_on_a_closed_box_is_zero_for_uniform_p_and_grad_p_times_v_for_linear_p() {
         let d = crate::Vec3::new(0.5, 0.25, 2.0);
         let (mut m, points, faces) = crate::mesh::topology::tests::box_mesh([4, 3, 2], d);
@@ -4924,7 +4917,6 @@ mod tests {
     /// the numbers either way are the same, because a plug flow's traction
     /// IS streamwise.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn drag_report_takes_the_run_axis_when_given_and_each_patch_own_traction_direction_otherwise()
     {
         let m = force_report_mesh();
@@ -4979,12 +4971,15 @@ mod tests {
                 );
                 assert!((f64::from(r.u_ref) - 4.0).abs() < 1e-12);
                 assert!((f64::from(r.length) - 7.0 * 0.25).abs() < 1e-12);
-                assert!((f64::from(r.re_l) - want_re).abs() <= 1e-9 * want_re);
+                assert!(
+                    (f64::from(r.re_l) - want_re).abs()
+                        <= crate::precision::roundoff_tol(1e-9) * want_re
+                );
                 let (c_f, _) = r.cf.expect("Re_L is in the laminar branch");
                 let want_fp = 0.5 * 1.2 * 16.0 * f64::from(c_f) * f64::from(r.area);
                 assert!(
                     (r.flat_plate.expect("estimate present") as f64 - want_fp).abs()
-                        <= 1e-12 * want_fp
+                        <= crate::precision::roundoff_tol(1e-12) * want_fp
                 );
             }
         }

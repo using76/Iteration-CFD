@@ -454,23 +454,64 @@ fn tet_mode(
     run_id: Option<String>,
 ) -> Result<()> {
     let t0 = Instant::now();
-    let out = driver::run_tet(cfg, surf, &mut |line| {
+    let mut out = driver::run_tet(cfg, surf, &mut |line| {
         println!("{line}");
         let _ = std::io::stdout().flush();
     })?;
     let case_dir = Path::new(&cfg.output.case_dir);
     let ident = identity::MeshIdentity::new("ofgpu-automesher", case_dir, &cfg.output.name, run_id);
+    // Both are in-memory, so they are built before the write branch below
+    // takes `out.layout` apart - and the summary's `source` block can carry
+    // the identity the run computed.
     let summary = driver::tet_summary_json(cfg, config_path, surf, &out, &ident);
     let poly_dir = case_dir.join("constant").join("polyMesh");
-    write_poly_mesh_raw(&poly_dir, &out.mesh)?;
-    println!(
-        "ofgpu-automesher: wrote {} ({} tetrahedra, {} prisms; dihedral {:.4} .. {:.4} degrees)",
-        poly_dir.display(),
-        out.n_tets,
-        out.n_prisms,
-        out.min_dihedral_deg,
-        out.max_dihedral_deg
-    );
+    if let Some(lay) = out.layout.take() {
+        // A run with declared bodies writes ONLY the layout (docs/10 §C,
+        // SPEC-LIT §97, §116.12): `mesh/regions.json` and one polyMesh per
+        // region, the same writes the hex path's split makes.
+        let dir = case_dir.join("mesh");
+        let kinds: Vec<ofgpu::cht::RegionKind> = lay.regions.iter().map(|r| r.kind).collect();
+        let region_meshes: Vec<(String, PolyMeshRaw)> =
+            lay.regions.into_iter().map(|r| (r.name, r.mesh)).collect();
+        let source = Some(serde_json::json!({
+            "tool": "ofgpu-automesher",
+            "config_path": config_path,
+            "identity": ident.to_json(),
+        }));
+        let manifest =
+            regions::write_layout(&dir, &region_meshes, &kinds, &lay.interfaces, source)?;
+        for (i, (name, raw)) in region_meshes.iter().enumerate() {
+            let n_cells = raw
+                .owner
+                .iter()
+                .chain(raw.neighbour.iter())
+                .copied()
+                .max()
+                .map_or(0, |m| m as usize + 1);
+            println!(
+                "ofgpu-automesher: wrote {} ({} cells, {})",
+                dir.join(name).join("polyMesh").display(),
+                n_cells,
+                manifest.regions[i].kind
+            );
+        }
+        println!(
+            "ofgpu-automesher: wrote {} ({} regions, {} interfaces)",
+            dir.join("regions.json").display(),
+            region_meshes.len(),
+            lay.interfaces.len()
+        );
+    } else {
+        write_poly_mesh_raw(&poly_dir, &out.mesh)?;
+        println!(
+            "ofgpu-automesher: wrote {} ({} tetrahedra, {} prisms; dihedral {:.4} .. {:.4} degrees)",
+            poly_dir.display(),
+            out.n_tets,
+            out.n_prisms,
+            out.min_dihedral_deg,
+            out.max_dihedral_deg
+        );
+    }
     let summary_path = case_dir.join(format!("{}_summary.json", cfg.output.name));
     let text = serde_json::to_string_pretty(&summary).map_err(|e| {
         Error::Config(format!("summary {}: {e}", summary_path.display()))

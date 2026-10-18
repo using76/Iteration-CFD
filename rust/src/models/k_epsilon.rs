@@ -607,15 +607,16 @@ mod tests {
     /// The coefficients' own decay law, which is a statement about the model
     /// and not about this implementation.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_decay_exponent_follows_from_c2() {
         let c = KEpsilonCoeffs::default();
-        assert!((c.decay_exponent() - 1.0 / 0.92).abs() < 1e-13);
+        assert!(((c.decay_exponent() - 1.0 / 0.92).abs() as f64)
+            < crate::precision::roundoff_tol(1e-13));
 
         // n(n+1) = C_2 n² is the equation it solves; check it directly rather
         // than checking the algebra against itself.
         let n = c.decay_exponent();
-        assert!((n * (n + 1.0) - c.c2 * n * n).abs() < 1e-13);
+        assert!(((n * (n + 1.0) - c.c2 * n * n).abs() as f64)
+            < crate::precision::roundoff_tol(1e-13));
     }
 
     /// Decaying homogeneous isotropic turbulence.
@@ -635,7 +636,6 @@ mod tests {
     /// This is the analytic check SPEC-LIT §10 asks for: no other code is
     /// consulted, and the answer comes from the coefficients themselves.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn decaying_isotropic_turbulence_follows_the_model_exponent() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -701,7 +701,8 @@ mod tests {
             // "no transport" premise is false and the rest is meaningless.
             for (i, &v) in k_num.iter().enumerate() {
                 assert!(
-                    (v - k_end).abs() <= 1e-12 * k_end,
+                    ((v - k_end).abs() as f64)
+                        <= crate::precision::roundoff_tol(1e-12) * k_end as f64,
                     "C2 {c2}: cell {i} holds k = {v}, cell 0 holds {k_end}: \
                      the field is not homogeneous"
                 );

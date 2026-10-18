@@ -904,7 +904,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_linear_displacement_is_an_exact_solution_of_the_block_system_on_the_graded_block() {
         let hm = graded_block();
         let mut ar = arrays(&hm, &[[CompBc::Fixed(0.0); 3]; 6]);
@@ -922,11 +921,10 @@ mod tests {
         residual_host(&mut r, &u, &a, &hm);
         let ratio = max_abs(&flatten3(&r)) / residual_scale(&a, &u);
         println!("  109-A graded block: max|r|/scale = {ratio:e}");
-        assert!(ratio <= 1e-12, "the linear patch test residual is {ratio:e} of the scale");
+        assert!((ratio as f64) <= crate::precision::roundoff_tol(1e-12), "the linear patch test residual is {ratio:e} of the scale");
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_free_expansion_state_is_an_exact_solution_of_the_block_system() {
         let hm = prototype::block(10).expect("block");
         let ar = arrays(&hm, &free_expansion());
@@ -938,7 +936,7 @@ mod tests {
         residual_host(&mut r, &u, &a, &hm);
         let ratio = max_abs(&flatten3(&r)) / residual_scale(&a, &u);
         println!("  109-A block(10): max|r|/scale = {ratio:e}");
-        assert!(ratio <= 1e-12, "the free-expansion residual is {ratio:e} of the scale");
+        assert!((ratio as f64) <= crate::precision::roundoff_tol(1e-12), "the free-expansion residual is {ratio:e} of the scale");
     }
 
     #[test]
@@ -977,7 +975,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_host_product_and_the_dense_expansion_agree() {
         let hm = prototype::jittered_block(4, 0.25).expect("jittered");
         let ar = arrays(&hm, &fixed_minus_x());
@@ -1004,13 +1001,12 @@ mod tests {
         let ratio = worst / residual_scale(&a, &u);
         println!("  §109.3 max|A u - dense x|/scale = {ratio:e}");
         assert!(
-            ratio <= 1e-14,
+            (ratio as f64) <= crate::precision::roundoff_tol(1e-14),
             "the product and the dense expansion differ by {ratio:e} of the scale"
         );
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_dense_block_system_solves_the_free_expansion_state_directly() {
         let hm = prototype::block(4).expect("block");
         let ar = arrays(&hm, &free_expansion());
@@ -1026,7 +1022,7 @@ mod tests {
         let err: Vec<Scalar> = x.iter().zip(&want).map(|(&g, &w)| g - w).collect();
         let rel = max_abs(&err) / max_abs(&want);
         println!("  §109.3 dense solve, relative error = {rel:e}");
-        assert!(rel <= 1e-10, "the dense solve misses the state by {rel:e}");
+        assert!((rel as f64) <= crate::precision::roundoff_tol(1e-10), "the dense solve misses the state by {rel:e}");
     }
 
     #[test]

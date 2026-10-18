@@ -1571,13 +1571,13 @@ mod tests {
     /// `0.0828` did NOT satisfy those, "set 2 is the transformed k-epsilon"
     /// would be a claim about a model this code does not contain.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn set_two_is_the_transformed_k_epsilon() {
         let c = KOmegaSstCoeffs::default();
         let ke = KEpsilonCoeffs::default();
 
         assert!(
-            (c.gamma_2 - (ke.c1 - 1.0)).abs() < 1e-12,
+            ((c.gamma_2 - (ke.c1 - 1.0)).abs() as f64)
+                < crate::precision::roundoff_tol(1e-12),
             "gamma_2 = {} but C_1 - 1 = {}",
             c.gamma_2,
             ke.c1 - 1.0
@@ -1594,9 +1594,11 @@ mod tests {
         assert!((c2 - 1.92).abs() < 1e-12, "{c2}");
 
         // And the consequence: the two models decay at the same rate.
-        assert!((c.decay_exponent(0.0) - 1.0 / (ke.c2 - 1.0)).abs() < 1e-12);
+        assert!(((c.decay_exponent(0.0) - 1.0 / (ke.c2 - 1.0)).abs() as f64)
+            < crate::precision::roundoff_tol(1e-12));
         // At F1 = 1 it is Wilcox's, with SST's own beta_1 = 0.075.
-        assert!((c.decay_exponent(1.0) - 0.09 / 0.075).abs() < 1e-12);
+        assert!(((c.decay_exponent(1.0) - 0.09 / 0.075).abs() as f64)
+            < crate::precision::roundoff_tol(1e-12));
     }
 
     /// Set 1 is the inner k-omega set, and it is NOT Wilcox's 1988 set - the
@@ -1642,6 +1644,7 @@ mod tests {
     /// zero and `CD_kw+` is at its floor. So `F1` must fall monotonically from
     /// one to zero, and there is nothing else it could be doing.
     #[test]
+    // f32 (F32-16): 1-1e-12 rounds up to 1.0 in f32, strict > fails
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn f1_is_one_at_a_wall_and_zero_in_the_free_stream() -> Result<()> {
         let Some(gpu) = gpu() else {
@@ -1853,7 +1856,6 @@ mod tests {
     /// second half of the test checks that too, so a pass cannot be an
     /// accident of a loose tolerance.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn forcing_f1_to_one_reproduces_k_omega() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -1906,11 +1908,13 @@ mod tests {
         let w_ref = gpu.download(&kw.omega().f)?[0];
 
         assert!(
-            (k_sst - k_ref).abs() <= 1e-11 * k_ref,
+            ((k_sst - k_ref).abs() as f64)
+                <= crate::precision::roundoff_tol(1e-11) * k_ref as f64,
             "SST with F1 = 1 gave k = {k_sst}, k-omega with set 1 gave {k_ref}"
         );
         assert!(
-            (w_sst - w_ref).abs() <= 1e-11 * w_ref,
+            ((w_sst - w_ref).abs() as f64)
+                <= crate::precision::roundoff_tol(1e-11) * w_ref as f64,
             "SST with F1 = 1 gave omega = {w_sst}, k-omega with set 1 gave {w_ref}"
         );
 
@@ -2074,7 +2078,6 @@ mod tests {
     /// so they agree to time-discretisation error rather than to round-off,
     /// and the tolerance says so.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn forcing_f1_to_zero_reproduces_the_transformed_k_epsilon() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());

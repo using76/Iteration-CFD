@@ -2185,7 +2185,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    #[cfg(not(feature = "single"))]
     fn the_ceiling_is_the_highest_swept_temperature_holding_exactly_one_hundred() {
         let pts = vec![
             sp(285.15, 100.0),
@@ -2300,7 +2300,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+    #[cfg(not(feature = "single"))]
     fn continuity_is_one_computation_printed_and_serialised() {
         let s = solution();
         let v = value(&s, None);

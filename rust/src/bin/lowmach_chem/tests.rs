@@ -29,6 +29,8 @@ use ofgpu::io::fields::read_scalar_field;
 use ofgpu::species::{Species, SpeciesCoeffs};
 use ofgpu::timescheme::DdtScheme;
 use ofgpu::turbulence::FlowState;
+
+use crate::lowmach_chem::{species_budget, BudgetInputs};
 use ofgpu::{Error, Gpu, GpuMesh, Label, Scalar};
 
 const TABLE_II: &str = include_str!("../../../../reference/mcbride-gordon-reno1993/table_II.csv");
@@ -50,7 +52,7 @@ const CODES: &[(&str, &str, &[(&str, u32)])] = &[
 
 /// The ten records as a CHEMKIN THERMO file (SAND89-8009 Table III's
 /// columns), each coefficient written in the record's own E15.8 digits.
-fn thermo_text() -> String {
+pub(crate) fn thermo_text() -> String {
     let mut rows: Vec<(String, f64, [f64; 7])> = Vec::new();
     for line in TABLE_II.lines() {
         let line = line.trim();
@@ -87,7 +89,7 @@ fn thermo_text() -> String {
 }
 
 /// CHR-06's fifteen-reaction fixture of §130.7 (placeholder rates).
-const MECHANISM: &str = "ELEMENTS H O C N END
+pub(crate) const MECHANISM: &str = "ELEMENTS H O C N END
 SPECIES H2 O2 H2O OH O H CO CO2 CH4 N2 END
 REACTIONS
 H + O2 <=> O + OH                 1.0E+14  -0.5  15000.0
@@ -120,7 +122,7 @@ END
 ";
 
 /// The mechanism's species, in its own order; N2 is the inert one.
-const NAMES: [&str; 10] = ["H2", "O2", "H2O", "OH", "O", "H", "CO", "CO2", "CH4", "N2"];
+pub(crate) const NAMES: [&str; 10] = ["H2", "O2", "H2O", "OH", "O", "H", "CO", "CO2", "CH4", "N2"];
 
 /// The molar mass of `name`, kg/mol, from the table's record.
 fn molar_mass(name: &str) -> f64 {
@@ -185,7 +187,7 @@ fn chem_blocks(inlet: Option<&str>) -> String {
     )
 }
 
-const NUMERICS: &str = r#"
+pub(crate) const NUMERICS: &str = r#"
   "numerics": {
     "algorithm": { "kind": "PIMPLE", "correctors": 2 },
     "ddt": "Euler",
@@ -276,7 +278,49 @@ fn tube_case() -> String {
     )
 }
 
-fn scratch_dir(tag: &str) -> PathBuf {
+/// The EDC tube: [`tube_case`] re-closed for CHR-16 - a RAS kEpsilon
+/// turbulence block carrying the case's `coeffs` (`C1` = 1.6, the row
+/// CHR-16 runs), `k`/`epsilon` prescribed at the inlet, zero-gradient at
+/// the outlet and in the initial fields, and EDC (1989) as the closure.
+/// `psrSpan` is 1 (an input, SPEC-LIT §134.8): `EdcWork`'s carried trial
+/// step grows to the span clamp once a cell converges, and at the default
+/// 20 spans a span-sized first trial into a fresh ignition overshot `T`
+/// below zero (measured: status 2, BAD_TEMPERATURE, near step 22). One span
+/// keeps the first trial at one `tau_e`; the fine structures are then not
+/// integrated to steady state (cells are flagged UNCONVERGED and counted),
+/// which this element gate does not depend on: both terms of (134.9)
+/// conserve elements at any span.
+fn edc_tube_case() -> String {
+    tube_case()
+        .replace(
+            r#""combustion": { "model": "laminar" }"#,
+            r#""combustion": { "model": "EDC", "variant": "1989", "psrSpan": 1 }"#,
+        )
+        .replace(
+            r#"  "patches": ["#,
+            r#"  "turbulence": { "kind": "RAS", "model": "kEpsilon",
+  "wallFunctions": { "kappa": 0.41, "E": 9.8 }, "coeffs": { "C1": 1.6 } },
+  "patches": ["#,
+        )
+        .replace(
+            r#""T": { "type": "fixedValue", "value": 1400.0 }"#,
+            r#""T": { "type": "fixedValue", "value": 1400.0 },
+      "k": { "type": "fixedValue", "value": 0.01 },
+      "epsilon": { "type": "fixedValue", "value": 1.0 }"#,
+        )
+        .replace(
+            r#""T": { "type": "inletOutlet", "inletValue": 1000.0 }"#,
+            r#""T": { "type": "inletOutlet", "inletValue": 1000.0 },
+      "k": { "type": "zeroGradient" },
+      "epsilon": { "type": "zeroGradient" }"#,
+        )
+        .replace(
+            r#""initial": { "U": [1.0, 0, 0], "T": 1000.0, "p": 0.0 }"#,
+            r#""initial": { "U": [1.0, 0, 0], "T": 1000.0, "p": 0.0, "k": 0.01, "epsilon": 1.0 }"#,
+        )
+}
+
+pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!(
         "ofgpu_lowmach_chem_{}_{}_{tag}",
@@ -289,7 +333,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 }
 
 /// Write `text` as `case.jsonc` beside the two chemistry files; its path.
-fn write_case(tag: &str, text: &str) -> PathBuf {
+pub(crate) fn write_case(tag: &str, text: &str) -> PathBuf {
     let dir = scratch_dir(tag);
     std::fs::write(dir.join("mech.ck"), MECHANISM).expect("mechanism");
     std::fs::write(dir.join("therm.dat"), thermo_text()).expect("thermo");
@@ -298,7 +342,7 @@ fn write_case(tag: &str, text: &str) -> PathBuf {
     path
 }
 
-fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
+pub(crate) fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
     let mut a = vec!["ofgpu-lowmach".to_string(), path.to_string_lossy().to_string()];
     a.extend(args.iter().map(|s| (*s).to_string()));
     let o = crate::parse(&a)?;
@@ -306,7 +350,7 @@ fn run_case(path: &Path, args: &[&str]) -> Result<crate::RunEnd, Error> {
 }
 
 /// The one time directory the run wrote (its final state, no schedule).
-fn final_dir(case: &Path) -> PathBuf {
+pub(crate) fn final_dir(case: &Path) -> PathBuf {
     let root = crate::common::json_case_output_dir(case);
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
         .expect("the output root")
@@ -322,7 +366,7 @@ fn final_dir(case: &Path) -> PathBuf {
     dirs.pop().expect("one")
 }
 
-fn written(dir: &Path, name: &str, n: usize) -> Vec<Scalar> {
+pub(crate) fn written(dir: &Path, name: &str, n: usize) -> Vec<Scalar> {
     read_scalar_field(&dir.join(name), n)
         .unwrap_or_else(|e| panic!("{name} was not written: {e}"))
         .internal
@@ -601,4 +645,193 @@ fn lowmach_reacting_refusals_name_the_setting() {
     refuse("strang", &strang, &tr, "chemistry.splitting");
     refuse("restart", &base, &["-endTime", "1e-5", "-deltaT", "1e-6", "-restartWrite", "2"], "restart");
     refuse("backward", &backward, &tr, "numerics.ddt");
+}
+
+// ==========================================================================
+//  lowmach_reacting_refused_cell_is_named
+// ==========================================================================
+
+/// **SPEC-LIT 133.11, row D (CHR-13).** A cell the reactor refuses ends the
+/// run NAMING it: the error holds `the reactor refused`, the count, the
+/// first cell, its status code and its name. The case is the 0-D box with
+/// an initial `T` of 150 K, below the thermo's 200 K floor, so every cell
+/// is refused on the first split step with OUTSIDE_THERMO_RANGE; before the
+/// diagnostic the cell's NaN surfaced later as a non-finite pressure
+/// residual and the run ended without naming the cause.
+#[test]
+fn lowmach_reacting_refused_cell_is_named() {
+    if Gpu::new(0).is_err() {
+        return;
+    }
+    let cold =
+        box_case(&chem_blocks(None), r#"{ "endTime": 1e-5, "deltaT": 1e-6 }"#)
+            .replace(r#""T": 1400.0"#, r#""T": 150.0"#);
+    let path = write_case("refused", &cold);
+    let err = run_case(&path, &["-endTime", "1e-5", "-deltaT", "1e-6"])
+        .expect_err("the cold box must be refused")
+        .to_string();
+    println!("  [133.11] cold box: run ended: {err}");
+    assert!(err.contains("the reactor refused"), "the error must name the reactor: {err}");
+    assert!(
+        err.contains("OUTSIDE_THERMO_RANGE"),
+        "the error must carry the status NAME: {err}"
+    );
+    assert!(err.contains("133.11"), "the error must name its section: {err}");
+}
+
+// ==========================================================================
+//  lowmach_edc_elements_conserved
+// ==========================================================================
+
+/// **SPEC-LIT §134.8, row R (CHR-16).** The 1-D tube runs 30 split steps at
+/// dt = 1e-5 s through `ofgpu-lowmach` with EDC (1989) as the closure under
+/// k-epsilon whose `C1` the case states as 1.6, and every cell's element
+/// content `n_e = Σ_k a_ek Y_k / W_k` (mol/kg) stays at the premixed value
+/// it entered with, measured as [`lowmach_reacting_elements_conserved`]
+/// measures it: both terms of (134.9) conserve elements, so the fine state
+/// keeps `n_e(Y*) = n_e(Ytilde)` at any span and (134.10)'s mean rate
+/// carries no element content. Tolerance `1e-10` relative, `1e-5` in f32
+/// (D-F32-1).
+#[test]
+fn lowmach_edc_elements_conserved() {
+    if Gpu::new(0).is_err() {
+        return;
+    }
+    let path = write_case("edc_tube", &edc_tube_case());
+    let end =
+        run_case(&path, &["-endTime", "3e-4", "-deltaT", "1e-5", "-check", "10"]).expect("the EDC tube runs");
+    assert_eq!(end.steps, 30, "the tube ran {} steps", end.steps);
+    let out = final_dir(&path);
+    let n = 40;
+    let y0 = h2_air();
+    let elements = |e: &str| -> Vec<(usize, f64)> {
+        CODES
+            .iter()
+            .filter_map(|(_, name, els)| {
+                let a = els.iter().find(|(s, _)| *s == e).map_or(0, |x| x.1);
+                (a > 0).then(|| {
+                    (NAMES.iter().position(|x| x == name).expect("named"), f64::from(a) / molar_mass(name))
+                })
+            })
+            .collect()
+    };
+    let state = |name: &str| -> Vec<Scalar> {
+        let _ = written(&out, name, n);
+        end.final_state.iter().find(|(r, _)| r == name).unwrap_or_else(|| panic!("{name}")).1.clone()
+    };
+    let ys: Vec<Vec<Scalar>> = NAMES.iter().map(|s| state(s)).collect();
+    let tol = if cfg!(feature = "single") { 1.0e-5 } else { 1.0e-10 };
+    let mut worst = 0.0f64;
+    for e in ["H", "O", "N", "C"] {
+        let rows = elements(e);
+        let n0: f64 = rows.iter().map(|(k, c)| c * y0[*k]).sum();
+        let mut err = 0.0f64;
+        for c in 0..n {
+            let nc: f64 = rows.iter().map(|(k, a)| a * f64::from(ys[*k][c])).sum();
+            err = err.max(if n0 > 0.0 { (nc - n0).abs() / n0 } else { nc.abs() });
+        }
+        println!("  [134.8] element {e}: n0 {n0:.6e} mol/kg, max relative change {err:.3e}");
+        worst = worst.max(err);
+    }
+    let hrr = state(crate::lowmach_chem::HRR);
+    let hrr_max = hrr.iter().fold(0.0f64, |a, v| a.max(f64::from(*v).abs()));
+    println!("  [134.8] max |HRR| {hrr_max:.3e} W/m3, worst {worst:.3e} (tol {tol:e})");
+    assert!(hrr_max > 0.0, "nothing reacted: the gate would measure nothing");
+    assert!(worst <= tol, "an element left its premixed content by {worst:.3e} (tol {tol:e})");
+}
+
+// ==========================================================================
+//  lowmach_edc_refusals_name_the_setting
+// ==========================================================================
+
+/// **SPEC-LIT §134.8, row D (CHR-16).** EDC under a model with no mixing
+/// rate (`MixingRate::None`, laminar) is refused naming both; EDM - built
+/// and lowered, CHR-14 - is refused by the run naming `combustion.model`
+/// and CHR-16, because ofgpu-lowmach wires EDC only.
+#[test]
+fn lowmach_edc_refusals_name_the_setting() {
+    if Gpu::new(0).is_err() {
+        return;
+    }
+    let edc = tube_case().replace(
+        r#""combustion": { "model": "laminar" }"#,
+        r#""combustion": { "model": "EDC", "variant": "1989", "psrSpan": 1 }"#,
+    );
+    let path = write_case("edc_no_turb", &edc);
+    let err = run_case(&path, &["-endTime", "1e-5", "-deltaT", "1e-5"])
+        .expect_err("EDC under laminar must be refused")
+        .to_string();
+    assert!(err.contains("EDC"), "the refusal must name the closure: {err}");
+    assert!(err.contains("MixingRate::None"), "the refusal must name the arm: {err}");
+    println!("  [134.8] EDC under laminar: refused: {err}");
+
+    let edm = edc_tube_case().replace(
+        r#""combustion": { "model": "EDC", "variant": "1989", "psrSpan": 1 }"#,
+        r#""combustion": { "model": "EDM", "A": 4.0, "B": 0.5 }"#,
+    );
+    let path = write_case("edm_tube", &edm);
+    let err = run_case(&path, &["-endTime", "1e-5", "-deltaT", "1e-5"])
+        .expect_err("EDM must be refused")
+        .to_string();
+    assert!(err.contains("combustion.model"), "the refusal must carry the key: {err}");
+    assert!(err.contains("CHR-16"), "the refusal must name the run: {err}");
+    println!("  [134.8] EDM: refused: {err}");
+}
+
+// ==========================================================================
+//  species_budget_closes_on_hand_data
+// ==========================================================================
+
+/// **SPEC-LIT §134.8, (134.19)-(134.21), row P (CHR-16).** A 2-cell hand
+/// data set with one inflow face, one outflow face, two members (one
+/// solved, the inert) and one element, every number a dyadic rational, so
+/// every sum the budget forms is exact in f64 and each balance closes at
+/// exactly 0: mass by `Σ phi_m = 0`, the element by construction (the
+/// convection and diffusion the members carry plus `z_A R_A` sum to 0).
+/// A leak of `1e-3 x inflow x dt / v_0` into cell 0's density then moves
+/// the mass residual to exactly `1e-3 x inflow`.
+#[test]
+fn species_budget_closes_on_hand_data() {
+    let v = [2.0f64, 4.0];
+    let dt = 0.5f64;
+    let rho = [1.0f64, 1.0];
+    let rho0 = [1.0f64, 1.0];
+    // Members: A solved, N the inert remainder; both steady, so storage 0.
+    let y = [[0.5f64, 0.25], [0.5, 0.0625]];
+    let y0 = y;
+    let su = [[0.25f64, 0.125]];
+    let phi_m = [-1.0f64, 1.0]; // one inflow face, one outflow face
+    let y_b = [[0.5f64, 0.25], [0.25, 0.8125]];
+    let g_b = [[0.125f64, 0.0]];
+    let z = [[1.0f64], [2.0]];
+    let element_names = ["X".to_string()];
+    let (y_s, y0_s, yb_s): ([&[f64]; 2], [&[f64]; 2], [&[f64]; 2]) =
+        ([&y[0], &y[1]], [&y0[0], &y0[1]], [&y_b[0], &y_b[1]]);
+    let (su_s, gb_s, z_s): ([&[f64]; 1], [&[f64]; 1], [&[f64]; 2]) =
+        ([&su[0]], [&g_b[0]], [&z[0], &z[1]]);
+    let inp = BudgetInputs {
+        v: &v,
+        rho: &rho,
+        rho0: &rho0,
+        y: &y_s,
+        y0: &y0_s,
+        su: &su_s,
+        phi_m: &phi_m,
+        y_b: &yb_s,
+        g_b: &gb_s,
+        z: &z_s,
+        element_names: &element_names,
+        dt,
+    };
+    let b = species_budget(&inp);
+    println!("  [134.8] {}", b.line("hand data"));
+    assert!(b.mass.residual.abs() <= 1e-15 * b.mass.inflow, "mass does not close: {:?}", b.mass);
+    for e in &b.elements {
+        assert!(e.residual.abs() <= 1e-15 * e.inflow, "element {} does not close: {e:?}", e.name);
+    }
+    // A leak into cell 0's density: storage grows by 1e-3 x inflow exactly.
+    let leaked = [rho[0] + 1e-3 * b.mass.inflow * dt / v[0], rho[1]];
+    let b = species_budget(&BudgetInputs { rho: &leaked, ..inp });
+    println!("  [134.8] leaked: mass relative {:.6e}", b.mass.relative);
+    assert!((b.mass.relative - 1e-3).abs() <= 1e-12, "relative = {}", b.mass.relative);
 }

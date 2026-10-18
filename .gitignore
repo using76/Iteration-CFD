@@ -61,6 +61,10 @@ cases/dust/*
 !cases/mech/
 cases/mech/*
 !cases/mech/README.md
+# docs/17 CHR-13: BFER2 at phi = 1, written here from the read paper, and its
+# TM-4513 thermo file (public domain) are tracked (SPEC-LIT 133.12).
+!cases/mech/bfer2_phi1.ck
+!cases/mech/tm4513_thermo.dat
 # The race-car sample is a geometry and a recipe, not a mesh: 52 kB of STL and
 # the two commands that turn it into a 2.1-million-cell run. The mesh and the
 # results it produces are a gigabyte, and they are what the user's own machine
@@ -99,6 +103,16 @@ cases/pipe_tet_L1/*
 !cases/pipe_tet_L1/constant/
 cases/pipe_tet_L1/constant/polyMesh/
 !cases/pipe_tet_L1/system/
+# docs/17 CMP-28: Gate CMP-NOZ's subsonic duct as a shipped OpenFOAM case.
+# The dicts, the README and the polyMesh pinned to gatemesh::nozzle_duct are
+# a few kB of text each and are tracked; the solver's time directories are
+# generated, not kept.
+!cases/nozzle/
+cases/nozzle/*
+!cases/nozzle/README.md
+!cases/nozzle/0/
+!cases/nozzle/constant/
+!cases/nozzle/system/
 
 # ------------------------------------------------------------- results -----
 *.png

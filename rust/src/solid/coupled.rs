@@ -1286,7 +1286,6 @@ mod tests {
     /// R3's DILU half: the device factorisation+sweep against the host
     /// face-list twin, to 1e-12, on all three meshes.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn block_dilu_matches_the_host_factorisation_on_three_meshes() {
         let Some(gpu) = gpu() else { return };
         let k = SolverKernels::new(&gpu).expect("solver kernels");
@@ -1306,13 +1305,12 @@ mod tests {
             let e = rel_max(&y_dev, &y_host);
             println!("  block-DILU {name}: rel_max(y) = {e:.3e} ({:.2e} on rD)",
                 rel_max(&rd_dev, &flat9(&rd_host)));
-            assert!(e <= 1e-12, "block-DILU {name}: rel_max = {e}");
+            assert!((e as f64) <= crate::precision::roundoff_tol(1e-12), "block-DILU {name}: rel_max = {e}");
         }
     }
 
     /// R3's Jacobi half: the device `3x3` diagonal inverse against the host's.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn block_jacobi_matches_the_host_inverse_on_three_meshes() {
         let Some(gpu) = gpu() else { return };
         let k = SolverKernels::new(&gpu).expect("solver kernels");
@@ -1332,7 +1330,7 @@ mod tests {
             let e = rel_max(&y_dev, &y_host);
             println!("  block-Jacobi {name}: rel_max(y) = {e:.3e} ({:.2e} on rD)",
                 rel_max(&rd_dev, &flat9(&rd_host)));
-            assert!(e <= 1e-12, "block-Jacobi {name}: rel_max = {e}");
+            assert!((e as f64) <= crate::precision::roundoff_tol(1e-12), "block-Jacobi {name}: rel_max = {e}");
         }
     }
 
@@ -1476,7 +1474,6 @@ mod tests {
     /// the dense direct solve's to 1e-10, and block-DILU converges in FEWER
     /// iterations than block-Jacobi at the same tolerance.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_block_solve_matches_the_dense_direct_solve_and_dilu_beats_jacobi() {
         let Some(gpu) = gpu() else { return };
         let k = SolverKernels::new(&gpu).expect("solver kernels");
@@ -1512,8 +1509,8 @@ mod tests {
              iterations; rel_max vs the dense direct solve: DILU {e_dilu:.3e}, Jacobi {e_jacobi:.3e}",
             perf_dilu.n_iterations, perf_jacobi.n_iterations
         );
-        assert!(e_dilu <= 1e-10, "block-DILU vs dense: {e_dilu}");
-        assert!(e_jacobi <= 1e-10, "block-Jacobi vs dense: {e_jacobi}");
+        assert!((e_dilu as f64) <= crate::precision::roundoff_tol(1e-10), "block-DILU vs dense: {e_dilu}");
+        assert!((e_jacobi as f64) <= crate::precision::roundoff_tol(1e-10), "block-Jacobi vs dense: {e_jacobi}");
         assert!(
             perf_jacobi.n_iterations > perf_dilu.n_iterations,
             "block-Jacobi ({}) did not need more iterations than block-DILU ({})",
@@ -1587,6 +1584,7 @@ mod tests {
     /// eighteen to reach 1e-12), so the relative comparison measures the
     /// report, not two summation orders of a round-off floor.
     #[test]
+    // f32 (F32-16): residual report off 1.4e-5 rel in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_fixed_iteration_block_solve_reports_the_recomputed_true_residual() {
         let Some(gpu) = gpu() else { return };
@@ -1765,7 +1763,6 @@ mod tests {
     /// point of the BLOCK map: one `apply_block` at `u = alpha dT x`
     /// returns it, the defect the block solve's own tolerance.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_free_expansion_state_is_a_fixed_point_of_the_block_map() {
         let Some(gpu) = gpu() else { return };
         let mat = Material::steel(0.3);
@@ -1786,14 +1783,13 @@ mod tests {
             "  109.6: block-map free expansion rel = {rel:e}  BiCGStab = {} iterations",
             perf.n_iterations
         );
-        assert!(rel <= 1e-9, "the block map does not fix the free-expansion state: {rel:e}");
+        assert!((rel as f64) <= crate::precision::roundoff_tol(1e-9), "the block map does not fix the free-expansion state: {rel:e}");
     }
 
     /// Gate 95-C's linear field on the graded block is a fixed point of the
     /// block map: prescribed by value on every face, one `apply_block`
     /// returns it.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_linear_displacement_is_a_fixed_point_of_the_block_map() {
         let Some(gpu) = gpu() else { return };
         let hm = graded_block();
@@ -1823,13 +1819,14 @@ mod tests {
             "  109.6: block-map linear state rel = {rel:e}  BiCGStab = {} iterations",
             perf.n_iterations
         );
-        assert!(rel <= 1e-9, "the block map does not fix the linear state: {rel:e}");
+        assert!((rel as f64) <= crate::precision::roundoff_tol(1e-9), "the block map does not fix the linear state: {rel:e}");
     }
 
     /// From rest, the coupled loop finds the free-expansion state; the
     /// segregated loop on a fresh displacement of the same problem runs
     /// beside it, its count and contraction printed, not held.
     #[test]
+    // f32 (F32-16): coupled loop does not converge in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_coupled_loop_finds_the_free_expansion_state_from_rest() {
         let Some(gpu) = gpu() else { return };
@@ -1894,6 +1891,7 @@ mod tests {
     /// the free-expansion state. The Anderson loop on the same problem runs
     /// beside it, its count printed, not held.
     #[test]
+    // f32 (F32-16): GMRES misses eight decades in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn gmres_reaches_eight_decades_on_the_free_expansion_block_in_twenty() {
         let Some(gpu) = gpu() else { return };

@@ -458,7 +458,6 @@ mod tests {
     /// Everything SPEC-LIT section 74.3 tabulates for a 2:1 hexahedral
     /// interface, measured on a mesh that has one.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_2to1_hex_interface_carries_the_numbers_section_74_tabulates() {
         let r = refined_half([4, 4, 4], CUBE, 1).unwrap();
         let m = &r.mesh;
@@ -489,18 +488,21 @@ mod tests {
                 m.delta_coeffs[f]
             );
             assert!(
-                (m.non_orth_corr[f].mag() - 0.4714045207910317).abs() < 1e-12,
+                (((m.non_orth_corr[f].mag() - 0.4714045207910317).abs()) as f64)
+                    < crate::precision::roundoff_tol(1e-12),
                 "face {f}: |k| is {}",
                 m.non_orth_corr[f].mag()
             );
             let skew = m.skew_corr[f].mag() / d.mag();
             assert!(
-                (skew - 0.14213381090374028).abs() < 1e-12,
+                (((skew - 0.14213381090374028).abs()) as f64)
+                    < crate::precision::roundoff_tol(1e-12),
                 "face {f}: relative skewness {skew}"
             );
         }
         assert!(
-            (worst_deg - 25.239401820678103).abs() < 1e-9,
+            (((worst_deg - 25.239401820678103).abs()) as f64)
+                < crate::precision::roundoff_tol(1e-9),
             "the interface non-orthogonality is {worst_deg} degrees, not 25.2394"
         );
 
@@ -520,7 +522,6 @@ mod tests {
     /// This is the claim that a 2:1 interface needs no flux register - four
     /// sub-areas summing to the parent area is the entire argument.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_refined_box_closes_and_is_ldu_ordered() {
         for r in [
             refined_half([4, 4, 4], CUBE, 1).unwrap(),
@@ -535,12 +536,12 @@ mod tests {
                 * r.base_d.y
                 * r.base_d.z;
             assert!(
-                (rep.total_volume - want).abs() < 1e-12 * want,
+                (rep.total_volume - want as f64).abs() < crate::precision::roundoff_tol(1e-12) * want as f64,
                 "total volume {} vs {want}",
                 rep.total_volume
             );
             assert!(
-                rep.max_closure_error < 1e-14,
+                rep.max_closure_error < crate::precision::roundoff_tol(1e-14),
                 "closure error {} at cell {}",
                 rep.max_closure_error,
                 rep.max_closure_cell

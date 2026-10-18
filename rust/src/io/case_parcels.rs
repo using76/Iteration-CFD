@@ -269,9 +269,9 @@ pub struct LoweredParcels {
 pub fn refuse_parcel_case(source: &str) -> Error {
     Error::Refused(format!(
         "{source}: this case states parcels. ofgpu-lowmach is the one driver that \
-         carries parcels (docs/17 section 10.2), and it drives them from a case only from \
-         CHR-26 on; until then every driver refuses a parcel case rather than run it \
-         without its parcels (SPEC-LIT §137.2, §137.6)"
+         carries parcels, and it runs them from a JSONC case's parcels block only \
+         (SPEC-LIT §137.10); this driver, or a case directory's constant/cloudProperties, \
+         refuses the case rather than run it without its parcels (SPEC-LIT §137.2, §137.6)"
     ))
 }
 
@@ -1031,10 +1031,10 @@ injectors
             .to_string();
         assert!(e.contains("addedMass"), "{e}");
 
-        // A parcel case is refused by every driver until CHR-26, naming the one
-        // driver that carries parcels.
+        // A parcel case is refused by every driver but ofgpu-lowmach, naming
+        // the one driver that carries parcels and where it runs them from.
         let e = refuse_parcel_case("parcels").to_string();
-        assert!(e.contains("ofgpu-lowmach") && e.contains("CHR-26"), "{e}");
+        assert!(e.contains("ofgpu-lowmach") && e.contains("137.10"), "{e}");
 
         // Through a whole JSONC case: the block lowers (its gravity is the
         // case's), the driver seam refuses it, a mass coupling is refused for

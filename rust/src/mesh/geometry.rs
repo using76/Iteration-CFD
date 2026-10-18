@@ -1369,9 +1369,9 @@ mod tests {
 
         let r = m.check();
         let total = nx as Scalar * d.x * ny as Scalar * d.y * nz as Scalar * d.z;
-        assert!(close(r.total_volume, total), "total {}", r.total_volume);
-        assert!(close(r.min_volume, cell_v));
-        assert!(close(r.max_volume, cell_v));
+        assert!(close(r.total_volume as Scalar, total), "total {}", r.total_volume);
+        assert!(close(r.min_volume as Scalar, cell_v));
+        assert!(close(r.max_volume as Scalar, cell_v));
     }
 
     /// A single tetrahedron: four triangular faces, no internal face at all.
@@ -1425,7 +1425,7 @@ mod tests {
         assert!(close(m.b_y[0], 0.25));
 
         let r = m.check();
-        assert!(r.max_closure_error <= CLOSURE_TOL, "closure {}", r.max_closure_error);
+        assert!(r.max_closure_error <= CLOSURE_TOL as f64, "closure {}", r.max_closure_error);
         // No internal faces, so there is no angle to report and nothing to
         // order.
         assert_eq!(r.max_non_orth_deg, 0.0);
@@ -1506,8 +1506,8 @@ mod tests {
         }
 
         let r = m.check();
-        assert!(r.max_non_orth_deg <= ANGLE_TOL, "angle {}", r.max_non_orth_deg);
-        assert!(r.mean_non_orth_deg <= ANGLE_TOL);
+        assert!(r.max_non_orth_deg <= ANGLE_TOL as f64, "angle {}", r.max_non_orth_deg);
+        assert!(r.mean_non_orth_deg <= ANGLE_TOL as f64);
     }
 
     /// A uniform shear is the cleanest non-orthogonal mesh there is: every
@@ -1535,19 +1535,19 @@ mod tests {
             }
         }
 
-        let want_deg = s.atan().to_degrees();
+        let want_deg = f64::from(s).atan().to_degrees();
         let r = m.check();
         assert!(
-            (r.max_non_orth_deg - want_deg).abs() <= ANGLE_TOL,
+            (r.max_non_orth_deg - want_deg).abs() <= ANGLE_TOL as f64,
             "max {} vs atan(s) {want_deg}",
             r.max_non_orth_deg
         );
         assert!(
-            (r.mean_non_orth_deg - want_deg).abs() <= ANGLE_TOL,
+            (r.mean_non_orth_deg - want_deg).abs() <= ANGLE_TOL as f64,
             "mean {} vs {want_deg}",
             r.mean_non_orth_deg
         );
-        assert!(r.max_closure_error <= CLOSURE_TOL, "closure {}", r.max_closure_error);
+        assert!(r.max_closure_error <= CLOSURE_TOL as f64, "closure {}", r.max_closure_error);
 
         for f in 0..m.n_internal_faces {
             let nf = m.sf[f].normalised();
@@ -1584,6 +1584,7 @@ mod tests {
     /// this `4 x 3 x 2` box of `0.5 x 0.25 x 2.0` ones, at `6.9e-18`. Both
     /// boxes are unskewed. See the constant.
     #[test]
+    // f32 (F32-17): the sheared mesh's skew_corr is 7e-9, not exactly zero
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_mesh_of_stacked_hexahedra_has_no_skewness_however_graded_or_sheared() {
         let n = [4usize, 3, 2];
@@ -1640,7 +1641,7 @@ mod tests {
             let m = built(n, Vec3::new(0.5, 0.25, 2.0));
             let r = m.check();
             assert!(
-                r.max_closure_error <= CLOSURE_TOL,
+                r.max_closure_error <= CLOSURE_TOL as f64,
                 "{n:?}: closure {} at cell {}",
                 r.max_closure_error,
                 r.max_closure_cell
@@ -1816,7 +1817,6 @@ mod tests {
     /// to be measured through both halves, or the coupled coefficient comes
     /// out twice what it should be and the weight 1 instead of 1/2.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cyclic_couple_measures_through_both_halves() {
         let (nx, ny, nz) = (3usize, 2usize, 2usize);
         let d = Vec3::new(0.5, 0.25, 2.0);

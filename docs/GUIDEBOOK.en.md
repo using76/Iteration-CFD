@@ -44,12 +44,12 @@ The host is Rust 1.85, the kernels are CUDA C++, double precision by default
 (single via the `single` feature), and the dependencies are `cudarc` and
 `thiserror` — that is all (AMGX is optional).
 
-**What it is for**: incompressible and low-Mach flow. RANS/LES/hybrid turbulence,
+**What it is for**: incompressible, low-Mach and compressible flow. RANS/LES/hybrid turbulence,
 buoyant plumes, variable-density low-Mach, two-phase VOF, conjugate heat
 transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and
 data-centre airflow with fan curves and porous jumps.
 
-**What it is not**: a compressible or transonic solver. There is no finite-rate
+**What it is not**: a validated transonic solver: `ofgpu-compressible` is new, and its transonic gates miss (§12). There is no finite-rate
 chemistry. It publishes no multi-GPU scaling numbers. The full list is in
 [§12](#12-what-it-cannot-do).
 
@@ -80,7 +80,7 @@ A driver is enough.
 Take `iterations-*.exe` from the releases and run it. Tick the PATH option and
 `ofgpu-*` runs from any prompt.
 
-It installs the 16 solver binaries, the case definitions (`cases/*.jsonc`), the
+It installs the 22 `ofgpu-*` binaries, the case definitions (`cases/*.jsonc`), the
 race-car sample, `docs/` (this guide plus SPEC-LIT, PROVENANCE and the schema),
 and the licence documents.
 
@@ -762,6 +762,7 @@ field**.
 | `ofgpu-vof` | **U, p**, α — two-phase free surface | directory |
 | `ofgpu-cht` | multi-region conduction + conjugate natural convection + thermal stress | JSONC |
 | `ofgpu-datacentre` | data-centre room (fans, tiles, humidity, metrics) | JSONC |
+| `ofgpu-compressible` | **U, p, T** — compressible, all speeds (SPEC-LIT §122-§127) | directory / JSONC |
 
 If you want a velocity field, **pick one of the bold ones.**
 
@@ -1114,7 +1115,7 @@ the eight names at the end of every `ofgpu-validate` run.
 | §88 Gate 88-T, §90 Gate 90-T — transition onset | OPEN | No measured onset Re_x for the T3A flat plate could be found to close the comparison; the free-stream decay matches the TMR's Tu 3.3 % | <https://tmbwg.github.io/turbmodels/> |
 | 78-D — the two splash criteria disagree | OPEN | The thresholds of Mundo et al. (1995) and Bai & Gosman (1995) differ by We × 4.78 for the same droplet | DOI 10.1016/0301-9322(94)00069-V; DOI 10.4271/950283 |
 
-The table was made from the `ofgpu-validate` output of 2026-09-09 (833/833, 37 sections)
+The table was made from the `ofgpu-validate` output of 2026-09-09 (833/833, 37 sections; this tree's run has 79, 2026-10-18)
 and the citations of [`README.md`](../README.en.md) "References" and
 [`rust/SPEC-LIT.md`](../rust/SPEC-LIT.md). Sources that were paywalled and not read (Kaminski
 & Prakash, Menter et al. 2015, Shur et al. 2008) and the places where a secondary source
@@ -1136,8 +1137,7 @@ is enforced by a test rather than by prose (`provenance_audit`).
   PCG/PBiCGStab are implemented and gated, but this runs in one process on one
   card. It links no communication library and publishes no strong-scaling
   numbers.
-- **No compressible or transonic flow.** The density-weighted time derivative is
-  used in VOF, but the pressure equation is incompressible.
+- **Compressible flow is new, and several of its gates miss.** `ofgpu-compressible` solves the all-speed pressure-based equations (SPEC-LIT §122-§127). Gates CMP-LM, CMP-COU and CMP-OBL hold (CMP-OBL without meeting its field stop). CMP-SOD's PISO row, CMP-AC, CMP-NOZ, CMP-RING and CMP-RAE miss, and `ofgpu-validate` names each one (§127.6). `cases/sodShockTube.jsonc` and `cases/nozzle` are its two shipped cases.
 - **No finite-rate (Arrhenius) chemistry** — no stiff ODE integrator, no
   reaction mechanisms.
 - **Radiation is surface-to-surface only.** Grey diffuse exchange across a

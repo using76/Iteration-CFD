@@ -77,7 +77,7 @@
       ]
     },
     "parcels": {
-      "description": "SPEC-LIT §137.2: the parcel model (`crate::io::case_parcels`). Absent\n(the default) is every case this reader has ever built; present, it\nlowers to [`LoweredCase::parcels`] and every driver refuses the case\nuntil CHR-26 wires `ofgpu-lowmach` (§137.6).",
+      "description": "SPEC-LIT §137.2: the parcel model (`crate::io::case_parcels`). Absent\n(the default) is every case this reader has ever built; present, it\nlowers to [`LoweredCase::parcels`], `ofgpu-lowmach` runs it (§137.10)\nand every other driver refuses the case (§137.6).",
       "anyOf": [
         {
           "$ref": "#/$defs/JsonParcels"
@@ -96,6 +96,17 @@
     },
     "physics": {
       "$ref": "#/$defs/JsonPhysics"
+    },
+    "radiation": {
+      "description": "SPEC-LIT §137.2: the radiation block (`crate::io::case_rad`). Absent\n(the default) is every case this reader has ever built; present, it\nlowers to [`LoweredCase::radiation`], `ofgpu-lowmach` runs it (P1 or\nfvDOM, §137.8) and every other driver refuses the case.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonRadiation"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "run": {
       "$ref": "#/$defs/JsonRun"
@@ -1380,12 +1391,62 @@
         "p": {
           "type": "number",
           "format": "double"
+        },
+        "regions": {
+          "description": "SPEC-LIT 125.8.1: `initial.regions`, the boxes that override `U`, `p`\nand/or `T` in the cells whose centre lies in them. Only\n`ofgpu-compressible` applies them, and [`JsonCase::lower`] refuses\nthem on a case without `physics.compressible`. Absent means uniform.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonInitialRegion"
+          }
         }
       },
       "additionalProperties": false,
       "required": [
         "U",
         "p"
+      ]
+    },
+    "JsonInitialRegion": {
+      "description": "One `initial.regions` entry (SPEC-LIT 125.8.1): a box of cell centres,\neach stated field overriding the uniform `initial` value in the cells\nwhose centre falls inside it. Only `ofgpu-compressible` applies a region.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "The temperature the region's cells take, absent keeps `initial.T`.\nRequires `initial.T` on the case - the gas law has no state without\none to override.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "U": {
+          "description": "The velocity the region's cells take, absent keeps `initial.U`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "box": {
+          "description": "The cell-centre box, in mesh coordinates, closed on both ends.",
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "p": {
+          "description": "The gauge pressure the region's cells take, absent keeps `initial.p`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "box"
       ]
     },
     "JsonInjector": {
@@ -2375,6 +2436,232 @@
         "S0"
       ]
     },
+    "JsonRadAbsorption": {
+      "description": "`radiation.absorption` - SPEC-LIT §137.2's absorption table.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path to a Bordbar 2021 `.dat`; required with `wsgg`/`wsggGrey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kappa": {
+          "description": "The grey absorption coefficient, 1/m; required with `constant`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`constant` (default) | `wsgg` | `wsggGrey`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pressure": {
+          "description": "atm, one of Bordbar 2021's ten; required with `wsgg`/`wsggGrey`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRadOpen": {
+      "description": "One entry of `radiation.open`.",
+      "type": "object",
+      "properties": {
+        "Tinf": {
+          "description": "The ambient temperature the boundary is black at, K.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "Tinf"
+      ]
+    },
+    "JsonRadScatter": {
+      "description": "`radiation.scatter` - SPEC-LIT §137.2's scatter table.",
+      "type": "object",
+      "properties": {
+        "A1": {
+          "description": "The linear-anisotropic phase function's `A_1`; required with\n`linearAnisotropic`, `|A1| <= 1`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "model": {
+          "description": "`none` (default) | `isotropic` | `linearAnisotropic`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sigma": {
+          "description": "The scattering coefficient, 1/m; required with the two scattering\nmodels.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonRadWall": {
+      "description": "One entry of `radiation.walls`.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "The stated wall temperature, K; absent, the wall radiates at its own\n`T` patch value.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "emissivity": {
+          "description": "The grey diffuse emissivity, in `[0, 1]`; `0` is refused later, by\n`P1::new`/`DomRows::new`, which need `(0, 1]` (SPEC-LIT §137.8).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "emissivity"
+      ]
+    },
+    "JsonRadiation": {
+      "description": "The `radiation` block. An absent block is bitwise the current run; the\nJSONC route has no `none` - an absent block IS no radiation (SPEC-LIT\n§137.8).",
+      "type": "object",
+      "properties": {
+        "absorption": {
+          "description": "The absorption/emission the medium carries; `constant` by default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRadAbsorption"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agglomerate": {
+          "description": "s2s only (SPEC-LIT §51.1): the agglomeration, fine faces per coarse\nradiating face; 1 by default is the identity map.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "ambientTemperature": {
+          "description": "s2s only (SPEC-LIT §51.1): §49.6's ambient closure surface, K.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "every": {
+          "description": "Solve when the outer-iteration count `i mod every = 0`; 1 by default.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "maxScatterIterations": {
+          "description": "fvDOM only: the sweep cap (§136.2's `maxScatterIterations`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "model": {
+          "description": "`P1` | `fvDOM` | `s2s` | `viewFactor`; the last two name CHR-24's\nenclosure model, which lowers onto [`LoweredRadiation::s2s`]\n(SPEC-LIT §137.9).",
+          "type": "string"
+        },
+        "open": {
+          "description": "Open boundaries by patch name, each at its stated `Tinf`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonRadOpen"
+          }
+        },
+        "quadrature": {
+          "description": "fvDOM only: `S2` | `S4` | `S6` | `S8`; `S4` by default. Refused under\nP1, where it would be read and then ignored.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "radiationRelaxation": {
+          "description": "s2s only (SPEC-LIT §51.1): §50.7's under-relaxation of `H`; 1 is no\nrelaxation.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "radiositySweeps": {
+          "description": "s2s only (SPEC-LIT §51.1): the radiosity sweep cap; 0 selects (S50.8).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "scatter": {
+          "description": "The scattering; `none` by default.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonRadScatter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scatterTol": {
+          "description": "fvDOM only: the sweep loop's tolerance on `change` (§136.7).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "viewFactorQuadrature": {
+          "description": "s2s only (SPEC-LIT §51.1): a forced Gauss-Legendre order; 0 selects\n§49.2's own table.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "walls": {
+          "description": "Radiating walls by patch name; a wall not named is black at its own\n`T` (SPEC-LIT §137.8).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonRadWall"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model"
+      ]
+    },
     "JsonRegion": {
       "description": "A rectangular window carved out of one box face, replacing the\n`PatchWindow` workaround `docs/05-io-redesign.md` section 4.1's opening\ncomment complains about: here it is just a region.",
       "type": "object",
@@ -2899,6 +3186,14 @@
     "JsonTurbulence": {
       "type": "object",
       "properties": {
+        "coeffs": {
+          "description": "SPEC-LIT §134.8 (CHR-16): a RAS model's coefficients by their\nOpenFOAM names, lowered into `RAS/<model>Coeffs/<name>`, which\n`model_coeff` reads; kEpsilon only (Cmu, C1, C2, C3, sigmak,\nsigmaEps).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "kind": {
           "$ref": "#/$defs/TurbulenceKind"
         },
@@ -3264,6 +3559,48 @@
             "type",
             "q"
           ]
+        },
+        {
+          "description": "SPEC-LIT §120.1's `fixedProfile`: a Function1 `table` of the face\ncoordinate `s = (d/|d|).x_f - origin` (`d` the `direction`, `origin`\n0 by default, `x_f` the face centre), evaluated once at setup - so a\nradial profile (the Sandia Flame D inlet, SPEC-LIT §134.8) is one\ncondition on ONE zmin patch where three zmin patches cannot exist\n(SPEC-LIT §119.3). It lowers to the same `direction`/`origin`/\n`profile` entries the dictionary route reads\n(`crate::function1::patch_entries`); fewer than two points, an `s`\nnot strictly increasing, a zero or non-finite direction and a\nnon-finite value are refused by name at lowering.",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "profile": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedProfile"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction",
+            "profile"
+          ]
         }
       ]
     },
@@ -3518,6 +3855,59 @@
           "additionalProperties": false,
           "required": [
             "type"
+          ]
+        },
+        {
+          "description": "The vector twin of [`ScalarBc::FixedProfile`] - SPEC-LIT §120.1's\n`fixedProfile`; in JSON one point is `[s, [ux, uy, uz]]`.",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "profile": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3
+                  }
+                ]
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedProfile"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction",
+            "profile"
           ]
         }
       ]

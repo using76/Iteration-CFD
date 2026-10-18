@@ -1,0 +1,65 @@
+// SPEC-LIT 125.8.1 - the JSONC `initial.regions` statement of Sod's shock
+// tube, shipped so the split state a JSONC case could not say before is a
+// case that LOADS AND RUNS with ofgpu-compressible as written (docs/17
+// CMP-28). Sod (1978), doi:10.1016/0021-9991(78)90023-2: (rho, u, p) =
+// (1, 0, 1e5 Pa | 0.125, 0, 1e4 Pa) in air (gamma 1.4, W 0.0289647 kg/mol,
+// mu 0), the diaphragm at x = 0.5 m of a 1 m tube, both ends closed, run to
+// t = 0.2 L/sqrt(p_L/rho_L) = 6.324555320336759e-4 s in 176 steps. The same
+// problem and 200-cell mesh as Gate CMP-SOD (SPEC-LIT 127.6.1), carried by
+// the coupling that meets that gate's bars: PIMPLE with 5 outer iterations
+// and p unrelaxed; the gate's own PISO row misses them (127.6.1). p is gauge about pOperating 1e5 = p_L, so the left
+// state is p 0 and the right one p -90000; T is the gas law's p/(rho R_s).
+// Run: ofgpu-compressible cases/sodShockTube.jsonc
+//
+// NOT A GATE: no test checks its numbers against the exact solution.
+{
+  "name": "sodShockTube",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [1, 0.01, 0.01] },
+    "cells": [200, 1, 1],
+    "boundaries": { "xmin": "endA", "xmax": "endB", "ymin": "sideA", "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 },
+    "buoyancy": "densityRatio",
+    "compressible": {
+      "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+      "viscosity": { "model": "const", "mu": 0 },
+      "pOperating": 1e5
+    }
+  },
+  "patches": [
+    { "match": "(endA|endB)", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" } },
+    { "match": "(sideA|sideB|sideC|sideD)", "kind": "symmetry" }
+  ],
+  "initial": {
+    "U": [0, 0, 0], "p": 0, "T": 348.36526821702523,
+    "regions": [
+      { "box": { "min": [0.5, -1, -1], "max": [1.5, 1, 1] }, "p": -90000, "T": 278.69221457362016 }
+    ]
+  },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 5 },
+    "ddt": "Euler",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss vanLeer",
+      "div(phi,T)": "Gauss vanLeer",
+      "div(phid,p)": "Gauss vanLeer"
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1, "T": 1, "p": 1 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12, "relTol": 0, "maxIter": 200 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12, "relTol": 0, "maxIter": 200 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-12, "relTol": 0, "maxIter": 200 }
+    ]
+  },
+  "run": { "endTime": 6.324555320336759e-4, "deltaT": 3.593497341100431e-6 }
+}

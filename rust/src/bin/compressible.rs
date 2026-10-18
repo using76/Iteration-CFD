@@ -805,13 +805,21 @@ fn load_fields_and_gas(
             let t = l.t_field.as_ref().ok_or_else(|| {
                 refuse("initial.T", "the gas law has no state without T (SPEC-LIT §122.6)")
             })?;
-            let f = InitialFields {
+            let mut f = InitialFields {
                 u: l.u_field.to_raw(hm.n_cells),
                 p: l.p_field.to_raw(hm.n_cells),
                 t: t.to_raw(hm.n_cells),
                 nu_tilda: None,
                 nut: None,
             };
+            // SPEC-LIT 125.8.1: the initial regions override `U`, `p` and/or
+            // `T` in the cells whose centre lies in each box, in order. The
+            // only driver that applies them; `JsonCase::lower` refuses them on
+            // a case without `physics.compressible`.
+            let counts = l.apply_initial_regions(hm, &mut f.u, &mut f.p, &mut f.t)?;
+            for (i, n) in counts.iter().enumerate() {
+                println!("initial.regions[{i}]: {n} cells (SPEC-LIT 125.8.1)");
+            }
             Ok((f, gas))
         }
         None => {
@@ -1806,6 +1814,8 @@ mod compressible {
     /// correction it repeats is identically zero; it is asserted on the
     /// controls in `the_orthogonal_settings_reach_the_controls`.
     #[test]
+    // f32 (F32-17): the two solver tolerances write bit-identical fields in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn every_knob_changes_the_run() {
         if Gpu::new(0).is_err() {
             return;
@@ -2557,5 +2567,311 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         for w in ["nut patch", "nutkWallFunction"] {
             assert!(e.contains(w), "{w:?} not in {e}");
         }
+    }
+
+    // ==========================================================================
+    //  CMP-28: the two shipped compressible recipes load and run as written
+    // ==========================================================================
+
+    /// Copy a shipped case into `tag`'s scratch directory - never write into
+    /// `cases/` - and answer where it landed.
+    fn shipped(tag: &str, from: &str) -> PathBuf {
+        let dir = scratch_dir(tag);
+        let case = dir.join(from);
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases").join(from),
+            &case,
+        )
+        .unwrap_or_else(|e| panic!("copy cases/{from}: {e}"));
+        case
+    }
+
+    /// Copy a case DIRECTORY recursively (`cases/nozzle`), into `tag`'s
+    /// scratch directory, and answer the copy's root.
+    fn shipped_dir(tag: &str, from: &str) -> PathBuf {
+        fn rec(src: &Path, dst: &Path) {
+            std::fs::create_dir_all(dst).expect("create the copy's directory");
+            for entry in std::fs::read_dir(src).expect("read the source directory") {
+                let e = entry.expect("directory entry");
+                let s = e.path();
+                let d = dst.join(e.file_name());
+                if e.file_type().expect("file type").is_dir() {
+                    rec(&s, &d);
+                } else {
+                    std::fs::copy(&s, &d).expect("copy one file");
+                }
+            }
+        }
+        let dir = scratch_dir(tag).join(from);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases").join(from);
+        rec(&src, &dir);
+        dir
+    }
+
+    /// The newest numeric time directory under a run's output root.
+    fn last_time(root: &Path) -> String {
+        std::fs::read_dir(root)
+            .expect("the run wrote its output")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.parse::<f64>().is_ok_and(|t| t > 0.0))
+            .max_by(|a, b| a.parse::<f64>().unwrap().total_cmp(&b.parse::<f64>().unwrap()))
+            .expect("a written time")
+    }
+
+    /// CMP-28: the shipped Sod case - the JSONC `initial.regions` statement
+    /// of the split state - loads and runs as written: 176 steps, no bound,
+    /// the five fields written at the last time, and a `p` that is no longer
+    /// the uniform start.
+    #[test]
+    fn the_shipped_sod_case_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let case = shipped("cmp28_sod_run", "sodShockTube.jsonc");
+        let dir = case.parent().expect("a scratch directory").to_path_buf();
+        let o = parse(&argv(&[case.to_string_lossy().as_ref(), "-reportEvery", "50"]))
+            .expect("the shipped case's command line parses");
+        let end = run(&o).expect("the shipped Sod case runs");
+        assert_eq!(end.steps, 176, "endTime/deltaT is 176 steps");
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0, "no bound");
+        let last = dir.join("sodShockTube_jsonc").join(last_time(&dir.join("sodShockTube_jsonc")));
+        assert_eq!(five_fields(&last).len(), 5, "the five fields are written");
+        let p = read_scalar_field(&last.join("p"), 200).expect("p reads back");
+        let first = f64::from(p.internal[0]);
+        assert!(
+            p.internal.iter().any(|x| (f64::from(*x) - first).abs() > 1e-6),
+            "the written p at the last time is uniform: the run solved nothing"
+        );
+    }
+
+    /// CMP-28: the shipped Sod case states Gate CMP-SOD's PIMPLE leg - the
+    /// coupling that meets the gate's bars (SPEC-LIT 127.6.1) - through
+    /// [`driver_controls`], so the case file and the gate cannot drift.
+    #[test]
+    fn the_shipped_sod_case_states_the_gate_pimple_controls() {
+        let case = shipped("cmp28_sod_ctrl", "sodShockTube.jsonc");
+        let (hm, cc, l) = load_case(&case).expect("the shipped case loads");
+        let (_, gas) = load_fields_and_gas(&case, &hm, l.as_ref()).expect("the fields load");
+        let dc = driver_controls(&case, &cc, l.as_ref(), gas, None).expect("the controls");
+        assert_eq!(dc.ctrl.n_outer, 5, "PIMPLE's five outer iterations");
+        assert_eq!(dc.ctrl.n_corr, 2, "PIMPLE's two correctors");
+        assert_eq!(
+            (
+                f64::from(dc.ctrl.p_relax),
+                f64::from(dc.ctrl.momentum.u_relax),
+                f64::from(dc.ctrl.energy.t_relax)
+            ),
+            (
+                f64::from(1.0 as Scalar),
+                f64::from(1.0 as Scalar),
+                f64::from(1.0 as Scalar)
+            ),
+            "p unrelaxed, U and T unrelaxed"
+        );
+        assert!(dc.transient, "Euler is a transient run");
+        assert_eq!(dc.n_steps, 176);
+        assert_eq!(f64::from(dc.ctrl.momentum.delta_t), f64::from(3.593497341100431e-6 as Scalar));
+        assert_eq!(dc.ctrl.momentum.ddt, DdtScheme::Euler);
+        assert_eq!(dc.ctrl.energy.ddt, DdtScheme::Euler);
+        assert_eq!(
+            dc.ctrl.momentum.div_scheme,
+            DivScheme::Limited(ofgpu::fv::Limiter::VanLeer),
+            "van Leer on the momentum convection"
+        );
+        assert_eq!(
+            dc.ctrl.energy.div_scheme,
+            DivScheme::Limited(ofgpu::fv::Limiter::VanLeer),
+            "van Leer on the energy convection"
+        );
+        assert_eq!(
+            dc.ctrl.pressure.retarded,
+            Retarded::Limited(ofgpu::fv::Limiter::VanLeer),
+            "van Leer on the retarded density"
+        );
+        for (name, s) in [
+            ("p", &dc.ctrl.pressure.p_solver),
+            ("U", &dc.ctrl.momentum.u_solver),
+            ("T", &dc.ctrl.energy.t_solver),
+        ] {
+            assert_eq!(
+                (s.solver, s.precon),
+                (
+                    ofgpu::io::case::LinearSolverKind::PBiCGStab,
+                    ofgpu::io::case::Preconditioner::Dilu
+                ),
+                "{name}'s solver"
+            );
+            assert_eq!(
+                (f64::from(s.tolerance), f64::from(s.rel_tol), s.max_iter),
+                (f64::from(1e-12 as Scalar), 0.0, 200),
+                "{name}'s tolerance, relTol and maxIter"
+            );
+        }
+        assert_eq!(
+            dc.ctrl.gas.viscosity,
+            Viscosity::Constant { mu: 0.0 },
+            "the inviscid gas"
+        );
+    }
+
+    /// The duct polyMesh and `0/p`'s internal list, exactly as generated:
+    /// `write_poly_mesh_raw` on `nozzle_duct(&DuctSpec::default())`, and the
+    /// gate's linear start from the inlet's total pressure to the back
+    /// pressure at each cell's axial midpoint (SPEC-LIT 127.6.5). With
+    /// `OFGPU_WRITE_NOZZLE_CASE=1` the polyMesh is written into
+    /// `cases/nozzle` itself - how the tracked files were created.
+    fn generate_nozzle(into: &Path) {
+        use ofgpu::compressible::gatemesh::{nozzle_duct, DuctSpec};
+        let duct = nozzle_duct(&DuctSpec::default()).expect("the gate duct builds");
+        ofgpu::io::polymesh::write_poly_mesh_raw(&into.join("constant/polyMesh"), &duct.raw)
+            .expect("write the polyMesh");
+        let n = duct.spec.n;
+        let pb_pt1 = 0.95;
+        let p_op = 1.0e5;
+        let p = ofgpu::io::fields::RawScalarField {
+            name: "p".into(),
+            dimensions: "[1 -1 -2 0 0 0 0]".into(),
+            internal: (0..n)
+                .map(|i| {
+                    (((2 * i + 1) as f64 / (2 * n) as f64) * (pb_pt1 - 1.0) * p_op) as Scalar
+                })
+                .collect(),
+            ..ofgpu::io::fields::RawScalarField::default()
+        };
+        ofgpu::io::fields::write_scalar_field(&into.join("p_gauge"), &p, "0")
+            .expect("write the generated p list");
+    }
+
+    /// The `internalField` block of a written `p`, the one part of `0/p`
+    /// that is generated rather than stated.
+    fn p_internal_block(text: &str) -> String {
+        let a = text.find("internalField").expect("an internalField entry");
+        let b = text.find("boundaryField").expect("a boundaryField entry");
+        text[a..b].replace("\r\n", "\n").trim_end().to_string()
+    }
+
+    /// CMP-28: `cases/nozzle`'s polyMesh and `0/p`'s internal list ARE the
+    /// generated ones - the case is pinned to
+    /// `ofgpu::compressible::gatemesh::nozzle_duct(&DuctSpec::default())`,
+    /// so a change to the builder fails here rather than silently
+    /// re-meshing every clone of the case.
+    #[test]
+    fn the_shipped_nozzle_case_is_the_generated_one() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/nozzle");
+        if std::env::var_os("OFGPU_WRITE_NOZZLE_CASE").is_some() {
+            // Only the polyMesh is written into the case: `0/p` carries
+            // stated boundary entries, and its internal list is compared below.
+            let tmp = scratch_dir("cmp28_nozzle_write");
+            generate_nozzle(&tmp);
+            let mesh = case.join("constant/polyMesh");
+            std::fs::create_dir_all(&mesh).expect("create cases/nozzle/constant/polyMesh");
+            for f in ["points", "faces", "owner", "neighbour", "boundary"] {
+                std::fs::copy(tmp.join("constant/polyMesh").join(f), mesh.join(f))
+                    .unwrap_or_else(|e| panic!("write cases/nozzle/constant/polyMesh/{f}: {e}"));
+            }
+            println!("wrote {}", mesh.display());
+            return;
+        }
+        let dir = scratch_dir("cmp28_nozzle_pin");
+        generate_nozzle(&dir);
+        for f in ["points", "faces", "owner", "neighbour", "boundary"] {
+            let gen = std::fs::read_to_string(dir.join("constant/polyMesh").join(f))
+                .unwrap_or_else(|e| panic!("read the generated {f}: {e}"));
+            let ship = std::fs::read_to_string(case.join("constant/polyMesh").join(f))
+                .unwrap_or_else(|e| panic!("read cases/nozzle/constant/polyMesh/{f}: {e}"));
+            assert_eq!(
+                gen.replace("\r\n", "\n").trim_end(),
+                ship.replace("\r\n", "\n").trim_end(),
+                "cases/nozzle/constant/polyMesh/{f} is not what nozzle_duct(&DuctSpec::default()) \
+                 writes; regenerate it with OFGPU_WRITE_NOZZLE_CASE=1"
+            );
+        }
+        let gen = std::fs::read_to_string(dir.join("p_gauge")).expect("the generated p");
+        let ship = std::fs::read_to_string(case.join("0").join("p")).expect("cases/nozzle/0/p");
+        assert_eq!(
+            p_internal_block(&gen),
+            p_internal_block(&ship),
+            "cases/nozzle/0/p's internal list is not the gate's linear start"
+        );
+    }
+
+    /// CMP-28: `cases/nozzle` states Gate CMP-NOZ's controls (SPEC-LIT
+    /// 127.6.5) through [`driver_controls`], so the case file and the gate
+    /// cannot drift.
+    #[test]
+    fn the_shipped_nozzle_case_states_the_gate_controls() {
+        let case = shipped_dir("cmp28_nozzle_ctrl", "nozzle");
+        let (hm, cc, l) = load_case(&case).expect("the shipped case loads");
+        let (_, gas) = load_fields_and_gas(&case, &hm, l.as_ref()).expect("the fields load");
+        let dc = driver_controls(&case, &cc, l.as_ref(), gas, None).expect("the controls");
+        assert!(!dc.transient, "localEuler is a steady march");
+        assert_eq!(dc.n_steps, 15000, "endTime counts iterations");
+        assert_eq!(f64::from(dc.ctrl.lts.cfl), f64::from(1.0 as Scalar), "maxCo 1");
+        assert_eq!(dc.ctrl.momentum.ddt, DdtScheme::LocalEuler);
+        assert_eq!(dc.ctrl.energy.ddt, DdtScheme::LocalEuler);
+        assert_eq!(dc.ctrl.n_outer, 1, "one outer corrector");
+        assert_eq!(
+            (
+                f64::from(dc.ctrl.momentum.u_relax),
+                f64::from(dc.ctrl.energy.t_relax),
+                f64::from(dc.ctrl.p_relax)
+            ),
+            (f64::from(0.7 as Scalar), f64::from(0.7 as Scalar), f64::from(0.3 as Scalar)),
+            "the gate's measured relaxation"
+        );
+        assert_eq!(
+            dc.ctrl.momentum.div_scheme,
+            DivScheme::Limited(ofgpu::fv::Limiter::VanLeer)
+        );
+        assert_eq!(
+            dc.ctrl.energy.div_scheme,
+            DivScheme::Limited(ofgpu::fv::Limiter::VanLeer)
+        );
+        assert_eq!(
+            dc.ctrl.pressure.retarded,
+            Retarded::Limited(ofgpu::fv::Limiter::VanLeer)
+        );
+        let (u, p, t) = (
+            &dc.ctrl.momentum.u_solver,
+            &dc.ctrl.pressure.p_solver,
+            &dc.ctrl.energy.t_solver,
+        );
+        for (name, s, tol, rel) in [
+            ("U", u, 1e-9, 0.01),
+            ("p", p, 1e-10, 1e-3),
+            ("T", t, 1e-9, 0.01),
+        ] {
+            assert_eq!(
+                (s.solver, s.precon),
+                (
+                    ofgpu::io::case::LinearSolverKind::PBiCGStab,
+                    ofgpu::io::case::Preconditioner::Dilu
+                ),
+                "{name}'s solver"
+            );
+            assert_eq!(
+                (f64::from(s.tolerance), f64::from(s.rel_tol), s.max_iter),
+                (f64::from(tol as Scalar), f64::from(rel as Scalar), 1000),
+                "{name}'s tolerance, relTol and maxIter"
+            );
+        }
+        assert!(dc.ctrl.residual_control.is_none(), "no residualControl");
+        assert_eq!(dc.ctrl.gas.viscosity, Viscosity::Constant { mu: 0.0 });
+        assert_eq!(dc.ctrl.gas.p_op, 1e5, "pOperating");
+    }
+
+    /// CMP-28: the shipped nozzle recipe runs as written - 200 iterations of
+    /// the 200-cell duct, no bound.
+    #[test]
+    fn the_shipped_nozzle_recipe_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let dir = shipped_dir("cmp28_nozzle_run", "nozzle");
+        let o = parse(&argv(&[dir.to_string_lossy().as_ref(), "-iters", "200"]))
+            .expect("the recipe's command line parses");
+        let end = run(&o).expect("the shipped nozzle recipe runs");
+        assert_eq!(end.steps, 200, "-iters 200 is 200 iterations");
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0, "no bound");
     }
 }

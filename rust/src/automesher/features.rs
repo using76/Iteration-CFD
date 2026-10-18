@@ -674,7 +674,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_index_agrees_with_a_linear_scan() {
         let surf = cube();
         let fs = extract(&surf, 30.0).expect("a cube extracts");
@@ -705,7 +704,7 @@ mod tests {
         pts.push(Vec3::new(-2.0, -2.0, -2.0));
         pts.push(Vec3::new(10.0, 10.0, 10.0));
 
-        let tol = 1e-9 * 4.0; // relative to the box size
+        let tol = crate::precision::roundoff_tol(1e-9 * 4.0); // relative to the box size
         for p in &pts {
             let (q, dist, e) = idx.closest_edge_point(*p).expect("the cube carries edges");
             let (rd, re, rq) = scan_edges(&fs, *p, &ids);
@@ -726,7 +725,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn for_patch_sees_only_its_own_patch() {
         let mut soup = box_soup([0.0; 3], [2.0; 3]);
         for (_, t) in box_soup([10.0; 3], [12.0; 3]) {
@@ -761,9 +759,12 @@ mod tests {
         assert!(d_all < d0, "the second box's own edge is the nearer one");
         let (rd, re, rq) = scan_edges(&fs, p, &near);
         assert_eq!(e0, re);
-        assert!((d0 as f64 - rd).abs() <= 1e-9 * 4.0);
+        assert!((d0 as f64 - rd).abs() <= crate::precision::roundoff_tol(1e-9 * 4.0));
         for ax in 0..3 {
-            assert!((q0.component(ax) as f64 - rq.component(ax) as f64).abs() <= 1e-9 * 4.0);
+            assert!(
+                (q0.component(ax) as f64 - rq.component(ax) as f64).abs()
+                    <= crate::precision::roundoff_tol(1e-9 * 4.0)
+            );
         }
         // And the far edges are still there, under their own patch.
         let patch1 = FeatureIndex::for_patch(&fs, 0.5, 1).expect("the far index builds");
@@ -867,11 +868,11 @@ mod tests {
                         let take = match best {
                             None => true,
                             Some((bd, be, _)) => {
-                                rd2 < bd || (rd2 == bd && eid < be)
+                                (rd2 as f64) < bd || ((rd2 as f64) == bd && eid < be)
                             }
                         };
                         if take {
-                            best = Some((rd2, eid, rq));
+                            best = Some((rd2 as f64, eid, rq));
                         }
                     }
                     let (rd2, re, rq) = best.expect("edges to scan");

@@ -961,7 +961,6 @@ mod tests {
     /// Each of the four remaining models has a parameter setting that IS the
     /// Newtonian fluid. All four must return a constant.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn every_model_has_a_newtonian_reduction() {
         let mu: Scalar = 1.7e-3;
         let cases: Vec<(&str, KinematicCoeffs)> = vec![
@@ -1011,7 +1010,7 @@ mod tests {
             for g in [1e-4 as Scalar, 1e-1, 1.0, 1e2, 1e5] {
                 let v = apparent_viscosity(&c, g);
                 assert!(
-                    (v - mu).abs() <= 1e-9 * mu,
+                    (v - mu).abs() as f64 <= crate::precision::roundoff_tol(1e-9) * mu as f64,
                     "{what}: gave {v} at gdot = {g}, not {mu}"
                 );
             }
@@ -1021,6 +1020,7 @@ mod tests {
     /// Shear thinning is the whole point of three of the five. `mu` must fall
     /// strictly with `gdot` over twelve decades.
     #[test]
+    // f32 (F32-17): two successive samples round equal in f32; strict monotonicity fails
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn shear_thinning_models_are_monotone() {
         let cases: Vec<(&str, KinematicCoeffs)> = vec![
@@ -1102,6 +1102,7 @@ mod tests {
     /// SPEC-LIT §38.3: the regularisation exists so `mu` is FINITE at
     /// `gdot = 0`, and the limit it reaches is stated, not incidental.
     #[test]
+    // f32 (F32-17): at gdot=1e-14 the f32 formula underflows to exactly 0
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_regularisation_is_bounded_and_reaches_its_stated_limit() {
         let (t0, k, n, m): (Scalar, Scalar, Scalar, Scalar) = (2.0, 0.35, 0.6, 1000.0);
@@ -1184,6 +1185,7 @@ mod tests {
     /// naive Papanastasiou form regularises the yield term alone and still
     /// diverges through `K gdot^(n-1)` for `n < 1`. The product form does not.
     #[test]
+    // f32 (F32-17): the naive form's strict growth stalls equal in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_naive_regularisation_still_diverges_and_the_product_form_does_not() {
         let (t0, k, n, m): (Scalar, Scalar, Scalar, Scalar) = (2.0, 0.35, 0.6, 1000.0);
@@ -1242,7 +1244,6 @@ mod tests {
     /// SPEC-LIT §38.9 Gate 1's reductions, which are what make the closed
     /// form trustworthy without a table to copy.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_hb_profile_reduces_to_the_parabola() {
         let (h, g_x, nu): (Scalar, Scalar, Scalar) = (0.02, 3.9, 1.5e-5);
         for i in 0..=40 {
@@ -1251,7 +1252,8 @@ mod tests {
             let big_y = (y - h).abs();
             let want = g_x * (h * h - big_y * big_y) / (2.0 * nu);
             assert!(
-                (got - want).abs() <= 1e-10 * want.abs().max(1.0),
+                (got - want).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-10) * want.abs().max(1.0) as f64,
                 "at y = {y} the HB profile gave {got}, the parabola {want}"
             );
         }
@@ -1318,6 +1320,7 @@ mod tests {
     /// Q      = int_0^R 2 pi r u(r) dr
     /// ```
     #[test]
+    // f32 (F32-17): f32 trapezoid round-off leaves 5.3e-5, past the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn buckingham_reiner_matches_the_integral_of_its_own_profile() {
         let (radius, mu_p): (Scalar, Scalar) = (0.01, 0.05);
@@ -1599,6 +1602,7 @@ mod tests {
     /// `gdot`, `gdot = 0` included, every model, both regularisation
     /// branches.
     #[test]
+    // f32 (F32-17): HerschelBulkley at gdot=0: device vs host 6e-5, past the cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_agrees_with_the_host() {
         let Some(g) = gpu() else { return };
@@ -1637,7 +1641,6 @@ mod tests {
     /// rounding from a relaxation that is not relaxing - and `w < 1` is the
     /// stated convex combination against whatever `nu` already held.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_relaxation_is_the_stated_convex_combination() {
         let Some(g) = gpu() else { return };
         let kern = RheologyKernels::new(&g).expect("the rheology module loads");
@@ -1671,7 +1674,11 @@ mod tests {
             );
             let want = apparent_viscosity(&c, *gd);
             let rel = (unrelaxed[i] - want).abs() / want;
-            assert!(rel < 1e-12, "at gdot = {gd}: {} against {want}", unrelaxed[i]);
+            assert!(
+                (rel as f64) < crate::precision::roundoff_tol(1e-12),
+                "at gdot = {gd}: {} against {want}",
+                unrelaxed[i]
+            );
         }
 
         // w = 0.3: exactly (1 - w) old + w fresh.
@@ -1684,7 +1691,11 @@ mod tests {
         for (i, gd) in gdot.iter().enumerate() {
             let want = (1.0 - w) * old[i] + w * apparent_viscosity(&c, *gd);
             let rel = (relaxed[i] - want).abs() / want;
-            assert!(rel < 1e-12, "at gdot = {gd}: {} against {want}", relaxed[i]);
+            assert!(
+                (rel as f64) < crate::precision::roundoff_tol(1e-12),
+                "at gdot = {gd}: {} against {want}",
+                relaxed[i]
+            );
             // And it actually relaxed: the answer is not the unrelaxed one.
             assert!(
                 relaxed[i] != unrelaxed[i],
@@ -1703,7 +1714,6 @@ mod tests {
     /// the two-point difference is entirely NORMAL, so its tangential part -
     /// and therefore `gdot_b` - must be zero.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_wall_strain_rate_is_the_analytic_shear_rate() {
         use crate::blockgen::{build_mesh, BlockSpec, GradedAxis};
 
@@ -1754,7 +1764,8 @@ mod tests {
                 // A y wall: the shear is entirely tangential and is exactly G.
                 walls += 1;
                 assert!(
-                    (got[i] - shear).abs() <= 1e-10 * shear,
+                    (got[i] - shear).abs() as f64
+                        <= crate::precision::roundoff_tol(1e-10) * shear as f64,
                     "face {i} on a y wall gave gdot_b = {}, not the analytic {shear}",
                     got[i]
                 );

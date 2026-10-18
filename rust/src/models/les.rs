@@ -588,7 +588,6 @@ mod tests {
     /// box the filter width is the edge, so the whole answer is
     /// `(C_s h)² a` - one number, checkable to round-off in every cell.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn smagorinsky_is_the_closed_form_in_a_uniform_shear() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -613,12 +612,14 @@ mod tests {
 
         for c in 0..hm.n_cells {
             assert!(
-                (delta[c] - h).abs() < 1e-13 * h,
+                ((delta[c] - h).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-13) * h as f64,
                 "cell {c}: Delta = {}",
                 delta[c]
             );
             assert!(
-                (nut[c] - want).abs() < 1e-12 * want,
+                ((nut[c] - want).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-12) * want as f64,
                 "cell {c}: nu_t = {}, (Cs h)² a = {want}",
                 nut[c]
             );
@@ -677,7 +678,6 @@ mod tests {
     /// second half of this test measures the difference rather than asserting
     /// zero against zero.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wale_vanishes_in_a_pure_shear_where_smagorinsky_does_not() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -722,7 +722,6 @@ mod tests {
     /// `S:S = 2a²`, `gd = diag(a², a², 0)`, `Sd = diag(a²/3, a²/3, -2a²/3)`
     /// and `Sd:Sd = (2/3) a⁴`.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn wale_is_the_closed_form_in_a_pure_strain() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -746,7 +745,8 @@ mod tests {
 
         for c in 0..hm.n_cells {
             assert!(
-                (nut[c] - want).abs() < 1e-11 * want,
+                ((nut[c] - want).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-11) * want as f64,
                 "cell {c}: nu_t = {}, Nicoud & Ducros give {want}",
                 nut[c]
             );
@@ -767,6 +767,7 @@ mod tests {
     /// that face's value at half the spacing of a cell centre, so its stencil
     /// is not symmetric and the cancellation is not exact there.
     #[test]
+    // f32 (F32-16): linear-field k_sgs 7e-15 over abs 1e-26 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn deardorff_sees_no_subgrid_energy_in_a_resolved_linear_field() -> Result<()> {
         let Some(gpu) = gpu() else {
@@ -806,7 +807,6 @@ mod tests {
     /// faces and halved by the filter's own weight - so
     /// `k_sgs = (a h²)²/72` and `nu_t = C_D h sqrt(k_sgs)`.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn deardorff_is_the_closed_form_on_an_unresolved_field() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -831,12 +831,14 @@ mod tests {
 
         for c in interior(&hm, n) {
             assert!(
-                (k_sgs[c] - want_k).abs() < 1e-11 * want_k,
+                ((k_sgs[c] - want_k).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-11) * want_k as f64,
                 "cell {c}: k_sgs = {}, closed form {want_k}",
                 k_sgs[c]
             );
             assert!(
-                (nut[c] - want_nut).abs() < 1e-11 * want_nut,
+                ((nut[c] - want_nut).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-11) * want_nut as f64,
                 "cell {c}: nu_t = {}, C_D Delta sqrt(k_sgs) = {want_nut}",
                 nut[c]
             );
@@ -851,6 +853,7 @@ mod tests {
 
     /// A uniform flow has no subgrid anything, whichever model is asked.
     #[test]
+    // f32 (F32-16): uniform-flow nu_t 7e-10 over abs 1e-15 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_uniform_flow_has_no_eddy_viscosity() -> Result<()> {
         let Some(gpu) = gpu() else {

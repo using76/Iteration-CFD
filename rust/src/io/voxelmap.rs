@@ -1296,7 +1296,7 @@ mod tests {
         let f: Vec<Scalar> = (0..hm.n_cells)
             .map(|c| {
                 let d = g.c[c] - centre;
-                (-(d.dot(d)) / 0.05).exp()
+                (-(d.dot(d)) / 0.05).exp() as Scalar
             })
             .collect();
         let vox = vm.sample(&f).expect("sample");

@@ -20,7 +20,7 @@
 
 use ofgpu::automesher::driver::{run, run_tet, tet_summary_json, TET_STAGES};
 use ofgpu::automesher::identity::MeshIdentity;
-use ofgpu::automesher::{read_config_str, AutomeshConfig, MeshKind};
+use ofgpu::automesher::{read_config_str, AutomeshConfig, BodySpec, MeshKind};
 use ofgpu::surface::stl::parse_stl;
 use ofgpu::surface::Surface;
 
@@ -300,4 +300,184 @@ fn tet_layers_refusal() {
     assert!(err.contains("tet/layers"), "{err}");
     assert!(lines.is_empty(), "{lines:?}");
     println!("tet layers refusal: {err}");
+}
+
+/// TET-19's end-to-end gate (docs/17, SPEC-LIT §116.12): the example with
+/// the sphere declared a body, at the example's band (level 2) and uniform
+/// (no bands). The plumbing is measured by the completing arm: TWO regions
+/// split out of the one union mesh by `io::regions::split_by_zones`
+/// (§92.15.4), the interface subtriangles internal and paired
+/// `fluid_to_ball` / `ball_to_fluid`, each region through §92.3 on its own,
+/// the layout written and read back, and the tet summary's `layout` block.
+/// The example's band misses: with the ball's interior kept, §116.13's
+/// refinement does not terminate - TET-13c's known rho-driven sliver
+/// cascade, now fed from the kept interior. Measured at the 300 000-point
+/// budget: 136 passes, 1 027 967 kept tetrahedra, the next pass asking
+/// 71 767 more; every bad tetrahedron's `h` is the band's 0.25 m or more
+/// (the size field is satisfied throughout), the circumcentres fall
+/// outside the sphere, and `l_min` collapses. Per §116.18's doctrine the
+/// miss is recorded and the mesher is not changed: in f64 the bounded run
+/// refuses `refine/cap` after the five stage banners; under `single` (the
+/// STL's f32-parsed points, widened exactly by §116.9) the passes terminate and the run refuses §92.3's G2 on
+/// the union mesh (A28) at the seven instead. The gate stays open.
+#[test]
+fn tet_bodies_end_to_end() {
+    let (mut cfg, surf) = example();
+    assert_eq!(cfg.kind, MeshKind::Tet);
+    cfg.castellation.bodies =
+        vec![BodySpec { name: "ball".to_string(), patches: vec!["sphere".to_string()] }];
+    // The MISSED arm: the example's band, bounded so the run terminates.
+    cfg.tet.as_mut().unwrap().refine.max_inserted_points = 10_000;
+    cfg.validate().expect("the body config validates");
+    let single = std::mem::size_of::<ofgpu::Scalar>() == 4;
+    let mut lines: Vec<String> = Vec::new();
+    let t0 = std::time::Instant::now();
+    let res = run_tet(&cfg, &surf, &mut |l: &str| lines.push(l.to_string()));
+    let seconds = t0.elapsed().as_secs_f64();
+    let banners: Vec<&String> = lines.iter().filter(|l| l.starts_with("=== stage ")).collect();
+    for (i, b) in banners.iter().enumerate() {
+        assert_eq!(**b, format!("=== stage {}/7  {} ===", i + 1, TET_STAGES[i]));
+    }
+    let err = match res {
+        Ok(_) => panic!("the example's band was recorded MISSED (TET-19's rows), not completed"),
+        Err(err) => err.to_string(),
+    };
+    let head: String = err.chars().take(240).collect();
+    if single {
+        // Under `single` (the STL's f32-parsed points) §116.13's passes end and
+        // the run reaches `emit`, where §92.3's G2 misses on the union mesh
+        // (docs/17-review-later A28).
+        assert!(err.contains("G2 (closure)"), "{err}");
+        assert_eq!(banners.len(), 7, "{err}");
+        println!("tet bodies end to end, level-2 band: 92.3 MISSED under single (A28) - {head}");
+    } else {
+        assert_eq!(banners.len(), 5, "{err}");
+        assert!(err.contains("refine/cap:"), "{err}");
+        println!(
+            "tet bodies end to end, level-2 band: refine does not terminate \
+             (MISSED, TET-19's rows; {:.1} s) - {head}",
+            seconds
+        );
+    }
+
+    // The completing arm: the same body, uniform h - §116.13 converges and
+    // the whole stage-7 path runs.
+    cfg.refinement.levels = Vec::new();
+    cfg.refinement.max_level = 0;
+    cfg.validate().expect("the uniform config validates");
+    lines.clear();
+    let out = match run_tet(&cfg, &surf, &mut |l: &str| lines.push(l.to_string())) {
+        Ok(out) => out,
+        Err(err) => {
+            // §116.16's miss under `single`: G2 sums the f32 area vectors
+            // of the union mesh (docs/17-review-later A28).
+            let text = err.to_string();
+            let head: String = text.chars().take(240).collect();
+            println!("tet bodies end to end: 92.3 MISSED under single (A28) - {head}");
+            assert!(single, "{err}");
+            assert!(text.contains("G2 (closure)"), "{err}");
+            let n: Vec<&String> =
+                lines.iter().filter(|l| l.starts_with("=== stage ")).collect();
+            assert_eq!(n.len(), 7, "{err}");
+            return;
+        }
+    };
+    let seconds = t0.elapsed().as_secs_f64();
+    let banners: Vec<&String> = lines.iter().filter(|l| l.starts_with("=== stage ")).collect();
+    assert_eq!(banners.len(), 7);
+    for (i, b) in banners.iter().enumerate() {
+        assert_eq!(**b, format!("=== stage {}/7  {} ===", i + 1, TET_STAGES[i]));
+    }
+    let layout = out.layout.as_ref().expect("a body run has a layout");
+    let names: Vec<&str> = layout.regions.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["fluid", "ball"]);
+    let kinds: Vec<ofgpu::cht::RegionKind> = layout.regions.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds, [ofgpu::cht::RegionKind::Fluid, ofgpu::cht::RegionKind::Solid]);
+    assert!(layout.regions.iter().all(|r| r.quality.passed()), "each region through 92.3");
+    let iface = &layout.interfaces[0];
+    assert_eq!(layout.interfaces.len(), 1);
+    assert_eq!(iface.patch_a, "fluid_to_ball");
+    assert_eq!(iface.patch_b, "ball_to_fluid");
+    assert!(iface.n_faces > 0);
+    let ball = &layout.regions[1];
+    let ball_patches: Vec<&str> = ball.mesh.patches.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(ball_patches, ["ball_to_fluid"]);
+    assert_eq!(ball.mesh.patches[0].size as usize, iface.n_faces);
+    let fluid = &layout.regions[0];
+    assert!(!fluid.mesh.patches.iter().any(|p| p.name == "sphere"));
+    let fluid_to_ball =
+        fluid.mesh.patches.iter().find(|p| p.name == "fluid_to_ball").expect("the interface");
+    assert_eq!(fluid_to_ball.size as usize, iface.n_faces);
+    for want in ["inlet", "outlet", "side_y0", "side_y1", "ground", "top"] {
+        assert!(fluid.mesh.patches.iter().any(|p| p.name == want), "fluid lacks {want}");
+    }
+
+    // Per-region closure: the sum of the cell volumes is the divergence
+    // sum (C_f . S_f)/3 over the region's boundary faces, and the two
+    // regions fill the 10 m box. The bar is 1e-12, in f64.
+    let mut total = 0.0f64;
+    for r in layout.regions.iter() {
+        let h = ofgpu::io::polymesh::build_host_mesh(&r.mesh).expect("build_host_mesh");
+        let v_sum: f64 = h.v.iter().map(|&x| f64::from(x)).sum();
+        let div: f64 =
+            (0..h.n_boundary_faces).map(|f| f64::from(h.b_cf[f].dot(h.b_sf[f]))).sum::<f64>() / 3.0;
+        let e = (v_sum - div).abs() / v_sum;
+        println!(
+            "tet bodies end to end: region \"{}\": {} cells, V {:.9e}, divergence {:.9e}, \
+             rel {e:.2e}",
+            r.name,
+            h.n_cells,
+            v_sum,
+            div
+        );
+        if !single {
+            assert!(e <= 1e-12, "region \"{}\": closure rel {e:e}", r.name);
+        }
+        total += v_sum;
+    }
+    println!("tet bodies end to end: fluid + ball V {total:.9e} against 1000, {:.1} s", seconds);
+    if !single {
+        assert!((total - 1000.0).abs() / 1000.0 <= 1e-12, "{total}");
+    }
+
+    // R1-R6 in Rust: the layout writes and loads, its pairings at the same
+    // bar, and the summary's `layout` block the written layout's shape.
+    let case = std::env::temp_dir().join(format!("ofgpu_tet19_{}", std::process::id()));
+    let kinds: Vec<ofgpu::cht::RegionKind> = layout.regions.iter().map(|r| r.kind).collect();
+    let meshes: Vec<(String, ofgpu::io::polymesh::PolyMeshRaw)> = layout
+        .regions
+        .iter()
+        .map(|r| (r.name.clone(), r.mesh.clone()))
+        .collect();
+    ofgpu::io::regions::write_layout(&case, &meshes, &kinds, &layout.interfaces, None)
+        .expect("write the layout");
+    match ofgpu::io::regions::load(&case.join("regions.json")) {
+        Ok(back) => {
+            for p in &back.pairing {
+                println!(
+                    "tet bodies end to end regions_check {}: {} faces, worst centroid {:.3e}, \
+                     area {:.3e}, normal {:.3e}",
+                    p.name, p.n_faces, p.worst_centroid, p.worst_area, p.worst_normal
+                );
+                if !single {
+                    assert!(p.worst_centroid <= 1e-12, "{}", p.worst_centroid);
+                    assert!(p.worst_area <= 1e-12, "{}", p.worst_area);
+                    assert!(p.worst_normal <= 1e-12, "{}", p.worst_normal);
+                }
+            }
+        }
+        Err(err) => {
+            let text = err.to_string();
+            assert!(single && text.contains("R2"), "{text}");
+            println!("MISSED under single: {text}");
+        }
+    }
+    let ident = MeshIdentity::new("ofgpu-automesher", &case, &cfg.output.name, None);
+    let s = tet_summary_json(&cfg, "box_sphere_tet.json", &surf, &out, &ident);
+    assert_eq!(s["layout"]["regions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        s["layout"]["interfaces"][0]["faces"].as_u64().unwrap() as usize,
+        iface.n_faces
+    );
+    let _ = std::fs::remove_dir_all(&case);
 }

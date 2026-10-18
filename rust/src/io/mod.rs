@@ -75,6 +75,7 @@ pub mod voxelmap;
 pub mod thermo_dict;
 pub mod case_parcels;
 pub mod case_chem;
+pub mod case_rad;
 pub mod case_dust;
 pub mod decomposed;
 

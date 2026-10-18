@@ -216,6 +216,7 @@ pub(crate) fn de_vahl_davis_with_form(
 }
 
 #[test]
+// f32 (F32-16): wall balance 0.35 - the f32 cavity run is not converged
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_59a_de_vahl_davis_square_cavity() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
@@ -423,6 +424,7 @@ pub(crate) fn kaminski_prakash(
 /// No published data at all, and it is the gate that says the INTERFACE is
 /// right independently of any flow.
 #[test]
+// f32 (F32-16): Nu sits 8.8e-3 off the series limit at Kr 0.1
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_59b_the_conduction_limit_is_the_series_resistance() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
@@ -898,7 +900,6 @@ const ARRAY_NAMES: [&str; 6] = [
 ///
 /// A test that compared one coefficient would pass while the run drifted.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_one_region_fluid_retarget_is_bitwise_the_plain_energy() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -993,7 +994,6 @@ fn a_one_region_fluid_retarget_is_bitwise_the_plain_energy() -> Result<()> {
 /// tests (S59.3)'s mask rather than the driver's care. A driver bug cannot
 /// leak convection into a solid, because `Energy` masks `phi_conv` itself.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_convective_term_vanishes_in_the_solid_in_every_bit() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1120,7 +1120,6 @@ fn the_convective_term_vanishes_in_the_solid_in_every_bit() -> Result<()> {
 /// thermodynamic pressure, and §25.2's term reaching one would be heat
 /// appearing out of the gas law.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_thermodynamic_pressure_term_does_not_reach_the_solid() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1175,7 +1174,6 @@ fn the_thermodynamic_pressure_term_does_not_reach_the_solid() -> Result<()> {
 /// all. That is both the "the solid carries its own heat capacity" check and
 /// the §13.4.1 pair test on `rhoSolid`/`cSolid` under a FLUID case.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_solid_ddt_weight_is_the_solids_own_rho_c() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1231,7 +1229,7 @@ fn the_solid_ddt_weight_is_the_solids_own_rho_c() -> Result<()> {
         worst = worst.max((got - want).abs() / want);
     }
     assert!(
-        worst < 1e-13,
+        (worst as f64) < crate::precision::roundoff_tol(1e-13),
         "SPEC-LIT 59.7: the solid ddt diagonal moved by a relative {worst} away \
          from (d(rho c)) V/dt. If it moved by ZERO the case said rhoSolid and \
          the solver ignored it (SPEC-LIT 13.4.1); if it moved by something else \
@@ -1253,7 +1251,6 @@ fn the_solid_ddt_weight_is_the_solids_own_rho_c() -> Result<()> {
 /// `|Sf|`, and `fvLapBoundary`'s interface branch takes the coefficient
 /// directly (S47.9).
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_coupled_interface_coefficients_are_bitwise_equal_with_a_fluid_on_one_side() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1316,7 +1313,6 @@ fn the_coupled_interface_coefficients_are_bitwise_equal_with_a_fluid_on_one_side
 /// SPEC-LIT §59.6: a face carries ONE condition, and the two ways to give it
 /// two are refused by name.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_face_cannot_be_both_an_interface_and_a_wall_condition() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1363,7 +1359,6 @@ fn a_face_cannot_be_both_an_interface_and_a_wall_condition() -> Result<()> {
 /// SPEC-LIT §59.6: `attach_conjugate` refuses a mesh that is not the one this
 /// `Energy` was built on, and a thermal mesh whose region 0 is a solid.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn attach_conjugate_refuses_the_wrong_mesh_and_a_solid_first_region() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1458,7 +1453,6 @@ fn open_cavity_case<'a>(
 /// that names a patch the mesh does not have gets the list of the ones it
 /// does, not a panic three kernels later.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn an_opening_naming_a_patch_the_fluid_mesh_lacks_lists_the_ones_it_has() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
 
@@ -1492,6 +1486,7 @@ fn an_opening_naming_a_patch_the_fluid_mesh_lacks_lists_the_ones_it_has() -> Res
 /// runs is the `Option` itself - the same mesh, the same properties, the same
 /// patch conditions and the same iteration count.
 #[test]
+// f32 (F32-16): mass imbalance 4.2e-7, over f32 relative cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_closed_cavity_and_an_open_one_differ_only_by_the_option() -> Result<()> {
     let Some(gpu) = gpu() else { return Ok(()) };
