@@ -17,7 +17,13 @@
 //! ```text
 //! ofgpu-par <case> [-np 2,3,4] [-comm threads] [-method all]
 //!                  [-sweeps N] [-alpha A] [-quiet]
+//! ofgpu-par -solve simple [-np 1,2,4] [-n N] [-method NAME] [-quiet]
 //! ```
+//!
+//! `-solve simple` is SPEC-LIT 139.4's gate (PAR-10c): the lid-driven cavity
+//! of Ghia, Ghia & Shin (1982) at Re = 100, run serial on the whole mesh and
+//! then decomposed per rank count with `Simple`'s exchange seam, every rank
+//! printing its L_inf differences against the serial answer.
 //!
 //! For every rank count, every partitioner and every rotation of the part
 //! labels, in one `ThreadComm` world per (rank count, partitioner):
@@ -48,6 +54,10 @@ use std::time::Instant;
 use ofgpu::comm::{Comm, Placement, ThreadComm};
 use ofgpu::decompose::{partition, Decomposition, PartMesh, PartitionMethod};
 use ofgpu::device::cfg_for;
+use ofgpu::distflow::{
+    cavity_ghia_errors, cavity_mesh, cavity_part, cavity_serial, CavityRun, CAVITY_ITER_BAND,
+    CAVITY_N, CAVITY_TOL_CENTRE, CAVITY_TOL_FIELD, CAVITY_U_TOL,
+};
 use ofgpu::distsolve::{
     dist_solve, spmd_solve, DistReduce, DistSystem, DistWorkspace, SpmdWorkspace,
 };
@@ -68,14 +78,19 @@ mod common;
 const USAGE: &str = "\
 usage: ofgpu-par <case> [options]
 
-  -np      2,3,4        rank counts to run (default 2,3,4)
+  -np      2,3,4        rank counts to run (default 2,3,4; solve mode 1,2,4)
   -comm    threads      the transport (default threads): one process, one
                         thread per rank. mpi is refused: the MPI transport
                         is PAR-06, deferred
-  -method  NAME         hilbert | linear | roundrobin | all (default all)
+  -method  NAME         hilbert | linear | roundrobin | all (default all;
+                        solve mode: one of the three, default hilbert)
   -sweeps  N            Jacobi sweeps in the halo gate (default 8)
   -alpha   A            under-relaxation factor (default 0.5)
   -quiet                print only the gate lines and the verdict
+  -solve   simple       run the decomposed-cavity gate of SPEC-LIT 139.4
+                        (PAR-10c) instead of the case gates: no <case> is
+                        read, the mesh is the generator's cavity
+  -n      N             cells per side of the -solve cavity (default 64)
 
 Rank r opens its own Gpu on device L[r mod |L|], L = OFGPU_DEVICES or every
 device (SPEC-LIT 138.7). Under mpiexec (PMI_RANK or PMI_SIZE set) the driver
@@ -166,6 +181,76 @@ fn parse(argv: &[String]) -> Result<Args> {
                 a.alpha = need(i)?
                     .parse()
                     .map_err(|e| Error::Config(format!("-alpha: {e}")))?;
+                i += 2;
+            }
+            "-quiet" => {
+                a.quiet = true;
+                i += 1;
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "unknown option '{other}'\n\n{USAGE}"
+                )))
+            }
+        }
+    }
+    Ok(a)
+}
+
+/// The options of `-solve simple`, SPEC-LIT 139.4's decomposed-cavity gate.
+/// No `<case>` is read; the mesh is `distflow::cavity_mesh(n)`.
+struct SolveArgs {
+    n: usize,
+    nps: Vec<usize>,
+    methods: Vec<String>,
+    quiet: bool,
+}
+
+fn parse_solve(argv: &[String]) -> Result<SolveArgs> {
+    let mut a = SolveArgs {
+        n: CAVITY_N,
+        nps: vec![1, 2, 4],
+        methods: vec!["hilbert".to_string()],
+        quiet: false,
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let need = |i: usize| -> Result<String> {
+            argv.get(i + 1)
+                .cloned()
+                .ok_or_else(|| Error::Config(format!("{} needs a value", argv[i])))
+        };
+        match argv[i].as_str() {
+            "-n" => {
+                a.n = need(i)?
+                    .parse()
+                    .map_err(|e| Error::Config(format!("-n: {e}")))?;
+                if a.n == 0 {
+                    return Err(Error::Config("-n: cells per side must be >= 1".to_string()));
+                }
+                i += 2;
+            }
+            "-np" => {
+                let v = need(i)?;
+                a.nps = v
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| Error::Config(format!("-np '{v}': {e}")))?;
+                if a.nps.iter().any(|&n| n == 0) {
+                    return Err(Error::Config(format!(
+                        "-np '{v}': a rank count must be at least 1"
+                    )));
+                }
+                i += 2;
+            }
+            "-method" => {
+                let v = need(i)?;
+                a.methods = if v == "all" {
+                    vec!["hilbert".to_string()]
+                } else {
+                    vec![v]
+                };
                 i += 2;
             }
             "-quiet" => {
@@ -745,11 +830,157 @@ fn verdict(ok: bool) -> &'static str {
     }
 }
 
+/// SPEC-LIT 139.4 (PAR-10c): `-solve simple` - the lid-driven cavity at
+/// Re = 100 (Ghia, Ghia & Shin 1982, DOI 10.1016/0021-9991(82)90058-4), run
+/// serial on the whole mesh and then decomposed, one `ThreadComm` thread per
+/// rank, every rank on its own `Gpu`. Each rank count prints its L_inf
+/// differences against the serial answer and PASS/FAIL against the gate
+/// constants of `distflow`; the exit status is 0 only when every run passes.
+fn run_solve(args: &SolveArgs) -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let hm = cavity_mesh(args.n)?;
+    if !args.quiet {
+        println!("solve  : simple - the lid-driven cavity at Re = 100 (Ghia, Ghia & Shin 1982)");
+        println!("mesh   : {} x {} x 1, {} cells", args.n, args.n, hm.n_cells);
+        println!("device : {}", gpu.name()?);
+        println!("np     : {:?}", args.nps);
+        println!();
+    }
+
+    let serial = cavity_serial(&gpu, &hm)?;
+    if !serial.converged {
+        return Err(Error::Config(format!(
+            "the serial cavity did not converge in {} iterations (U \
+             residualControl {CAVITY_U_TOL:e}); the gate has no \
+             reference",
+            serial.iterations,
+        )));
+    }
+    let errs_s = cavity_ghia_errors(&hm, &serial.u);
+    let worst_s = errs_s.iter().fold(0.0 as Scalar, |a, &x| a.max(x));
+    let u_scale = serial.u.iter().fold(0.0 as Scalar, |a, v| {
+        a.max(v.x.abs()).max(v.y.abs()).max(v.z.abs())
+    });
+    let p_scale = serial.p.iter().fold(0.0 as Scalar, |a, &v| a.max(v.abs()));
+    if !args.quiet {
+        println!(
+            "serial : {} iterations, worst U residual {:.3e}, continuity \
+             {:.3e}, worst centreline |e| {worst_s:.4}",
+            serial.iterations, serial.u_residual, serial.continuity
+        );
+        println!();
+    }
+
+    let mut all_ok = true;
+    let t_all = Instant::now();
+    for &np in &args.nps {
+        for name in &args.methods {
+            // The name is validated on every run; P = 1 is the Linear cut,
+            // which IS the one-part cut - so that is the name printed too.
+            let named = method_named(name, &hm, np)?;
+            let method = if np == 1 { PartitionMethod::Linear } else { named };
+            let name = if np == 1 { "linear" } else { name.as_str() };
+            let t0 = Instant::now();
+            let dec = Decomposition::build(&hm, np, &method)?;
+            let got = ThreadComm::run(np, |comm| -> Result<CavityRun> {
+                let gpu = Gpu::new(0)?;
+                cavity_part(&gpu, comm, &dec)
+            })?;
+            let mut up = vec![Vec3::ZERO; hm.n_cells];
+            let mut pp = vec![0.0 as Scalar; hm.n_cells];
+            let mut iters = Vec::new();
+            let mut conv_ok = true;
+            // A rank that failed fails the run by its own message: its owned
+            // cells would otherwise stay zero in the scatter below.
+            let got = got.into_iter().collect::<Result<Vec<CavityRun>>>()?;
+            for r in got.iter() {
+                for (i, &g) in r.global_cell.iter().enumerate() {
+                    up[g] = r.u[i];
+                    pp[g] = r.p[i];
+                }
+                iters.push(r.iterations);
+                conv_ok &= r.converged;
+            }
+            let u_rel = up
+                .iter()
+                .zip(&serial.u)
+                .fold(0.0 as Scalar, |a, (x, w)| {
+                    a.max((x.x - w.x).abs())
+                        .max((x.y - w.y).abs())
+                        .max((x.z - w.z).abs())
+                })
+                / u_scale;
+            let p_rel = pp
+                .iter()
+                .zip(&serial.p)
+                .fold(0.0 as Scalar, |a, (&x, &w)| a.max((x - w).abs()))
+                / p_scale;
+            let errs = cavity_ghia_errors(&hm, &up);
+            let worst_e = errs.iter().fold(0.0 as Scalar, |a, &x| a.max(x));
+            // The centreline rule, at every Ghia station: the decomposed
+            // error within the serial run's own error plus the tolerance.
+            let centre_ok = errs
+                .iter()
+                .zip(&errs_s)
+                .all(|(&ep, &es)| ep <= es + CAVITY_TOL_CENTRE);
+            let it_s = serial.iterations as f64;
+            let it_ok = iters
+                .iter()
+                .all(|&it| (it as f64 - it_s).abs() <= CAVITY_ITER_BAND * it_s);
+            let ok = u_rel <= CAVITY_TOL_FIELD
+                && p_rel <= CAVITY_TOL_FIELD
+                && centre_ok
+                && it_ok
+                && conv_ok;
+            all_ok &= ok;
+            println!(
+                "P = {np:<2} {name:<10} {} - iters {:?} (serial {}), U rel \
+                 {u_rel:.3e} <= {CAVITY_TOL_FIELD:e}, p rel {p_rel:.3e}, \
+                 worst centreline |e| {worst_e:.4} vs serial {worst_s:.4}, \
+                 {:.1} s",
+                verdict(ok),
+                iters,
+                serial.iterations,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    let secs = t_all.elapsed().as_secs_f64();
+    if all_ok {
+        println!(
+            "ofgpu-par -solve simple: PASS - every rank count reproduced the \
+             serial cavity within the gate constants, {secs:.1} s"
+        );
+        Ok(())
+    } else {
+        println!("ofgpu-par -solve simple: FAIL - {secs:.1} s");
+        std::process::exit(1);
+    }
+}
+
 fn run() -> Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         println!("{USAGE}");
         std::process::exit(if argv.is_empty() { 2 } else { 0 });
+    }
+    // SPEC-LIT 139.4's solve mode: `ofgpu-par -solve simple [options]`. The
+    // value is refused by name here, where the mode is chosen, so a typo
+    // never reads a case.
+    if argv[0] == "-solve" {
+        match argv.get(1).map(String::as_str) {
+            Some("simple") => {
+                let args = parse_solve(&argv[2..])?;
+                return run_solve(&args);
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "-solve '{}': known: simple",
+                    other.unwrap_or("")
+                )));
+            }
+        }
     }
     let args = parse(&argv)?;
     refuse_unbuilt_transport(&args.comm)?;

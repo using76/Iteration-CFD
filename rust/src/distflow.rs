@@ -50,32 +50,51 @@
 //! (SPEC-LIT 81.3, 138.5), and so every solve this module routes fails a
 //! capture rather than silently serialising it.
 //!
+//! SPEC-LIT 139.4 (PAR-10c) closes the loop: [`FlowExchange`] is the ONE
+//! interface the SIMPLE loop needs to run on a part, and a `RankCtx` is what
+//! implements it on a decomposed run - so `Simple` holds a `Box<dyn
+//! FlowExchange>` where a serial run holds `None`, and every place the loop
+//! touches another rank goes through it:
+//!
+//! | call | what crosses a rank |
+//! |---|---|
+//! | [`FlowExchange`] | the trait behind `Simple`'s decomposed run: a field's or a raw cell buffer's halo, the world's max, the world's OR, the world's mean, one owner's scalar, and the whole-mesh id of an owned cell |
+//!
+//! The same subsection is this module's cavity fixture - the lid-driven
+//! cavity of Ghia, Ghia & Shin (1982) at Re = 100, run serial and
+//! decomposed by [`cavity_serial`] and [`cavity_part`] - which is the gate
+//! `tests/distflow_simple.rs` and `ofgpu-par -solve simple` measure.
+//!
 //! Provenance: ORIGINAL - the exchange points are this project's own design
-//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b) over the SPMD exchange of
-//! 138.3 (PAR-02), the boundary evaluation this crate already ships and the
-//! SPMD Krylov of 138.5/138.6 (PAR-04a/b); no kernel is launched here and
-//! no existing numerics change. No external source. No GPL-licensed
-//! source was consulted.
+//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c) over the SPMD
+//! exchange of 138.3 (PAR-02), the boundary evaluation this crate already
+//! ships and the SPMD Krylov of 138.5/138.6 (PAR-04a/b); no kernel is
+//! launched here and no existing numerics change. No external source. No
+//! GPL-licensed source was consulted.
 
+use crate::blockgen::{build_case, CaseKind};
 use crate::comm::Comm;
 use crate::decompose::{Decomposition, PartMesh};
 use crate::device::{DevBuf, Gpu};
 use crate::distsolve::{spmd_solve, DistPerformance, DistReduce, DistSystem, SpmdWorkspace};
 use crate::error::{Error, Result};
 use crate::exactsum::SpmdReduction;
-use crate::field::{GpuScalarField, GpuVectorField};
+use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
+use crate::fv::SnGradScheme;
 use crate::halo::SpmdHalo;
-use crate::io::case::SolverControls;
+use crate::io::case::{ResidualControl, SolverControls};
+use crate::io::dict::FoamDict;
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::GpuMesh;
-use crate::momentum::ComponentRoute;
-use crate::pressure::{PressureBackend, SystemProbe};
+use crate::momentum::{BuoyancyCoeffs, ComponentRoute, MomentumControls};
+use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
+use crate::simple::{Simple, SimpleControls};
 use crate::solver::{
     LinearSolverKind, Preconditioner, SolverKernels, SolverPerformance,
 };
 use crate::HostMesh;
-use crate::{Scalar, Tensor, Vec3};
+use crate::{Label, Scalar, Tensor, Vec3};
 
 /// One rank's view of a decomposed flow solve: its part, the transport, and
 /// the two objects every cross-part step goes through.
@@ -98,6 +117,7 @@ pub struct RankCtx<'c> {
     halo: SpmdHalo,
     reduce: SpmdReduction,
     part: usize,
+    global: Vec<Label>,
 }
 
 impl<'c> RankCtx<'c> {
@@ -154,6 +174,9 @@ impl<'c> RankCtx<'c> {
             part: part.part,
             halo: SpmdHalo::new(gpu, part, comm.size())?,
             reduce: SpmdReduction::new(gpu, comm, part.mesh.n_cells)?,
+            // The whole-mesh id of every OWNED cell, local order - what
+            // `local_of_global` answers out of (SPEC-LIT 139.4).
+            global: part.global_cell[..part.mesh.n_cells].to_vec(),
         })
     }
 
@@ -243,6 +266,187 @@ impl<'c> RankCtx<'c> {
     /// moved as one [`Tensor`], the exchange plan's third payload.
     pub fn exchange_gradient_tensor(&mut self, gpu: &Gpu, g: &mut DevBuf<Tensor>) -> Result<()> {
         self.halo.tensor(gpu, self.comm, g)
+    }
+}
+
+// ==========================================================================
+//  The SIMPLE exchange seam - SPEC-LIT 139.4 (PAR-10c)
+// ==========================================================================
+
+/// SPEC-LIT 139.4 (PAR-10c): every place the SIMPLE loop touches another
+/// rank.
+///
+/// A serial run never calls any of it - `Simple` holds the exchange as an
+/// `Option` and every method's `None` arm is the launch it always made - so
+/// the serial path is provably unchanged. A decomposed run hands `Simple` a
+/// `Box<dyn FlowExchange>` over this module's [`RankCtx`].
+///
+/// Every reduction folds the gathered bytes in RANK ORDER, so every rank
+/// gets identical bits whatever the transport does between them.
+pub trait FlowExchange {
+    /// Halo of `f.f`, then `field_ops::correct_boundary_conditions` - what
+    /// [`RankCtx::exchange_field`] does.
+    fn field(
+        &mut self,
+        gpu: &Gpu,
+        k: &FieldKernels,
+        f: &mut GpuScalarField,
+        m: &GpuMesh,
+    ) -> Result<()>;
+    /// The same for a vector field - what [`RankCtx::exchange_field_vector`]
+    /// does.
+    fn field_vector(
+        &mut self,
+        gpu: &Gpu,
+        k: &FieldKernels,
+        u: &mut GpuVectorField,
+        m: &GpuMesh,
+    ) -> Result<()>;
+    /// Halo of a raw cell buffer ([`SpmdHalo::scalar`] /
+    /// [`SpmdHalo::vector`](crate::halo::SpmdHalo::vector)); no boundary
+    /// evaluation follows.
+    fn cells(&mut self, gpu: &Gpu, v: &mut DevBuf<Scalar>) -> Result<()>;
+    /// The same for a three-component cell buffer.
+    fn cells_vector(&mut self, gpu: &Gpu, v: &mut DevBuf<Vec3>) -> Result<()>;
+    /// The world's max; NaN anywhere -> NaN on every rank
+    /// ([`crate::simple::nan_propagating_max`]).
+    fn max(&mut self, x: Scalar) -> Result<Scalar>;
+    /// The world's OR.
+    fn any(&mut self, b: bool) -> Result<bool>;
+    /// Exactly one rank passes `Some(v)`; every rank gets `v`, bit for bit.
+    fn owner_value(&mut self, mine: Option<Scalar>) -> Result<Scalar>;
+    /// The LOCAL owned-cell index of whole-mesh cell `g` on this rank, if
+    /// this rank owns it.
+    fn local_of_global(&self, g: usize) -> Option<usize>;
+    /// The world's mean of a per-cell quantity: this rank's sum over its
+    /// OWNED cells and its owned count in, `Σ sums / Σ counts` out - every
+    /// rank the same bits (a rank-order fold of the gathered f64 records).
+    /// The pinned pressure equation's source is removed by the mean of the
+    /// WHOLE source - `assemble_pressure`'s own invariant - and on a part
+    /// that mean is a cross-part quantity, which is what this moves.
+    fn world_mean(&mut self, local_sum: Scalar, n_owned: usize) -> Result<Scalar>;
+}
+
+impl FlowExchange for RankCtx<'_> {
+    fn field(
+        &mut self,
+        gpu: &Gpu,
+        k: &FieldKernels,
+        f: &mut GpuScalarField,
+        m: &GpuMesh,
+    ) -> Result<()> {
+        self.exchange_field(gpu, k, f, m)
+    }
+
+    fn field_vector(
+        &mut self,
+        gpu: &Gpu,
+        k: &FieldKernels,
+        u: &mut GpuVectorField,
+        m: &GpuMesh,
+    ) -> Result<()> {
+        self.exchange_field_vector(gpu, k, u, m)
+    }
+
+    fn cells(&mut self, gpu: &Gpu, v: &mut DevBuf<Scalar>) -> Result<()> {
+        self.halo.scalar(gpu, self.comm, v)
+    }
+
+    fn cells_vector(&mut self, gpu: &Gpu, v: &mut DevBuf<Vec3>) -> Result<()> {
+        self.halo.vector(gpu, self.comm, v)
+    }
+
+    fn max(&mut self, x: Scalar) -> Result<Scalar> {
+        let n = self.comm.size();
+        let mut all = vec![0u8; 8 * n];
+        self.comm
+            .allgather(&(x as f64).to_le_bytes(), &mut all)?;
+        let mut it = all
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().expect("8 bytes")));
+        let first = it.next().unwrap_or(f64::NAN);
+        // Folded in f64 so both builds reduce identically; `max` only picks,
+        // never rounds, so the answer is one rank's own value.
+        Ok(it
+            .fold(first, |a: f64, b: f64| {
+                if a.is_nan() || b.is_nan() {
+                    f64::NAN
+                } else {
+                    a.max(b)
+                }
+            })
+            as Scalar)
+    }
+
+    fn any(&mut self, b: bool) -> Result<bool> {
+        let n = self.comm.size();
+        let mut all = vec![0u8; 8 * n];
+        let one = if b { 1.0f64 } else { 0.0f64 };
+        self.comm.allgather(&one.to_le_bytes(), &mut all)?;
+        Ok(all
+            .chunks_exact(8)
+            .any(|c| f64::from_le_bytes(c.try_into().expect("8 bytes")) != 0.0))
+    }
+
+    fn owner_value(&mut self, mine: Option<Scalar>) -> Result<Scalar> {
+        // A 16-byte record per rank: the flag 1.0/0.0 as a little-endian
+        // f64, then the value as a little-endian f64. The f64 bytes are the
+        // same in both builds, so the record is too. The count is folded
+        // AFTER the gather, so every rank sees the same array and refuses
+        // alike.
+        const REC: usize = 16;
+        let n = self.comm.size();
+        let mut rec = [0u8; REC];
+        rec[..8].copy_from_slice(&if mine.is_some() {
+            1.0f64.to_le_bytes()
+        } else {
+            0.0f64.to_le_bytes()
+        });
+        if let Some(v) = mine {
+            rec[8..].copy_from_slice(&(v as f64).to_le_bytes());
+        }
+        let mut all = vec![0u8; REC * n];
+        self.comm.allgather(&rec, &mut all)?;
+        let mut count = 0usize;
+        let mut v = 0.0f64;
+        for c in all.chunks_exact(REC) {
+            if f64::from_le_bytes(c[..8].try_into().expect("8 bytes")) != 0.0 {
+                count += 1;
+                v = f64::from_le_bytes(c[8..].try_into().expect("8 bytes"));
+            }
+        }
+        if count != 1 {
+            return Err(Error::Config(format!(
+                "distflow: owner_value needs exactly one rank to pass Some, \
+                 but {count} did - the reference cell must be owned by one \
+                 rank and one rank only"
+            )));
+        }
+        Ok(v as Scalar)
+    }
+
+    fn local_of_global(&self, g: usize) -> Option<usize> {
+        self.global.iter().position(|&x| x as usize == g)
+    }
+
+    fn world_mean(&mut self, local_sum: Scalar, n_owned: usize) -> Result<Scalar> {
+        // A 16-byte record per rank: the rank's sum as a little-endian f64,
+        // then its owned-cell count as a little-endian f64 - the f64 bytes
+        // are the same in both builds. The fold is in RANK ORDER, so every
+        // rank divides the same two numbers.
+        const REC: usize = 16;
+        let n = self.comm.size();
+        let mut rec = [0u8; REC];
+        rec[..8].copy_from_slice(&(local_sum as f64).to_le_bytes());
+        rec[8..].copy_from_slice(&(n_owned as f64).to_le_bytes());
+        let mut all = vec![0u8; REC * n];
+        self.comm.allgather(&rec, &mut all)?;
+        let (mut ss, mut nn) = (0.0f64, 0.0f64);
+        for c in all.chunks_exact(REC) {
+            ss += f64::from_le_bytes(c[..8].try_into().expect("8 bytes"));
+            nn += f64::from_le_bytes(c[8..].try_into().expect("8 bytes"));
+        }
+        Ok((ss / nn) as Scalar)
     }
 }
 
@@ -610,3 +814,374 @@ impl ComponentRoute for SpmdMomentumRoute<'_> {
 }
 
 
+
+// ==========================================================================
+//  The cavity fixture - SPEC-LIT 139.4 (PAR-10c)
+// ==========================================================================
+
+/// The gate constants, FIXED BEFORE MEASURING (docs/17 §12, row PAR-10c):
+/// neither the test nor the driver may loosen them, and a run that misses
+/// keeps the assert and reports its numbers.
+///
+/// The cavity: 64 cells per side, the lid-driven square of **U. Ghia, K. N.
+/// Ghia, C. T. Shin, J. Comput. Phys. 48 (1982) 387-411**, DOI
+/// 10.1016/0021-9991(82)90058-4, at `Re = U·L/nu = 100` (lid 1 m/s, side
+/// 0.1 m, nu 1e-3).
+pub const CAVITY_N: usize = 64;
+/// The REDUCED cavity of the verify run: the same gate constants at 32
+/// cells per side, because the 64 x 64 gate runs 20-46 min per rank count on
+/// the shared card (SPEC-LIT 139.4) - the size is reduced, never a tolerance.
+pub const CAVITY_N_REDUCED: usize = 32;
+/// The outer loop's hard ceiling; the run stops on `residualControl` long
+/// before it.
+pub const CAVITY_MAX_OUTER: usize = 4000;
+/// `residualControl` on U - a SOLVER control (the outer loop's stopping
+/// criterion), not a gate tolerance.
+pub const CAVITY_U_TOL: Scalar = if cfg!(feature = "single") { 1e-5 } else { 1e-7 };
+/// The gate: decomposed vs serial, and centreline vs Ghia within the serial
+/// run's own error. Fixed before measuring.
+pub const CAVITY_TOL_FIELD: Scalar = if cfg!(feature = "single") { 1e-3 } else { 1e-6 };
+pub const CAVITY_TOL_CENTRE: Scalar = CAVITY_TOL_FIELD;
+/// The SIMPLE iteration count may move by this much of the serial count.
+pub const CAVITY_ITER_BAND: f64 = 0.02;
+
+/// `u` along the vertical centreline at `Re = 100`, Table I of Ghia, Ghia &
+/// Shin (1982): `(y, u)`, `y` from the stationary floor, `u` scaled by the
+/// lid speed. `src/simple.rs`'s own copy of the same table, byte for byte.
+pub const GHIA_U_RE100: [(f64, f64); 17] = [
+    (1.0000, 1.00000),
+    (0.9766, 0.84123),
+    (0.9688, 0.78871),
+    (0.9609, 0.73722),
+    (0.9531, 0.68717),
+    (0.8516, 0.23151),
+    (0.7344, 0.00332),
+    (0.6172, -0.13641),
+    (0.5000, -0.20581),
+    (0.4531, -0.21090),
+    (0.2813, -0.15662),
+    (0.1719, -0.10150),
+    (0.1016, -0.06434),
+    (0.0703, -0.04775),
+    (0.0625, -0.04192),
+    (0.0547, -0.03717),
+    (0.0000, 0.00000),
+];
+
+/// What one cavity run reports - a serial run's whole mesh, a decomposed
+/// run's OWNED cells only (in the part's local order, `global_cell[i]` the
+/// whole-mesh id of owned cell `i`).
+pub struct CavityRun {
+    pub global_cell: Vec<usize>,
+    pub u: Vec<Vec3>,
+    pub p: Vec<Scalar>,
+    pub iterations: usize,
+    pub converged: bool,
+    pub u_residual: Scalar,
+    pub continuity: Scalar,
+}
+
+/// The cavity mesh: the block generator's own `cavity` case, `n x n x 1` -
+/// the cube 0..0.1 m, one cell deep, `leftWall`/`rightWall`/`fixedWall`/
+/// `movingWall` walls and two `empty` patches.
+pub fn cavity_mesh(n: usize) -> Result<HostMesh> {
+    Ok(build_case(CaseKind::Cavity, n, n, 1)?.0)
+}
+
+/// Exactly `src/simple.rs`'s lid-driven-cavity controls, at `nu = 1e-3` so
+/// `Re = 1·0.1/1e-3 = 100`: central convection (the cell Reynolds number is
+/// 1.6), uncorrected snGrad, no variable-viscosity stress, relaxation 0.7 /
+/// 0.3, PBiCGStab over the default Diagonal preconditioner, both solves at
+/// `1e-10` in f64 (`1e-6` within 300 iterations under `single`, below) -
+/// solver controls, not gate tolerances.
+pub fn cavity_controls() -> SimpleControls {
+    use crate::fv::DivScheme;
+    // The inner pressure solve asks what the build's precision delivers on
+    // this singular system. At f32 a deep PBiCGStab degenerates - alpha over
+    // a vanished (r0, v) writes NaN into p (SPEC-LIT 112.3, 141.9's raw
+    // float floor) - so the single build caps the float body at 300
+    // iterations, inside which it reaches tol 1e-6 in ~100, and §118.4's
+    // refinement carries the accuracy. The f64 ask is the measured 1e-10.
+    #[cfg(feature = "single")]
+    let (u_tol, p_tol, p_max): (Scalar, Scalar, i32) = (1e-6, 1e-6, 300);
+    #[cfg(not(feature = "single"))]
+    let (u_tol, p_tol, p_max): (Scalar, Scalar, i32) = (1e-10, 1e-10, 600);
+    SimpleControls {
+        momentum: MomentumControls {
+            nu: 1e-3,
+            u_solver: SolverControls {
+                tolerance: u_tol,
+                max_iter: 200,
+                check_interval: 5,
+                ..SolverControls::default()
+            },
+            u_relax: 0.7,
+            div_scheme: DivScheme::Central,
+            bounded_convection: true,
+            sn_grad: SnGradScheme::Uncorrected,
+            variable_viscosity_stress: false,
+            ..MomentumControls::default()
+        },
+        p_solver: SolverControls {
+            tolerance: p_tol,
+            max_iter: p_max,
+            check_interval: 5,
+            ..SolverControls::default()
+        },
+        p_relax: 0.3,
+        ..SimpleControls::default()
+    }
+}
+
+/// The boundary-face patch of every boundary face, ascending.
+fn patch_of(hm: &HostMesh) -> Vec<usize> {
+    let mut v = vec![0usize; hm.n_boundary_faces];
+    for (p, pi) in hm.patches.iter().enumerate() {
+        for k in 0..pi.size {
+            v[pi.start + k] = p;
+        }
+    }
+    v
+}
+
+/// The cavity's boundary conditions, on the whole mesh and on a part alike,
+/// BY PATCH NAME: `U` fixedValue (1,0,0) on `movingWall`, fixedValue 0 on
+/// the other three walls (`fr` 1); `p` zeroGradient there. `Empty` patches
+/// stay `Empty` and processor patches stay `Cyclic` with `fr` 0 - what
+/// `GpuScalarField::zeros` seeds them with - so this writes the wall faces
+/// only.
+pub fn cavity_bcs(gpu: &Gpu, hm: &HostMesh, s: &mut Simple<'_>) -> Result<()> {
+    let owner = patch_of(hm);
+    let nbf = hm.n_boundary_faces;
+
+    // Start from what `GpuVectorField::zeros` seeded - `Empty` on the empty
+    // patches, `Cyclic` (fr 0) on every processor patch, zeroGradient
+    // elsewhere - and overwrite the four walls only: a processor face
+    // written zeroGradient would leave the coupled branch every kernel tests.
+    let mut ukind: Vec<crate::Label> = gpu.download(&s.u().bc_kind)?;
+    let mut ufr: Vec<Scalar> = gpu.download(&s.u().fr)?;
+    let mut urv: Vec<Vec3> = gpu.download(&s.u().ref_value)?;
+    let urg: Vec<Vec3> = gpu.download(&s.u().ref_grad)?;
+    if ukind.len() != nbf {
+        return Err(Error::Config(format!(
+            "distflow: cavity_bcs was given a host mesh of {nbf} boundary faces and a Simple of {}",
+            ukind.len()
+        )));
+    }
+    for (i, &p) in owner.iter().enumerate() {
+        let name = hm.patches[p].name.as_str();
+        let wall = matches!(
+            name,
+            "movingWall" | "leftWall" | "rightWall" | "fixedWall"
+        );
+        if wall {
+            ukind[i] = BcKind::FixedValue as crate::Label;
+            ufr[i] = 1.0;
+            urv[i] = if name == "movingWall" {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::ZERO
+            };
+        }
+    }
+    {
+        let u = s.u_mut();
+        gpu.write(&mut u.bc_kind, &ukind)?;
+        gpu.write(&mut u.fr, &ufr)?;
+        gpu.write(&mut u.ref_value, &urv)?;
+        gpu.write(&mut u.ref_grad, &urg)?;
+    }
+    Ok(())
+}
+
+/// Linear interpolation of a profile sampled at cell centres, extended to
+/// the two walls by the boundary values the case prescribes - the same
+/// sampler `src/simple.rs`'s cavity test uses.
+fn sample(profile: &[(Scalar, Scalar)], at: Scalar) -> Scalar {
+    if at <= profile[0].0 {
+        return profile[0].1;
+    }
+    for w in profile.windows(2) {
+        let (x0, v0) = w[0];
+        let (x1, v1) = w[1];
+        if at <= x1 {
+            let t = (at - x0) / (x1 - x0);
+            return v0 + t * (v1 - v0);
+        }
+    }
+    profile[profile.len() - 1].1
+}
+
+/// |u_centreline(y) - u_Ghia| at the 17 stations. `u` is the whole mesh's
+/// cell velocities in whole-mesh order; the centreline value at row `j` is
+/// the mean of columns `n/2 - 1` and `n/2` - `x = 0.05` falls exactly
+/// between two cell centres on the even mesh - and the profile runs wall to
+/// wall, `(0, 0)` ... `(1, 1)`, linearly interpolated at each Ghia `y`.
+pub fn cavity_ghia_errors(hm: &HostMesh, u: &[Vec3]) -> Vec<Scalar> {
+    let n = (hm.n_cells as f64).sqrt() as usize;
+    let h = 0.1 / n as Scalar; // the cavity cube is 0.1 m on a side
+    let (ia, ib) = (n / 2 - 1, n / 2);
+
+    let mut line = vec![0.0 as Scalar; n];
+    let mut seen = vec![0usize; n];
+    for (c, &cc) in hm.c.iter().enumerate() {
+        let i = ((cc.x / h).floor() as usize).min(n - 1);
+        let j = ((cc.y / h).floor() as usize).min(n - 1);
+        if i == ia || i == ib {
+            line[j] += u[c].x;
+            seen[j] += 1;
+        }
+    }
+    let mut prof: Vec<(Scalar, Scalar)> = vec![(0.0, 0.0)];
+    for j in 0..n {
+        // Ghia's y is normalised by the cavity side, L = n·h.
+        let y = (j as Scalar + 0.5) * h / (h * n as Scalar);
+        prof.push((y, line[j] / seen[j].max(1) as Scalar));
+    }
+    prof.push((1.0, 1.0));
+
+    GHIA_U_RE100
+        .iter()
+        .map(|&(y, want)| (sample(&prof, y as Scalar) - want as Scalar).abs())
+        .collect()
+}
+
+/// The outer loop both runners share: `residualControl` on U at
+/// [`CAVITY_U_TOL`], then up to [`CAVITY_MAX_OUTER`] calls of
+/// [`Simple::solve_step`], stopping when the loop says `converged`.
+/// Returns (iterations, converged, worst U initial residual of the last
+/// call, its continuity error).
+fn cavity_loop(
+    gpu: &Gpu,
+    s: &mut Simple<'_>,
+    backend: &mut dyn PressureBackend,
+    nut: &GpuScalarField,
+    t: &GpuScalarField,
+) -> Result<(usize, bool, Scalar, Scalar)> {
+    let src = format!("SIMPLE {{ residualControl {{ U {CAVITY_U_TOL:e}; }} }}");
+    let d = FoamDict::parse(&src, "fvSolution")?;
+    s.set_residual_control(ResidualControl::read(&d));
+
+    let mut iterations = 0usize;
+    let mut last = crate::simple::PimplePerformance::default();
+    for _ in 0..CAVITY_MAX_OUTER {
+        last = s.solve_step(gpu, backend, nut, t)?;
+        iterations += 1;
+        if last.converged {
+            break;
+        }
+    }
+    let u_residual = last
+        .last
+        .u
+        .iter()
+        .map(|q| q.initial_residual)
+        .fold(0.0 as Scalar, Scalar::max);
+    Ok((iterations, last.converged, u_residual, last.last.continuity_error))
+}
+
+/// A zero eddy viscosity, never written - a laminar run.
+fn cavity_nut(gpu: &Gpu, m: &GpuMesh) -> Result<GpuScalarField> {
+    GpuScalarField::zeros(gpu, m, "nut")
+}
+
+/// A uniform temperature at the reference, corrected once, so the buoyancy
+/// body force is identically zero (`g = Vec3::ZERO` besides).
+fn cavity_t(gpu: &Gpu, m: &GpuMesh, fk: &FieldKernels) -> Result<GpuScalarField> {
+    let t_ref = BuoyancyCoeffs::default().t_ref;
+    let mut t = GpuScalarField::zeros(gpu, m, "T")?;
+    gpu.write(&mut t.f, &vec![t_ref; m.n_local()])?;
+    field_ops::correct_boundary_conditions(gpu, fk, &mut t, m)?;
+    Ok(t)
+}
+
+/// The cavity on the WHOLE mesh, on one card - the serial reference. No
+/// route, no exchange: the calls `Simple` has always made.
+pub fn cavity_serial(gpu: &Gpu, hm: &HostMesh) -> Result<CavityRun> {
+    let m = GpuMesh::upload(gpu, hm)?;
+    let ctrl = cavity_controls();
+    let mut s = Simple::new(
+        gpu,
+        hm,
+        &m,
+        ctrl,
+        BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        },
+    )?;
+    cavity_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let nut = cavity_nut(gpu, &m)?;
+    let t = cavity_t(gpu, &m, &fk)?;
+
+    let mut backend = PbicgstabBackend::new(cavity_controls().p_solver);
+    backend.setup(gpu, hm, &m, &SystemProbe::default())?;
+
+    let (iterations, converged, u_residual, continuity) =
+        cavity_loop(gpu, &mut s, &mut backend, &nut, &t)?;
+    let n = hm.n_cells;
+    Ok(CavityRun {
+        global_cell: (0..n).collect(),
+        u: gpu.download(&s.u().f)?,
+        p: gpu.download(&s.p().f)?,
+        iterations,
+        converged,
+        u_residual,
+        continuity,
+    })
+}
+
+/// The cavity on rank `comm.rank()`'s part of `dec` - the decomposed run:
+/// the part uploaded with its halo, the momentum predictor and the pressure
+/// equation routed through the SPMD Krylov (139.3), the exchange set (139.4)
+/// and the SAME boundary conditions, by patch name, the serial run gave the
+/// whole mesh.
+pub fn cavity_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<CavityRun> {
+    let part = &dec.parts[comm.rank()];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(
+        gpu,
+        hm,
+        &gm,
+        cavity_controls(),
+        BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        },
+    )?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, cavity_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    cavity_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let nut = cavity_nut(gpu, &gm)?;
+    let t = cavity_t(gpu, &gm, &fk)?;
+
+    let (iterations, converged, u_residual, continuity) =
+        cavity_loop(gpu, &mut s, &mut backend, &nut, &t)?;
+    let n = hm.n_cells;
+    Ok(CavityRun {
+        global_cell: part.global_cell[..n].iter().map(|&g| g as usize).collect(),
+        u: gpu.download(&s.u().f)?[..n].to_vec(),
+        p: gpu.download(&s.p().f)?[..n].to_vec(),
+        iterations,
+        converged,
+        u_residual,
+        continuity,
+    })
+}

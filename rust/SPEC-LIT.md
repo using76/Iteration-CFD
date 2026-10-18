@@ -53101,7 +53101,7 @@ contract (ORIGINAL). It has no external input.
 §71 cuts the mesh and §73 solves a linear system across the cut. §138 moves
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
-(§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b) and the decomposed SIMPLE gate (PAR-10c).
+(§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b) and the decomposed SIMPLE (§139.4, PAR-10c).
 
 This section defines no equation, so it carries no equation label.
 
@@ -53470,6 +53470,162 @@ library's own float assembly still sums in whatever order the fold walks
 the faces - the first version's numbers above are what that cost. GAMG on the flow
 path is refused by name, not run. MPI and
 multi-GPU are deferred: the gates run `ThreadComm` ranks on one GPU.
+
+### 139.4 The decomposed SIMPLE (PAR-10c)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** PAR-10a gave a part its halo exchanges and PAR-10b routed the p and
+momentum solves through the SPMD Krylov, but `Simple` itself still never
+exchanged: its boundary evaluation ran on processor faces whose ghost cells
+held zeros, and its four global quantities - the Dirichlet test, the
+pressure level, the continuity error and the pinned source's mean - were
+rank-local. A decomposed run of the loop was therefore not the loop. This
+subsection adds the exchange points and the global reductions INSIDE
+`Simple`, behind one seam: `Simple` holds `exchange: Option<Box<dyn
+FlowExchange>>`, `None` for every serial run - where every `None` arm is
+the launch the module has always made, launch for launch - and a decomposed
+driver sets a `RankCtx` through `Simple::set_exchange`.
+
+**The exchange points.** `FlowExchange` (in `src/distflow.rs`, implemented
+by `RankCtx`) is the whole interface: a field's halo plus its boundary
+evaluation (`field`, `field_vector`), a raw cell buffer's halo with no
+boundary evaluation (`cells`, `cells_vector`), the world's max with NaN
+propagating (`max`, `crate::simple::nan_propagating_max`), the world's OR
+(`any`), one owner's scalar broadcast bit for bit (`owner_value`), and the
+local owned-cell index of a whole-mesh cell (`local_of_global`). The seven
+places `Simple` calls it:
+
+| # | place | what is exchanged / reduced, and why |
+|---|---|---|
+| 1 | `initialise`, and `correct_outer_impl` after `update_mapped_scalar`; the `p` calls after a refreshed cyclic jump, after `backend.solve` (+ level fix), and after `relax_pressure` | `U`'s and `p`'s halos then their boundary evaluation (`bc_u`/`bc_p`): the coupled faces' `bf` must be `w psi_P + (1 - w) psi_ghost` with the neighbour rank's value, or every operator that reads a processor face reads a lie |
+| 2 | `correct_outer_impl`, at its start | no exchange - a refusal: a motion, flow devices or a patch-mean/mapped rule attached since `set_exchange` must not run exchangeless |
+| 3 | after the momentum predictor | `U`'s halo (`bc_u`, a NEW dist-only call): the predictor's coupled faces read the ghost U, so the velocity feeding Rhie-Chow crosses first |
+| 4 | the PISO loop: `rhie_chow_with(.., Some(x))`, and `bc_u` after `correct_flux_and_velocity` | `rau`'s and `hbya`'s halos (`cells`/`cells_vector`) - the face interpolation and `amul` read both at the halo index (the HbyA component copy launches over `n_local` so the ghost component is the neighbour's); then the corrected `U` again |
+| 5 | `pressure_has_a_dirichlet` | the world's OR (`any`): one rank's patches may carry no Dirichlet while another's do, and `initialise` pins on the WORLD's answer |
+| 6 | `fix_pressure_level` | one scalar from one owner (`local_of_global` + the existing `pick_value` + `owner_value`): `reference_cell` is a WHOLE-MESH cell id, the owning rank picks, every rank subtracts the same bits from its owned cells |
+| 7 | `continuity_error` | the world's max (`max`): the worst flux imbalance is the world's, and NaN propagates to every rank |
+| 8 | `assemble_pressure`, the pinned source's mean removal | the world's MEAN (`world_mean`): `assemble_pressure` subtracts "the mean of the whole source" - its own invariant since the singular system first ran - and on a part the whole source's mean is a cross-part quantity. The first version kept the rank-local mean; the gate measured what that does (below), and the shipped seam moves the local sum and the local cell count through a 16-byte record per rank and every rank subtracts the same world mean, bit for bit |
+
+The reductions go through `allgather` of 8 bytes per rank (`f64` bytes, so
+both builds gather the same array) and fold in RANK ORDER, so every rank
+gets identical bits; `owner_value` and `world_mean` move a 16-byte record -
+a little-endian `f64` payload (a flag then the value; a sum then a count) -
+and `owner_value` refuses, AFTER the gather so every rank refuses alike,
+when the number of ranks that passed `Some` is not exactly 1.
+
+**The refusals**, all `Error::Config` starting `distflow: `, checked only
+for `Some`, in order, at `set_exchange` and again at the top of every outer
+corrector for what a driver can attach later:
+
+| refusal | names |
+|---|---|
+| a motion is attached | "moving mesh" |
+| flow devices are attached | "flow devices" |
+| `divScheme` neither `upwind` nor `central` | the scheme with `{:?}`; gradients have no halo on the flow path yet |
+| `snGrad` not `uncorrected` | "snGrad" |
+| variable-viscosity stress on | "variable-viscosity stress" |
+| a patch-mean or mapped rule on `u` or `p` (outer corrector only) | "patch-mean or mapped rule" |
+
+**The gate.** `tests/distflow_simple.rs`, in BOTH builds, plus
+`ofgpu-par -solve simple`: the lid-driven cavity of **Ghia, Ghia & Shin
+(1982), J. Comput. Phys. 48, DOI 10.1016/0021-9991(82)90058-4**, Re =
+`U·L/nu = 1·0.1/1e-3 = 100`, run serial by `cavity_serial` and decomposed
+by `cavity_part` on P = 1 (Linear), 2 and 4 (Hilbert) `ThreadComm` ranks.
+The fixture is `distflow.rs`'s own: the block generator's `cavity` case,
+the controls of `src/simple.rs`'s cavity test at `nu = 1e-3` - central
+convection with bounded convection, uncorrected snGrad - `cavity_bcs`
+writing the four walls by patch name and leaving every `empty` face
+`Empty` and every processor face `Cyclic`, `residualControl
+{ U <CAVITY_U_TOL> }` with `CAVITY_U_TOL` 1e-7 in f64 and 1e-5 under
+`single` - a solver control, not a gate - and the constants FIXED BEFORE
+MEASURING:
+
+| class | constant | bound |
+|---|---|---|
+| R (U, p L_inf rel vs serial; centreline within the serial run's own error plus the tolerance) | `CAVITY_TOL_FIELD`, `CAVITY_TOL_CENTRE` | `1e-6` f64, tol32 `1e-3` under `single` |
+| D (equal iterations on every rank; the iteration count within the band of the serial count) | `CAVITY_ITER_BAND` | `0.02` |
+
+The test `assert_eq!`s the constants to their literals for the build before
+measuring, so nobody loosens them silently. The plan's size is 64 x 64
+(`CAVITY_N`), and `the_full_size_cavity_gate` runs it; on the shared card it
+takes 20-46 min per rank count, over the 10-minute verify budget, so it is
+`#[ignore]`d and run as a deferred item. The verify run,
+`a_decomposed_cavity_converges_to_the_serial_answer`, is the same gate at
+`CAVITY_N_REDUCED` = 32 cells per side: the size is reduced, never a
+constant. `the_cavity_boundary_keeps_the_empty_and_processor_kinds` holds
+the fixture's boundary kinds on a 2-part 8 x 8 cut, and
+`the_decomposed_simple_refuses_by_name` the refusal table and
+`owner_value`'s no-owner refusal.
+
+The inner pressure solve asks what the build's precision delivers on this
+singular system: `1e-10` in 600 iterations in f64, and `1e-6` in 300 under
+`single` (the momentum solve `1e-6` there too), where the float body
+degenerates at deep iteration (below) and §118.4's refinement, not depth,
+carries the accuracy.
+
+**Measured (2026-10-18, RTX 5070 Ti; the card was shared with two other lane
+sessions and a long rigid-body run while these ran, so the wall times are
+inflated and noisy - never the numbers).**
+
+*The verify run, 32 x 32, the shipped fixture.* f64: the serial cavity
+converges in 390 outer iterations (worst U initial residual 9.744e-8,
+continuity 1.244e-16); P = 1, 2, 4 land on 390 on every rank with the same
+`u_residual` bits, U rel 1.363e-12 / 1.938e-12 / 1.450e-12 and p rel
+1.596e-11 / 2.407e-11 / 6.141e-12 against 1e-6, the worst centreline |e|
+0.0032 the serial run's own; 185 s for the file. `single`: serial 236
+iterations (worst U residual 9.788e-6, continuity 2.910e-11); P = 1, 2, 4:
+236 on every rank, U rel 1.320e-7 / 1.979e-7 / 1.979e-7, p rel 3.128e-7 /
+4.480e-7 / 3.226e-7 against 1e-3, centreline 0.0033 the serial run's own;
+152 s. The gate HOLDS in both builds, by five to six orders of magnitude in
+f64 and by three and a half under `single`; the bounds stay where they were
+fixed.
+
+*The full 64 x 64 gate, measured during development with the fixture's
+earlier boundary setup* - which wrote zeroGradient over the `empty` and
+processor faces of `U`, the defect the kinds test now holds against - so
+these numbers describe that fixture, not the shipped one. Central, f64:
+serial 1348 iterations; P = 1, 2, 4: 1348 on every rank, U rel 8.659e-13 /
+1.619e-12 / 3.155e-12, p rel 2.747e-11 / 2.768e-11 / 4.411e-11, worst
+centreline |e| 0.0034 the serial run's own; 700-1320 s per rank count.
+Upwind (a development detour), f64: serial 1367, U rel <= 2.794e-12, p rel
+<= 5.320e-11, centreline 0.0111; up to 2766 s per rank count. Upwind under
+`single`: serial 751, U rel <= 2.510e-7, p rel <= 4.551e-7. The full gate
+with the shipped fixture, in both builds, is a deferred run.
+
+The seam's first version kept `assemble_pressure`'s mean removal
+rank-local, and the gate caught exactly what row 8 predicts: at P = 2
+Hilbert, 64 x 64, the run still "converged" - 1315 iterations against the
+serial 1348 - but to a different answer, U rel 2.666e-2 and p rel 2.786e-3
+against the 1e-6 bound. The shipped `world_mean` replaces it.
+
+Under `single` the serial cavity first died at the f64 ask (1e-10 in 600
+iterations): the float pressure body degenerated at deep iteration - alpha
+over a vanished `(r0, v)` - and NaN reached p, the run refusing at outer 7
+with max |sum_f phi| inf; at tol 1e-6 uncapped it refused at outer 2. That
+is 141.9's raw float floor, and the cure is the one 141.9 shipped: cap the
+float body so it reaches its reachable tolerance (caps 100, 200 and 300
+converged identically, the pressure solves taking ~100 iterations to 1e-6)
+and let 118.4's refinement carry the accuracy. The shipped `single` ask is
+1e-6 in 300 - an input control; no solver numerics changed.
+
+**The cost.** A decomposed outer iteration is latency-bound: every Krylov
+iteration crosses the transport for two halo exchanges and its exact
+reductions, each a host round trip with stream synchronisations (§138.3,
+§138.5), so on this 4096-cell cavity a P = 2 outer iteration costs about
+0.2-1.5 s against the serial run's 0.1 s, depending on what else the card
+runs. That is the measured reason the full gate is deferred; it is a
+property of the in-process transport on one card, not a scaling number
+(PAR-16 measures `L_ex` and `L_ag`).
+
+**What this does not establish.** Gradients have no halo on the flow path
+yet: the limited and `linearUpwind` convection schemes and the
+non-orthogonal correction are refused by name, not run decomposed. PISO
+shares the exchange points above but is not gated here - the gate runs
+`nCorrectors 1`, SIMPLE. Energy and scalar transport decomposed are PAR-11,
+turbulence PAR-12. MPI and multi-GPU are deferred: the ranks are
+`ThreadComm` threads, each with its own `Gpu::new(0)` on one card.
 
 ---
 

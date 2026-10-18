@@ -99,6 +99,7 @@
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::distflow::FlowExchange;
 use crate::error::{Error, Result};
 use crate::field::{BcKind, GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
@@ -426,6 +427,12 @@ pub struct Simple<'m> {
     /// one `match` in [`Self::correct_outer_impl`].
     motion: Option<SimpleMotion>,
 
+    /// SPEC-LIT 139.4 (PAR-10c): the exchange a decomposed run needs, set
+    /// through [`Self::set_exchange`]. `None` - every serial run - and the
+    /// exchange seam picks the launch this module has always made on every
+    /// one of its arms.
+    exchange: Option<Box<dyn FlowExchange + 'm>>,
+
     fvk: FvKernels,
     lduk: LduKernels,
     fldk: FieldKernels,
@@ -474,6 +481,7 @@ impl<'m> Simple<'m> {
             outer_correctors: 0,
             flow_devices: None,
             motion: None,
+            exchange: None,
 
             fvk: FvKernels::new(gpu)?,
             lduk: LduKernels::new(gpu)?,
@@ -666,6 +674,95 @@ impl<'m> Simple<'m> {
         self.momentum.set_route(route)
     }
 
+    /// SPEC-LIT 139.4: set the exchange a decomposed run needs. `None` (the
+    /// default) leaves every serial call launch for launch; a distributed
+    /// driver hands a
+    /// [`RankCtx`](crate::distflow::RankCtx) over, and the loop's halo
+    /// exchanges and global reductions then go through it.
+    ///
+    /// Refusals (`Error::Config`, starting `distflow: `), checked only for
+    /// `Some`, in this order: a motion is attached ("moving mesh"); flow
+    /// devices are attached ("flow devices"); `divScheme` is neither `upwind`
+    /// nor `central` (named with `{:?}` - the limited and linearUpwind
+    /// schemes read a cell GRADIENT at the far cell of a face, and gradients
+    /// have no halo on the flow path yet); `snGrad` is not `uncorrected`;
+    /// variable-viscosity stress is on. A refusing driver keeps its serial
+    /// loop - the exchange is simply not set.
+    pub fn set_exchange(&mut self, x: Option<Box<dyn FlowExchange + 'm>>) -> Result<()> {
+        if x.is_some() {
+            if self.motion.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run on a moving \
+                     mesh - the mesh flux has no exchange yet"
+                        .to_string(),
+                ));
+            }
+            if self.flow_devices.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run with flow \
+                     devices attached - the fan and porous-jump updates have \
+                     no exchange yet"
+                        .to_string(),
+                ));
+            }
+            match self.ctrl.momentum.div_scheme {
+                crate::fv::DivScheme::Upwind | crate::fv::DivScheme::Central => {}
+                other => {
+                    return Err(Error::Config(format!(
+                        "distflow: divScheme {other:?} needs a cell gradient \
+                         at the far cell of a face, and gradients have no \
+                         halo on the flow path yet (PAR-10c); a decomposed \
+                         Simple runs upwind or central convection only"
+                    )));
+                }
+            }
+            if self.ctrl.momentum.sn_grad != crate::fv::SnGradScheme::Uncorrected {
+                return Err(Error::Config(format!(
+                    "distflow: snGrad {:?} adds the non-orthogonal \
+                     correction at the far cell of a face; a decomposed \
+                     Simple runs snGrad uncorrected only",
+                    self.ctrl.momentum.sn_grad
+                )));
+            }
+            if self.ctrl.momentum.variable_viscosity_stress {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run the \
+                     variable-viscosity stress - the stress divergence has \
+                     no exchange yet"
+                        .to_string(),
+                ));
+            }
+        }
+        self.exchange = x;
+        Ok(())
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
+    }
+
+    /// `U`'s halo, then the boundary evaluation - or, serially, exactly the
+    /// `correct_boundary_conditions_vector` call this module always made.
+    fn bc_u(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.field_vector(gpu, &self.fldk, &mut self.u, m),
+            None => {
+                field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)
+            }
+        }
+    }
+
+    /// The same for `p`.
+    fn bc_p(&mut self, gpu: &Gpu) -> Result<()> {
+        let m = self.m;
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.field(gpu, &self.fldk, &mut self.p, m),
+            None => field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m),
+        }
+    }
+
     /// What a turbulence model or a scalar transport equation needs from the
     /// flow: the velocity, the conservative flux, and the molecular viscosity.
     ///
@@ -707,10 +804,8 @@ impl<'m> Simple<'m> {
     /// [`Simple::u_mut`], [`Simple::p_mut`] and [`Simple::phi_mut`], and
     /// before the first [`Simple::correct`].
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
-        let m = self.m;
-
-        field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
-        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+        self.bc_u(gpu)?;
+        self.bc_p(gpu)?;
 
         field_ops::store_old_time_vector(gpu, &self.fldk, &mut self.u)?;
         field_ops::store_old_time(gpu, &self.fldk, &mut self.p)?;
@@ -729,7 +824,11 @@ impl<'m> Simple<'m> {
     /// at all, and a cyclic couple relates two unknowns without pinning
     /// either. Everything else is judged by `fr`, because that is exactly the
     /// coefficient that puts a value into the diagonal (SPEC-LIT §4).
-    fn pressure_has_a_dirichlet(&self, gpu: &Gpu) -> Result<bool> {
+    ///
+    /// SPEC-LIT 139.4: with an exchange the LOCAL answer is only this rank's
+    /// patches, so it goes through `x.any` and the world's answer is what
+    /// [`Self::initialise`] pins on.
+    fn pressure_has_a_dirichlet(&mut self, gpu: &Gpu) -> Result<bool> {
         let nbf = self.m.n_boundary_faces;
         if nbf == 0 {
             return Ok(false);
@@ -738,16 +837,21 @@ impl<'m> Simple<'m> {
         let fr = gpu.download(&self.p.fr)?;
         let kinds = gpu.download(&self.p.bc_kind)?;
 
+        let mut local = false;
         for i in 0..nbf {
             let k = kinds[i];
             if k == BcKind::Empty as Label || k == BcKind::Cyclic as Label {
                 continue;
             }
             if fr[i] > 0.0 {
-                return Ok(true);
+                local = true;
+                break;
             }
         }
-        Ok(false)
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.any(local),
+            None => Ok(local),
+        }
     }
 
     // ---- one iteration ----------------------------------------------------
@@ -884,6 +988,42 @@ impl<'m> Simple<'m> {
             return Ok(SimplePerformance::default());
         }
 
+        // SPEC-LIT 139.4: a decomposed run refuses, on every outer
+        // iteration, what `set_exchange` refused at setup - a driver can
+        // attach a motion or a device, or build a patch-mean or mapped rule,
+        // AFTER setting the exchange, and the loop must not run it
+        // exchangeless.
+        if self.exchange.is_some() {
+            if self.motion.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run on a moving \
+                     mesh - the mesh flux has no exchange yet"
+                        .to_string(),
+                ));
+            }
+            if self.flow_devices.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run with flow \
+                     devices attached - the fan and porous-jump updates have \
+                     no exchange yet"
+                        .to_string(),
+                ));
+            }
+            if !self.u.mean_rules.is_empty()
+                || !self.u.mapped.is_empty()
+                || !self.p.mean_rules.is_empty()
+                || !self.p.mapped.is_empty()
+            {
+                return Err(Error::Config(
+                    "distflow: a decomposed Simple cannot run a patch-mean \
+                     or mapped rule - the rules rewrite their refValue from \
+                     cells that may live on another rank, and the sampler \
+                     has no exchange yet"
+                        .to_string(),
+                ));
+            }
+        }
+
         // Numbered before it runs, so a divergence inside this very iteration
         // reports the iteration it happened in.
         self.outer_correctors += 1;
@@ -927,8 +1067,8 @@ impl<'m> Simple<'m> {
         // per rule the setup built (BcInputs::mapped), nothing without one.
         field_ops::update_mapped_vector(gpu, &self.fldk, &mut self.u, m)?;
         field_ops::update_mapped_scalar(gpu, &self.fldk, &mut self.p, m)?;
-        field_ops::correct_boundary_conditions_vector(gpu, &self.fldk, &mut self.u, m)?;
-        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+        self.bc_u(gpu)?;
+        self.bc_p(gpu)?;
 
         // The velocity's old-time level - in a STEADY run only.
         //
@@ -975,6 +1115,13 @@ impl<'m> Simple<'m> {
             [SolverPerformance::default(); 3]
         };
 
+        // SPEC-LIT 139.4: the predictor's coupled faces read the ghost U at
+        // the halo index, so the velocity a decomposed run is about to feed
+        // Rhie-Chow crosses first. Dist only - a new call, not a moved one.
+        if self.exchange.is_some() {
+            self.bc_u(gpu)?;
+        }
+
         if is_final {
             self.momentum.set_relaxation(alpha_u)?;
         }
@@ -991,7 +1138,13 @@ impl<'m> Simple<'m> {
             // rAU, HbyA, phi_HbyA - and this is the line that makes it PISO:
             // `H` is re-evaluated from the velocity the PREVIOUS corrector
             // produced, with the momentum matrix held frozen (Issa 1986).
-            self.momentum.rhie_chow(gpu, &self.u)?;
+            {
+                let Self { momentum, u, exchange, .. } = self;
+                match exchange.as_deref_mut() {
+                    Some(x) => momentum.rhie_chow_with(gpu, u, Some(x))?,
+                    None => momentum.rhie_chow(gpu, u)?,
+                }
+            }
 
             // SPEC-LIT §52/§53: the fan triples and the porous-jump
             // coefficient division, between `rhie_chow` writing the face
@@ -1020,7 +1173,7 @@ impl<'m> Simple<'m> {
                 }
             };
             if refreshed {
-                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+                self.bc_p(gpu)?;
             }
 
             // The non-orthogonal correctors: the same `phi_HbyA`, the
@@ -1033,7 +1186,7 @@ impl<'m> Simple<'m> {
                 if self.pinned {
                     self.fix_pressure_level(gpu)?;
                 }
-                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+                self.bc_p(gpu)?;
             }
 
             // ---- flux and velocity, from the pressure that satisfies
@@ -1041,6 +1194,12 @@ impl<'m> Simple<'m> {
             self.momentum.update_force(gpu, &self.p, &self.u)?;
             self.momentum
                 .correct_flux_and_velocity(gpu, &mut self.u, &mut self.phi)?;
+
+            // SPEC-LIT 139.4: the corrected velocity crosses before the next
+            // corrector's Rhie-Chow reads it at a halo index. Dist only.
+            if self.exchange.is_some() {
+                self.bc_u(gpu)?;
+            }
         }
 
         // SPEC-LIT 105.7: and again from the corrected flux, so `flow_state()`
@@ -1052,7 +1211,7 @@ impl<'m> Simple<'m> {
         // ---- relax the pressure FIELD, for the next predictor ---------------
         if !is_final {
             self.relax_pressure(gpu)?;
-            field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.p, m)?;
+            self.bc_p(gpu)?;
         }
 
         let continuity_error = if self.ctrl.report_continuity {
@@ -1210,11 +1369,25 @@ impl<'m> Simple<'m> {
         // face has `fr = 0` and `refGrad = 0`), but the order is fixed so the
         // mean removed is the mean of the whole source.
         if self.pinned && n > 0 {
+            // SPEC-LIT 139.4: the mean removed is the mean of the WHOLE
+            // source - the invariant this branch's own comment has always
+            // stated. On a part the local sum and the local cell count
+            // cross the exchange (`FlowExchange::world_mean`) and every
+            // rank subtracts the world's mean, bit for bit.
             let Self { solk, momentum, a_p, sk, .. } = self;
             let ws = momentum.workspace_mut();
             solver::device_sum(gpu, solk, &mut ws.num, &a_p.source, &mut ws.partials, n)?;
-            let scale = 1.0 / n as Scalar;
-            launch_sub_scalar(gpu, &sk.sub_scalar, &mut a_p.source, &ws.num, scale, n)?;
+            match self.exchange.as_deref_mut() {
+                Some(x) => {
+                    let mean = x.world_mean(gpu.download(&ws.num)?[0], n)?;
+                    gpu.write(&mut self.red, &[mean])?;
+                    launch_sub_scalar(gpu, &sk.sub_scalar, &mut a_p.source, &self.red, 1.0, n)?;
+                }
+                None => {
+                    let scale = 1.0 / n as Scalar;
+                    launch_sub_scalar(gpu, &sk.sub_scalar, &mut a_p.source, &ws.num, scale, n)?;
+                }
+            }
         }
 
         ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a_p, m)
@@ -1222,23 +1395,49 @@ impl<'m> Simple<'m> {
 
     /// Subtract the reference cell's value, so a pressure defined only up to a
     /// constant has a definite one.
+    ///
+    /// SPEC-LIT 139.4: with an exchange, `reference_cell` is a WHOLE-MESH
+    /// cell id. The rank that owns it picks the value out of its own part
+    /// (`local_of_global`); `owner_value` then hands that one scalar to every
+    /// rank, bit for bit, and every rank subtracts it from its OWNED cells -
+    /// so the world keeps one level.
     fn fix_pressure_level(&mut self, gpu: &Gpu) -> Result<()> {
         let n = self.m.n_cells;
         if n == 0 {
             return Ok(());
         }
-        let idx = self.reference_cell.min(n - 1) as Label;
 
-        // Read the reference out first. Every thread subtracting `p[ref]`
-        // while one of them writes it is a race.
-        let f = self.sk.pick_value.clone();
-        unsafe {
-            gpu.stream()
-                .launch_builder(&f)
-                .arg(&mut self.red)
-                .arg(&self.p.f)
-                .arg(&idx)
-                .launch(cfg_for(1))?;
+        if let Some(x) = self.exchange.as_deref_mut() {
+            let l = x.local_of_global(self.reference_cell);
+            let mut mine: Option<Scalar> = None;
+            if let Some(li) = l {
+                // Read the reference out first. Every thread subtracting
+                // `p[ref]` while one of them writes it is a race.
+                let idx = li as Label;
+                let f = self.sk.pick_value.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut self.red)
+                        .arg(&self.p.f)
+                        .arg(&idx)
+                        .launch(cfg_for(1))?;
+                }
+                mine = gpu.download(&self.red)?.first().copied();
+            }
+            let v = x.owner_value(mine)?;
+            gpu.write(&mut self.red, &[v])?;
+        } else {
+            let idx = self.reference_cell.min(n - 1) as Label;
+            let f = self.sk.pick_value.clone();
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&f)
+                    .arg(&mut self.red)
+                    .arg(&self.p.f)
+                    .arg(&idx)
+                    .launch(cfg_for(1))?;
+            }
         }
 
         let Self { sk, p, red, .. } = self;
@@ -1296,7 +1495,14 @@ impl<'m> Simple<'m> {
         }
 
         let v = gpu.download(&self.momentum.workspace().den)?;
-        Ok(v.first().copied().unwrap_or(0.0))
+        let local = v.first().copied().unwrap_or(0.0);
+
+        // SPEC-LIT 139.4: the local max is this rank's cells; the world's
+        // worst cell is what a divergence report is about. NaN propagates.
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.max(local),
+            None => Ok(local),
+        }
     }
 }
 
