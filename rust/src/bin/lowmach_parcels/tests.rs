@@ -71,7 +71,7 @@ const EVAP_COUPLING: &str = r#"{ "momentum": "semiImplicit", "energy": "explicit
 /// over the chem box's fluid, every boundary a wall. `chem` carries the
 /// reacting blocks and `coupling` the coupling object, so the steady refusal
 /// can run the same case with neither ahead of the parcels one.
-fn evap_with(run: &str, chem: &str, coupling: &str) -> String {
+pub(crate) fn evap_with(run: &str, chem: &str, coupling: &str) -> String {
     let head = format!(
         r#"{{
   "name": "parcelsEvap",
@@ -115,7 +115,7 @@ fn evap_with(run: &str, chem: &str, coupling: &str) -> String {
     format!("{head}{tail}")
 }
 
-fn evap_case(run: &str) -> String {
+pub(crate) fn evap_case(run: &str) -> String {
     evap_with(run, EVAP_CHEM, EVAP_COUPLING)
 }
 

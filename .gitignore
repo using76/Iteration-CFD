@@ -65,6 +65,9 @@ cases/mech/*
 # TM-4513 thermo file (public domain) are tracked (SPEC-LIT 133.12).
 !cases/mech/bfer2_phi1.ck
 !cases/mech/tm4513_thermo.dat
+# docs/17 DST-15: the authored one-step volatile mechanism of a Phase B dust
+# cloud (SPEC-LIT 159.10), tracked.
+!cases/mech/volatile1.ck
 # The race-car sample is a geometry and a recipe, not a mesh: 52 kB of STL and
 # the two commands that turn it into a 2.1-million-cell run. The mesh and the
 # results it produces are a gigabyte, and they are what the user's own machine

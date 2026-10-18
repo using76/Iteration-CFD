@@ -220,6 +220,17 @@ pub struct Reacting<'m> {
     members: Vec<(String, f64, Vec<(String, u32)>)>,
     /// The mechanism's elements, (name, g/mol), in mechanism order.
     elements: Vec<(String, f64)>,
+    /// SPEC-LIT §159.10 (159.20): the dust cloud's members, as
+    /// `(solved index, owned mdot''' buffer, (137.9) factor)`. Empty for
+    /// every run without one, which then makes exactly the calls it made;
+    /// `set_external_sources` fills it, `before_flow_with` reads it.
+    external: Vec<(usize, DevBuf<Scalar>, Scalar)>,
+    /// SPEC-LIT §159.10 (159.22): the cloud's dilution, as
+    /// `(solved index, owned −Y_i Σ_k ṁ'''_k buffer)`. Empty for every run
+    /// without one, which then makes exactly the calls it made;
+    /// `set_dilution_sources` fills it, `before_flow_with` reads it - onto
+    /// su only, after the molar sum is formed, never into `net`.
+    dilution: Vec<(usize, DevBuf<Scalar>)>,
 }
 
 /// `calculated` for every patch whose type names a value rule, so a field
@@ -353,7 +364,93 @@ impl<'m> Reacting<'m> {
             edc: None,
             members,
             elements,
+            external: Vec::new(),
+            dilution: Vec::new(),
         })
+    }
+
+    /// Take over this step's external species sources - SPEC-LIT §159.10
+    /// (159.20), the dust cloud's four members. Each entry is the solved
+    /// index, the member's `mdot'''` in kg/(m3 s) per cell, and its (137.9)
+    /// factor `(1/W_N)/(1/W_k - 1/W_N)`, the same form one evaporating
+    /// pool's vapour takes. Every buffer is COPIED into owned storage -
+    /// allocated on the first call, a `memcpy_dtod` after - so the caller's
+    /// scratch may be reused the very next step. Refused
+    /// ([`Error::Config`]): a solved index at or above
+    /// [`Species::n_solved`], or a buffer shorter than the run's cells.
+    pub fn set_external_sources(
+        &mut self,
+        gpu: &Gpu,
+        sources: &[(usize, &DevBuf<Scalar>, Scalar)],
+    ) -> Result<()> {
+        let n = self.hrr.n_cells;
+        for (i, (k, buf, factor)) in sources.iter().enumerate() {
+            if *k >= self.species.n_solved() {
+                return Err(Error::Config(format!(
+                    "dust.cloud: external source {i} names solved species {k}, which is \
+                     not below the {} solved members (SPEC-LIT §159.10)",
+                    self.species.n_solved()
+                )));
+            }
+            if buf.len() < n {
+                return Err(Error::Config(format!(
+                    "dust.cloud: external source {i} holds {} values for {n} cells \
+                     (SPEC-LIT §159.10)",
+                    buf.len()
+                )));
+            }
+            if self.external.len() <= i {
+                let owned = gpu.upload(&vec![0.0 as Scalar; n.max(1)])?;
+                self.external.push((*k, owned, *factor));
+            }
+            let (own_k, own, own_f) = &mut self.external[i];
+            gpu.stream().memcpy_dtod(&buf.slice(0..n), &mut own.slice_mut(0..n))?;
+            *own_k = *k;
+            *own_f = *factor;
+        }
+        self.external.truncate(sources.len());
+        Ok(())
+    }
+
+    /// Take over this step's dilution sources - SPEC-LIT §159.10 (159.22),
+    /// the cloud's `−Y_i Σ_k ṁ'''_k` per solved species, with `Y_i` at the
+    /// step's opening. Each entry is the solved index and the per-cell
+    /// dilution in kg/(m3 s). Every buffer is COPIED into owned storage -
+    /// allocated on the first call, a `memcpy_dtod` after - so the caller's
+    /// scratch may be reused the very next step. Refused
+    /// ([`Error::Config`]): a solved index at or above
+    /// [`Species::n_solved`], or a buffer shorter than the run's cells.
+    pub fn set_dilution_sources(
+        &mut self,
+        gpu: &Gpu,
+        sources: &[(usize, &DevBuf<Scalar>)],
+    ) -> Result<()> {
+        let n = self.hrr.n_cells;
+        for (i, (k, buf)) in sources.iter().enumerate() {
+            if *k >= self.species.n_solved() {
+                return Err(Error::Config(format!(
+                    "dust.cloud: dilution source {i} names solved species {k}, which is \
+                     not below the {} solved members (SPEC-LIT §159.10)",
+                    self.species.n_solved()
+                )));
+            }
+            if buf.len() < n {
+                return Err(Error::Config(format!(
+                    "dust.cloud: dilution source {i} holds {} values for {n} cells \
+                     (SPEC-LIT §159.10)",
+                    buf.len()
+                )));
+            }
+            if self.dilution.len() <= i {
+                let owned = gpu.upload(&vec![0.0 as Scalar; n.max(1)])?;
+                self.dilution.push((*k, owned));
+            }
+            let (own_k, own) = &mut self.dilution[i];
+            gpu.stream().memcpy_dtod(&buf.slice(0..n), &mut own.slice_mut(0..n))?;
+            *own_k = *k;
+        }
+        self.dilution.truncate(sources.len());
+        Ok(())
     }
 
     /// The solved members' fields, in [`GasMixture::names`] order.
@@ -633,6 +730,20 @@ impl<'m> Reacting<'m> {
             })?;
             field_ops::add_field(gpu, &self.fk, su, &v.mdot, n)?;
         }
+        // SPEC-LIT §159.10 (159.20): a dust cloud's members go where one
+        // vapour's goes - each `mdot'''` added to its named species'
+        // reaction source, which (133.24)'s net loop below carries into the
+        // constraint. Empty for every run without a cloud: nothing runs.
+        for (k, mdot, _) in &self.external {
+            let su = self.species.reaction_source_mut(*k).ok_or_else(|| {
+                Error::Config(format!(
+                    "dust.cloud: solved species {} has no reaction source for the \
+                     cloud step's mdot''' (SPEC-LIT §159.10)",
+                    k
+                ))
+            })?;
+            field_ops::add_field(gpu, &self.fk, su, mdot, n)?;
+        }
         if let Some(d) = self.edc.as_ref() {
             // SPEC-LIT §134.8: (134.18)'s heat release of the step's mean
             // rate, formed by `chemHeatRelease` inside `step.step`.
@@ -680,6 +791,35 @@ impl<'m> Reacting<'m> {
                     field_ops::add_field(gpu, fk, &mut net[i], vap, n)?;
                 }
             }
+        }
+        // SPEC-LIT §159.10 (159.20): each member's molar source
+        // `S_k,mol = S_k + factor mdot'''`, `factor = (1/W_N)/(1/W_k -
+        // 1/W_N)`, so (133.21)'s molar sum gains `mdot'''/W_k` - the same
+        // three calls the vapour's arm inside the loop makes, after it.
+        // Empty for every run without a cloud: nothing runs.
+        for (k, mdot, factor) in &self.external {
+            field_ops::copy_field(gpu, &self.fk, &mut self.vap, mdot, n)?;
+            field_ops::scale_field(gpu, &self.fk, &mut self.vap, *factor, n)?;
+            field_ops::add_field(gpu, &self.fk, &mut self.net[*k], &self.vap, n)?;
+        }
+        // SPEC-LIT §159.10 (159.22): the dilution the cloud's arriving mass
+        // does to every species already there, `−Y_i Σ_k ṁ'''_k` with `Y_i`
+        // at the step's opening. The species equations run bounded (86.6),
+        // so what they solve is the non-conservative `ρ DY/Dt = S`, whose
+        // source for arriving mass carries (77.1)'s dilution; the
+        // constraint's molar sum (133.21) is a statement about the
+        // conservative sources, so this lands on su AFTER the `net` loop
+        // above has formed the sum, and never reaches `net`. Empty for
+        // every run without a cloud: nothing runs.
+        for (k, dil) in &self.dilution {
+            let su = self.species.reaction_source_mut(*k).ok_or_else(|| {
+                Error::Config(format!(
+                    "dust.cloud: solved species {} has no reaction source for the \
+                     cloud step's dilution (SPEC-LIT §159.10)",
+                    k
+                ))
+            })?;
+            field_ops::add_field(gpu, &self.fk, su, dil, n)?;
         }
         let refs: Vec<&DevBuf<Scalar>> = self.net.iter().collect();
         gas.set_molar_change(gpu, &refs)

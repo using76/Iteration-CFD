@@ -62475,6 +62475,198 @@ oracle to 1e−12. Tests: 4 new in `io::case_dust::tests` (f64) and the same 4 i
 `tests/case_dust.rs` (14 in that file, both builds); `io::case_parcels` and the schema test pass
 unchanged in count.
 
+### 159.10 Phase B in `ofgpu-lowmach` as built (DST-15)
+
+`No GPL-licensed source was consulted.` DST-15 runs the cloud of §159.9 in `ofgpu-lowmach`: the
+seeded parcels walk and feel drag (CHR-26's pool), heat, dry, devolatilise and burn char (DST-12's
+and DST-13's step), and the gas gets their mass, momentum and energy back. Files:
+`src/dust/cloud.rs` (new), `src/bin/lowmach_cloud/` (new), `src/bin/lowmach.rs`,
+`src/bin/lowmach_parcels/mod.rs`, `src/bin/lowmach_chem/mod.rs`, `src/parcels.rs`,
+`src/bin/common/mod.rs`, `src/io/case_json.rs`, `cases/mech/volatile1.ck` (new) and the tests named
+below. The specification was informed by a review of FSCDustFoam (Huang & Lipatnikov, GPL) and no
+code was copied; the equations below are §152's, §159.1-§159.9's, (137.8)-(137.9) and the
+derivations given here.
+
+**Which driver.** `ofgpu-lowmach` is the one driver that runs `dust.cloud`. `common::load_case`
+(and so `ofgpu-par`, `ofgpu-decompose`) and `load_case_vented` (`ofgpu-compressible`) still refuse
+it by name through `LoweredCase::refuse_parcels`, whose first call is `refuse_cloud`. In
+`ofgpu-lowmach` a cloud is refused by name, before a field is set up (key `dust.cloud` unless
+stated): without the `species`, `chemistry` and `combustion` blocks; when any of `VOL`, `O2`, `H2O`,
+`CO2` is not a solved species; with `combustion.model` other than `laminar` (key
+`combustion.model`); beside a `parcels` block (one pool per run); beside a `radiation` block
+(DST-18 couples it); in a steady run; with a ddt other than Euler; with a checkpoint or restart;
+with a motion block or `-rigidBody`.
+
+**The volatile pseudo-species** **[derived from (152.4)-(152.5) and (152.7)]**. The volatile matter
+is the dust's own fuel formula of §152.1 (corn starch, `C6H7.88O4.98`) as one gas species `VOL`. A
+CHEMKIN thermo record holds integer element counts (§128.2), so `VOL` is that formula times 50:
+
+```
+  VOL = C300 H394 O249 ;   b1 = 50 a0 ,  b2 = 50 a1 ,  b3 = b4 = b5 = 0 ,  b6 = 50 a5 ,  b7 = 0
+  one range on both intervals, 200 / 1000 / 6000 K ;   a5 of §152.2 (from H_f,cs, not the print)  (159.16)
+```
+
+Per kilogram it is the starch's record (152.4)-(152.5) exactly: the molar mass and the per-mole
+coefficients scale by the same 50. No equilibrium uses it, so b7 = 0 as in §152.4. A dust with
+another volatile needs its own record, authored the same way.
+
+**The one-step volatile reaction** (`cases/mech/volatile1.ck`; plan decision DD11). The complete
+oxidation of (152.1) times 50, irreversible, first order in each reactant (CHEMKIN `FORD`):
+
+```
+  VOL + 274 O2  =>  300 CO2 + 197 H2O ,     k = A exp(−E/(R0 T)) [VOL] [O2]
+  A = 1.0E14 cm3/(mol s) ,   E = 30 000 cal/mol                                                  (159.17)
+```
+
+**The rate is authored and uncalibrated.** No open source gives corn-starch volatile kinetics
+(§151.8; the same gap that leaves DST-16 (iii) NAMED and NOT RUN). The numbers were chosen so that
+at 1500 K and one atmosphere of air the volatile's life, `1/(k [O2])` ≈ 0.14 ms, is short against
+the devolatilisation of §159.2's test inputs, and the rate is negligible at room temperature. No gate
+depends on them: the box's end state is the AICC whatever the rate, and DST-16/17 compare the cloud
+with the gas flame of the same mechanism in the fine-particle limit.
+
+**The particle's enthalpy** **[derived]**. Each stage of a particle carries a constant datum, so a
+particle's enthalpy is a function of its stored state alone:
+
+```
+  E_p = m C_p (T_p − T°) + m_w h°_w + m_v h°_v + m_c h°_c + m_a h°_a ,     T° = 298.15 K
+  h°_w = h_H2O(T°)/W_H2O − h_v(T°) ,   h°_v = h_VOL(T°)/W_VOL − ΔH_devol ,   h°_c = h°_a = 0        (159.18)
+```
+
+h_k is the mechanism's record in J/mol and W_k its molar mass; h_v is §159.7's Watson latent heat
+(the water `Drying` of the cloud); ΔH_devol is the cloud's `devolatilisation.dH` (0 without one).
+h°_c = 0 is graphite's reference state; ash is inert.
+
+**The gather** **[derived]**. Every step, after DST-12's kernel, each parcel's state before the step
+and after it (the stored `Scalar` words, widened to f64) give its cell P, in slot order, in f64:
+
+```
+  ΔM_H2O,P = Σ n_p (m_w − m_w') ,   ΔM_VOL,P = Σ n_p (m_v − m_v')
+  ΔM_CO2,P = Σ n_p (m_c − m_c') W_CO2/W_C ,   ΔM_O2,P = − Σ n_p (m_c − m_c') W_O2/W_C
+  ΔE_P = Σ n_p ( E_p − E_p' )                                                                     (159.19)
+```
+
+with the mechanism's own molar masses, `W_C` the element table's carbon and `W_CO2 = W_C + W_O2`,
+so carbon and oxygen balance by construction as (159.11) does for the particle. Every term is a
+difference of stored words, so the gas's gains over a run telescope to the cloud's losses, as
+(77.4)-(77.5) do for a vapour.
+
+**The sources** **[derived]**:
+
+```
+  ṁ'''_k,P = ΔM_k,P / (V_P Δt) ,    k ∈ {VOL, H2O, CO2, O2}
+  q_P = [ ΔE_P − Σ_k ΔM_k,P h_k(T_P)/W_k ] / (V_P Δt)                                               (159.20)
+```
+
+ṁ'''_k enters the mass-weighted species equation's reaction source and the constraint's molar sum
+exactly as (137.8)-(137.9) put one vapour there, with each member's own factor
+`(1/W_N)/(1/W_k − 1/W_N)`. q enters §18's registry, explicit, every outer iteration. T_P is the gas
+temperature at the step's opening. Why q is the temperature equation's source: with
+`ρ h = Σ_k ρ Y_k h_k(T)/W_k`, `d(ρ h) = ρ c_p dT + Σ_k (h_k/W_k) d(ρ Y_k)`, so a cell that gains the
+enthalpy ΔE and the species masses ΔM_k gains `ΔE − Σ_k ΔM_k h_k(T)/W_k` in `ρ c_p dT`. (77.2) is this
+with one vapour and one constant c_p. The char's reaction heat h_c (§159.8) heats the particle by
+`h_s Δm h_c` in its own budget; the gas side is whatever ΔE_P leaves after the species' enthalpies,
+so the heat the box releases is the mechanism records' formation enthalpies (the CO2 record's
+−393.5 kJ/mol is 32.8 MJ per kg of carbon, against h_c = 32.9 MJ/kg), which is what makes the box
+end on the AICC of the same records. Without a radiation block a parcel sees `G = 4 σ_SB T_P⁴`, an
+enclosure at its cell's gas temperature, and its net exchange is the gas's, inside ΔE_P; DST-18
+puts P1's G there.
+
+**The dilution** **[derived from (77.1), (86.4) and (86.6)]**. The species equations run with
+§19's bounded convection (the default of `species_controls`). On the mass-weighted equation (86.1)
+the bounded correction subtracts `Y_P R_P`, and the `ddt` half of R_P is the cell's whole density
+change, the mass the cloud adds included; what is solved is therefore the non-conservative
+`ρ DY/Dt = S`, whose source for arriving mass is (77.1)'s, with the dilution the arriving mass does
+to every species already there. Each solved species i (a member or not) gets
+
+```
+  su_i += ṁ'''_i − Y_i,P Σ_k ṁ'''_k          (ṁ'''_i = 0 for a solved species that is not a member)   (159.22)
+```
+
+with Y_i,P at the step's opening; the inert's share, `−Y_N Σ_k ṁ'''_k`, follows from its closure
+`1 − Σ Y`. The constraint's molar sum (133.21) is a statement about the conservative sources, so it
+reads ṁ'''_k and (137.9)'s factor term only: the dilution is added to su after the molar sum is
+formed. A cloud beside an unbounded species convection is refused by name (key `numerics.div`).
+**Measured without it** (the box of the gates, f64, dt 1e−4, so recorded): O2 ended 2.5e−9 kg
+(6.3 %) above complete conversion, the inert N2 1.36 % below its start although nothing feeds it,
+and the carbon 1.9 % above what the cloud released, the same within 0.1 % at dt 2e−4 and 5e−5, while
+(159.19)'s ledger closed to 6e−16: the O2 excess is `∫ Y_O2 Σ ṁ dt` ≈ 0.2 × 1.14e−8 kg, the
+dilution the bare (137.8) form leaves out.
+
+**The host AICC of the cloud** **[derived from (152.11)]**. Per cubic metre: the initial gas ρ_k0
+(kg/m3) at T_0 with `p_0 = R0 T_0 Σ_k ρ_k0/W_k`, and the cloud's concentration C with the fractions
+(f_w, f_v, f_c, f_a), all at T_0. Complete conversion: the moisture becomes H2O, `n_v = C f_v/W_VOL`
+moles of VOL (counts n_C, n_H, n_O) become CO2 and H2O, the char becomes CO2, the ash stays:
+
+```
+  U_0 = Σ_k ρ_k0 h_k(T_0)/W_k − p_0 + C [ C_p (T_0 − T°) + f_w h°_w + f_v h°_v + f_c h°_c + f_a h°_a ]
+  ρ_H2O,e = ρ_H2O,0 + C f_w + n_v (n_H/2) W_H2O ,     ρ_VOL,e = 0
+  ρ_CO2,e = ρ_CO2,0 + n_v n_C W_CO2 + C f_c W_CO2/W_C
+  ρ_O2,e  = ρ_O2,0 − n_v (n_C + n_H/4 − n_O/2) W_O2 − C f_c W_O2/W_C
+  U_e(T) = Σ_k ρ_k,e h_k(T)/W_k − R0 T Σ_k ρ_k,e/W_k + C f_a C_p (T − T°)
+  U_e(T_v) = U_0 ,      p_v = R0 T_v Σ_k ρ_k,e/W_k                                                   (159.21)
+```
+
+ρ_O2,e < 0 is refused by name (a rich cloud has no complete conversion). The particles' own volume
+is neglected, here and in the driver. h_k and W_k are the case's mechanism records: the TM-4513
+records of DST-01's thermo (`cases/mech/tm4513_thermo.dat`) and (159.16)'s VOL.
+
+**Decisions taken by recommendation** (plan section 10, recorded here). The pool walks with
+Schiller-Naumann drag, `physics` inert (the dust step owns the heat and the mass), walls rebound with
+restitution 1, momentum coupling explicit, and `rho_liquid = rhoP`: the drag sees the seeded
+density, while the diameter follows the char's shrinkage (copied to the pool every step). The
+particles' gas constants (§159.9's `CloudGas`): `μ = ν ρ_0`, `k_g = μ c_p,g/Pr`, c_p,g the initial
+mixture's at T_0, c_p of the volatile VOL's record at T_0, and the drying pressure the initial p0,
+with ρ_0 the initial density of cell 0. `p_O2 = X_O2 p0`. The gather runs on the host every step
+(the state is downloaded, gathered in f64 and the sources uploaded); a device gather is later work.
+Forced ignition of the box is its initial temperature: the whole box, gas and cloud, starts at T_0.
+
+**Gates** (`lowmach_cloud::tests` of `ofgpu-lowmach`, both builds; the plan's `lowmach::tests` path,
+the tree's module), on the closed adiabatic box: a 1 cm cube of 2×2×2 cells, every patch an
+adiabatic wall, `-sealed`, at rest, air (`O2` 0.233, `N2` the inert) at T_0 = 1500 K and 101 325 Pa,
+and a cloud of C = 0.012 kg/m3, d = 10 µm, K = 2, composition {0.05, 0.75, 0.15, 0.05},
+ρ_p = 1500, C_p = 1500, ε_0 = 0.9, devolatilisation {A 1.5e5 1/s, Ea 7.4e4 J/mol, dH 1e5 J/kg},
+char {C0 5e−12, A 2e−3, Ea 7.9e4, hs 0.3}. These particle inputs are authored test inputs, not a
+dust's measured kinetics (§151.8), and were not tuned.
+
+* `dust_b_box_conserves` (A, 1e−10 relative): the mass `M = Σ ρ V + Σ n_p m_p`, each element
+  C, H, O, N of the gas plus the particles' moisture, volatile and char, and the energy
+  `U = Σ_c ρ_c V_c Σ_k Y_k h_k(T_c)/W_k − p0 V + Σ n_p E_p`, its drift over the run divided by
+  `|U_gas(0)| + Σ n_p |E_p(0)|`.
+* `dust_b_box_ends_at_aicc` (P, 0.5 %): the end p0 against p_v of (159.21), the cloud converted.
+* `dust_b_momentum_balance` (A, 1e−12; 1e−5 under `single`, CHR-26's row): the same box at 300 K
+  with gravity: the momentum the gas was given by the last step equals what the live parcels lost.
+* `no_cloud_no_change` (D): CHR-26's reacting, evaporating case writes the same final state, bit
+  for bit, as the tree before DST-15 (FNV-1a 64 pins per build).
+* `dust_b_case_equals_library` (D): the driver's cloud step against the library pieces called by
+  hand on frozen gas fields: particle state and sources bit for bit.
+
+**Measured** (RTX 5070 Ti, 2026-10-19; `lowmach_cloud::tests`, 7 in each build; `dust::cloud::tests`
+and `tests/dust_cloud.rs`, 6 in each build). The host AICC of the box is t_v = 2297.51 K and
+p_v = 160 635.1 Pa (p_v/p_0 = 1.58535); (159.21)'s U_e(t_v) is within 1.6e−16 of U_0 and its end
+elements within 1.5e−16 of the gas plus the cloud. After 500 steps the cloud is converted (no
+volatile or char left, Y_VOL below 1e−140) and **`dust_b_box_ends_at_aicc` holds**: p0 ends at
+161 093.9 Pa, 0.286 % above p_v in both builds (bar 0.5 %), the mean T at 2301.8 K. The two ledgers
+of (159.19) close to round-off (mass 0 and 4.4e−16, energy 5.9e−16 and 9.8e−16 in f64 and `single`).
+**`dust_b_box_conserves`'s six rows are MISSED** (bar 1e−10), in f64 and `single` alike: mass
+9.60e−4, C 7.92e−4, H 6.2e−5, O 9.32e−4, N 1.03e−3, energy 4.71e−3. The cause is measured: the
+sealed reacting driver's first-order time error, not the coupling. Over the same 0.05 s the mass row
+is 1.72e−3, 9.60e−4, 5.03e−4 and 2.87e−4 at dt 2e−4, 1e−4, 5e−5 and 2.5e−5, and the energy row
+8.03e−3, 4.71e−3, 2.66e−3 and 1.51e−3. The pieces are (133.22)'s explicit sealed p0 against the
+EOS density, which the inert N2 closure absorbs; the step-opening Y of (159.22); and the
+temperature form. The gas holds 2.4e−10 kg more than the cloud gave it at dt 1e−4. A cure would be
+a mass-conserving sealed p0 or outer correctors per step. Either changes the driver's numerics, so
+it is the user's decision. The test asserts that only these six rows miss, that both ledgers close,
+and that mass, N and energy fall from dt 2e−4 to 1e−4 (ratios 1.79, 1.79 and 1.70).
+`dust_b_momentum_balance`: defect/lost 4.2e−16 (f64) and 0 (`single`) over 20 steps.
+`no_cloud_no_change`: CHR-26's case writes 9783 bytes with FNV-1a 0xa237c787a84d0c04 (f64) and 4919
+bytes with 0x306b867c219387f8 (`single`), the pre-DST-15 pins.
+`dust_b_case_equals_library`: 0 of 400 state words, 0 of 200 source words and 0 of 160 dilution
+words differ over 5 steps, in both builds. `dust_b_members_enter_the_constraint`: (137.8) is exact
+on all four members, and (137.9) moves the target divergence within 4.2e−16 (f64) and 1.3e−7
+(`single`) of `Σ_k R T ṁ_k/(p0 W_k)`. Before the fix of the molar loop, which added ṁ instead of
+the factor term, it missed at 2.08.
+
 ---
 
 ## 160. The flame-age option and the studio surface

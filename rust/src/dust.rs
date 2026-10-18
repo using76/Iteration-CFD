@@ -47,6 +47,7 @@
 
 pub mod age;
 pub mod char;
+pub mod cloud;
 pub mod courant;
 pub mod device;
 pub mod fsc;

@@ -31,7 +31,7 @@ use ofgpu::io::case_parcels::LoweredParcels;
 use ofgpu::momentum::MomentumSources;
 use ofgpu::parcels::couple::{live_parcel_impulse, ParcelCoupling};
 use ofgpu::parcels::deposit::ParcelDeposition;
-use ofgpu::parcels::{ParcelPhysics, ParcelStats, Parcels};
+use ofgpu::parcels::{ParcelPhysics, ParcelStats, Parcels, SeedParcel};
 use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar, Vec3};
 
 use crate::lowmach_chem::VapourSource;
@@ -141,6 +141,12 @@ pub struct CaseParcels<'m> {
     cp: ParcelCoupling<'m>,
     vapour: Option<(usize, Scalar)>,
     steps: usize,
+    /// SPEC-LIT §159.10: a dust cloud's (159.20) temperature-equation source
+    /// `q`, W/m3, one buffer per cell, handed in by `enable_cloud_energy`
+    /// and registered on every outer iteration's freshly cleared registry
+    /// beside this step's (68.9). `None` for every case without a cloud,
+    /// which registers exactly what it always registered.
+    cloud_q: Option<DevBuf<Scalar>>,
 }
 
 impl<'m> CaseParcels<'m> {
@@ -168,7 +174,34 @@ impl<'m> CaseParcels<'m> {
         let parcels = Parcels::new(gpu, hm, m, lp.controls.clone(), &lp.injectors, dt)?;
         let dep = ParcelDeposition::new(gpu, &parcels)?;
         let cp = ParcelCoupling::new(gpu, &parcels, lp.coupling)?;
-        Ok(Self { parcels, dep, cp, vapour, steps: 0 })
+        Ok(Self { parcels, dep, cp, vapour, steps: 0, cloud_q: None })
+    }
+
+    /// Place parcels directly, at setup, with no injector - the seeding
+    /// route [`Parcels::seed`] owns, through to the cloud's driver (SPEC-LIT
+    /// §159.10) and every verification case.
+    pub fn seed(&mut self, gpu: &Gpu, hm: &HostMesh, seeds: &[SeedParcel]) -> Result<()> {
+        self.parcels.seed(gpu, hm, seeds)
+    }
+
+    /// The pool, mutable - the dust cloud's step copies the shrunken char
+    /// diameters into it once per step (`Parcels::set_diameters`, SPEC-LIT
+    /// §159.10).
+    pub fn parcels_mut(&mut self) -> &mut Parcels<'m> {
+        &mut self.parcels
+    }
+
+    /// Allocate the cloud's per-cell temperature-equation source, zeroed.
+    /// Setup only; a case without a cloud never calls it and never carries
+    /// the buffer.
+    pub fn enable_cloud_energy(&mut self, gpu: &Gpu, n: usize) -> Result<()> {
+        self.cloud_q = Some(gpu.upload(&vec![0.0 as Scalar; n.max(1)])?);
+        Ok(())
+    }
+
+    /// The cloud's source buffer, for the step to overwrite.
+    pub fn cloud_energy_mut(&mut self) -> Option<&mut DevBuf<Scalar>> {
+        self.cloud_q.as_mut()
     }
 
     /// The vapour's solved-species index, when the mass coupling is on.
@@ -239,7 +272,15 @@ impl<'m> CaseParcels<'m> {
             self.cp.register_energy(gpu, s)
         } else {
             Ok(())
+        }?;
+        // SPEC-LIT §159.10 (159.20): a dust cloud's q, explicit, every outer
+        // iteration - the step overwrote it once per time step. Beside the
+        // branch above, never instead of it; `None` registers nothing and
+        // the run makes exactly the calls it made.
+        if let Some(q) = &self.cloud_q {
+            s.register_explicit(gpu, q)?;
         }
+        Ok(())
     }
 
     /// The vapour source for the reacting step, from this step's `mdot'''`
@@ -289,7 +330,7 @@ impl<'m> CaseParcels<'m> {
         let gained = self.cp.total_impulse(gpu)?;
         let lost = live_parcel_impulse(&self.parcels.snapshot(gpu)?);
         let stats = self.parcels.stats(gpu)?;
-        Ok(ParcelsEnd { steps: self.steps, stats, gained, lost })
+        Ok(ParcelsEnd { steps: self.steps, stats, gained, lost, cloud: None })
     }
 
     /// The pool, for the tests.
@@ -323,7 +364,13 @@ pub struct ParcelsEnd {
     pub gained: Vec3,
     /// What the live parcels lost, N s - `live_parcel_impulse`.
     pub lost: Vec3,
+    /// SPEC-LIT §159.10: the run's dust cloud - its ledgers, its seeded and
+    /// final particle states and its last step's (159.20) sources. `None`
+    /// for every case without one; the cloud's driver fills it after this
+    /// struct is built.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub cloud: Option<crate::lowmach_cloud::CloudEnd>,
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -2151,6 +2151,33 @@ impl<'m> Parcels<'m> {
         })
     }
 
+    /// Copy `d[0..n]` over the pool's own diameters `d[0..n]`, device to
+    /// device. SPEC-LIT §159.10: the dust cloud's step shrinks the char
+    /// particle every step, and the pool's drag of the NEXT step reads the
+    /// pool's diameter - so the cloud's driver hands the shrunken one over
+    /// once per step, and this is that handoff. Setup-and-step: a
+    /// `memcpy_dtod` only, no host word is written and no capture is
+    /// disturbed. Refused (Error::Config): `n` above the pool's capacity,
+    /// or a source shorter than `n`.
+    pub fn set_diameters(&mut self, gpu: &Gpu, d: &DevBuf<Scalar>, n: usize) -> Result<()> {
+        if n > self.ctrl.capacity {
+            return Err(Error::Config(format!(
+                "parcels: set_diameters was handed {} diameters but the pool's \
+                 capacity is {}",
+                n, self.ctrl.capacity
+            )));
+        }
+        if d.len() < n {
+            return Err(Error::Config(format!(
+                "parcels: set_diameters needs {} diameters, its source holds {}",
+                n,
+                d.len()
+            )));
+        }
+        gpu.stream().memcpy_dtod(&d.slice(0..n), &mut self.d.slice_mut(0..n))?;
+        Ok(())
+    }
+
     /// Write the live parcels as a VTK PolyData (`.vtp`) file - SPEC-LIT
     /// S66.13. Without this a spray cannot be debugged at all.
     pub fn write_vtp(&self, gpu: &Gpu, path: &Path, time: Option<Scalar>) -> Result<()> {

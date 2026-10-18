@@ -1014,7 +1014,8 @@ fn cloud_refusals() {
             .to_string();
         assert!(e.contains("bogusKey"), "{e}");
     }
-    // A cloud case lowers, and no driver runs it before DST-15.
+    // A cloud case lowers, and ofgpu-lowmach is the one driver that runs
+    // Phase B (SPEC-LIT §159.10).
     let l = lowers(&dust_case("300", "", CLOUD)).expect("the cloud case lowers");
     let e = l.refuse_parcels().expect_err("the cloud case is refused");
     assert!(e.to_string().contains("dust.cloud"), "{e}");

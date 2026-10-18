@@ -125,10 +125,9 @@ fn load_case_inner(
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
-        // SPEC-LIT §159.9: a dust cloud is refused by every driver, the one
-        // that runs a case's parcels included (no driver runs it before
-        // DST-15).
-        lowered.refuse_cloud()?;
+        // SPEC-LIT §159.10: a dust cloud is run by ofgpu-lowmach alone
+        // (`allow_chemistry`); every other loader refuses it below through
+        // `refuse_parcels`, whose first call is `refuse_cloud`.
         // SPEC-LIT §137.6/§137.10: parcels are run by ofgpu-lowmach only (the
         // same flag).
         // SPEC-LIT §137.7: a case's chemistry is refused by every driver but

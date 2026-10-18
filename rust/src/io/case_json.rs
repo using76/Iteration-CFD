@@ -1842,9 +1842,10 @@ pub struct LoweredCase {
     /// not a dust one - then [`Self::chem`] is exactly what it always was.
     pub dust: Option<crate::io::case_dust::LoweredDust>,
     /// SPEC-LIT §159.9: the `dust.cloud` block, lowered onto the cloud's
-    /// config (DST-14). `None` for every case without the block. No driver
-    /// runs it before DST-15, so [`Self::refuse_cloud`] refuses a case that
-    /// states one, in every driver.
+    /// config (DST-14). `None` for every case without the block.
+    /// `ofgpu-lowmach` is the one driver that runs Phase B (SPEC-LIT
+    /// §159.10); every other one refuses a case that states it, through
+    /// [`Self::refuse_cloud`].
     pub cloud: Option<crate::io::case_dust::LoweredCloud>,
     /// SPEC-LIT §158.8: the `vent` block, lowered onto the one-domain vent's
     /// spec. `None` for every case without the block.
@@ -1916,15 +1917,15 @@ impl LoweredCase {
         }
     }
 
-    /// SPEC-LIT §159.9: every driver's refusal of a case that states a dust
-    /// cloud - `ofgpu-lowmach`, which runs a case's parcels, included: no
-    /// driver runs Phase B before DST-15, so a run would ignore the cloud.
-    /// `Ok` for every case without the block.
+    /// SPEC-LIT §159.10: a driver's refusal of a case that states a dust
+    /// cloud. `ofgpu-lowmach` is the one driver that runs Phase B (SPEC-LIT
+    /// §159.10); a run of any other driver would ignore the cloud, so it
+    /// refuses the case instead. `Ok` for every case without the block.
     pub fn refuse_cloud(&self) -> Result<()> {
         if self.cloud.is_some() {
             return Err(Error::Refused(
-                "dust.cloud: this case states a dust cloud; no driver runs Phase B before \
-                 DST-15 (SPEC-LIT §159.9)"
+                "dust.cloud: this case states a dust cloud; ofgpu-lowmach is the one \
+                 driver that runs Phase B (SPEC-LIT §159.10)"
                     .into(),
             ));
         }

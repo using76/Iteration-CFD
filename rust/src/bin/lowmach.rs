@@ -238,6 +238,9 @@ use lowmach_rad::CaseRadiation;
 #[path = "lowmach_parcels/mod.rs"]
 mod lowmach_parcels;
 
+#[path = "lowmach_cloud/mod.rs"]
+mod lowmach_cloud;
+
 #[path = "lowmach_dust/mod.rs"]
 mod lowmach_dust;
 use lowmach_dust::DustStep;
@@ -2320,6 +2323,47 @@ fn run(o: &Options) -> Result<RunEnd> {
         )?;
     }
 
+    // SPEC-LIT §159.10 (DST-15): a dust cloud, refused by name where this
+    // driver cannot honour it, still before a field is set up - the same
+    // shape the two refusals above read, and the parcels and radiation
+    // presence the case states.
+    let cloud_case: Option<ofgpu::io::case_dust::LoweredCloud> =
+        lowered.as_ref().and_then(|l| l.cloud.clone());
+    if cloud_case.is_some() {
+        let solved: Vec<String> = chem_case
+            .as_ref()
+            .map(|c| {
+                c.species
+                    .names
+                    .iter()
+                    .filter(|n| **n != c.species.inert)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        lowmach_cloud::refuse_settings(&lowmach_cloud::CloudRunShape {
+            transient,
+            ddt: ctrls.energy.ddt,
+            restart: o.restart_from.is_some()
+                || o.restart_write.is_some()
+                || output_plan.as_ref().is_some_and(|p| p.restart.is_some()),
+            motion: lowered.as_ref().is_some_and(|l| l.motion.is_some()) || o.rigid_body.is_some(),
+            parcels: parcels_case.is_some(),
+            radiation: lowered.as_ref().is_some_and(|l| l.radiation.is_some()),
+            combustion: chem_case.as_ref().map(|c| &c.combustion),
+            species: chem_case.as_ref().map(|_| solved.as_slice()),
+            // SPEC-LIT §159.10 (159.22): the cloud's dilution is the
+            // bounded species equation's, so the flag of the convection
+            // this run will use goes with the shape. `true` without the
+            // chemistry blocks: the first refusal names those already.
+            species_bounded: if chem_case.is_some() {
+                species_controls(&CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?, &cc.turb)?.1.bounded
+            } else {
+                true
+            },
+        })?;
+    }
+
     // SPEC-LIT §157.4 (DST-06): a dust case, refused by name where this
     // driver cannot honour it, before a field is set up - the same shape the
     // chemistry refusal above reads. (`ofgpu-par` and `ofgpu-decompose` load
@@ -2850,6 +2894,42 @@ fn run(o: &Options) -> Result<RunEnd> {
         None => None,
     };
 
+    // SPEC-LIT §159.10 (DST-15): the case's dust cloud, Phase B - it seeds
+    // the pool above (no injector), walks in it, and hands the gas its
+    // sources from here to the end of the run. The reacting case is not
+    // `None` here: the cloud refusal above demanded the species, chemistry
+    // and combustion blocks, and the chemistry blocks build `reacting`.
+    let mut cloud: Option<lowmach_cloud::CaseCloud> = None;
+    if let Some(lc) = &cloud_case {
+        let r = reacting
+            .as_ref()
+            .ok_or_else(|| Error::Config("dust.cloud: the case has no reacting step".into()))?;
+        let base = o.case_path.parent().unwrap_or_else(|| Path::new("."));
+        let mech = chem_case
+            .as_ref()
+            .expect("the cloud refusal demanded the chemistry blocks")
+            .load(base)?;
+        let c = lowmach_cloud::CaseCloud::new(
+            &gpu,
+            &hm,
+            lc,
+            r,
+            &mech,
+            &gas,
+            energy.field(),
+            f64::from(cc.nu),
+            f64::from(gas_props.pr),
+        )?;
+        let lp = c.pool_block(cc.buoyancy.g);
+        let mut pc = lowmach_parcels::CaseParcels::new(&gpu, &hm, &mesh, &lp, dt, None)?;
+        pc.seed(&gpu, &hm, &c.seeds())?;
+        pc.enable_cloud_energy(&gpu, hm.n_cells)?;
+        println!("{}", pc.describe());
+        println!("{}", c.describe());
+        parcels = Some(pc);
+        cloud = Some(c);
+    }
+
     // ---- volumetric sources (SPEC-LIT §18, §31.1) -------------------------
     //
     // Two routes into the SAME registry: a JSONC case's own `sources[]`
@@ -3284,6 +3364,13 @@ fn run(o: &Options) -> Result<RunEnd> {
             pc.step(&gpu, s.u(), &gas.rho().f, &energy.field().f, yv, dt)?;
             pc.register_momentum(&gpu, s.momentum_mut().field_sources_mut())?;
         }
+        // SPEC-LIT §159.10: the cloud's step, after the pool walk it seeded
+        // and the momentum that walk registered - the sources the outer
+        // iteration below reads are this step's.
+        if let (Some(cl), Some(pc), Some(r)) = (cloud.as_mut(), parcels.as_mut(), reacting.as_mut())
+        {
+            cl.step(&gpu, pc, s.u(), &gas, energy.field(), r, dt)?;
+        }
 
         let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
         // SPEC-LIT §17/§30.2: `g`/`Prt` feed `G_b`; `self.buoy` (built once
@@ -3525,7 +3612,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     }
     // SPEC-LIT §137.10: the parcels' last step - (68.4)'s two sides on the
     // host, one line for the report.
-    let parcels_end = match parcels.as_mut() {
+    let mut parcels_end = match parcels.as_mut() {
         Some(pc) => {
             let end = pc.finish(&gpu)?;
             println!(
@@ -3542,6 +3629,11 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
         None => None,
     };
+    // SPEC-LIT §159.10: the cloud's own report rides the parcels' end - the
+    // ledgers of (159.19), the seeded and final states, the last (159.20).
+    if let (Some(end), Some(cl)) = (parcels_end.as_mut(), cloud.as_ref()) {
+        end.cloud = Some(cl.end());
+    }
     // Gate 68-B's readout, full precision, test builds only - it feeds no
     // output.
     let final_flow = if cfg!(test) {

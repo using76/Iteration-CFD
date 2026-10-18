@@ -75,3 +75,13 @@ M. Frenklach, `http://www.me.berkeley.edu/drm/`.
 the pair tabled above — as its `chemistry` block. The paths are relative to
 the run copy, so the user places both files in that copy's `mech/` before
 running; the repository itself carries neither, for the reason above.
+
+## volatile1.ck (DST-15)
+
+`volatile1.ck` is the one-step volatile mechanism of a Phase B dust cloud (SPEC-LIT 159.10). Its
+species VOL is the corn-starch formula of SPEC-LIT 152.1 times 50 (C300 H394 O249), with the
+starch's NASA-7 record times 50 (Huang, Bloching & Lipatnikov 2022, eqs. (1)-(2), Table 1). The
+reaction `VOL + 274 O2 => 300 CO2 + 197 H2O` and its rate (A = 1.0E14 cm3/(mol s), E = 30 000
+cal/mol, first order in VOL and O2) are **authored and uncalibrated**: no open source gives the
+kinetics of corn-starch volatiles (SPEC-LIT 151.8). Use it with `tm4513_thermo.dat`, which holds
+the other four species.
