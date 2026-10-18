@@ -34813,97 +34813,286 @@ rewrites it, and passes alone. Each binary's suite takes at most 208 s (`ofgpu-l
 
 ### 112.4 `ofgpu-validate` at f32, section by section
 
-`target/single/release/ofgpu-validate.exe -json …`, 2026-09-24 05:56, 3.5 s, exit 2:
+This table replaces the run of 2026-09-24. That run aborted at section 8's first conduction case, with the anisotropy
+residual `0.00000011920926` at internal face 376 against its limit `0.0000000001`. Its verdict words read an error
+below `1e-5`, about 84 f32 ulps at 1, as right to single precision, and that is the cap D-F32-1 took in (118.14.1).
+Two changes since then let every section run and report. §118.3 moved that guard's measurement into f64. §118.14's
+`Checks::ran` turns a section that stops under `single` into one failed row. docs/17's F32-18 row asks for "the measured 51-section table". The tree has **81**
+sections: main's 1-79, then DST-LEEDS (80) and DST-VES (81). The table has a row for each.
 
-```
-validation aborted: conduction: the anisotropy residual |E - Dhat n (n.d)|/(Dhat |d|) is
-0.00000011920926 at internal face 376, limit 0.0000000001
-```
+**How it was measured** (2026-10-18 and 19, F32-18, HEAD 5e10534; this unit changes nothing `ofgpu-validate`
+computes):
+* Each section is its own command, `ofgpu-validate -sections N -json`, run once in each build, f32 first, the sections
+  one after another. Each command is capped at 600 s (the ten-minute rule). A section over the cap is **NOT RUN**,
+  and the rows it reached by then are counted in brackets.
+* Sections 42, 80 and 81 were re-run once under `single`. 42 had hit the cap and passed in 484 s on the re-run. 80
+  and 81 start `ofgpu-lowmach` beside the validate executable, which the first run's copy did not have. The table
+  shows the re-runs.
+* The four §69 audit rows that every run prints are not counted.
+* The card (RTX 5070 Ti, sm_120) was shared with lanes S and G and another GPU process, so the times are wall times
+  on a busy card.
 
-The run stops at the first conduction case, which is the first case of section 8, for
-the reason §112.3 gives. The f64 column is `af8f7fd`'s run (936 of 937, the one miss
-being Gate 105-C's CFD2 lift, §105.14); §111 and this section change nothing
-`ofgpu-validate` computes in f64 (§112.2: every row is byte-identical).
+The f32 columns read every row at its class tolerance (§118.14): P, A and D at the f64 tolerance, and R at (118.14.1).
 
-The verdict is read from the rows, with no tolerance changed: **holds** — every row
-passes at its f64 tolerance; **loosens** — some rows miss their f64 tolerance, but every
-miss is an error below `1e-5` (84 single-precision units in the last place at 1), so the
-arithmetic is right to single precision and the tolerance is double's (the worst error is
-printed: it is what an f32 tolerance would have to admit); **fails** — the section cannot
-be taken in f32.
+The verdicts:
+* **holds** — every row passes;
+* **misses** — the rows named fail, each with its error against its tolerance;
+* **NOT RUN** — over 600 s;
+* a dash — no rows in either build (Gate 105-C's meshes are not generated in this tree).
 
-| # | section | f64 | f32 | at f32 |
-|---|---|---|---|---|
-| 1 | 3-D graded block | 71/71 | 18/71 | **loosens**: 53 rows miss an f64 tolerance, worst err 9.1e-06 |
-| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 11/36 | **loosens**: 25 rows miss an f64 tolerance, worst err 5.5e-06 |
-| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 18/35 | **loosens**: 17 rows miss an f64 tolerance, worst err 1.8e-06 |
-| 4 | the adapt: refine, coarsen, and what a rebuild costs | 34/34 | 30/34 | **loosens**: 4 rows miss an f64 tolerance, worst err 2.6e-07 |
-| 5 | 2-D block with empty front and back | 37/37 | 13/37 | **loosens**: 24 rows miss an f64 tolerance, worst err 9.4e-06 |
-| 6 | linear solvers | 6/6 | 1/6 | **loosens**: 5 rows miss an f64 tolerance, worst err 4.8e-07 |
-| 7 | method of manufactured solutions, -lap(psi) = f | 6/6 | 6/6 | **holds** |
-| 8 | observed order and reported uncertainty (SPEC-LIT 94) | 10/10 | aborted | **fails**: the run stops at this section's first case, above |
-| 9 | buoyancy | 12/12 | not reached | not reached |
-| 10 | buoyancy production, sources, species, phi I/O | 14/14 | not reached | not reached |
-| 11 | volume of fluid (SPEC-LIT 20, the 22 rows) | 16/16 | not reached | not reached |
-| 12 | msh hex closure, cut-cell closure (SPEC-LIT 23, 24) | 10/10 | not reached | not reached |
-| 13 | the low-Mach reference pressure (SPEC-LIT 25) | 3/3 | not reached | not reached |
-| 14 | wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) | 5/5 | not reached | not reached |
-| 15 | Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) | 9/9 | not reached | not reached |
-| 16 | periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) | 4/4 | not reached | not reached |
-| 17 | the thermal wall-function gate, redesigned (SPEC-LIT 32) | 27/27 | not reached | not reached |
-| 18 | Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) | 10/10 | not reached | not reached |
-| 19 | resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) | 3/3 | not reached | not reached |
-| 20 | the bulk-temperature thermostat (SPEC-LIT 35) | 15/15 | not reached | not reached |
-| 21 | thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) | 5/5 | not reached | not reached |
-| 22 | bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) | 10/10 | not reached | not reached |
-| 23 | Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) | 10/10 | not reached | not reached |
-| 24 | realizable and RNG k-epsilon (SPEC-LIT 40, 41) | 39/39 | not reached | not reached |
-| 25 | the output block, and fp16 voxels (SPEC-LIT 44, 45) | 22/22 | not reached | not reached |
-| 26 | conjugate heat transfer (SPEC-LIT 46, 47, 48) | 16/16 | not reached | not reached |
-| 27 | the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) | 6/6 | not reached | not reached |
-| 28 | an equation that lives on a region - Gate 93-A (SPEC-LIT 93) | 8/8 | not reached | not reached |
-| 29 | the conjugate fluid/solid interface (SPEC-LIT 59, 60) | 48/48 | not reached | not reached |
-| 30 | surface-to-surface radiation (SPEC-LIT 49, 50, 51) | 47/47 | not reached | not reached |
-| 31 | fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55) | 83/83 | not reached | not reached |
-| 32 | Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58) | 43/43 | not reached | not reached |
-| 33 | gamma-Re_theta transition (SPEC-LIT 88, 89) | 20/20 | not reached | not reached |
-| 34 | the 2015 gamma transition model (SPEC-LIT 90) | 24/24 | not reached | not reached |
-| 35 | Lagrangian parcels (SPEC-LIT 66) | 11/11 | not reached | not reached |
-| 36 | the parcel sort and gather-shaped deposition (SPEC-LIT 67) | 12/12 | not reached | not reached |
-| 37 | two-way coupling of the dispersed phase (SPEC-LIT 68) | 13/13 | not reached | not reached |
-| 38 | droplet heating and evaporation (SPEC-LIT 76) | 12/12 | not reached | not reached |
-| 39 | the vapour into the gas (SPEC-LIT 77) | 14/14 | not reached | not reached |
-| 40 | droplet-wall impact (SPEC-LIT 78) | 45/45 | not reached | not reached |
-| 41 | Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) | 6/6 | not reached | not reached |
-| 42 | Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) | 3/3 | not reached | not reached |
-| 43 | the imported region (SPEC-LIT 97) | 5/5 | not reached | not reached |
-| 44 | the region layout (SPEC-LIT 97) | 3/3 | not reached | not reached |
-| 45 | Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) | 10/10 | not reached | not reached |
-| 46 | Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) | 14/14 | not reached | not reached |
-| 47 | Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over three meshes, CFD3 on a wobbling mesh (SPEC-LIT 105.14) | 20/21 | not reached | not reached |
-| 48 | lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) | 8/8 | not reached | not reached |
-| 49 | Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) | 0 rows (open) | not reached | not reached |
-| 50 | Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) | 0 rows (open) | not reached | not reached |
-| 51 | Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) | 16/16 | not reached | not reached |
+| # | section | f64 | f32 | f32 s | f32 misses (error against tolerance) |
+|---|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 71/71 | 1 | holds |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 36/36 | 0 | holds |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 35/35 | 0 | holds |
+| 4 | the adapt | 34/34 | 34/34 | 2 | holds |
+| 5 | 2-D block with empty front and back | 37/37 | 37/37 | 0 | holds |
+| 6 | linear solvers | 6/6 | 10/12 | 6 | cuFFT == iterative, sealed box: NaN against 1e-5; the refined pair: NaN against 1e-10 (A18) |
+| 7 | method of manufactured solutions | 6/6 | 6/6 | 0 | holds |
+| 8 | observed order and reported uncertainty | 10/10 | 10/10 | 1 | holds |
+| 9 | buoyancy | 12/12 | 8/12 | 0 | sealed box flux 2.03e-4 and rest 2.19e-4 against 1e-5; T == T_ref body force 5.2e-9 against 0; solenoidal flux 1.31e-5 against 1e-5 |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | 13/14 | 1 | G_b, stable stratification: 1.07e-5 against 1e-5 |
+| 11 | volume of fluid | 16/16 | 13/16 | 50 | the static drop's Laplace jump and both spurious-current rows: NaN (the step diverges) |
+| 12 | msh hex closure, cut-cell closure | 10/10 | 10/10 | 1 | holds |
+| 13 | the low-Mach reference pressure | 3/3 | 3/3 | 1 | holds |
+| 14 | wall treatment, the thermal wall function | 5/5 | 5/5 | 1 | holds |
+| 15 | Werner-Wengle, turbulence selection | 9/9 | 9/9 | 1 | holds |
+| 16 | cyclic-pair invariants | 4/4 | 4/4 | 1 | holds |
+| 17 | the thermal wall-function gate | 27/27 | 25/27 | 0 | drag_kin and tau_w balances at ny = 200: 1.46e-5 against 1e-5 |
+| 18 | Launder-Sharma damping functions | 10/10 | 10/10 | 0 | holds |
+| 19 | resolved leg mesh resolution, replayed | 3/3 | 3/3 | 1 | holds |
+| 20 | the bulk-temperature thermostat | 17/17 | 17/17 | 0 | holds |
+| 21 | thermostat weighting, replayed | 5/5 | 5/5 | 0 | holds |
+| 22 | bounded convection on momentum, replayed | 10/10 | 10/10 | 1 | holds |
+| 23 | Kays-Crawford Pr_t | 10/10 | 6/10 | 1 | Pe_t -> inf 596 against 0.2; the O(Pe_t^-2) coefficient 0.154 against 1e-6; monotone in Pe_t (D); the rearrangement 2.14e-4 against 1e-5 |
+| 24 | realizable and RNG k-epsilon | 39/39 | 37/39 | 74 | kEpsilon's live fixed point 9.7e-3 and P/eps 1.93e-2 against 5e-3 |
+| 25 | the output block, fp16 voxels | 22/22 | 22/22 | 1 | holds |
+| 26 | conjugate heat transfer | 16/16 | 15/16 | 2 | S47.12 Gate 2, k_solid -> inf: 3.66e-4 against 8e-5 |
+| 27 | Gate 93-B | 6/6 | 3/6 | 1 | leg B: no global tolerance gives each region 1e-8 (D); its series q 1.0 and T_i 4.75 against 1e-5 |
+| 28 | Gate 93-A | 8/8 | 8/8 | 1 | holds |
+| 29 | the conjugate fluid/solid interface | 48/48 | NOT RUN (8/20) | 600 | at the cap: 59-B's series and balance rows 8.5e-4 .. 1.0e-1 against 1e-5; 59-A balance 8.6e-2 and Nu 6.4e-2; Gate 5 balance and transcription rows |
+| 30 | surface-to-surface radiation | 47/47 | 45/47 | 3 | S50.4 fr in [0,1) (D); S50.2 the sweep count against its table (D) |
+| 31 | fan curves, porous jumps, psychrometrics, metrics | 83/83 | 81/83 | 1 | S52.12 lumped triple 2.74e-5 and S52.5 Fritsch-Carlson 6.10e-5 against 1e-5 |
+| 32 | Spalart-Allmaras, DES | 43/43 | 39/43 | 2 | S56.4 at chi = 1e14 9.0 against 1e-5; S57.3 tanh saturation (D); S57.3 f_d threshold 7.38e-2 against 1e-5; S57.4 one ulp (D) |
+| 33 | gamma-Re_theta | 20/20 | 19/20 | 1 | S88 the 596 breakpoint (D) |
+| 34 | the 2015 gamma model | 24/24 | 21/24 | 1 | three §90.11 limiter and monotonicity rows (D) |
+| 35 | Lagrangian parcels | 11/11 | 11/11 | 1 | holds |
+| 36 | the parcel sort and deposition | 12/12 | 12/12 | 0 | holds |
+| 37 | two-way coupling | 13/13 | 13/13 | 6 | holds |
+| 38 | droplet heating and evaporation | 12/12 | 9/12 | 2 | 76-A d^2 line 1.55e-2 against 5e-3; 76-A steady T 5.62e-3 against 1e-3; 76-B balance 3.36e-4 against 1e-5 |
+| 39 | the vapour into the gas | 14/14 | 13/14 | 3 | 77-B energy ledger 1.85e-4 against 1e-5 |
+| 40 | droplet-wall impact | 45/45 | 42/45 | 22 | 78-A splash threshold (D); Buckingham-Reiner 1.22e-4 against 1e-5; HerschelBulkley plug 0.465 against 0.05 |
+| 41 | Gate 95-D | 6/6 | 3/6 | 113 | outer loop converged at nr = 12, 24, 48 (D); the stress rows pass |
+| 42 | Gate 95-E | 3/3 | 3/3 | 484 | holds |
+| 43 | Gate 95-A, block-coupled cantilever | 36/42 | 4/42 | 454 | no block-coupled loop converges (D, 24 rows); 14 order and tip rows (P), the tip up to 1.37e16 and one stress order inf |
+| 44 | Gate 95-G | 24/24 | NOT RUN (3/11) | 600 | at the cap: every outer loop runs to its cap (D, 8 rows) |
+| 45 | the imported region | 5/5 | 5/5 | 1 | holds |
+| 46 | the region layout | 3/3 | 3/3 | 1 | holds |
+| 47 | Gate 98-A | 1/1 | 1/1 | 1 | holds |
+| 48 | Gate 98-B | 4/4 | 3/4 | 0 | the Newton ratio over 2C 6.33e6 against 1, at the f32 floor |
+| 49 | Gate 98-C | 5/5 | 2/5 | 268 | re-radiating walls 5.77e-2 and black closure 5.02e-4 against 1e-5; the three relaxations within 4000 iterations (D) |
+| 50 | Gate 100-B | 5/5 | 4/5 | 0 | silicon, every knot to the bit (D) |
+| 51 | Gate 100-A | 4/4 | 0/1 | 1 | stops: the outer loop's 1e-13 relative change is not reached in 60 passes |
+| 52 | Gate 100-C | 16/16 | NOT RUN (3/8) | 601 | at the cap: the channels do not converge (D); balance 1.68e-4 and 1.86e-4 against 1e-5 |
+| 53 | Gate 100-D | 11/11 | 0/1 | 1 | stops: T leaves water's mu(T) curve |
+| 54 | Gate 105-A | 10/10 | 10/10 | 1 | holds |
+| 55 | Gate 105-B | 14/14 | 8/14 | 82 | the piston's uniform state 1.58e-2 .. 6.01e-2 against 1e-5; backward order 0.737 against 0.1; extrapolation direction (D) |
+| 56 | Gate 105-C | 0/0 | 0/0 | 1 | - |
+| 57 | Gate 94-D, the Ghia cavity | 8/8 | NOT RUN (4/4) | 600 | at the cap: Re = 100's four rows pass |
+| 58 | Gate 110-A | 17/17 | 17/17 | 0 | holds |
+| 59 | Gate 110-B | 1/1 | 1/1 | 0 | holds |
+| 60 | Gate 110-C | 17/17 | 17/17 | 1 | holds |
+| 61 | Gate CMP-B | 13/13 | NOT RUN (3/9) | 600 | at the cap: w and s at Ra 1e3, 1e4, 1e5, 8.6e-4 .. 5.07e-3 against 1e-5 |
+| 62 | Gate 119-A, the wedge | 5/5 | 5/5 | 242 | holds |
+| 63 | Gate 145-A, the dam break | 9/9 | 9/9 | 85 | holds |
+| 64 | Gate 78-D measured leg | 2/2 | 2/2 | 0 | holds |
+| 65 | Gate 132-L, Blasius | 7/7 | 7/7 | 24 | holds |
+| 66 | T3A leg 1 in 2-D, replayed | 6/6 | 6/6 | 1 | holds |
+| 67 | Gates 88-T, 90-T leg 4, replayed | 4/4 | 4/4 | 0 | holds |
+| 68 | Gate 132-Z, replayed | 5/5 | 5/5 | 0 | holds |
+| 69 | Gate 131-P, replayed | 13/13 | 13/13 | 1 | holds |
+| 70 | Gate CMP-SOD | 3/9 | 3/9 | 40 | the same six rows as f64 (plateaus 0.16-0.46, shock position, order 0.585) |
+| 71 | Gate CMP-AC | 1/2 | 1/2 | 28 | the pulse speed, 0.189 against 0.01, as f64 |
+| 72 | Gate CMP-LM | 3/3 | 3/3 | 27 | holds |
+| 73 | Gate CMP-COU | 3/3 | 3/3 | 57 | holds |
+| 74 | Gate CMP-NOZ | 1/7 | 1/7 | 100 | the same six rows as f64 (subsonic 6.0e-3 against 5e-3; five NaN) |
+| 75 | Gate CMP-OBL | 3/3 | 3/3 | 353 | holds |
+| 76 | Gate CMP-RING | 3/4 | 3/3 | 343 | holds (the order row is judged in f64 only, A50) |
+| 77 | Gate CMP-RAE | 2/13 | 0/13 | 3 | the live smoke stops at step 13 (A52), so its two passing f64 rows fail too; the replayed rows as f64 |
+| 78 | Gate 116-P, replayed | 2/5 | 2/5 | 0 | the same three rows as f64 (replayed: f64 +15.5 %, the single solve and the single mesher, A59 and A28) |
+| 79 | Gates 88-T, 90-T leg 3, replayed | 14/14 | 14/14 | 0 | holds |
+| 80 | Gate DST-LEEDS | NOT RUN (4/5; the cap cut the u' = 2.45 m/s run) | 2/23 | 20 | all four runs refused by the Mach guard (A71); the 12 S_t,b and 4 p0 rows inf, the slope row (D) |
+| 81 | Gate DST-VES | 7/21 | 0/9 | 61 | all four runs refused by the Mach guard (A75), so the nine rows reached fail |
 
-Seven of the 51 sections are reached: 225 rows, 97 pass at their f64 tolerance, 128 miss
-it by at most `9.4e-6`, and none misses it by more. Section 8 onward, 44 sections and 712 of
-the f64 run's 937 rows, is not reached, so for them this section can say only that f32 does
-not get there. Gates 94-A to 94-D, 95-D, 95-E, 105-A to 105-C and 110-C are among them.
+**What it adds up to.**
+* **f32:** 43 sections hold, 32 miss, 5 are NOT RUN and 1 has no rows. In the 76 sections that ran, 937 of 1,091 rows
+  pass. Seven of the 32 misses (43, 70, 71, 74, 77, 78, 81) miss in f64 as well.
+* **f64:** 71 sections hold and 8 miss: 43, 70, 71, 74, 76, 77 and 78 by their known findings, and 81 by DST-VES's
+  bands. Section 80 is NOT RUN, and 105-C has no rows. 1,149 of 1,197 rows pass.
+* **Time:** the f32 sections took 5,985 s in all, the f64 ones 3,515 s. Five f32 sections and one f64 section (80) reached the 600-s cap.
 
-### 112.5 What this does not cover, and the decision it leaves
+**The deferred full run.** The plan's gate is "a deferred long run of `ofgpu-validate` under single exits 0 (R rows
+per D-F32-1)", and it is **MISSED**. The rows above already fail in 32 sections, so an unflagged run under `single`
+exits 1. That run is longer than ten minutes: about 100 minutes here, five sections of it over 600 s each. It was not
+taken, and it is listed for the user's long slot.
 
-* **It does not make f32 a supported configuration.** It makes it build, keeps its floors
-  alive, and states what holds. The f64 build remains the one every gate is taken in.
-* **No speed or memory figure** is taken for f32 (§111's model is an f64 measurement), and
-  mixed precision is not attempted. §118 records the mixed precision added since.
-* **The decision.** `ANISOTROPY_RESIDUAL_LIMIT` and the conjugate interface's tolerances
-  are guards whose right value depends on the precision, like the floors of §112.1: in
-  f64 each sits far above round-off, in f32 below it. Giving each an f32 value (a limit
-  near `1e-5` would sit about 84 units in the last place above the f32 noise and far below
-  any misalignment §46's tests construct) would let `ofgpu-validate` run past section 8 in
-  f32 and let most of the 89 refused tests run. It changes what the f32 build accepts,
-  so it is left to whoever owns those guards; the f64 values stay as they are either way.
+The misses are those of §118.14's two tables. Where a section was renumbered since then, its row names the gate. The
+new sections hold under `single`, or miss as f64 does: 66-69, 72, 73, 75, 76 and 79 hold, and 70, 71, 74 and 78 miss
+as f64 does. The three exceptions are 77 (the live RAE smoke stops at step 13), and 80 and 81 (the dust runs refused, A71
+and A75). Each miss is a finding, recorded here and not hidden. No
+tolerance moved, and a cure is a numerics change (§112.5).
+
+### 112.5 What "supported" means at f32, and what stays open
+
+After F32-18 the f32 build is a **supported configuration**. That word claims four things, each measured:
+
+* **It builds.** Every Rust unit of tranche 17 compiles `cargo build --release` and
+  `cargo build --release --lib --features single --target-dir target/single`, and the f64 build stays bitwise
+  (§112.2, docs/17 §5.1 rules 1 and 2).
+* **Every test runs or is named.** Each library and binary test runs under the feature or carries a named cause in
+  §112.3 (F32-16, F32-17).
+* **Every validate section reports.** Each of the 81 sections runs under `single` and prints every row at its class
+  tolerance (§112.4, §118.14), or is NOT RUN because it alone takes more than ten minutes.
+* **The studio can run it.** F32-19's precision setting starts the `target/single` drivers. Its preview flag is lane
+  G's to clear now that this section is written. The studio keeps `double` as its default (docs/17 §10.1 A18).
+
+It does **not** claim that f32 passes every gate. The f64 build remains the build of record: every gate verdict
+that SPEC-LIT and the READMEs quote is the f64 one, and an f32 verdict is reported beside it. §112.4 lists every
+row that misses in f32. The open single-build defects are below, with what each one blocks. Each is a row of
+`docs/17-review-later.md`, and every cure named there changes numerics, so each is left to the user (docs/17 §11).
+
+**The linear solvers on singular or long-path systems.** In f32, PBiCGStab fails on a pure-Neumann or
+long-upwind-path system that f64 and PCG still solve.
+* A1: fvDOM step-scheme rows on paths of 64 cells or more. This blocks f32 fvDOM radiation in any real enclosure.
+* A3: the ABL pressure system with a Diagonal preconditioner. The ABL gate runs PCG and DIC instead.
+* A18 and A24: §118.4's refined PBiCGStab returns NaN on the sealed all-Neumann box (§112.4 section 6).
+* Lane G's CHR-26 row: PBiCGStab stalls on a sealed 4-cubed box. This blocks PBiCGStab for p in any closed f32
+  domain, so PCG is the choice there.
+
+**The steady and low-Mach flow paths.**
+* A4: f32 SIMPLE parks in a 2-cycle about `3e-6` from its fixed point. This blocks steady stop criteria below about
+  `1e-8` change.
+* A21: `cases/channelThermalWF.jsonc` diverges at step 11.
+* A44: the `step` and `channel` presets of `ofgpu-lowmach` stop at step 0 and step 19.
+* A59: the tet pipe hits the Mach guard at step 20 (Gate 116-P, §112.4 section 78).
+* A41: VAL-51's Re_tau 178 fine run diverges at outer iteration 32503.
+* A52: the RAE 2822 single run stops at step 210.
+* A70, A71 and A75: the dust tube, the Leeds bomb and the four DST-VES vessels are refused by the Mach guard.
+
+Together these block f32 runs of the low-Mach driver on fine or tetrahedral meshes, the compressible transonic case,
+and every dust gate. §112.4 sections 11 (the static drop), 59 (two of 110-B's step meshes), 70, 74 and 77 show the
+same pattern inside `ofgpu-validate`.
+
+**Geometry computed in float.**
+* A28 and A87: §92.3's G2 closure sums f32 face-area vectors, so the automesher's tetrahedral and union meshes are
+  refused under `single`. This blocks f32 meshing. An f64-built mesh can still be read.
+* A37: the device wall distance loses up to 16 % in the wall cells of a `5e-7` m first cell. This widens f32
+  Spalart-Allmaras `C_f`.
+* A82: the s2s coarse view-factor rows of `box_rig` miss 1 by `0.16`. This blocks f32 s2s enclosures that
+  agglomerate.
+
+**Iterations that stop short of an f64 criterion.**
+* A25: §112.4's NOT RUN and MISSED loop gates, which are 59-A/B, 95-A, 95-D, 95-G, 98-C, 100-A, 100-C, 94-D and CMP-B.
+* A84: 34 library tests (stress-mode CHT, the externalSlab outer loop, solid Anderson and GMRES, Newton).
+* Lane G's F32-15 rows: the ALE backward-order miss, and the bimetal and SST-forcing wall budgets.
+
+These block f32 for conjugate heat transfer at interface tolerances, solid stress and enclosure radiation coupled to a
+flow. A criterion set below the f32 floor either never ends or ends on its cap.
+
+**Closed forms and ledgers evaluated in `Scalar`.**
+* A24: §112.4 sections 9, 10, 17, 23 and 24.
+* A85: 71 library tests past the 84-ulp cap, a published band, or an exact value.
+* A65: CMP-NR's outlet mean.
+* A66: CHR-09's inert N2.
+* A80: DST-20's age budget.
+* A12: DST-04's plateau.
+
+These are answers right to single precision and no further. They block no run, but they do block quoting the f64
+digits.
+
+**NaN, and the test-suite bars.**
+* A83: NaN in 11 tests, among them the SA log-layer production on the host and the device, the k-epsilon realizability
+  number at `k/eps = 1e-6`, and three CHT fluid runs.
+* A81 and F32-17's two misses (§112.3): 191 library and 7 binary tests stay marked, and `--bins` passes 439 of 442.
+* A88: `ofgpu-compressible`'s two tolerance knobs write bit-identical fields in f32.
+
+**Speed and memory** are §112.6. f32 halves bytes per cell as planned, but it does not make the SIMPLE loop 1.5 times
+faster, so f32 is not the faster choice for steady runs yet.
+
+**Where f32 fits today.** 43 of §112.4's sections hold at their class tolerances. They include:
+* the discretisation sections (1-5, 7, 8, 12) and the wall treatments (14, 15);
+* the Launder-Sharma damping (18) and the thermostats (20-22);
+* parcels (35-37) and the bimetal strip (Gate 95-E);
+* moving-mesh space conservation (Gate 105-A) and Gates 110-A to 110-C;
+* the wedge (Gate 119-A), the dam break (Gate 145-A) and the Blasius plate (Gate 132-L);
+* the replayed transition and TMR legs;
+* CMP-LM, CMP-COU, CMP-OBL and CMP-RING.
+
+A run in one of the blocked areas above should use the f64 build. The decision this subsection used to leave is closed.
+That decision was the f32 value of `ANISOTROPY_RESIDUAL_LIMIT` and of the conjugate interface guards. F32-04 measures
+those guards in f64 instead and keeps their limits (§118.3), so the conduction cases run past section 8.
+
+### 112.6 Speed and memory at f32 - bytes per cell, the cliff, and SIMPLE seconds per iteration
+
+`No GPL-licensed source was consulted.` The sources are this tree's `ofgpu-bench` and the measurements below.
+
+docs/17's F32-18 row sets three bars before measuring:
+1. the k-epsilon case's bytes per cell slope at most `0.65` times f64's;
+2. the cliff at least `1.5` times §111's `4.72 M` cells, that is `7.08 M`;
+3. SIMPLE seconds per iteration on a 1 M-cell cavity at least `1.5` times faster.
+
+For bar 3, `ofgpu-bench` gained a model (F32-18, `src/bin/bench.rs`): `-model simpleCavity` times `Simple::correct` on
+the unit-cube lid-driven cavity. The case is Re 100, `nu = 0.01`, the lid at `(1, 0, 0)` on `+y`, `MomentumControls`'
+default schemes, `u_relax 0.7` and `p_relax 0.3`, and PBiCGStab for p through `PbicgstabBackend`. The U solve stops at
+`1e-8` or relTol `0.1` (cap 200), and the p solve at `1e-8` or relTol `0.05` (cap 1000). `-fixedIters N` instead runs
+exactly `N` sweeps of each solve, with no host transfer and no refinement (a fixed solve is not refined, §118.4). Three
+untimed iterations come first; the pool is read after them, so the figure includes every lazily allocated workspace.
+`the_simple_cavity_bench_runs_and_reports_finite_figures` runs it on a 12-cubed cavity in both builds and asserts that
+a fixed solve reports exactly its sweeps (class D).
+
+**Measured** 2026-10-18, 23:04-23:05, at HEAD 5e10534 plus this unit's bench, on the machine of record: RTX 5070 Ti,
+16,302 MiB, sm_120. **The card was shared.** Lanes S and G ran their test binaries on it throughout, and the card read
+57-95 % utilisation at the start of the runs. The times are wall times on that shared card, not an idle one. The two
+builds were run alternately (f64, f32, f64, f32), so the contention fell on both. Each figure is a run of 10 timed
+iterations. The pool figures are this process's own pool (§111.2), which no neighbour changes.
+
+| case | f64 | f32 | f32 / f64 |
+|---|---|---|---|
+| k-epsilon, 400 x 250 x 20 (2.0 M), pool after the model | 1162.3 B/cell | 671.8 B/cell | |
+| k-epsilon, 400 x 250 x 40 (4.0 M), pool after the model | 1139.9 B/cell | 659.4 B/cell | |
+| k-epsilon, **slope** between 2 M and 4 M (whole case) | **1117.5 B/cell** | **647.0 B/cell** | **0.579** |
+| of which mesh and frozen flow | 623.1 B/cell | 377.7 B/cell | 0.606 |
+| of which the k-epsilon model | 494.4 B/cell | 269.3 B/cell | 0.545 |
+| k-epsilon, 400 x 250 x 71 (7.1 M) | 7,652 MiB, 111.5 ms/iter | 4,428 MiB, 95.7 ms/iter | |
+| k-epsilon, 400 x 250 x 95 (9.5 M) | not run | 5,909 MiB, 101.4 ms/iter | |
+| SIMPLE cavity 100^3 (1.0 M), pool | 1766.6 B/cell | 994.5 B/cell | 0.563 |
+| SIMPLE cavity, s/iter, the solves to tolerance (two runs) | 0.1795, 0.1768 | 0.1548, 0.1541 | speed-up **1.15** |
+| inner sweeps per outer iteration, to tolerance | U 5 5 5, p 127 | U 5 5 5, p 129 | |
+| SIMPLE cavity, s/iter, `-fixedIters 20` (two runs) | 0.1011, 0.1008 | 0.0728, 0.0769 | speed-up **1.35** |
+
+The f64 slopes reproduce §111.3's model (622.2 + 494.3 = 1116.5 B/cell) to 0.1 %. The 7.1 M f64 row gives the same
+whole-case slope from 2 M, 1117.5 B/cell, and the f32 9.5 M row gives 647.0.
+
+**The verdicts.**
+1. **Bytes per cell: holds.** The slope is `0.579` times f64's, against the bar of `0.65`. It is not `0.5`, because
+   the face addressing (`Label`), the f64 accumulators of §118.1 and the f64 geometry the f32 build keeps (§118.2,
+   §118.7) do not shrink. The mesh part shrinks least, to 0.606.
+2. **The cliff: holds.** §111.1 showed that `4.72 M` was a reading taken beside a neighbour, not a limit. On this card,
+   beside the other lanes, the f32 k-epsilon case ran at 7.1 M and at 9.5 M cells (2.01 times 4.72 M) with 7,189 MiB
+   resident on the whole card, and throughput held: 74 and 94 Mcell-iter/s against 64 at 4 M. By the measured slope,
+   the 14.66 GiB that §111.4 finds for the pool on an idle card holds about 24.2 M f32 cells, against 14.04 M in f64
+   (1.73 times).
+3. **SIMPLE speed: MISSED.** Solving to tolerance, f32 is 1.15 times faster on the 1 M cavity, and with fixed sweeps
+   it is 1.35 times faster. Both are short of 1.5. Bytes moved per sweep shrink only to about 0.56 of f64's (the
+   pool ratio). Part of a SIMPLE iteration is not bandwidth at all: kernel launches and the host reads of every
+   residual check (`check_interval 5`) cost the same time in either build. Under `single`, the refined solve of
+   §118.4 also adds its f64 residual steps. Per sweep, the run to tolerance costs about 1.25 ms in f64 and 1.07 ms
+   in f32, and the fixed run 1.26 and 0.94 ms. So the checks and the refinement take back nearly half of what f32
+   saves. These causes are read from the two
+   pairs of runs and were not traced kernel by kernel.
+
+Per the user's rule of 2026-10-14, the miss is recorded and the figure is not re-run until it passes. A cure that
+changes numerics (a check interval or refinement policy that differs between builds) is not built.
 
 ---
 
@@ -39262,9 +39451,11 @@ subsections, by unit:
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
 - 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13 sections 1-25, F32-14 sections 26-65)
+- 118.16 — the section closed: what is double in the f32 build, and what is not (F32-18)
 
 and, later, chemistry in
-double (CHR-07b), and the opt-in f32 GAMG preconditioner (AMG-06b).
+double (CHR-07b, 118.10), refinement on the other backends (118.12), and the opt-in f32 GAMG
+preconditioner (AMG-06b, 118.13).
 
 No GPL-licensed source was consulted.
 
@@ -41067,6 +41258,47 @@ causes. Some are an iteration that stops short of its f64 criterion under `singl
 95-D, 95-G, 98-C, 100-A, 100-C and CMP-B. The others evaluate a closed form or a ledger in
 `Scalar`: S52, S56.4, S57.3, 76, 77-B and Buckingham-Reiner. 100-D and 105-B diverge or drift
 under `single`. A cure changes numerics or a criterion and is not built here.
+
+### 118.16 The section closed - what is double in the f32 build, and what is not
+
+This section is closed with F32-18 (docs/17 §12.4): the f32 build is a supported configuration (§112.5), and the
+places where it computes in double are the ones listed here. No later unit of tranche 17 adds another one under
+§118. A new f64 island changes what the f32 build computes, so it is a numerics change, and it is the user's to
+decide (docs/17 §11). It would get its own section.
+
+**What is double in the f32 build:**
+* every device reduction's accumulator (§118.1);
+* host geometry, the points as read and the sweeps (§118.2);
+* the setup guards' measurements (§118.3);
+* the residual and the solution update of the refined Krylov solves (§118.4), also on the cuFFT, selector,
+  distributed and SPMD paths (§118.12);
+* the time levels of a delta-form step (§118.5);
+* field, phi and restart I/O at nine digits (§118.6);
+* the local origin (§118.7);
+* moving geometry on the device (§118.8);
+* parcel positions, the walk and the exchange sums (§118.9);
+* chemistry (§118.10);
+* the FSC rate constant (§118.11);
+* the validation's own round-off rows, through the class rule (118.14.1) (§118.14).
+
+F32-15 (lane G) adds the four tests that did not finish, which is a stop criterion and not a new f64 island. §118.13
+is the one reverse case: an f64 solve with an opt-in f32 preconditioner.
+
+**What is float, and is where the open f32 defects sit** (§112.5, docs/17-review-later.md):
+* the low-Mach and SIMPLE flow paths: the pressure-velocity fixed point (A4), the Mach-guard failures (A21, A44, A59,
+  A70, A71, A75) and PBiCGStab on singular systems (A1, A3, A18);
+* the device wall distance (A37);
+* §92.3's closure sums (A28, A87);
+* the s2s view-factor agglomeration (A82);
+* the solid and CHT outer loops (A84);
+* the closed forms `ofgpu-validate` evaluates in `Scalar` (§112.4).
+
+Each could move to f64 by the same pattern as the subsections above. That would be a numerics change, and none is
+made here.
+
+**What closing means for the measurements.** §112.4's table and §112.6's figures are the f32 build's record at
+5e10534. A later unit that changes an f32 result re-measures the sections it touches with `-sections`, and updates
+§112.4's row in place.
 
 ## 119. The true wedge: a rotational self-couple
 
