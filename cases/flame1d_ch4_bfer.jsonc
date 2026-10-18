@@ -1,0 +1,94 @@
+// CHR-13: the 1-D freely propagating stoichiometric methane-air flame,
+// BFER2 chemistry (cases/mech/bfer2_phi1.ck), SPEC-LIT 133.12. The flame
+// front is the 1500 K isotherm and S_L = U_in - dx_f/dt; this file is the
+// 50 um level (300 cells over 15 mm) - the 100 um and 25 um levels are the
+// same file with ONLY "cells" edited to [150,1,1] and [600,1,1].
+//
+// The initial state is the complete-combustion products at 1600 K (CO2 +
+// 2 H2O + 7.52 N2 by mass) - an ignition source, not a claim about T_ad.
+// The inlet carries the stoichiometric fresh mixture CH4 + 2 (O2 + 3.76 N2)
+// by mass, computed with the solver's own molar masses (SPEC-LIT 128.2).
+// phi = 1 stays exact everywhere because every species has the same
+// diffusivity: species.transport is the Lewis route (133.11) with every Le
+// at its default 1, so the element mass fractions obey a source-free
+// transport equation whose uniform inlet and initial values are both
+// stoichiometric.
+//
+// Transport DESIGN (fixed before any S_L was measured, 133.12): the
+// molecular conductivity has no JSONC spelling, and nu is constant, so nu
+// is set to Pr k / (rho cp) of the complete-combustion products at the
+// gate's 1500 K isotherm and 1 atm - TM-4513 cp: W_b 27.6332 g/mol,
+// cp_b 1425.3 J/(kg K), rho 0.224503 kg/m3, nu = 5.6878e-5 - so the
+// species and thermal diffusivities are equal (Le_eff = 1) there. This is
+// NOT BFER's transport (Franzelli eq. (1): mu0 (T/T0)^0.6759, unity Lewis):
+// the measured S_L is this driver's, not BFER's.
+//
+// Run recipe (each level, on a scratch copy with only "cells" edited):
+//   ofgpu-lowmach <copy>/flame1d_ch4_bfer.jsonc -endTime 6e-3 -deltaT 1e-6 -check 500 -writeInterval 2e-4
+{
+  "name": "flame1dCh4Bfer",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.015, 0.00025, 0.00025] },
+    "cells": [300, 1, 1],
+    "boundaries": { "xmin": "inlet", "xmax": "outlet", "ymin": "sideA", "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 5.688e-5, "Pr": 0.7, "Prt": 0.85, "TRef": 300.0 },
+    "buoyancy": "densityRatio"
+  },
+  "patches": [
+    {
+      "match": "inlet", "kind": "inlet",
+      "U": { "type": "fixedValue", "value": [1.0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "fixedValue", "value": 300.0 }
+    },
+    {
+      "match": "outlet", "kind": "open",
+      "U": { "type": "zeroGradient" },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 1600.0 }
+    },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [1.0, 0, 0], "T": 1600.0, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0, "Yi": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "Yi", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.006, "deltaT": 1e-6 },
+  "species": {
+    "names": ["CH4", "O2", "CO", "H2O", "CO2", "N2"],
+    "inert": "N2",
+    "transport": { "model": "lewis" },
+    "initial": { "CH4": 0.0, "O2": 0.0, "CO": 0.0, "H2O": 0.1239433974, "CO2": 0.1513916001 },
+    "patches": [
+      { "match": "inlet", "Y": {
+        "CH4": { "type": "fixedValue", "value": 0.05518632456 },
+        "O2": { "type": "fixedValue", "value": 0.2201486730 },
+        "CO": { "type": "fixedValue", "value": 0.0 },
+        "H2O": { "type": "fixedValue", "value": 0.0 },
+        "CO2": { "type": "fixedValue", "value": 0.0 }
+      } }
+    ]
+  },
+  "chemistry": {
+    "mechanism": "mech/bfer2_phi1.ck",
+    "thermo": "mech/tm4513_thermo.dat",
+    "rtol": 1e-6,
+    "atol": 1e-10
+  },
+  "combustion": { "model": "laminar" }
+}

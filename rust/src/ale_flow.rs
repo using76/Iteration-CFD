@@ -550,6 +550,7 @@ pub fn piston(gpu: &Gpu, scheme: DdtScheme, bounded: bool) -> Result<PistonRun> 
 
 /// The stroking outlet of SPEC-LIT 105.10 (b): `steps` steps to `STROKE_T`,
 /// the volume-weighted mean of `U_x` there, and how far apart the cells sit.
+#[allow(clippy::unnecessary_cast)]
 pub fn stroke(gpu: &Gpu, scheme: DdtScheme, steps: usize) -> Result<StrokeRun> {
     if steps == 0 {
         return Err(Error::Config(
@@ -602,13 +603,15 @@ pub fn stroke(gpu: &Gpu, scheme: DdtScheme, steps: usize) -> Result<StrokeRun> {
     }
     let u = gpu.download(&s.u().f)?;
     let v = gpu.download(&gm.v)?;
-    let mut num = 0.0 as Scalar;
-    let mut den = 0.0 as Scalar;
+    // SPEC-LIT 118.15 (and 118.1: reductions add in double): the mean is
+    // accumulated in f64 and rounded once.
+    let mut num = 0.0 as f64;
+    let mut den = 0.0 as f64;
     let mut lo = Scalar::INFINITY;
     let mut hi = Scalar::NEG_INFINITY;
     for c in 0..n_cells {
-        num += v[c] * u[c].x;
-        den += v[c];
+        num += v[c] as f64 * u[c].x as f64;
+        den += v[c] as f64;
         lo = lo.min(u[c].x);
         hi = hi.max(u[c].x);
     }
@@ -616,7 +619,7 @@ pub fn stroke(gpu: &Gpu, scheme: DdtScheme, steps: usize) -> Result<StrokeRun> {
         scheme,
         steps,
         dt,
-        value: num / den,
+        value: (num / den) as Scalar,
         spread: hi - lo,
         min_volume_ratio,
     })
@@ -624,17 +627,22 @@ pub fn stroke(gpu: &Gpu, scheme: DdtScheme, steps: usize) -> Result<StrokeRun> {
 
 /// The exact answer the stroke gate measures against: `U0 + P0` times the
 /// integral of `1 / L(s)` over `[0, T]`, composite Simpson to round-off.
+/// Evaluated in f64 and rounded once, in both builds (SPEC-LIT 118.15).
+#[allow(clippy::unnecessary_cast)]
 pub fn stroke_exact() -> Scalar {
     let n = 20_000usize;
-    let h = STROKE_T / n as Scalar;
-    let pi = std::f64::consts::PI as Scalar;
-    let f = |s: Scalar| 1.0 / (STROKE_L0 + STROKE_A * (2.0 * pi * s / STROKE_PERIOD).sin());
-    let mut acc = f(0.0) + f(STROKE_T);
+    let h = STROKE_T as f64 / n as f64;
+    let pi = std::f64::consts::PI;
+    let f = |s: f64| {
+        1.0
+            / (STROKE_L0 as f64 + STROKE_A as f64 * (2.0 * pi * s / STROKE_PERIOD as f64).sin())
+    };
+    let mut acc = f(0.0) + f(STROKE_T as f64);
     for i in 1..n {
         let w = if i % 2 == 1 { 4.0 } else { 2.0 };
-        acc += w * f(i as Scalar * h);
+        acc += w * f(i as f64 * h);
     }
-    STROKE_U0 + STROKE_P0 * acc * h / 3.0
+    (STROKE_U0 as f64 + STROKE_P0 as f64 * acc * h / 3.0) as Scalar
 }
 
 /// The stroke at all three step counts with the grid study over them

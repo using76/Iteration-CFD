@@ -2,9 +2,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { ServerMsg } from '@cfd/shared'
+import { parse as parseJsonc } from 'jsonc-parser'
 import { ChatError } from '../agent/types.js'
 import { loadCaseSchema, loadOptionalCaseSchema, type CaseSchema } from '../registry/schema.js'
 import { makeTempWorkspace, REPO_ROOT, testConfig, type TempWorkspace } from '../runs/test-helpers.js'
+import { setSchemaValidator } from '../tools/case.js'
 import { registerApiRoutes } from './routes.js'
 import { Router } from './router.js'
 import { createHttpServer, type HttpServerHandle } from './server.js'
@@ -84,6 +86,8 @@ describe('api routes', () => {
     expect(reg.binaries.map((b: { name: string }) => b.name)).toContain('ofgpu-k-epsilon')
     expect(reg.pickLists.patchKinds).toEqual(['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'])
     expect(reg.meshPresets.length).toBe(7)
+    expect(reg.caseBlocks.radiation.choices['radiation.model']).toEqual(['P1', 'fvDOM', 's2s', 'viewFactor'])
+    expect(Object.keys(reg.caseBlocks)).toEqual(['species', 'chemistry', 'combustion', 'radiation', 'parcels'])
     const schema = await get('/api/schema/case-1.json')
     expect(schema.headers.get('content-type')).toContain('json')
     expect(((await schema.json()) as { title: string }).title).toBe('JsonCase')
@@ -139,6 +143,31 @@ describe('api routes', () => {
     expect(fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')).toBe(disk)
     expect((await postJson(`${base}/api/case/validate`, { path: '../x.jsonc', content: '{}' })).status).toBe(403)
     expect((await postJson(`${base}/api/case/validate`, { path: 'README.md', content: '' })).status).toBe(400)
+  })
+
+  it('validates a mock-LLM case with a radiation block (CHR-28)', async () => {
+    // The temp workspace has no docs/schema, so the route would fall back to
+    // structuralValidate; inject the real one for this check.
+    const real = loadCaseSchema([path.join(REPO_ROOT, 'docs', 'schema', 'case-1.json')])
+    setSchemaValidator((json) => real.validate(json))
+    try {
+      const disk = fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')
+      const json = parseJsonc(disk, [], { allowTrailingComma: true }) as { radiation?: Record<string, unknown> }
+      json.radiation = { model: 'P1', absorption: { model: 'constant', kappa: 0.5 }, walls: { floor: { emissivity: 0.8 } }, every: 1 }
+      const res = await postJson(`${base}/api/case/validate`, { path: 'cases/plume.jsonc', content: JSON.stringify(json) })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as Loose
+      expect(body.ok).toBe(true)
+      expect(body.errors).toEqual([])
+      json.radiation = { model: 'P1', absorbtion: {} }
+      const bad = (await (await postJson(`${base}/api/case/validate`, { path: 'cases/plume.jsonc', content: JSON.stringify(json) })).json()) as Loose
+      expect(bad.ok).toBe(false)
+      expect(bad.errors.map((e: { pointer: string }) => e.pointer)).toContain('/radiation/absorbtion')
+      // the route validates a buffer: the file on disk never changes
+      expect(fs.readFileSync(path.join(ws.root, 'cases', 'plume.jsonc'), 'utf8')).toBe(disk)
+    } finally {
+      setSchemaValidator(null)
+    }
   })
 
   it("serves the Boundary editor's table and applies its set_patch (STU-07b)", async () => {

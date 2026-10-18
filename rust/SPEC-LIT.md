@@ -3828,6 +3828,71 @@ sink) and −16.5 % on the wall-function leg (viscous form) or −27.9 %
 this gate in its own right, on both meshes, and it is a MOMENTUM finding
 — §33.3's territory, not §29.3's.
 
+##### 32.5.3.1 Addendum (VAL-41): why the wall-function leg's realised `f` is −28 % of the pipe `f`
+
+The wall-function leg realises `f` = 0.0171402 in the `rho u_tau^2` form
+against Petukhov's pipe `f` = 0.0238816 at its own `Re` — −28.2 %, the
+finding §32.5.3 left open on the table. This addendum measures why, and it
+measures by INPUT alone: a diagnosis probe (`src/bin/lowmach_val41/mod.rs`,
+tests only — no solver code is touched) runs `cases/channelPeriodicFluxWF.jsonc`
+and three input variants of it through the whole `ofgpu-lowmach` driver at
+10 000 steady iterations each (about 70 s per run; 10 000 reproduces the
+40 000-iteration record digit for digit), reads the written fields back, and
+decomposes the realised friction factor as an exact identity. Three tests,
+each printing every number before it asserts:
+`val41_probe_the_shipped_leg_decomposes_and_its_seam_is_a_wall`,
+`val41_probe_a_seam_that_is_not_a_wall_closes_half_of_it`,
+`val41_probe_the_first_cell_y_plus_sweep_with_the_seam_not_a_wall`, run as
+`cargo test --release --bin ofgpu-lowmach val41_probe -- --ignored
+--nocapture --test-threads=1`.
+
+The decomposition, an identity the probe asserts to 1e-12 relative on every
+leg:
+
+```text
+F1 = mean(rho_f sqrt(Cmu) k_P) / (rho_w u_tau^2)   the u_tau form: k_P against equilibrium
+F2 = rho_w / rho_b                                 the density convention of a kinematic momentum equation (§32.5.2)
+F3 = f_kin / f_pipe,   f_kin = 8 u_tau^2 / U_b^2   the kinematic friction against the pipe
+f_k / f_pipe = F1 · F2 · F3
+```
+
+Shipped: 0.71771 = 0.86640 × 0.92246 × 0.89803. Every candidate below is
+ruled in or out by what one input edit does to that product; the shares are
+log shares of the shipped total, ln(0.71771) = −0.332, with the three factors
+taken at the seam-free state the variants isolate.
+
+| Candidate | How measured | Measured | Verdict |
+|---|---|---|---|
+| the seam: the two cyclic patches carry the catch-all rule's wall-function types (`epsilonWallFunction`, `kqRWallFunction`) in the lowered fields, and `field_setup::faces_where` (called by `WallFaces::from_case`) flags faces by the raw patch type without the `topology_override` that makes them cyclic, so the epsilon pin of the two seam wall cells averages the cyclic face in as a wall face at `y = dx/2` | input: the catch-all rule becomes `"kind": "symmetry"`, which reaches only the two cyclic patches (the mesh still couples them cyclically) | interior wall cells pinned to 1e-5 (probe 6.3e-6); seam cells 13.35 % below `epsilon_wall(k_P, y_P)` and equal to the area-weighted mix to 3e-6; the flow then NOT streamwise-invariant (`k_P` spread 6.06 %, `U_y` up to 0.031 m/s at the seam). Seam-free: x-invariant (`k_P` spread 0, `U_y` 2e-10), `f_k/f_pipe` 0.84473 | RULED IN — ln share −0.163 of the total −0.332 (49 %) |
+| the density convention F2 = `rho_w/rho_b` (a kinematic momentum equation reported in Pa at the wall density and divided by `rho(T_b)`, §32.5.2) | read off the same decomposition at the seam-free state | 0.92578 | RULED IN — a convention of the report, not a defect of the solve; share −0.077 (23 %) |
+| the u_tau form F1: `k_P` below the equilibrium `u_tau^2/sqrt(Cmu)` | the seam-free decomposition, plus the wall cell's own k budget | 0.93245; the budget `G − eps + D` closes to 2.4e-7 of `G`, with `G/eps` = 1.069 — the surplus production diffuses into the three-cell half-channel core | RULED IN — share −0.070 (21 %) |
+| first-cell y+ ~ 60 against the log-law constants (`kappa` 0.41, `E` 9.8) | input: the wall-normal cell count, seam-free, `ny` 4/6/10 — `y+_k` 89.3/59.9/36.2 | the wall function reproduces its own law (`U_P+ = (u_tau/u_k) u+(y+_k)` to 1e-4), so `U_P+` 16.066 against `u+(62.06)` = 15.603 is F1's deficit seen through the law, not the constants'. The sweep moves F1 0.921/0.932/0.944 and F3 0.961/0.979/0.997: the kinematic friction approaches the pipe value as the first cell moves in | RULED IN as a resolution effect of F1's mechanism — F3's share at the shipped mesh −0.022 (7 %) |
+| the `bounded` correction on `k` and `epsilon` | input: `div(phi,k)` and `div(phi,epsilon)` unbounded, shipped and seam-free | `f_k` moves −5.7e-5 relative on the shipped case and is BIT-IDENTICAL seam-free (`contErr` 2.8e-14) | RULED OUT (the momentum one was retired by §32.5.5) |
+
+**The seam-free leg's own driver readout** (`ofgpu-lowmach`'s own report of the
+seam-free run at 10 000 iterations; the supervisor's 20 000-iteration run
+reproduces every printed digit): `Nu` 67.8038, Gnielinski at
+the pipe `f` **+2.7 %** (shipped −5.9 %), Reynolds analogy at its own
+measured `f` **+23.2 %** (still OPEN), Dittus–Boelter **−4.7 %**, thermostat
+balance 4.67e-8 W (shipped −5.57e-4 W). Removing the seam therefore does not
+close the Reynolds-analogy verdict — F2 and F1 remain — but it moves the
+absolute-prediction verdict from −5.9 % to +2.7 %, and it is the largest
+single share of the friction finding.
+
+**Options, NOT built** — the numerics and the gate records are the user's
+decision, and this addendum measures without either:
+
+- (a) code — `faces_where` (or `WallFaces::from_case`) skips faces of a
+  `PatchKind::Cyclic` patch; it changes every JSONC cyclic wall-function run.
+- (b) input — the catch-all of `channelPeriodicFluxWF.jsonc` becomes
+  `"kind": "symmetry"`; it moves this gate's record (§32.4.1's wall-function
+  rows). Whether the seam faces also receive a `nu_t` wall value (the `nut`
+  set is flagged by the same `faces_where`) was not measured separately. The resolved leg (`nutLowRe`, no epsilon pin) is
+  not affected by this path.
+
+No citation beyond Launder & Spalding and Kader, both already carried by
+§6.4.
+
 #### 32.5.4 What must hold
 
 | Check | Expected |
@@ -31630,7 +31695,9 @@ cold wall by radiation.
   `constant/radiationProperties`, or a `T` with a
   `greyDiffusiveRadiationViewFactor` or `s2sWall` patch, is refused naming
   `ofgpu-cht` and §98.7 - where before this section it was seeded adiabatic
-  and run.
+  and run. **Superseded by CHR-24 (§137.9):** `ofgpu-buoyant` now runs the
+  enclosure from the case directory. Its wall conductivity is (137.7), and
+  `-graph` with an enclosure is refused for the read-back reason above.
 * **§50.12's first item stands.** The coupled cavity of Balaji & Venkateshan
   and of Akiyama & Chong - its `Nu_conv`/`Nu_rad` tables are behind
   Elsevier's paywall - is not run. §98 ships with no gate against a published
@@ -33990,6 +34057,46 @@ plume_dT_z53_over_Q23 21.6
 buoyancy_constant 0.935
 ```
 
+**Leg 2 — the same plume with a participating medium (docs/17 VAL-54).** Leg 1 above is the hot-gas
+inlet with nothing radiating. Leg 2 is the same case with a radiative loss the run computes itself:
+`cases/plumeMcCaffreyRad.jsonc`, which is `cases/plumeMcCaffrey.jsonc` with three stated inputs and
+nothing else changed (the box, the burner window, the declared `Q = 57.5 kW` at `U_in = 2.3985 m/s`,
+k-ε, the numerics, and the mesh levels):
+
+1. `radiation: P1` (§135.7, run by `ofgpu-lowmach` as §137.8 builds it), grey, `absorption.kappa =
+   1.0` 1/m, no scattering, solved every iteration (PCG on DIC, `relTol 0.01`). A hot-gas inlet's gas
+   is air, which has no absorption coefficient of its own, so `κ` is SIZED, not a property. On leg 1's
+   own recorded fields (VAL-53, 4 000 iterations) the optically thin emission
+   `I = Σ_P 4σ(T_P^4 - T_inf^4) V_P` is 13 397 / 15 681 / 18 543 W per (1/m) at 0.10 / 0.05 /
+   0.025 m. The `κ` at which `κ I = 0.30 Q`, the midpoint of McCaffrey's 20-40 % radiant fraction,
+   is therefore 1.29 / 1.10 / 0.93 1/m, and 1.0 is that value rounded. It was fixed before any
+   radiating run.
+2. The five walls state `T fixedValue 293.15 K` (leg 1: `zeroGradient`). §137.8 balances an
+   adiabatic radiating wall: the radiation it receives goes back into the gas by conduction, so no
+   radiant power could leave the box. It also records that the balanced wall's explicit lag
+   diverges when the radiative conductance is far above the conductive one. A stated wall is not
+   balanced, and it is black at `T_inf`, so what the plume radiates to the walls leaves the box, as
+   it left the report's open laboratory.
+3. The inlet and the outlet are named in `radiation.open` at `Tinf 293.15 K`, black at ambient. The
+   burner window therefore adds no radiant power, and all of `Q` still enters as enthalpy.
+
+The bands are leg 1's, unchanged: P1-P4, the stations, the study functional, and the verdict words
+(a correlation: outside is OPEN). One number is added and asserted as nothing: the radiant fraction
+the run computes,
+
+```text
+chi_r = L / Q,   L = Σ_b (q_r·n)_b |S_b| over every boundary face                     (137.6)
+```
+
+`L` is the `walls` value of the driver's `radiation (137.3)` line, taken from the extra solve at the
+final `T`. It is printed beside McCaffrey's 20-40 % and beside P4's `chi_c`. With `κ = 1.0` the
+box's half-width is 1.65 optical depths, so the gas that surrounds the plume absorbs part of what the
+plume emits. A grey constant `κ` cannot make the plume emit and its surroundings transparent at the
+same time. That needs `κ` per cell (`κ(T, X)` on a products tracer, CHR-22's first open item, §137.8),
+which is named and not built. The gate is `src/bin/validate_gates/plume_rad.rs`. It replays its
+records in the `ofgpu-validate` section "Gate 110-C leg 2" through the same P1-P4 logic as leg 1, and
+loads the key through leg 1's `load_mc_key`, so the answer-key marker stays once.
+
 ### 110.5 The recipe, and the record
 
 **The channel.** `cases/channelDns{180,395,590}.jsonc` at `ofgpu-lowmach`, 40 000
@@ -34017,7 +34124,9 @@ at `x = -4H` the column starts at the first cell centre above the floor `y = 1H`
 `-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
 0.05 / 0.025 m — runs on scratch copies with only `cells` edited (the shipped file is
 the 66 level), and `ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at
-1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations.
+1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations. Leg 2 (§110.4, docs/17 VAL-54) runs the same
+recipe on `cases/plumeMcCaffreyRad.jsonc`, and `ofgpu-sample` reads that case although it states
+`radiation` (below).
 
 **Placing a key.** All five keys have their manifest rows and their
 `// answer-key: <id>` markers at the `key::load_text` calls in `validate.rs` (docs/17
@@ -34102,6 +34211,7 @@ has been made, and no verdict in this table is a claim.
 | Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-B reattachment | Driver & Seegmiller (1985) through the TMR: x_r/H = 6.26 +- 0.10 | x_r/H = 5.637 at dx 0.2H, the one level that converged, E = -0.623 (-9.9 % of D); delta_99/H at x = -4H = 1.674 (U_e 10.554 m/s) against approximately 1.5 | not formed: dx 0.1H stopped at step 1232 (M 3.615, cell 56) and dx 0.05H at step 30 (M 1.920, cell 917604), both on the Mach guard of §93.6 | MISSES (the study is not formed; the one converged level lies outside the band); class R MISSES (the single build stops at step 0 on all three levels) |
 | Gate 110-C plume centreline | McCaffrey Table 1, plume region, at the declared Q = 57.5 kW: dT_c(2.00 m) = 101.356 K, w_c(2.00 m) = 3.4311 m/s | dT_c(2.00 m) = 265.214 K, w_c = 5.9370 m/s at 0.025 m; P1 worst +212.6 % (z = 1.25 m), P2 worst +76.1 % (z = 1.75 m); P3 slope -2.130; P4 chi_c = 0.224 | 231.556 / 224.483 / 265.214 K, oscillatory diverging, p n/a, u_num = 144.1 K (142 % of D), u_input = 0 (Q declared) | P1 OPEN (outside); P2 OPEN (undecided at u_val/D = 1.422); P3 OPEN (outside -5/3 +- 0.25); class R holds |
+| Gate 110-C leg 2, radiating (P1, kappa 1.0 1/m) | the same correlation at the same declared Q; the run's radiant fraction beside McCaffrey's 0.20-0.40 | dT_c(2.00 m) = 236.986 K, w_c = 5.8776 m/s at 0.025 m; P1 worst +153.9 % (z = 1.50 m), P2 worst +73.6 % (z = 1.75 m); P3 slope -1.833; P4 chi_c = 0.278; chi_r = 0.061 / 0.068 / 0.077 | 48.138 / 107.037 / 236.986 K, monotone diverging, p n/a, u_num = 271.4 K (268 % of D), u_input = 0 (Q declared) | P3 holds; P1/P2 OPEN (undecided at u_val/D = 2.678); class R holds |
 
 **The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
 stands, with nothing edited but `cells`: `cases/channelDns{180,395,590}.jsonc` (LaunderSharmaKE,
@@ -34277,6 +34387,76 @@ an outside-band result against a correlation. The P1/P2 headline names each leg'
 so a leg that is undecided is never reported as outside because the other one is. It also says
 whether a high miss lies inside what 20-40 % radiative loss accounts for. The class-R row follows
 Gate 110-A's (VAL-51). No band, tolerance or functional changed.
+
+**The record of Gate 110-C leg 2 (docs/17 VAL-54).** The three runs are §110.5's plume recipe with
+nothing edited but `cells`, on `cases/plumeMcCaffreyRad.jsonc` (§110.4's leg 2) instead of leg 1's
+file: `[33,33,40] / [66,66,80] / [132,132,160]`, each `ofgpu-lowmach -iters 4000 -check 500` in the
+f64 release build at `335c85a`, and each set of stations from `ofgpu-sample column <copy> 4000 z 0 0
+-at 1.25,1.5,1.75,2.0,2.25,2.5`. The single build ran the finest copy the same way. Until this unit
+the sampler refused the case: it loaded every case through the drivers' `load_case`, which refuses a
+`radiation` block in every driver but `ofgpu-lowmach` (§137.8). The sampler reads a run's mesh and
+fields and never runs its physics, so it now loads with the lowmach-only blocks let through
+(`load_sampled_case`). The coarse and medium stations were first taken through a copy of the case
+with the `radiation` block removed, the same mesh and the same output directory, and the fixed
+sampler reproduces those station lines byte for byte. The records are constants in
+`src/bin/validate_gates/plume_rad.rs`, printed from the runs' outputs by its ignored test
+`record_plume_rad`, and section "Gate 110-C leg 2" of `ofgpu-validate` replays them.
+
+Pricing came first, as VAL-50 priced leg 1: 200 timed iterations per level gave 26.0 / 61.6 /
+789.5 ms per iteration (mean; last window 26.8 / 50.0 / 773.8), projected at 1.8 / 4.2 / 52.9 min
+for 4 000 iterations. The fine level peaks at 8,074 MiB of pool (3,037 B/cell), against leg 1's
+7,177 MiB. The P1 solve every iteration roughly doubles the fine level's cost over leg 1's 425 ms. The
+recorded runs took 52 s, about 3 min and 44.9 min, and the single build's 25.8 min, beside the other
+lanes' jobs on the card. With the pricing, a coarse-level G-tolerance probe, and the medium and fine
+2 000-iteration checks, leg 2 used about 2 h of card time.
+
+| level | dT_c at z = 1.25 / 1.50 / 1.75 / 2.00 / 2.25 / 2.50 m (K) | w_c at the same stations (m/s) | P3 slope | chi_r = L/Q (L in W) |
+|---|---|---|---|---|
+| 0.10 m | 143.54 / 95.25 / 65.68 / 48.14 / 37.07 / 30.36 | 2.2349 / 1.6989 / 1.3393 / 1.1101 / 0.9601 / 0.8796 | -2.2704 | 0.061 (3 490) |
+| 0.05 m | 249.83 / 179.70 / 135.09 / 107.04 / 89.41 / 77.90 | 4.0624 / 3.6245 / 3.2658 / 3.0147 / 2.8649 / 2.7881 | -1.7021 | 0.068 (3 929) |
+| 0.025 m | 528.05 / 415.64 / 310.90 / 236.99 / 187.08 / 152.26 | 5.5887 / 6.1903 / 6.2282 / 5.8776 / 5.4746 / 5.1133 | -1.8326 | 0.077 (4 405) |
+| 0.025 m, single | 521.05 / 414.63 / 313.67 / 239.78 / 189.23 / 153.85 | 5.5601 / 6.1300 / 6.2319 / 5.9210 / 5.5242 / 5.1597 | -1.7971 | 0.076 (4 387) |
+| leg 1, 0.025 m | 693.55 / 511.25 / 361.31 / 265.21 / 204.15 / 163.25 | 5.4024 / 6.2163 / 6.3188 / 5.9370 / 5.4886 / 5.0914 | -2.1297 | 0 |
+| McCaffrey at Q = 57.5 kW | 221.84 / 163.71 / 126.62 / 101.36 / 83.29 / 69.88 | 4.0130 / 3.7764 / 3.5872 / 3.4311 / 3.2990 / 3.1851 | -5/3 | 0.20-0.40 |
+
+The conductive heat the stated walls take is 340 / 290 / 206 W, 0.6 % / 0.5 % / 0.4 % of `Q`. The
+radiation line closes (137.3) to 0.18 / 0.10 / 7e-4 W in f64 (the G solve runs at `relTol 0.01`) and
+to 7.4 W under single.
+
+What the record says. **The radiant fraction the run computes is 0.061 / 0.068 / 0.077**, against
+McCaffrey's 0.20-0.40 and against the 0.30 the sizing of `κ` aimed at. The optically thin estimate
+does not hold at `κ = 1.0`. On the finest level the gross volume emission `Σ κ 4σT^4 V` is about
+87 kW. It is formed from (137.6)'s `S` and `L`, with every boundary flux taken as outward. About 73 kW
+of it is the ambient gas's own `4σT_inf^4` over the 43.56 m3 box. The plume's excess, about 14 kW, is
+near the `0.30 Q` = 17 kW the sizing aimed at, but only `L` = 4.4 kW of it leaves the box. The gas
+around the plume absorbs the rest. The box's median cell temperature rises from 293.3 K in leg 1 to
+294.9 / 295.0 K on the coarse and medium levels. P4's implied convective fraction on the
+finest mesh is 0.278, beside the run's own `1 - chi_r = 0.923`, so the centreline excess is still
+not radiation's. On the finest mesh `dT_c` lies +117.9 % to +153.9 % above the correlation (leg 1:
++133.6 % to +212.6 %), and `w_c` +39.3 % to +73.6 % (leg 1: +34.6 % to +76.1 %). Radiation lowered the
+near field most, by 165 K at z = 1.25 m and 28 K at z = 2.00 m. **P3 holds** on the finest mesh:
+the slope is -1.833 against -5/3 ± 0.25, where leg 1's -2.130 was outside. **P1/P2 is OPEN,
+undecided.** It is judged as leg 1's is, at the study of `dT_c(2.00 m)`. That study runs 48.14,
+107.04 and 236.99 K over the three levels, monotone diverging, so `p` is not available and
+`u_num` = 271.4 K (268 % of D). `u_val/D` = 2.678 reaches past the 15 % edge from the worst station's
++153.9 %, and the band cannot decide. **Class R holds**: the single build's finest run lands in every
+band the f64 run lands in (P1 +153.27 %, P2 +73.72 %, slope -1.797, `chi_r` 0.076, `dT_c(2.00 m)`
+239.78 against 236.99 K, +1.2 %).
+
+The coarse and medium levels are not a plume on the axis. Their columns carry a cross velocity of
+0.3-0.4 m/s at the stations (`U_x` -0.37 and +0.35 m/s at z = 1.25 m). Leg 1 carried 2e-5 m/s on the
+coarse mesh and at most 0.06 m/s on the finest. The radiating plume leans, in a different direction on
+each level, and the fixed column samples its flank. The lean is not the G solve's: a coarse probe
+with G solved to `1e-14`, `relTol 0` (gap 8.8e-11 W) leans the same way, by 0.29 m/s. The medium
+level is also not converged in the iterations. Run to 2 000 iterations, it gives `dT_c(2.00 m)` =
+159.70 K, leaning along `-y`, against 107.04 K along `+x` at 4 000. The finest level is converged in the iterations to a few per cent. At 2 000 iterations it gives
+`dT_c(2.00 m)` = 232.79 K against 236.99 K at 4 000 (-1.8 %), its worst station 514.68 against
+528.05 K (-2.5 %), and its P3 slope -1.811 against -1.833. Its column carries at most 0.04 m/s
+across the axis. The study's divergence
+is therefore at least partly the coarse levels' leaning, wandering states. The candidates, none
+measured here, are the absorbing ambient's stratification against walls held at `T_inf`, and steady
+SIMPLE picking an asymmetric state of a symmetric box. Each cure changes the case or the model
+(per-cell `κ`, an open side boundary, a transient run), so none was tried (docs/17 review-later).
 
 ---
 
@@ -34602,7 +34782,7 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, F32-16 (below) took 186 away, and F32-17 (below) took 112 more. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, F32-16 (below) took 186 away, and F32-17 (below) took 112 more; the merge of lane G's W8 into lane M (2026-10-19) was recounted by this test and moved neither number, because F32-15 (§118.15) runs its four tests as `tests/f32_unfinished.rs` and changes no attribute. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
 105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's), §105.18 one (the `backward`
 stroke's regression test) and §144.3 one (`ofgpu-validate`'s 10:1 cantilever mesh test, which first compiled under
 the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`). F32-17 (below) took eleven away and added one (`ofgpu-compressible`'s `every_knob_changes_the_run`).
@@ -34817,8 +34997,10 @@ This table replaces the run of 2026-09-24. That run aborted at section 8's first
 residual `0.00000011920926` at internal face 376 against its limit `0.0000000001`. Its verdict words read an error
 below `1e-5`, about 84 f32 ulps at 1, as right to single precision, and that is the cap D-F32-1 took in (118.14.1).
 Two changes since then let every section run and report. §118.3 moved that guard's measurement into f64. §118.14's
-`Checks::ran` turns a section that stops under `single` into one failed row. docs/17's F32-18 row asks for "the measured 51-section table". The tree has **81**
-sections: main's 1-79, then DST-LEEDS (80) and DST-VES (81). The table has a row for each.
+`Checks::ran` turns a section that stops under `single` into one failed row. docs/17's F32-18 row asks for "the measured 51-section table". The tree had **81**
+sections: main's 1-79, then DST-LEEDS (80) and DST-VES (81). The table has a row for each. The merge with lane G
+(2026-10-19) brought lane G's three: Gate CHR-13 (82), Gate CHR-16 (83) and Gate 110-C leg 2 (84). Their rows were
+measured at that merge, the same way, and they are not in the totals below.
 
 **How it was measured** (2026-10-18 and 19, F32-18, HEAD 5e10534; this unit changes nothing `ofgpu-validate`
 computes):
@@ -34896,7 +35078,7 @@ The verdicts:
 | 52 | Gate 100-C | 16/16 | NOT RUN (3/8) | 601 | at the cap: the channels do not converge (D); balance 1.68e-4 and 1.86e-4 against 1e-5 |
 | 53 | Gate 100-D | 11/11 | 0/1 | 1 | stops: T leaves water's mu(T) curve |
 | 54 | Gate 105-A | 10/10 | 10/10 | 1 | holds |
-| 55 | Gate 105-B | 14/14 | 8/14 | 82 | the piston's uniform state 1.58e-2 .. 6.01e-2 against 1e-5; backward order 0.737 against 0.1; extrapolation direction (D) |
+| 55 | Gate 105-B | 14/14 | 8/14 | 82 | the piston's uniform state 1.58e-2 .. 6.01e-2 against 1e-5; backward order 0.285 against 0.1 (p = 2.285; it read 0.737 at 5e10534, and was re-measured at the lane-G merge, in 63 s, after F32-15's f64 stroke reference of §118.15, which also moves the backward finest step from 1.07e-6 to 8.25e-8 against 5e-6); extrapolation direction (D) |
 | 56 | Gate 105-C | 0/0 | 0/0 | 1 | - |
 | 57 | Gate 94-D, the Ghia cavity | 8/8 | NOT RUN (4/4) | 600 | at the cap: Re = 100's four rows pass |
 | 58 | Gate 110-A | 17/17 | 17/17 | 0 | holds |
@@ -34923,6 +35105,9 @@ The verdicts:
 | 79 | Gates 88-T, 90-T leg 3, replayed | 14/14 | 14/14 | 0 | holds |
 | 80 | Gate DST-LEEDS | NOT RUN (4/5; the cap cut the u' = 2.45 m/s run) | 2/23 | 20 | all four runs refused by the Mach guard (A71); the 12 S_t,b and 4 p0 rows inf, the slope row (D) |
 | 81 | Gate DST-VES | 7/21 | 0/9 | 61 | all four runs refused by the Mach guard (A75), so the nine rows reached fail |
+| 82 | Gate CHR-13, replayed | 0/3 | 0/3 | 2 | the same three rows as f64: each recorded level stops at 0.6 ms on the reactor's refusal (A98); the Konnov row is a skip in both |
+| 83 | Gate CHR-16 REDUCED, replayed | 1/7 | 1/7 | 0 | the same six rows as f64: the recorded run stops at step 41 (A100), and its inventory budgets are 1.30e-2 .. 2.35e-1 against 1e-6 |
+| 84 | Gate 110-C leg 2, replayed | 2/2 | 2/2 | 1 | holds; the single build's recorded run lands where the f64 run does (class R), and P1/P2 stay OPEN in both (A104) |
 
 **What it adds up to.**
 * **f32:** 43 sections hold, 32 miss, 5 are NOT RUN and 1 has no rows. In the 76 sections that ran, 937 of 1,091 rows
@@ -34930,6 +35115,9 @@ The verdicts:
 * **f64:** 71 sections hold and 8 miss: 43, 70, 71, 74, 76, 77 and 78 by their known findings, and 81 by DST-VES's
   bands. Section 80 is NOT RUN, and 105-C has no rows. 1,149 of 1,197 rows pass.
 * **Time:** the f32 sections took 5,985 s in all, the f64 ones 3,515 s. Five f32 sections and one f64 section (80) reached the 600-s cap.
+* **Sections 82-84** (lane G's, measured at the merge on 2026-10-19, 3 s under `single`): all three replay recorded runs,
+  and each gives the same rows in both builds. 82 and 83 miss as f64 does, 1 of 10 rows passing; 84 holds, 2 of 2.
+  With them, `single` holds 44 of the 84 sections and misses 34, and f64 holds 72 and misses 10.
 
 **The deferred full run.** The plan's gate is "a deferred long run of `ofgpu-validate` under single exits 0 (R rows
 per D-F32-1)", and it is **MISSED**. The rows above already fail in 32 sections, so an unflagged run under `single`
@@ -34951,7 +35139,7 @@ After F32-18 the f32 build is a **supported configuration**. That word claims fo
   (§112.2, docs/17 §5.1 rules 1 and 2).
 * **Every test runs or is named.** Each library and binary test runs under the feature or carries a named cause in
   §112.3 (F32-16, F32-17).
-* **Every validate section reports.** Each of the 81 sections runs under `single` and prints every row at its class
+* **Every validate section reports.** Each of the 84 sections (81 at F32-18, and lane G's 82-84 measured at the merge) runs under `single` and prints every row at its class
   tolerance (§112.4, §118.14), or is NOT RUN because it alone takes more than ten minutes.
 * **The studio can run it.** F32-19's precision setting starts the `target/single` drivers. Its preview flag is lane
   G's to clear now that this section is written. The studio keeps `double` as its default (docs/17 §10.1 A18).
@@ -34966,7 +35154,7 @@ long-upwind-path system that f64 and PCG still solve.
 * A1: fvDOM step-scheme rows on paths of 64 cells or more. This blocks f32 fvDOM radiation in any real enclosure.
 * A3: the ABL pressure system with a Diagonal preconditioner. The ABL gate runs PCG and DIC instead.
 * A18 and A24: §118.4's refined PBiCGStab returns NaN on the sealed all-Neumann box (§112.4 section 6).
-* Lane G's CHR-26 row: PBiCGStab stalls on a sealed 4-cubed box. This blocks PBiCGStab for p in any closed f32
+* A92 (lane G's CHR-26): PBiCGStab stalls on a sealed 4-cubed box. This blocks PBiCGStab for p in any closed f32
   domain, so PCG is the choice there.
 
 **The steady and low-Mach flow paths.**
@@ -34994,7 +35182,7 @@ same pattern inside `ofgpu-validate`.
 **Iterations that stop short of an f64 criterion.**
 * A25: §112.4's NOT RUN and MISSED loop gates, which are 59-A/B, 95-A, 95-D, 95-G, 98-C, 100-A, 100-C, 94-D and CMP-B.
 * A84: 34 library tests (stress-mode CHT, the externalSlab outer loop, solid Anderson and GMRES, Newton).
-* Lane G's F32-15 rows: the ALE backward-order miss, and the bimetal and SST-forcing wall budgets.
+* A93-A95 (lane G's F32-15): the ALE backward-order miss, and the bimetal and SST-forcing wall budgets.
 
 These block f32 for conjugate heat transfer at interface tolerances, solid stress and enclosure radiation coupled to a
 flow. A criterion set below the f32 floor either never ends or ends on its cap.
@@ -35013,7 +35201,7 @@ digits.
 **NaN, and the test-suite bars.**
 * A83: NaN in 11 tests, among them the SA log-layer production on the host and the device, the k-epsilon realizability
   number at `k/eps = 1e-6`, and three CHT fluid runs.
-* A81 and F32-17's two misses (§112.3): 191 library and 7 binary tests stay marked, and `--bins` passes 439 of 442.
+* A81, and F32-17's two misses A105 and A106 (§112.3): 191 library and 7 binary tests stay marked, and `--bins` passes 439 of 442.
 * A88: `ofgpu-compressible`'s two tolerance knobs write bit-identical fields in f32.
 
 **Speed and memory** are §112.6. f32 halves bytes per cell as planned, but it does not make the SIMPLE loop 1.5 times
@@ -39451,6 +39639,7 @@ subsections, by unit:
 - 118.9 — parcel positions, the walk and the exchange sums in f64 (F32-12)
 - 118.11 — the FSC rate constant formed once in f64 (DST-03)
 - 118.14 — row classes in `ofgpu-validate` and the round-off tolerance D-F32-1 (F32-13 sections 1-25, F32-14 sections 26-65)
+- 118.15 — the four tests that did not finish at f32, and the stroke's reference in f64 (F32-15)
 - 118.16 — the section closed: what is double in the f32 build, and what is not (F32-18)
 
 and, later, chemistry in
@@ -41259,6 +41448,82 @@ causes. Some are an iteration that stops short of its f64 criterion under `singl
 `Scalar`: S52, S56.4, S57.3, 76, 77-B and Buckingham-Reiner. 100-D and 105-B diverge or drift
 under `single`. A cure changes numerics or a criterion and is not built here.
 
+### 118.15 The four tests that did not finish at f32 - they finish now, and what each one costs
+
+§112.3 lists four library tests that were stopped after 95 minutes under `single`:
+`ale_flow::tests::gate_105b_the_stroking_outlet_has_the_scheme_time_order`,
+`models::k_omega_sst::tests::forcing_f1_to_zero_reproduces_the_transformed_k_epsilon`,
+`solid::tests::gate_95_e_the_bimetal_curvature_is_timoshenko_s` and
+`solid::tests::the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`. That was
+measured before §118.4. Each of them solves with PCG or PBiCGStab to a stop of `1e-13` or `1e-14`,
+below the float floor, so every solve ran to `maxIter`. §118.4's refinement now reaches those stops
+in double, and all four finish. The unit is F32-15. The plan expected the cause to be a stop below
+the f32 floor, removed by refinement and the delta form; the tree shows refinement alone was enough.
+
+**The timeout test.** The library test target does not compile under `single` in this tree, so
+`tests/f32_unfinished.rs` runs the four cases again as integration tests, with the library tests'
+own assertions in both builds. Each case runs on its own thread behind a cap of 10 times its f64
+wall time. Past the cap it "did not finish": a failure in the f64 build and a printed MISSED under
+`single`. A body that panics is a failure in both builds. The plan's budget is 3 times the f64 wall
+time. The test prints it as PASS or MISSED but does not assert it, because three lanes share one
+card and a wall time cannot be repeated. Under `single` a budget miss asserts its cause instead:
+more sweeps or outer iterations than the f64 run took. The f64 wall times are the library tests'
+own, on an idle card (2026-10-18, RTX 5070 Ti): 16.2 s, 5.3 s, 29.6 s and 39.8 s.
+
+**One reference defect, fixed in both builds.** `ale_flow::stroke_exact` summed its 20 000 Simpson
+terms in `Scalar`. Under `single` it returned 0.72244805098 against 0.72244723847, a relative error
+of 1.1e-6. That is larger than backward's real finest-step error (2.2e-7 in f64), so the reference
+failed the scheme it judged. It now evaluates in f64 and rounds once:
+
+    exact = fl(U0 + P0 * S_h[1 / (L0 + A sin(2 pi s / P))] over [0, T])          (118.15.1)
+
+`S_h` is composite Simpson with n = 20 000 and every constant widened from its stored `Scalar`.
+`stroke` forms its volume-weighted mean `sum V U_x / sum V` with f64 sums and rounds once, as
+§118.1 does for every reduction. In the f64 build both are the same operations in the same order:
+Gate 105-B's 90 rows of `ofgpu-validate -sections 55` are identical to the previous binary
+(`tools/f64_identity.py rows`). The test holds (118.15.1) against the closed form
+
+    int_0^T ds / (a + b sin(k s)) = (2 / (k r)) [atan((a tan(kT/2) + b) / r) - atan(b / r)],
+    r = sqrt(a^2 - b^2), a = L0, b = A, k = 2 pi / P                             (118.15.2)
+
+(Gradshteyn & Ryzhik 2.551.3; open: https://en.wikipedia.org/wiki/List_of_integrals_of_trigonometric_functions)
+to `max(1e-12, eps_Scalar)` relative, which is class D: one rounding of an f64 value. Under
+`single` (118.15.2) is 0.722447238112, with `A` widened from its float 0.200000003, and
+`stroke_exact` is 0.722447216511, 2.2e-8 away (under half a float ulp). Before the fix the gap was 1.1e-6.
+
+**What each case measures** (2026-10-18; two `single` runs, the second on a card shared with
+another lane; every physics row has the same tolerance as in f64):
+
+| case | f64 | `single` wall | ratio | rows under `single` |
+|---|---|---|---|---|
+| stroke, euler and backward | 16.2 s | 32.0 / 33.9 s | 1.97 / 2.09 | euler passes: p 1.0066, finest 9.03e-5 against 5e-4. Backward: finest 8.25e-8 against 5e-6 passes; **MISSED** p = 2.2854 against 2 +- 0.1, and the extrapolation is 4.13e-7 against the finest step's 8.25e-8 |
+| SST with F1 = 0 against k-epsilon | 5.3 s | 15.5 / 21.2 s | 2.92 / 3.99 | passes: 2.40e-3 against 5e-3, 1.74e-3 against 1e-2, 1.44e-3 against 0.02. The budget is **MISSED** on the shared card |
+| bimetal 192 x 32, series | 29.6 s | 111.3 / 123.0 s | 3.76 / 4.16 | passes: converged, kappa error 1.32e-2 against 0.02 (f64 5.9e-3). The budget is **MISSED** |
+| linear and series bond, 96 x 16 | 39.8 s | 66.3 / 77.5 s | 1.66 / 1.95 | passes: R_linear / R_series = 2.17 against 2 |
+
+**Causes.**
+- *Backward's order.* In exact arithmetic the 1-D stroke keeps `U_x` uniform, so the spread of the
+  cells is pure round-off. Under `single` the spread at the finest level is 1.79e-7, about three
+  float ulps at 0.72. The finest step difference `|v(160) - v(320)|` is only 4.77e-7. The finest
+  value sits 2.4e-7 (four ulps) from the f64 run's. The order and the extrapolation therefore read
+  the velocity's round-off, not the scheme. Euler's differences are a hundred times larger, and its
+  rows pass. The test asserts this cause: finest spread >= 0.1 |v(160) - v(320)| (f64: 1.6e-9
+  against 4.9e-7, so the f64 build cannot take this branch). The cure is the delta form of §118.5
+  in the SIMPLE step: f64 time levels for `U` and `p`. That changes the solver's numerics and is
+  not built here.
+- *SST.* Refinement reaches the `1e-14` stop in 7.83 inner sweeps per solve, on average over the
+  8000 solves. The f64 solve takes 3. Each pass also reads its residual back. The step costs about
+  three times f64's, so the ratio sits at the 3x budget and goes over it when the card is shared.
+- *Bimetal.* The outer loop needs 646 iterations against f64's 306 to reach its six decades, and
+  977 681 linear sweeps against 266 161 (1513 per outer iteration against 870). The wall time
+  follows the sweeps.
+
+A cure for the three budget rows is a stop the f32 build can meet without refinement: a criterion
+read in the class tolerance of §118.14, or an outer loop that stops at the float floor. Either
+changes a solver's numerics or criterion, so it is the user's decision and is not built. No
+library test changes its attribute here. The ALE test still fails under `single` and keeps
+`#[cfg_attr(feature = "single", ignore ...)]`; §112.3's counts do not move.
+
 ### 118.16 The section closed - what is double in the f32 build, and what is not
 
 This section is closed with F32-18 (docs/17 §12.4): the f32 build is a supported configuration (§112.5), and the
@@ -41279,9 +41544,10 @@ decide (docs/17 §11). It would get its own section.
 * parcel positions, the walk and the exchange sums (§118.9);
 * chemistry (§118.10);
 * the FSC rate constant (§118.11);
+* the ALE stroke's exact reference and its volume-weighted mean, each rounded once (118.15.1) (§118.15);
 * the validation's own round-off rows, through the class rule (118.14.1) (§118.14).
 
-F32-15 (lane G) adds the four tests that did not finish, which is a stop criterion and not a new f64 island. §118.13
+F32-15 (lane G, §118.15) runs the four tests that did not finish as integration tests, which is a stop criterion and not a new f64 island; its one double evaluation is the stroke's reference listed above (added at the merge of lanes G and M). §118.13
 is the one reverse case: an f64 solve with an opt-in f32 preconditioner.
 
 **What is float, and is where the open f32 defects sit** (§112.5, docs/17-review-later.md):
@@ -48856,6 +49122,9 @@ Dryer, *Combust. Sci. Technol.* 27 (1981) 31-43, DOI
 Gicquel & Poinsot, *Combust. Flame* 159 (2012) 621-637, DOI
 10.1016/j.combustflame.2011.08.004). All three DOIs were checked on Crossref.
 **All three papers are closed (OpenAlex), and none was read by this unit.**
+CHR-13 later read BFER2 from the authors' manuscript on CERFACS's site and
+wrote `cases/mech/bfer2_phi1.ck` from it (§133.12); WD1 and JL4 remain
+unread.
 
 A mechanism file's rate parameters are numbers from a paper. They are
 transcribed only from a read copy, with its table and page as provenance, and
@@ -50276,7 +50545,7 @@ Labels: (133.1)-(133.12).
 | Lindemann 1922 | 10.1039/TF9221700598 | closed | no | added |
 | Westbrook & Dryer 1981 | 10.1080/00102208108946970 | closed | no | DOI confirmed; parameters need a read copy |
 | Jones & Lindstedt 1988 | 10.1016/0010-2180(88)90021-1 | closed | no | DOI confirmed; parameters need a read copy |
-| Franzelli et al. 2012 (BFER) | 10.1016/j.combustflame.2011.08.004 | closed | no | DOI confirmed; parameters need a read copy |
+| Franzelli et al. 2012 (BFER) | 10.1016/j.combustflame.2011.08.004 | closed (an author manuscript is on CERFACS's site) | yes (CHR-13, §133.12) | Tables 3-4 and eqs. (6)-(7) read; §133.12 |
 | GRI-Mech 3.0, DRM19 | combustion.berkeley.edu (HTTP) | disclaimer, **no licence** | yes | **decision: user path, not vendored** (§129.6) |
 | Sandu et al. 1997 | 10.1016/S1352-2310(97)83212-8 | green OA (CWI) | yes | **ROS4 not printed there**: ROS4 named, ROS3 added |
 | Hairer & Wanner 1996 | 10.1007/978-3-642-05221-7 | book | no | — |
@@ -50701,7 +50970,10 @@ and the species keep one old level); a checkpoint, `-restartFrom`,
 `-restartWrite` or an output restart series (the `.mcr` format carries no
 mass fractions); a motion block; and a species named like another field the
 run writes. The dictionary route keeps §137.7's refusal: a case directory
-with chemistry is refused by every driver.
+with chemistry is refused by every driver. A reactor cell that the split
+step itself refuses ends the run naming the reactor, the count, the first
+cell and its status (CHR-13, §133.12); before, the cell's NaN surfaced later
+as a non-finite pressure residual.
 
 **What is not built, stated.** The dictionary route, Strang, `backward`, a
 restart of the mass fractions, the closures of §134, the turbulent part of
@@ -50732,6 +51004,166 @@ records, with the reactor at `rtol` 1e-6.
 | `lowmach_reacting_refusals_name_the_setting` | a steady run, Strang, `-restartWrite` and `backward`, each refused naming its key and §133.11 | refused | D | all four, both builds |
 
 Labels: (133.24).
+
+### 133.12 The 1-D freely propagating methane-air flame (CHR-13, `cases/flame1d_ch4_bfer.jsonc`, `src/bin/validate_gates/flame1d.rs`)
+
+`No GPL-licensed source was consulted.`
+
+**(a) The source, and what was read.** B. Franzelli, E. Riber,
+L. Y. M. Gicquel and T. Poinsot, "Large Eddy Simulation of combustion
+instabilities in a lean partially premixed swirled flame", *Combustion and
+Flame* 159 (2012) 621-637, DOI 10.1016/j.combustflame.2011.08.004 — read as
+the authors' manuscript hosted by CERFACS at
+`https://www.cerfacs.fr/cantera/docs/mechanisms/methane-air/DOCS/BFER/CF_Preccinsta.pdf`,
+52 pages, sha256
+`42c230d28d2e25382928f43489497d8c5d727b746d86225fbb1bb780bd77f982`, read
+2026-10-18. Read: §2.1 eqs. (1)-(7) (pp. 8-10) and Tables 3-4 (p. 28). The
+mechanism is the two-step reduced scheme of eqs. (2)-(3),
+`CH4 + 1.5 O2 => CO + 2 H2O` and `CO + 0.5 O2 <=> CO2`, with the rates of
+eqs. (4)-(5), `k_f,j = A_j f_j(phi) T^beta_j exp(-Ea,j/RT)` times the
+reactants' powers: Table 3 ("Units are: mol, s, cm3 and cal/mol") gives the
+CH4 oxidation Ea 3.55e4 cal/mol, beta 0.0, A1 4.9e9, nCH4 0.50, nO2 0.65,
+and the CO-CO2 equilibrium Ea 1.2e4 cal/mol, beta 0.8, A2 2e8, nCO 1.00,
+nO2 0.50. The phi corrections are the paper's eqs. (6)-(7).
+
+```
+f1(phi) = 2 / ( [1 + tanh((phi0,1 - phi)/sigma0,1)] + B1 [1 + tanh((phi - phi1,1)/sigma1,1)]
+                + C1 [1 + tanh((phi - phi2,1)/sigma2,1)] )
+
+f2(phi) = (1/2)[1 + tanh((phi0,2 - phi)/sigma0,2)] + (B2/2)[1 + tanh((phi - phi1,2)/sigma1,2)]
+          + (C2/2)[1 + tanh((phi - phi2,2)/sigma2,2)] x [1 + tanh((phi3,2 - phi)/sigma3,2)]
+```
+
+Table 4 (phi0, sigma0, B, phi1, sigma1, C, phi2, sigma2, phi3, sigma3):
+j = 1: 1.1, 0.09, 0.37, 1.13, 0.03, 6.7, 1.6, 0.22, -, -. j = 2: 0.95, 0.08,
+2.5e-5, 1.3, 0.04, 0.0087, 1.2, 0.04, 1.2, 0.05.
+
+**(b) Why the file carries constants.** Evaluated at phi = 1 in f64,
+f1(1) = 1.0743172004768002 and f2(1) = 0.22270092849097087, so
+`cases/mech/bfer2_phi1.ck` carries A1' = 4.9e9 f1(1) = 5.264154282E+09 and
+A2' = 2e8 f2(1) = 4.454018570E+07 (10 significant digits), with FORD
+/CH4 0.5/ and /O2 0.65/ on reaction 1; reaction 2 needs no FORD, its orders
+equal its coefficients. A constant is EXACT here, not an approximation: in this case
+every species has the same diffusivity (one Le for all, §133.11's Lewis
+route), so each element mass fraction obeys a source-free transport
+equation whose uniform inlet and initial values are both stoichiometric,
+and the local phi is 1 everywhere at all times.
+
+**(c) A recorded inconsistency, in the paper's favour.** CERFACS's own
+Cantera file `2S_CH4_BFER.cti` (sha256
+`a7bf7580673e7eb1f7b8d915e472e4a07c57aca3595ceb9e75ff95408845cea5`) carries
+beta2 = 0.7 and no f1/f2; the paper's Table 3 says 0.8. The paper is used.
+
+**(d) Thermo: TM-4513 Table II. DESIGN.** `cases/mech/tm4513_thermo.dat` is
+the ten TM-4513 Table II records (§128; a US-Government work, public
+domain, tracked digit for digit in
+`reference/mcbride-gordon-reno1993/table_II.csv`) as a CHEMKIN THERMO file
+at p_ref = 1 atm, 200/1000/6000 K — NOT Franzelli's species data, whose
+fits the read pages do not print as numbers.
+
+**(e) Transport: not BFER's, said plainly.** BFER's own transport
+(Franzelli eq. (1)) is `mu(T) = mu0 (T/T0)^0.6759` with mu0 = 1.8405e-5
+kg/(m s), T0 = 300 K, Pr 0.7 and unity Lewis numbers. `ofgpu-lowmach` has
+neither: its JSONC route fixes the molecular conductivity at
+`GasProperties::default().k` = 0.026 W/(m K) (no JSONC key), and §133.11's
+species diffusivity is `D_k = nu/(Pr Le_k)` with constant kinematic `nu`.
+The rule, fixed BEFORE any S_L was measured: `nu = Pr k / (rho cp)` of the
+complete-combustion products at T = 1500 K (the gate's isotherm) and
+p = 101325 Pa, so the species and thermal diffusivities are equal
+(Le_eff = 1) there. With TM-4513 cp: W_b 27.6332 g/mol, cp_b 1425.3
+J/(kg K), rho 0.224503 kg/m3, nu = 5.6878e-5 m2/s; the case writes 5.688e-5.
+This is NOT BFER's transport, so the measured S_L is this driver's, not
+BFER's.
+
+**(f) The case and the recipe.** `cases/flame1d_ch4_bfer.jsonc` is the
+50 µm level: a 1-D tube of 300 x 1 x 1 cells over 15 mm (`xmin inlet`,
+`xmax outlet` open, four symmetry sides), inlet U fixedValue 1 m/s at
+300 K carrying the stoichiometric fresh mixture CH4 + 2 (O2 + 3.76 N2) by
+mass — computed from the solver's own molar masses (§128.2): Y_CH4
+0.05518632456, Y_O2 0.2201486730, CO/H2O/CO2 0 — Euler at dt = 1e-6 s to
+6 ms. The other levels edit ONLY `cells`: [150,1,1] and [600,1,1]. THREE
+levels, not the plan's two, because §94.1 refuses a two-level study
+(`vv::grid_study` needs three); the plan's dx 50 and 25 µm are its finest
+two. The initial state is the complete-combustion products at 1600 K
+(CO2 + 2 H2O + 7.52 N2 by mass: Y_CO2 0.1513916001, Y_H2O 0.1239433974) —
+an ignition source, not a claim about T_ad. The reactor runs at `rtol`
+1e-6 and `atol` 1e-10 (the probes: below that atol the reactor refused
+cells early). The recipe, per level on a scratch copy:
+
+```
+ofgpu-lowmach <copy>/flame1d_ch4_bfer.jsonc -endTime 6e-3 -deltaT 1e-6 -check 500 -writeInterval 2e-4
+```
+
+**(g) The measurement.** `x_f(t)` is the first 1500 K crossing from the
+inlet, linear between the cell centres `x_i = (i + 1/2) dx`; and
+
+```
+S_L = U_in - dx_f/dt,  dx_f/dt the least-squares slope of x_f over t >= 3 ms of the 2e-4 s writes   (133.25)
+```
+
+**(h) Rows.** The gate is REPLAYED (`src/bin/validate_gates/flame1d.rs`,
+the pattern of §110.5's plume): a run changes DATA, not code — the ignored
+`record_flame1d` prints the `RUNS` literal the supervisor pastes. No
+comparison against a published value is made. A level that stopped before
+its end time registers the gate's MISSES verdict, replayed, through §69's
+registry (the per-level rows are replayed rows); with every level at its
+end and no reference, the gate registers none. (j) is the first case.
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| R1: the ±10 % row | S_L against Konnov et al. 2018's recommended phi = 1.0 value | ±10 % | P | NOT RUN: Konnov et al. 2018 (DOI 10.1016/j.pecs.2018.05.003) is closed and no read copy exists (§133.6) |
+| per level, x3 | the {100, 50, 25} µm run reached its end time 6 ms with the driver's normal-end line; then S_L by (133.25) from the recorded fronts; a fit with fewer than 4 fronts after 3 ms fails its row | reached | D | **MISSED** at all three levels: each stopped at its 3rd write, t = 0.6 ms of 6 ms, with the reactor's BELOW_NEGATIVE_ATOL (status 8) at the flame (cells 13, 25, 48); see (j) |
+| the §94 study | `vv::grid_study` on the three S_L, finest first (§94.1 refused the plan's two) | - | note | NOT RUN: 0 of 3 levels gave an S_L |
+| T1 `bfer_corrections_at_phi_one` | f1(1), f2(1) against the f64 evaluation of (6)-(7) | `1e-14` relative | D | both |
+| T2 `bfer_mechanism_matches_franzelli_tables` | the two files through the crate's own readers: 6 species, 2 reactions, reaction 1 irreversible with the Table 3 numbers (A in the reader's stored units), FORD orders CH4 0.5 and O2 0.65, reaction 2 reversible; every TM-4513 coefficient equal to `table_II.csv` | `1e-9` relative on A; the rest exact | D | both |
+| T3 `flame1d_case_carries_the_record_inputs` | the case lowers to the record inputs: cells [300,1,1], length 15 mm, inlet U 1 m/s, dt 1e-6, end 6 ms, inlet and initial compositions from the solver's molar masses, phi = 1, and nu by the (e) rule with the crate's NASA-7 cp | `1e-9` (compositions, class R: D-F32-1's `1e-5` in f32); the scalars exact as `Scalar`, `1e-12` (phi), `2e-4` (nu) | D | both |
+| T4 `front_position_interpolates_linearly` | the locator's first crossing from the inlet, linear between centres; all-300 gives None; two crossings give the first | `1e-15` absolute | D | both |
+| T5 `fit_slope_recovers_a_line` | the OLS slope of an exact line, `flame_speed(1.0, 0.25)` = 0.75, and the four-pair floor | `1e-12`; exact | D | both |
+| T6 `three_levels_feed_the_94_study` | S(h) = 0.4 + 0.1 (h/1e-4)^2 at 25/50/100 µm through `grid_study`: p = 2, phi_ext = 0.4 | `1e-6` (p), `1e-9` (phi_ext); D-F32-1 `1e-5` in f32 | R | both |
+| T8 `flame1d_records_state_their_miss` | every recorded level stopped before 6 ms, its `ended` names BELOW_NEGATIVE_ATOL, and no front lies after 3 ms; prints each MISSED line | exact | D | both (asserts the miss of (j)) |
+| T7 `record_flame1d` | the recorder; ignored, reads `$CHR13_RUNS`, prints the `RUNS` literal | - | - | not part of any verification |
+
+**(i) What is not built, stated.** BFER's `mu(T)` and its conductivity
+curve in `ofgpu-lowmach` — the JSONC route has neither key — so S_L here is
+this driver's, not BFER's (see (e)). The plan's DEFERRED sweep (phi
+0.7-1.4, DRM19, GRI-3.0) is NOT RUN; (j) gives its price.
+
+**(j) The recorded runs, 2026-10-18 (supervisor; RTX 5070 Ti shared with two
+other lanes; built at 3a53be6 with this unit's working tree).** The recipe of
+(f) on three copies. Every level stopped, `run ended: refused | chemistry:
+the reactor refused 1 cell; the first is cell {13, 25, 48} with status 8
+(BELOW_NEGATIVE_ATOL)`, between steps 600 and 800, at the flame (x = 1.2-1.35
+mm). The fronts written before the stop, `(t, x_f)` in (s, m): 100 µm
+(2e-4, 5.2207e-4), (4e-4, 7.2132e-4), (6e-4, 8.1633e-4); 50 µm (2e-4,
+4.8292e-4), (4e-4, 7.0000e-4), (6e-4, 8.2918e-4); 25 µm (2e-4, 4.6800e-4),
+(4e-4, 6.8619e-4), (6e-4, 8.2211e-4) - the flame is still forming (the peak
+T is 1846-1871 K at step 500, below the burnt state), so no S_L is measured
+and the per-level rows are MISSED, asserted by
+`flame1d_records_state_their_miss`.
+**The cause, measured.** Status 8 is §132.10's guard: a mass fraction below
+`-atol` at the reactor's observer. The likely mechanism (not proven):
+reaction 1's forward orders are 0.5 and 0.65, so near CH4 burn-out
+`dY/dt ~ -Y^0.5` reaches Y = 0 in finite time (the rate is not Lipschitz at
+0) and an accepted Rosenbrock step lands below it. Measured on the 100 µm level to 2 ms, each a case input changed alone:
+`deltaT` 5e-7, `atol` 1e-6, `rtol` 1e-8, `rtol` 1e-4 and `integrator ros3`
+all stop the same way (status 8, cells 12-15). In an earlier probe of the same
+tube (nu 2.4e-4 and the reactor's default `atol`), the fractional orders
+stopped at step 9 while integer orders (FORD 1.0 and 1.0, a probe, not
+BFER) ran all 200 steps, and either fractional order alone ran its 40; that
+points at the two fractional orders together, without proving it. A cure changes the
+reactor's numerics (for example evaluating `max(c, 0)^n` inside every stage,
+or clipping at the observer) and is the user's decision (docs/17 §5.3 rule
+4); it is not built.
+**The DEFERRED sweep, priced.** Measured per step on the 300-cell tube at
+dt = 1e-6 s before ignition (setup subtracted): DRM19 (21 species, 84
+reactions; `drm19.dat` with GRI 1.2's `thermo12.dat`, user-supplied paths,
+§129.6) 0.70 s, so one phi at three levels (150/300/600 cells, 6000 steps
+each) is about 4 h and the eight phi of 0.7-1.4 about 32 h; GRI-3.0 (53
+species, 325 reactions) 2.35 s, about 13 h per phi and 100 h for the sweep.
+Both exceed this unit's 3 h of card time; both are recorded NOT RUN with
+these prices (docs/17 §11 item 7).
+
+Labels: (133.25).
 
 ---
 
@@ -51067,7 +51499,361 @@ both builds and carries one tolerance (docs/17 §5.1.4). The device path
 | `edc_cap_is_counted` | `Re_T < C_γ^4` cells | count equals the cells with `γ_λ > gammaMax` | D |
 | `edc_refuses_batch_variant` | `variant "batch"` | refused with §134.3's reason | D |
 
-Labels: (134.1)-(134.13).
+### 134.6 EDM and PaSR as built (CHR-14)
+
+`src/chem/tci.rs` builds EDM (§134.2) and PaSR's frozen-mean form (§134.4)
+as f64 host twins and as two device kernels in `cuda/chem.cu`
+(`chemEdmSource`, `chemPasrScale`), which compute in `double` in both
+builds, as the rest of `chem.cu` does (§132.6, §118.10). Their inputs and
+outputs are ofscalar. The tests are in `tests/chem_tci.rs`, an integration
+test, so every row runs in both builds. EDC is §134.3's and CHR-15's, built
+in §134.7. Until CHR-15 landed, the selector refused it by name. `ofgpu-lowmach` still refuses
+every closure (§137.7). Wiring a closure into the split step is not part of
+CHR-14's row.
+The two kernels capture into one CUDA graph and replay bitwise
+(`chem::tci::tests::tci_replays_under_capture`, §81.6's registry row).
+
+**Selection.** `tci::select(combustion, MixingKind, k_present)` applies
+§134.1's refusals in this order. `laminar` is always accepted. Any closure
+with `MixingRate::None` is refused, naming the model and the arm. EDM or EDC
+with `MixingRate::Strain` is refused. EDC was refused as not built until
+CHR-15; §134.7 replaces that step. For PaSR,
+`tauMix strain` is refused under a RANS arm, and any other `tauMix` under
+`Strain`. `kolmogorov` and `geometric` under `Omega` without the model's `k`
+field are refused, naming `k`. `integral` without `Cmix` is refused.
+`select_for(combustion, &MixingRate, Option<&k>)` reads the arm from the
+running model and calls `select`.
+
+**The mixing time, by arm** (DESIGN: the arms of §134.1 written out with
+the Wilcox identity `ε = β* k ω` that `MixingRate::Omega`'s doc states):
+
+```
+Epsilon { k, ε }:   τ_I = k / ε,          ε = ε
+Omega { ω, β* }:    τ_I = 1 / (β* ω),     ε = β* k ω   (needs the model's k)
+τ_m = C_mix τ_I  |  (ν/ε)^(1/2)  |  (τ_I (ν/ε)^(1/2))^(1/2)  |  1/|S|          (134.14)
+      integral       kolmogorov       geometric                 strain
+```
+
+EDM reads the rate `r = ε/k` (Epsilon) or `r = β* ω` (Omega). `ν` is a
+per-cell buffer, filled by the caller (the laminar kinematic viscosity).
+
+**The reacting fraction, at its edges** (DESIGN, decided by
+recommendation):
+
+```
+κ = 1                     if τ_m = 0, or if every species is dormant
+κ = τ_c / (τ_c + τ_m)     otherwise                                               (134.15)
+```
+
+The first line is the limit `τ_m → 0` of (134.12), taken before `τ_c` is
+read. It is needed because `ffr` and `gfr` give `τ_c = 0` whenever a
+non-dormant species has `Y_i = 0`. That is a product being formed from
+nothing, and then (134.12) would be `0/0`. With `τ_m > 0`, the same species
+gives `κ = 0`, so `ffr` and `gfr` stop a reaction until its products exist.
+That is a property of Piscopo et al.'s eqs. (6)-(7) as written. It is not
+cured here. `τ_m = +∞` (`ε = 0`) gives `κ = 0`.
+
+**The mean rate's order of operations** (host and device alike). EDM:
+`q_r = ((A r) ρ) lim_r`. `lim_r` is the minimum over the reactants in list
+order, then `min(lim_r, B (Σ_P Ỹ_β) / (Σ_P ν''_β W_β))`, with both sums in
+list order from 0. `W_m ω̄_m = W_m acc_m`, where `acc_m` starts at 0 and
+takes `-ν' q_r` from each reactant entry and `+ν'' q_r` from each product
+entry, reaction by reaction. That is §130.7's accumulation. PaSR:
+`ẏ_i = (W_i ω_i)/ρ`, and `W_i ω̄_i = κ (W_i ω_i)`. So `κ = 1` returns the
+laminar `W_i ω_i` bitwise.
+`Ỹ` enters (134.2) as given, with no clipping. A negative mass fraction
+gives a negative rate of progress, as the formula is written.
+
+**Cell statuses** (they extend §132.9's codes and never reuse them). A
+refused cell writes NaN to every output and its code: 3 for a non-finite
+`Y`, 11 (`BAD_MIXING`) for a mixing input that gives a non-finite or
+negative rate or a NaN or negative `τ_m`, 12 (`BAD_DENSITY`) for `ρ ≤ 0` or
+non-finite, and 13 (`BAD_RATE`) for a non-finite laminar `ω` handed to PaSR.
+
+**The rows CHR-14 makes true** (§134.5's EDM and PaSR rows, plus the device
+twin):
+
+| row | as built |
+|---|---|
+| `edm_box_closed_form` | `2H2 + O2 => 2H2O` over H2, O2, H2O, N2, `Y = (0.01, 0.23, 0, 0.76)`, `A = 4`, `k = 1`, `ε = 10`, `B` absent, `ρ` frozen. The host twin is integrated by §132's `rosenbrock::integrate` and compared with (134.3) at t = 0.01, 0.05 and 0.1 s: 0.006703200460356393, 0.0013533528323661271 and 0.00018315638888734178, to 1e-10 relative (P). It also checks one product-limited point with `B = 0.5` against the reduction in §134.2, to 1e-14 (P) |
+| `edm_two_step_conserves_elements` | a two-step global mechanism, `CH4 + 1.5O2 => CO + 2H2O` and `CO + 0.5O2 => CO2`. Element production per cell is within 1e-14 of `Σ\|q_r\|` (A) |
+| `edm_requires_a_and_b` | the lowered case without `A` is refused, naming `combustion.A` and Magnussen & Hjertager (D) |
+| `pasr_limit_is_laminar` | `τ_m = 0` gives the laminar `W ω` bitwise, on the host and on the device (D) |
+| `pasr_linear_kappa_exact` | `FUEL => PROD` at `k_r = 1000 1/s`, `tauChem sfr`, `tauMix integral` with `C_mix = 1`, `k = 1`, `ε = 1000`: `κ = 0.5`, and `W_F ω̄_F/ρ = -25` at `Y_F = 0.05`, to 1e-12 relative (P) |
+| `tci_refuses_no_mixing_rate` | EDM, EDC and PaSR under `MixingRate::None` are refused, naming the combination (D) |
+| `tci_device_matches_host` | 4096 random cells: `chemEdmSource` and `chemPasrScale` against the host twins. The tolerance is 1e-13 relative to the cell's largest `\|W ω̄\|` in f64. In f32 it is 1e-6, with the host fed the f32-rounded inputs (R) |
+
+Labels: (134.1)-(134.15).
+
+### 134.7 EDC as built (CHR-15)
+
+`src/chem/tci.rs` builds §134.3's EDC as an f64 host twin (`edc_host`)
+and as one device kernel in `cuda/chem.cu` (`chemEdcIntegrate`). The
+kernel computes in `double` in both builds, as the rest of `chem.cu` does
+(§132.6, §118.10). Its inputs and its `W ω̄` output are ofscalar; the fine
+state `(Y*, T*)` stays in an f64 work buffer. The tests are in
+`tests/chem_tci.rs`, an integration test, so every row runs in both
+builds. `ofgpu-lowmach` still refuses every closure (§137.7). Wiring EDC
+into the split step is CHR-16's (Flame D).
+
+**Selection** (it replaces §134.6's "EDC is refused as not built" step,
+in the same place in the order). EDC with `MixingRate::None` is refused,
+and so is EDC with `MixingRate::Strain`. EDC under `Omega` without the
+model's `k` field is refused, naming `k`, because (134.4) and (134.5) read
+`ε = β* k ω` (§134.1). Otherwise `select` returns `Closure::Edc` with the
+lowered `variant`, `CD1`, `CD2`, `gammaMax` and `psrSpan`.
+
+**The per-cell order of operations** (host and device alike; DESIGN in
+its order, the formulas are §134.3's):
+
+```
+Epsilon { k, ε }:  k, ε                 Omega { ω, β* }:  k = the model's k,  ε = (β* k) ω
+C_γ = (3 C_D2 / (4 C_D1 C_D1))^(1/4),   C_τ = (C_D2 / 3)^(1/2)    (host f64, once per closure)
+γ_λ = C_γ (ν ε / (k k))^(1/4);  capped when γ_λ > gammaMax, and then γ_λ = gammaMax
+γ*  = γ_λ γ_λ γ_λ (1989)  |  γ_λ γ_λ (2005)
+τ*  = C_τ (ν / ε)^(1/2);    τ_e = (1 - γ*) τ*;    span = psrSpan τ_e
+```
+
+`γ* = 0` (`ε = 0` or `ν = 0`) means no fine structures. Then
+`W_k ω̄_k = 0` exactly, `Y* = Ỹ` and `T* = T̃`, and nothing is integrated
+(DESIGN: (134.10) carries the factor `γ*`, and `τ*` would be `+∞` at
+`ε = 0`).
+
+**The fine-structure reactor's energy** (DESIGN, derived here).
+§134.3 states that `T*` solves `h(T*, Y*) = h̃`. The integrated state is
+`(Y*, T*)`, as in §132.10. Its temperature equation is the chemistry part
+of (132.7)-(132.9) plus a mixing term:
+
+```
+dT*/dt = [(132.9)'s chemistry rate at (Y*, T*)]
+         - (Σ_k Ỹ_k h_k(T*) - h̃) / (c_p(T*, Y*⁺) τ_e),      h̃ = Σ_k Ỹ_k h_k(T̃)   (134.16)
+```
+
+Here `h_k` is the species' enthalpy per unit mass, `c_p` the mixture
+`c_p` over the clipped `Y*⁺ = max(Y*, 0)` (as (132.9) takes it), and both
+sums skip species with `Ỹ_k = 0`. Derivation: the chemistry part keeps
+`h(T*, Y*)` constant (that is (132.9)). The species term of (134.9)
+changes `h` by `-Σ_k h_k(T*) (Y*_k - Ỹ_k)/τ_e`. Adding `c_p` times the
+mixing term of (134.16) makes the total `dh/dt = -(h(T*, Y*) - h̃)/τ_e`.
+The start `(Ỹ, T̃)` has `h = h̃`, so `h* = h̃` holds along the whole
+path, and it holds exactly at any steady state, whatever the path.
+
+**The integration.** (134.9) with (134.16) is integrated from
+`(Ỹ, T̃)` over `[0, span]` by §132.10's integrator. It uses the same
+control array (`DeviceReactor`, built from the case's `ReactorOptions`:
+method, `rtol`, `atol_y`, `atol_t`, `h_max`, `max_steps`), R9's input
+checks and R10's observer. The host twin runs
+`rosenbrock::integrate_observed` from `opts.h0`. The kernel copies
+`chemIntegrate`'s step loop with only the right-hand side replaced.
+`chemIntegrate` itself is not edited, so its SASS is unchanged. Each
+cell's first trial step is carried over calls in the work buffer, as
+`integrate`'s `h` is; it starts at `opts.h0`.
+
+**The residual of (134.8)** after the span, in the integrator's own
+error weights (the (132.5) norm of `τ_e f`):
+
+```
+r_res = ( (1/m) Σ_l ( τ_e f_l(Y*, T*) / (atol_l + rtol |y_l|) )^2 )^(1/2),   m = K + 1   (134.17)
+```
+
+`f` is the right-hand side of (134.9) with (134.16). `τ_e f_k` is
+`(1 - γ*) τ* R*_k/ρ* - (Y*_k - Ỹ_k)`, which is (134.8)'s residual. A cell
+with `r_res > 1`, or with a non-finite `r_res`, is flagged
+`UNCONVERGED`. It is counted, and its `W ω̄` is still written. A cell
+whose `γ_λ` was capped is flagged `CAPPED`. `edc_report` downloads the
+flags and the statuses and returns the two counts plus the refused
+count. It is the step's report. It synchronises, so it runs after the
+step, outside any capture.
+
+**The mean rate** is (134.10) with `χ = 1`, in this order:
+`W_k ω̄_k = ((ρ̄ γ*) (Y*_k - Ỹ_k)) / τ_e`. `ρ̄` is the caller's mean
+density.
+
+**Cell statuses** (§132.10's codes keep their meaning; §134.6's 11 and 12
+are reused for the same causes). In this order: 1 `p`, 3 a `Y` negative
+or not finite, 2 `T̃`, 12 `ρ̄ ≤ 0` or not finite, and 11 when `k ≤ 0`,
+`ε < 0`, `ν < 0`, `ω < 0` or any of them is not finite. Then, only when
+`γ* > 0`: 5 for `h̃` with `T̃` outside a needed record's range, 9 for a
+carried step that is not finite or not above 0, and §132.10's run codes
+(2, 4, 5, 6, 7, 8). Last come the residual evaluation's own codes. A
+refused cell writes NaN to its `W ω̄` and to its fine state, leaves its
+carried step as it was, and has flags 0.
+
+**The rows CHR-15 makes true** (§134.5's EDC rows, plus the energy and
+device rows):
+
+| row | as built |
+|---|---|
+| `edc_constants_by_variant` | `C_γ`, `C_τ` of row (a) against 2.129810347487575 and 0.408248290463863 (40-digit evaluations of (134.4)-(134.5)). `γ_λ`, `γ*` and `τ*` of §134.3's table against their exact forms 18^(-1/2), 18^(-3/2) (1989), 1/18 (2005) and 5e-4, to 1e-14 relative (P). The table prints these rounded to 15 digits |
+| `edc_psr_closed_form` | `FUEL => PROD` at `k_r = 1000 1/s` (no activation, equal thermo records, so `T*` stays `T̃`). `Ỹ = (0.05, 0, 0.95)`, `T̃ = 1000 K`, `ν = 1.5e-5`, `k = 1`, `ε = 10`, both variants, `rtol 1e-10`. The host twin's `Y*_F` and `W_F ω̄_F/ρ̄` match (134.11) to 1e-8 relative (P). So does the device over 64 cells in f64, and to 1e-6 in f32 (R). No cell is unconverged |
+| `edc_cap_is_counted` | 64 cells with `k = 0.01 + 0.003 c`. The 18 cells with `k < 0.0616` have `γ_λ > 0.95`. The device's `CAPPED` count equals the host twin's count (18), and each capped cell's `γ*` is `0.95^3` (D) |
+| `edc_refuses_batch_variant` | `variant "batch"` is refused at lowering, naming `batch` and (134.9) (D) |
+| `edc_psr_holds_mean_enthalpy` | an exothermic `FUEL => PROD` (`θ ≈ 5032 K`, the product's enthalpy 5000 K · R per mole below the fuel's): `h(T*, Y*) = h̃` to 1e-8 relative on the host, with `T* > T̃` (P). Over 256 random cells the device matches the host twin fed the values the device saw, to 1e-8 of the cell's largest `\|W ω̄\|` and of `T̃` in f64, and to 1e-6 in f32 (R). The `CAPPED` and `UNCONVERGED` counts are equal |
+| `edc_replays_under_capture` | `chemEdcIntegrate` captures into one graph and replays bitwise (§81.6; a lib test, f64 build) |
+
+**Measured at landing (2026-10-17).** `edc_constants_by_variant`: worst
+2.1e-16. `edc_psr_closed_form`: host worst 3.0e-13, device worst 6.6e-13
+in f64 and 1.9e-8 in f32, `T*` exactly 1000 K. `edc_cap_is_counted`: 18
+and 18, bits on the same cells. `edc_psr_holds_mean_enthalpy`: host
+`|h* - h̃|` = 0 (`T*` = 1309.86 K, `r_res` 2.4e-5). Device against host:
+3.1e-13 in the rate and 1.6e-14 in `T*` in f64, and 5.3e-8 in f32.
+`CAPPED` was 9 and 9.
+
+**`UNCONVERGED` at `rtol 1e-10`.** 11 of the 256 random cells are
+`UNCONVERGED`, on the host and the device alike. So are 19 of the 64
+cells of `edc_cap_is_counted`, the 18 capped ones among them. The largest
+host `r_res` is 4.8, at `τ_e` = 3.4e-5 s and `T̃` = 910 K, where
+`k_r τ_e` is about 0.14. The cause is the size of the span. (134.9)'s
+deviation from its steady state decays as
+`exp(-(1 + k_r τ_e) t/τ_e)`. After `psrSpan = 20` it is about 2e-9 of the
+starting residual, which is itself about `k_r τ_e Ỹ`. That leftover is
+below §134.3's 1e-8, the target the default `psrSpan` was sized for. It is
+above these rows' `rtol 1e-10 · Y`, though, whenever the chemistry is
+slow against the mixing. The flag reports exactly that, and no row
+asserts zero there. Not built: a span sized from `rtol`, for example
+`ln(1/rtol)` time constants. That would change the default, so it is left
+for review.
+
+Labels: (134.16)-(134.17).
+
+### 134.8 EDC in ofgpu-lowmach's split step, the species budget, and Sandia Flame D REDUCED (CHR-16, `src/chem/tci.rs`, `cuda/chem.cu`, `src/bin/lowmach_chem/`, `src/io/case_json.rs`, `cases/sandiaFlameD.jsonc`, `src/bin/validate_gates/flame_d.rs`)
+
+**(a) Plan versus tree.** The plan's row names the case and `ofgpu-validate`;
+`ofgpu-lowmach` refused every closure by name (§137.7) and CHR-14/CHR-15
+named CHR-16 as the owner of the wiring, so the split step is wired here —
+EDC only; EDM and PaSR stay refused by name. JL4 is not in the tree and
+DRM19 is user-path only (§129.6), so the case names `mech/drm19.dat` +
+`mech/thermo12.dat`, which the user places in the run copy. JSONC had no
+k-epsilon coefficient and no profile condition: `turbulence.coeffs` (kEpsilon
+only) lowers into `RAS/kEpsilonCoeffs/<name>`, which `model_coeff` reads, and
+`fixedProfile` lowers §120.1's condition to the same entries the dictionary
+route reads, for scalar and vector conditions alike. A wedge refuses
+`mesh.regions` (§119.3), so the jet, the pilot and the coflow cannot be three
+zmin patches: they are radial steps of one inlet. The REDUCED run is
+recorded and replayed — CHR-13's pattern (§133.12): a run changes DATA, not
+code.
+
+**(b) The step**, decided by recommendation. EDC's (134.10) mean rate at the
+step's opening state is each solved species' explicit source for the step,
+
+```
+su_k = W_k omega_bar_k ;   Q = - sum_k h_k(T~) W_k omega_bar_k   (134.18)
+h_k = R T (H/RT)_k / W_k ,
+```
+
+the reactor's Lie step is not run under EDC. (134.18)'s `h_k` is the NASA-7
+enthalpy per unit mass, and the heat release is linearised about the opening
+state — the same place (133.16)'s `rho cp (T* - T°)/dt` reads.
+`EdcStep` runs `chemEdcIntegrate` then `chemHeatRelease`;
+`edc_heat_release_host` is the f64 twin. The mixing inputs are staged once
+per step from the running model (`MixingRate`), and nu is the case's laminar
+nu.
+
+**(c) The budget of the last step**, as `species_budget` forms it — sums
+over cells `c` and boundary faces `b`, outward mass flux
+`phi_m,b = phi_b rho_f,b`, members `m` = the solved species and the inert
+remainder N, `z_me` = element e's mass per unit mass of member m:
+
+```
+mass:      R = sum_c V_c (rho_c - rho°_c)/dt + sum_b phi_m,b ;
+           relative = |R| / sum_b max(-phi_m,b, 0)                        (134.19)
+member m:  S_m = sum_c V_c (rho_c Y_m,c - rho°_c Y°_m,c)/dt,
+           C_m = sum_b phi_m,b Y_m,b,  D_m = -sum_b g_m,b
+           (g = the species equation's own boundary diffusive flux;
+           D_N = +sum_i sum_b g_i,b),  R_m = sum_c V_c su_m,c            (134.20)
+element e: R_e = sum_m z_me (S_m + C_m + D_m - R_m);
+           relative = |R_e| / sum_b max(-phi_m,b, 0) sum_m z_me Y_m,b     (134.21)
+```
+
+Two versions are printed. "Inventory" (the gate's) takes `rho` = the
+end-of-step density (133.20) formed from the new T and Y, and `rho°` = the
+step's opening density. "As read" takes the two density levels the species
+correction read, which with one outer corrector are both the opening
+density.
+
+**(d) The case.** `cases/sandiaFlameD.jsonc` — Sandia Flame D, the piloted
+CH4/air jet flame (Re 22400, d 7.2 mm), from the TNF documentation
+(SandiaPilotDoc21.pdf, Release 2.1 of 15 June 2007,
+https://tnfworkshop.org/wp-content/uploads/2019/02/SandiaPilotDoc21.pdf,
+sha256 `4e748acd113f3d72fe814be6e5b1e27154577b5040951d59a015e9d287209f72`,
+pages 2, 3, 4, 5, 7): jet 25 % CH4 / 75 % dry air by volume at 49.6 m/s
+(nu 1.58e-5 m2/s), pilot 11.4 m/s at phi 0.77 and 1880 K with its printed
+minor-species mass fractions, coflow 0.9 m/s at 291 K, 0.993 atm. DESIGN
+choices, each named in the case header: ONE zmin inlet with the three
+streams as radial steps at r = 0.003725 m and 0.009275 m (the p. 5
+mid-wall convention), each step a 1e-7 m ramp no face centre lies inside;
+the streams' mass fractions from the solver's molar masses (jet CH4
+0.1563714015, O2 0.1964954433, N2 the remainder; pilot N2 remainder
+0.7342292 because NO is not a DRM19 species; coflow from element fractions
+Y2H 0.0007 and Y2O 0.2413); k = 1.215e-4 and epsilon = 0.1 on the whole
+inlet and in the initial field (the coflow's 1 % intensity, epsilon 0.1
+not the coflow's own 2.2e-5 — the measured reason below); T enters at
+302 K, not 294/291 K (thermo12's N2, AR and CH3O records start at 300 K);
+chemistry atol 1e-5 with EDC's defaults (psrSpan 20); gravity 0 (the jet's
+Froude number is 3.5e4). The wedge is 5 degrees, 80 x 1 x 120 cells,
+z-graded by expansion 5, C1 = 1.6.
+
+**(e) The rows.**
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| chem_tci `edc_step_is_the_kernel_rate` | the device `EdcStep` rate against the kernel's | bitwise | D |
+| chem_tci `edc_heat_release_matches_host` | device vs `edc_heat_release_host`, f64 / single; hand value | 1e-12; 1e-6; 1e-14 | R; R; P |
+| chem_tci `edc_step_conserves_elements_and_mass` | the reactor's own element and mass closures | 1e-10; single 1e-6 | A |
+| chem_tci `edc_step_refuses_short_buffers` | the input checks | exact | D |
+| lowmach `lowmach_edc_elements_conserved` | the tube's element content through the split step | 1e-10; single 1e-5 | R |
+| lowmach `lowmach_edc_refusals_name_the_setting` | the closure refusals | exact | D |
+| lowmach `species_budget_closes_on_hand_data` | (134.19)-(134.21) on hand data | 1e-15 and 1e-12 | P |
+| case_json `turbulence_coeffs_lower_into_model_coeff` | the coeffs' lowering | exact | D |
+| case_json `json_fixed_profile_matches_the_dictionary_spec` | the two routes' entries | exact | D |
+| case_json `json_fixed_profile_is_refused_by_name` | the bad profiles | exact | D |
+| case_json `json_fixed_profile_seeds_the_t_boundary_bitwise` | the seeded boundary | bitwise | D |
+| case_json `sandia_flame_d_case_lowers` | the case's lowering | exact | D |
+| validate (this gate) | the run reached 300 steps and ended on its budget; every field finite at the last good step | exact | D |
+| validate (this gate) | the inventory mass and O/H/C/N budgets (134.19), (134.21) | 1e-6 | A |
+| validate (this gate) | the DEFERRED TNF band (§137.4) | NOT RUN | — |
+
+**(f) The measured EDC library values** (runs A and B): heat release device
+vs host 0.0 (f64) and 2.518e-8 (single); elements 1.171e-13 and mass
+2.856e-14 (f64), 5.279e-8 and 4.436e-8 (single); lowmach EDC tube elements
+2.532e-13 (f64; run B measured it over 100 steps, the test now runs 30;
+psrSpan 1); existing chem.cu kernels' SASS unchanged in both builds.
+
+**(g) The recorded runs** (built at 1111b2a with CHR-16's working tree, on
+the RTX 5070 Ti shared with two other lanes). The REDUCED run
+(`-endTime 3e-3 -deltaT 1e-5 -p0 100615.725`) completed 40 of 300 steps and
+stopped on step 41 with "EDC refused 1 cell(s); the first is cell 244 with
+status 8 (BELOW_NEGATIVE_ATOL)"; mean T reached 1523 K. The same case to
+`-endTime 4e-4` ended on its budget, and its last-step inventory budgets
+are mass 3.785e-2, O 1.175e-1, H 2.194e-1, C 2.354e-1, N 1.298e-2 — all
+MISSED against 1e-6. As read: O 3.8e-14, H 5.5e-14, C 9.7e-15 (the species
+equations close to round-off) but mass 1.389e-1 and N 1.802e-1; CH4 reached
+0.1618 against the jet's 0.15637. 384000 of 384000 cell-steps were capped
+(the laminar start keeps Re_T below C_gamma^4) and 737 unconverged; 60.3 s
+for 40 steps.
+
+The input search, each measured: inlet T 300 K -> about 2250 cells out of
+range on step 2 (hence 302 K); epsilon 2.2e-5 -> nut 0.12 m2/s after one
+step and M 1.6 on step 2, with or without chemistry (hence 0.1); atol
+1e-10, 1e-8, 1e-6 -> 1 to 14 cells refused BELOW_NEGATIVE_ATOL on step 2;
+atol 1e-5 -> step 41 (the record); atol 1e-4 -> OUTSIDE_THERMO_RANGE
+between steps 41 and 50; psrSpan 1 (atol 1e-5) -> BELOW_NEGATIVE_ATOL
+between steps 31 and 40; the bounded species scheme -> OUTSIDE_THERMO_RANGE
+between steps 11 and 20; at the earlier inputs (T 300 K or epsilon 2.2e-5)
+psrSpan 0.2, 5 and 20, rtol 1e-3 and 1e-8, and ros3 all stopped on step 2.
+
+Causes, stated as measured and not proven: the reactor's observer refuses a
+component below -atol after an accepted step whose RMS error norm passed;
+and the species equations read the step's opening density at both levels
+while the flux carries the step's dilatation, so mass and the inert
+remainder (N) do not close and a mass fraction can overshoot. Cures change
+numerics and are the user's; they are not built. The DEFERRED comparison is
+NOT RUN: the REDUCED run stops at step 41 on the reactor's negativity
+guard, and a statistically steady flame needs about 0.2 s of flow (2e4
+steps at dt 1e-5) at the measured 1.5 s per step, about 8 h of card time,
+over this unit's 3 h.
+
+Labels: (134.18)-(134.21).
 
 ---
 
@@ -52855,6 +53641,479 @@ three blocks lowers, serialises and runs exactly as before.
 | `tests/case_chem.rs` | both routes equal, `load`, `ros4` and EDM under `MixingRate::None` refused, in both builds | exact | D |
 
 No labels.
+
+### 137.8 Radiation in `ofgpu-lowmach` as built (CHR-23)
+
+`src/io/case_rad.rs` reads §137.2's `radiation` table, and
+`src/bin/lowmach_rad/mod.rs` runs it in `ofgpu-lowmach`'s outer iteration on
+CHR-18's P1 (§135.7) and CHR-20/21's fvDOM (§136.7-§136.8). This subsection
+records what the table leaves open, as the code applies it. It is this
+project's own contract (ORIGINAL), built on (135.4), (137.1)-(137.3), §25,
+§26 and §4. It has no external source.
+
+**One lowering for both routes.** The JSONC block is written out as the
+entries of §137.2's dictionary table (`radiationModel`,
+`absorptionEmissionModel`, `absorptionCoefficient`, `wsggFile`,
+`wsggPressure`, `scatterModel`, `scatterCoefficient`, `A1`; each number in
+Rust's shortest round-trip form) and read by `ParticipatingConfig::from_dict`,
+so both routes share every refusal of §137.2. `LoweredRadiation` holds that
+config, the quadrature (fvDOM), the sweep tolerance and cap (fvDOM), `every`,
+and the stated `walls` and `open` entries. `JsonCase::lower` stores it in
+`LoweredCase::radiation`. The dictionary route reads
+`constant/radiationProperties`. Its entries beyond §137.2's table are
+`solverFreq` (`every`), `quadrature`, `scatterTol` and
+`maxScatterIterations`. The walls come from the radiation field file, `0/G`
+under P1 and `0/IDefault` under fvDOM, when it exists. `radiationModel none`
+on the dictionary route means no radiation. The JSONC route has no `none`:
+an absent block is no radiation.
+
+**The patches (DESIGN).** Every patch of the mesh gets one radiative
+condition, decided from its `PatchKind`:
+
+| patch | P1 (CHR-18) | fvDOM (CHR-20) |
+|---|---|---|
+| `wall`, named in `walls` | `MarshakPatch`, the stated `emissivity`; `T` stated -> `Fixed(T)`, absent -> `FromField` | `GreyDiffuse`, the same two entries |
+| `wall`, not named | `MarshakPatch`, emissivity 1, `FromField` (black at its own `T`) | `GreyDiffuse`, emissivity 1, `FromField` |
+| ordinary patch (`inlet`, `open`), named in `open` | `MarshakPatch`, emissivity 1, `Fixed(Tinf)` | `Open { t_inf: Tinf }` |
+| ordinary patch, not named in `open` | refused, naming the patch and `open` | refused, the same |
+| `symmetry` | nothing (`G` zero-gradient, §135.7) | `Symmetry` |
+| `empty`, or no faces | nothing | nothing |
+| cyclic, processor, conjugate interface | refused (§136.6's v1 rule, applied to both models) | refused |
+
+A `walls` entry on a patch that is not a wall, an `open` entry on a wall, a
+name that is no patch, and a patch named in both are refused by name.
+`emissivity` outside `[0, 1]` is refused by the lowering; `0` is then refused
+by `P1::new` and `DomRows::new`, which need `(0, 1]`.
+
+On the dictionary route the field file's `boundaryField` gives each patch a
+type. Four names are read here, and they are the four that BC-01's catalogue
+lists as CHR-23's. They are read only from the radiation field file, never
+as a condition of a solved field, so `BcKind::from_name` keeps refusing them
+by name (the catalogue keeps them `Owned { unit: "CHR-23" }`, as CHR-29 kept
+its species names):
+
+| type | model | on a wall | on an ordinary patch |
+|---|---|---|---|
+| `MarshakRadiation` | P1 | `emissivity` (default 1), `FromField` | refused (an open boundary needs a stated temperature) |
+| `MarshakRadiationFixedTemperature` | P1 | `Trad` (required), `emissivity` (default 1): `Fixed(Trad)` | black at `Trad`: `emissivity` other than 1 is refused |
+| `greyDiffusiveRadiation` | fvDOM | `emissivity` (default 1); a `T` entry that is a number -> `Fixed(T)`, absent -> `FromField` | `Open { t_inf: T }`: `T` required, `emissivity` other than 1 refused |
+| `wideBandDiffusiveRadiation` | — | refused: a banded medium is named, not built (§136.4) | refused |
+
+`symmetry`, `symmetryPlane` and `empty` read as in the table above. Any other
+type, a model mismatch (a P1 name in `0/IDefault` or the reverse), and an
+unknown entry inside a recognised type are refused by name. Without the field
+file every wall is black at its own `T`, and an ordinary patch is refused.
+
+**Refusals at the driver.** `ofgpu-lowmach` refuses, by name: `s2s` or
+`viewFactor` (CHR-24 built it as §137.9's enclosure, which the driver now runs); `wsgg` and `wsggGrey` (CHR-22's three open
+items: per-cell `a_i(T, X)` and `kappa_i(T, X)`, the wall weight `a_i(T_w)`
+and the transparent window are named and not built); radiation with a
+`motion` block or `-rigidBody` (the radiation geometry is built once);
+`every > 1` with `-restartFrom` (the solve phase is not in the checkpoint);
+and a radiating wall whose `T` condition is not `fixedValue`,
+`zeroGradient` or `fixedFluxTemperature`. Every other driver refuses a JSONC
+`radiation` block through `LoweredCase::refuse_radiation`, called in
+`common::load_case_with` wherever it does not let chemistry through.
+`ofgpu-buoyant` keeps `refuse_enclosure`. Its `T` is a kinematic
+`ScalarTransport` with no implicit-sink registry and no `rho cp` to divide
+(137.2) by. Radiation there is named and not built, and the plan's row is
+narrowed accordingly.
+
+**The order of the outer iteration.** After `EnergySources::clear`, the
+chemistry's `before_flow`, the heater and the thermostat:
+
+1. Solve when due. The outer iterations are counted from 0 in each run, and
+   iteration `i` solves when `i mod every = 0`. P1 runs `P1::solve`. fvDOM
+   runs `DomSolve::solve`, which reports an unconverged sweep loop in one
+   line and never stops the run (§136.7). Between solves `G` is held.
+2. Register (137.2) at `T* =` the current `T`, every iteration, from the
+   held `G`. P1 uses `P1::register_energy_source`. fvDOM launches the same
+   kernel, `radSourcePair`, on `DomSolve::g()` with `σ` unweighted.
+3. Rewrite the balanced walls, (137.5).
+
+Then `update_target_divergence`, the flow, `energy.correct` and the sealed
+`p0` follow, as before.
+
+**The constraint's `Q`.** (137.2) puts `κ(G + 12σT*^4)` in the explicit
+half and `-16κσT*^3` in the implicit half. §25.1's constraint and §25.2's
+`p0` read only the explicit half, which alone is not the radiative source.
+Whenever an implicit sink has been registered since the last `clear`, the
+constraint reads instead
+
+```
+Q_c  =  q_c + sp_c T_c                                                           (137.4)
+```
+
+at the `T` the divergence is evaluated at, written `sp*T + q` in that order
+into a scratch buffer. `total_q` integrates the same buffer for the sealed
+`p0`, so the constraint and the ODE see one `Q` (§26.1's rule). A registry
+with no implicit sink in the iteration (every run before this unit, and
+every run without radiation) reads `q` itself, the same launches on the same
+buffer, so it is bitwise unchanged. `crate::cht::flow` registers a sink but
+never evaluates the constraint, so its `total_q` reads `q` as before.
+
+**The walls, balanced.** On a radiating wall face `b` whose `T` condition
+is `zeroGradient` (adiabatic) or `fixedFluxTemperature` (stated `q_in,b`,
+positive into the fluid), the stated flux carries the radiation the wall
+receives. With `(q_r·n)_b` the radiation solve's wall flux, positive out of
+the medium ((135.15) for P1, (136.4) for fvDOM):
+
+```
+q_in,b  <-  q_stated,b + (q_r·n)_b,        k_eff,b ∂T/∂n_out = q_in,b               (137.5)
+```
+
+This is §137.1's "the conductive flux is the stated flux minus `q_w·n`",
+with both fluxes measured out of the medium. At set-up, a `zeroGradient` face
+of a radiating wall becomes `fixedFluxTemperature` with `q_stated = 0`
+(`fr = 0`, `ref_grad = 0`, `ref_value = 0`, the same triple), and joins
+`Energy::set_fixed_flux_walls`. Every iteration, step 3 writes `ref_value`
+on the balanced faces only (host-side, one download and one upload of `T`'s
+`ref_value`). `Energy`'s own `update_fixed_flux` then turns it into
+`ref_grad`. Other faces keep whatever their own conditions wrote. A
+`fixedValue` wall is not balanced: its temperature is stated, and the
+conductive flux is whatever the solve gives.
+
+**The report and the outputs.** After the loop, one more radiation solve
+runs at the final `T`. It is not counted in `every`. Both sides of (137.3)
+are then formed on the host:
+
+```
+L = Σ_b (q_r·n)_b |S_b|,   R = Σ_P κ (4σT_P^4 - G_P) V_P,
+S = Σ_b |(q_r·n)_b| |S_b| + Σ_P κ (4σT_P^4 + G_P) V_P                           (137.6)
+```
+
+Each term is computed in f64 from the downloaded values, rounded once to
+`Scalar`, and each sum is `exactsum::host_exact_sum`. The faces are every
+boundary face of every patch, since the wall flux is 0 where nothing
+radiates. The gate tolerance is `|L - R| <= 8 ε S`, with `ε` the `Scalar`
+machine epsilon. Each term carries at most six roundings (the fourth power,
+the products and the difference), and the two exact sums add half an ulp
+each. The discrete identity behind (137.3) holds only to the radiation
+solve's linear residual `Σ_P r_P`: interior faces cancel exactly, and each
+cell row is `A G = b` up to `r_P`. The gate case therefore solves `G`
+(P1) or every `I^l` (fvDOM) to tolerance `1e-30`, relative tolerance 0. A miss
+is printed with `Σ r` as its cause. The wall heat-flux report prints the
+radiative column per wall patch, `Σ (q_r·n) |S|` in W beside the conductive
+one, and one line `radiation (137.3): walls L W | volume R W | gap L-R W |
+scale S W | solves n`. Every write time writes `G` (W/m2; boundary values:
+P1's `G` faces, the owner cell's under fvDOM) and `qr` (W/m2, the cell
+`q_r`; boundary values `(q_r·n)_b n̂_b`), both `calculated`.
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| `case_radiation_equals_library` | a P1 and an fvDOM JSONC case lowered and run through `lowmach_rad` for 3 iterations on a fixed non-uniform `T`, against `P1`/`DomSolve` built by hand from the same numbers: `G`, the registry's `q` and `sp`, the wall flux, and `T`'s `ref_value` on the balanced faces | bitwise | D |
+| `radiative_power_balance_closes` | the heated sealed box through the driver, P1 and fvDOM (S4): (137.6) | `8 ε S` | A |
+| `radiation_every_is_honoured` | `every 3` and `every 1` over 9 iterations: solves counted 3 and 9 | exact | D |
+| `radiative_walls_are_balanced` | after one iteration, `ref_value` on an adiabatic and on a fixed-flux radiating wall equals `q_stated + (q_r·n)` bitwise, and no other face's `ref_value` changed | bitwise | D |
+| `constraint_q_reads_the_sink` | a registry with a sink: the constraint's `Q` equals `sp*T + q` bitwise; without one it is `q` (the same buffer) | bitwise | D |
+| `case_radiation_refusals` | every refusal above and in §137.2, on both routes and at the driver | refused, naming the key | D |
+| `the_shipped_schema_is_the_generated_one` | `docs/schema/case-1.json` equals `emit_schema()` | exact | D |
+
+**As built and measured (CHR-23).** The rows run in both builds.
+
+* The power-balance case is a 6^3 box with all six walls stated
+  `fixedValue` 300 K. A stated wall is not balanced, so this case does not
+  depend on (137.5). The initial `T` is 600 K, and the run makes 30
+  transient steps of 0.01 s with `-sealed -heaterPower 500` (relaxation
+  `U` 0.7, `p` 0.3, `T` 0.5). A steady sealed run has no `p0` ODE to take
+  the heat. (137.3)'s row-sum identity holds at any state, so the gate reads
+  the final state of the march, not a converged steady state.
+* The f64 runs solve every linear system at tolerance `1e-30`, relative
+  tolerance 0. Under `single`, the case's `p`, `U`, `T`, `G` and `Ii` rows
+  run at `1e-6`. f32 PBiCGStab goes non-finite at `1e-13` on this case
+  with or without radiation, and the equals and `every` cases ride the same
+  number. Measured gap/(ε S): P1 2.04 and fvDOM 0.29 in f64; P1 2.04 and
+  fvDOM 0.00 under `single`. Both are inside 8.
+* `case_radiation_equals_library` has 0 differing bits in both builds,
+  for P1 and fvDOM. `radiative_walls_are_balanced` covers 80 balanced
+  faces, with 0 wrong values and 0 other faces moved. The `every` case
+  states all its walls and counts 3 and 9 solves.
+
+**The balanced walls through the driver (REVIEW-LATER).** (137.5) feeds
+the wall flux of the LAST radiation solve into the next `T` solve. That is
+an explicit lag, and it is unstable when the wall's radiative conductance
+is far above its conductive one. P1's Marshak wall linearises to
+`h_rad = a 16σT_w^3`, which is 98 W/(m2 K) at 600 K with `ε = 1`. A laminar
+gas's first-cell conductance is `k/δ`, about 0.31 W/(m2 K) for air at
+`δ = 1/12` m. The ratio is about 300. Measured: the power-balance case with
+its four side walls `zeroGradient` (balanced; P1, κ = 1, 6^3, the same
+march) drives `p0` to -2.2e6 Pa on its second step, and the run stops
+there with `GasState::advance_p0`'s refusal. The stated flux becomes a
+first-cell temperature jump of order 10^4 K, and `T_w`'s fourth power
+feeds it back. The cure is a numerics change, so it is not built: carry
+the wall emission implicitly in `T`'s triple. That is a mixed condition
+whose `h_rad` and reference come from (135.15) linearised about `T_w*`, as
+(137.2) linearises the volume source. Until then the balanced faces are
+exact to their contract (bitwise, `radiative_walls_are_balanced`), and a
+case that runs radiation through the driver states its walls' `T`.
+
+Labels: (137.4)-(137.6).
+
+### 137.9 Surface-to-surface radiation from `ofgpu-buoyant` and `ofgpu-lowmach` as built (CHR-24)
+
+§98.7-§98.8 put an enclosure in a conjugate case. CHR-24 puts the same
+model, `S2s` of §49-§51 unchanged, in the two single-region drivers.
+`src/s2s.rs` is not modified. The construction, the cadence and the stamp
+are §98.8's. Only the selection of the radiating faces and the wall
+conductivity differ between the drivers.
+
+**What the case says.**
+
+| route | driver | the enclosure | the radiating faces |
+|---|---|---|---|
+| JSONC `radiation` | `ofgpu-lowmach` | `"model": "s2s"` (alias `viewFactor`), and the optional §51.1 entries in JSONC spelling: `ambientTemperature`, `radiationRelaxation`, `radiositySweeps`, `agglomerate`, `viewFactorQuadrature` | the `walls` patches, each with its own `emissivity` |
+| `constant/radiationProperties` | `ofgpu-lowmach`, `ofgpu-buoyant` | `radiationModel viewFactor` (or `s2s`), read by `S2sConfig::from_dict` exactly as §51.1 states it | every `T` patch whose type is `s2sWall` or `greyDiffusiveRadiationViewFactor`, at the dictionary's `emissivity`, with `q_ext = 0` |
+
+The JSONC block is written out as §51.1's dictionary entries and read by
+`S2sConfig::from_dict`, as §137.2 lowers the participating block. Its
+`emissivity` entry is the least of the walls' emissivities. Every
+radiating face carries its own, so that entry only feeds §50.2's sweep
+count and §50.9's lower bound. The lowering gives the transparent medium
+(`constant`, `kappa = 0`, no scatter) with `LoweredRadiation::s2s` set.
+
+A JSONC wall's `T` condition says how the wall is claimed
+(`case_rad::claim_s2s_walls`). A `zeroGradient` face becomes an adiabatic,
+re-radiating `s2sWall` (`q_ext = 0`). A `fixedFluxTemperature` face becomes
+an `s2sWall` whose `q_ext` is the stated `q` (§50.3). The face leaves
+`Energy`'s fixed-flux list, because the stamp's `refGrad = q_ext/k_eff`
+replaces that conversion. Each claimed face is seeded with the triple
+`(0, 0, 0)`. Any other condition is refused by patch name. A stated
+temperature is not an `s2sWall`. Where a surface at a stated temperature
+must close the view, `ambientTemperature` (§49.6) does it.
+
+**Refusals**, continuing §137.2's table for `s2s`. Each one names its key.
+
+| case | refused |
+|---|---|
+| `absorption`, `scatter`, `quadrature`, `scatterTol`, `maxScatterIterations` under `s2s` | a non-participating medium; the key would be read and ignored (§50.9) |
+| `every` other than 1 | the exchange runs every iteration (§98.10) |
+| `open` | the closure is `ambientTemperature` (§49.6) |
+| no `walls` | nothing radiates (§98.7 row 14) |
+| `walls.<p>.T` | a stated temperature is not an `s2sWall` |
+| a wall `emissivity` below `EPS_MIN_SUPPORTED` (0.02) | §50.2 |
+| any of the five §51.1 keys under `P1` or `fvDOM` | read by `s2s` only |
+| a `walls` patch that is missing, not a wall, or whose `T` is not `zeroGradient`/`fixedFluxTemperature` | at the driver, naming the patch |
+| a `T` with an `s2sWall` patch and no enclosure (`ofgpu-lowmach` dictionary route; `ofgpu-buoyant`) | §98.7 row 15 |
+| an enclosure where no face radiates | §98.7 row 14 |
+| `-restartFrom` with `radiationRelaxation < 1` | the relaxed irradiation `H_old` is not in the checkpoint |
+| `ofgpu-buoyant -graph` with an enclosure | the exchange reads back every iteration (§98.10) |
+| `ofgpu-buoyant` with `radiationModel P1` or `fvDOM` | `ofgpu-lowmach` runs a participating medium (§137.8) |
+
+`ofgpu-lowmach` keeps §137.8's refusals of a `motion` block and
+`-rigidBody`: the view factors are built once.
+
+**Where the exchange runs.** `case_rad::DriverEnclosure` holds `S2s` and
+the per-face read-backs that §98.8's `Enclosure` holds, without the
+interface parts. In `ofgpu-lowmach` it runs once per outer iteration,
+after the participating radiation's place in `outer_iteration` and before
+`Energy::update_target_divergence`. `Energy::k_eff_wall()` is copied and
+`S2s::update` runs on the energy's `T`. This is §98.8's step 4c, and it
+carries §50.7's lag of `k_eff`. In `ofgpu-buoyant` it runs once per pass,
+just before `ScalarTransport::correct`.
+
+**The wall conductivity of a kinematic `T` (DESIGN).** `ofgpu-buoyant`
+solves `T` with the diffusivity `alpha_eff = nu/Pr + nu_t/Pr_t`. No
+conductivity is in the equation, so (S50.12)'s `k_eff` is formed from two
+new entries of `physicalProperties` (or `transportProperties`), `rhoRef`
+and `CpRef`. Both are required whenever the case has an enclosure. Neither
+has a default, and each is refused by name when it is missing or not
+positive:
+
+```
+k_eff,b = rhoRef CpRef ( nu/Pr + nu_t,b / Pr_t )                         (137.7)
+```
+
+`nu_t,b` is the boundary `nut` that `ScalarTransport::correct` copies, so
+`k_eff,b / (rhoRef CpRef)` is the face diffusivity the `T` equation
+assembles. With this `k_eff`, (S50.12)'s `k_eff snGrad_b = a - h T_b` is
+`alpha_eff snGrad_b = (a - h T_b)/(rhoRef CpRef)`, the same wall balance
+in the equation's own units. `k_eff` is formed on the host from the
+current `nut` at every exchange, so `ofgpu-buoyant` has no `k_eff` lag.
+`ofgpu-lowmach` reads `Energy`'s, as §98.8 does.
+
+**What a run reports.** `ofgpu-lowmach`'s `RunEnd::enclosure` and
+`ofgpu-buoyant`'s `run_report` return §98.8's `EnclosureReport` of the
+last exchange. The setup prints the view-factor report, and the end
+prints the updates, `SUM A q_r`, `SUM A |q_r|`, the (S50.3) residual and
+the sweeps.
+
+**The gates.**
+
+| test | measure | tolerance | class |
+|---|---|---|---|
+| `buoyant_s2s_parallel_plates` | `ofgpu-buoyant`, plume 8^3, 3 iterations, ceiling `s2sWall` at `eps = 0.6` into the closure at 400 K: each face's `eps (sigma T0^4 - H_b)` against `parallel_plate_flux(T0, 400, 0.6, 1)` and `concentric_flux(T0, 400, 0.6, 1, A_ceiling/A_boundary)`; `SUM A q_r` | `1e-10` relative (§50) | R |
+| `lowmach_s2s_equals_library` | `DriverEnclosure` on a claimed JSONC box (xmin `eps 0.8`, xmax `eps 0.5` with `q 50`, closure 350 K, `radiationRelaxation 0.5`), 3 exchanges, against `S2s` built by hand | bitwise | D |
+| `lowmach_s2s_runs` | `ofgpu-lowmach` on the same box, 3 iterations: `SUM A q_r` against `SUM A \|q_r\|` | `1e-10` | R |
+| `an_enclosure_is_read_or_refused_by_name`, `case_radiation_s2s_refusals`, `s2s_restart_with_relaxation_is_refused` | every refusal above | refused, naming the key | D |
+| `case_radiation_s2s_lowers` | each JSONC key read back | exact | D |
+
+**Plan against tree (the tree wins).** The docs/17 row names two infinite
+parallel plates and concentric cylinders "through the driver". A view
+factor from quadrature over a finite mesh does not reach `1e-10` against
+the grey two-surface forms, as §98.9(b)(3) already found. The driver gate
+therefore takes §98.9(b)(3)'s construction. One planar surface radiates
+into the black closure, and its coplanar faces see none of each other.
+`H_b = sigma T_amb^4` on every face, and both closed forms hold to
+round-off at `e2 = 1`. The grey second surface and the unequal areas stay
+Gates 50-A and 50-B, on the hand-written `F` they need. No concentric-
+cylinder mesh is built.
+
+**Measured (f64, CHR-24).** `buoyant_s2s_parallel_plates`: the worst
+face's relative error against both closed forms is `9.5e-16`.
+`SUM A q_r = 8.9e-11` W against `SUM A |q_r| = 2.64e4` W, a ratio of
+`3.4e-15`. The (S50.3) residual is `7.4e-17` after 31 sweeps, over 3
+updates. `lowmach_s2s_equals_library` shows 0 differing bits over 3
+exchanges. `lowmach_s2s_runs`: `SUM A q_r = 4.5e-13` W against `5.22e3` W,
+a ratio of `8.7e-17`, with residual `1.6e-16` after 40 sweeps. That run
+holds the four non-radiating side walls at `fixedValue` 600 K. The equals
+gate's box has no Dirichlet face on `T`, so its sealed steady energy
+equation is singular with or without radiation. That is a property of the
+fixture, not of the enclosure. The `single` build compiles. The driver
+tests were not run under `single`; there the tolerance column is `1e-5`
+(class R round-off).
+
+Labels: (137.7).
+
+### 137.10 Parcels in `ofgpu-lowmach` as built (CHR-26, `src/bin/lowmach.rs`, `src/bin/lowmach_parcels/`)
+
+`No GPL-licensed source was consulted.` The parcel step, the deposit and
+the coupling are §66-§68 and §76-§77 unchanged. This subsection adds the
+order in which `ofgpu-lowmach` runs them, the refusals, and the mixture
+form of §77.6's volume term, (137.8)-(137.9). It is this project's own
+contract (ORIGINAL). The derivation uses Day & Bell's equation of state and
+species equations as §133.1-§133.2 write them, and the continuity equation
+with a mass source of (77.9).
+
+**What runs.** A JSONC case with a `parcels` block (§137.6) runs in
+`ofgpu-lowmach`. `common::load_case_with(path, true)` lets the block past
+§137.6's seam for this driver only. Every other driver keeps the refusal
+through `common::load_case`. A case directory with
+`constant/cloudProperties` is still refused by `read_case_controls`, in
+every driver. *DESIGN, decided by recommendation:* the dictionary route of
+the parcels block lowers (§137.6) but is not run, as CHR-12b decided for the
+chemistry blocks.
+
+**One step, in §68.7's order.** The pool is built once, for the run's `dt`
+and on its fixed mesh (`CaseParcels::new`: `Parcels::new`,
+`ParcelDeposition::new`, `ParcelCoupling::new`; their own refusals stand).
+In each time step, after the step is opened and before the turbulence and
+the unit of work:
+
+1. `Parcels::step` on the gas the last step left: `U`, `rho`, and `T` when
+   the physics is thermal. An evaporating pool also gets the vapour
+   member's `Y`.
+2. The sort and CSR, then the deposit (`ParcelDeposition::update`).
+3. The coupling gather (`ParcelCoupling::update`). It is handed `T` when the
+   energy coupling is on and `Y_v` when the mass coupling is on. The
+   library refuses the other pairings by name.
+4. Momentum, when its coupling is on: `MomentumSources` is cleared and
+   registered once per step, and every outer iteration's assembly reads it
+   (§68.7). With the coupling off nothing is cleared or registered, so the
+   matrix is §68.10's by construction.
+5. Energy, when its coupling is on: registered in `outer_iteration` after
+   `-heaterPower` and the thermostat, on each iteration's freshly cleared
+   `EnergySources`. The target divergence and the `p0` ODE then read it as
+   part of `Q` (§77.6, first bullet).
+6. On a reacting case with `coupling.mass evaporation`: the vapour enters the
+   split step's sources by (137.8)-(137.9), inside
+   `Reacting::before_flow_with`.
+
+**The vapour in a reacting mixture.** §77.3 writes the vapour source for the
+unit-density, non-conservative species equation of §19. §77.6 writes the
+volume term `S_m/rho` for one constant `W`. The reacting driver has neither.
+Its species equations are §86's mass-weighted, conservative form, and its
+constraint is (133.21), whose molar sum closes the inert member by
+`S_N = -Σ_k S_k`. That closure holds for reactions and diffusion, which
+conserve mass. It does not hold for a mass source. Continuity with the
+source, `Drho/Dt + rho div u = S_m`, and (133.3)'s equation of state give
+
+```
+div u = (1/T) DT/Dt - (1/p0) dp0/dt + (W/rho) Σ_m S_m^tot / W_m
+```
+
+summed over every member `m`, with `S_m^tot` the member's conservative
+source. The `S_m/rho` of continuity cancels against the dilution term of
+`D(1/W)/Dt`. The vapour `v` is a solved member, and the reactive and
+diffusive parts sum to zero over all members. So
+`Σ_m S_m^tot/W_m = Σ_k (1/W_k - 1/W_N) S_k + mdot'''/W_v`, where `S_k` is
+(133.24)'s net source without the vapour. The molar sum must therefore gain
+`mdot'''/W_v`. The vapour's net source carries `mdot'''` by (137.8), which
+brings `(1/W_v - 1/W_N) mdot'''`. The rest, `mdot'''/W_N`, is added by a
+scaling:
+
+```
+su_v  <-  su_v + mdot'''                                   (the mass-weighted Y_v equation, kg/(m3 s))   (137.8)
+S_v,mol = S_v + f mdot''',     f = (1/W_N) / (1/W_v - 1/W_N)                                              (137.9)
+```
+
+`S_v,mol` is what `GasState::set_molar_change` is handed for the vapour.
+With it, (133.21) gains `(1/W_v - 1/W_N)(1 + f) mdot''' = mdot'''/W_v`.
+Multiplied by `R T/p0 = W/rho`, that is `(W/W_v)(mdot'''/rho)`, the FDS
+Technical Reference Guide's `D_SOURCE` term `(W/W_a) mdot'''_a/rho`, which
+§77.6 cites. With one constant `W` it is (77.3). The sealed `p0` of (133.22)
+integrates the same `D`, so the added mass raises `p0` without a second
+path. The inert member is diluted through `Y_N = 1 - Σ_k Y_k`. `f` is formed
+in f64 from the mixture's own molar masses (`GasMixture::coefficient` and
+`inverse_molar_mass`) and rounded once to the build's scalar. (77.1)'s
+`vapour_source` and (77.3)'s `divergence_source` are not used in this driver.
+They belong to the constant-density species equation and the constant-`W`
+constraint. *DESIGN, stated:* (77.2)'s vapour enthalpy uses the coupling's
+own `cpGas`, not the mixture's `cp` field (133.18).
+
+**Refused by name, before a field is set up** (`lowmach_parcels::refuse_settings`):
+
+* a steady run, because the pool walks a physical `dt` and §66.8 fixes the
+  injection interval in whole steps;
+* a checkpoint, `-restartFrom`, `-restartWrite` or an output restart series,
+  because the `.mcr` format carries no parcels;
+* a motion block or `-rigidBody`, because the pool is built on a fixed mesh;
+* `physics evaporating` without `coupling.mass evaporation`, because the
+  vapour member's field is the only `Y_v` (76.7) can read in this driver;
+* a `coupling.vapour` on a case without the reacting blocks;
+* the inert member as the vapour, because it is closed by `1 - Σ` and takes
+  no source;
+* a vapour that is not a solved member;
+* a vapour with the inert member's molar mass, where `f` divides by zero
+  (`vapour_member`).
+
+§77.7's consistency rules stay in `ParcelCoupling::new`.
+
+**Written.** `parcels.vtp` (§66.13) goes into every time directory the run
+writes, the final one included. The periodic report prints the pool's
+counters. The last line before `done` gives the last step's momentum, given
+to the gas and lost by the live parcels. `RunEnd` holds the same (the
+`parcels` report). In test builds only, it also holds the final `U`, `p`,
+`T` and `rho` at full precision (`final_flow`).
+
+**What is not built, stated.** The dictionary route; steady, restarted and
+moving-mesh runs with parcels; evaporation into a non-reacting case, which
+has no species set; and the mixture `cp` in (77.2).
+
+**Tree against plan.** The row asks for "a §76 evaporation gate case through
+the driver equals the library path bitwise". As in §137.8's
+`case_radiation_equals_library`, the pair is made at the driver module.
+`CaseParcels`, built from the lowered case, is set against `Parcels`,
+`ParcelDeposition` and `ParcelCoupling` built from hand-written controls.
+Both take the same frozen gas, because the coupled flow solve is the
+driver's own code on both sides. The whole driver is held by Gate 68-B and
+the momentum row below. The flow fixtures solve `p` with PCG. On the sealed
+all-wall box, the `single` build's PBiCGStab stalled at a `p` residual of
+7.6e-2 and then diverged. The double build converged with PBiCGStab, and
+PCG converged in both builds. The fixture changed its input, not a
+tolerance.
+
+**Gates, measured 2026-10-18 (both builds, `lowmach_parcels::tests`, bin
+tests of `ofgpu-lowmach`).**
+
+| row | measure | tolerance | class | measured |
+|---|---|---|---|---|
+| `lowmach_parcels_equal_library` | gate 76-A's shape (a 500 µm water droplet at 285 K in still 25 °C air at 30 % rh), 4^3 walled box, `evaporating`, Schiller-Naumann, momentum `semiImplicit`, energy `explicit`, mass `evaporation` into H2O, 25 steps of 1 ms: the lowering against the hand-written controls; every field of both pool snapshots (`x64` included), both coupling snapshots and both registries | bitwise | D | 0 bits differ in both builds; vapour 2.04e-3 kg/(m3 s) (f32 2.03e-3), max `|su|` 0.25 m/s2, max `q` 7.0e3 W/m3 |
+| `lowmach_parcels_vapour_enters_species` | the reacting step `run()` builds, twice, with and without `mdot''' = 1e-3 (1 + c/n)`: (137.8) on H2O's reaction source, every other member unmoved; (137.9) the target divergence moves by `R T mdot'''/(p0 W_v)`; `f` against its f64 form | bitwise; `1e-12` relative (`1e-5` f32) | D, R | bitwise; `1.6e-16` (f32 `9.6e-8`) |
+| `lowmach_no_parcels_no_change` | Gate 68-B through the driver: a sealed, heated 4^3 box with drifting gas, 10 steps, without a block (A), with the model and every parcel of zero weight (B), and with a 1e-4 kg/s spray (C): `final_flow` and the `U_x` and `T` means, A against B; C against A | bitwise; C differs | D | 0 bits; C differs in 383 values |
+| `lowmach_parcels_momentum_balance` | VAL-72a's row: on C with momentum `semiImplicit`, the momentum the last step gave the gas against what the live parcels lost, (68.4) | `1e-12` relative (`1e-5` f32) | R | `5.9e-18` (f32 0) |
+| `lowmach_parcels_refusals_name_the_setting` | each refusal above, `vapour_member` on equal molar masses, a steady run through the driver, and `common::load_case` naming §137.10 | refused, naming the key | D | all named |
+
+Labels: (137.8)-(137.9).
 
 ---
 

@@ -6,14 +6,29 @@ This folder is where mechanisms that may be shipped with meteor-cfd live.
 
 ## What is here, and what is not
 
-**Nothing is vendored yet.**
+**Only BFER2 at phi = 1 is here** (`bfer2_phi1.ck`, with its thermo
+`tm4513_thermo.dat`, the ten TM-4513 Table II records of
+`reference/mcbride-gordon-reno1993/table_II.csv` as a CHEMKIN THERMO file).
 
 * **WD1, JL4, BFER2.** These are the one-step Westbrook & Dryer (1981), the
   four-step Jones & Lindstedt (1988) and the two-step Franzelli et al. (2012)
   methane mechanisms (SPEC-LIT §129.6). Each would be written here by hand
   from a read copy of its paper, with the table and page cited. All three
-  papers are closed and no copy has been read, so the files do not exist yet.
-  No rate number is ever written from memory.
+  papers are closed. No copy of WD1's or JL4's has been read, so their files
+  do not exist yet.
+  No rate number is ever written from memory. **BFER2 is now here**, as
+  `bfer2_phi1.ck`, written from the read author manuscript on CERFACS's site
+  (Franzelli, Riber, Gicquel & Poinsot, *Combust. Flame* 159 (2012) 621-637,
+  DOI 10.1016/j.combustflame.2011.08.004,
+  `https://www.cerfacs.fr/cantera/docs/mechanisms/methane-air/DOCS/BFER/CF_Preccinsta.pdf`,
+  sha256 `42c230d28d2e25382928f43489497d8c5d727b746d86225fbb1bb780bd77f982`,
+  read 2026-10-18; SPEC-LIT §133.12). Its Tables 3-4 and eqs. (6)-(7) are
+  transcribed with the phi corrections f1 and f2 evaluated once at phi = 1
+  and folded into the two A factors — exact only when every species has the
+  same diffusivity, as the flame case that uses the file has (one Le for
+  all, SPEC-LIT §133.11's Lewis route), so the local phi is 1 everywhere at
+  all times. It is the phi = 1 file only: no general f(phi) mechanism is
+  authored here. WD1 and JL4 stay as written above.
 * **GRI-Mech 3.0 and DRM19.** Their files carry a disclaimer and no grant of
   permission to redistribute (SPEC-LIT §129.6 quotes it). They are therefore
   not in this repository. You download them yourself and name them by path.
@@ -52,3 +67,11 @@ To cite GRI-Mech 3.0, the authors ask you to refer to its web page,
 Golden, Frenklach, Moriarty, Eiteneer, Goldenberg, Bowman, Hanson, Song,
 Gardiner, Lissianski, Qin). For DRM19 they ask for: A. Kazakov and
 M. Frenklach, `http://www.me.berkeley.edu/drm/`.
+
+## Which case names these files
+
+`cases/sandiaFlameD.jsonc` (Gate CHR-16, SPEC-LIT §134.8) names
+`mech/drm19.dat` and `mech/thermo12.dat` — DRM19 with GRI-Mech 1.2's thermo,
+the pair tabled above — as its `chemistry` block. The paths are relative to
+the run copy, so the user places both files in that copy's `mech/` before
+running; the repository itself carries neither, for the reason above.

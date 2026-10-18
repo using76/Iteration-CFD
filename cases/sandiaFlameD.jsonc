@@ -1,0 +1,225 @@
+// CHR-16: Sandia Flame D (piloted CH4/air jet flame), run REDUCED on the true
+// wedge (SPEC-LIT 119): a coarse mesh, EDC (1989) with DRM19, and k-epsilon with
+// the case-stated C1 = 1.6. SPEC-LIT 134.8 states the case, its gate and its
+// recorded runs; 137.4 the proposed band and 137.5 the TNF answer key.
+//
+// Source, read by the supervisor (quoted here, never fetched by the solver):
+// the TNF documentation SandiaPilotDoc21.pdf, Release 2.1 (15 June 2007),
+// https://tnfworkshop.org/wp-content/uploads/2019/02/SandiaPilotDoc21.pdf,
+// sha256 4e748acd113f3d72fe814be6e5b1e27154577b5040951d59a015e9d287209f72 (the
+// file SPEC-LIT 137.5 records):
+//   p. 2  burner: jet d = 7.2 mm; pilot annulus 7.7 mm inner diameter, 0.25 mm
+//         wall, 18.2 mm outer diameter; burner outer wall 18.9 mm.
+//   p. 3  coflow 0.9 m/s at 291 K, 0.993 atm; jet 25 % CH4 / 75 % dry air by
+//         volume, 49.6 m/s at 294 K, nu 1.58e-5 m2/s; the pilot at the exit:
+//         phi 0.77, 1880 K, Yh2 1.29e-4, Yh 2.48e-5, Yh2o 0.0942, Yco 4.07e-3,
+//         Yco2 0.1098, Yoh 0.0028, Yno 4.8e-6, Yn2 0.7342, Yo2 0.0540,
+//         Yo 7.47e-4.
+//   p. 4  pilot 11.4 m/s for flame D.
+//   p. 5  the old profiles put the half-velocity points mid-way across the
+//         burner walls (wall thickness neglected); coflow free-stream
+//         turbulence intensity 1 %.
+//   p. 7  dry air 21 % O2 / 79 % N2 by volume; jet Y1H 0.0393, Y1C 0.1170;
+//         coflow Y2H 0.0007, Y2C 0, Y2O 0.2413, Y2N 0.7580.
+//
+// DESIGN - ONE zmin inlet. A wedge mesh refuses mesh.regions (SPEC-LIT 119.3)
+// and a slot carries one window, so the jet, the pilot and the coflow cannot
+// be three zmin patches. JSONC's fixedProfile (SPEC-LIT 120.1, 134.8) states
+// them as radial steps at r = 0.003725 m (mid inner wall: d/2 = 3.6 mm plus
+// half the 0.25 mm wall) and r = 0.009275 m (mid outer wall), the p. 5
+// convention. Each step is a 1e-7 m linear ramp between two table points; no
+// face centre lies inside one (the 0.9275 mm radial cells put the jet on 4
+// faces, the pilot on 6 and the coflow on 70), so every face takes its
+// stream's value exactly.
+//
+// DESIGN - the three streams' mass fractions:
+//   jet     25/75 by volume with the solver's molar masses: CH4 0.1563714015,
+//           O2 0.1964954433, N2 the inert remainder.
+//   pilot   p. 3 as printed. NO (4.8e-6) is not a DRM19 species, so the N2
+//           remainder is 1 - sum(solved) = 0.7342292.
+//   coflow  from the element fractions Y2H and Y2O: H2O 0.006255677917,
+//           O2 0.2357443221, N2 remainder 0.758.
+//
+// DESIGN - k and epsilon on the whole inlet and in the initial field: k is the
+// coflow's 1 %, k = 1.5 (0.01 x 0.9)^2 = 1.215e-4, and epsilon is 0.1 - a
+// laminar start (nut = 0.09 k^2/eps = 1.3e-8). Per-stream values would need a
+// profile on the turbulence conditions (TurbBc), which JSONC does not carry.
+// With the coflow's own epsilon (eps = 0.09^0.75 k^1.5 / 0.01 m = 2.2e-5) the
+// jet's shear layer took nut to 0.12 m2/s in one step and the turbulent
+// conduction from the 1880 K pilot faces drove M to 1.6 on the second step
+// (measured; the same with chemistry off); with 0.1 the start runs.
+//
+// DESIGN - T enters at 302 K, not 294 K (jet) or 291 K (coflow): thermo12's
+// N2, AR and CH3O records start at 300 K, and at exactly 300 K about 2250
+// cells left the range on the second step (measured); 2 K is the margin.
+//
+// DESIGN - chemistry atol 1e-5: at atol 1e-10, 1e-8 and 1e-6 the reactor's
+// negativity guard refused 1 to 14 cells on the second step (status 8,
+// BELOW_NEGATIVE_ATOL; measured, SPEC-LIT 134.8); at 1e-5 the run proceeds.
+// EDC keeps its defaults (psrSpan 20).
+//
+// gravity 0: the jet's Froude number U^2/(g d) is 3.5e4.
+//
+// Run recipe (the copy's mech/ must hold the user-supplied drm19.dat and
+// thermo12.dat, SPEC-LIT 129.6; the supervisor records the runs):
+//   ofgpu-lowmach <copy>/sandiaFlameD.jsonc -endTime 3e-3 -deltaT 1e-5 -p0 100615.725 -check 10
+// (p0 = 0.993 atm.)
+{
+  "name": "sandiaFlameD",
+  "mesh": {
+    "kind": "cartesian",
+    "wedge": { "angle": 5 },
+    "bounds": { "min": [0, 0, 0], "max": [0.0742, 0.0, 0.576] },
+    "cells": [80, 1, 120],
+    "grading": { "z": { "expansion": 5 } },
+    "boundaries": {
+      "xmin": "axis", "xmax": "side",
+      "ymin": "back", "ymax": "front",
+      "zmin": "inlet", "zmax": "outlet"
+    }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.58e-5, "Pr": 0.7, "Prt": 0.85, "TRef": 300 },
+    "buoyancy": "densityRatio"
+  },
+  "turbulence": {
+    "kind": "RAS",
+    "model": "kEpsilon",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 },
+    "coeffs": { "C1": 1.6 }
+  },
+  "patches": [
+    { "match": "(back|front)", "kind": "wedge" },
+    {
+      "match": "inlet", "kind": "inlet",
+      "U": {
+        "type": "fixedProfile", "direction": [1, 0, 0],
+        "profile": [
+          [0, [0, 0, 49.6]], [0.003725, [0, 0, 49.6]],
+          [0.0037251, [0, 0, 11.4]], [0.009275, [0, 0, 11.4]],
+          [0.0092751, [0, 0, 0.9]], [0.0742, [0, 0, 0.9]]
+        ]
+      },
+      "T": {
+        "type": "fixedProfile", "direction": [1, 0, 0],
+        "profile": [
+          [0, 302], [0.003725, 302],
+          [0.0037251, 1880], [0.009275, 1880],
+          [0.0092751, 302], [0.0742, 302]
+        ]
+      },
+      "p": { "type": "zeroGradient" },
+      "k": { "type": "fixedValue", "value": 1.215e-4 },
+      "epsilon": { "type": "fixedValue", "value": 0.1 }
+    },
+    {
+      "match": "outlet", "kind": "open",
+      "U": { "type": "zeroGradient" },
+      "p": { "type": "fixedValue", "value": 0.0 },
+      "T": { "type": "inletOutlet", "inletValue": 302 },
+      "k": { "type": "zeroGradient" },
+      "epsilon": { "type": "zeroGradient" }
+    },
+    { "match": "side", "kind": "symmetry" },
+    { "match": ".*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0.9], "T": 302, "p": 0, "k": 1.215e-4, "epsilon": 0.1 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": {
+      "default": "Gauss upwind",
+      "div(phi,U)": "Gauss upwind",
+      "div(phi,T)": "bounded Gauss upwind",
+      "div(phi,k)": "bounded Gauss upwind",
+      "div(phi,epsilon)": "bounded Gauss upwind",
+      "div(phi,Yi)": "Gauss upwind"
+    },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0, "k": 1.0, "epsilon": 1.0, "Yi": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-10, "relTol": 0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-10, "relTol": 0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-10, "relTol": 0, "maxIter": 2000 },
+      { "match": "k", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-10, "relTol": 0, "maxIter": 2000 },
+      { "match": "epsilon", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-10, "relTol": 0, "maxIter": 2000 },
+      { "match": "Yi", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.003, "deltaT": 1e-5 },
+  "species": {
+    "names": [
+      "H2", "H", "O", "O2", "OH", "H2O", "HO2", "CH2", "CH2(S)", "CH3", "CH4",
+      "CO", "CO2", "HCO", "CH2O", "CH3O", "C2H4", "C2H5", "C2H6", "N2", "AR"
+    ],
+    "inert": "N2",
+    "transport": { "model": "lewis" },
+    "initial": {
+      "H2": 0, "H": 0, "O": 0, "O2": 0.2357443221, "OH": 0,
+      "H2O": 0.006255677917, "HO2": 0, "CH2": 0, "CH2(S)": 0, "CH3": 0,
+      "CH4": 0, "CO": 0, "CO2": 0, "HCO": 0, "CH2O": 0, "CH3O": 0,
+      "C2H4": 0, "C2H5": 0, "C2H6": 0, "AR": 0
+    },
+    "patches": [
+      {
+        "match": "inlet", "Y": {
+          "CH4": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0.1563714015], [0.003725, 0.1563714015],
+            [0.0037251, 0], [0.009275, 0], [0.0092751, 0], [0.0742, 0]] },
+          "O2": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0.1964954433], [0.003725, 0.1964954433],
+            [0.0037251, 0.0540], [0.009275, 0.0540],
+            [0.0092751, 0.2357443221], [0.0742, 0.2357443221]] },
+          "H2O": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 0.0942], [0.009275, 0.0942],
+            [0.0092751, 0.006255677917], [0.0742, 0.006255677917]] },
+          "H2": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 1.29e-4], [0.009275, 1.29e-4],
+            [0.0092751, 0], [0.0742, 0]] },
+          "H": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 2.48e-5], [0.009275, 2.48e-5],
+            [0.0092751, 0], [0.0742, 0]] },
+          "O": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 7.47e-4], [0.009275, 7.47e-4],
+            [0.0092751, 0], [0.0742, 0]] },
+          "OH": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 0.0028], [0.009275, 0.0028],
+            [0.0092751, 0], [0.0742, 0]] },
+          "CO": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 4.07e-3], [0.009275, 4.07e-3],
+            [0.0092751, 0], [0.0742, 0]] },
+          "CO2": { "type": "fixedProfile", "direction": [1, 0, 0], "profile": [
+            [0, 0], [0.003725, 0],
+            [0.0037251, 0.1098], [0.009275, 0.1098],
+            [0.0092751, 0], [0.0742, 0]] },
+          "HO2": { "type": "fixedValue", "value": 0 },
+          "CH2": { "type": "fixedValue", "value": 0 },
+          "CH2(S)": { "type": "fixedValue", "value": 0 },
+          "CH3": { "type": "fixedValue", "value": 0 },
+          "CH2O": { "type": "fixedValue", "value": 0 },
+          "HCO": { "type": "fixedValue", "value": 0 },
+          "CH3O": { "type": "fixedValue", "value": 0 },
+          "C2H4": { "type": "fixedValue", "value": 0 },
+          "C2H5": { "type": "fixedValue", "value": 0 },
+          "C2H6": { "type": "fixedValue", "value": 0 },
+          "AR": { "type": "fixedValue", "value": 0 }
+        }
+      }
+    ]
+  },
+  "chemistry": {
+    "mechanism": "mech/drm19.dat",
+    "thermo": "mech/thermo12.dat",
+    "rtol": 1e-6,
+    "atol": 1e-5
+  },
+  "combustion": { "model": "EDC", "variant": "1989" }
+}

@@ -190,7 +190,7 @@ export function registerApiRoutes(router: Router, deps: ApiDeps): Router {
     deps.hub.broadcast({ t: 'llm.changed', llm: view })
     return view
   })
-  router.get('/api/registry', () => ({ binaries: BINARIES, pipelines: PIPELINES, models: MODELS, pickLists: schema.pickLists, meshPresets: MESH_PRESETS }))
+  router.get('/api/registry', () => ({ binaries: BINARIES, pipelines: PIPELINES, models: MODELS, pickLists: schema.pickLists, caseBlocks: schema.blocks, meshPresets: MESH_PRESETS }))
   router.get('/api/schema/case-1.json', ({ res }) => {
     res.writeHead(200, { 'content-type': 'application/schema+json; charset=utf-8', 'cache-control': 'no-cache' })
     res.end(schema.text)

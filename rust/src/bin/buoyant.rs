@@ -140,6 +140,7 @@ use ofgpu::io::fields::{
     read_scalar_field, read_vector_field, RawScalarField, RawVectorField,
 };
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
+use ofgpu::io::case_rad::DriverEnclosure;
 use ofgpu::models::{build_coupled, select_turbulence_model, CoupledTurbulence, RasModel, ThermalCtx};
 use ofgpu::momentum::{BuoyancyCoeffs, BuoyancyForm, MomentumControls};
 use ofgpu::potential_flow::{
@@ -1240,6 +1241,10 @@ fn one_pass(
     n_correctors: Label,
     thermal: Option<(Vec3, Scalar, BuoyancyForm)>,
     diss_name: &'static str,
+    // SPEC-LIT 137.9: the enclosure, exchanged once per pass - after the
+    // turbulence model has refreshed `nut` and before `heat.correct`
+    // assembles the equation from the triple the exchange just stamped.
+    encl: Option<&mut BuoyantEnclosure<'_>>,
 ) -> Result<Residuals> {
     let mut r = Residuals::default();
     r.diss_name = diss_name;
@@ -1283,6 +1288,12 @@ fn one_pass(
         form,
     });
     let (eps, k) = turb.correct(gpu, &flow, ctx.as_ref())?;
+    // SPEC-LIT 137.9, §98.8's step 4c: the exchange runs on the boundary
+    // temperatures the PREVIOUS `heat.correct` evaluated and the `nut` this
+    // model just refreshed, and its stamp is what the solve below reads.
+    if let Some(e) = encl {
+        e.exchange(gpu, heat, turb.nut())?;
+    }
     let t = heat.correct(gpu, &flow, turb.nut())?;
 
     r.k = k.initial_residual;
@@ -1312,6 +1323,7 @@ fn one_step(
     thermal: Option<(Vec3, Scalar, BuoyancyForm)>,
     diss_name: &'static str,
     open_step: bool,
+    mut encl: Option<&mut BuoyantEnclosure<'_>>,
 ) -> Result<Residuals> {
     // ONE rotation of the time levels per TIME STEP, before the correctors -
     // not one per corrector, which would collapse U^{n-2} onto U^{n-1} and
@@ -1325,7 +1337,7 @@ fn one_step(
 
     let mut r = Residuals::default();
     for _ in 0..outer.max(1) {
-        r = one_pass(gpu, s, turb, heat, backend, n_correctors, thermal, diss_name)?;
+        r = one_pass(gpu, s, turb, heat, backend, n_correctors, thermal, diss_name, encl.as_deref_mut())?;
     }
     Ok(r)
 }
@@ -1446,6 +1458,9 @@ struct Fields<'a, 'm> {
     /// "epsilon" or "omega" - which dissipation equation this run's model
     /// actually carries, for [`Residuals::by_field`] and the printed report.
     diss_name: &'static str,
+    /// SPEC-LIT 137.9: the enclosure, exchanged once per pass. `None` on
+    /// every case that names no enclosure.
+    encl: Option<&'a mut BuoyantEnclosure<'m>>,
 }
 
 /// The one loop. `Schedule::transient` decides whether a unit of work is a
@@ -1462,7 +1477,7 @@ fn run_loop(
     up: Vec3,
     t_ref: Scalar,
 ) -> Result<RunReport> {
-    let Fields { s, turb, heat, backend, thermal, diss_name } = f;
+    let Fields { s, turb, heat, backend, thermal, diss_name, mut encl } = f;
 
     // Without -graph nothing is ever captured, so "warm-up" is the whole run.
     let warmup = if sched.graph {
@@ -1511,6 +1526,10 @@ fn run_loop(
                         thermal,
                         diss_name,
                         open_step,
+                        // SPEC-LIT 98.10: the exchange's read-backs are what
+                        // no graph can capture, so a case with one is
+                        // refused before the loop and this is never Some.
+                        None,
                     )?;
                     Ok(())
                 })?
@@ -1554,6 +1573,7 @@ fn run_loop(
                 thermal,
                 diss_name,
                 open_step,
+                encl.as_deref_mut(),
             )?,
         };
 
@@ -1822,7 +1842,9 @@ fn pick_backend(
 //  Driver
 // ==========================================================================
 
-fn run(o: &Options) -> Result<()> {
+/// The run, with its enclosure report: CHR-24 (SPEC-LIT 137.9) returns the
+/// last exchange's report so a test can hold it against §50's closed forms.
+fn run_report(o: &Options) -> Result<Option<ofgpu::cht::flow::EnclosureReport>> {
     // Started before anything else, because one of the numbers asked for is
     // the wall clock of the whole run - device init and mesh read included.
     let t_total = Instant::now();
@@ -2372,7 +2394,30 @@ fn run(o: &Options) -> Result<()> {
     // the same reader every other one does (SPEC-LIT §13.4.1).
     heat.set_convection(t_div);
     setup_scalar_field(&gpu, heat.field_mut(), &raw_t, &hm)?;
-    refuse_enclosure(&o.case_dir, &gpu.download(&heat.field().bc_kind)?)?;
+    // SPEC-LIT 137.9: the enclosure this case asks for, if it does - the
+    // exchange `refuse_enclosure` used to refuse by name, run on (137.7)'s
+    // conductivity once per outer iteration.
+    let mut encl: Option<BuoyantEnclosure<'_>> =
+        match read_enclosure(
+            &o.case_dir,
+            &gpu.download(&heat.field().bc_kind)?,
+            o.graph,
+            o.restart_from.is_some(),
+        )? {
+            Some((cfg, rho_cp)) => {
+                let sel = ofgpu::s2s::RadiantFaces::from_field(&gpu, heat.field(), cfg.emissivity)?;
+                let e = DriverEnclosure::new(&gpu, &mesh, &hm, &raw_mesh, sel, cfg)?;
+                println!("{}", e.describe());
+                Some(BuoyantEnclosure {
+                    e,
+                    rho_cp,
+                    alpha_lam: t_coeffs.alpha_laminar(cc.nu),
+                    r_prt: t_coeffs.r_prt(),
+                    k_host: vec![0.0 as Scalar; hm.n_boundary_faces],
+                })
+            }
+            None => None,
+        };
 
     for (fname, field) in turb.output_fields_mut() {
         if fname != "nut" {
@@ -2643,6 +2688,7 @@ fn run(o: &Options) -> Result<()> {
             backend: &mut *backend,
             thermal: thermal_cfg,
             diss_name: diss_name.unwrap_or("epsilon"),
+            encl: encl.as_mut(),
         },
         &hm,
         &sched,
@@ -2700,32 +2746,176 @@ fn run(o: &Options) -> Result<()> {
         );
     }
 
-    Ok(())
+    // SPEC-LIT 137.9: the enclosure's own report of the last exchange, with
+    // one line beside it - the updates the loop took, §50.4's two powers and
+    // the residual the sweeps left.
+    let enclosure = encl.as_ref().map(|e| e.e.report());
+    if let Some(r) = &enclosure {
+        println!(
+            "s2s enclosure (S50.4): net {} W | gross {} W | residual {} | {} sweeps | {} updates",
+            sci(f64::from(r.net_power), 6),
+            sci(f64::from(r.gross_power), 6),
+            sci(f64::from(r.radiosity_residual), 3),
+            r.sweeps,
+            r.updates
+        );
+    }
+    Ok(enclosure)
 }
 
-/// SPEC-LIT §98.10: this driver runs no enclosure. Its heat equation is
-/// `ScalarTransport`, which has no wall conductivity for (S50.12) to read, and
-/// its loop is the one `-graph` captures. A case directory holding
-/// `constant/radiationProperties`, or a `T` with a radiating patch, is refused
-/// naming the driver that runs one, rather than seeded adiabatic and run.
-fn refuse_enclosure(case_dir: &Path, t_kinds: &[Label]) -> Result<()> {
+/// The command-line entry: the run, its enclosure report printed and dropped.
+fn run(o: &Options) -> Result<()> {
+    run_report(o).map(|_| ())
+}
+
+/// SPEC-LIT 137.9: the enclosure this driver runs, read the way the case
+/// states it - `constant/radiationProperties` with `radiationModel
+/// viewFactor` (§51.1) and/or a `T` with `s2sWall` patches (§98.7). What was
+/// `refuse_enclosure` is now the implementation it pointed at. Returns the
+/// configuration and (137.7)'s `rhoRef*CpRef`, the constant the kinematic
+/// temperature equation's wall conductivity is built from; `Ok(None)` is
+/// every case that names no enclosure, which runs exactly as before.
+fn read_enclosure(
+    case_dir: &Path,
+    t_kinds: &[Label],
+    graph: bool,
+    restart: bool,
+) -> Result<Option<(ofgpu::s2s::S2sConfig, Scalar)>> {
+    use ofgpu::radiation::RadiationModel;
     let p = case_dir.join("constant").join("radiationProperties");
     let wall = t_kinds.iter().any(|&k| k == BcKind::S2sWall as Label);
-    if !(wall || p.exists()) {
-        return Ok(());
+    if !p.exists() {
+        if !wall {
+            return Ok(None);
+        }
+        // SPEC-LIT 98.7 row 15: the condition nothing would ever compute.
+        return Err(Error::Config(format!(
+            "{}: T carries an s2sWall patch, and the case states no radiation - \
+             a radiating wall with no enclosure is the key that is missing. \
+             Write constant/radiationProperties with `radiationModel viewFactor` \
+             (SPEC-LIT 137.9)",
+            case_dir.display()
+        )));
     }
-    let what = if wall {
-        "T has a greyDiffusiveRadiationViewFactor / s2sWall patch".to_string()
-    } else {
-        format!("{} exists", p.display())
+    let d = FoamDict::read(&p)?;
+    let name = d.get_or("radiationModel", "").trim();
+    if name == "none" && !wall {
+        return Ok(None);
+    }
+    match RadiationModel::from_name(name) {
+        Ok(RadiationModel::ViewFactor) => {}
+        Ok(m) => {
+            return Err(Error::Config(format!(
+                "constant/radiationProperties/radiationModel {}: a participating \
+                 medium is run by ofgpu-lowmach, not ofgpu-buoyant (SPEC-LIT 137.8)",
+                m.name()
+            )));
+        }
+        Err(e) => return Err(e),
+    }
+    let cfg = ofgpu::s2s::config_from_case(case_dir)?;
+    if !wall {
+        // The dictionary names an enclosure and no face radiates in it.
+        return Err(Error::Config(format!(
+            "constant/radiationProperties: radiationModel viewFactor, and no \
+             face of `T` carries an s2sWall patch - nothing radiates, and an \
+             enclosure nothing radiates in is a setting the solver would \
+             ignore (SPEC-LIT 98.7 row 14, 137.9)",
+        )));
+    }
+    // SPEC-LIT 98.10: the exchange reads the face temperatures back every
+    // iteration, which is exactly the read `-graph` exists to empty.
+    if graph {
+        return Err(Error::Config(
+            "-graph with an enclosure is refused - the s2s exchange reads its \
+             face temperatures and irradiation back every iteration, and a \
+             captured graph cannot (SPEC-LIT 98.10, 137.9)"
+                .to_string(),
+        ));
+    }
+    // The relaxed irradiation is not in the checkpoint; a resumed run would
+    // relax from a zero `H`.
+    if restart && cfg.relaxation < 1.0 {
+        return Err(Error::Config(format!(
+            "-restartFrom with radiationRelaxation {} is refused - the relaxed \
+             irradiation is not in the checkpoint (SPEC-LIT 50.7, 137.9)",
+            f64::from(cfg.relaxation)
+        )));
+    }
+    // (137.7): the kinematic `T` of `ScalarTransport` hands
+    // `k_eff,b = rhoRef CpRef (nu/Pr + nut_b/Prt)`, and the two constants
+    // live beside `nu` in the first property dictionary the case has -
+    // `read_prandtl`'s lookup.
+    let mut rho_ref: Option<Scalar> = None;
+    let mut cp_ref: Option<Scalar> = None;
+    for nm in ["physicalProperties", "transportProperties"] {
+        let pp = case_dir.join("constant").join(nm);
+        if pp.exists() {
+            let f = FoamDict::read(&pp)?;
+            if f.has("rhoRef") {
+                rho_ref = Some(f.scalar("rhoRef", 0.0));
+            }
+            if f.has("CpRef") {
+                cp_ref = Some(f.scalar("CpRef", 0.0));
+            }
+            break;
+        }
+    }
+    let rho_ref = match rho_ref {
+        Some(v) if v.is_finite() && v > 0.0 => v,
+        _ => {
+            return Err(Error::Config(format!(
+                "{}: the enclosure needs a positive finite `rhoRef` in \
+                 constant/physicalProperties - (137.7)'s wall conductivity is \
+                 `rhoRef*CpRef*alphaEff` (SPEC-LIT 137.9)",
+                case_dir.display()
+            )));
+        }
     };
-    Err(Error::Config(format!(
-        "{}: ofgpu-buoyant runs no radiating enclosure - {what}. The driver that runs one is \
-         ofgpu-cht: a conjugate *.cht.jsonc case names the enclosure with `radiation` and its \
-         walls with `s2sWall` (SPEC-LIT 98.7). This driver's heat equation has no wall \
-         conductivity to hand the exchange (SPEC-LIT 98.10)",
-        case_dir.display()
-    )))
+    let cp_ref = match cp_ref {
+        Some(v) if v.is_finite() && v > 0.0 => v,
+        _ => {
+            return Err(Error::Config(format!(
+                "{}: the enclosure needs a positive finite `CpRef` in \
+                 constant/physicalProperties - (137.7)'s wall conductivity is \
+                 `rhoRef*CpRef*alphaEff` (SPEC-LIT 137.9)",
+                case_dir.display()
+            )));
+        }
+    };
+    Ok(Some((cfg, rho_ref * cp_ref)))
+}
+
+/// CHR-24 (SPEC-LIT 137.9, (137.7)): the enclosure over this driver's
+/// kinematic temperature equation. `ScalarTransport` has no
+/// `Energy::k_eff_wall`, so the conductivity the stamp (S50.12) reads is
+/// built here from the same `alphaEff` the equation assembles with:
+/// `rhoRef*CpRef*(nu/Pr + nut_b/Prt)`, with `nut_b` the boundary `nut`
+/// `ScalarTransport::correct` copies.
+struct BuoyantEnclosure<'m> {
+    e: DriverEnclosure<'m>,
+    rho_cp: Scalar,
+    alpha_lam: Scalar,
+    r_prt: Scalar,
+    k_host: Vec<Scalar>,
+}
+
+impl<'m> BuoyantEnclosure<'m> {
+    /// One exchange: the boundary conductivity of (137.7), then the update -
+    /// gather, solve, relax, net flux, broadcast, stamp (S50.12).
+    fn exchange(
+        &mut self,
+        gpu: &Gpu,
+        heat: &mut ScalarTransport<'_>,
+        nut: &ofgpu::field::GpuScalarField,
+    ) -> Result<()> {
+        let nut_b = gpu.download(&nut.bf)?;
+        for (k, &n) in self.k_host.iter_mut().zip(nut_b.iter()) {
+            *k = self.rho_cp * (self.alpha_lam + n * self.r_prt);
+        }
+        gpu.write(self.e.k_wall_mut(), &self.k_host)?;
+        self.e.exchange(gpu, heat.field_mut())
+    }
 }
 
 fn main() -> ExitCode {
@@ -3366,27 +3556,173 @@ mod buoyant_tests {
         assert_eq!(t_ctrl.sn_grad, ofgpu::fv::SnGradScheme::Uncorrected);
     }
 
-    /// SPEC-LIT §98.10: an enclosure is refused by name on this driver, from
-    /// either direction - the dictionary on disk or a radiating `T` patch.
+    /// SPEC-LIT 137.9: `read_enclosure` reads an enclosure or refuses one by
+    /// name - every rule of the function, in its own order.
     #[test]
-    fn an_enclosure_is_refused_by_name() {
-        let dir = scratch_dir("enclosureRefused");
+    fn an_enclosure_is_read_or_refused_by_name() {
+        let dir = scratch_dir("enclosureRead");
         std::fs::create_dir_all(dir.join("constant")).expect("mkdir");
-        refuse_enclosure(&dir, &[BcKind::ZeroGradient as Label]).expect("nothing radiates, nothing is refused");
-        let e = refuse_enclosure(&dir, &[BcKind::S2sWall as Label])
-            .expect_err("an s2sWall patch must be refused")
-            .to_string();
-        println!("{e}");
-        for w in ["ofgpu-cht", "s2sWall", "SPEC-LIT 98.10"] {
-            assert!(e.contains(w), "{w:?} not in: {e}");
+        let rad = dir.join("constant").join("radiationProperties");
+        let props = dir.join("constant").join("physicalProperties");
+        let zg = [BcKind::ZeroGradient as Label];
+        let s2s = [BcKind::S2sWall as Label];
+        let no_graph_no_restart = |dir: &Path| read_enclosure(dir, &zg, false, false);
+        let want = |e: ofgpu::Error, words: &[&str]| {
+            let m = format!("{e}");
+            for w in words {
+                assert!(m.contains(w), "{w:?} not in: {m}");
+            }
+        };
+
+        // No dictionary and no radiating face: no enclosure, exactly as
+        // before CHR-24.
+        assert!(no_graph_no_restart(&dir).expect("nothing stated").is_none());
+        // An s2sWall patch with no dictionary is the key that is missing.
+        want(
+            read_enclosure(&dir, &s2s, false, false).expect_err("row 15"),
+            &["s2sWall", "radiationProperties", "137.9"],
+        );
+
+        // `radiationModel none` and no radiating face: no enclosure.
+        std::fs::write(&rad, "radiationModel none;\n").expect("write");
+        assert!(no_graph_no_restart(&dir).expect("none").is_none());
+
+        // A participating medium runs in ofgpu-lowmach, not here.
+        std::fs::write(&rad, "radiationModel P1;\nabsorptionCoefficient 1;\n").expect("write");
+        want(
+            no_graph_no_restart(&dir).expect_err("P1"),
+            &["P1", "ofgpu-lowmach", "137.8"],
+        );
+        std::fs::write(&rad, "radiationModel fvDOM;\nabsorptionCoefficient 1;\nquadrature S4;\n").expect("write");
+        want(
+            no_graph_no_restart(&dir).expect_err("fvDOM"),
+            &["fvDOM", "ofgpu-lowmach", "137.8"],
+        );
+
+        // The enclosure's dictionary with no radiating face: nothing radiates.
+        std::fs::write(&rad, "radiationModel viewFactor;\nemissivity 0.6;\n").expect("write");
+        want(
+            no_graph_no_restart(&dir).expect_err("row 14"),
+            &["s2sWall", "nothing radiates", "row 14"],
+        );
+
+        // With a face radiating, -graph is refused: the exchange reads back
+        // every iteration (SPEC-LIT 98.10).
+        want(read_enclosure(&dir, &s2s, true, false).expect_err("graph"), &["-graph", "98.10"]);
+
+        // A restart with a relaxed irradiation: the checkpoint has none.
+        std::fs::write(&rad, "radiationModel viewFactor;\nemissivity 0.6;\nradiationRelaxation 0.5;\n").expect("write");
+        want(
+            read_enclosure(&dir, &s2s, false, true).expect_err("restart"),
+            &["-restartFrom", "radiationRelaxation"],
+        );
+
+        // (137.7)'s two constants, each refused by name, then read.
+        std::fs::write(&rad, "radiationModel viewFactor;\nemissivity 0.6;\n").expect("write");
+        want(read_enclosure(&dir, &s2s, false, false).expect_err("no rhoRef"), &["rhoRef", "137.9"]);
+        std::fs::write(&props, "rhoRef 1.2;\n").expect("write");
+        want(read_enclosure(&dir, &s2s, false, false).expect_err("no CpRef"), &["CpRef", "137.9"]);
+        std::fs::write(&props, "rhoRef -1;\nCpRef 1005;\n").expect("write");
+        want(read_enclosure(&dir, &s2s, false, false).expect_err("rhoRef < 0"), &["rhoRef", "137.9"]);
+        std::fs::write(&props, "rhoRef 1.2;\nCpRef 0;\n").expect("write");
+        want(read_enclosure(&dir, &s2s, false, false).expect_err("CpRef = 0"), &["CpRef", "137.9"]);
+
+        // The happy read: the configuration and rhoRef*CpRef.
+        std::fs::write(&props, "rhoRef 1.2;\nCpRef 1005;\n").expect("write");
+        let (cfg, rho_cp) =
+            read_enclosure(&dir, &s2s, false, false).expect("reads").expect("some");
+        assert_eq!(cfg.emissivity, 0.6);
+        assert_eq!(rho_cp, 1.2 * 1005.0, "rhoRef*CpRef, computed the same way");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **CHR-24 (SPEC-LIT 137.9).** The plume case's ceiling is the one
+    /// `s2sWall` patch, the enclosure closed by `ambientTemperature 400` -
+    /// §49.6's black surface. Nothing else radiates, the ceiling is coplanar,
+    /// so every face sees the closure alone and each face's net flux
+    /// `eps (sigma T0^4 - H)` is §50.11's parallel-plate closed form against
+    /// 400 K - and, at `e2 = 1`, the concentric one at any area ratio. The
+    /// enclosure's own power balance closes to the tolerance.
+    #[test]
+    fn buoyant_s2s_parallel_plates() {
+        if Gpu::new(0).is_err() {
+            return;
         }
-        std::fs::write(dir.join("constant").join("radiationProperties"), "radiationModel viewFactor;\n")
-            .expect("write");
-        let e = refuse_enclosure(&dir, &[]).expect_err("the dictionary must be refused").to_string();
-        println!("{e}");
-        for w in ["ofgpu-cht", "radiationProperties", "SPEC-LIT 98.7"] {
-            assert!(e.contains(w), "{w:?} not in: {e}");
+        let dir = scratch_dir("s2sPlates");
+        let case = dir.join("case");
+        write_case(&case, CaseKind::Plume, 8, 8, 8).expect("generate the plume case");
+        // The ceiling is the one radiating patch.
+        let t_path = case.join("0/T");
+        let text = std::fs::read_to_string(&t_path).expect("0/T");
+        let (head, tail) = text.split_once("ceiling").expect("the ceiling patch is named");
+        std::fs::write(&t_path, format!("{head}ceiling{}", tail.replacen("zeroGradient", "s2sWall", 1)))
+            .expect("rewrite 0/T");
+        // (137.7)'s two constants, and §51.1's dictionary.
+        let mut props = std::fs::read_to_string(case.join("constant/physicalProperties")).expect("physicalProperties");
+        props.push_str("\nrhoRef 1.2;\nCpRef 1005;\n");
+        std::fs::write(case.join("constant/physicalProperties"), props).expect("append rhoRef/CpRef");
+        std::fs::write(
+            case.join("constant").join("radiationProperties"),
+            "FoamFile { version 2.0; format ascii; class dictionary; object radiationProperties; }\n\
+             radiationModel viewFactor;\nemissivity 0.6;\nambientTemperature 400;\n",
+        )
+        .expect("write radiationProperties");
+
+        let args = argv(&[
+            case.to_string_lossy().as_ref(),
+            "-iters",
+            "3",
+            "-check",
+            "100",
+            "-backend",
+            "pbicgstab",
+        ]);
+        let o = parse(&args).expect("the command line parses");
+        let rep = run_report(&o).expect("the run ends").expect("the enclosure ran");
+
+        assert_eq!(rep.faces.len(), 64, "the 8 x 8 ceiling");
+        assert!(rep.updates >= 3, "one exchange per outer iteration, {}", rep.updates);
+        assert!(rep.faces.iter().all(|f| f.t0 > 0.0), "every face temperature is positive");
+
+        let tol = if std::mem::size_of::<Scalar>() == 4 { 1e-5 } else { 1e-10 };
+        let raw = read_poly_mesh(&case).expect("polyMesh");
+        let hm = build_host_mesh(&raw).expect("host mesh");
+        let ceil = hm.patches.iter().find(|p| p.name == "ceiling").expect("the ceiling patch");
+        let a_ceiling: f64 = (ceil.start..ceil.start + ceil.size).map(|bf| f64::from(hm.b_mag_sf[bf])).sum();
+        // The fluid box's whole boundary: the ceiling against every face of
+        // it, as §98.9(b)(3)'s interface against its box.
+        let a_boundary: f64 = hm.b_mag_sf.iter().map(|&a| f64::from(a)).sum();
+        let mut worst = 0.0f64;
+        for f in &rep.faces {
+            let q = f64::from(f.emissivity)
+                * (f64::from(ofgpu::radiation::SIGMA_SB) * f64::from(f.t0).powi(4) - f64::from(f.irradiation));
+            let closed = ofgpu::s2s::parallel_plate_flux(f.t0, 400.0, f.emissivity, 1.0);
+            let concentric = ofgpu::s2s::concentric_flux(
+                f.t0,
+                400.0,
+                f.emissivity,
+                1.0,
+                (a_ceiling / a_boundary) as Scalar,
+            );
+            assert!(
+                (f64::from(q) - f64::from(closed)).abs() <= tol * f64::from(closed).abs(),
+                "face {}: {q} vs parallel-plate {closed}",
+                f.bf
+            );
+            assert!(
+                (f64::from(q) - f64::from(concentric)).abs() <= tol * f64::from(concentric).abs(),
+                "face {}: {q} vs concentric {concentric}",
+                f.bf
+            );
+            worst = worst.max((f64::from(q) - f64::from(closed)).abs() / f64::from(closed).abs());
         }
+        println!("buoyant_s2s_parallel_plates: worst relative flux error {worst:.3e}");
+        assert!(
+            f64::from(rep.net_power).abs() <= tol * f64::from(rep.gross_power),
+            "the enclosure's power balance: net {} vs gross {}",
+            rep.net_power,
+            rep.gross_power
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

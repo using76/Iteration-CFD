@@ -92,7 +92,9 @@ pub fn load_case(case_path: &Path) -> Result<(HostMesh, CaseControls, Option<Low
 /// [`load_case`], with a JSONC case's `species`, `chemistry` and `combustion`
 /// blocks let through when `allow_chemistry` is set - SPEC-LIT §133.11:
 /// `ofgpu-lowmach` is the one driver that runs them (CHR-12b), and every
-/// other driver keeps §137.7's refusal through [`load_case`]. The dictionary
+/// other driver keeps §137.7's refusal through [`load_case`]. The same flag
+/// also lets `parcels` and `radiation` through, which the same driver runs
+/// from a JSONC case (SPEC-LIT §137.8, §137.10). The dictionary
 /// route is refused on both, by `read_case_controls`.
 pub fn load_case_with(
     case_path: &Path,
@@ -123,12 +125,19 @@ fn load_case_inner(
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
-        // SPEC-LIT §137.6: a case's parcels are refused until CHR-26.
-        lowered.refuse_parcels()?;
+        // SPEC-LIT §159.9: a dust cloud is refused by every driver, the one
+        // that runs a case's parcels included (no driver runs it before
+        // DST-15).
+        lowered.refuse_cloud()?;
+        // SPEC-LIT §137.6/§137.10: parcels are run by ofgpu-lowmach only (the
+        // same flag).
         // SPEC-LIT §137.7: a case's chemistry is refused by every driver but
-        // the one that asks for it (§133.11).
+        // the one that asks for it (§133.11) - and the same flag names
+        // radiation, which §137.8 hands to the same single driver.
         if !allow_chemistry {
+            lowered.refuse_parcels()?;
             lowered.refuse_chemistry()?;
+            lowered.refuse_radiation()?;
         }
         // SPEC-LIT §157.4: a case's dust model is refused the same way -
         // DST-06's part 3 wires it into ofgpu-lowmach, DST-10's part 3 into

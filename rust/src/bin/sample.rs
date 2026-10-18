@@ -9,8 +9,9 @@
 //! gates of SPEC-LIT §110 record their measurements with: a column of cells
 //! along an axis through a point, and a wall patch's adjacent-cell velocity
 //! with its sign changes (the reattachment search of Gate 110-B). It is
-//! built on `common::load_case` and `common::output_root` and nothing else
-//! of its own; it reads, it never solves. Original, no external source.
+//! built on `common::load_case_with` (the lowmach-only blocks let through,
+//! docs/17 VAL-54) and `common::output_root` and nothing else of its own; it
+//! reads, it never solves. Original, no external source.
 //!
 //! `volume` is SPEC-LIT 117.11's offline path (docs/17 VIO-06): the volume
 //! files a run would have written at one finished time directory, through
@@ -32,7 +33,8 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use ofgpu::io::case_json::JsonOutput;
+use ofgpu::io::case::CaseControls;
+use ofgpu::io::case_json::{JsonOutput, LoweredCase};
 use ofgpu::io::fields::{read_scalar_field, read_vector_field};
 use ofgpu::io::nvdb::Precision;
 use ofgpu::io::polymesh::{build_host_mesh, read_poly_mesh};
@@ -274,6 +276,15 @@ fn run(args: &[String]) -> Result<()> {
     }
 }
 
+/// The case a sampler subcommand reads: [`common::load_case_with`] with the
+/// lowmach-only blocks let through. The sampler reads a run's mesh and fields
+/// and never runs its physics, so a case's `radiation` (and `species` /
+/// `chemistry` / `parcels`) block is not a silently dropped source here - the
+/// drivers' refusal is not this tool's (SPEC-LIT 110.5 / docs/17 VAL-54).
+fn load_sampled_case(case: &Path) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    common::load_case_with(case, true)
+}
+
 /// The fields of one time directory: `U`, and `T` when it is there.
 fn read_fields(tdir: &Path, n_cells: usize) -> Result<(ofgpu::io::fields::RawVectorField, Option<ofgpu::io::fields::RawScalarField>)> {
     let u = read_vector_field(&tdir.join("U"), n_cells)?;
@@ -295,7 +306,7 @@ fn column_cmd(
     at: &[Scalar],
     mean: bool,
 ) -> Result<()> {
-    let (m, _cc, _lc) = common::load_case(case)?;
+    let (m, _cc, _lc) = load_sampled_case(case)?;
     common::refuse_motion_block(_lc.as_ref(), "ofgpu-sample")?;
     let (u, t) = read_fields(&common::output_root(case).join(time), m.n_cells)?;
     let letter = (b'x' + axis as u8) as char;
@@ -380,7 +391,7 @@ fn column_cmd(
 }
 
 fn wall_cmd(case: &Path, time: &str, patch: &str, axis: usize) -> Result<()> {
-    let (m, _cc, _lc) = common::load_case(case)?;
+    let (m, _cc, _lc) = load_sampled_case(case)?;
     common::refuse_motion_block(_lc.as_ref(), "ofgpu-sample")?;
     let (u, _t) = read_fields(&common::output_root(case).join(time), m.n_cells)?;
     let letter = (b'x' + axis as u8) as char;
@@ -635,7 +646,7 @@ fn volume_cmd(v: &VolumeArgs) -> Result<()> {
 
     // ---- the mesh: world coordinates in both builds (117.2 item 4) -------
     let (raw, hm, lowered) = if common::is_json_case(&v.case) {
-        let (m, _cc, lc) = common::load_case(&v.case)?;
+        let (m, _cc, lc) = load_sampled_case(&v.case)?;
         common::refuse_motion_block(lc.as_ref(), "ofgpu-sample")?;
         (None, m, lc)
     } else {
@@ -1012,5 +1023,24 @@ internalField uniform (1 0 0);";
         assert_eq!(foam_class(head), Some("volVectorField"));
         assert_eq!(foam_class("FoamFile { format ascii; object p; }"), None);
         assert_eq!(foam_class("internalField uniform 0;"), None);
+    }
+
+    /// The sampler reads a radiating case: `common::load_case` still refuses
+    /// it (the drivers' refusal stands), while `load_sampled_case` - the one
+    /// the three subcommands take - lets the lowmach-only blocks through,
+    /// because the sampler reads a run's mesh and fields and never runs its
+    /// physics (SPEC-LIT 110.5 / docs/17 VAL-54).
+    #[test]
+    fn the_sampler_reads_a_radiating_case() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/plumeMcCaffreyRad.jsonc");
+        let refused = match common::load_case(&p) {
+            Ok(_) => panic!("the drivers' refusal stands"),
+            Err(e) => e,
+        };
+        assert!(refused.to_string().contains("radiation"), "{refused}");
+        let (m, _cc, lc) = load_sampled_case(&p).expect("the sampler reads it");
+        assert_eq!(m.n_cells, 348_480, "the case's 66 x 66 x 80 mesh");
+        let lc = lc.expect("a JSONC case lowers");
+        assert!(lc.radiation.is_some(), "the radiation block came through");
     }
 }

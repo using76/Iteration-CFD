@@ -30,6 +30,7 @@ pub mod mechanism;
 pub mod reactor;
 pub mod rosenbrock;
 pub mod source;
+pub mod tci;
 pub mod thermo;
 pub mod transport;
 #[cfg(test)]

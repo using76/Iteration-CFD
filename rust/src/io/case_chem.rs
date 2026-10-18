@@ -47,8 +47,8 @@ use crate::chem::rosenbrock::Method;
 use crate::chem::thermo::{ElementTable, ThermoSet, P_ATM};
 use crate::error::{Error, Result};
 use crate::io::case_json::{
-    patch_class, resolve_patch_rule, JsonPatchRule, LoweredScalarField, PatchPresetKind, ScalarBc,
-    TurbulenceKind,
+    check_fixed_profile_scalar, patch_class, resolve_patch_rule, scalar_fixed_profile_spec,
+    JsonPatchRule, LoweredScalarField, PatchPresetKind, ScalarBc, TurbulenceKind,
 };
 use crate::io::dict::FoamDict;
 use crate::io::fields::PatchFieldSpec;
@@ -625,6 +625,15 @@ fn lower_species(sp: &JsonSpecies, boundary: Option<(&[String], &[JsonPatchRule]
                         fraction(&key, *inlet_value)?;
                     }
                     ScalarBc::ZeroGradient {} => {}
+                    // SPEC-LIT §120.1's `fixedProfile`: the dictionary route's
+                    // shape check, then this route's `fraction` on every value -
+                    // a profile's values are mass fractions on the faces.
+                    ScalarBc::FixedProfile { direction, profile, .. } => {
+                        check_fixed_profile_scalar(&key, direction, profile)?;
+                        for &[_, v] in profile {
+                            fraction(&key, v)?;
+                        }
+                    }
                     _ => {
                         return Err(refused(
                             &key,
@@ -690,6 +699,11 @@ fn species_spec(
                 s.inlet_value = vec![*inlet_value as Scalar];
                 s.value = vec![*inlet_value as Scalar];
                 s
+            }
+            // SPEC-LIT §120.1: the same `PatchFieldSpec` `T` lowers to - the
+            // catch-all's `zeroGradient` must not swallow it.
+            ScalarBc::FixedProfile { direction, origin, profile } => {
+                scalar_fixed_profile_spec(direction, *origin, profile)
             }
             _ => spec("zeroGradient"),
         });

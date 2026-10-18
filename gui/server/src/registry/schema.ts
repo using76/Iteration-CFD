@@ -24,6 +24,7 @@ export interface CaseSchema {
   schema: Record<string, unknown>
   validate(json: unknown): SchemaError[]
   pickLists: PickLists
+  blocks: Record<CaseBlockName, CaseBlock>
 }
 
 const SCHEMARS_FORMATS = ['double', 'float', 'uint', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'int8', 'uint16', 'int16', 'usize', 'isize']
@@ -83,6 +84,7 @@ export function compileCaseSchema(schemaPath: string, text: string): CaseSchema 
     text,
     schema,
     pickLists: mergePickLists(schema),
+    blocks: caseBlocks(schema),
     validate(json) {
       const ok = validateFn(json)
       if (ok || !validateFn.errors) return []
@@ -165,4 +167,94 @@ export function getChtSchema(candidates?: string[]): CaseSchema | null {
 export function setChtSchema(schema: CaseSchema | null): void {
   chtLoaded = true
   chtSingleton = schema
+}
+
+// ---- CHR-28: the five case blocks the generated schema carries ------------
+
+/** The five optional top-level blocks the regenerated case schema owns. */
+export const CASE_BLOCK_NAMES = ['species', 'chemistry', 'combustion', 'radiation', 'parcels'] as const
+export type CaseBlockName = (typeof CASE_BLOCK_NAMES)[number]
+
+export interface CaseBlock {
+  name: CaseBlockName
+  /** The $defs name the property refers to, e.g. 'JsonRadiation'. */
+  def: string
+  /** The top-level property's description ('' if none). */
+  description: string
+  /** Object.keys of the def's properties, sorted. */
+  keys: string[]
+  /** The def's `required`, sorted; [] when absent. */
+  required: string[]
+  /** Dotted path from the case root -> the description's backtick choices. */
+  choices: Record<string, string[]>
+}
+
+const CLAUSE_SPLIT = /;|\.(?= |$)/
+const MULTI = /^[^`]*`[^`]+`( \([^)]*\))?( \| `[^`]+`( \([^)]*\))?)+$/
+const SINGLE = /^`[^`]+` \((the )?default\)$/
+
+/** The backtick alternatives a description's first clause offers ("`P1` | `fvDOM`"); null when it offers none. */
+export function choicesOf(description: string | undefined): string[] | null {
+  if (!description) return null
+  const t = description.replace(/\s+/g, ' ').trim()
+  const m = t.match(CLAUSE_SPLIT)
+  const clause = m ? t.slice(0, m.index) : t
+  if (!MULTI.test(clause) && !SINGLE.test(clause)) return null
+  const out: string[] = []
+  for (const mm of clause.matchAll(/`([^`]+)`/g)) out.push(mm[1])
+  return out.length ? out : null
+}
+
+/** The $defs name a property points at ($ref, the first anyOf $ref, or items.$ref); an additionalProperties map is not followed. */
+function refName(p: unknown): string | null {
+  if (!p || typeof p !== 'object') return null
+  const d = p as { $ref?: unknown; anyOf?: unknown; items?: { $ref?: unknown } }
+  const last = (r: string) => r.split('/').pop() ?? null
+  if (typeof d.$ref === 'string') return last(d.$ref)
+  if (Array.isArray(d.anyOf)) {
+    const b = d.anyOf.find((x) => x && typeof (x as { $ref?: unknown }).$ref === 'string') as { $ref: string } | undefined
+    if (b) return last(b.$ref)
+  }
+  if (d.items && typeof d.items.$ref === 'string') return last(d.items.$ref)
+  return null
+}
+
+function walkChoices(defs: Record<string, unknown>, defName: string, prefix: string, path: string[], choices: Record<string, string[]>): void {
+  const def = defs[defName]
+  const props = def && typeof def === 'object' ? (def as { properties?: Record<string, unknown> }).properties : undefined
+  if (!props) return
+  for (const [k, p] of Object.entries(props)) {
+    const c = choicesOf((p as { description?: string }).description)
+    if (c) choices[prefix + k] = c
+    const ref = refName(p)
+    if (ref && !path.includes(ref)) walkChoices(defs, ref, `${prefix}${k}.`, [...path, ref], choices)
+  }
+}
+
+/**
+ * What the registry knows about the five blocks: the $defs target, its sorted
+ * keys and required, and every dotted choice path read out of the def tree.
+ * A block whose property or def is missing from the schema is left out.
+ */
+export function caseBlocks(schema: Record<string, unknown>): Record<CaseBlockName, CaseBlock> {
+  const out = {} as Record<CaseBlockName, CaseBlock>
+  const props = (schema.properties ?? {}) as Record<string, unknown>
+  const defs = (schema.$defs ?? {}) as Record<string, unknown>
+  for (const name of CASE_BLOCK_NAMES) {
+    const p = props[name]
+    const def = p ? refName(p) : null
+    if (!p || !def || typeof defs[def] !== 'object' || defs[def] === null) continue
+    const d = defs[def] as { properties?: Record<string, unknown>; required?: unknown }
+    const block: CaseBlock = {
+      name,
+      def,
+      description: typeof (p as { description?: unknown }).description === 'string' ? (p as { description: string }).description : '',
+      keys: d.properties ? Object.keys(d.properties).sort() : [],
+      required: Array.isArray(d.required) ? d.required.filter((r): r is string => typeof r === 'string').sort() : [],
+      choices: {},
+    }
+    walkChoices(defs, def, `${name}.`, [def], block.choices)
+    out[name] = block
+  }
+  return out
 }
