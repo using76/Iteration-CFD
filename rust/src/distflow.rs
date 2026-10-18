@@ -83,7 +83,11 @@
 //! built, and writing a chosen step's fields to `processorN/` - so
 //! `tests/decomposed_io.rs` and `ofgpu-par -solve restart` can compare
 //! write -> restart -> one iteration against the uninterrupted run, bit for
-//! bit, and a set cut at another P refused on every rank.
+//! bit, and a set cut at another P refused on every rank. Since PAR-16
+//! (§140) the same construction with `from` and `write` both `None` is
+//! [`cavity_part_timed`], which times `iters` outer iterations after `warm`
+//! untimed ones and returns the seconds per iteration that
+//! `ofgpu-par -bench` measures and scales.
 //!
 //! Provenance: ORIGINAL - the exchange points are this project's own design
 //! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c; 139.5, PAR-11;
@@ -1374,6 +1378,85 @@ fn download_rank_fields(gpu: &Gpu, s: &Simple<'_>, n_cells: usize) -> Result<Ran
         phi_f: gpu.download(&s.phi().f)?,
         phi_bf: gpu.download(&s.phi().bf)?,
     })
+}
+
+/// [`cavity_part_steps`]'s construction, timed (SPEC-LIT 140.1, PAR-16):
+/// exactly the same route, [`RankCtx`], backend, [`cavity_bcs`],
+/// [`Simple::initialise`], `nut`, `t` and residual control, with
+/// `from = None, write = None`, written out again rather than refactored so
+/// the timed run cannot drift from the gated one.
+///
+/// After the construction, `warm` [`Simple::solve_step`]s run untimed; then
+/// the device syncs and the world barriers, `iters` more `solve_step`s run
+/// timed, the device syncs and the world barriers again, and the seconds per
+/// outer iteration on THIS rank are returned (the caller takes the max over
+/// ranks). There is no convergence break: a scaling measurement is at a
+/// fixed work count, like [`cavity_part_steps`]' fixed step count.
+///
+/// Refused before anything is built: `iters == 0`.
+pub fn cavity_part_timed(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    dec: &Decomposition,
+    warm: usize,
+    iters: usize,
+) -> Result<f64> {
+    if iters == 0 {
+        return Err(Error::Config(
+            "cavity_part_timed: iters must be >= 1".to_string(),
+        ));
+    }
+    let rank = comm.rank();
+    let part = &dec.parts[rank];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(
+        gpu,
+        hm,
+        &gm,
+        cavity_controls(),
+        BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        },
+    )?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, cavity_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    cavity_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let nut = cavity_nut(gpu, &gm)?;
+    let t = cavity_t(gpu, &gm, &fk)?;
+
+    // The same residual control `cavity_loop` sets (it changes the stop, not
+    // a step's arithmetic; there is no break here).
+    let src = format!("SIMPLE {{ residualControl {{ U {CAVITY_U_TOL:e}; }} }}");
+    let d = FoamDict::parse(&src, "fvSolution")?;
+    s.set_residual_control(ResidualControl::read(&d));
+
+    for _ in 0..warm {
+        s.solve_step(gpu, &mut backend, &nut, &t)?;
+    }
+    gpu.sync()?;
+    comm.barrier()?;
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters {
+        s.solve_step(gpu, &mut backend, &nut, &t)?;
+    }
+    gpu.sync()?;
+    comm.barrier()?;
+    Ok(t0.elapsed().as_secs_f64() / iters as f64)
 }
 
 // ==========================================================================

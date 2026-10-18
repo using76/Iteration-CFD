@@ -19,7 +19,22 @@
 //!                  [-sweeps N] [-alpha A] [-quiet]
 //! ofgpu-par -solve simple [-np 1,2,4] [-n N] [-method NAME] [-quiet]
 //! ofgpu-par -solve restart [-np 1,2,4] [-n N] [-iters K] [-dir DIR] [-quiet]
+//! ofgpu-par -bench strong|weak [-np 1,2,3,4] [-n N] [-warm W] [-iters K]
+//!                [-exchanges M] [-method NAME] [-comm threads] [-json FILE]
+//!                [-quiet]
 //! ```
+//!
+//! `-bench strong|weak` is SPEC-LIT §140's measured-scaling harness
+//! (PAR-16): per rank count and per repeat it builds one fresh `ThreadComm`
+//! world, times `cavity_part_timed`'s per-iteration time, then `SpmdHalo`'s
+//! halo exchange (`L_ex`) and the transport's allgather (`L_ag`), and
+//! reports the median and its 95 % t interval over 5 repeats. Speedup and
+//! efficiency are COMPUTED only while `P <= D`, D the number of distinct
+//! device ordinals in the placement; at `P > D` the row prints
+//! "time-shared, not scaling" (SPEC-LIT 73.6's rule), because time-shared
+//! ranks measure the card's context switching, not scaling. The MS-MPI
+//! column is printed and written as NOT RUN: the MPI transport is PAR-06,
+//! deferred by the user.
 //!
 //! `-solve simple` is SPEC-LIT 139.4's gate (PAR-10c): the lid-driven cavity
 //! of Ghia, Ghia & Shin (1982) at Re = 100, run serial on the whole mesh and
@@ -85,6 +100,7 @@ use ofgpu::{DevBuf, Error, Gpu, HostMesh, Label, Result, Scalar, Tensor, Vec3};
 use cudarc::driver::PushKernelArg;
 
 mod common;
+mod par_bench;
 
 const USAGE: &str = "\
 usage: ofgpu-par <case> [options]
@@ -110,6 +126,12 @@ usage: ofgpu-par <case> [options]
   -dir    DIR           the case directory the restart set is written to
                         (default <temp>/ofgpu-par-restart-<pid>, removed
                         at the end)
+  -bench   strong|weak  measure the per-iteration time, the halo exchange
+                        latency L_ex and the allgather latency L_ag for the
+                        threads transport (SPEC-LIT 140, PAR-16); the
+                        efficiency is REFUSED when ranks > devices. Options:
+                        -np 1,2,3,4 -n N -warm W -iters K -exchanges M
+                        -method NAME -comm threads -json FILE -quiet
 
 Rank r opens its own Gpu on device L[r mod |L|], L = OFGPU_DEVICES or every
 device (SPEC-LIT 138.7). Under mpiexec (PMI_RANK or PMI_SIZE set) the driver
@@ -1282,6 +1304,27 @@ fn run() -> Result<()> {
             other => {
                 return Err(Error::Config(format!(
                     "-solve '{}': known: simple, restart",
+                    other.unwrap_or("")
+                )));
+            }
+        }
+    }
+    // SPEC-LIT 140's bench mode: `ofgpu-par -bench strong|weak [options]`.
+    // The mode is refused by name here, before any option is read and before
+    // any device is opened.
+    if argv[0] == "-bench" {
+        match argv.get(1).map(String::as_str) {
+            Some("strong") => {
+                let args = par_bench::parse_bench("strong", &argv[2..])?;
+                return par_bench::run_bench(&args);
+            }
+            Some("weak") => {
+                let args = par_bench::parse_bench("weak", &argv[2..])?;
+                return par_bench::run_bench(&args);
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "-bench '{}': known: strong, weak",
                     other.unwrap_or("")
                 )));
             }

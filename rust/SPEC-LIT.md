@@ -16612,6 +16612,15 @@ in cells: §71.2's live-axis rule, with the 2-D curve for two live axes. On
 (gate 10,200), and `plume` is unchanged to the face. The table above is kept as
 the record of what was measured before the fix.
 
+**Measured since PAR-16 (§140).** `ofgpu-par -bench` now measures the halo
+exchange latency `L_ex` and the allgather latency `L_ag` for the
+`ThreadComm` transport as medians with 95 % intervals over five repeats,
+and equation (140.3) of SPEC-LIT 140.4 puts those measured values in this
+section's free `L` in the crossover - for that transport only; a fabric's
+`L` stays free until the MPI transport (PAR-06) is built. The efficiency
+refusal is unchanged: with `P > D` distinct devices the row prints
+"time-shared, not scaling" and no efficiency figure.
+
 ---
 
 ### 73.7 What a distributed Krylov solve still cannot do — the §13.4 list
@@ -54091,6 +54100,232 @@ view - it does not feed a solve. There is no parallel FILE system: every
 rank writes its own directory of one shared case, on one disk. MPI and
 multi-GPU are deferred: the ranks are `ThreadComm` threads, each with its
 own `Gpu::new(0)` on one card.
+
+## 140. Measured scaling - per-iteration time, L_ex and L_ag on ThreadComm, and the efficiency refusal
+
+Scaling is MEASURED, not modelled (docs/17 §12, row PAR-16): `ofgpu-par -bench
+strong|weak` measures the decomposed SIMPLE cavity's per-iteration time
+`t_iter`, the halo exchange latency `L_ex` and the allgather latency `L_ag`
+for the `ThreadComm` transport, per rank count and per repeat, and reports
+each as the median and the 95 % interval of five independent repeats.
+Speedup and efficiency are COMPUTED from those measurements only while the
+rule of 140.3 allows it; the harness refuses the efficiency wherever ranks
+exceed devices. **ORIGINAL; the definitions are cited**: strong scaling is
+Amdahl's fixed-work figure, weak scaling Gustafson's fixed-time figure, the
+median-plus-interval-over-repeats protocol is Hoefler & Belli (2015), and
+the interval's quantile is Student (1908)'s.
+
+Sources: **Amdahl, G. M. (1967), "Validity of the single processor approach
+to achieving large scale computing capabilities", AFIPS Spring Joint
+Computer Conf. 30, 483-485, DOI 10.1145/1465482.1465560**; **Gustafson, J. L.
+(1988), "Reevaluating Amdahl's law", Commun. ACM 31(5) 532-533, DOI
+10.1145/42411.42415**; **Hoefler, T. & Belli, R. (2015), "Scientific
+benchmarking of parallel computing systems: twelve ways to tell the masses
+when reporting performance results", SC15, DOI 10.1145/2807591.2807644**
+(repeat the measurement, report a robust centre such as the median with a
+confidence interval, and do not assume normality unchecked); **Student
+(1908), "The probable error of a mean", Biometrika 6(1) 1-25** (the t
+distribution whose 4-df quantile the interval uses).
+
+### 140.1 What is measured and how
+
+Per rank count `P` of `-np` (default 1,2,3,4) and per repeat of `REPEATS` =
+5, ONE fresh `ThreadComm::run(P, ..)` world: its own transport, its own
+`Gpu` per rank, its own cut and its own part construction. The repeats are
+independent runs in Hoefler & Belli's sense, not re-timings of one warm
+process. Strong mode fixes the mesh at the generated cavity
+`build_case(Cavity, n, n, 1)` (`-n`, default 32) while `P` grows; weak mode
+grows the mesh so the WORK per rank is fixed: `weak_shape(P)` returns
+`(a, b)` with `a = ceil(sqrt(P))` incremented until `P % a == 0` and the
+mesh is `build_case(Cavity, a*n, b*n, 1)` - exactly `n*n` cells per rank,
+Gustafson's fixed-time assumption in its mesh form.
+
+On every rank of a world, three quantities:
+
+* `t_iter` - `distflow::cavity_part_timed`, `cavity_part_steps`'s exact
+  construction with `from = None, write = None` (same route, `RankCtx`,
+  backend, `cavity_bcs`, `initialise`, `nut`, `t`, residual control), then
+  `warm` (default 2) untimed `solve_step`s; `gpu.sync` + `comm.barrier`;
+  `iters` (default 5) timed `solve_step`s; `gpu.sync` + `comm.barrier`;
+  the rank's value is `elapsed / iters`. No convergence break: a scaling
+  measurement is at a fixed work count, as the restart gate is at a fixed
+  step count.
+* `L_ex` - `SpmdHalo::new` on the rank's part, a `DevBuf<Scalar>` of
+  `n_cells + n_halo` filled with the rank's id, 5 untimed `halo.scalar`,
+  `gpu.sync` + `comm.barrier`, `-exchanges` (default 100) timed
+  `halo.scalar`, `gpu.sync` + `comm.barrier`, `elapsed / exchanges`.
+* `L_ag` - `(rank as f64).to_le_bytes()` allgathered into `8 * P` bytes, 5
+  untimed, barrier, `-exchanges` timed, barrier, `elapsed / exchanges`.
+
+The repeat's value of each quantity is the MAX over the ranks: a decomposed
+world runs at its slowest rank's pace, so the max is the only number a
+scaling figure may be honest about. The per-`P` row reports the statistics
+of the five repeat values, and the harness exits 0 on a completed run - a
+measurement is not a gate.
+
+**The trailing barrier's bias, stated.** Every timed block ends at
+`gpu.sync` + `comm.barrier` on every rank, so the last exchange's
+completion is every rank's time and one barrier's cost sits inside the
+measured block. Divided by the call count it biases `L_ex` and `L_ag`
+UPWARD by about one barrier latency over `-exchanges` (1/100 of a barrier at
+the default) and `t_iter` by one barrier over `iters`. It is stated, not
+subtracted.
+
+**What the two latencies are on this transport.** A `ThreadComm` halo
+exchange is `SpmdHalo`'s pack kernel, a device-to-host copy, an in-process
+channel send and receive, and a host-to-device copy (SPEC-LIT 138.3); an
+allgather is an in-process channel collective with no device work. Both are
+one process on one card, so they are what this transport costs, and lower
+bounds on what a fabric between two GPUs would cost.
+
+### 140.2 The definitions
+
+`t(P)` is the MEDIAN of the five repeats' batch means; `x_0..x_4` are those
+batch means in repeat order.
+
+```
+S(P) = t(1) / t(P),   E(P) = S(P) / P                            (140.1)
+E(P) = t(1) / t(P),   S(P) = P * E(P)
+mean = (x0 + x1 + x2 + x3 + x4) / 5                             (140.2)
+s    = sqrt( sum_i (x_i - mean)^2 / 4 )
+half = t95(4) * s / sqrt(5),  t95(4) = 2.7764451051977987
+ci95 = [mean - half, mean + half],   range = [min, max]
+```
+
+(140.1)'s first line is strong scaling (Amdahl 1967): the mesh is fixed, S
+divides and E divides by `P`. Its second line is weak scaling (Gustafson
+1988): the work per rank is fixed, E is the ratio of per-rank times and S
+- the scaled speedup - multiplies by `P`. (140.2) is the summary of one
+quantity's five repeats: the median reported, the mean and its 95 % t
+interval (Hoefler & Belli 2015's protocol of a centre with a confidence
+interval over repeated runs; the quantile is Student 1908's at 4 degrees of
+freedom), and the range.
+
+**Why the interval is the t interval of the batch means, and why the
+median's own 95 % CI is not attainable at n = 5.** The distribution-free
+interval for the median built from the order statistics, `[x(1), x(n)]`,
+covers the median with probability `1 - 2 (1/2)^n`; at `n = 5` that is
+`1 - 2/32 = 0.9375`, and no other order-statistic pair at five samples
+reaches 0.95; `[x(1), x(6)]` at `n = 6` is the first to (0.96875). The JSON
+carries the range as the 93.75 % interval it honestly is, and the printed
+and published 95 % interval is the t interval (140.2) of the batch means,
+whose normality rests on each sample being a mean over many calls or steps
+- an assumption stated here, not checked.
+
+### 140.3 The refusal
+
+SPEC-LIT 73.6's rule - a strong-scaling number needs a second GPU, and no
+efficiency figure is published from time-shared ranks - made mechanical.
+With `D` the number of DISTINCT ordinals in `placement.devices()`:
+`P = 1` is the **reference** and claims no S and no E; `1 < P <= D` gives
+S and E (**measured**); `P > D` gives NO S and NO E - the row and the JSON
+print "time-shared, not scaling" with null speedup and efficiency, and the
+stdout adds `efficiency refused: P > D = <D> device(s) - time-shared, not
+scaling (SPEC-LIT 73.6)`. `OFGPU_DEVICES=0,0` still gives `D = 1`: two
+ranks on one listed card are time-sharing that card, and naming it twice
+does not make it two cards. A run whose `-np` has no `1` has no reference:
+its `1 < P <= D` rows say "no P = 1 reference" and claim nothing. On this machine `D = 1`, so every `P > 1` row
+of every run here is refused - which is the rule working, not a gap.
+
+### 140.4 The crossover, with the measured L in place of the free L
+
+SPEC-LIT 73.6's crossover named `L` a free parameter. Since PAR-16 `L` is
+MEASURED for the `ThreadComm` transport: equation (140.3) puts `L_ex` and
+`L_ag` in its place, PCG paying one halo exchange and two allgathers per
+iteration and PBiCGStab two and four:
+
+```
+n* = (L_ex + 2 L_ag) / t_cell     (PCG)                          (140.3)
+n* = (2 L_ex + 4 L_ag) / t_cell   (PBiCGStab)
+```
+
+`tools/par/scaling.py` computes it from the `-bench` JSON with §73.6's
+`t_cell` table (plume 2.49e-9 s, gb_800000 0.84e-9 s, `--t-cell
+NAME=SECONDS` to override or add). This replaces the free `L` for the
+`ThreadComm` transport ONLY: a fabric's `L` - MS-MPI's - stays free until
+PAR-06 is built and measured on real hardware.
+
+### 140.5 The gate
+
+Classes A and D on the definitions (the interval literals to 1e-14
+relative, class A; everything else exact, class D) -
+`par_bench/mod.rs`'s `#[cfg(test)] mod tests`,
+`cargo test --release --bin ofgpu-par`, 4 tests: `stats` on [1,2,3,4,5] and
+on its permutation [5,1,4,2,3] (median 3.0 and mean 3.0 exactly, range
+(1,5), the ci95 literals to 1e-14 relative); `stats` on the skewed
+[10,12,11,30,13] (median 12.0, mean 15.2, the ci95 literals) and on the
+flat [2;5] (ci95 == (2,2) exactly); `scaling` on (Strong, 1.0, 0.5, 2, 2)
+-> Measured{2.0, 1.0}, (Strong, 2.0, 0.625, 4, 4) -> Measured{3.2, 0.8},
+(Weak, 1.0, 1.25, 4, 4) -> Measured{speedup 3.2, efficiency 0.8},
+(Strong, 1.0, 0.5, 2, 1) -> TimeShared, (Weak, 1.0, 1.0, 4, 2) ->
+TimeShared, and P = 1 -> Reference; `weak_shape` 1->(1,1), 2->(2,1),
+3->(3,1), 4->(2,2), 6->(3,2), 8->(4,2) and `distinct(&[0,0]) == 1`,
+`distinct(&[0,1,0]) == 2`.
+
+`tests/par_bench.rs` (BOTH builds) gates the harness itself: the refusals
+(`-bench speed` naming strong and weak; `-comm mpi` naming PAR-06; a zero
+`-n`, `-np`, `-iters` or `-exchanges` naming its option, all before any
+device is opened); a reduced strong run whose P = 1 row is "reference"
+with null speedup and efficiency, every one of its statistics five
+positive samples with the range bracketing the median and the interval
+bracketing the mean and "mpi" starting "NOT RUN", and - below two devices
+- the P = 2 row "time-shared, not scaling" on stdout; `OFGPU_DEVICES=0,0`
+reporting `devices` 1 with the P = 2 weak row (the 2n x n box, `n*n` cells
+per rank) time-shared and null; `-method all` refused naming the three cuts; and the plan's gate - the harness at its
+DEFAULTS for P = 1..4, strong then weak, inside 600 s FIXED BEFORE
+MEASURING, a miss printed and the test continued. `tools/par/scaling.py
+--selftest` feeds the printer a document that LIES - a time-shared P = 2
+row carrying efficiency 0.9 - and checks the re-applied rule refuses to
+print the number, then checks (140.3)'s arithmetic (PCG 12,000, PBiCGStab
+24,000).
+
+**Measured (2026-10-19, RTX 5070 Ti, `D = 1`, the card shared with two
+other work trees' runs; medians with the 95 % t interval).** The gate
+holds: the harness at its defaults (P = 1, 2, 3, 4, `-n 32`, warm 2, iters
+5, 100 exchanges, 5 repeats) ran strong then weak in **66.8 s** (f64) and
+**61.1 s** (`single`) against the 600 s fixed before measuring, and every
+test of both builds passed (4 bin tests, 6 integration tests,
+`scaling.py --selftest`). One f64 run of `ofgpu-par -bench strong` (25.1 s)
+and `-bench weak` (46.1 s):
+
+| P | strong `t_iter` (1,024 cells) | weak `t_iter` (1,024 per rank) | `L_ex` (strong) | `L_ag` (strong) |
+|---|---|---|---|---|
+| 1 | 70.9 ms [70.2, 72.4] | 69.6 ms [69.1, 70.7] | 0.156 µs [0.154, 0.162] | 0.037 µs [0.035, 0.039] |
+| 2 | 111.6 ms [109.8, 114.4] | 189.9 ms [185.3, 201.3] | 53.3 µs [52.4, 54.8] | 0.74 µs [0.66, 0.79] |
+| 3 | 218.0 ms [209.4, 222.9] | 521.3 ms [470.5, 582.2] | 67.8 µs [64.8, 73.5] | 1.53 µs [1.50, 1.58] |
+| 4 | 282.6 ms [269.1, 321.8] | 519.7 ms [492.0, 551.1] | 111 µs [74, 158] | 3.17 µs [3.07, 3.26] |
+
+Every `P > 1` row printed "time-shared, not scaling" and carries no
+speedup and no efficiency: `t_iter` RISES with `P` on one card, as §73.6's
+`t_P/t_1` did, and that rise is the cost of time-sharing, not a scaling
+result. At `P = 1` there is no neighbour, so `L_ex` is the empty plan's
+call overhead. From `P = 2` a `ThreadComm` halo exchange costs about
+**53 µs** - the pack kernel, the two copies and the channel, with two
+contexts on one card - and an allgather about **0.74 µs**, growing to
+3.2 µs at four threads. Put into (140.3) at `P = 2`, the PCG crossover is
+**22,003** cells per rank at plume's `t_cell` and **65,223** at
+gb_800000's (PBiCGStab 44,006 and 130,445). The two latencies are not
+one `L`: the halo exchange's host round trip is about five times §73.6's
+largest assumed `L` (10 µs), the allgather below its smallest (3 µs), and
+together they put the PCG crossover 1.8 times above §73.6's `L = 10 µs`
+entry (12,057 cells at plume's `t_cell`). The
+`single` build measured the same shape (strong `P = 1` 54.6 ms, `P = 2`
+`L_ex` 51.6 µs, `L_ag` 0.74 µs). These numbers move by the 7 % that §73.6
+records for wall-clock times on this desktop card, and more while other
+work shares it; the medians and intervals are this run's, not constants.
+
+### 140.6 What is NOT RUN
+
+* **MS-MPI.** The MPI transport is PAR-06, deferred by the user: every
+  MS-MPI column prints and writes "NOT RUN - the MPI transport (PAR-06) is
+  deferred by the user", and `-comm mpi` is refused by name through
+  `refuse_unbuilt_transport`.
+* **Any multi-GPU strong or weak scaling.** This machine has one card
+  (§73.7's `cuDeviceGetCount` = 1); real strong/weak scaling (Amdahl 1967;
+  Gustafson 1988, DOI 10.1145/42411.42415) needs multi-GPU hardware and is
+  a recorded deferred run.
+* **The efficiency figure on this machine.** With `D = 1` every `P > 1`
+  row is time-shared and refuses it (140.3).
 
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §141 to the GAMG units
