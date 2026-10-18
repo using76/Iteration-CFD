@@ -34771,8 +34771,8 @@ eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from
 `#[cfg(not(feature = "single"))]` and a plain `#[ignore]` measurement, and moves neither count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **191** library
-tests and **7** binary tests. So the second invocation of the house command reports
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **192** library
+tests and **7** binary tests. (F32-17 left 191; the 192nd is CHR-24's `io::case_rad::tests::field_file_lowers_and_refuses`, first compiled under single at lane M's W10 merge with main: it asserts the read emissivity 0.8 exactly, and the single build's reader gives 0.800000011920929, an exact-value test kept by F32-16's rule.) So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
