@@ -76,9 +76,18 @@
 //! decomposed by [`dvd_serial`] and [`dvd_part`] - the gate
 //! `tests/distflow_thermal.rs` measures.
 //!
+//! SPEC-LIT 139.7 (PAR-15) gives the decomposed run its I/O, and this
+//! module the runner its gate needs: [`cavity_part_steps`] is
+//! [`cavity_part`]'s construction with a fixed step count and two optional
+//! moves - reading its rank's restart set from disk before anything else is
+//! built, and writing a chosen step's fields to `processorN/` - so
+//! `tests/decomposed_io.rs` and `ofgpu-par -solve restart` can compare
+//! write -> restart -> one iteration against the uninterrupted run, bit for
+//! bit, and a set cut at another P refused on every rank.
+//!
 //! Provenance: ORIGINAL - the exchange points are this project's own design
-//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c; 139.5, PAR-11)
-//! over the SPMD
+//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c; 139.5, PAR-11;
+//! 139.7, PAR-15) over the SPMD
 //! exchange of 138.3 (PAR-02), the boundary evaluation this crate already
 //! ships and the SPMD Krylov of 138.5/138.6 (PAR-04a/b); no kernel is
 //! launched here and no existing numerics change. No external source. No
@@ -97,6 +106,7 @@ use crate::field_ops::{self, FieldKernels};
 use crate::fv::{DivScheme, SnGradScheme};
 use crate::halo::SpmdHalo;
 use crate::io::case::{ResidualControl, SolverControls, TurbulenceControls};
+use crate::io::decomposed::{read_rank, write_rank, RankFields};
 use crate::io::dict::FoamDict;
 use crate::io::schemes::DivEntry;
 use crate::ldu::GpuLduMatrix;
@@ -111,6 +121,7 @@ use crate::solver::{
 };
 use crate::HostMesh;
 use crate::{Label, Scalar, Tensor, Vec3};
+use std::path::Path;
 
 /// One rank's view of a decomposed flow solve: its part, the transport, and
 /// the two objects every cross-part step goes through.
@@ -1208,6 +1219,160 @@ pub fn cavity_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<Ca
         converged,
         u_residual,
         continuity,
+    })
+}
+
+// ==========================================================================
+//  The restart fixture - SPEC-LIT 139.7 (PAR-15)
+// ==========================================================================
+
+/// The restart gate's cavity: cells per side and the step count before the
+/// write. FIXED BEFORE MEASURING (docs/17 §12, row PAR-15): the gate
+/// compares bits, so neither number trades against a tolerance.
+pub const RESTART_N: usize = 16;
+pub const RESTART_ITERS: usize = 5;
+
+/// What one rank's run of [`cavity_part_steps`] reports: its owned cells'
+/// whole-mesh ids, the fields written at the write step (when there was
+/// one), and the fields after the last step.
+pub struct CavitySteps {
+    /// `[mesh.n_cells]` the whole-mesh id of every owned cell, local order.
+    pub global_cell: Vec<usize>,
+    /// The rank's fields at the write step, when `write` was given and its
+    /// step came.
+    pub written: Option<RankFields>,
+    /// The rank's fields after the last step.
+    pub end: RankFields,
+}
+
+/// [`cavity_part`]'s construction, with the two moves the restart gate
+/// needs (SPEC-LIT 139.7, PAR-15):
+///
+/// * `from = Some((case, time))` - [`read_rank`](crate::io::decomposed::
+///   read_rank)`(case, dec, rank, time)` is the FIRST thing this rank does,
+///   before any Gpu upload, route, [`RankCtx`] or backend, so a refused set
+///   refuses before anything collective; after [`cavity_bcs`] the owned U,
+///   p (halo entries zero) and phi.f / phi.bf are written into the
+///   [`Simple`] and `initialise`'s exchange refills the halo from the
+///   owners, bit for bit (SPEC-LIT 139.4).
+/// * `write = Some((case, k, time))` - after step `k` (1-based;
+///   `k <= iters`) this rank's [`RankFields`] are downloaded (owned slices
+///   of u.f / p.f, the full bf arrays, phi.f, phi.bf),
+///   [`write_rank`](crate::io::decomposed::write_rank)ed under `case`, and
+///   kept in [`CavitySteps::written`]; the run continues to `iters`.
+///
+/// Otherwise exactly [`cavity_part`]: the same construction order, the same
+/// residual control as [`cavity_loop`], and then EXACTLY `iters` calls of
+/// [`Simple::solve_step`] - no convergence break, so the comparison is at a
+/// fixed iteration count and measures the restart, not the convergence.
+pub fn cavity_part_steps(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    dec: &Decomposition,
+    iters: usize,
+    from: Option<(&Path, &str)>,
+    write: Option<(&Path, usize, &str)>,
+) -> Result<CavitySteps> {
+    let rank = comm.rank();
+    // PAR-15: the restart read comes first, before any Gpu upload, route,
+    // RankCtx or backend - a set from a different P refuses here, on every
+    // rank, identically.
+    let seeded = match from {
+        Some((case, time)) => Some(read_rank(case, dec, rank, time)?),
+        None => None,
+    };
+    let part = &dec.parts[rank];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(
+        gpu,
+        hm,
+        &gm,
+        cavity_controls(),
+        BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        },
+    )?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, cavity_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    cavity_bcs(gpu, hm, &mut s)?;
+    if let Some(rf) = &seeded {
+        // OWNED values only, halo zero: `initialise`'s exchange (bc_u/bc_p)
+        // refills the halo from the owners and re-evaluates every boundary
+        // face, so the restarted state is the written state bit for bit.
+        let mut u = rf.u.clone();
+        u.resize(gm.n_local(), Vec3::ZERO);
+        let mut p = rf.p.clone();
+        p.resize(gm.n_local(), 0.0 as Scalar);
+        {
+            let uf = s.u_mut();
+            gpu.write(&mut uf.f, &u)?;
+            gpu.write(&mut uf.bf, &rf.u_bf)?;
+            let pf = s.p_mut();
+            gpu.write(&mut pf.f, &p)?;
+            gpu.write(&mut pf.bf, &rf.p_bf)?;
+            let phi = s.phi_mut();
+            gpu.write(&mut phi.f, &rf.phi_f)?;
+            gpu.write(&mut phi.bf, &rf.phi_bf)?;
+        }
+    }
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let nut = cavity_nut(gpu, &gm)?;
+    let t = cavity_t(gpu, &gm, &fk)?;
+
+    // The same residual control `cavity_loop` sets, then EXACTLY `iters`
+    // steps - no convergence break (SPEC-LIT 139.7).
+    let src = format!("SIMPLE {{ residualControl {{ U {CAVITY_U_TOL:e}; }} }}");
+    let d = FoamDict::parse(&src, "fvSolution")?;
+    s.set_residual_control(ResidualControl::read(&d));
+
+    let mut written = None;
+    for step in 1..=iters {
+        s.solve_step(gpu, &mut backend, &nut, &t)?;
+        if let Some((case, k, time)) = write {
+            if step == k {
+                let w = download_rank_fields(gpu, &s, hm.n_cells)?;
+                write_rank(case, dec, rank, time, &w)?;
+                written = Some(w);
+            }
+        }
+    }
+    let end = download_rank_fields(gpu, &s, hm.n_cells)?;
+    Ok(CavitySteps {
+        global_cell: part.global_cell[..hm.n_cells]
+            .iter()
+            .map(|&g| g as usize)
+            .collect(),
+        written,
+        end,
+    })
+}
+
+/// The rank's field state off the device: the owned slices of u.f and p.f,
+/// the full boundary arrays, and the flux's internal and boundary arrays.
+fn download_rank_fields(gpu: &Gpu, s: &Simple<'_>, n_cells: usize) -> Result<RankFields> {
+    let u = gpu.download(&s.u().f)?;
+    let p = gpu.download(&s.p().f)?;
+    Ok(RankFields {
+        u: u[..n_cells].to_vec(),
+        u_bf: gpu.download(&s.u().bf)?,
+        p: p[..n_cells].to_vec(),
+        p_bf: gpu.download(&s.p().bf)?,
+        phi_f: gpu.download(&s.phi().f)?,
+        phi_bf: gpu.download(&s.phi().bf)?,
     })
 }
 

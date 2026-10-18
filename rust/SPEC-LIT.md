@@ -53103,7 +53103,8 @@ the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
 (§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11), and
-k-epsilon and SST on a part (§139.6, PAR-12).
+k-epsilon and SST on a part (§139.6, PAR-12), and decomposed I/O (§139.7,
+PAR-15).
 
 This section defines no equation, so it carries no equation label.
 
@@ -53962,9 +53963,135 @@ refused. The wall distance is solved serial on the whole mesh and split - not
 solved decomposed. MPI and multi-GPU are deferred: the ranks are `ThreadComm`
 threads, each with its own `Gpu::new(0)` on one card.
 
----
+### 139.7 Decomposed I/O (PAR-15)
 
-## 141. Native GAMG and AMGX — aggregation, the Galerkin hierarchy, and the AMGX library
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** 139.4-139.6 run the solver decomposed, but nothing could put a
+decomposed run's state on disk or bring it back: the only writer wrote whole
+case fields at `writePrecision` 6, and the only restart reader read them, so
+a decomposed run had no way to stop and continue, and no way to hand its
+answer to a post-processor. This subsection writes what the ranks hold -
+per-rank field sets under `processorN/` - reads a set back as a restart, and
+gathers a set to the whole mesh for post-processing.
+
+**What is written where.** Rank `N` of a run on `P` ranks writes, under the
+case directory:
+
+```text
+processorN/decomposition                        FoamDict text: nParts P; part N; nGlobalCells G
+processorN/constant/polyMesh/cellProcAddressing FoamFile labelList, one entry per owned cell
+processorN/<time>/U    volVectorField           owned cells; every patch's boundary faces
+processorN/<time>/p    volScalarField           the same
+processorN/<time>/phi  surfaceScalarField       the rank's internal faces; every patch
+<case>/<time>/U, <case>/<time>/p                reconstructed whole-mesh case fields
+<case>/VTK/reconstructed_<time>.vtu             reconstructed whole-mesh VTU, cell data U and p
+```
+
+Every field file goes out through the case writer of `io::fields`
+(`write_*_field_prec` at `ROUND_TRIP_DIGITS`, no uniform collapsing). On a
+rank's OWN files every `boundaryField` entry is `type calculated` with its
+slice of the boundary-face array - on EVERY patch, processor and empty
+included, so every boundary value comes back; `calculated` because the case
+writer gives no `value` to a constraint type (`empty`, `processor`), and the
+part's patch kinds come from the decomposition, never from the file. In the
+reconstructed case fields the whole mesh's patches get `type empty;` with NO
+value for Empty patches and `calculated` + value otherwise.
+
+**Why bitwise.** Every number is written at `ROUND_TRIP_DIGITS` with no
+uniform collapsing, the precision at which a value written is a value read
+back bit for bit (SPEC-LIT 118.6). Every value written is an OWNER's: the
+halo is refilled, never written, and a restart seeds only the owned cells
+(and the flux arrays) with the halo left zero and lets `initialise`'s
+exchange refill it from the owners, bit for bit - the exchange §139.4 puts
+behind `bc_u`/`bc_p`. `write -> restart -> one iteration` is therefore the
+same arithmetic on the same bits, and the gate below demands exactly that.
+
+**The refusal table** (`check_processor_set`, every message `Error::Config`
+starting `decomposed: `; host-only reads, nothing collective, so every rank
+of a run over the same disk refuses identically BEFORE anything
+collective):
+
+| # | what is on disk | refusal |
+|---|---|---|
+| 1 | no `processor0` | "<case> holds no processor set (no processor0)" |
+| 2a | a gap: a `processor{M}` directory with `M >= k`, `k` the consecutive run's length | "processor{k} is missing from the processor set in <case>" |
+| 2b | `k != n_parts` | "<case> holds a processor set of {k} parts (processor0..processor{k-1}) and this run has {P} ranks: a processorN set from a different P is refused - reconstruct it, or restart on {k} ranks" |
+| 3 | `decomposition` says other numbers | the file, `nParts`/`part` on disk and the directory's |
+| 4 | `nGlobalCells` differs | both numbers |
+| 5 | `cellProcAddressing` differs by length or entry | "processor{N}'s cellProcAddressing is not this run's decomposition (local cell {i}: {a} on disk, {b} here) - the set was cut by another partitioner" |
+| 6 | no `processorN/<time>` | "processor{N}/{time} does not exist" |
+
+`read_rank` adds: a field file whose `boundaryField` lacks a patch of the
+part, or whose `value` length is neither the patch's face count nor 1 (one
+expands to the patch), is refused naming the field, the patch and both
+lengths.
+
+**The reconstruct.** `reconstruct` reads every rank's set, gathers U and p
+to whole-mesh order (cells by `global_cell`; the boundary faces of the
+NON-processor patches by `global_face`, the whole boundary face being the
+global polyMesh face id minus `n_global_internal_faces` - a cut face is the
+whole mesh's INTERNAL face, and no rank owns it as a boundary one), checks
+every whole cell and every whole boundary face was set EXACTLY once (else
+the first gap is named and nothing is written), and only then writes the
+case fields and the VTU. `phi` is written per rank and restored on restart;
+it is NOT reconstructed, because a reconstructed case is for
+post-processing while a restart reads the processor set, where the flux
+still lives.
+
+**The fixture.** `distflow` gains the constants `RESTART_N` = 16 (cells per
+side) and `RESTART_ITERS` = 5 (the step before the write), FIXED BEFORE
+MEASURING - the gate compares bits, so neither number trades against a
+tolerance - and the runner `cavity_part_steps(gpu, comm, dec, iters, from,
+write)`: `cavity_part`'s construction order exactly, the same residual
+control as `cavity_loop`, then EXACTLY `iters` calls of `solve_step` (no
+convergence break, so the comparison is at a fixed iteration count and
+measures the restart, not the convergence); `from = Some((case, time))`
+makes `read_rank` the FIRST thing the rank does, before any Gpu upload,
+route, `RankCtx` or backend; `write = Some((case, k, time))` downloads the
+rank's fields after step `k` - owned slices of `u.f`/`p.f`, the full bf
+arrays, `phi.f`, `phi.bf` - and writes them under `case`.
+
+**The gate.** `tests/decomposed_io.rs`, in BOTH builds, every comparison
+`to_bits()` equality with zero differing values, each test its own temp
+directory:
+
+| test | what it holds |
+|---|---|
+| `the_rank_files_round_trip_bit_for_bit` | a synthetic set per part of a P = 3 Hilbert cut (values `sqrt(i+1)/7`, `-0.0`, `Scalar::MIN_POSITIVE`, `Scalar::MAX`, `-1/3`) writes and reads back bitwise |
+| `a_processor_set_from_a_different_p_is_refused` | a P = 4 set against a P = 2 decomposition: `check_processor_set`, `read_rank` and `reconstruct` all refuse with "processor set of 4 parts", "2 ranks", "from a different P" |
+| `a_processor_set_from_another_cut_is_refused` | a Hilbert set against a Linear decomposition at the same P: "cellProcAddressing" (round robin if the two cuts ever coincide) |
+| `a_missing_time_or_rank_is_refused` | a time the set does not hold: "does not exist"; `processor1` removed from a P = 3 set: "processor1 is missing"; an empty directory: "no processor0" |
+| `restart_and_reconstruct_on_one_rank` / `_two_ranks` / `_four_ranks` | the restart leg on `ThreadComm` ranks, P = 1 Linear, 2 and 4 Hilbert: B's end = A's end on every rank's six arrays; reconstruct = gather of A's written (U, p and both bf arrays); `<dir>/K/U`, `p` read back at the whole cell count = the gathered internals; the reconstructed VTU byte for byte `write_vtu` of the gathered fields; printing `[139.7] P = n: restart differing values 0, reconstruct differing values 0` |
+| `a_restart_from_a_different_p_refuses_on_every_rank` | a P = 4 set, a P = 2 restart world: every rank's `Err` contains "from a different P" and the world returns, no rank left in a collective |
+
+`ofgpu-par -solve restart [-np 1,2,4] [-n N] [-iters K] [-dir DIR] [-quiet]`
+runs the same three legs per rank count - world A writes and reconstructs,
+world B restarts, a decomposition at another P must be refused by name -
+one line per leg with the count of differing values and PASS/FAIL, exit 0
+only when all pass. If a restart is ever NOT bitwise, nothing is loosened:
+the miss is reported with the test, P, array, count, first index and both
+values, and the state `Simple` missed is found before anything else moves.
+
+Measured (2026-10-19, RTX 5070 Ti shared with two other lanes, `ThreadComm`
+ranks on the one card): `tests/decomposed_io.rs` 8 passed of 8 in the f64
+build (3.2 s) and 8 of 8 under `single` (4.4 s); at P = 1 (Linear), 2 and 4
+(Hilbert) on the 16 x 16 cavity, write after step 5 -> restart -> step 6
+differs from the uninterrupted step 6 in 0 values of the six arrays of any
+rank, and the reconstruct differs from the gathered fields in 0 values, in
+BOTH builds. `ofgpu-par -solve restart -np 1,2,4` passes all nine legs in
+5.9 s (f64). MS-MPI and multi-GPU legs: NOT RUN (deferred by the user).
+
+**What this does not establish.** The write is the whole restart state of
+the laminar incompressible SIMPLE cavity and nothing else: a turbulent,
+thermal or transient restart would need those models' fields in the set,
+and the set does not carry them. The reconstruct is a post-processing
+view - it does not feed a solve. There is no parallel FILE system: every
+rank writes its own directory of one shared case, on one disk. MPI and
+multi-GPU are deferred: the ranks are `ThreadComm` threads, each with its
+own `Gpu::new(0)` on one card.
+
 
 `No GPL-licensed source was consulted.` Docs/17 §4.3 allocates §141 to the GAMG units
 (AMG-01 writes §141.1) and to AMX-01. This section is the contract of a native
