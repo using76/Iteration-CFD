@@ -67,3 +67,11 @@ To cite GRI-Mech 3.0, the authors ask you to refer to its web page,
 Golden, Frenklach, Moriarty, Eiteneer, Goldenberg, Bowman, Hanson, Song,
 Gardiner, Lissianski, Qin). For DRM19 they ask for: A. Kazakov and
 M. Frenklach, `http://www.me.berkeley.edu/drm/`.
+
+## Which case names these files
+
+`cases/sandiaFlameD.jsonc` (Gate CHR-16, SPEC-LIT §134.8) names
+`mech/drm19.dat` and `mech/thermo12.dat` — DRM19 with GRI-Mech 1.2's thermo,
+the pair tabled above — as its `chemistry` block. The paths are relative to
+the run copy, so the user places both files in that copy's `mech/` before
+running; the repository itself carries neither, for the reason above.

@@ -1094,3 +1094,352 @@ fn edc_psr_holds_mean_enthalpy() {
     assert_eq!(rep.unconverged, host_unc, "the unconverged counts must agree");
     assert_eq!(rep.refused, 0, "no cell may be refused");
 }
+
+/// The §134.8 fixture: H2 O2 OH H2O N2 moving H and O between species -
+/// `H2 + O2 => OH + OH` and `H2 + OH + OH => H2O + H2O`, irreversible,
+/// with OH's and H2O's formation enthalpies carried by both a6 slots - so
+/// the heat release of a mean rate has a one-term hand value. Rates chosen
+/// so that at T 900-1500 K and the rows' k/eps every cell's fine reactor
+/// moves off its mean composition: no cell integrates silently to a zero
+/// rate.
+fn edc_step_mech() -> Mechanism {
+    mech_h(
+        &[
+            ("H2", &[("H", 2)], 0.0),
+            ("O2", &[("O", 2)], 0.0),
+            ("OH", &[("O", 1), ("H", 1)], -2000.0),
+            ("H2O", &[("H", 2), ("O", 1)], -30000.0),
+            ("N2", &[("N", 2)], 0.0),
+        ],
+        "H O N",
+        &[
+            "H2 + O2 => OH + OH  1.0E+09 0.0 6000.0",
+            "H2 + OH + OH => H2O + H2O  1.0E+09 0.0 6000.0",
+        ],
+    )
+}
+
+/// The heat-release gate's tolerance: 1e-12 in f64, 1e-6 in the f32
+/// build, where `q` crosses one ofscalar rounding.
+#[cfg(not(feature = "single"))]
+fn heat_tol() -> f64 {
+    1.0e-12
+}
+
+#[cfg(feature = "single")]
+fn heat_tol() -> f64 {
+    1.0e-6
+}
+
+/// The conservation gate's tolerance: 1e-10 in f64, 1e-6 in the f32
+/// build, where every wdot_k crosses one ofscalar rounding.
+#[cfg(not(feature = "single"))]
+fn cons_tol() -> f64 {
+    1.0e-10
+}
+
+#[cfg(feature = "single")]
+fn cons_tol() -> f64 {
+    1.0e-6
+}
+
+/// The states the §134.8 rows run: 64 cells from one fixed SplitMix64
+/// seed, T 900-1500 K, rho 0.2-2, k 0.2-5, eps 1-1000, nu 1.5e-5, p
+/// 101325, and Y with H2 0.01-0.05, O2 0.1-0.2, OH 0-0.01, H2O 0-0.1 and
+/// N2 the remainder - `(t, rho, k, eps, nu, y)`, `y[k * n + c]`.
+type EdcStepStates = (
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+    Vec<f64>,
+);
+
+fn edc_step_states(n: usize, ks: usize) -> EdcStepStates {
+    let mut rng = SplitMix64(20261018);
+    let (mut t, mut rho, mut kf, mut eps) = (
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+        Vec::with_capacity(n),
+    );
+    let mut y = vec![0.0; ks * n];
+    for c in 0..n {
+        let (y_h2, y_o2) = (0.01 + 0.04 * rng.u(), 0.1 + 0.1 * rng.u());
+        let (y_oh, y_h2o) = (0.01 * rng.u(), 0.1 * rng.u());
+        for (k_i, v) in [y_h2, y_o2, y_oh, y_h2o, 1.0 - y_h2 - y_o2 - y_oh - y_h2o]
+            .iter()
+            .enumerate()
+        {
+            y[k_i * n + c] = *v;
+        }
+        t.push(900.0 + 600.0 * rng.u());
+        rho.push(0.2 + 1.8 * rng.u());
+        kf.push(0.2 + 4.8 * rng.u());
+        eps.push(1.0 + 999.0 * rng.u());
+    }
+    let nu = vec![1.5e-5; n];
+    (t, rho, kf, eps, nu, y)
+}
+
+/// The buffers one §134.8 device row reads, `edc_step_states` uploaded as
+/// `EdcStep::step` takes them: `(k, epsilon, nu, rho, t, p, y)`.
+type EdcStepBufs = (
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+    ofgpu::device::DevBuf<Scalar>,
+);
+
+fn edc_step_bufs(g: &Gpu, n: usize, ks: usize) -> EdcStepBufs {
+    let (t, rho, kf, eps, nu, y) = edc_step_states(n, ks);
+    let s = |src: &[f64]| src.iter().map(|&v| v as Scalar).collect::<Vec<_>>();
+    (
+        g.upload(&s(&kf)).expect("upload"),
+        g.upload(&s(&eps)).expect("upload"),
+        g.upload(&s(&nu)).expect("upload"),
+        g.upload(&s(&rho)).expect("upload"),
+        g.upload(&s(&t)).expect("upload"),
+        g.upload(&vec![P_ATM as Scalar; n]).expect("upload"),
+        g.upload(&s(&y)).expect("upload"),
+    )
+}
+
+/// SPEC-LIT §134.8 `edc_step_is_the_kernel_rate`: `EdcStep::step`'s mean
+/// rate is, bitwise, a direct `edc_source_device` call's on a fresh
+/// `EdcWork` over the same buffers - the split step is that call plus the
+/// heat launch, nothing else - with the same refused cells and codes, and
+/// the fixture gives at least half the cells a nonzero rate.
+#[test]
+fn edc_step_is_the_kernel_rate() {
+    let m = edc_step_mech();
+    let opts = edc_opts();
+    let n = 64usize;
+    let ks = m.species().len();
+    let Some(g) = gpu() else { return };
+    let mut step = ofgpu::chem::tci::EdcStep::new(&g, &m, &opts, &prm(EdcVariant::V1989), n)
+        .expect("the step builds");
+    let (dk, de, dnu, drho, dt, dp, dy) = edc_step_bufs(&g, n, ks);
+    let mix = DeviceMixing::Epsilon { k: &dk, epsilon: &de };
+    step.step(&g, &mix, &dnu, &drho, &dt, &dp, &dy).expect("the step runs");
+    g.sync().expect("sync");
+    // The same inputs through the bare kernel on a fresh work: the same
+    // carried-step seed (`opts.h0`), so the rates must be bitwise.
+    let kern = TciKernels::new(&g).expect("tci kernels");
+    let dm = DeviceMechanism::upload(&g, &m).expect("upload");
+    let dr = DeviceReactor::new(&g, &opts).expect("reactor");
+    let mut work = EdcWork::new(&g, &dm, &dr, n).expect("work");
+    let mut wdot = g.zeros::<Scalar>(ks * n).expect("alloc");
+    let mut st = g.zeros::<i32>(n).expect("alloc");
+    edc_source_device(
+        &g, &kern, &dm, &dr, &mut work, &prm(EdcVariant::V1989), &mix, &dnu, &drho, &dt, &dp,
+        &dy, &mut wdot, &mut st, n,
+    )
+    .expect("launch");
+    g.sync().expect("sync");
+    let got_w = g.download(step.wdot()).expect("download");
+    let want_w = g.download(&wdot).expect("download");
+    let sts = g.download(&st).expect("download");
+    for (a, b) in got_w.iter().zip(&want_w) {
+        assert_eq!(a.to_bits(), b.to_bits(), "the rates must be bitwise");
+    }
+    let refused: Vec<(usize, i32)> =
+        (0..n).filter(|&c| sts[c] != 0).map(|c| (c, sts[c])).collect();
+    eprintln!(
+        "edc_step_is_the_kernel_rate: bitwise over {} rate element(s); {} refused cell(s)",
+        got_w.len(),
+        refused.len()
+    );
+    assert_eq!(step.first_refused(&g).expect("first_refused"), refused.first().copied());
+    let rep = step.report(&g).expect("report");
+    let want_rep = edc_report(&g, &work, &st, n).expect("report");
+    assert_eq!(rep, want_rep, "the step's report is the kernel's");
+    let live = (0..n).filter(|&c| got_w[c..].iter().step_by(n).any(|w| *w != 0.0)).count();
+    eprintln!(
+        "edc_step_is_the_kernel_rate: {live} of {n} cell(s) carry a nonzero rate; report \
+         capped {}, unconverged {}, refused {}",
+        rep.capped, rep.unconverged, rep.refused
+    );
+    assert!(live * 2 >= n, "the fixture must move at least half the cells, moved {live}");
+}
+
+/// SPEC-LIT §134.8 `edc_heat_release_matches_host`: (134.18)'s heat
+/// release, on the device against the host twin fed each cell's own T and
+/// downloaded mean rate, over the sum of |h_k wdot_k / W_k|; and the
+/// one-term hand value - `wdot` = -1 on H2, +1 on H2O, zero elsewhere, at
+/// 1000 K - against `-(h/W)` summed by hand.
+#[test]
+fn edc_heat_release_matches_host() {
+    let m = edc_step_mech();
+    let thermo = m.thermo();
+    // The hand value: the zero skip leaves H2's -1 and H2O's +1, so the
+    // twin's sum is -(-h_H2/W_H2 + h_H2O/W_H2O), term for term the hand
+    // sum of -(h_k/W_k) wdot_k.
+    let t_hand = 1000.0f64;
+    let mut wdot_hand = vec![0.0; m.species().len()];
+    wdot_hand[0] = -1.0;
+    wdot_hand[3] = 1.0;
+    let got = ofgpu::chem::tci::edc_heat_release_host(&m, t_hand, &wdot_hand)
+        .expect("the hand cell releases");
+    let mut hand = 0.0;
+    for (k, name) in m.species().iter().enumerate() {
+        let s = thermo.get(name).expect("thermo record");
+        hand += -(s.h(t_hand).expect("h") / s.molar_mass) * wdot_hand[k];
+    }
+    let e = ((got - hand) / hand.abs()).abs();
+    eprintln!(
+        "edc_heat_release_matches_host: hand Q = {hand:e}, host twin {got:e}, relative error \
+         {e:.3e}"
+    );
+    assert!(e <= 1e-14, "hand {hand:e} against {got:e}, relative error {e:.3e}");
+    let Some(g) = gpu() else { return };
+    let n = 64usize;
+    let ks = m.species().len();
+    let mut step = ofgpu::chem::tci::EdcStep::new(&g, &m, &edc_opts(), &prm(EdcVariant::V2005), n)
+        .expect("the step builds");
+    let (dk, de, dnu, drho, dt, dp, dy) = edc_step_bufs(&g, n, ks);
+    let mix = DeviceMixing::Epsilon { k: &dk, epsilon: &de };
+    step.step(&g, &mix, &dnu, &drho, &dt, &dp, &dy).expect("the step runs");
+    g.sync().expect("sync");
+    assert_eq!(step.first_refused(&g).expect("first_refused"), None, "clean fixture");
+    let (t, _, _, _, _, _) = edc_step_states(n, ks);
+    let q = g.download(step.heat_release()).expect("download");
+    let w = g.download(step.wdot()).expect("download");
+    let mut worst = 0.0f64;
+    for c in 0..n {
+        let col: Vec<f64> = (0..ks).map(|k_i| w[k_i * n + c] as f64).collect();
+        let t_c = t[c] as Scalar as f64;
+        let host =
+            ofgpu::chem::tci::edc_heat_release_host(&m, t_c, &col).expect("the host twin runs");
+        let mut scale = 0.0;
+        for (k_i, name) in m.species().iter().enumerate() {
+            let s = thermo.get(name).expect("thermo record");
+            scale += (s.h(t_c).expect("h") * col[k_i] / s.molar_mass).abs();
+        }
+        if scale == 0.0 {
+            assert_eq!(q[c].to_bits(), (0.0 as Scalar).to_bits(), "cell {c}: no rate, no heat");
+            continue;
+        }
+        let e = (q[c] as f64 - host).abs() / scale;
+        worst = worst.max(e);
+    }
+    eprintln!(
+        "edc_heat_release_matches_host: worst |q_dev - q_host|/sum|h wdot/W| = {worst:.3e}; \
+         tolerance {:e}",
+        heat_tol()
+    );
+    assert!(worst <= heat_tol(), "worst heat-release error {worst:.3e} exceeds {:e}", heat_tol());
+}
+
+/// SPEC-LIT §134.8 `edc_step_conserves_elements_and_mass`: (134.10)'s mean
+/// rate is a balanced stoichiometric vector, so per active cell
+/// `|sum_k wdot_k| / sum_k |wdot_k|` and, per element, the same ratio for
+/// `sum_k n_ek wdot_k / W_k` hold to the round-off of the ofscalar
+/// crossing - the integrator keeps linear invariants exactly.
+#[test]
+fn edc_step_conserves_elements_and_mass() {
+    let m = edc_step_mech();
+    let thermo = m.thermo();
+    let mut elements: Vec<String> = Vec::new();
+    for s in thermo.species() {
+        for (sym, _) in &s.elements {
+            if !elements.contains(sym) {
+                elements.push(sym.clone());
+            }
+        }
+    }
+    let Some(g) = gpu() else { return };
+    let n = 64usize;
+    let ks = m.species().len();
+    let mut step = ofgpu::chem::tci::EdcStep::new(&g, &m, &edc_opts(), &prm(EdcVariant::V1989), n)
+        .expect("the step builds");
+    let (dk, de, dnu, drho, dt, dp, dy) = edc_step_bufs(&g, n, ks);
+    let mix = DeviceMixing::Epsilon { k: &dk, epsilon: &de };
+    step.step(&g, &mix, &dnu, &drho, &dt, &dp, &dy).expect("the step runs");
+    g.sync().expect("sync");
+    assert_eq!(step.first_refused(&g).expect("first_refused"), None, "clean fixture");
+    let w = g.download(step.wdot()).expect("download");
+    let (mut worst_m, mut worst_e, mut wc, mut we) = (0.0f64, 0.0f64, 0usize, String::new());
+    for c in 0..n {
+        let col: Vec<f64> = (0..ks).map(|k_i| w[k_i * n + c] as f64).collect();
+        let denom: f64 = col.iter().map(|v| v.abs()).sum();
+        if denom > 0.0 {
+            let r = col.iter().sum::<f64>().abs() / denom;
+            if r > worst_m {
+                worst_m = r;
+                wc = c;
+            }
+        }
+        for el in &elements {
+            let (num, den) = col.iter().enumerate().fold((0.0, 0.0), |(nu_, de_), (k_i, w_k)| {
+                let s = thermo.get(&m.species()[k_i]).expect("thermo record");
+                let n_e = s
+                    .elements
+                    .iter()
+                    .find(|(sym, _)| sym == el)
+                    .map_or(0.0, |(_, v)| f64::from(*v));
+                (nu_ + n_e * w_k / s.molar_mass, de_ + n_e * w_k.abs() / s.molar_mass)
+            });
+            if den > 0.0 {
+                let r = (num / den).abs();
+                if r > worst_e {
+                    worst_e = r;
+                    we = el.clone();
+                }
+            }
+        }
+    }
+    eprintln!(
+        "edc_step_conserves_elements_and_mass: worst |sum wdot|/sum|wdot| = {worst_m:.3e} at \
+         cell {wc}, worst element ratio = {worst_e:.3e} ({we}); tolerance {:e}",
+        cons_tol()
+    );
+    assert!(worst_m <= cons_tol(), "mass ratio {worst_m:.3e} exceeds {:e}", cons_tol());
+    assert!(worst_e <= cons_tol(), "element ratio {worst_e:.3e} exceeds {:e}", cons_tol());
+}
+
+/// SPEC-LIT §134.8 `edc_step_refuses_short_buffers`: the step refuses a
+/// `y` one element short, naming the buffer; the host twin refuses a
+/// `wdot` one rate short, naming it, and a `T` of 0, naming the cause.
+#[test]
+fn edc_step_refuses_short_buffers() {
+    let m = edc_step_mech();
+    let ks = m.species().len();
+    match ofgpu::chem::tci::edc_heat_release_host(&m, 1000.0, &vec![0.0; ks - 1]) {
+        Err(Error::Config(msg)) => {
+            assert!(msg.contains("wdot"), "{msg}");
+            eprintln!("edc_step_refuses_short_buffers: short wdot refused with: {msg}");
+        }
+        other => panic!("short wdot: expected a refusal, got {other:?}"),
+    }
+    match ofgpu::chem::tci::edc_heat_release_host(&m, 0.0, &vec![0.0; ks]) {
+        Err(Error::Config(msg)) => {
+            assert!(msg.contains("T = 0"), "{msg}");
+            eprintln!("edc_step_refuses_short_buffers: T = 0 refused with: {msg}");
+        }
+        other => panic!("T = 0: expected a refusal, got {other:?}"),
+    }
+    let Some(g) = gpu() else { return };
+    let n = 8usize;
+    let mut step = ofgpu::chem::tci::EdcStep::new(&g, &m, &edc_opts(), &prm(EdcVariant::V1989), n)
+        .expect("the step builds");
+    let dnu = g.upload(&vec![1.5e-5 as Scalar; n]).expect("upload");
+    let drho = g.upload(&vec![1.0 as Scalar; n]).expect("upload");
+    let dt = g.upload(&vec![1000.0 as Scalar; n]).expect("upload");
+    let dp = g.upload(&vec![P_ATM as Scalar; n]).expect("upload");
+    let dk = g.upload(&vec![1.0 as Scalar; n]).expect("upload");
+    let de = g.upload(&vec![10.0 as Scalar; n]).expect("upload");
+    let dy = g.upload(&vec![0.0 as Scalar; ks * n - 1]).expect("upload");
+    let mix = DeviceMixing::Epsilon { k: &dk, epsilon: &de };
+    match step.step(&g, &mix, &dnu, &drho, &dt, &dp, &dy) {
+        Err(Error::Config(msg)) => {
+            assert!(msg.contains("the buffer y holds"), "{msg}");
+            eprintln!("edc_step_refuses_short_buffers: short y refused with: {msg}");
+        }
+        other => panic!("short y: expected a refusal, got {other:?}"),
+    }
+}

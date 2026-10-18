@@ -2581,9 +2581,15 @@ fn run(o: &Options) -> Result<RunEnd> {
             let (y_ctrl, y_conv) = species_controls(&num, &cc.turb)?;
             let raws = ch.species.fields.iter().map(|f| f.to_raw(hm.n_cells)).collect();
             let base = o.case_path.parent().unwrap_or_else(|| Path::new("."));
-            let r = Reacting::new(
+            let mut r = Reacting::new(
                 &gpu, &hm, &mesh, ch, base, raws, cc.nu, gas_props.pr, y_ctrl, y_conv, f64::from(dt),
             )?;
+            // SPEC-LIT §134.8 (CHR-16): an EDC case arms the EDC split step
+            // against the running model's mixing rate; laminar keeps the
+            // path it has always taken.
+            if matches!(ch.combustion, ofgpu::io::case_chem::LoweredCombustion::Edc { .. }) {
+                r.enable_edc(&gpu, ch, base, &turb.mixing_rate(), find_field(&turb.output_fields(), "k"), cc.nu)?;
+            }
             gas.use_mixture(&gpu, r.mixture.clone())?;
             energy.sources_mut().use_meters(&gpu)?;
             r.update_density(&gpu, &mut gas, energy.field())?;
@@ -3055,6 +3061,12 @@ fn run(o: &Options) -> Result<RunEnd> {
         let turb_fields = turb.output_fields();
         let k_for_wall: &GpuScalarField =
             find_field(&turb_fields, "k").unwrap_or_else(|| turb.nut());
+
+        // SPEC-LIT §134.8 (CHR-16): the EDC step's mixing inputs, staged
+        // once per time step from the model the iteration is about to run.
+        if let Some(r) = reacting.as_mut() {
+            r.stage_mixing(&gpu, &turb.mixing_rate(), find_field(&turb_fields, "k"))?;
+        }
 
         let is_final = transient; // one outer corrector - see the module doc
         let report = outer_iteration(
@@ -3664,6 +3676,33 @@ fn run(o: &Options) -> Result<RunEnd> {
                 g(f64::from(th.power()) + q_wall_w),
                 if th.saturated() { " | SATURATED" } else { "" },
             );
+        }
+
+        // SPEC-LIT §134.8 (CHR-16): the species/element budget of the LAST
+        // step, measured on the inputs that step's own species correction
+        // read. It downloads, so it runs once, here, on a transient run.
+        if let (true, Some(r)) = (transient, reacting.as_mut()) {
+            let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
+            let (b, as_read) = r.budget(&gpu, &mesh, &flow, turb.nut(), &gas, energy.field(), f64::from(dt))?;
+            println!("\n=== species budget, last step (SPEC-LIT §134.8) ===");
+            println!("{}", b.line("inventory"));
+            println!("{}", as_read.line("as read"));
+            for row in std::iter::once(&b.mass).chain(b.elements.iter()) {
+                println!(
+                    "  {name}: storage {storage:e} convective {convective:e} diffusive {diffusive:e} \
+                     source {source:e} residual {residual:e} inflow {inflow:e} kg/s",
+                    name = row.name,
+                    storage = row.storage,
+                    convective = row.convective,
+                    diffusive = row.diffusive,
+                    source = row.source,
+                    residual = row.residual,
+                    inflow = row.inflow,
+                );
+            }
+            if let Some(line) = r.edc_summary() {
+                println!("  {line}");
+            }
         }
 
         // ---- SPEC-LIT §32.5.5's specified experiment, DIAGNOSTIC ---------

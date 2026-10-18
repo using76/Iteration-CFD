@@ -746,6 +746,12 @@ pub struct JsonTurbulence {
     /// OpenFOAM-compatible default) when the case names none.
     #[serde(rename = "wallTreatment", default)]
     pub wall_treatment: WallTreatmentKind,
+    /// SPEC-LIT §134.8 (CHR-16): a RAS model's coefficients by their
+    /// OpenFOAM names, lowered into `RAS/<model>Coeffs/<name>`, which
+    /// `model_coeff` reads; kEpsilon only (Cmu, C1, C2, C3, sigmak,
+    /// sigmaEps).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub coeffs: BTreeMap<String, f64>,
 }
 
 /// SPEC-LIT §29.1's four presets, as the JSONC format spells them -
@@ -874,6 +880,23 @@ pub enum ScalarBc {
     /// condition is exact on both.
     #[serde(rename = "fixedFluxTemperature")]
     FixedFluxTemperature { q: f64 },
+    /// SPEC-LIT §120.1's `fixedProfile`: a Function1 `table` of the face
+    /// coordinate `s = (d/|d|).x_f - origin` (`d` the `direction`, `origin`
+    /// 0 by default, `x_f` the face centre), evaluated once at setup - so a
+    /// radial profile (the Sandia Flame D inlet, SPEC-LIT §134.8) is one
+    /// condition on ONE zmin patch where three zmin patches cannot exist
+    /// (SPEC-LIT §119.3). It lowers to the same `direction`/`origin`/
+    /// `profile` entries the dictionary route reads
+    /// (`crate::function1::patch_entries`); fewer than two points, an `s`
+    /// not strictly increasing, a zero or non-finite direction and a
+    /// non-finite value are refused by name at lowering.
+    #[serde(rename = "fixedProfile")]
+    FixedProfile {
+        direction: [f64; 3],
+        #[serde(default)]
+        origin: f64,
+        profile: Vec<[f64; 2]>,
+    },
 }
 
 /// Vector counterpart of [`ScalarBc`], for `U`.
@@ -889,6 +912,15 @@ pub enum VectorBc {
     },
     #[serde(rename = "zeroGradient")]
     ZeroGradient {},
+    /// The vector twin of [`ScalarBc::FixedProfile`] - SPEC-LIT §120.1's
+    /// `fixedProfile`; in JSON one point is `[s, [ux, uy, uz]]`.
+    #[serde(rename = "fixedProfile")]
+    FixedProfile {
+        direction: [f64; 3],
+        #[serde(default)]
+        origin: f64,
+        profile: Vec<(f64, [f64; 3])>,
+    },
 }
 
 /// One `k`/`epsilon`/`omega`/`nut` boundary condition. A superset of
@@ -1685,6 +1717,10 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `radiation` block, lowered onto the library's
     /// settings (§137.8). `None` for every case without the block.
     pub radiation: Option<crate::io::case_rad::LoweredRadiation>,
+    /// SPEC-LIT §134.8 (CHR-16): `turbulence.coeffs`, by their OpenFOAM
+    /// names - kEpsilon only, in the case's (BTreeMap) order. Empty for
+    /// every case that names no coefficients.
+    pub turbulence_coeffs: Vec<(String, f64)>,
 }
 
 impl LoweredCase {
@@ -1857,6 +1893,25 @@ LES {{ model {model}; }}
                 // parse failure here would be a bug in the synthesis, not in
                 // the case, so surface it as the model name and let the
                 // selector produce its own section-13.4 error downstream.
+                Err(_) => {}
+            }
+        }
+        // SPEC-LIT §134.8 (CHR-16): stated coefficients lower into the SAME
+        // dictionary an OpenFOAM `RAS/kEpsilonCoeffs` sub-dict carries,
+        // synthesised one line per coefficient, so `model_coeff` reads them
+        // exactly as it reads a case written in the dictionary format.
+        if !self.turbulence_coeffs.is_empty() {
+            let mut src = String::from(
+                "simulationType RAS;\nRAS\n{\n    model kEpsilon;\n    kEpsilonCoeffs\n    {\n",
+            );
+            for (name, value) in &self.turbulence_coeffs {
+                src.push_str(&format!("        {name} {value};\n"));
+            }
+            src.push_str("    }\n}\n");
+            match crate::io::dict::FoamDict::parse(&src, "<jsonc turbulence>") {
+                Ok(d) => c.momentum_transport = d,
+                // Unreachable for the strings this format can produce, as
+                // the LES branch above argues for its own.
                 Err(_) => {}
             }
         }
@@ -2449,6 +2504,56 @@ fn to_vec3(v: [f64; 3]) -> Vec3 {
     Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar)
 }
 
+/// The `extra` entries SPEC-LIT §120.1's `fixedProfile` lowers to:
+/// `direction`, `origin` and `profile` as form 3's inline `table` - the
+/// text `patch_entries` hands `F1::parse` and `f1_profile_argument` from a
+/// dictionary file, so the JSONC and dictionary routes give the reader the
+/// same text. Numbers are printed with `{}`, Rust's shortest round trip.
+fn fixed_profile_entries(direction: &[f64; 3], origin: f64) -> BTreeMap<String, String> {
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "direction".to_string(),
+        format!("({} {} {})", direction[0], direction[1], direction[2]),
+    );
+    extra.insert("origin".to_string(), format!("{origin}"));
+    extra
+}
+
+/// A scalar `fixedProfile` as a [`PatchFieldSpec`] - after
+/// [`check_fixed_profile_scalar`] (the species route's too) has passed it.
+pub(crate) fn scalar_fixed_profile_spec(
+    direction: &[f64; 3],
+    origin: f64,
+    profile: &[[f64; 2]],
+) -> PatchFieldSpec {
+    let mut s = spec("fixedProfile");
+    s.extra = fixed_profile_entries(direction, origin);
+    let points = profile
+        .iter()
+        .map(|p| format!("({} {})", p[0], p[1]))
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.extra.insert("profile".to_string(), format!("table ({points})"));
+    s
+}
+
+/// A vector `fixedProfile` as a [`PatchFieldSpec`] - one point is `(s (x y z))`.
+fn vector_fixed_profile_spec(
+    direction: &[f64; 3],
+    origin: f64,
+    profile: &[(f64, [f64; 3])],
+) -> PatchFieldSpec {
+    let mut s = spec("fixedProfile");
+    s.extra = fixed_profile_entries(direction, origin);
+    let points = profile
+        .iter()
+        .map(|p| format!("({} ({} {} {}))", p.0, p.1[0], p.1[1], p.1[2]))
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.extra.insert("profile".to_string(), format!("table ({points})"));
+    s
+}
+
 fn scalar_bc_spec(bc: &ScalarBc) -> PatchFieldSpec {
     match bc {
         ScalarBc::FixedValue { value } => {
@@ -2473,6 +2578,9 @@ fn scalar_bc_spec(bc: &ScalarBc) -> PatchFieldSpec {
             s.extra.insert("q".to_string(), q.to_string());
             s
         }
+        ScalarBc::FixedProfile { direction, origin, profile } => {
+            scalar_fixed_profile_spec(direction, *origin, profile)
+        }
     }
 }
 
@@ -2490,6 +2598,9 @@ fn vector_bc_spec(bc: &VectorBc) -> PatchFieldSpec {
             s
         }
         VectorBc::ZeroGradient {} => spec("zeroGradient"),
+        VectorBc::FixedProfile { direction, origin, profile } => {
+            vector_fixed_profile_spec(direction, *origin, profile)
+        }
     }
 }
 
@@ -2643,6 +2754,80 @@ fn validate_freestream_rules(
                  (SPEC-LIT §122.3, §122.6)",
                 rule.pattern, fs.u, fs.t
             )));
+        }
+    }
+    Ok(())
+}
+
+/// `fixedProfile`'s four shape refusals (SPEC-LIT §120.1): a zero or
+/// non-finite `direction`, fewer than two points, an `s` not finite and
+/// strictly increasing, a non-finite value. `what` names the JSON path and
+/// every message names "fixedProfile" and ends with its section. The caller
+/// spreads `s` and the values so both variants share the check.
+fn refuse_bad_fixed_profile(
+    what: &str,
+    direction: &[f64; 3],
+    s: &[f64],
+    mut values: impl Iterator<Item = f64>,
+) -> Result<()> {
+    let bad = |why: &str| -> Error {
+        Error::Config(format!("{what}: fixedProfile {why} (SPEC-LIT §120.1)"))
+    };
+    if !direction.iter().all(|v| v.is_finite()) || direction.iter().all(|&v| v == 0.0) {
+        return Err(bad("needs a finite, non-zero `direction`"));
+    }
+    if s.len() < 2 {
+        return Err(bad("needs at least two `profile` points"));
+    }
+    if !s.iter().all(|v| v.is_finite()) || s.windows(2).any(|w| w[1] <= w[0]) {
+        return Err(bad("needs the `profile`'s s finite and strictly increasing"));
+    }
+    if !values.all(|v| v.is_finite()) {
+        return Err(bad("needs every `profile` value finite"));
+    }
+    Ok(())
+}
+
+/// [`refuse_bad_fixed_profile`] on scalar points - the species route in
+/// case_chem uses the same check.
+pub(crate) fn check_fixed_profile_scalar(
+    what: &str,
+    direction: &[f64; 3],
+    profile: &[[f64; 2]],
+) -> Result<()> {
+    let s: Vec<f64> = profile.iter().map(|p| p[0]).collect();
+    refuse_bad_fixed_profile(what, direction, &s, profile.iter().map(|p| p[1]))
+}
+
+/// [`refuse_bad_fixed_profile`] on vector points - all three components are values.
+fn check_fixed_profile_vector(
+    what: &str,
+    direction: &[f64; 3],
+    profile: &[(f64, [f64; 3])],
+) -> Result<()> {
+    let s: Vec<f64> = profile.iter().map(|p| p.0).collect();
+    refuse_bad_fixed_profile(what, direction, &s, profile.iter().flat_map(|p| p.1))
+}
+
+/// Checks every rule's `fixedProfile` conditions at lowering, before any
+/// field is read - where `validate_freestream_rules` sits.
+fn validate_fixed_profile_rules(patches: &[JsonPatchRule]) -> Result<()> {
+    for rule in patches {
+        if let Some(VectorBc::FixedProfile { direction, profile, .. }) = &rule.u {
+            check_fixed_profile_vector(
+                &format!("patches: rule \"{}\" U", rule.pattern),
+                direction,
+                profile,
+            )?;
+        }
+        for (bc, field) in [(&rule.p, "p"), (&rule.t, "T")] {
+            if let Some(ScalarBc::FixedProfile { direction, profile, .. }) = bc {
+                check_fixed_profile_scalar(
+                    &format!("patches: rule \"{}\" {field}", rule.pattern),
+                    direction,
+                    profile,
+                )?;
+            }
         }
     }
     Ok(())
@@ -3016,6 +3201,42 @@ impl JsonCase {
             .as_ref()
             .map(|t| t.wall_treatment)
             .unwrap_or_default();
+        // SPEC-LIT §134.8 (CHR-16): stated coefficients are refused on any
+        // model but RAS kEpsilon - the one whose coefficients this crate
+        // reads through `model_coeff` - and on a name outside the six the
+        // model carries, or a value that is not a number.
+        let turbulence_coeffs: Vec<(String, f64)> = match &self.turbulence {
+            Some(t) if !t.coeffs.is_empty() => {
+                if t.kind != TurbulenceKind::Ras || t.model != "kEpsilon" {
+                    return Err(Error::Config(format!(
+                        "turbulence.coeffs: coefficients are stated for the {} model \
+                         \"{name}\", and `model_coeff` reads kEpsilon only (SPEC-LIT §134.8)",
+                        if t.kind == TurbulenceKind::Ras { "RAS" } else { "LES" },
+                        name = t.model
+                    )));
+                }
+                const KEPS_COEFFS: [&str; 6] = ["Cmu", "C1", "C2", "C3", "sigmak", "sigmaEps"];
+                let mut out = Vec::with_capacity(t.coeffs.len());
+                for (name, value) in &t.coeffs {
+                    if !KEPS_COEFFS.contains(&name.as_str()) {
+                        return Err(Error::Config(format!(
+                            "turbulence.coeffs: \"{name}\" is not one of the kEpsilon \
+                             coefficients this format carries (Cmu, C1, C2, C3, sigmak, \
+                             sigmaEps) (SPEC-LIT §134.8)"
+                        )));
+                    }
+                    if !value.is_finite() {
+                        return Err(Error::Config(format!(
+                            "turbulence.coeffs: {name} = {value} is not a finite coefficient \
+                             (SPEC-LIT §134.8)"
+                        )));
+                    }
+                    out.push((name.clone(), *value));
+                }
+                out
+            }
+            _ => Vec::new(),
+        };
 
         // Which dissipation variable this case's MODEL transports fills the
         // one dissipation slot of `TurbulenceControls` - the same rule, and
@@ -3137,6 +3358,7 @@ impl JsonCase {
         // before any field is lowered.
         let compressible = self.physics.compressible.as_ref().map(|c| c.gas()).transpose()?;
         validate_freestream_rules(&self.patches, compressible.as_ref(), self.initial.t)?;
+        validate_fixed_profile_rules(&self.patches)?;
 
         let mut names = mesh_patch_names(&block);
         // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
@@ -3435,6 +3657,7 @@ impl JsonCase {
             parcels,
             chem,
             radiation,
+            turbulence_coeffs,
         })
     }
 }
@@ -5378,6 +5601,7 @@ mod tests {
             model: "Deardorff".to_string(),
             wall_functions: JsonWallFunctions { kappa: 0.41, e: 9.8 },
             wall_treatment: WallTreatmentKind::Standard,
+            coeffs: Default::default(),
         });
         let lowered = case.lower().expect("lowers");
         let cc = lowered.to_case_controls();
@@ -5396,11 +5620,64 @@ mod tests {
             model: "kOmegaSST".to_string(),
             wall_functions: JsonWallFunctions { kappa: 0.41, e: 9.8 },
             wall_treatment: WallTreatmentKind::Standard,
+            coeffs: Default::default(),
         });
         let cc2 = ras.lower().expect("lowers").to_case_controls();
         let sel2 = crate::models::registry::select_turbulence_model(&cc2)
             .expect("RAS route");
         assert!(format!("{sel2:?}").contains("KOmegaSST"), "got {sel2:?}");
+    }
+
+    /// SPEC-LIT §134.8 (CHR-16): `turbulence.coeffs` lowers into
+    /// `RAS/kEpsilonCoeffs/<name>`, which `model_coeff` reads exactly as it
+    /// reads an OpenFOAM-written dictionary; a kOmegaSST model, a name
+    /// outside the six kEpsilon carries, and a non-finite value are each
+    /// refused by name.
+    #[test]
+    fn turbulence_coeffs_lower_into_model_coeff() {
+        let ras_k_epsilon = |coeffs: BTreeMap<String, f64>, model: &str| {
+            let mut case = minimal_case_with_mesh("");
+            case.turbulence = Some(JsonTurbulence {
+                kind: TurbulenceKind::Ras,
+                model: model.to_string(),
+                wall_functions: JsonWallFunctions { kappa: 0.41, e: 9.8 },
+                wall_treatment: WallTreatmentKind::Standard,
+                coeffs,
+            });
+            case
+        };
+        let case = ras_k_epsilon(BTreeMap::from([("C1".to_string(), 1.6)]), "kEpsilon");
+        let lowered = case.lower().expect("lowers");
+        assert_eq!(lowered.turbulence_coeffs, vec![("C1".to_string(), 1.6)]);
+        let cc = lowered.to_case_controls();
+        assert_eq!(crate::io::case::model_coeff(&cc, "C1", 1.44), 1.6, "C1 read from the lowered dict");
+        assert_eq!(crate::io::case::model_coeff(&cc, "C2", 1.92), 1.92, "C2 keeps its default");
+        let sel = crate::models::registry::select_turbulence_model(&cc).expect("selects");
+        assert!(format!("{sel:?}").contains("KEpsilon"), "still kEpsilon: {sel:?}");
+
+        let err = ras_k_epsilon(BTreeMap::from([("C1".to_string(), 1.6)]), "kOmegaSST")
+            .lower()
+            .err()
+            .expect("kOmegaSST with coeffs must be refused")
+            .to_string();
+        assert!(err.contains("turbulence.coeffs"), "{err}");
+        println!("  [134.8] kOmegaSST: refused: {err}");
+
+        let err = ras_k_epsilon(BTreeMap::from([("C4".to_string(), 1.0)]), "kEpsilon")
+            .lower()
+            .err()
+            .expect("an unknown name must be refused")
+            .to_string();
+        assert!(err.contains("turbulence.coeffs"), "{err}");
+        println!("  [134.8] C4: refused: {err}");
+
+        let err = ras_k_epsilon(BTreeMap::from([("C1".to_string(), f64::NAN)]), "kEpsilon")
+            .lower()
+            .err()
+            .expect("a NaN must be refused")
+            .to_string();
+        assert!(err.contains("turbulence.coeffs"), "{err}");
+        println!("  [134.8] NaN: refused: {err}");
     }
 
     // ------------------------------------------------------------------
@@ -6133,6 +6410,244 @@ mod tests {
                 .expect_err(block)
                 .to_string();
             assert!(e.contains(needle) && e.contains("numerics.solvers"), "{block}: {e}");
+        }
+    }
+
+    /// A `fixedProfile` case text - `u` and `t` are the rule's U and T bodies.
+    fn profile_case_text(u: &str, t: &str) -> String {
+        format!(
+            r#"{{
+                "name": "fixedProfileTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0,0,0], "max": [1,0.1,0.1] }},
+                    "cells": [4, 1, 1],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "inlet", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0, 0, 0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.7, "Prt": 0.85, "TRef": 300 }},
+                    "buoyancy": "densityRatio"
+                }},
+                "patches": [
+                    {{ "match": "inlet", "kind": "inlet",
+                       "U": {u}, "T": {t}, "p": {{ "type": "zeroGradient" }} }},
+                    {{ "match": ".*", "kind": "wall" }}
+                ],
+                "initial": {{ "U": [0,0,0], "T": 300, "p": 0 }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "PIMPLE", "correctors": 2 }},
+                    "ddt": "Euler",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1e-3, "deltaT": 1e-4 }}
+            }}"#
+        )
+    }
+
+    /// A JSONC scalar and vector `fixedProfile` lower to the same
+    /// [`PatchFieldSpec`] a dictionary entry gives - type_name and the
+    /// `direction`/`origin`/`profile` entries, bit for bit (SPEC-LIT §120.1).
+    #[test]
+    fn json_fixed_profile_matches_the_dictionary_spec() {
+        let t = r#"{ "type": "fixedProfile", "direction": [0, 1, 0], "origin": 0.5,
+                     "profile": [[0, 300], [0.5, 300], [0.5000001, 900], [1, 900]] }"#;
+        let u = r#"{ "type": "fixedProfile", "direction": [0, 1, 0], "origin": 0.5,
+                     "profile": [[0, [1, 0, 0]], [1, [2, 0, 0]]] }"#;
+        let lowered = read_case_jsonc_str(&profile_case_text(u, t), "fixture")
+            .and_then(|c| c.lower())
+            .expect("a fixedProfile inlet lowers");
+
+        let mut want_t = PatchFieldSpec {
+            type_name: "fixedProfile".to_string(),
+            ..PatchFieldSpec::default()
+        };
+        want_t.extra.insert("direction".into(), "(0 1 0)".into());
+        want_t.extra.insert("origin".into(), "0.5".into());
+        want_t
+            .extra
+            .insert("profile".into(), "table ((0 300) (0.5 300) (0.5000001 900) (1 900))".into());
+        assert_eq!(
+            lowered.t_field.as_ref().unwrap().boundary["inlet"],
+            want_t,
+            "the scalar profile IS the dictionary entry"
+        );
+
+        let mut want_u = PatchFieldSpec {
+            type_name: "fixedProfile".to_string(),
+            ..PatchFieldSpec::default()
+        };
+        want_u.extra.insert("direction".into(), "(0 1 0)".into());
+        want_u.extra.insert("origin".into(), "0.5".into());
+        want_u.extra.insert("profile".into(), "table ((0 (1 0 0)) (1 (2 0 0)))".into());
+        assert_eq!(lowered.u_field.boundary["inlet"], want_u, "the vector profile too");
+    }
+
+    /// `fixedProfile`'s shape refusals come by name at lowering: one point,
+    /// a decreasing `s`, a zero direction - each names "fixedProfile" and
+    /// ends with its section (SPEC-LIT §120.1).
+    #[test]
+    fn json_fixed_profile_is_refused_by_name() {
+        let u_ok = r#"{ "type": "fixedValue", "value": [0, 0, 0] }"#;
+        for why in [
+            r#"{ "type": "fixedProfile", "direction": [1, 0, 0], "profile": [[0, 300]] }"#,
+            r#"{ "type": "fixedProfile", "direction": [1, 0, 0],
+                 "profile": [[0, 300], [0.5, 900], [0.4, 600]] }"#,
+            r#"{ "type": "fixedProfile", "direction": [0, 0, 0],
+                 "profile": [[0, 300], [1, 900]] }"#,
+        ] {
+            let e = read_case_jsonc_str(&profile_case_text(u_ok, why), "fixture")
+                .and_then(|c| c.lower())
+                .err()
+                .expect("a bad fixedProfile is refused");
+            let m = format!("{e}");
+            assert!(m.contains("fixedProfile"), "{why}: {m}");
+            assert!(m.ends_with("(SPEC-LIT §120.1)"), "{why}: {m}");
+        }
+
+        // The vector side refuses the same way - a zero direction on U.
+        let u_bad = r#"{ "type": "fixedProfile", "direction": [0, 0, 0],
+                         "profile": [[0, [1, 0, 0]], [1, [2, 0, 0]]] }"#;
+        let t_ok = r#"{ "type": "fixedValue", "value": 300 }"#;
+        let e = read_case_jsonc_str(&profile_case_text(u_bad, t_ok), "fixture")
+            .and_then(|c| c.lower())
+            .err()
+            .expect("a bad vector fixedProfile is refused");
+        let m = format!("{e}");
+        assert!(m.contains("rule \"inlet\" U") && m.contains("fixedProfile"), "{m}");
+    }
+
+    /// GPU-free, end to end: on a 4 x 1 x 2 cartesian mesh the zmin `T` step
+    /// `fixedProfile` lowers and `scalar_boundary` writes 300, 300, 900, 900
+    /// on the four zmin faces, bitwise. The face centres are x = 0.125,
+    /// 0.375, 0.625, 0.875 - outside the 1e-7 ramp between 0.5 and
+    /// 0.5000001, so even the linear table gives the step values exactly
+    /// (SPEC-LIT §120.1).
+    #[test]
+    fn json_fixed_profile_seeds_the_t_boundary_bitwise() {
+        let t = r#"{ "type": "fixedProfile", "direction": [1, 0, 0],
+                     "profile": [[0, 300], [0.5, 300], [0.5000001, 900], [1, 900]] }"#;
+        let lowered = read_case_jsonc_str(
+            &profile_case_text(r#"{ "type": "fixedValue", "value": [0, 0, 0] }"#, t),
+            "fixture",
+        )
+        .and_then(|c| c.lower())
+        .expect("the fixedProfile case lowers");
+        let m = lowered.build_host_mesh().expect("the host mesh builds");
+        let raw = lowered.t_field.as_ref().unwrap().to_raw(m.n_cells);
+        let b = crate::field_setup::scalar_boundary(&raw, &m, &raw.internal)
+            .expect("the T boundary builds");
+
+        let p = m.patches.iter().find(|p| p.name == "inlet").expect("the zmin patch");
+        assert_eq!(p.size, 4, "the zmin patch is the 4 x 1 inlet disk");
+        let want = [300.0 as Scalar, 300.0 as Scalar, 900.0 as Scalar, 900.0 as Scalar];
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                b.ref_value[p.start + i].to_bits(),
+                w.to_bits(),
+                "zmin face {i}"
+            );
+        }
+    }
+
+    /// CHR-16's Sandia Flame D case (`../cases/sandiaFlameD.jsonc`) lowers:
+    /// the true wedge, kEpsilon with C1 = 1.6, 21 species with N2 inert, EDC,
+    /// and the inlet's U, T and every species as `fixedProfile` or
+    /// `fixedValue` as listed below (SPEC-LIT §134.8).
+    #[test]
+    fn sandia_flame_d_case_lowers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cases/sandiaFlameD.jsonc");
+        let lowered = read_case_jsonc(&path)
+            .and_then(|c| c.lower())
+            .expect("../cases/sandiaFlameD.jsonc lowers");
+
+        assert!(lowered.wedge.is_some(), "the case is a true wedge");
+        assert_eq!(lowered.turbulence_model.as_deref(), Some("kEpsilon"));
+        assert_eq!(lowered.turbulence_coeffs, vec![("C1".to_string(), 1.6)]);
+
+        let chem = lowered.chem.as_ref().expect("the species blocks lower");
+        assert_eq!(chem.species.names.len(), 21);
+        assert_eq!(chem.species.inert, "N2");
+        assert!(matches!(
+            chem.combustion,
+            crate::io::case_chem::LoweredCombustion::Edc { psr_span, .. } if psr_span == 20.0
+        ));
+
+        // The inlet's radial steps: r = 0.003725 (mid inner wall) and 0.009275
+        // (mid outer wall). The numbers are the lowering's shortest `{}` text.
+        let bp = [0.0, 0.003725, 0.0037251, 0.009275, 0.0092751, 0.0742];
+        let steps = |jet: f64, pilot: f64, coflow: f64| -> String {
+            let v = [jet, jet, pilot, pilot, coflow, coflow];
+            let pts: Vec<String> =
+                bp.iter().zip(v).map(|(s, y)| format!("({s} {y})")).collect();
+            format!("table ({})", pts.join(" "))
+        };
+        let steps_v = |j: [f64; 3], p: [f64; 3], c: [f64; 3]| -> String {
+            let v = [j, j, p, p, c, c];
+            let pts: Vec<String> = bp
+                .iter()
+                .zip(v)
+                .map(|(s, y)| format!("({s} ({} {} {}))", y[0], y[1], y[2]))
+                .collect();
+            format!("table ({})", pts.join(" "))
+        };
+
+        let inlet_u = &lowered.u_field.boundary["inlet"];
+        assert_eq!(inlet_u.type_name, "fixedProfile");
+        assert_eq!(inlet_u.extra["direction"], "(1 0 0)");
+        assert_eq!(inlet_u.extra["origin"], "0");
+        assert_eq!(
+            inlet_u.extra["profile"],
+            steps_v([0.0, 0.0, 49.6], [0.0, 0.0, 11.4], [0.0, 0.0, 0.9])
+        );
+        let inlet_t = &lowered.t_field.as_ref().unwrap().boundary["inlet"];
+        assert_eq!(inlet_t.type_name, "fixedProfile");
+        assert_eq!(inlet_t.extra["profile"], steps(302.0, 1880.0, 302.0));
+        assert!(lowered.t_field.as_ref().unwrap().boundary["outlet"].type_name == "inletOutlet");
+
+        // Nine species carry the three streams' values (jet | pilot | coflow)
+        // as `fixedProfile`; the other eleven are 0 everywhere: `fixedValue 0`.
+        let profiles: [(&str, f64, f64, f64); 9] = [
+            ("CH4", 0.1563714015, 0.0, 0.0),
+            ("O2", 0.1964954433, 0.0540, 0.2357443221),
+            ("H2O", 0.0, 0.0942, 0.006255677917),
+            ("H2", 0.0, 1.29e-4, 0.0),
+            ("H", 0.0, 2.48e-5, 0.0),
+            ("O", 0.0, 7.47e-4, 0.0),
+            ("OH", 0.0, 0.0028, 0.0),
+            ("CO", 0.0, 4.07e-3, 0.0),
+            ("CO2", 0.0, 0.1098, 0.0),
+        ];
+        for (name, jet, pilot, coflow) in profiles {
+            let f = chem
+                .species
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} is a solved species"));
+            let b = &f.boundary["inlet"];
+            assert_eq!(b.type_name, "fixedProfile", "{name}");
+            assert_eq!(b.extra["profile"], steps(jet, pilot, coflow), "{name}");
+        }
+        for name in
+            ["HO2", "CH2", "CH2(S)", "CH3", "CH2O", "HCO", "CH3O", "C2H4", "C2H5", "C2H6", "AR"]
+        {
+            let f = chem
+                .species
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} is a solved species"));
+            let b = &f.boundary["inlet"];
+            assert_eq!(b.type_name, "fixedValue", "{name}");
+            assert_eq!(b.value, vec![0.0 as Scalar], "{name}");
         }
     }
 }

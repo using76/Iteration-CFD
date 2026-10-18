@@ -2529,6 +2529,14 @@
     "JsonTurbulence": {
       "type": "object",
       "properties": {
+        "coeffs": {
+          "description": "SPEC-LIT §134.8 (CHR-16): a RAS model's coefficients by their\nOpenFOAM names, lowered into `RAS/<model>Coeffs/<name>`, which\n`model_coeff` reads; kEpsilon only (Cmu, C1, C2, C3, sigmak,\nsigmaEps).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "format": "double"
+          }
+        },
         "kind": {
           "$ref": "#/$defs/TurbulenceKind"
         },
@@ -2817,6 +2825,48 @@
             "type",
             "q"
           ]
+        },
+        {
+          "description": "SPEC-LIT §120.1's `fixedProfile`: a Function1 `table` of the face\ncoordinate `s = (d/|d|).x_f - origin` (`d` the `direction`, `origin`\n0 by default, `x_f` the face centre), evaluated once at setup - so a\nradial profile (the Sandia Flame D inlet, SPEC-LIT §134.8) is one\ncondition on ONE zmin patch where three zmin patches cannot exist\n(SPEC-LIT §119.3). It lowers to the same `direction`/`origin`/\n`profile` entries the dictionary route reads\n(`crate::function1::patch_entries`); fewer than two points, an `s`\nnot strictly increasing, a zero or non-finite direction and a\nnon-finite value are refused by name at lowering.",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "profile": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number",
+                  "format": "double"
+                },
+                "maxItems": 2,
+                "minItems": 2
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedProfile"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction",
+            "profile"
+          ]
         }
       ]
     },
@@ -3071,6 +3121,59 @@
           "additionalProperties": false,
           "required": [
             "type"
+          ]
+        },
+        {
+          "description": "The vector twin of [`ScalarBc::FixedProfile`] - SPEC-LIT §120.1's\n`fixedProfile`; in JSON one point is `[s, [ux, uy, uz]]`.",
+          "type": "object",
+          "properties": {
+            "direction": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "double"
+              },
+              "maxItems": 3,
+              "minItems": 3
+            },
+            "origin": {
+              "type": "number",
+              "format": "double",
+              "default": 0.0
+            },
+            "profile": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "maxItems": 2,
+                "minItems": 2,
+                "prefixItems": [
+                  {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number",
+                      "format": "double"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3
+                  }
+                ]
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "fixedProfile"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "direction",
+            "profile"
           ]
         }
       ]

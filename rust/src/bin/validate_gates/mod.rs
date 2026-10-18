@@ -70,3 +70,7 @@ pub(crate) mod couette;
 /// BFER phi 1.0, S_L by the 1500 K isotherm on three meshes, replayed from
 /// the recorded runs (CHR-13).
 pub(crate) mod flame1d;
+
+/// SPEC-LIT §134.8, Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon
+/// C1 1.6, REDUCED on the true wedge, replayed from the recorded run (CHR-16).
+pub(crate) mod flame_d;

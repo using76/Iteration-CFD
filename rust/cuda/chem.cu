@@ -1772,3 +1772,60 @@ extern "C" __global__ void chemEdcIntegrate
     counts[2 * n + c] = clipped;
     status[c] = st;
 }
+
+//- chemHeatRelease: SPEC-LIT 134.8 (134.18), the heat release of a mean
+//  rate - Q = - sum_k h_k(T) W_k omega-bar_k, with h_k the species'
+//  specific enthalpy carrying its formation enthalpy (J/kg) =
+//  R T (H/RT)_k / W_k, and W_k omega-bar_k = wdot_k, the (134.10) mean
+//  rate in mechanism order, kg/(m3 s). One thread per cell, the
+//  chemProductionRates launch style: t/q/status[c], wdot[k*n+c]. The sum
+//  runs in mechanism order over wdot != 0, term for term as the host twin
+//  edc_heat_release_host runs it, so the two agree to round-off in f64.
+//  Status (132.9 D3's codes, in the hosts' order of checks): 2 T not
+//  finite or not above 0, 13 a non-finite wdot_k, 5 a T outside a needed
+//  record's range; a refused cell writes NaN to its q, nothing else. -
+extern "C" __global__ void chemHeatRelease
+(
+    const ofscalar* __restrict__ t,
+    const ofscalar* __restrict__ wdot,
+    ofscalar* __restrict__ q,
+    int* __restrict__ status,
+    const ofchem* __restrict__ mf,
+    const int* __restrict__ mi,
+    oflabel n
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= n) return;
+    const int K = mi[0];
+    const ofchem rg = mf[18 * K];
+    const ofchem tc = (ofchem)t[c];
+    if (!isfinite(tc) || tc <= 0.0)
+    {
+        q[c] = (ofscalar)nan("");
+        status[c] = 2;
+        return;
+    }
+    ofchem sum = 0.0;
+    for (int k = 0; k < K; ++k)
+    {
+        const ofchem w = (ofchem)wdot[k * n + c];
+        if (!isfinite(w))
+        {
+            q[c] = (ofscalar)nan("");
+            status[c] = 13;
+            return;
+        }
+        if (w == 0.0) continue;
+        const ofchem* sp = mf + 18 * k;
+        if (chemRange(sp, tc) != 0)
+        {
+            q[c] = (ofscalar)nan("");
+            status[c] = 5;
+            return;
+        }
+        sum += (rg * tc * chemHrt(chemCoeffs(sp, tc), tc)) * w / sp[0];
+    }
+    q[c] = (ofscalar)(-sum);
+    status[c] = 0;
+}

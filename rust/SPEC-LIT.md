@@ -49956,6 +49956,145 @@ for review.
 
 Labels: (134.16)-(134.17).
 
+### 134.8 EDC in ofgpu-lowmach's split step, the species budget, and Sandia Flame D REDUCED (CHR-16, `src/chem/tci.rs`, `cuda/chem.cu`, `src/bin/lowmach_chem/`, `src/io/case_json.rs`, `cases/sandiaFlameD.jsonc`, `src/bin/validate_gates/flame_d.rs`)
+
+**(a) Plan versus tree.** The plan's row names the case and `ofgpu-validate`;
+`ofgpu-lowmach` refused every closure by name (§137.7) and CHR-14/CHR-15
+named CHR-16 as the owner of the wiring, so the split step is wired here —
+EDC only; EDM and PaSR stay refused by name. JL4 is not in the tree and
+DRM19 is user-path only (§129.6), so the case names `mech/drm19.dat` +
+`mech/thermo12.dat`, which the user places in the run copy. JSONC had no
+k-epsilon coefficient and no profile condition: `turbulence.coeffs` (kEpsilon
+only) lowers into `RAS/kEpsilonCoeffs/<name>`, which `model_coeff` reads, and
+`fixedProfile` lowers §120.1's condition to the same entries the dictionary
+route reads, for scalar and vector conditions alike. A wedge refuses
+`mesh.regions` (§119.3), so the jet, the pilot and the coflow cannot be three
+zmin patches: they are radial steps of one inlet. The REDUCED run is
+recorded and replayed — CHR-13's pattern (§133.12): a run changes DATA, not
+code.
+
+**(b) The step**, decided by recommendation. EDC's (134.10) mean rate at the
+step's opening state is each solved species' explicit source for the step,
+
+```
+su_k = W_k omega_bar_k ;   Q = - sum_k h_k(T~) W_k omega_bar_k   (134.18)
+h_k = R T (H/RT)_k / W_k ,
+```
+
+the reactor's Lie step is not run under EDC. (134.18)'s `h_k` is the NASA-7
+enthalpy per unit mass, and the heat release is linearised about the opening
+state — the same place (133.16)'s `rho cp (T* - T°)/dt` reads.
+`EdcStep` runs `chemEdcIntegrate` then `chemHeatRelease`;
+`edc_heat_release_host` is the f64 twin. The mixing inputs are staged once
+per step from the running model (`MixingRate`), and nu is the case's laminar
+nu.
+
+**(c) The budget of the last step**, as `species_budget` forms it — sums
+over cells `c` and boundary faces `b`, outward mass flux
+`phi_m,b = phi_b rho_f,b`, members `m` = the solved species and the inert
+remainder N, `z_me` = element e's mass per unit mass of member m:
+
+```
+mass:      R = sum_c V_c (rho_c - rho°_c)/dt + sum_b phi_m,b ;
+           relative = |R| / sum_b max(-phi_m,b, 0)                        (134.19)
+member m:  S_m = sum_c V_c (rho_c Y_m,c - rho°_c Y°_m,c)/dt,
+           C_m = sum_b phi_m,b Y_m,b,  D_m = -sum_b g_m,b
+           (g = the species equation's own boundary diffusive flux;
+           D_N = +sum_i sum_b g_i,b),  R_m = sum_c V_c su_m,c            (134.20)
+element e: R_e = sum_m z_me (S_m + C_m + D_m - R_m);
+           relative = |R_e| / sum_b max(-phi_m,b, 0) sum_m z_me Y_m,b     (134.21)
+```
+
+Two versions are printed. "Inventory" (the gate's) takes `rho` = the
+end-of-step density (133.20) formed from the new T and Y, and `rho°` = the
+step's opening density. "As read" takes the two density levels the species
+correction read, which with one outer corrector are both the opening
+density.
+
+**(d) The case.** `cases/sandiaFlameD.jsonc` — Sandia Flame D, the piloted
+CH4/air jet flame (Re 22400, d 7.2 mm), from the TNF documentation
+(SandiaPilotDoc21.pdf, Release 2.1 of 15 June 2007,
+https://tnfworkshop.org/wp-content/uploads/2019/02/SandiaPilotDoc21.pdf,
+sha256 `4e748acd113f3d72fe814be6e5b1e27154577b5040951d59a015e9d287209f72`,
+pages 2, 3, 4, 5, 7): jet 25 % CH4 / 75 % dry air by volume at 49.6 m/s
+(nu 1.58e-5 m2/s), pilot 11.4 m/s at phi 0.77 and 1880 K with its printed
+minor-species mass fractions, coflow 0.9 m/s at 291 K, 0.993 atm. DESIGN
+choices, each named in the case header: ONE zmin inlet with the three
+streams as radial steps at r = 0.003725 m and 0.009275 m (the p. 5
+mid-wall convention), each step a 1e-7 m ramp no face centre lies inside;
+the streams' mass fractions from the solver's molar masses (jet CH4
+0.1563714015, O2 0.1964954433, N2 the remainder; pilot N2 remainder
+0.7342292 because NO is not a DRM19 species; coflow from element fractions
+Y2H 0.0007 and Y2O 0.2413); k = 1.215e-4 and epsilon = 0.1 on the whole
+inlet and in the initial field (the coflow's 1 % intensity, epsilon 0.1
+not the coflow's own 2.2e-5 — the measured reason below); T enters at
+302 K, not 294/291 K (thermo12's N2, AR and CH3O records start at 300 K);
+chemistry atol 1e-5 with EDC's defaults (psrSpan 20); gravity 0 (the jet's
+Froude number is 3.5e4). The wedge is 5 degrees, 80 x 1 x 120 cells,
+z-graded by expansion 5, C1 = 1.6.
+
+**(e) The rows.**
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| chem_tci `edc_step_is_the_kernel_rate` | the device `EdcStep` rate against the kernel's | bitwise | D |
+| chem_tci `edc_heat_release_matches_host` | device vs `edc_heat_release_host`, f64 / single; hand value | 1e-12; 1e-6; 1e-14 | R; R; P |
+| chem_tci `edc_step_conserves_elements_and_mass` | the reactor's own element and mass closures | 1e-10; single 1e-6 | A |
+| chem_tci `edc_step_refuses_short_buffers` | the input checks | exact | D |
+| lowmach `lowmach_edc_elements_conserved` | the tube's element content through the split step | 1e-10; single 1e-5 | R |
+| lowmach `lowmach_edc_refusals_name_the_setting` | the closure refusals | exact | D |
+| lowmach `species_budget_closes_on_hand_data` | (134.19)-(134.21) on hand data | 1e-15 and 1e-12 | P |
+| case_json `turbulence_coeffs_lower_into_model_coeff` | the coeffs' lowering | exact | D |
+| case_json `json_fixed_profile_matches_the_dictionary_spec` | the two routes' entries | exact | D |
+| case_json `json_fixed_profile_is_refused_by_name` | the bad profiles | exact | D |
+| case_json `json_fixed_profile_seeds_the_t_boundary_bitwise` | the seeded boundary | bitwise | D |
+| case_json `sandia_flame_d_case_lowers` | the case's lowering | exact | D |
+| validate (this gate) | the run reached 300 steps and ended on its budget; every field finite at the last good step | exact | D |
+| validate (this gate) | the inventory mass and O/H/C/N budgets (134.19), (134.21) | 1e-6 | A |
+| validate (this gate) | the DEFERRED TNF band (§137.4) | NOT RUN | — |
+
+**(f) The measured EDC library values** (runs A and B): heat release device
+vs host 0.0 (f64) and 2.518e-8 (single); elements 1.171e-13 and mass
+2.856e-14 (f64), 5.279e-8 and 4.436e-8 (single); lowmach EDC tube elements
+2.532e-13 (f64; run B measured it over 100 steps, the test now runs 30;
+psrSpan 1); existing chem.cu kernels' SASS unchanged in both builds.
+
+**(g) The recorded runs** (built at 1111b2a with CHR-16's working tree, on
+the RTX 5070 Ti shared with two other lanes). The REDUCED run
+(`-endTime 3e-3 -deltaT 1e-5 -p0 100615.725`) completed 40 of 300 steps and
+stopped on step 41 with "EDC refused 1 cell(s); the first is cell 244 with
+status 8 (BELOW_NEGATIVE_ATOL)"; mean T reached 1523 K. The same case to
+`-endTime 4e-4` ended on its budget, and its last-step inventory budgets
+are mass 3.785e-2, O 1.175e-1, H 2.194e-1, C 2.354e-1, N 1.298e-2 — all
+MISSED against 1e-6. As read: O 3.8e-14, H 5.5e-14, C 9.7e-15 (the species
+equations close to round-off) but mass 1.389e-1 and N 1.802e-1; CH4 reached
+0.1618 against the jet's 0.15637. 384000 of 384000 cell-steps were capped
+(the laminar start keeps Re_T below C_gamma^4) and 737 unconverged; 60.3 s
+for 40 steps.
+
+The input search, each measured: inlet T 300 K -> about 2250 cells out of
+range on step 2 (hence 302 K); epsilon 2.2e-5 -> nut 0.12 m2/s after one
+step and M 1.6 on step 2, with or without chemistry (hence 0.1); atol
+1e-10, 1e-8, 1e-6 -> 1 to 14 cells refused BELOW_NEGATIVE_ATOL on step 2;
+atol 1e-5 -> step 41 (the record); atol 1e-4 -> OUTSIDE_THERMO_RANGE
+between steps 41 and 50; psrSpan 1 (atol 1e-5) -> BELOW_NEGATIVE_ATOL
+between steps 31 and 40; the bounded species scheme -> OUTSIDE_THERMO_RANGE
+between steps 11 and 20; at the earlier inputs (T 300 K or epsilon 2.2e-5)
+psrSpan 0.2, 5 and 20, rtol 1e-3 and 1e-8, and ros3 all stopped on step 2.
+
+Causes, stated as measured and not proven: the reactor's observer refuses a
+component below -atol after an accepted step whose RMS error norm passed;
+and the species equations read the step's opening density at both levels
+while the flux carries the step's dilatation, so mass and the inert
+remainder (N) do not close and a mass fraction can overshoot. Cures change
+numerics and are the user's; they are not built. The DEFERRED comparison is
+NOT RUN: the REDUCED run stops at step 41 on the reactor's negativity
+guard, and a statistically steady flame needs about 0.2 s of flow (2e4
+steps at dt 1e-5) at the measured 1.5 s per step, about 8 h of card time,
+over this unit's 3 h.
+
+Labels: (134.18)-(134.21).
+
 ---
 
 ## 135. The radiative transfer equation, the exact slab, and P1 with Marshak walls

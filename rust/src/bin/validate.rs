@@ -3942,6 +3942,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_flame1d", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 134.8 - Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon
+    // C1 1.6, REDUCED on the true wedge, replayed from the recorded run of
+    // src/bin/validate_gates/flame_d.rs (CHR-16); the TNF band is named and
+    // NOT RUN there.
+    if c.section("Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8)") {
+    c.enter_gate(validate_gates::flame_d::GATE);
+    let r = validate_gates::flame_d::check_flame_d(c);
+    c.ran("check_flame_d", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

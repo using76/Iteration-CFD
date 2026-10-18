@@ -415,6 +415,7 @@ pub struct TciKernels {
     edm: CudaFunction,
     pasr: CudaFunction,
     edc: CudaFunction,
+    heat: CudaFunction,
 }
 
 impl TciKernels {
@@ -424,6 +425,7 @@ impl TciKernels {
             edm: k.func("chemEdmSource")?,
             pasr: k.func("chemPasrScale")?,
             edc: k.func("chemEdcIntegrate")?,
+            heat: k.func("chemHeatRelease")?,
         })
     }
 }
@@ -1123,6 +1125,220 @@ pub fn edc_report(gpu: &Gpu, work: &EdcWork, status: &DevBuf<i32>, n: usize) -> 
         }
     }
     Ok(rep)
+}
+
+/// (134.18)'s host twin (SPEC-LIT §134.8): `Q = -sum_k h_k(T) W_k
+/// omega_bar_k`, with `h_k` the species' specific enthalpy carrying its
+/// formation enthalpy, `R T (H/RT)_k / W_k` (J/kg), and `W_k omega_bar_k =
+/// wdot_k`, the (134.10) mean rate in kg/(m3 s), mechanism order - so the
+/// sum is over `h_k(T) wdot_k / W_k`, in mechanism order, skipping
+/// `wdot[k] == 0.0` exactly where the kernel's sum skips it. The species'
+/// enthalpy is the thermo set's `h` (J/mol) and the division is by the
+/// record's `molar_mass` (kg/mol). Refused, each an `Error::Config`
+/// naming the cause and ending "(SPEC-LIT §134.8)": a `wdot` whose length
+/// is not the species count, a `t` not finite or not above 0, a mechanism
+/// species with no thermo record, and a `T` outside the record's range.
+pub fn edc_heat_release_host(mech: &Mechanism, t: f64, wdot: &[f64]) -> Result<f64> {
+    const TAG: &str = "(SPEC-LIT §134.8)";
+    let n_sp = mech.species().len();
+    if wdot.len() != n_sp {
+        return Err(Error::Config(format!(
+            "edc_heat_release_host: wdot holds {} rate(s), the mechanism has {n_sp} species \
+             {TAG}",
+            wdot.len()
+        )));
+    }
+    if !t.is_finite() || t <= 0.0 {
+        return Err(Error::Config(format!(
+            "edc_heat_release_host: T = {t} K must be finite and above 0 {TAG}"
+        )));
+    }
+    let thermo = mech.thermo();
+    let mut acc = 0.0;
+    for (k, name) in mech.species().iter().enumerate() {
+        if wdot[k] == 0.0 {
+            continue;
+        }
+        let s = thermo.get(name).ok_or_else(|| {
+            Error::Config(format!(
+                "edc_heat_release_host: the mechanism's species \"{name}\" has no thermo \
+                 record {TAG}"
+            ))
+        })?;
+        acc += s.h(t)? * wdot[k] / s.molar_mass;
+    }
+    Ok(-acc)
+}
+
+/// EDC as the split step's source (SPEC-LIT §134.8): [`edc_source_device`]
+/// - `chemEdcIntegrate` - on every cell, then `chemHeatRelease` of its
+/// mean rate. Allocates once in [`EdcStep::new`]; [`EdcStep::step`]
+/// allocates nothing and reads nothing back (capturable).
+pub struct EdcStep {
+    kern: TciKernels,
+    dm: DeviceMechanism,
+    dr: DeviceReactor,
+    work: EdcWork,
+    prm: EdcParams,
+    /// `[K * n]`: (134.10)'s mean rate `W_k omega_bar_k` in mechanism
+    /// order, kg/(m3 s), NaN on a refused cell.
+    wdot: DevBuf<Scalar>,
+    /// `[n]`: (134.18)'s heat release of that mean rate, W/m3, NaN on a
+    /// refused cell.
+    q: DevBuf<Scalar>,
+    /// `[n]`: the step's EDC statuses (§134.7's codes).
+    status: DevBuf<i32>,
+    /// `[n]`: `chemHeatRelease`'s own statuses.
+    q_status: DevBuf<i32>,
+    n: usize,
+}
+
+impl EdcStep {
+    /// Build the step for `mech` on `n_cells` cells (SPEC-LIT §134.8):
+    /// the kernels load once, the mechanism and the reactor go to the
+    /// device once, and the scratch is sized once. Every refusal of
+    /// [`DeviceReactor::new`] and of the uploads applies here.
+    pub fn new(
+        gpu: &Gpu,
+        mech: &Mechanism,
+        opts: &ReactorOptions,
+        prm: &EdcParams,
+        n_cells: usize,
+    ) -> Result<Self> {
+        let kern = TciKernels::new(gpu)?;
+        let dm = DeviceMechanism::upload(gpu, mech)?;
+        let dr = DeviceReactor::new(gpu, opts)?;
+        let work = EdcWork::new(gpu, &dm, &dr, n_cells)?;
+        let ks = dm.n_species();
+        let nc = n_cells.max(1);
+        Ok(Self {
+            kern,
+            dm,
+            dr,
+            work,
+            prm: *prm,
+            wdot: gpu.zeros(ks * nc)?,
+            q: gpu.zeros(nc)?,
+            status: gpu.zeros(nc)?,
+            q_status: gpu.zeros(nc)?,
+            n: n_cells,
+        })
+    }
+
+    /// One EDC step over every cell (SPEC-LIT §134.8), in order:
+    /// [`edc_source_device`] writes (134.10)'s mean rate and the step's
+    /// statuses, then `chemHeatRelease` forms (134.18)'s heat release of
+    /// that rate - readable through [`EdcStep::heat_release`] with its own
+    /// statuses. Both launches read the same `t`, so its layout is checked
+    /// against the heat kernel too; `n == 0` launches nothing. No sync, no
+    /// allocation, no read-back, so the pair captures;
+    /// [`EdcStep::report`] reads the step afterwards, outside any capture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step(
+        &mut self,
+        gpu: &Gpu,
+        mix: &DeviceMixing<'_>,
+        nu: &DevBuf<Scalar>,
+        rho: &DevBuf<Scalar>,
+        t: &DevBuf<Scalar>,
+        p: &DevBuf<Scalar>,
+        y: &DevBuf<Scalar>,
+    ) -> Result<()> {
+        edc_source_device(
+            gpu,
+            &self.kern,
+            &self.dm,
+            &self.dr,
+            &mut self.work,
+            &self.prm,
+            mix,
+            nu,
+            rho,
+            t,
+            p,
+            y,
+            &mut self.wdot,
+            &mut self.status,
+            self.n,
+        )?;
+        check_layout("chemHeatRelease", "t", t.len(), self.n)?;
+        if self.n > 0 {
+            let nl = self.n as Label;
+            unsafe {
+                gpu.stream()
+                    .launch_builder(&self.kern.heat)
+                    .arg(t)
+                    .arg(&self.wdot)
+                    .arg(&mut self.q)
+                    .arg(&mut self.q_status)
+                    .arg(self.dm.flat_f())
+                    .arg(self.dm.flat_i())
+                    .arg(&nl)
+                    .launch(cfg_for(self.n))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `[K * n]`: (134.10)'s mean rate `W_k omega_bar_k`, mechanism order,
+    /// kg/(m3 s), NaN on a refused cell.
+    pub fn wdot(&self) -> &DevBuf<Scalar> {
+        &self.wdot
+    }
+
+    /// `[n]`: (134.18)'s heat release of the step's mean rate, W/m3, NaN
+    /// on a refused cell.
+    pub fn heat_release(&self) -> &DevBuf<Scalar> {
+        &self.q
+    }
+
+    /// The species count, K.
+    pub fn n_species(&self) -> usize {
+        self.dm.n_species()
+    }
+
+    /// The cell count the step was built for.
+    pub fn n_cells(&self) -> usize {
+        self.n
+    }
+
+    /// The step's report (SPEC-LIT §134.8): [`edc_report`]'s capped,
+    /// unconverged and refused counts, plus one more download - the cells
+    /// whose step status is 0 but whose `chemHeatRelease` status is not
+    /// are added to `refused`. Downloads, so it synchronises: it runs
+    /// after the step and never inside a capture.
+    pub fn report(&self, gpu: &Gpu) -> Result<EdcReport> {
+        let mut rep = edc_report(gpu, &self.work, &self.status, self.n)?;
+        if self.n == 0 {
+            return Ok(rep);
+        }
+        let sts = gpu.download(&self.status)?;
+        let qs = gpu.download(&self.q_status)?;
+        for c in 0..self.n {
+            if sts[c] == 0 && qs[c] != 0 {
+                rep.refused += 1;
+            }
+        }
+        Ok(rep)
+    }
+
+    /// The lowest cell index the step refused, with its status code; else
+    /// the lowest one `chemHeatRelease` refused on its own, with that
+    /// code; else `None` (SPEC-LIT §134.8). Downloads, so it synchronises.
+    pub fn first_refused(&self, gpu: &Gpu) -> Result<Option<(usize, i32)>> {
+        if self.n == 0 {
+            return Ok(None);
+        }
+        let sts = gpu.download(&self.status)?;
+        let qs = gpu.download(&self.q_status)?;
+        if let Some(c) = (0..self.n).find(|&c| sts[c] != 0) {
+            return Ok(Some((c, sts[c])));
+        }
+        if let Some(c) = (0..self.n).find(|&c| qs[c] != 0) {
+            return Ok(Some((c, qs[c])));
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
