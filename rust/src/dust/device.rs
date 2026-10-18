@@ -15,7 +15,11 @@
 //! [`crate::dust::ignition`] and [`crate::dust::courant`]. DST-12 adds the
 //! reacting-parcel step of `cuda/dustparticle.cu` (SPEC-LIT §159), whose
 //! host twin is [`crate::dust::particle::step`]; DST-13 adds its char
-//! stage (SPEC-LIT §159.8, [`crate::dust::char`]). A launcher only
+//! stage (SPEC-LIT §159.8, [`crate::dust::char`]). DST-06 part 2 adds the
+//! three thermo kernels of one dust step (SPEC-LIT (152.12), (133.17),
+//! (133.18)): the mixture `cp` on the two pseudo-species' NASA-7 rows, the
+//! heat release and the enthalpy diffusion - each with its host twin in
+//! [`crate::dust::thermo`] and [`crate::dust::source`]. A launcher only
 //! launches - no sync, no download, no allocation - so a captured region
 //! can hold it; a counter is a one-element `u64` buffer the caller zeroes,
 //! and the kernels add to it.
@@ -27,6 +31,9 @@
 //!     counter; §154.8 - the implicit split (154.11)
 //!   SPEC-LIT §159.1-§159.4, §159.7 - the reacting parcel (DST-12)
 //!   SPEC-LIT §159.8 - its char stage and the five char accumulators (DST-13)
+//!   SPEC-LIT §160.5 - the flame-age kernels (DST-20): `dustFscAged` - the
+//!     closures at the per-cell age a* of (160.4) - `dustAgePredict` and
+//!     `dustAgeSources`, whose host twin is [`crate::dust::age`]
 //! The specification was informed by a review of FSCDustFoam (Huang &
 //! Lipatnikov, GPL) and no code was copied.
 //! No GPL-licensed source was consulted.
@@ -38,16 +45,24 @@ use crate::error::{Error, Result};
 use crate::{Acc, Label, Scalar, Vec3};
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
-/// The two kernels of `cuda/dust.cu`, loaded from the `DUST` module.
+/// The kernels of `cuda/dust.cu` loaded from the `DUST` module: the
+/// closures at the global clock, their f32-safe Arrhenius row, and - DST-20
+/// (SPEC-LIT §160) - `dustFscAged`, the same closure with both clocks read
+/// per cell from the flame-age field.
 pub struct FscKernels {
     fsc: CudaFunction,
     arrhenius: CudaFunction,
+    fsc_aged: CudaFunction,
 }
 
 impl FscKernels {
     pub fn new(gpu: &Gpu) -> Result<Self> {
         let k = KernelSet::new(gpu, crate::kernels::DUST)?;
-        Ok(Self { fsc: k.func("dustFsc")?, arrhenius: k.func("dustArrhenius")? })
+        Ok(Self {
+            fsc: k.func("dustFsc")?,
+            arrhenius: k.func("dustArrhenius")?,
+            fsc_aged: k.func("dustFscAged")?,
+        })
     }
 }
 
@@ -145,6 +160,73 @@ pub fn fsc(
     Ok(())
 }
 
+/// `dustFscAged`: [`fsc`] with the flame-age clock on (SPEC-LIT §160.5) -
+/// the same closure operation for operation, with both clocks read per
+/// cell from `age` (the closures' age a* of (160.4): t_fd AND the t of
+/// (154.7)). Cells the zero rule writes as 0 are added to `n_zero[0]`.
+#[allow(clippy::too_many_arguments)]
+pub fn fsc_aged(
+    gpu: &Gpu,
+    k: &FscKernels,
+    c: &FscConstants,
+    out: FscFields<'_>,
+    n_zero: &mut DevBuf<u64>,
+    inp: FscInputsDev<'_>,
+    age: &DevBuf<Scalar>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("d_t", out.d_t.len()),
+        ("u_t", out.u_t.len()),
+        ("u_t_isp", out.u_t_isp.len()),
+        ("tau_l", out.tau_l.len()),
+        ("k_rate", out.k_rate.len()),
+        ("t", inp.t.len()),
+        ("k", inp.k.len()),
+        ("omega", inp.omega.len()),
+        ("nu_t", inp.nu_t.len()),
+        ("age", age.len()),
+    ] {
+        check_len("fsc_aged", name, len, n)?;
+    }
+    check_len("fsc_aged", "n_zero", n_zero.len(), 1)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let model: Label = c.model.code();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.fsc_aged)
+            .arg(&mut *out.d_t)
+            .arg(&mut *out.u_t)
+            .arg(&mut *out.u_t_isp)
+            .arg(&mut *out.tau_l)
+            .arg(&mut *out.k_rate)
+            .arg(&mut *n_zero)
+            .arg(inp.t)
+            .arg(inp.k)
+            .arg(inp.omega)
+            .arg(inp.nu_t)
+            .arg(age)
+            .arg(&nl)
+            .arg(&model)
+            .arg(&c.t_flacc)
+            .arg(&c.a)
+            .arg(&c.tau_f)
+            .arg(&c.pr_t)
+            .arg(&c.c_d)
+            .arg(&c.beta_star)
+            .arg(&c.k_b)
+            .arg(&c.theta_b)
+            .arg(&c.t_b)
+            .arg(&c.kappa_b)
+            .arg(&c.e_zero)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
 /// `dustArrhenius`: E(T) of (154.10) with the zero rule, cells zeroed added
 /// to `n_zero[0]`.
 pub fn arrhenius(
@@ -178,14 +260,19 @@ pub fn arrhenius(
     Ok(())
 }
 
-/// The five kernels of the progress-variable equation in `cuda/dust.cu`
-/// (SPEC-LIT §155, docs/17 DST-04), loaded from the `DUST` module.
+/// The kernels of the progress-variable equation in `cuda/dust.cu`
+/// (SPEC-LIT §155, docs/17 DST-04) loaded from the `DUST` module, with
+/// DST-20's two flame-age kernels (SPEC-LIT §160): the predicted alpha
+/// level and the closures' age of (160.4), and the source pair of
+/// (160.5)-(160.6).
 pub struct ProgressKernels {
     sources: CudaFunction,
     ignition: CudaFunction,
     courant: CudaFunction,
     reynolds: CudaFunction,
     bounds: CudaFunction,
+    age_predict: CudaFunction,
+    age_sources: CudaFunction,
 }
 
 impl ProgressKernels {
@@ -197,6 +284,8 @@ impl ProgressKernels {
             courant: k.func("dustFlameCourant")?,
             reynolds: k.func("dustReynoldsMean")?,
             bounds: k.func("dustCountOutOfBounds")?,
+            age_predict: k.func("dustAgePredict")?,
+            age_sources: k.func("dustAgeSources")?,
         })
     }
 }
@@ -261,6 +350,121 @@ pub fn progress_sources(
             .arg(&nl)
             .arg(&has_ign)
             .arg(&inp.rho_u)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The per-cell inputs of the age sources of (160.5)-(160.6): the c~
+/// solve's own S_U / S_P' pair and levels, the rho and c~ old levels, and
+/// the clock weights (w0, w00) of (160.5) with the floor c_a.
+pub struct AgeSourceInputs<'a> {
+    /// The S_U of the c~ solve just made, `[n]`.
+    pub su: &'a DevBuf<Scalar>,
+    /// The S_P' of the c~ solve just made, `[n]`.
+    pub sp: &'a DevBuf<Scalar>,
+    /// c~, the solved level, `[n]`.
+    pub c: &'a DevBuf<Scalar>,
+    /// rho^{n-1}, `[n]`.
+    pub rho0: &'a DevBuf<Scalar>,
+    /// c~^{n-1}, `[n]`.
+    pub c0: &'a DevBuf<Scalar>,
+    /// rho^{n-2}, `[n]`.
+    pub rho00: &'a DevBuf<Scalar>,
+    /// c~^{n-2}, `[n]`.
+    pub c00: &'a DevBuf<Scalar>,
+    /// (160.5)'s w0 = -a_0 Delta_n.
+    pub w0: f64,
+    /// (160.5)'s w00 = -a_00 (Delta_n + Delta_{n-1}).
+    pub w00: f64,
+    /// The floor c_a of (160.1).
+    pub c_a: f64,
+}
+
+/// `dustAgePredict`: the predicted alpha level alpha* = alpha^n +
+/// Delta_n c~^n and the closures' age a* = alpha*/max(c~^n, c_a) of
+/// (160.4), per cell (SPEC-LIT §160.5). Its host twin is
+/// [`crate::dust::age::predict_cell`].
+pub fn age_predict(
+    gpu: &Gpu,
+    k: &ProgressKernels,
+    alpha: &mut DevBuf<Scalar>,
+    age: &mut DevBuf<Scalar>,
+    alpha0: &DevBuf<Scalar>,
+    c0: &DevBuf<Scalar>,
+    delta: f64,
+    c_a: f64,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in
+        [("alpha", alpha.len()), ("age", age.len()), ("alpha0", alpha0.len()), ("c0", c0.len())]
+    {
+        check_len("age_predict", name, len, n)?;
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.age_predict)
+            .arg(&mut *alpha)
+            .arg(&mut *age)
+            .arg(alpha0)
+            .arg(c0)
+            .arg(&nl)
+            .arg(&delta)
+            .arg(&c_a)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustAgeSources`: the clock source S_alpha of (160.5) and the
+/// inheritance coefficient of (160.6) per cell - the pair
+/// `fvm_su(sua, +1)` and `fvm_sp(spa, +1)` put into the alpha matrix.
+/// Its host twin is [`crate::dust::age::sources_cell`].
+pub fn age_sources(
+    gpu: &Gpu,
+    k: &ProgressKernels,
+    sua: &mut DevBuf<Scalar>,
+    spa: &mut DevBuf<Scalar>,
+    inp: &AgeSourceInputs<'_>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("sua", sua.len()),
+        ("spa", spa.len()),
+        ("su", inp.su.len()),
+        ("sp", inp.sp.len()),
+        ("c", inp.c.len()),
+        ("rho0", inp.rho0.len()),
+        ("c0", inp.c0.len()),
+        ("rho00", inp.rho00.len()),
+        ("c00", inp.c00.len()),
+    ] {
+        check_len("age_sources", name, len, n)?;
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.age_sources)
+            .arg(&mut *sua)
+            .arg(&mut *spa)
+            .arg(inp.su)
+            .arg(inp.sp)
+            .arg(inp.c)
+            .arg(inp.rho0)
+            .arg(inp.c0)
+            .arg(inp.rho00)
+            .arg(inp.c00)
+            .arg(&nl)
+            .arg(&inp.w0)
+            .arg(&inp.w00)
+            .arg(&inp.c_a)
             .launch(cfg_for(n))?;
     }
     Ok(())
@@ -404,6 +608,166 @@ pub fn count_out_of_bounds(
     Ok(())
 }
 
+
+/// The three thermo kernels of DST-06 part 2 (SPEC-LIT (152.12), (133.17),
+/// (133.18) with Y_B = c~), loaded from the `DUST` module. Their host twins
+/// are [`crate::dust::thermo::EquivalentGas`]'s `cp`, `heat_release` and
+/// the (133.17) formula.
+pub struct SourceKernels {
+    mixture_cp: CudaFunction,
+    heat_release: CudaFunction,
+    enthalpy_diffusion: CudaFunction,
+}
+
+impl SourceKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::DUST)?;
+        Ok(Self {
+            mixture_cp: k.func("dustMixtureCp")?,
+            heat_release: k.func("dustHeatRelease")?,
+            enthalpy_diffusion: k.func("dustEnthalpyDiffusion")?,
+        })
+    }
+}
+
+/// One pseudo-species' row for the three kernels (SPEC-LIT (128.1), (128.2),
+/// (128.5)): `[R0/W, t_mid, lower a1..a5, lower a6, upper a1..a5, upper a6]`.
+/// `R0` is [`crate::chem::thermo::R_GAS`], so `row[0]` is J/(kg K) per unit
+/// cp/R and `a[5]` of either interval IS its a6.
+pub fn thermo_row(sp: &crate::chem::thermo::SpeciesThermo) -> [Acc; 14] {
+    let mut row = [0.0; 14];
+    row[0] = crate::chem::thermo::R_GAS / sp.molar_mass;
+    row[1] = sp.t_mid;
+    row[2..7].copy_from_slice(&sp.lower[..5]);
+    row[7] = sp.lower[5];
+    row[8..13].copy_from_slice(&sp.upper[..5]);
+    row[13] = sp.upper[5];
+    row
+}
+
+/// `dustMixtureCp`: (133.18)'s `cp = (1 - c) cp_U(T) + c cp_B(T)` per kg,
+/// J/(kg K), over `n` values.
+#[allow(clippy::too_many_arguments)]
+pub fn mixture_cp(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    cp: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    c: &DevBuf<Scalar>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [("cp", cp.len()), ("t", t.len()), ("c", c.len())] {
+        check_len("mixture_cp", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("mixture_cp", "row_u", row_u.len(), 14)?;
+    check_len("mixture_cp", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.mixture_cp)
+            .arg(&mut *cp)
+            .arg(t)
+            .arg(c)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustHeatRelease`: (152.12)'s `qdot = (h_U(T) - h_B(T)) wdot_c`, W/m3,
+/// over `n` values.
+pub fn heat_release(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    q: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    wdot: &DevBuf<Scalar>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [("q", q.len()), ("t", t.len()), ("wdot", wdot.len())] {
+        check_len("heat_release", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("heat_release", "row_u", row_u.len(), 14)?;
+    check_len("heat_release", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.heat_release)
+            .arg(&mut *q)
+            .arg(t)
+            .arg(wdot)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// `dustEnthalpyDiffusion`: (133.17)'s
+/// `Q_hd = rho Gamma (cp_B(T) - cp_U(T)) (grad c~ . grad T)`, W/m3, over
+/// `n` cells.
+#[allow(clippy::too_many_arguments)]
+pub fn enthalpy_diffusion(
+    gpu: &Gpu,
+    k: &SourceKernels,
+    q: &mut DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    rho: &DevBuf<Scalar>,
+    gamma: &DevBuf<Scalar>,
+    grad_c: &DevBuf<Vec3>,
+    grad_t: &DevBuf<Vec3>,
+    row_u: &DevBuf<Acc>,
+    row_b: &DevBuf<Acc>,
+    n: usize,
+) -> Result<()> {
+    for (name, len) in [
+        ("q", q.len()),
+        ("t", t.len()),
+        ("rho", rho.len()),
+        ("gamma", gamma.len()),
+        ("grad_c", grad_c.len()),
+        ("grad_t", grad_t.len()),
+    ] {
+        check_len("enthalpy_diffusion", name, len, n)?;
+    }
+    // The thermo rows are 14 wide per SPEC-LIT (128.1), not n long.
+    check_len("enthalpy_diffusion", "row_u", row_u.len(), 14)?;
+    check_len("enthalpy_diffusion", "row_b", row_b.len(), 14)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.enthalpy_diffusion)
+            .arg(&mut *q)
+            .arg(t)
+            .arg(rho)
+            .arg(gamma)
+            .arg(grad_c)
+            .arg(grad_t)
+            .arg(row_u)
+            .arg(row_b)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
 
 /// The reacting-parcel kernel of `cuda/dustparticle.cu` (SPEC-LIT §159,
 /// docs/17 DST-12), loaded from the `DUSTPARTICLE` module. Its host twin is
@@ -857,5 +1221,80 @@ mod tests {
         )
         .expect("SPEC-LIT 159: the dust reacting-parcel step must capture and replay bitwise");
         println!("  dust reacting-parcel step: {report}");
+    }
+
+    /// DST-06 part 2's three thermo kernels (SPEC-LIT (152.12), (133.17),
+    /// (133.18)) under §81.6's protocol: T is fed back from the heat release
+    /// each iteration, so a replay that skipped a kernel cannot reproduce
+    /// the state. The rows are the prescribed Leeds pseudo-species'.
+    #[test]
+    fn dust_source_kernels_replay_under_capture() {
+        use crate::dust::thermo::{EquivalentGas, PrescribedInputs};
+        struct S {
+            sk: SourceKernels,
+            fl: FieldKernels,
+            row_u: DevBuf<Acc>,
+            row_b: DevBuf<Acc>,
+            t: DevBuf<Scalar>,
+            c: DevBuf<Scalar>,
+            rho: DevBuf<Scalar>,
+            gam: DevBuf<Scalar>,
+            gc: DevBuf<Vec3>,
+            gt: DevBuf<Vec3>,
+            wdot: DevBuf<Scalar>,
+            cp: DevBuf<Scalar>,
+            q: DevBuf<Scalar>,
+            qhd: DevBuf<Scalar>,
+        }
+        let Some(g) = gpu() else { return };
+        let n = 64;
+        let gas = EquivalentGas::prescribed(&PrescribedInputs {
+            cp: 1100.0,
+            w_u: 0.0328,
+            w_b: 0.0297,
+            t_u: 328.0,
+            t_b: 1500.0,
+        })
+        .expect("gas");
+        let col = |f: &dyn Fn(usize) -> f64| (0..n).map(|i| f(i) as Scalar).collect::<Vec<Scalar>>();
+        let report = capture_replays_bitwise(
+            &g,
+            "the dust source kernels (SPEC-LIT (152.12), 133.17, 133.18)",
+            || {
+                Ok(S {
+                    sk: SourceKernels::new(&g)?,
+                    fl: FieldKernels::new(&g)?,
+                    row_u: g.upload(&thermo_row(&gas.unburned))?,
+                    row_b: g.upload(&thermo_row(&gas.burned))?,
+                    t: g.upload(&col(&|i| 900.0 + 20.0 * i as f64))?,
+                    c: g.upload(&col(&|i| i as f64 / 63.0))?,
+                    rho: g.upload(&col(&|i| 1.0 + 0.01 * i as f64))?,
+                    gam: g.upload(&col(&|i| 2.0e-5 * (1.0 + 0.1 * i as f64)))?,
+                    gc: g.upload(&(0..n).map(|i| Vec3::new((10.0 + i as f64) as Scalar, 1.0, 0.0)).collect::<Vec<Vec3>>())?,
+                    gt: g.upload(&(0..n).map(|i| Vec3::new(1.0, (2.0 + i as f64) as Scalar, 0.0)).collect::<Vec<Vec3>>())?,
+                    wdot: g.upload(&col(&|i| 10.0 + i as f64))?,
+                    cp: g.zeros(n)?,
+                    q: g.zeros(n)?,
+                    qhd: g.zeros(n)?,
+                })
+            },
+            |s| {
+                mixture_cp(&g, &s.sk, &mut s.cp, &s.t, &s.c, &s.row_u, &s.row_b, n)?;
+                heat_release(&g, &s.sk, &mut s.q, &s.t, &s.wdot, &s.row_u, &s.row_b, n)?;
+                enthalpy_diffusion(&g, &s.sk, &mut s.qhd, &s.t, &s.rho, &s.gam, &s.gc, &s.gt, &s.row_u, &s.row_b, n)?;
+                crate::field_ops::scale_field(&g, &s.fl, &mut s.rho, 1.0e-3, n)?;
+                crate::field_ops::add_field(&g, &s.fl, &mut s.t, &s.rho, n)
+            },
+            |s| {
+                Ok(vec![
+                    ("t", g.download(&s.t)?),
+                    ("cp", g.download(&s.cp)?),
+                    ("q", g.download(&s.q)?),
+                    ("qhd", g.download(&s.qhd)?),
+                ])
+            },
+        )
+        .expect("SPEC-LIT (152.12): the dust source kernels must capture and replay bitwise");
+        println!("  dust source kernels: {report}");
     }
 }

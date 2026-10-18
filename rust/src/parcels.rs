@@ -86,6 +86,7 @@ use crate::device::{DevBuf, Gpu, KernelSet, BLOCK};
 use crate::error::{Error, Result};
 use crate::field::GpuVectorField;
 use crate::io::contract;
+use crate::parcels::inject::event_mass_coefficient;
 use crate::mesh::gpugeom::GeoVec3;
 use crate::mesh::{GpuMesh, HostMesh, PatchKind};
 use crate::types::{to_dvec3, to_vec3, DVec3};
@@ -98,6 +99,9 @@ pub mod couple;
 pub mod deposit;
 pub mod evaporation;
 pub mod impact;
+pub mod inject;
+
+pub use inject::{RosinRammler, SizeDistribution};
 
 pub use couple::{
     CouplingControls, CouplingMode, CouplingSnapshot, MassCoupling, ParcelCoupling,
@@ -755,6 +759,8 @@ pub struct Injector {
     /// arithmetic on the device - a floating-point `floor(t/interval)` would
     /// make the whole spray depend on how the accumulated time was summed.
     pub interval: Scalar,
+    /// SPEC-LIT 147.1. Default Monodisperse.
+    pub size: SizeDistribution,
 }
 
 impl Default for Injector {
@@ -770,6 +776,7 @@ impl Default for Injector {
             mass_flow: 0.0,
             parcels_per_event: 1,
             interval: 0.0,
+            size: SizeDistribution::Monodisperse,
         }
     }
 }
@@ -1215,6 +1222,13 @@ pub struct Parcels<'m> {
     inj_weight: DevBuf<Scalar>,
     inj_half_angle: DevBuf<Scalar>,
     inj_standoff: DevBuf<Scalar>,
+    /// SPEC-LIT 147.1: the Rosin-Rammler descriptors, one entry per
+    /// injector. `inj_rr_q[j] > 0` marks an injector with a distribution on
+    /// the device; `inj_mass_coef` is (147.5)'s `c` in f64.
+    inj_rr_x: DevBuf<Scalar>,
+    inj_rr_q: DevBuf<Scalar>,
+    inj_seed: DevBuf<u64>,
+    inj_mass_coef: DevBuf<f64>,
     n_inj: i32,
 
     /// The `dt` the injection strides were computed against. A captured graph
@@ -1335,6 +1349,10 @@ impl<'m> Parcels<'m> {
         let mut standoff = vec![0.0 as Scalar; one];
         let mut per_event = vec![0i32; one];
         let mut stride = vec![0i32; one];
+        let mut rr_x = vec![0.0 as Scalar; one];
+        let mut rr_q = vec![0.0 as Scalar; one];
+        let mut seed = vec![0u64; one];
+        let mut mass_coef = vec![0.0f64; one];
 
         for (j, inj) in injectors.iter().enumerate() {
             if inj.parcels_per_event == 0 {
@@ -1420,6 +1438,27 @@ impl<'m> Parcels<'m> {
             standoff[j] = inj.standoff;
             per_event[j] = inj.parcels_per_event as i32;
             stride[j] = st;
+            // SPEC-LIT 147.1: the Rosin-Rammler draw's descriptors, refused
+            // here if either extreme of the draw cannot survive in Scalar.
+            // A Monodisperse injector leaves all four at zero, and its
+            // diameter/weight above are the (66.13) values they always were.
+            match inj.size {
+                SizeDistribution::Monodisperse => {}
+                SizeDistribution::RosinRammler(rr) => {
+                    let c = event_mass_coefficient(
+                        inj.mass_flow,
+                        dt,
+                        st,
+                        inj.parcels_per_event,
+                        ctrl.rho_liquid,
+                    );
+                    rr.validate(j, inj.parcels_per_event, c)?;
+                    rr_x[j] = rr.x;
+                    rr_q[j] = rr.q;
+                    seed[j] = rr.seed;
+                    mass_coef[j] = c;
+                }
+            }
         }
 
         Ok(Self {
@@ -1470,6 +1509,10 @@ impl<'m> Parcels<'m> {
             inj_weight: gpu.upload(&weight)?,
             inj_half_angle: gpu.upload(&half_angle)?,
             inj_standoff: gpu.upload(&standoff)?,
+            inj_rr_x: gpu.upload(&rr_x)?,
+            inj_rr_q: gpu.upload(&rr_q)?,
+            inj_seed: gpu.upload(&seed)?,
+            inj_mass_coef: gpu.upload(&mass_coef)?,
             n_inj: n as i32,
 
             dt,
@@ -1813,6 +1856,10 @@ impl<'m> Parcels<'m> {
                 inj_half_angle,
                 inj_standoff,
                 inj_per_event,
+                inj_rr_x,
+                inj_rr_q,
+                inj_seed,
+                inj_mass_coef,
                 ..
             } = self;
             unsafe {
@@ -1843,6 +1890,10 @@ impl<'m> Parcels<'m> {
                     .arg(&*inj_half_angle)
                     .arg(&*inj_standoff)
                     .arg(&*inj_per_event)
+                    .arg(&*inj_rr_x)
+                    .arg(&*inj_rr_q)
+                    .arg(&*inj_seed)
+                    .arg(&*inj_mass_coef)
                     .arg(&n_inj)
                     .arg(&m.owner)
                     .arg(&m.neighbour)

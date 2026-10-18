@@ -131,6 +131,19 @@ pub struct JsonCase {
     /// SPEC-LIT §137.2: the combustion closure (§134).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub combustion: Option<crate::io::case_chem::JsonCombustion>,
+    /// SPEC-LIT §157.4: the `dust` block (`crate::io::case_dust`), the
+    /// DST-06 equivalent-gas charge beside a `combustion.model` FSC/TFC.
+    /// Absent (the default) is every case this reader has ever built;
+    /// present, it lowers to [`LoweredCase::dust`] and every driver but
+    /// `ofgpu-lowmach` refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dust: Option<crate::io::case_dust::JsonDust>,
+    /// SPEC-LIT §158.8: the one-domain opening vent (DST-09). Absent is every
+    /// case this reader has built; present, it lowers to
+    /// [`LoweredCase::vent`] and every driver but `ofgpu-compressible`
+    /// refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vent: Option<crate::dust::vent::JsonVent>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -370,6 +383,17 @@ pub struct JsonMesh {
     /// rule - a box has no wedge sides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedge: Option<JsonWedge>,
+    /// SPEC-LIT 157.3: presence makes the case a 1-D SPHERICAL SECTOR - the
+    /// REDUCED dust gates' mesh (DST-07). The x axis is the radius
+    /// (`bounds.max[0]` = R, `cells[0]` the uniform cell count), `xmin`
+    /// names the APEX, which has no faces exactly like a wedge pipe's axis,
+    /// `xmax` the outer square and ymin/ymax/zmin/zmax the four sides. The
+    /// reader lowers the case onto `crate::dust::gatemesh::SectorSpec` and
+    /// refuses everything a sector mesh cannot say (each a §13.4 error
+    /// naming the JSON path and SPEC-LIT 157.3). Absent: the case lowers
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector: Option<JsonSector>,
 }
 
 /// [`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL
@@ -379,6 +403,20 @@ pub struct JsonMesh {
 #[serde(deny_unknown_fields)]
 pub struct JsonWedge {
     pub angle: f64,
+}
+
+/// [`JsonMesh::sector`]'s one entry - SPEC-LIT 157.3. `angle` is the FULL
+/// angle between opposite side faces in degrees (finite, in `(0, 90]`),
+/// `fineRadius` the uniform spacing's end `r_f` in m (`0 < r_f <
+/// bounds.max[0]`) and `growth` the ratio of successive radial spacings
+/// beyond `r_f` (finite, in `[1, 1.2]`) - each checked with its JSON path
+/// named, in [`JsonCase::lower`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JsonSector {
+    pub angle: f64,
+    pub fine_radius: f64,
+    pub growth: f64,
 }
 
 /// One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six
@@ -1265,6 +1303,49 @@ pub struct JsonVisualisation {
     /// uniform Cartesian box is written on its own cells and never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lattice: Option<JsonLattice>,
+    /// The Isaac Sim profile - SPEC-LIT 117.9: one `density` grid on the
+    /// `.vdb` and the `.usda` scene. Absent writes exactly what this crate
+    /// has always written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isaac: Option<JsonIsaac>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// `output.visualisation.isaac` - SPEC-LIT 117.9's nine keys, `field`
+/// required, the rest optional. Resolved, and every 117.12 refusal raised,
+/// by [`crate::io::output_plan::OutputPlan::from_json`]; nothing here
+/// validates.
+pub struct JsonIsaac {
+    /// `index` (the default) or `pathtrace` - 117.9's two profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The cell field the density is made from. Required.
+    pub field: String,
+    /// `opticalDepth` (the default) or `physical` - 117.9's two scalings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<String>,
+    /// The target optical depth of the densest column (`opticalDepth`);
+    /// absent is 2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tau: Option<f64>,
+    /// `[f_lo, f_hi]` of the normalisation (`opticalDepth`); absent is the
+    /// min and max of the field over the fluid voxels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[f64; 2]>,
+    /// Specific extinction, m^2/kg (`physical`); absent is 8700 - 117.14's
+    /// 8.7 m^2/g of Mulholland & Croarkin 2000.
+    #[serde(rename = "Km", default, skip_serializing_if = "Option::is_none")]
+    pub km: Option<f64>,
+    /// `density` (the default) or `massFraction` - what `rho_s` is (117.14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The stage's up axis; absent is `"Z"`.
+    #[serde(rename = "upAxis", default, skip_serializing_if = "Option::is_none")]
+    pub up_axis: Option<String>,
+    /// The stage's unit scale; absent is 1.0.
+    #[serde(rename = "metersPerUnit", default, skip_serializing_if = "Option::is_none")]
+    pub meters_per_unit: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1696,6 +1777,11 @@ pub struct LoweredCase {
     /// `mesh.wedge` - [`Self::build_host_mesh`] then builds exactly what
     /// `crate::blockgen::build_mesh(&self.block)` always built.
     pub wedge: Option<crate::blockgen::WedgeSpec>,
+    /// SPEC-LIT 157.3: `mesh.sector`, lowered onto the gatemesh
+    /// [`crate::dust::gatemesh::SectorSpec`]. `None` for every case without
+    /// `mesh.sector` - [`Self::build_host_mesh`] then builds exactly what it
+    /// always built.
+    pub sector: Option<crate::dust::gatemesh::SectorSpec>,
     /// SPEC-LIT §122.6: `physics.compressible`, lowered onto §122.1's gas and
     /// validated (the `cp` check included). `None` for every case without
     /// the block.
@@ -1706,6 +1792,18 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `species`, `chemistry` and `combustion` blocks,
     /// lowered onto one config (§137.7). `None` for every case without them.
     pub chem: Option<crate::io::case_chem::LoweredChem>,
+    /// SPEC-LIT §157.4: the `dust` block beside a `combustion.model` FSC or
+    /// TFC, lowered onto the DST-06 config. `None` for every case that is
+    /// not a dust one - then [`Self::chem`] is exactly what it always was.
+    pub dust: Option<crate::io::case_dust::LoweredDust>,
+    /// SPEC-LIT §159.9: the `dust.cloud` block, lowered onto the cloud's
+    /// config (DST-14). `None` for every case without the block. No driver
+    /// runs it before DST-15, so [`Self::refuse_parcels`] refuses a case
+    /// that states one.
+    pub cloud: Option<crate::io::case_dust::LoweredCloud>,
+    /// SPEC-LIT §158.8: the `vent` block, lowered onto the one-domain vent's
+    /// spec. `None` for every case without the block.
+    pub vent: Option<crate::dust::vent::VentSpec>,
     /// SPEC-LIT 125.8.1: `initial.regions`, in file order - a later entry
     /// overrides an earlier one where their boxes overlap. Empty for every
     /// case without the block.
@@ -1736,10 +1834,43 @@ impl LoweredCase {
         }
     }
 
+    /// SPEC-LIT §157.4: a driver's refusal of a case that states the dust
+    /// model (DST-06). Every driver but `ofgpu-lowmach` (part 3 of that
+    /// unit) would ignore it; `Ok` for every case without the block.
+    pub fn refuse_dust(&self) -> Result<()> {
+        match self.dust {
+            Some(_) => Err(crate::io::case_dust::refuse_dust_case("dust")),
+            None => Ok(()),
+        }
+    }
+
+    /// SPEC-LIT §158.8: a driver's refusal of a case that states the
+    /// one-domain vent (DST-09). Every driver but `ofgpu-compressible` would
+    /// ignore it; `Ok` for every case without the block.
+    pub fn refuse_vent(&self) -> Result<()> {
+        match self.vent {
+            Some(_) => Err(Error::Refused(
+                "vent: the vent block is run by ofgpu-compressible only; this driver \
+                 would ignore it (SPEC-LIT §158.8)"
+                    .into(),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// SPEC-LIT §137.6: a driver's refusal of a case that states parcels.
     /// No driver carries a case's parcels before CHR-26, so a run would
-    /// ignore them; `Ok` for every case without the block.
+    /// ignore them; `Ok` for every case without the block. A case stating a
+    /// dust cloud (§159.9) is refused too: no driver runs Phase B before
+    /// DST-15, so a run would ignore the cloud as well.
     pub fn refuse_parcels(&self) -> Result<()> {
+        if self.cloud.is_some() {
+            return Err(Error::Refused(
+                "dust.cloud: this case states a dust cloud; no driver runs Phase B before \
+                 DST-15 (SPEC-LIT §159.9)"
+                    .into(),
+            ));
+        }
         match self.parcels {
             Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
             None => Ok(()),
@@ -1751,9 +1882,10 @@ impl LoweredCase {
     /// are the builder's; the map reads the faces and points only, in the
     /// mesh's own face order.
     pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
-        match &self.wedge {
-            None => crate::blockgen::raw_mesh(&self.block),
-            Some(w) => crate::blockgen::raw_wedge_mesh(w),
+        match (&self.wedge, &self.sector) {
+            (None, None) => crate::blockgen::raw_mesh(&self.block),
+            (Some(w), _) => crate::blockgen::raw_wedge_mesh(w),
+            (None, Some(s)) => crate::dust::gatemesh::raw_sector_mesh(s),
         }
     }
 
@@ -1768,6 +1900,12 @@ impl LoweredCase {
     /// and no lowered field carries a boundary entry under it.
     pub fn build_host_mesh(&self) -> Result<crate::mesh::HostMesh> {
         let Some(w) = &self.wedge else {
+            if let Some(s) = &self.sector {
+                // SPEC-LIT 157.3: the sector mesh; the case's own patch
+                // names and classes are already on the spec the lowering
+                // built, so the geometry comes back under them untouched.
+                return crate::dust::gatemesh::build_sector_mesh(s);
+            }
             return crate::blockgen::build_mesh(&self.block);
         };
         let mut hm = crate::blockgen::build_wedge_mesh(w)?;
@@ -2441,6 +2579,140 @@ fn wedge_spec_of(
     }))
 }
 
+/// SPEC-LIT 157.3: `mesh.sector`, lowered onto the 157.3 `SectorSpec`
+/// (`None` for every case without it) - and the block's refusal list,
+/// checked BEFORE any mesh is built, every entry an `Error::Config` naming
+/// the JSON path and the section. A case without `mesh.sector` lowers
+/// exactly as before.
+fn sector_spec_of(
+    mesh: &JsonMesh,
+    patches: &[JsonPatchRule],
+) -> Result<Option<crate::dust::gatemesh::SectorSpec>> {
+    let Some(s) = &mesh.sector else { return Ok(None) };
+    let refused = |path: &str, detail: String| {
+        Error::Config(format!("{path}: {detail} (SPEC-LIT 157.3)"))
+    };
+    if mesh.bounds.min != [0.0, 0.0, 0.0] {
+        return Err(refused(
+            "mesh.bounds.min",
+            format!("must be [0, 0, 0] - the apex IS the origin, got {:?}", mesh.bounds.min),
+        ));
+    }
+    if mesh.bounds.max[1] != 0.0 || mesh.bounds.max[2] != 0.0 {
+        return Err(refused(
+            "mesh.bounds.max",
+            format!(
+                "max[1] = {} and max[2] = {} must both be 0 - the radius is the x axis \
+                 alone, and a second statement of the extent could only disagree",
+                mesh.bounds.max[1], mesh.bounds.max[2]
+            ),
+        ));
+    }
+    if !(s.fine_radius.is_finite() && s.fine_radius > 0.0) {
+        return Err(refused(
+            "mesh.sector.fineRadius",
+            format!("{} - must be finite and > 0", s.fine_radius),
+        ));
+    }
+    if !(mesh.bounds.max[0].is_finite() && mesh.bounds.max[0] > s.fine_radius) {
+        return Err(refused(
+            "mesh.bounds.max[0]",
+            format!(
+                "{} - must be finite and > mesh.sector.fineRadius = {}",
+                mesh.bounds.max[0], s.fine_radius
+            ),
+        ));
+    }
+    if mesh.cells[0] == 0 || mesh.cells[1] != 1 || mesh.cells[2] != 1 {
+        return Err(refused(
+            "mesh.cells",
+            format!(
+                "[{}, {}, {}] - a sector is one cell across y and z, and cells[0] is \
+                 the uniform radial count (>= 1)",
+                mesh.cells[0], mesh.cells[1], mesh.cells[2]
+            ),
+        ));
+    }
+    if !(s.growth.is_finite() && (1.0..=1.2).contains(&s.growth)) {
+        return Err(refused(
+            "mesh.sector.growth",
+            format!("{} - must be finite and in [1, 1.2]", s.growth),
+        ));
+    }
+    if !(s.angle.is_finite() && s.angle > 0.0 && s.angle <= 90.0) {
+        return Err(refused(
+            "mesh.sector.angle",
+            format!(
+                "{} - the FULL angle in degrees must be finite and in (0, 90]",
+                s.angle
+            ),
+        ));
+    }
+    if mesh.wedge.is_some() {
+        return Err(refused(
+            "mesh.wedge",
+            "stated beside mesh.sector - a case is one mesh, and these are two \
+             different meshes"
+                .to_string(),
+        ));
+    }
+    if !mesh.regions.is_empty() {
+        return Err(refused(
+            "mesh.regions",
+            format!(
+                "{} region(s) beside mesh.sector - a sector carries no region windows",
+                mesh.regions.len()
+            ),
+        ));
+    }
+    if !mesh.cyclic.is_empty() {
+        return Err(refused(
+            "mesh.cyclic",
+            format!(
+                "{} pair(s) beside mesh.sector - a sector carries no cyclic pair",
+                mesh.cyclic.len()
+            ),
+        ));
+    }
+    if mesh.grading.is_some() {
+        return Err(refused(
+            "mesh.grading",
+            "stated beside mesh.sector - the radial grading IS mesh.sector's \
+             fineRadius and growth, there is nothing else to state"
+                .to_string(),
+        ));
+    }
+    let names = [
+        mesh.boundaries.xmin.clone(),
+        mesh.boundaries.xmax.clone(),
+        mesh.boundaries.ymin.clone(),
+        mesh.boundaries.ymax.clone(),
+        mesh.boundaries.zmin.clone(),
+        mesh.boundaries.zmax.clone(),
+    ];
+    let class = |slot: usize| -> Result<String> {
+        Ok(patch_class(resolve_patch_rule(patches, &names[slot])?.kind).to_string())
+    };
+    Ok(Some(crate::dust::gatemesh::SectorSpec {
+        radius: mesh.bounds.max[0],
+        fine_radius: s.fine_radius,
+        n_fine: mesh.cells[0] as usize,
+        growth: s.growth,
+        angle_deg: s.angle,
+        // The sector's five patches are the case's OWN slots 1..5: xmax is
+        // the outer square, ymin/ymax/zmin/zmax the sides; `xmin` stands for
+        // the apex, which has no faces at all.
+        patch_name: [
+            names[1].clone(),
+            names[2].clone(),
+            names[3].clone(),
+            names[4].clone(),
+            names[5].clone(),
+        ],
+        patch_type: [class(1)?, class(2)?, class(3)?, class(4)?, class(5)?],
+    }))
+}
+
 // ------------------------------------------------------------ cyclic pairs
 
 /// Which axis (0=x, 1=y, 2=z) `pair` names, given the six `mesh.boundaries`
@@ -3018,6 +3290,18 @@ fn solver_for(solvers: &[JsonSolverRule], var: &str) -> Result<SolverControls> {
 impl JsonCase {
     /// Map the parsed tree onto the solver's own control types.
     pub fn lower(&self) -> Result<LoweredCase> {
+        // SPEC-LIT 157.3: `mesh.sector` lowers onto the gatemesh
+        // `SectorSpec` and owns the mesh when it is present. Its refusal
+        // list runs BEFORE any mesh is built, so a sector case answers for
+        // itself and not as a box (or a wedge) first.
+        let sector = sector_spec_of(&self.mesh, &self.patches)?;
+        if sector.is_some() && self.motion.is_some() {
+            return Err(Error::Config(
+                "motion: a moving mesh beside mesh.sector is refused - a sector \
+                 case has no motion path (SPEC-LIT 157.3)"
+                    .to_string(),
+            ));
+        }
         let (block, windows) = build_block(&self.mesh, &self.patches)?;
 
         // SPEC-LIT 119.3: `mesh.wedge` lowers onto the 119.0 `WedgeSpec`
@@ -3281,6 +3565,12 @@ impl JsonCase {
         if wedge.is_some() && self.mesh.bounds.min[0] == 0.0 {
             names.remove(0);
         }
+        // SPEC-LIT 157.3: on a sector mesh the `xmin` name stands for the
+        // APEX, which has no faces - exactly the wedge pipe's axis - so no
+        // lowered field may carry a boundary entry under it.
+        if sector.is_some() {
+            names.remove(0);
+        }
         let ambient_t = self.initial.t.map(|v| v as Scalar).unwrap_or(0.0);
 
         let mut u_boundary = BTreeMap::new();
@@ -3500,19 +3790,44 @@ impl JsonCase {
         }
 
         let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
+        // SPEC-LIT §157.4: the dust case lowers BEFORE the chemistry blocks
+        // and owns the case when it lowers at all - an FSC/TFC model's gas is
+        // its own two pseudo-species (§152.4), so a `Some` here means
+        // `lower_blocks` is not called: the case states neither species nor
+        // chemistry, and its combustion keys are the dust model's.
+        let cx = crate::io::case_dust::DustContext {
+            species: self.species.is_some(),
+            chemistry: self.chemistry.is_some(),
+            turbulence_kind,
+            turbulence_model: turbulence_model.as_deref(),
+            compressible: compressible.is_some(),
+            gravity: self.physics.gravity,
+            initial_t: self.initial.t,
+            patch_names: &names,
+            rules: &self.patches,
+        };
+        let dust = crate::io::case_dust::lower_dust(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
+        // SPEC-LIT §159.9: the `dust.cloud` block, against the same context
+        // - `lower_dust` has already refused a cloud beside the FSC/TFC
+        // model, so what reaches here lowers to the DST-15 seeding.
+        let cloud = crate::io::case_dust::lower_cloud(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
         // SPEC-LIT §137.2 and §137.7: the three chemistry blocks, one
         // lowering; each solved species' field is built on the same patch
-        // names and rules as `T`'s.
-        let chem = crate::io::case_chem::lower_blocks(
-            crate::io::case_chem::ChemBlocks {
-                species: self.species.as_ref(),
-                chemistry: self.chemistry.as_ref(),
-                combustion: self.combustion.as_ref(),
-            },
-            crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
-            compressible.is_some(),
-            Some((&names, &self.patches)),
-        )?;
+        // names and rules as `T`'s. A dust case skips it entirely.
+        let chem = if dust.is_some() {
+            None
+        } else {
+            crate::io::case_chem::lower_blocks(
+                crate::io::case_chem::ChemBlocks {
+                    species: self.species.as_ref(),
+                    chemistry: self.chemistry.as_ref(),
+                    combustion: self.combustion.as_ref(),
+                },
+                crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
+                compressible.is_some(),
+                Some((&names, &self.patches)),
+            )?
+        };
         // SPEC-LIT §137.2: a mass coupling's vapour is checked against
         // `species.names` (refused without a species block); the parcels'
         // gravity, when the block states none, is the case's.
@@ -3523,6 +3838,17 @@ impl JsonCase {
                 p.lower(chem.as_ref().map(|c| c.species.names.as_slice()), Some(self.physics.gravity))
             })
             .transpose()?;
+        // SPEC-LIT §158.8: the one-domain vent (DST-09) lowers beside nothing
+        // that already owns the mesh - the vent splits a BLOCK mesh, and a
+        // wedge or a sector is another mesh builder's.
+        let vent = self.vent.as_ref().map(|v| v.lower()).transpose()?;
+        if vent.is_some() && (wedge.is_some() || sector.is_some()) {
+            return Err(Error::Refused(
+                "vent: a vent beside mesh.wedge or mesh.sector is not built - the one-domain \
+                 vent splits a block mesh (SPEC-LIT §158.8)"
+                    .into(),
+            ));
+        }
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -3562,9 +3888,13 @@ impl JsonCase {
             sources,
             motion,
             wedge,
+            sector,
             compressible,
             parcels,
             chem,
+            dust,
+            cloud,
+            vent,
             initial_regions,
         })
     }
@@ -6500,5 +6830,27 @@ mod tests {
             .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
             .expect("no regions at all");
         assert!(counts.is_empty(), "no region, no count");
+    }
+
+    /// SPEC-LIT §158.8: a minimal case's `vent` block lowers onto the
+    /// [`crate::dust::vent::VentSpec`] (`wall` defaulting to `noSlip`), and
+    /// [`LoweredCase::refuse_vent`] names the one driver that runs it.
+    #[test]
+    fn the_vent_block_lowers_and_is_refused_beside_a_sector() {
+        let mut case = minimal_case_with_mesh("");
+        case.vent = Some(crate::dust::vent::JsonVent {
+            normal: [1.0, 0.0, 0.0],
+            p_stat: 1.0e4,
+            centre: Some([0.5, 0.5, 0.5]),
+            radius: Some(0.2),
+            faces: None,
+            wall: None,
+        });
+        let low = case.lower().expect("a vent case on a box lowers");
+        let v = low.vent.as_ref().expect("the block lowers onto a spec");
+        assert_eq!(v.p_stat, 1.0e4);
+        assert_eq!(v.wall, crate::dust::vent::MembraneWall::NoSlip);
+        let e = low.refuse_vent().err().expect("the vent is refused");
+        assert!(e.to_string().contains("ofgpu-compressible"), "{e}");
     }
 }

@@ -787,6 +787,7 @@ fn base_injector() -> Injector {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     }
 }
 

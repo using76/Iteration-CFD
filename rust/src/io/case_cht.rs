@@ -2412,6 +2412,18 @@ impl ChtCase {
                 // region alone (117.3's default box is the region's). Only a
                 // region on which no lattice can be laid is refused, by name.
                 if let Some(v) = &plan.vis {
+                    // SPEC-LIT 117.9's D6 (VIO-09): the Isaac scene is ONE
+                    // stage over ONE lattice, and a multi-region case
+                    // writes one volume file PER REGION.
+                    if v.isaac.is_some() {
+                        return Err(Error::Config(
+                            "output.visualisation.isaac: the Isaac scene is one stage over one \
+                             region's volume, and ofgpu-cht writes one .vdb per region - an \
+                             isaac block is not built for a multi-region case. Drop the isaac \
+                             block (SPEC-LIT 117.9)"
+                                .to_string(),
+                        ));
+                    }
                     if let Some(f) = v.formats.iter().find(|f| !matches!(f, OutputFormat::Vdb | OutputFormat::Nvdb)) {
                         return Err(Error::Config(format!(
                             "output/visualisation/format: ofgpu-cht writes `vdb` and `nvdb`, \

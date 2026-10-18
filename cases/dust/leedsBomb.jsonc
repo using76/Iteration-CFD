@@ -1,0 +1,62 @@
+// The Leeds fan-stirred bomb of H20 (vessel 0.023 m3, D = 305 mm) as its
+// equal-volume 1-D sector, R = 176.4 mm (SPEC-LIT 157.3): 0.125 mm cells
+// out to 50 mm and growth 1.05 beyond, the 90 deg sector's apex ON the
+// ignition point, so `xmin` names the apex, which has no faces
+// (mesh.sector, SPEC-LIT §157.3), `xmax` the vessel wall and the four
+// sides the slip planes. The file's own row is u' = 1.62 m/s; the gate
+// sets the other three (k, omega from H20 Table 4). The charge is corn
+// starch in air at 328 K: prescribed thermo (cp = k Pr/mu_u with the
+// driver's k = 0.026, SPEC-LIT §151.5), the measured burned state and the
+// ρ-weighted SST sustained at the unburned turbulence.
+{
+  "name": "leedsBomb",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.1764, 0, 0] },
+    "cells": [400, 1, 1],
+    "boundaries": { "xmin": "apex", "xmax": "vessel", "ymin": "sideYmin",
+      "ymax": "sideYmax", "zmin": "sideZmin", "zmax": "sideZmax" },
+    "sector": { "angle": 90, "fineRadius": 0.05, "growth": 1.05 }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.3636e-5, "Pr": 0.7, "Prt": 0.4, "TRef": 328 },
+    "buoyancy": "densityRatio"
+  },
+  "turbulence": { "kind": "RAS", "model": "kOmegaSST",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 } },
+  "patches": [
+    // The apex has no faces; it only needs a rule so every boundary name
+    // resolves - no lowered field carries a boundary entry under it.
+    { "match": "apex", "kind": "symmetry" },
+    { "match": "vessel", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 3.94 },
+      "omega": { "type": "omegaWallFunction", "value": 1101.33 } },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 328, "p": 0.0, "k": 3.94, "omega": 1101.33 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-10, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 },
+      { "match": "k|omega", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-12, "relTol": 1e-6, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.03, "deltaT": 1.1e-5 },
+  "combustion": { "model": "FSC", "A": 0.4, "PrT": 0.4,
+    "ignition": { "point": [0, 0, 0], "sigmaR": 2.5e-4, "W0": 1e13, "t0": 1e-3 } },
+  "dust": { "thermo": "prescribed", "cp": 1011.1, "Wu": 0.0328, "Wb": 0.0297,
+    "Tb": 1500, "SL": 0.12,
+    "sst": { "sust": { "kAmb": 3.94, "omegaAmb": 1101.33 } } }
+}

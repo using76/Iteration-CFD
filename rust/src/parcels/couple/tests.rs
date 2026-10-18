@@ -23,7 +23,8 @@ use crate::ldu::GpuLduMatrix;
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::momentum::{BuoyancyCoeffs, Momentum, MomentumControls, MomentumSources};
 use crate::parcels::{
-    DragModel, Injector, ParcelControls, ParcelDeposition, ParcelSnapshot, SeedParcel, WallAction,
+    DragModel, Injector, ParcelControls, ParcelDeposition, ParcelSnapshot, SeedParcel,
+    SizeDistribution, WallAction,
 };
 
 // ----------------------------------------------------------------------
@@ -460,6 +461,7 @@ fn the_gate_holds_for_an_injected_spray_that_loses_parcels() {
         mass_flow: 1e-3,
         parcels_per_event: 16,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let ctrl = ParcelControls { capacity: 2048, ..base_controls() };
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
@@ -1310,6 +1312,7 @@ fn the_coupling_captures_once_and_replays() {
         mass_flow: 1e-4,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
 
     let eager = {

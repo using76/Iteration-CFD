@@ -42,7 +42,9 @@
 
 #![allow(clippy::excessive_precision)]
 
+use crate::chem::thermo::R_GAS;
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::dust::thermo::EquivalentGas;
 use crate::error::{Error, Result};
 use crate::types::Vec3;
 use crate::{Label, Scalar};
@@ -442,6 +444,250 @@ pub fn sound_mach(
             .arg(t)
             .arg(&nl)
             .arg(&c.grs)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  The dust model's hConst pair and its mixture kernels (SPEC-LIT §158.4)
+// ==========================================================================
+
+/// The `hConst` pair of the two pseudo-species as the compressible energy
+/// equation and the mixture gas law read them (SPEC-LIT §158.4): one
+/// constant `c_p` per pseudo-species, so `h_X(T) = a_X + cp_X T` per kg on
+/// the 0 K datum, `R_mix(c~)` from (152.8), and Δh_c the formation-enthalpy
+/// difference of U and B. Every number is host f64; a launcher rounds once.
+pub struct DustHConst {
+    /// J/(kg K), the unburned pseudo-species' constant `c_p`.
+    pub cp_u: f64,
+    /// J/(kg K), the burned pseudo-species' constant `c_p`.
+    pub cp_b: f64,
+    /// kg/mol, the unburned pseudo-species' molar mass.
+    pub w_u: f64,
+    /// kg/mol, the burned pseudo-species' molar mass.
+    pub w_b: f64,
+    /// J/kg, the unburned formation enthalpy `h_U(T_u) - cp_u T_u`.
+    pub a_u: f64,
+    /// J/kg, the burned formation enthalpy `h_B(T_u) - cp_b T_u`.
+    pub a_b: f64,
+}
+
+impl DustHConst {
+    /// From the equivalent gas at the unburned temperature `t_u` (SPEC-LIT
+    /// §158.4): `cp_b` the mean of `h_B` over [`T_u`, `T_b`], which keeps
+    /// the NASA-7 isobaric `T_b` exactly (`a_b + cp_b T_b = h_B(T_b) =
+    /// h_U(T_u)`), and the formation enthalpies `a_X = h_X(T_u) - cp_X T_u`.
+    /// A `c_p` or `c_v` that is not finite and positive is refused by name
+    /// (§158.4).
+    pub fn from_gas(gas: &EquivalentGas, t_u: f64) -> Result<Self> {
+        let who = "compressible::thermo::DustHConst::from_gas";
+        let t_b = gas.isobaric_burned(t_u)?.t_b;
+        let cp_u = gas.cp_u(t_u)?;
+        let (h_b_hi, h_b_lo) = (gas.h_b(t_b)?, gas.h_b(t_u)?);
+        let cp_b = (h_b_hi - h_b_lo) / (t_b - t_u);
+        let a_u = gas.h_u(t_u)? - cp_u * t_u;
+        let a_b = h_b_lo - cp_b * t_u;
+        let out = Self { cp_u, cp_b, w_u: gas.w_u(), w_b: gas.w_b(), a_u, a_b };
+        for (name, v) in [
+            ("cp_u", out.cp_u),
+            ("cp_b", out.cp_b),
+            ("cv_u", out.cp_u - R_GAS / out.w_u),
+            ("cv_b", out.cp_b - R_GAS / out.w_b),
+        ] {
+            if !v.is_finite() || v <= 0.0 {
+                return Err(Error::Config(format!(
+                    "{who}: {name} = {v} is not a finite positive value (SPEC-LIT §158.4)"
+                )));
+            }
+        }
+        Ok(out)
+    }
+
+    /// (152.8): `c_p(T, c~) = (1 - c~) c_p,U + c~ c_p,B` - the constant per
+    /// pseudo-species, so the temperature drops out.
+    pub fn cp(&self, c: f64) -> f64 {
+        self.cp_u + c * (self.cp_b - self.cp_u)
+    }
+
+    /// J/(kg K), the unburned gas constant `R0/W_U`.
+    pub fn r_u(&self) -> f64 {
+        R_GAS / self.w_u
+    }
+
+    /// J/(kg K), the burned gas constant `R0/W_B`.
+    pub fn r_b(&self) -> f64 {
+        R_GAS / self.w_b
+    }
+
+    /// (152.8): `r(c~) = r_u + c~ (r_b - r_u)`, `R0/W(c~)` per kg.
+    pub fn r(&self, c: f64) -> f64 {
+        self.r_u() + c * (self.r_b() - self.r_u())
+    }
+
+    /// (158.4)'s `q~ = Δh_c wdot_c`: the formation-enthalpy difference of
+    /// U and B, J/kg, positive for a burn.
+    pub fn delta_h_c(&self) -> f64 {
+        self.a_u - self.a_b
+    }
+
+    /// K, the isobaric burned temperature of the hConst pair,
+    /// `T_b = (a_u - a_b + cp_u T_u)/cp_b` - the NASA-7 (152.10) value.
+    pub fn isobaric_tb(&self, t_u: f64) -> f64 {
+        (self.a_u - self.a_b + self.cp_u * t_u) / self.cp_b
+    }
+
+    /// (152.11) on the hConst pair: `t_v` from `u_B(T_v) = u_U(T_0)` with
+    /// `u_X = a_X + cv_X T`, and `P_max/p_0 = T_v W_U/(T_0 W_B)` - the
+    /// compressible AICC identity, NOT the NASA-7 evaluation.
+    pub fn aicc(&self, t0: f64) -> (f64, f64) {
+        let cv_u = self.cp_u - R_GAS / self.w_u;
+        let cv_b = self.cp_b - R_GAS / self.w_b;
+        let t_v = (self.a_u - self.a_b + cv_u * t0) / cv_b;
+        let p_ratio = t_v * self.w_u / (t0 * self.w_b);
+        (t_v, p_ratio)
+    }
+
+    /// The unburned `gamma` of the hConst pair, (155.10)'s exponent.
+    pub fn gamma_u(&self) -> f64 {
+        let cv_u = self.cp_u - R_GAS / self.w_u;
+        self.cp_u / cv_u
+    }
+}
+
+/// The three mixture kernels of `cuda/compressible.cu` (§158.4), loaded
+/// from the `COMPRESSIBLE` module `build.rs` compiles.
+pub struct MixKernels {
+    gas_state_mix: CudaFunction,
+    scale_cp: CudaFunction,
+    rho_u_ratio: CudaFunction,
+}
+
+impl MixKernels {
+    pub fn new(gpu: &Gpu) -> Result<Self> {
+        let k = KernelSet::new(gpu, crate::kernels::COMPRESSIBLE)?;
+        Ok(Self {
+            gas_state_mix: k.func("cmpGasStateMix")?,
+            scale_cp: k.func("cmpScaleCp")?,
+            rho_u_ratio: k.func("cmpDustRhoURatio")?,
+        })
+    }
+}
+
+/// (152.8)+(152.9) elementwise: `rs = rs_u + c drs`, `psi = 1/(rs T)` and
+/// `rho = psi (p + pop)` - the mixture gas law about the gauge datum, the
+/// constants formed in f64 and rounded once here. A launcher only launches.
+#[allow(clippy::too_many_arguments)]
+pub fn gas_state_mix(
+    gpu: &Gpu,
+    k: &MixKernels,
+    hc: &DustHConst,
+    psi: &mut DevBuf<Scalar>,
+    rho: &mut DevBuf<Scalar>,
+    p: &DevBuf<Scalar>,
+    t: &DevBuf<Scalar>,
+    c: &DevBuf<Scalar>,
+    n: usize,
+    pop: f64,
+) -> Result<()> {
+    check_len("gas_state_mix", "psi", psi.len(), n)?;
+    check_len("gas_state_mix", "rho", rho.len(), n)?;
+    check_len("gas_state_mix", "p", p.len(), n)?;
+    check_len("gas_state_mix", "t", t.len(), n)?;
+    check_len("gas_state_mix", "c", c.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let (rs_u, drs) = (hc.r_u() as Scalar, (hc.r_b() - hc.r_u()) as Scalar);
+    let pop = pop as Scalar;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.gas_state_mix)
+            .arg(&mut *psi)
+            .arg(&mut *rho)
+            .arg(p)
+            .arg(t)
+            .arg(c)
+            .arg(&nl)
+            .arg(&rs_u)
+            .arg(&drs)
+            .arg(&pop)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (152.8) elementwise: `out = a (cp_u + c dcp)` - `a` the carried field
+/// (rho for the energy weights, 1 for a bare `c_p`), the constants formed
+/// in f64 and rounded once here.
+#[allow(clippy::too_many_arguments)]
+pub fn scale_cp(
+    gpu: &Gpu,
+    k: &MixKernels,
+    out: &mut DevBuf<Scalar>,
+    a: &DevBuf<Scalar>,
+    c: &DevBuf<Scalar>,
+    n: usize,
+    cp_u: f64,
+    dcp: f64,
+) -> Result<()> {
+    check_len("scale_cp", "out", out.len(), n)?;
+    check_len("scale_cp", "a", a.len(), n)?;
+    check_len("scale_cp", "c", c.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let (cp_u, dcp) = (cp_u as Scalar, dcp as Scalar);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.scale_cp)
+            .arg(&mut *out)
+            .arg(a)
+            .arg(c)
+            .arg(&nl)
+            .arg(&cp_u)
+            .arg(&dcp)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// (155.10) elementwise: `ut_out = ut ((p + pop)/p_init)^(1/gamma_u)` - the
+/// propagation speed carried at the LOCAL pressure, the power in double on
+/// the device and the constants in f64 on the host, rounded once at the
+/// write.
+#[allow(clippy::too_many_arguments)]
+pub fn rho_u_ratio(
+    gpu: &Gpu,
+    k: &MixKernels,
+    ut_out: &mut DevBuf<Scalar>,
+    ut: &DevBuf<Scalar>,
+    p: &DevBuf<Scalar>,
+    n: usize,
+    pop: f64,
+    p_init: f64,
+    gamma_u: f64,
+) -> Result<()> {
+    check_len("rho_u_ratio", "ut_out", ut_out.len(), n)?;
+    check_len("rho_u_ratio", "ut", ut.len(), n)?;
+    check_len("rho_u_ratio", "p", p.len(), n)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let inv_gamma = 1.0 / gamma_u;
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.rho_u_ratio)
+            .arg(&mut *ut_out)
+            .arg(ut)
+            .arg(p)
+            .arg(&nl)
+            .arg(&pop)
+            .arg(&p_init)
+            .arg(&inv_gamma)
             .launch(cfg_for(n))?;
     }
     Ok(())

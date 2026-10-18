@@ -297,6 +297,19 @@ OFGPU_DEV unsigned long long parcelUid
     return z;
 }
 
+//  SPEC-LIT 147.1: the same mix applied to a key ALONE - the keyed half of
+//  the Rosin-Rammler draw. `parcelUid` packs (injector, event, index) and
+//  mixes it; this takes the already-packed key the caller formed, so the
+//  draw and the identity share one bijection. `parcels::inject::mix64` on
+//  the host is this function bit for bit.
+OFGPU_DEV unsigned long long ofpMix64(unsigned long long z)
+{
+    z ^= z >> 30; z *= 0xbf58476d1ce4e5b9ULL;
+    z ^= z >> 27; z *= 0x94d049bb133111ebULL;
+    z ^= z >> 31;
+    return z;
+}
+
 // --------------------------------------------------------------------------
 //  SPEC-LIT S78: the droplet-wall impact regime map
 // --------------------------------------------------------------------------
@@ -1403,11 +1416,15 @@ extern "C" __global__ void parcelBeginStep
 //  index): no atomic counter, no RNG, no dependence on which thread ran it.
 //
 //  The cone is a deterministic RING - azimuth (i + 1/2)/n of a turn at the
-//  cone half-angle - because this crate has no random number generator and
-//  adding one is not this unit's job. Rosin-Rammler stratified sampling
-//  needs a counter-based generator and is refused by name until it exists;
-//  a ring is what a hollow-cone nozzle is, sampled regularly instead of
-//  randomly, and it is exactly reproducible.
+//  cone half-angle - and it is unchanged: an injector's azimuths never
+//  depended on a random number. What §66.8 refused by name until a
+//  counter-based generator existed, the Rosin-Rammler diameter draw of
+//  SPEC-LIT 147.1, now exists on the same footing: a keyed bijection of
+//  (66.9)'s uid (Salmon, Moraes, Dror & Shaw, SC '11, in the sense of the
+//  idea, with SplitMix64's finaliser as the mix), stratified over u, so an
+//  injector with a distribution draws its diameters from (147.1) and one
+//  without keeps the monodisperse branch below bit for bit. Both branches
+//  are pure functions of (injector, event, index, seed).
 extern "C" __global__ void parcelInject
 (
     ofpos3* __restrict__ px,
@@ -1436,6 +1453,13 @@ extern "C" __global__ void parcelInject
     const ofscalar* __restrict__ injHalfAngle,
     const ofscalar* __restrict__ injStandoff,
     const int* __restrict__ injPerEvent,
+    // SPEC-LIT 147.1, per-injector: the Rosin-Rammler X and q (q > 0 marks
+    // an injector with a distribution), its draw key, and (147.5)'s
+    // coefficient c = mdot dt stride / (n rho_l pi/6) precomputed in f64.
+    const ofscalar* __restrict__ injRRX,
+    const ofscalar* __restrict__ injRRQ,
+    const unsigned long long* __restrict__ injSeed,
+    const double* __restrict__ injMassCoef,
     int nInj,
     // mesh, for the birth walk
     const oflabel* __restrict__ owner,
@@ -1504,9 +1528,39 @@ extern "C" __global__ void parcelInject
 
         px[slot] = x;
         pu[slot] = u;
-        pd[slot] = injDiameter[j];
+        // SPEC-LIT 147.1: the diameter draw. `injRRQ[j] > 0` marks an
+        // injector with a Rosin-Rammler distribution; the other branch is
+        // the §66.8 monodisperse store, unchanged bit for bit. (147.4): the
+        // offset inside parcel `local`'s own stratum, keyed on THIS
+        // parcel's (66.9) uid - the same call the uid store below makes.
+        // (147.3): the quantile of the stratified u. (147.5): the weight
+        // that keeps the event's mass mdot dt stride - every quantity in
+        // double in BOTH builds, d and n_p rounded once each to ofscalar,
+        // in the same operation order as `parcels::inject` on the host.
+        if (injRRQ[j] > 0)
+        {
+            const unsigned long long uid = parcelUid(
+                (unsigned long long)j,
+                (unsigned long long)injEvent[j],
+                (unsigned long long)local);
+            const unsigned long long h =
+                ofpMix64(uid ^ (injSeed[j] * 0x9E3779B97F4A7C15ULL));
+            const double r =
+                ((double)(h >> 11) + 0.5) * 1.1102230246251565404e-16; // 2^-53
+            const double uu = ((double)local + r) / (double)injPerEvent[j];
+            const double dd =
+                (double)injRRX[j] * pow(-log1p(-uu), 1.0 / (double)injRRQ[j]);
+            const ofscalar ds = (ofscalar)dd;
+            const double dw = (double)ds;
+            pd[slot] = ds;
+            pnp[slot] = (ofscalar)(injMassCoef[j] / (dw * dw * dw));
+        }
+        else
+        {
+            pd[slot] = injDiameter[j];
+            pnp[slot] = injWeight[j];
+        }
         pt[slot] = injTemperature[j];
-        pnp[slot] = injWeight[j];
         pcell[slot] = cell;
         puid[slot] = parcelUid(
             (unsigned long long)j,

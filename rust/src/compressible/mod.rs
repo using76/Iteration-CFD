@@ -39,6 +39,12 @@
 //!   §126.8 (CMP-16), the outlets of §126.9 (CMP-17) and the
 //!   characteristic far-field of §126.10 (CMP-18).
 //!
+//! With a [`crate::dust::source::CompressibleDust`] attached
+//! ([`Compressible::attach_dust`], SPEC-LIT §158.6), every `gas_state` is
+//! the mixture law (152.8)-(152.9), step 3 runs the dust coupling's c~
+//! solve, `rho cp(c~)` mixture energy equation and S_dust of (158.4) before
+//! it, and step 7 the coupling's rho-weighted SST.
+//!
 //! Written from:
 //!   ofgpu SPEC-LIT.md §125.3 - the outer loop, its order and its reports,
 //!     which is the contract of [`Compressible::step`]
@@ -83,7 +89,9 @@ use crate::{Label, Scalar};
 use energy::{EnergyInputs, RhoEnergy, RhoEnergyControls};
 use momentum::{RhoMomentum, RhoMomentumControls};
 use pressure::{RhoPressure, RhoPressureControls};
-use thermo::{GasConstants, PerfectGas, ThermoKernels};
+use crate::dust::source::CompressibleDust;
+
+use thermo::{GasConstants, MixKernels, PerfectGas, ThermoKernels};
 
 /// A refusal in the one house format.
 fn refuse(who: &str, msg: String) -> Error {
@@ -346,6 +354,9 @@ pub struct Compressible<'m> {
     local: bool,
 
     thk: ThermoKernels,
+    /// §158.6: the mixture gas law's kernels, launched only while a dust
+    /// coupling is attached.
+    mk: MixKernels,
     fvk: FvKernels,
     fldk: FieldKernels,
     relax_field: CudaFunction,
@@ -375,6 +386,10 @@ pub struct Compressible<'m> {
     farfields: Option<bc::CompressibleFarfields>,
     /// SPEC-LIT §126.11: the free-stream family, if any.
     freestreams: Option<bc::CompressibleFreestreams>,
+    /// SPEC-LIT §158.6: the Phase A dust model, if attached - call
+    /// [`Self::attach_dust`] before [`Self::initialise`]; `None` runs every
+    /// step exactly as the solver always ran it.
+    dust: Option<CompressibleDust<'m>>,
     /// SPEC-LIT §127.1.2: Spalart-Allmaras in its conservative form, if the
     /// run attached one through [`Self::set_turbulence`].
     sa: Option<SpalartAllmaras<'m>>,
@@ -499,6 +514,7 @@ impl<'m> Compressible<'m> {
             local,
 
             thk: ThermoKernels::new(gpu)?,
+            mk: MixKernels::new(gpu)?,
             fvk: FvKernels::new(gpu)?,
             fldk: FieldKernels::new(gpu)?,
             relax_field: si.func("smpRelaxField")?,
@@ -518,11 +534,86 @@ impl<'m> Compressible<'m> {
             outlets: None,
             farfields: None,
             freestreams: None,
+            dust: None,
             sa: None,
             mu_lam: None,
             mu_t: None,
             nu_ref: 0.0,
         })
+    }
+
+    /// SPEC-LIT §158.6: attach the dust coupling, whose `gas_state`,
+    /// `before_energy` and `correct_turbulence` then replace steps 1, 3 and
+    /// 7's laminar ones. Call BEFORE [`Self::initialise`], which then forms
+    /// the gas law with the mixture kernels. Refused by name (§158.6): a
+    /// steady or `localEuler` run, a ddt other than Euler, any attached
+    /// boundary rule of §126.8-§126.11 (inlets, outlets, far-fields, free
+    /// streams), and an attached Spalart-Allmaras (§127.1.2).
+    pub fn attach_dust(&mut self, gpu: &Gpu, dust: CompressibleDust<'m>) -> Result<()> {
+        let who = "Compressible::attach_dust";
+        if self.steady {
+            return Err(refuse(
+                who,
+                format!(
+                    "the run is steady (ddtSchemes {:?}); the dust model's c~ equation \
+                     and the mixture energy equation (SPEC-LIT §158.6) are transient. \
+                     Alternative: Euler",
+                    self.ctrl.momentum.ddt
+                ),
+            ));
+        }
+        if self.local {
+            return Err(refuse(
+                who,
+                "localEuler is named; the mixture energy equation (SPEC-LIT §158.6) \
+                 is built for one Euler step for every cell alike. Alternative: Euler"
+                    .to_string(),
+            ));
+        }
+        if self.ctrl.momentum.ddt != DdtScheme::Euler {
+            return Err(refuse(
+                who,
+                format!(
+                    "ddtSchemes is {:?}; the dust model attaches to an Euler run only \
+                     (SPEC-LIT §158.6). Alternative: Euler",
+                    self.ctrl.momentum.ddt
+                ),
+            ));
+        }
+        if self.has_boundary_rules() {
+            return Err(refuse(
+                who,
+                "a boundary rule of §126.8-§126.11 is attached (inlet, outlet, \
+                 far-field or free stream), and the mixture gas law forms every \
+                 boundary face from the c~ of its owner, which a rule-rewritten \
+                 face has none of (SPEC-LIT §158.6). Alternative: fixedValue and \
+                 zeroGradient conditions only"
+                    .to_string(),
+            ));
+        }
+        if self.sa.is_some() {
+            return Err(refuse(
+                who,
+                "SpalartAllmaras is attached (SPEC-LIT §127.1.2), and the dust \
+                 coupling carries its own rho-weighted turbulence and mu_eff \
+                 (SPEC-LIT §158.6); one run takes one model. Alternative: the dust \
+                 block's kOmegaSST or laminar, without SpalartAllmaras"
+                    .to_string(),
+            ));
+        }
+        self.energy.enable_mixture(gpu)?;
+        self.dust = Some(dust);
+        Ok(())
+    }
+
+    /// The attached dust coupling, if any.
+    pub fn dust(&self) -> Option<&CompressibleDust<'m>> {
+        self.dust.as_ref()
+    }
+
+    /// The attached dust coupling, for the driver's Courant checks.
+    pub fn dust_mut(&mut self) -> Option<&mut CompressibleDust<'m>> {
+        self.dust.as_mut()
     }
 
     /// SPEC-LIT §126.8: attach the compressible inlets `bc::lower` found;
@@ -627,8 +718,17 @@ impl<'m> Compressible<'m> {
     /// scheme and `delta_t` the momentum equation carries - one time step
     /// advances every equation (§125.3). `localEuler` on the model itself is
     /// refused by [`crate::timescheme::Ddt::add_rho`] (§86.7) at solve time.
+    /// Refused too while a dust coupling is attached (§158.6), which carries
+    /// its own turbulence and `mu_eff`.
     pub fn set_turbulence(&mut self, gpu: &Gpu, sa: SpalartAllmaras<'m>) -> Result<()> {
         let who = "Compressible::set_turbulence";
+        if self.dust.is_some() {
+            return Err(Error::Config(format!(
+                "{who}: a dust coupling is attached (SPEC-LIT §158.6), which carries its \
+                 own rho-weighted turbulence and mu_eff; one run takes one model \
+                 (SPEC-LIT §127.1.2)"
+            )));
+        }
         let mc = &self.ctrl.momentum;
         let (sa_ddt, sa_dt) = (sa.core().ctrl.ddt, sa.core().ctrl.delta_t);
         if self.steady {
@@ -739,6 +839,13 @@ impl<'m> Compressible<'m> {
         self.steps
     }
 
+    /// SPEC-LIT §158.8: a run handed over from another mesh (DST-09's vent)
+    /// continues its step count, so the first step after the opening advances
+    /// both ddt clocks as an uninterrupted run would.
+    pub fn set_steps_taken(&mut self, steps: u64) {
+        self.steps = steps;
+    }
+
     /// §125.7: the per-cell reciprocal step `r_P = 1/dt_P` of the pseudo
     /// step last taken (the momentum equation's; the energy equation holds
     /// a copy). `None` unless the run names `localEuler`.
@@ -764,8 +871,13 @@ impl<'m> Compressible<'m> {
 
     /// (122.10) on cells and boundary faces: `psi` from `T`, and
     /// `rho = psi (p + p_op)` - step 4's `psi` and the `rho*` CMP-10's
-    /// corrector needs. `p`'s and `T`'s boundary values must be evaluated.
+    /// corrector needs. With a dust coupling the MIXTURE law (152.8)-(152.9)
+    /// of §158.6 runs instead. `p`'s and `T`'s boundary values must be
+    /// evaluated.
     fn gas_state(&self, gpu: &Gpu, s: &mut CompressibleState) -> Result<()> {
+        if let Some(d) = self.dust.as_ref() {
+            return d.gas_state(gpu, &self.mk, s, self.p_op);
+        }
         let (n, nbf) = (self.m.n_cells, self.m.n_boundary_faces);
         let CompressibleState { psi, rho, p, t, .. } = s;
         thermo::gas_state(gpu, &self.thk, &self.gas, &mut psi.f, &mut rho.f, &p.f, &t.f, n)?;
@@ -957,7 +1069,14 @@ impl<'m> Compressible<'m> {
         if self.local {
             self.update_local_step(gpu, s)?;
         }
+        // §158.6: the dust coupling's step-long |grad c~|, once per step.
+        if let Some(d) = self.dust.as_mut() {
+            d.open_step(gpu)?;
+        }
         let step = self.steps + 1;
+        // §158.6: the time at the END of this step, which the dust model's
+        // closures and ignition read.
+        let t_new = step as f64 * w64(self.mom.ddt.state.dt);
 
         let n_outer = self.ctrl.n_outer;
         let mut outers = Vec::with_capacity(n_outer);
@@ -974,23 +1093,40 @@ impl<'m> Compressible<'m> {
             self.transport(gpu, s)?;
             self.apply_eddy_viscosity(gpu, s)?;
 
-            // 2. The momentum predictor, relaxed unless final.
+            // 2. The momentum predictor, relaxed unless final. With a dust
+            // coupling, mu_eff = mu + rho nu_t (§158.6).
             self.mom.set_u_relax(if is_final { 1.0 } else { self.ctrl.momentum.u_relax })?;
-            self.mom.set_viscosity(gpu, &s.u, &s.mu)?;
+            let mu_eff: &GpuScalarField = match self.dust.as_mut() {
+                Some(d) => {
+                    d.update_mu_eff(gpu, s)?;
+                    d.mu_eff().unwrap_or(&s.mu)
+                }
+                None => &s.mu,
+            };
+            self.mom.set_viscosity(gpu, &s.u, mu_eff)?;
             self.mom.set_force(gpu, &s.p, &s.u, &s.rho)?;
             let perf_u = self.mom.solve(gpu, &mut s.u, &s.mdot, &s.rho)?;
 
-            // 3. Energy, relaxed unless final.
+            // 3. Energy, relaxed unless final - the dust coupling's
+            // closures, c~ solve and mixture state first (§158.6), and the
+            // laplacian on its lambda.
             self.energy
                 .set_t_relax(if is_final { 1.0 } else { self.ctrl.energy.t_relax })?;
             let perf_t = {
+                if let Some(d) = self.dust.as_mut() {
+                    d.before_energy(gpu, m, &self.mk, s, &mut self.energy, self.p_op, t_new)?;
+                }
+                let kappa_eff: &GpuScalarField = match self.dust.as_ref() {
+                    Some(d) => d.lambda(),
+                    None => &s.kappa,
+                };
                 let inp = EnergyInputs {
                     u: &s.u,
                     p: &s.p,
                     mdot: &s.mdot,
                     rho: &s.rho,
                     mu_eff: &s.mu,
-                    kappa_eff: &s.kappa,
+                    kappa_eff,
                 };
                 self.energy.solve(gpu, &mut s.t, &inp)?
             };
@@ -1027,9 +1163,15 @@ impl<'m> Compressible<'m> {
                 self.gas_state(gpu, s)?;
             }
 
-            // 7. Turbulence: Spalart-Allmaras in its conservative form
-            // (SPEC-LIT §127.1.2), corrected once per step - every outer
-            // iteration of a steady run, the final one of a transient one.
+            // 7. Turbulence: the dust coupling's rho-weighted SST, when a
+            // model is attached (§158.6); or Spalart-Allmaras in its
+            // conservative form (SPEC-LIT §127.1.2), corrected once per step -
+            // every outer iteration of a steady run, the final one of a
+            // transient one. The two are never attached together; with
+            // neither, the gas is laminar.
+            if let Some(d) = self.dust.as_mut() {
+                d.correct_turbulence(gpu, m, s, t_new)?;
+            }
             let nu_tilda = self.correct_turbulence(gpu, s, steady, is_final)?;
 
             // 8. Bounds, residuals, the report.

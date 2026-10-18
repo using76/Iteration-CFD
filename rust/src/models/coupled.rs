@@ -247,6 +247,35 @@ pub trait CoupledTurbulence {
     /// own closure provides it - see [`MixingRate`]'s doc for why this
     /// exists and what each arm carries.
     fn mixing_rate(&self) -> MixingRate<'_>;
+
+    /// The rho-weighted form's settings (SPEC-LIT §156.3, §156.4). The
+    /// default REFUSES by name: §156's form is the SST's alone, and a model
+    /// that has no `correct_rho` has no settings for it to read.
+    fn set_rho_options(&mut self, _opts: crate::models::k_omega_sst::RhoSstOptions) -> Result<()> {
+        Err(crate::error::Error::Refused(format!(
+            "{}: the rho-weighted form (SPEC-LIT §156) is kOmegaSST's alone; \
+             this model runs no rho-weighted correction to configure",
+            self.name()
+        )))
+    }
+
+    /// One outer iteration of the rho-weighted form (SPEC-LIT §156,
+    /// (156.1)-(156.9)) - [`crate::models::k_omega_sst::KOmegaSst::correct_rho`]
+    /// behind the trait, so a driver that holds a `dyn CoupledTurbulence`
+    /// can run it without downcasting. The default REFUSES by name: the
+    /// kinematic `correct` is every other model's whole story.
+    fn correct_rho(
+        &mut self,
+        _gpu: &Gpu,
+        _flow: &FlowState,
+        _dens: &crate::models::k_omega_sst::SstDensity<'_>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        Err(crate::error::Error::Refused(format!(
+            "{}: the rho-weighted form (SPEC-LIT §156) is kOmegaSST's alone; \
+             run `correct` on this model",
+            self.name()
+        )))
+    }
 }
 
 // ==========================================================================
@@ -739,6 +768,24 @@ impl<'m> CoupledTurbulence for CoupledKOmegaSst<'m> {
             omega: self.model.omega(),
             beta_star: self.model.coeffs().beta_star,
         }
+    }
+
+    // SPEC-LIT §156 (DST-05/DST-06): the rho-weighted form is THIS model's,
+    // so the SST wrapper is the one override of the two defaults above.
+    fn set_rho_options(
+        &mut self,
+        opts: crate::models::k_omega_sst::RhoSstOptions,
+    ) -> Result<()> {
+        self.model.set_rho_options(opts)
+    }
+
+    fn correct_rho(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState,
+        dens: &crate::models::k_omega_sst::SstDensity<'_>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        self.model.correct_rho(gpu, flow, dens)
     }
 }
 

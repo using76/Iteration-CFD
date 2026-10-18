@@ -164,7 +164,10 @@ impl Word {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JsonCombustion {
-    /// `laminar` (the default) | `EDM` | `EDC` | `PaSR`.
+    /// `laminar` (the default) | `EDM` | `EDC` | `PaSR` | `FSC` | `TFC`.
+    /// `FSC` and `TFC` are the dust model's closures (§154); they lower in
+    /// `crate::io::case_dust` and are refused here, as is every one of the
+    /// four keys below under any of the four species-closure names.
     #[serde(alias = "combustionModel", default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// EDM's `A` (§134.2). No default.
@@ -193,6 +196,78 @@ pub struct JsonCombustion {
     /// `C_mix` of `tauMix integral`. No default.
     #[serde(rename = "Cmix", default, skip_serializing_if = "Option::is_none")]
     pub c_mix: Option<f64>,
+    /// FSC/TFC's Pr_t (§151.5: each case its own - Leeds 0.4, REMBE 0.28).
+    /// REQUIRED with `model` FSC or TFC; there is no default.
+    #[serde(rename = "PrT", default, skip_serializing_if = "Option::is_none")]
+    pub pr_t: Option<f64>,
+    /// The extended FSC's t_flacc (§154.7). FSC only - TFC has no clock
+    /// (§154.6).
+    #[serde(rename = "tFlacc", default, skip_serializing_if = "Option::is_none")]
+    pub t_flacc: Option<f64>,
+    /// `global` (the default, the papers' clock of (154.2)) or `local` (the
+    /// transported flame age of SPEC-LIT §160.5); FSC only - refused with
+    /// TFC, which has no clock.
+    #[serde(rename = "flameAge", default, skip_serializing_if = "Option::is_none")]
+    pub flame_age: Option<String>,
+    /// The flame-Courant limit Co_f,max of (155.9); the default is
+    /// `ofgpu::dust::courant::CO_F_MAX` = 0.5.
+    #[serde(rename = "maxFlameCourant", default, skip_serializing_if = "Option::is_none")]
+    pub max_flame_courant: Option<f64>,
+    /// The ignition source of (155.4); absent is no ignition source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignition: Option<JsonIgnition>,
+    /// Gate DST-VES's prescribed `U_t` (SPEC-LIT §157.6): the TFC operator
+    /// runs at `U_t = S0 (T_u/T_u0)^alpha (p/p0)^beta` instead of the
+    /// closures'. TFC only - refused beside `model` FSC and beside any
+    /// turbulence model, and lowered in `crate::io::case_dust`.
+    #[serde(rename = "prescribedUt", default, skip_serializing_if = "Option::is_none")]
+    pub prescribed_ut: Option<JsonPrescribedUt>,
+    /// Gate DST-VES's density the propagation reads (SPEC-LIT §157.6):
+    /// `"compressed"` (the default, the (155.10) gas) or `"initial"` - the
+    /// negative control of INSIGHTS (g). Lowered in `crate::io::case_dust`.
+    #[serde(rename = "unburnedDensity", default, skip_serializing_if = "Option::is_none")]
+    pub unburned_density: Option<String>,
+}
+
+/// `combustion.prescribedUt`, the prescribed burning law of Gate DST-VES
+/// (SPEC-LIT §157.6 (i)): `U_t = S0 (T_u(p)/T_u0)^alpha (p/p0)^beta` with
+/// `T_u(p)/T_u0 = (p/p0)^((g-1)/g)` - a test input, not a correlation
+/// claim. `alpha` and `beta` omitted are 0, the constant law.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonPrescribedUt {
+    /// m/s, the burning velocity at the initial state. Required, finite
+    /// and above zero.
+    #[serde(rename = "S0")]
+    pub s0: f64,
+    /// The exponent of the unburned-temperature ratio; omitted is 0.
+    #[serde(default)]
+    pub alpha: f64,
+    /// The exponent of the pressure ratio; omitted is 0.
+    #[serde(default)]
+    pub beta: f64,
+}
+
+/// `combustion.ignition`, the source of (155.4) (SPEC-LIT §155.3). `sigmaT`
+/// omitted is t0 (§151.7 item 8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonIgnition {
+    /// The ignition point in world coordinates, m. Required.
+    pub point: [f64; 3],
+    /// sigma_r, m (H20 §3.3's 0.25 mm). Required, finite and above zero.
+    #[serde(rename = "sigmaR")]
+    pub sigma_r: f64,
+    /// W_0, 1/s (H20 §3.3's 1e13). Required, finite and above zero.
+    #[serde(rename = "W0")]
+    pub w0: f64,
+    /// t_0, s - the end of the ramp and the origin of t_fd. Required, finite
+    /// and at or above zero.
+    #[serde(rename = "t0")]
+    pub t0: f64,
+    /// sigma_t, s; omitted is t0 (§151.7 item 8).
+    #[serde(rename = "sigmaT", default, skip_serializing_if = "Option::is_none")]
+    pub sigma_t: Option<f64>,
 }
 
 // ==========================================================================
@@ -682,8 +757,10 @@ fn lower_chemistry(ch: &JsonChemistry) -> Result<LoweredChemistry> {
 
 fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<LoweredCombustion> {
     let model = c.model.as_deref().unwrap_or("laminar");
-    // §13.4.1: a key of a closure the case did not select is refused.
-    let keys: [(&str, bool, &str); 10] = [
+    // §13.4.1: a key of a closure the case did not select is refused. The
+    // FSC/TFC keys lower in `crate::io::case_dust`; under laminar/EDM/EDC/
+    // PaSR they are refused here by the same table.
+    let keys: [(&str, bool, &str); 17] = [
         ("A", c.a.is_some(), "EDM"),
         ("B", c.b.is_some(), "EDM"),
         ("variant", c.variant.is_some(), "EDC"),
@@ -694,6 +771,13 @@ fn lower_combustion(c: &JsonCombustion, mixing: Option<MixingKind>) -> Result<Lo
         ("tauMix", c.tau_mix.is_some(), "PaSR"),
         ("tauChem", c.tau_chem.is_some(), "PaSR"),
         ("Cmix", c.c_mix.is_some(), "PaSR"),
+        ("PrT", c.pr_t.is_some(), "FSC/TFC"),
+        ("tFlacc", c.t_flacc.is_some(), "FSC/TFC"),
+        ("flameAge", c.flame_age.is_some(), "FSC/TFC"),
+        ("maxFlameCourant", c.max_flame_courant.is_some(), "FSC/TFC"),
+        ("ignition", c.ignition.is_some(), "FSC/TFC"),
+        ("prescribedUt", c.prescribed_ut.is_some(), "FSC/TFC"),
+        ("unburnedDensity", c.unburned_density.is_some(), "FSC/TFC"),
     ];
     if !["laminar", "EDM", "EDC", "PaSR"].contains(&model) {
         return Err(refused(

@@ -33,7 +33,29 @@
 //! not have (§122.4), and writes `p` (gauge, about `pOperating`), `U`, `T`,
 //! `rho` and `Mach` through the one output pipeline of SPEC-LIT §44.
 //!
+//! SPEC-LIT §158.8 (DST-09): a JSONC case's `vent` block runs the one-domain
+//! vent here and nowhere else. The run starts on the mesh split at the
+//! membrane, reads the membrane's pressure difference after every step, and
+//! on opening hands the state over to a solver on the case's own mesh; a
+//! steady run with a vent is refused, and every other driver refuses the
+//! case by name (`LoweredCase::refuse_vent`).
+//!
+//! SPEC-LIT §158.6 (DST-10): a JSONC case's dust model runs here too, on
+//! the mixture gas law (152.8)-(152.9) about the case's `physics.compressible`
+//! air. The coupling - the c~ equation (155.3) on the solver's own mass
+//! flux, the heat release (158.4), R_mix(c~), the local ρ_u(p) of (155.10),
+//! the ρ-weighted SST of §156 as the one carried turbulence model, and the
+//! flame-Courant limit (155.9) - is
+//! [`ofgpu::dust::source::CompressibleDust`], attached before
+//! `initialise`; a vent beside it, a non-Euler ddt and any §126 rule are
+//! refused by name. Without a dust block nothing in the run changes, bit
+//! for bit.
+//!
 //! Written from:
+//!   ofgpu SPEC-LIT.md §158.1, §158.8 - the membrane and the vent as built
+//!   ofgpu SPEC-LIT.md §158.4, §158.6 - the mixture heat release, and the
+//!     dust model this driver runs: its refusals, its c~ controls, its
+//!     (155.9) checks and its four written fields
 //!   ofgpu SPEC-LIT.md §122.4 - v1's scope, and that everything else is
 //!     refused by name here
 //!   ofgpu SPEC-LIT.md §122.2, §122.6 - the gauge pressure and the two
@@ -61,9 +83,11 @@ use ofgpu::compressible::{
     Compressible, CompressibleControls, CompressibleState, OuterReport,
     ResidualControl as CmpResidualControl,
 };
+use ofgpu::dust::source::{CompressibleDust, DustSetup};
+use ofgpu::dust::vent;
 use ofgpu::field_setup::{
-    harvest_scalar_field, harvest_vector_field, setup_scalar_field, setup_vector_field,
-    wall_coeffs_from_case, NutRoughness, WallFaces,
+    harvest_scalar_field, harvest_vector_field, setup_scalar_field, wall_coeffs_from_case,
+    NutRoughness, WallFaces,
 };
 use ofgpu::fv::DivScheme;
 use ofgpu::io::case::{find_start_time, format_time_name, CaseControls};
@@ -73,20 +97,22 @@ use ofgpu::io::fields::{
 };
 use ofgpu::io::voxelmap::LatticeSpec;
 use ofgpu::io::{DivEntry, FoamDict};
-use ofgpu::models::registry::{select_turbulence_model, RasModel};
+use ofgpu::models::coupled::CoupledTurbulence;
+use ofgpu::models::k_omega_sst::{RhoSstOptions, SstSust};
+use ofgpu::models::registry::{build_coupled, select_turbulence_model, RasModel};
 use ofgpu::models::{sa_coeffs, SpalartAllmaras};
 use ofgpu::momentum::BuoyancyForm;
 use ofgpu::timescheme::DdtScheme;
-use ofgpu::turbulence::TurbulenceControls;
+use ofgpu::turbulence::{FlowState, TurbulenceControls};
 use ofgpu::walldistance;
-use ofgpu::{Error, Gpu, GpuMesh, GpuScalarField, GpuVectorField, HostMesh, Result, Scalar};
+use ofgpu::{Error, Gpu, GpuMesh, HostMesh, Result, Scalar, Vec3};
 
 #[path = "common/mod.rs"]
 mod common;
 
 use common::{
-    device_banner, g, load_case, next_arg, output_root, parse_output_formats, sci, CaseNumerics,
-    OutputFormat,
+    device_banner, g, load_case_vented, next_arg, output_root, parse_output_formats, sci,
+    CaseNumerics, OutputFormat,
 };
 
 /// The binary's name, in every refusal it makes.
@@ -302,13 +328,21 @@ fn refuse_out_of_scope(case_path: &Path, cc: &CaseControls, lowered: Option<&Low
     };
     if let Some(sel) = named {
         let is_laminar = sel.model == RasModel::Laminar && sel.les.is_none() && sel.des.is_none();
+        // SPEC-LIT §158.6 lifts CMP-15's non-SA refusal for kOmegaSST ONLY:
+        // the dust case's ρ-weighted form (§156) is the one model the
+        // mixture coupling carries, and it exists beside a `dust` block
+        // alone.
+        let is_dust_sst = lowered.is_some_and(|l| l.dust.is_some())
+            && sel.model == RasModel::KOmegaSST
+            && sel.les.is_none()
+            && sel.des.is_none();
         let is_sa = sel.model == RasModel::SpalartAllmaras && sel.les.is_none() && sel.des.is_none();
         // SPEC-LIT §127.1.2: Spalart-Allmaras runs here in its conservative
         // form - but only through the OpenFOAM case format, whose `0/nuTilda`
         // states the field the equation transports. The JSONC format has no
         // nuTilda initial field (`LoweredCase` carries none), so an SA case
         // stated in JSONC would run the model without its unknown.
-        if !is_laminar && !(is_sa && lowered.is_none()) {
+        if !is_laminar && !is_dust_sst && !(is_sa && lowered.is_none()) {
             let setting = if lowered.is_some() {
                 "physics.turbulence"
             } else {
@@ -321,6 +355,13 @@ fn refuse_out_of_scope(case_path: &Path, cc: &CaseControls, lowered: Option<&Low
                      form (SPEC-LIT §127.1), which reads a nuTilda initial field - and the \
                      JSONC format has no nuTilda to state it with. Alternative: the OpenFOAM \
                      case format"
+                )
+            } else if sel.model == RasModel::KOmegaSST && sel.les.is_none() && sel.des.is_none() {
+                format!(
+                    "{name}: kOmegaSST runs in ofgpu-compressible only with a dust block, as \
+                     §156's rho-weighted form (SPEC-LIT §158.6); without the model's own \
+                     closures this driver would run it as a substitution (SPEC-LIT §13.4). \
+                     Alternative: laminar, or the dust block"
                 )
             } else {
                 format!(
@@ -704,6 +745,33 @@ fn print_controls(dc: &DriverControls) {
     }
 }
 
+/// The c~ equation's controls by its own entry names (§13.4.1), the local
+/// copy of `lowmach_dust::c_controls` this driver forms (SPEC-LIT §158.6):
+/// `div(phi,c)` where the case names one, otherwise §155.3's bounded Gauss
+/// upwind - never the case's `default`; the `c` solver and relaxation
+/// (1 where the case names none, a dust run being transient); `grad(c)`;
+/// `snGradSchemes default`; Euler at the run's dt, and never steady.
+pub fn dust_c_controls(
+    num: &CaseNumerics<'_>,
+    base: &TurbulenceControls,
+    dt: Scalar,
+) -> Result<TurbulenceControls> {
+    let conv = match num.div_named("div(phi,c)")? {
+        Some(a) => a,
+        None => DivEntry { scheme: DivScheme::Upwind, bounded: true },
+    };
+    let mut c = *base;
+    c.k_solver = num.solver("c", base.k_solver)?;
+    c.k_relax = num.relax("c", 1.0)?;
+    c.grad_scheme = num.grad("grad(c)")?;
+    c.sn_grad = num.sn_grad("default")?;
+    c.div_scheme = conv.scheme;
+    c.bounded_convection = conv.bounded;
+    c.steady = false;
+    c.delta_t = dt;
+    Ok(c)
+}
+
 // ==========================================================================
 //  Fields
 // ==========================================================================
@@ -811,9 +879,34 @@ fn calculated_like(t: &RawScalarField, name: &str) -> RawScalarField {
 /// check reads the same list).
 const OUTPUT_FIELDS: [&str; 5] = ["U", "p", "T", "rho", "Mach"];
 
+/// The four dust fields a dust run adds (SPEC-LIT §158.6): `c` (the
+/// progress variable), `Ut` (U_t', m/s), `Cof` (the last measured
+/// flame-Courant number) and `HRR` (q, W/m3). An output block may name
+/// them only beside a `dust` block.
+const DUST_FIELDS: [&str; 4] = ["c", "Ut", "Cof", "HRR"];
+
+/// The field names `check_fields` reads, the five base ones plus the four
+/// dust ones exactly when the case has a `dust` block (SPEC-LIT §158.6).
+fn available_fields(has_dust: bool) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = OUTPUT_FIELDS.to_vec();
+    if has_dust {
+        v.extend(DUST_FIELDS);
+    }
+    v
+}
+
 /// Write the five fields - plus `nuTilda` and `nut` when SA is attached
 /// (§127.1.2) - at time label `t` (seconds, or the iteration count of a
-/// steady run), through the one pipeline.
+/// steady run), through the one pipeline. With a dust coupling the
+/// write carries the four dust fields as well, and `Mach` is the mixture's
+/// - `a^2 = gamma(c~) r(c~) T` of the hConst pair (SPEC-LIT §158.6); the
+/// scalar `cof` is the last MEASURED flame-Courant number `Cof` writes.
+///
+/// `hm` is the CASE'S own mesh in both phases of a vented run: the split
+/// mesh's boundary arrays start with the case's boundary faces in the same
+/// order (its cells are the same), so the harvest's per-patch slices read
+/// the right values of either state (SPEC-LIT §158.1). A dust run is never
+/// vented, so its boundary faces are always `hm`'s own.
 #[allow(clippy::too_many_arguments)]
 fn write_time(
     gpu: &Gpu,
@@ -826,6 +919,8 @@ fn write_time(
     pipeline: &mut ofgpu::io::OutputPipeline,
     force: bool,
     volume: Option<&ofgpu::io::VolumeTarget>,
+    dust: Option<&CompressibleDust>,
+    cof: Option<f64>,
 ) -> Result<bool> {
     if !force && !pipeline.any_due(t) {
         return Ok(false);
@@ -849,22 +944,61 @@ fn write_time(
     // (122.12) per cell and per boundary face, from the solver's u and T:
     // the patch entries are T's (expanded per patch by the harvest), and
     // each patch's values are overwritten from its own slice of the
-    // boundary arrays, as the harvest itself slices them.
+    // boundary arrays, as the harvest itself slices them. With a dust
+    // coupling the gas law is the mixture's (152.8)-(152.9), so Mach reads
+    // `a^2 = gamma(c~) r(c~) T` with `gamma = cp(c~)/(cp(c~) - r(c~))` of
+    // the hConst pair, host f64 - not the case gas (SPEC-LIT §158.6).
     let k = gas.constants();
     let mut out_m = calculated_like(&fields.t, "Mach");
     harvest_scalar_field(gpu, &mut out_m, &s.t, hm)?;
     out_m.dimensions = "[0 0 0 0 0 0 0]".to_string();
-    out_m.internal = out_u
-        .internal
-        .iter()
-        .zip(&out_t.internal)
-        .map(|(u, tt)| k.mach(*u, *tt))
-        .collect();
     let (ub, tb) = (gpu.download(&s.u.bf)?, gpu.download(&s.t.bf)?);
-    let face_mach: Vec<Scalar> = ub.iter().zip(&tb).map(|(u, tt)| k.mach(*u, *tt)).collect();
-    for patch in &hm.patches {
-        if let Some(spec) = out_m.boundary.get_mut(&patch.name) {
-            spec.value = face_mach[patch.start..patch.start + patch.size].to_vec();
+    match dust {
+        None => {
+            out_m.internal = out_u
+                .internal
+                .iter()
+                .zip(&out_t.internal)
+                .map(|(u, tt)| k.mach(*u, *tt))
+                .collect();
+            let face_mach: Vec<Scalar> = ub.iter().zip(&tb).map(|(u, tt)| k.mach(*u, *tt)).collect();
+            for patch in &hm.patches {
+                if let Some(spec) = out_m.boundary.get_mut(&patch.name) {
+                    spec.value = face_mach[patch.start..patch.start + patch.size].to_vec();
+                }
+            }
+        }
+        Some(d) => {
+            let hc = d.hconst();
+            let cf = gpu.download(&d.c().f)?;
+            let cfb = gpu.download(&d.c().bf)?;
+            let mach_mix = |c: f64, sp2: f64, tt: f64| -> Scalar {
+                let (cp, r) = (hc.cp(c), hc.r(c));
+                let gamma = cp / (cp - r);
+                (sp2.sqrt() / (gamma * r * tt).sqrt()) as Scalar
+            };
+            let speed2 = |u: &Vec3| -> f64 {
+                let (ux, uy, uz) = (f64::from(u.x), f64::from(u.y), f64::from(u.z));
+                ux * ux + uy * uy + uz * uz
+            };
+            out_m.internal = out_u
+                .internal
+                .iter()
+                .zip(&out_t.internal)
+                .zip(&cf)
+                .map(|((u, tt), c)| mach_mix(f64::from(*c), speed2(u), f64::from(*tt)))
+                .collect();
+            let face_mach: Vec<Scalar> = ub
+                .iter()
+                .zip(&tb)
+                .zip(&cfb)
+                .map(|((u, tt), c)| mach_mix(f64::from(*c), speed2(u), f64::from(*tt)))
+                .collect();
+            for patch in &hm.patches {
+                if let Some(spec) = out_m.boundary.get_mut(&patch.name) {
+                    spec.value = face_mach[patch.start..patch.start + patch.size].to_vec();
+                }
+            }
         }
     }
 
@@ -903,6 +1037,48 @@ fn write_time(
         ofgpu::io::OutputField::scalar("rho", &out_rho.internal),
         ofgpu::io::OutputField::scalar("Mach", &out_m.internal),
     ];
+    // The four dust fields (SPEC-LIT §158.6): `c` harvested from the c~
+    // field into a calculated_like copy; `Ut` (U_t', m/s), `Cof` (the last
+    // measured number, uniform) and `HRR` (q~ of (158.4), W/m3) from the
+    // coupling's own cell buffers, each boundary face its owner's value.
+    let mut out_c = calculated_like(&fields.t, "c");
+    let mut out_ut = calculated_like(&fields.t, "Ut");
+    let mut out_cof = calculated_like(&fields.t, "Cof");
+    let mut out_hrr = calculated_like(&fields.t, "HRR");
+    if let Some(d) = dust {
+        harvest_scalar_field(gpu, &mut out_c, d.c(), hm)?;
+        out_c.dimensions = "[0 0 0 0 0 0 0]".to_string();
+        let owner_fill = |raw: &mut RawScalarField, dims: &str, cell: &[Scalar]| {
+            raw.dimensions = dims.to_string();
+            raw.internal = cell[..hm.n_cells].to_vec();
+            for p in &hm.patches {
+                if let Some(spec) = raw.boundary.get_mut(&p.name) {
+                    spec.value = (p.start..p.start + p.size)
+                        .map(|f| cell[hm.b_face_cells[f] as usize])
+                        .collect();
+                }
+            }
+        };
+        let ut: Vec<Scalar> = gpu.download(d.u_t_local())?;
+        let hrr: Vec<Scalar> = gpu.download(d.heat_release())?;
+        // (155.9) per cell, as the last measurement formed it; zeros before
+        // the first one.
+        let cof_cell: Vec<Scalar> = match cof {
+            Some(_) => gpu.download(d.courant())?,
+            None => vec![0.0 as Scalar; hm.n_cells],
+        };
+        owner_fill(&mut out_ut, "[0 1 -1 0 0 0 0]", &ut);
+        owner_fill(&mut out_cof, "[0 0 0 0 0 0 0]", &cof_cell);
+        owner_fill(&mut out_hrr, "[1 -1 -3 0 0 0 0]", &hrr);
+        foam.push(ofgpu::io::FoamField::scalar("c", &out_c));
+        foam.push(ofgpu::io::FoamField::scalar("Ut", &out_ut));
+        foam.push(ofgpu::io::FoamField::scalar("Cof", &out_cof));
+        foam.push(ofgpu::io::FoamField::scalar("HRR", &out_hrr));
+        vis.push(ofgpu::io::OutputField::scalar("c", &out_c.internal));
+        vis.push(ofgpu::io::OutputField::scalar("Ut", &out_ut.internal));
+        vis.push(ofgpu::io::OutputField::scalar("Cof", &out_cof.internal));
+        vis.push(ofgpu::io::OutputField::scalar("HRR", &out_hrr.internal));
+    }
     if let (Some(nt), Some(nut)) = (&out_nt, &out_nut) {
         foam.push(ofgpu::io::FoamField::scalar("nuTilda", nt));
         foam.push(ofgpu::io::FoamField::scalar("nut", nut));
@@ -934,6 +1110,62 @@ struct RunEnd {
     converged: bool,
     last: Option<OuterReport>,
     seconds: f64,
+    /// The membrane's state at the end of a run with a `vent` block; `None`
+    /// without one (SPEC-LIT §158.8).
+    vent: Option<ofgpu::dust::vent::VentState>,
+}
+
+/// Everything a case's `vent` block adds to a run (SPEC-LIT §158.8): the
+/// lowered block, the mesh split at the membrane, the host mesh built from
+/// the split one, and the closed-stage lowered fields with the two membrane
+/// patches. `None` for every case without the block.
+struct VentRun {
+    spec: ofgpu::dust::vent::VentSpec,
+    split: ofgpu::dust::vent::VentSplit,
+    hm_split: HostMesh,
+    closed: ofgpu::compressible::bc::Lowered,
+}
+
+/// One opening check of the membrane (SPEC-LIT §158.1), run at n = 0 (after
+/// `initialise`) and after every step n (t = `t` s) while it is closed: read
+/// the area-weighted pressure difference from the solved gauge `p`, and when
+/// it has reached `pStat`, print the opening and hand the run over to the
+/// merged-mesh solver [`vent::open_onto`] builds. Returns the handed-over
+/// (solver, state) when the membrane opened - the caller replaces its own -
+/// and the reading either way.
+#[allow(clippy::too_many_arguments)]
+fn check_membrane<'m>(
+    gpu: &Gpu,
+    v: &VentRun,
+    trigger: &mut vent::VentTrigger,
+    membrane: &mut vent::Membrane,
+    n: u64,
+    t: f64,
+    solver: &Compressible<'_>,
+    s: &CompressibleState,
+    mesh: &'m GpuMesh,
+    hm: &HostMesh,
+    ctrl: CompressibleControls,
+    inlets: &ofgpu::compressible::bc::Lowered,
+) -> Result<(Option<(Compressible<'m>, CompressibleState)>, vent::VentReading)> {
+    let r = trigger.read(gpu, &s.p.f)?;
+    if membrane.check(n, t, &r) {
+        println!(
+            "vent: opened after step {n} (t = {} s): dp = {} Pa >= pStat {} Pa \
+             (p_in {} Pa, p_out {} Pa); the {} faces are interior faces from \
+             step {} on, SPEC-LIT 158.1",
+            g(t),
+            g(r.dp),
+            g(v.spec.p_stat),
+            g(r.p_in),
+            g(r.p_out),
+            v.split.faces.len(),
+            n + 1
+        );
+        let handed = vent::open_onto(gpu, &v.split, solver, s, mesh, hm, ctrl, inlets)?;
+        return Ok((Some(handed), r));
+    }
+    Ok((None, r))
 }
 
 fn run(o: &Options) -> Result<RunEnd> {
@@ -941,7 +1173,7 @@ fn run(o: &Options) -> Result<RunEnd> {
     let gpu = Gpu::new(0)?;
     println!("{}", device_banner(&gpu, "compressible")?);
 
-    let (hm, cc, lowered) = load_case(&o.case_path)?;
+    let (hm, cc, lowered) = load_case_vented(&o.case_path)?;
     refuse_out_of_scope(&o.case_path, &cc, lowered.as_ref())?;
     hm.print_report();
 
@@ -994,8 +1226,82 @@ fn run(o: &Options) -> Result<RunEnd> {
         }
     }
 
+    // ---- SPEC-LIT §158.6: what a dust case may not state here, by name,
+    // before anything is built. The c~ equation's mixture gas law forms
+    // every boundary face from the c~ of its owner, which a §126-rewritten
+    // face has none of, and the hand-over of c~ and the closures on
+    // opening is DST-11's.
+    let has_dust = lowered.as_ref().is_some_and(|l| l.dust.is_some());
+    if has_dust {
+        let inl = &inlets;
+        if !inl.rules.is_empty()
+            || !inl.outlets.is_empty()
+            || !inl.farfields.is_empty()
+            || !inl.freestreams.is_empty()
+        {
+            return Err(refuse(
+                "boundaryField",
+                "a §126 rule (inlet, outlet, far-field or free stream) is attached, and \
+                 the mixture gas law forms every boundary face from the c~ of its owner, \
+                 which a rule-rewritten face has none of (SPEC-LIT §158.6). Alternative: \
+                 fixedValue and zeroGradient conditions only",
+            ));
+        }
+        if lowered.as_ref().and_then(|l| l.vent.as_ref()).is_some() {
+            return Err(refuse(
+                "vent",
+                "the hand-over of c~ and the closures on opening is DST-11's; a dust case \
+                 runs sealed here (SPEC-LIT §158.6). Alternative: drop the vent block",
+            ));
+        }
+    }
+
     let dc = driver_controls(&o.case_path, &cc, lowered.as_ref(), gas, o.iters)?;
     print_controls(&dc);
+    // SPEC-LIT §158.6: the c~ equation keeps one old level and the mixture
+    // energy equation is built for one Euler step for every cell alike, so
+    // a dust run is a transient Euler run and nothing else.
+    if has_dust && dc.ctrl.momentum.ddt != DdtScheme::Euler {
+        return Err(refuse(
+            "numerics.ddt",
+            &format!(
+                "{:?} with a dust case: the c~ equation (155.3) keeps one old level and \
+                 the mixture energy equation (SPEC-LIT §158.4) rides one Euler step for \
+                 every cell alike. Alternative: Euler",
+                dc.ctrl.momentum.ddt
+            ),
+        ));
+    }
+
+    // ---- the vent (SPEC-LIT §158.8), before the output pipeline: it owns
+    // which mesh the run starts on -----------------------------------------
+    let vented = match lowered.as_ref().and_then(|l| l.vent.as_ref()) {
+        Some(spec) => {
+            if !dc.transient {
+                return Err(refuse(
+                    "vent",
+                    "a steady run has no opening time: the vent needs a transient ddt, \
+                     Euler or backward (SPEC-LIT §158.8)",
+                ));
+            }
+            let raw = common::case_raw_mesh(&o.case_path, lowered.as_ref())?;
+            let split = vent::split_raw(&raw, vent::select_faces(&raw, spec)?)?;
+            let hm_split = ofgpu::io::polymesh::build_host_mesh(&split.raw)?;
+            let closed = vent::closed_lowered(&inlets, spec.wall)?;
+            println!(
+                "vent: {} membrane face(s), area {} m^2, pStat {} Pa, wall {}; closed, \
+                 the run starts on the split mesh ({} + {} boundary faces), SPEC-LIT §158.8",
+                split.faces.len(),
+                g(split.area),
+                g(spec.p_stat),
+                if spec.wall == vent::MembraneWall::NoSlip { "noSlip" } else { "slip" },
+                split.n_boundary_merged,
+                2 * split.faces.len(),
+            );
+            Some(VentRun { spec: spec.clone(), split, hm_split, closed })
+        }
+        None => None,
+    };
 
     // SPEC-LIT §127.1.2: SA reached the solver on the OpenFOAM route (the
     // refusal above); read its fields and controls now, and attach the model
@@ -1092,7 +1398,10 @@ fn run(o: &Options) -> Result<RunEnd> {
     let out_root = output_root(&o.case_path);
     let mut pipeline = match &output_plan {
         Some(plan) => {
-            plan.check_fields(&OUTPUT_FIELDS)?;
+            // SPEC-LIT §158.6: an output block may name the four dust
+            // fields only when the case has a dust block - the list below
+            // is the check's whole vocabulary.
+            plan.check_fields(&available_fields(has_dust))?;
             ofgpu::io::OutputPipeline::from_plan(plan, &out_root, "compressible", "restart")?
         }
         None => ofgpu::io::OutputPipeline::from_command_line(
@@ -1113,18 +1422,112 @@ fn run(o: &Options) -> Result<RunEnd> {
 
     // ---- the solver --------------------------------------------------------
     let mesh = GpuMesh::upload(&gpu, &hm)?;
-    let mut u = GpuVectorField::zeros(&gpu, &mesh, "U")?;
-    let mut p = GpuScalarField::zeros(&gpu, &mesh, "p")?;
-    let mut t = GpuScalarField::zeros(&gpu, &mesh, "T")?;
-    setup_vector_field(&gpu, &mut u, &inlets.u, &hm)?;
-    setup_scalar_field(&gpu, &mut p, &inlets.p, &hm)?;
-    setup_scalar_field(&gpu, &mut t, &inlets.t, &hm)?;
-    let mut s = CompressibleState::new(&gpu, &mesh, u, p, t)?;
-    let mut solver = Compressible::new(&gpu, &mesh, dc.ctrl)?;
-    solver.set_boundary_rules(&gpu, inlets.rules)?;
-    solver.set_outlet_rules(&gpu, inlets.outlets)?;
-    solver.set_farfield_rules(&gpu, inlets.farfields)?;
-    solver.set_freestream_rules(&gpu, inlets.freestreams)?;
+    // The run's first mesh: the split one when there is a vent, else the
+    // case's own - which `mesh` already is.
+    let split_mesh = match &vented {
+        Some(v) => Some(GpuMesh::upload(&gpu, &v.hm_split)?),
+        None => None,
+    };
+    // `vent::setup_state` and `vent::build_solver` make exactly the calls
+    // this section made before DST-09, in the same order - on the split mesh
+    // with the closed-stage fields when there is a vent, else on the case's
+    // own mesh with its inlets.
+    let ctrl = dc.ctrl;
+    let (mut solver, mut s) = match (&vented, &split_mesh) {
+        (Some(v), Some(gm)) => {
+            let s = vent::setup_state(&gpu, gm, &v.hm_split, &v.closed)?;
+            let solver = vent::build_solver(&gpu, gm, ctrl, &v.closed)?;
+            (solver, s)
+        }
+        _ => {
+            let s = vent::setup_state(&gpu, &mesh, &hm, &inlets)?;
+            let solver = vent::build_solver(&gpu, &mesh, ctrl, &inlets)?;
+            (solver, s)
+        }
+    };
+    // ---- SPEC-LIT §158.6: the dust case's coupling, built on the run's
+    // own mesh and attached BEFORE `initialise`, whose gas state is then
+    // the mixture law (152.8)-(152.9) from the first outer iteration on.
+    let mut dust_attached = false;
+    if let Some(d) = lowered.as_ref().and_then(|l| l.dust.as_ref()) {
+        // The initial thermodynamic pressure (155.10)'s datum: p_op plus
+        // the uniform initial gauge p (SPEC-LIT §122.2).
+        let p_gauge = fields.p.internal.first().copied().unwrap_or(0.0 as Scalar);
+        if fields.p.internal.iter().any(|&v| v != p_gauge) {
+            return Err(refuse(
+                "initial.p",
+                "not uniform: the dust model's datum p_init = pOperating + p is one \
+                 number (SPEC-LIT §158.6)",
+            ));
+        }
+        let kc = gas.constants();
+        let t_u = d.t_u;
+        let k_mol = f64::from(kc.kappa(t_u as Scalar));
+        let setup = DustSetup::new(d, gas.p_op + f64::from(p_gauge), k_mol)?;
+        let nu_ref = f64::from(kc.mu(t_u as Scalar)) / setup.rho_u0;
+        let num = CaseNumerics::read(&o.case_path, &cc, lowered.as_ref())?;
+        let c_ctrl = dust_c_controls(&num, &cc.turb, dc.ctrl.momentum.delta_t)?;
+        let raw_c = d.c_field.to_raw(hm.n_cells);
+        // §158.6: the rho-weighted SST is the one model the coupling
+        // carries; `refuse_out_of_scope` let it through for a dust case
+        // only, so a selection here is kOmegaSST's or laminar's.
+        let selection = select_turbulence_model(&cc)?;
+        let turb: Option<Box<dyn CoupledTurbulence>> =
+            if selection.model == RasModel::KOmegaSST
+                && selection.les.is_none()
+                && selection.des.is_none()
+            {
+                let lc = lowered.as_ref().ok_or_else(|| {
+                    refuse("physics.turbulence", "not a JSONC case (SPEC-LIT §158.6)")
+                })?;
+                let omega_raw = lc.omega_field.as_ref().ok_or_else(|| {
+                    refuse(
+                        "physics.turbulence",
+                        "kOmegaSST names no omega field: the rho-weighted form's \
+                         closures read the case's k and omega (SPEC-LIT §158.6)",
+                    )
+                })?;
+                let omega_raw = omega_raw.to_raw(hm.n_cells);
+                let nut_raw = lc.nut_field.as_ref().map(|f| f.to_raw(hm.n_cells));
+                // As `ofgpu-lowmach` builds its model: the wall faces from
+                // omega's and nut's own patch types, the roughness from
+                // nut's, the case's k/omega/nut seeded, then the first
+                // nu_t from the initial flow.
+                let wall_faces = WallFaces::from_case(&omega_raw, nut_raw.as_ref(), &hm)?;
+                let roughness = NutRoughness::from_case(nut_raw.as_ref(), &hm)?;
+                let mut t = build_coupled(&gpu, &hm, &mesh, &cc, &selection, &wall_faces, &roughness)?;
+                for (fname, field) in t.output_fields_mut() {
+                    let raw = match fname {
+                        "k" => lc.k_field.as_ref().map(|f| f.to_raw(hm.n_cells)),
+                        "omega" => Some(omega_raw.clone()),
+                        "nut" => nut_raw.clone(),
+                        _ => None,
+                    };
+                    if let Some(raw) = raw {
+                        setup_scalar_field(&gpu, field, &raw, &hm)?;
+                    }
+                }
+                if let Some(sst) = &d.sst {
+                    t.set_rho_options(RhoSstOptions {
+                        limit_omega_production: sst.limit_omega_production,
+                        sust: sst.sust.map(|(k, w)| SstSust {
+                            k_amb: k as Scalar,
+                            omega_amb: w as Scalar,
+                        }),
+                    })?;
+                }
+                t.initialise(&gpu, &FlowState::new(&s.u, &s.mdot, nu_ref as Scalar))?;
+                Some(t)
+            } else {
+                None
+            };
+        let dust = CompressibleDust::new(&gpu, &hm, &mesh, setup, &raw_c, c_ctrl, turb, nu_ref)?;
+        solver.attach_dust(&gpu, dust)?;
+        dust_attached = true;
+    }
+    // SPEC-LIT §127.1.2: SA reaches here on the OpenFOAM route only, and the
+    // vent (§158.8) and the dust model (§158.6) on the JSONC route only, so
+    // the model is attached to a solver on the case's own mesh.
     if let Some((raw_nt, raw_nut, sa_ctrl)) = sa_parts {
         // SPEC-LIT §6.6: the wall distance, once, at setup; nut's own patch
         // types are its wall treatment (§15.5), and the conservative form
@@ -1157,8 +1560,65 @@ fn run(o: &Options) -> Result<RunEnd> {
     }
     solver.initialise(&gpu, &mut s)?;
 
+    // SPEC-LIT §158.6: the run's one dust line - what the coupling runs
+    // with - then the (155.9) check of the fixed step against the
+    // PREDICTED number of the initial field.
+    let mut last_cof: Option<f64> = None;
+    if dust_attached {
+        let d = solver.dust().expect("dust");
+        let (st, hc) = (d.setup(), d.hconst());
+        let (t_v, p_ratio) = hc.aicc(st.t_u);
+        println!(
+            "dust (SPEC-LIT §158.6): model {:?}, thermo {:?}, T_u {} K, hConst cp_u {} cp_b {} \
+             J/(kg K), delta_h_c {} J/kg, isobaric T_b {} K, AICC T_v {} K (p_max/p_0 {}), \
+             S_L {} m/s, sigma {}, max flame Courant {}",
+            st.fsc.model,
+            st.gas.mode,
+            g(st.t_u),
+            g(hc.cp_u),
+            g(hc.cp_b),
+            sci(hc.delta_h_c(), 4),
+            g(hc.isobaric_tb(st.t_u)),
+            g(t_v),
+            sci(p_ratio, 4),
+            g(st.s_l),
+            g(st.sigma),
+            g(st.max_flame_courant),
+        );
+    }
+
+    // SPEC-LIT §158.1: the trigger and the membrane exist only with a vent.
+    let mut membrane = vented
+        .as_ref()
+        .map(|v| vent::VentTrigger::new(&gpu, &v.split).map(|t| (t, vent::Membrane::new(v.spec.p_stat))))
+        .transpose()?;
+
+    // The opening check also runs at n = 0, straight after `initialise` - a
+    // membrane whose initial state already meets pStat opens before any step.
+    let mut last_dp = 0.0;
+    if let (Some((trigger, mem)), Some(v)) = (membrane.as_mut(), vented.as_ref()) {
+        let (handed, r) =
+            check_membrane(&gpu, v, trigger, mem, 0, 0.0, &solver, &s, &mesh, &hm, ctrl, &inlets)?;
+        last_dp = r.dp;
+        if let Some((ns, nst)) = handed {
+            solver = ns;
+            s = nst;
+        }
+    }
+
     let dt = f64::from(dc.ctrl.momentum.delta_t);
-    let mut end = RunEnd { steps: 0, converged: false, last: None, seconds: 0.0 };
+    if dust_attached {
+        let co = solver
+            .dust_mut()
+            .expect("dust")
+            .predicted_courant(&gpu, &hm, &s.u, dt)?;
+        println!(
+            "flame Courant (155.9): predicted Co_f {} against max {} on the initial field",
+            g(co),
+            g(solver.dust().expect("dust").setup().max_flame_courant)
+        );
+    }
+    let mut end = RunEnd { steps: 0, converged: false, last: None, seconds: 0.0, vent: None };
     for step in 1..=dc.n_steps {
         let r = solver.step(&gpu, &mut s)?;
         end.steps = step;
@@ -1169,20 +1629,71 @@ fn run(o: &Options) -> Result<RunEnd> {
             if let Some(l) = &end.last {
                 println!("{}", l.line());
             }
+            // SPEC-LIT §158.6, (155.9): the MEASURED number of the step
+            // just taken, and the last c~ solve's out-of-bounds count.
+            if dust_attached {
+                let co =
+                    solver.dust_mut().expect("dust").measured_courant(&gpu, &mesh, &s, dt)?;
+                let oob = solver
+                    .dust()
+                    .expect("dust")
+                    .last_solve()
+                    .map(|sv| sv.out_of_bounds)
+                    .unwrap_or(0);
+                println!("flame Courant (155.9): measured Co_f max {}, c~ bounds: {}", g(co), oob);
+                last_cof = Some(co);
+            }
+        }
+        // SPEC-LIT §158.1: while the membrane is closed, its check runs
+        // after every step n (t = n dt); the hand-over puts the run on the
+        // case's own mesh from the next step on. A check at the last step
+        // that opens still hands over - it is cheap, and the membrane's
+        // state is what the run reports. Once open, nothing is read.
+        if let (Some((trigger, mem)), Some(v)) = (membrane.as_mut(), vented.as_ref()) {
+            if !mem.is_open() {
+                let (handed, r) = check_membrane(
+                    &gpu, v, trigger, mem, step, step as f64 * dt, &solver, &s, &mesh, &hm, ctrl,
+                    &inlets,
+                )?;
+                last_dp = r.dp;
+                if let Some((ns, nst)) = handed {
+                    solver = ns;
+                    s = nst;
+                }
+            }
         }
         let clock = if dc.transient { step as f64 * dt } else { step as f64 };
-        if o.do_write && !last_step && write_time(&gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, false, volume.as_ref())? {
+        if o.do_write
+            && !last_step
+            && write_time(
+                &gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, false, volume.as_ref(),
+                solver.dust(), last_cof,
+            )?
+        {
             println!("    written at {}", g(clock));
         }
         if last_step {
             if o.do_write {
-                write_time(&gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, true, volume.as_ref())?;
+                write_time(
+                    &gpu, &solver, &s, &gas, &hm, &fields, clock, &mut pipeline, true, volume.as_ref(),
+                    solver.dust(), last_cof,
+                )?;
                 println!("    final state written at {} to {}", g(clock), out_root.display());
             }
             break;
         }
     }
     end.seconds = t0.elapsed().as_secs_f64();
+    if let (Some((_, mem)), Some(v)) = (&membrane, vented.as_ref()) {
+        end.vent = Some(mem.state);
+        if !mem.is_open() {
+            println!(
+                "vent: closed for the whole run; the last dp = {} Pa < pStat {} Pa",
+                g(last_dp),
+                g(v.spec.p_stat)
+            );
+        }
+    }
     println!(
         "{DRIVER}: {} {}{} in {:.2} s",
         end.steps,
@@ -1213,6 +1724,9 @@ fn main() -> ExitCode {
 mod compressible {
     use super::*;
     use common::knobs::{apply, assert_none_inert, scratch_dir, written_state, Knob, NO_PRE};
+    // `load_case` is the other drivers' route: the tests below use it to
+    // show a vent case is refused there (SPEC-LIT §158.8).
+    use common::load_case;
 
     /// The 50-cell tube of SPEC-LIT §125.8: 1 m long, one cell across,
     /// air at 300 K moving at 50 m/s, a 320 K inlet, a fixed-`p` outlet and
@@ -1668,6 +2182,311 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
         assert_eq!(end.steps, 5);
         assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
         five_fields(&dir.join("0.005"));
+    }
+
+    /// The tube's one `vent` line, inserted before its `numerics` block.
+    fn add_vent(case: &Path, p_stat: &str) {
+        edit(
+            case,
+            "  \"numerics\": {",
+            &format!(
+                "  \"vent\": {{ \"normal\": [1, 0, 0], \"centre\": [0.5, 0.01, 0.01], \
+                 \"radius\": 1.0, \"pStat\": {p_stat} }},\n  \"numerics\": {{"
+            ),
+        );
+    }
+
+    /// SPEC-LIT §158.8 (DST-09): the vented tube starts on the split mesh,
+    /// the membrane opens once when its pressure difference reaches pStat,
+    /// and the run reports the opening's step and reading.
+    #[test]
+    fn a_vented_tube_opens_once_and_reports() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_open");
+        edit(&case, r#""endTime": 0.00003"#, r#""endTime": 0.0002"#);
+        add_vent(&case, "5000");
+        let o = parse(&argv(&[case.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the vented tube runs");
+        println!("dst09: the membrane ended {:?}", end.vent);
+        assert_eq!(end.steps, 20);
+        match end.vent {
+            Some(vent::VentState::Open { step, dp, .. }) => {
+                assert!((1..=20).contains(&step), "opened at step {step}");
+                assert!(dp >= 5000.0, "dp {dp} Pa");
+            }
+            other => panic!("the membrane opened: {other:?}"),
+        }
+        assert_eq!(end.last.expect("an outer report").bounds.total(), 0);
+    }
+
+    /// The same vent at a pStat nothing in the run reaches: three steps, the
+    /// membrane still closed, and the run says so.
+    #[test]
+    fn a_closed_vent_never_opens() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_closed");
+        add_vent(&case, "1e9");
+        let o = parse(&argv(&[case.to_string_lossy().as_ref()])).unwrap();
+        let end = run(&o).expect("the closed-vent tube runs");
+        assert_eq!(end.steps, 3);
+        assert_eq!(end.vent, Some(vent::VentState::Closed));
+    }
+
+    /// SPEC-LIT §158.8: a steady run has no opening time, so the driver
+    /// refuses the vent; every other driver refuses the case outright.
+    #[test]
+    fn a_vent_is_refused_where_it_cannot_run() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = tube("dst09_steady");
+        add_vent(&case, "5000");
+        edit(&case, r#""ddt": "Euler""#, r#""ddt": "steadyState""#);
+        // A steady tube is a SIMPLE one - otherwise the algorithm check
+        // answers first and the vent never does.
+        edit(&case, r#""kind": "PIMPLE""#, r#""kind": "SIMPLE""#);
+        // ...and a steady run takes -iters, not endTime/deltaT.
+        let e = refusal(&case, &["-iters", "3"]);
+        assert!(e.contains("vent") && e.contains("§158.8"), "{e}");
+        let e = common::load_case(&case).err().expect("the vent case is refused");
+        assert!(e.to_string().contains("ofgpu-compressible"), "{e}");
+    }
+
+    // ==========================================================================
+    //  DST-10's driver gates (SPEC-LIT §158.6)
+    // ==========================================================================
+
+    /// The sealed dust box: `lowmach_dust::tests`'s 2x2x2 cube of 1 cm
+    /// sides, every patch an adiabatic wall, at rest at T 273, with the air
+    /// gas block of SPEC-LIT §122.6 about 101325 Pa, PIMPLE 5 outer / 2
+    /// correctors, Euler, and that file's TFC pair. `sst` swaps the
+    /// kOmegaSST block and its k/omega entries in, and states `dust.sst`
+    /// beside the model.
+    fn dust_box_text(sst: bool) -> String {
+        let text = r#"
+{
+  "name": "dustBox",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.01, 0.01, 0.01] },
+    "cells": [2, 2, 2],
+    "boundaries": { "xmin": "wallX0", "xmax": "wallX1", "ymin": "wallY0",
+      "ymax": "wallY1", "zmin": "wallZ0", "zmax": "wallZ1" }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 },
+    "buoyancy": "densityRatio",
+    "compressible": { "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+      "viscosity": { "model": "sutherland", "As": 1.458e-6, "Ts": 110.4 },
+      "pOperating": 101325 }
+  }__TURB__,
+  "patches": [
+    {
+      "match": ".*", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" }__KPATCH__
+    }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 273, "p": 0.0__KINIT__ },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 5 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.02, "deltaT": 1e-4 },
+  "combustion": { "model": "TFC", "PrT": 0.28,
+    "ignition": { "point": [0.005, 0.005, 0.005], "sigmaR": 1000, "W0": 1000, "t0": 1e-4 } },
+  "dust": { "thermo": "formula", "phi": 0.62__DUSTSST__ }
+}
+"#;
+        dust_box_variants(sst, text)
+    }
+
+    /// The four `dust_box_text` substitutions: the kOmegaSST block and its
+    /// k/omega entries when `sst`, the laminar box's empty ones otherwise.
+    fn dust_box_variants(sst: bool, text: &str) -> String {
+        let (turb, kpatch, kinit, dustsst) = if sst {
+            (
+                r#",
+  "turbulence": { "kind": "RAS", "model": "kOmegaSST", "wallFunctions": { "kappa": 0.41, "E": 9.8 } }"#,
+                r#",
+      "k": { "type": "kqRWallFunction", "value": 3.94 },
+      "omega": { "type": "omegaWallFunction", "value": 1101.4 }"#,
+                r#", "k": 3.94, "omega": 1101.4"#,
+                r#", "sst": { "sust": { "kAmb": 3.94, "omegaAmb": 1101.4 } }"#,
+            )
+        } else {
+            ("", "", "", "")
+        };
+        text.replace("__TURB__", turb)
+            .replace("__KPATCH__", kpatch)
+            .replace("__KINIT__", kinit)
+            .replace("__DUSTSST__", dustsst)
+    }
+
+    /// A fresh dust box in its own scratch directory: `(dir, case file)`.
+    fn dust_box(tag: &str, sst: bool) -> (PathBuf, PathBuf) {
+        let dir = scratch_dir(tag);
+        let case = dir.join("case.jsonc");
+        std::fs::write(&case, dust_box_text(sst)).expect("write the dust box case");
+        (dir, case)
+    }
+
+    /// The one time directory a run wrote (its final state).
+    fn final_time_dir(case: &Path) -> PathBuf {
+        let root = common::json_case_output_dir(case);
+        let last = std::fs::read_dir(&root)
+            .expect("the case is written")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.parse::<f64>().is_ok_and(|t| t > 0.0))
+            .max_by(|a, b| a.parse::<f64>().unwrap().total_cmp(&b.parse::<f64>().unwrap()))
+            .expect("a written time");
+        root.join(last)
+    }
+
+    /// **SPEC-LIT §158.6 (DST-10):** the sealed dust box runs 20 steps of
+    /// 1e-4 s, the write carries the four dust fields beside `rho`, `T` and
+    /// `p`, and the volume-mean `p` in the final time directory is above
+    /// the initial one - the box burns on the (158.4) heat release.
+    #[test]
+    fn a_dust_box_runs_and_writes_c() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = dust_box("dst10_box", false);
+        let o = parse(&argv(&[case.to_string_lossy().as_ref(), "-iters", "20"])).unwrap();
+        let end = run(&o).expect("the dust box runs");
+        assert_eq!(end.steps, 20);
+        let out = final_time_dir(&case);
+        for name in ["c", "Ut", "Cof", "HRR", "rho", "T", "p"] {
+            let text = std::fs::read_to_string(out.join(name))
+                .unwrap_or_else(|e| panic!("{name} was not written: {e}"));
+            assert!(text.contains("object"), "{name} is not a field file");
+        }
+        let p = read_scalar_field(&out.join("p"), 8).expect("the written p reads");
+        let mean: f64 =
+            p.internal.iter().map(|v| f64::from(*v)).sum::<f64>() / p.internal.len() as f64;
+        println!("dst10 box: 20 steps, volume-mean gauge p {}", g(mean));
+        assert!(mean > 0.0, "the box did not burn: volume-mean gauge p {mean}");
+        let c = read_scalar_field(&out.join("c"), 8).expect("the written c reads");
+        let c_mean: f64 = c.internal.iter().map(|v| f64::from(*v)).sum::<f64>() / 8.0;
+        println!("dst10 box: c~ mean {c_mean}");
+    }
+
+    /// **SPEC-LIT §158.6:** the same box as kOmegaSST (the ρ-weighted form
+    /// of §156, the one model the coupling carries) runs 5 steps at a small
+    /// dt - the model stays frozen at its initial k/omega before 2 t_0, as
+    /// §155.3's H20 rule reads - and every written field is finite.
+    #[test]
+    fn a_dust_sst_box_runs() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = dust_box("dst10_sst_box", true);
+        let o = parse(&argv(&[case.to_string_lossy().as_ref(), "-iters", "5"])).unwrap();
+        let end = run(&o).expect("the SST dust box runs");
+        assert_eq!(end.steps, 5);
+        let out = final_time_dir(&case);
+        for name in ["U", "p", "T", "rho", "Mach", "c", "Ut", "Cof", "HRR"] {
+            if name == "U" {
+                let u = read_vector_field(&out.join(name), 8)
+                    .unwrap_or_else(|e| panic!("{name} was not written: {e}"));
+                assert!(
+                    u.internal.iter().all(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()),
+                    "{name} holds a non-finite value"
+                );
+                continue;
+            }
+            let v = read_scalar_field(&out.join(name), 8)
+                .unwrap_or_else(|e| panic!("{name} was not written: {e}"));
+            assert!(v.internal.iter().all(|x| x.is_finite()), "{name} holds a non-finite value");
+        }
+        println!("dst10 SST box: 5 steps in {:.2} s, all written fields finite", end.seconds);
+    }
+
+    /// **SPEC-LIT §158.6:** every run a dust case cannot make is refused
+    /// with its key in the message - a steady or non-Euler ddt, a vent
+    /// beside the model, kOmegaSST without a dust block, a compressible
+    /// preset patch, a step above the flame-Courant bound, and the
+    /// low-Mach loader's refusal of the gas beside the model.
+    #[test]
+    fn dust_refusals_name_the_setting() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let _g = ofgpu::io::contract::permissive_test_guard();
+        ofgpu::io::contract::set_permissive(false);
+        // A steady ddt: the c~ equation is transient.
+        let (_dir, case) = dust_box("dst10_ref_steady", false);
+        edit(&case, r#""ddt": "Euler""#, r#""ddt": "steadyState""#);
+        edit(&case, r#""kind": "PIMPLE""#, r#""kind": "SIMPLE""#);
+        let e = refusal(&case, &["-iters", "2"]);
+        assert!(e.contains("numerics.ddt"), "{e}");
+        // backward: the mixture energy equation rides one Euler step.
+        let (_dir, case) = dust_box("dst10_ref_backward", false);
+        edit(&case, r#""ddt": "Euler""#, r#""ddt": "backward""#);
+        let e = refusal(&case, &[]);
+        assert!(e.contains("numerics.ddt"), "{e}");
+        // A vent block beside the dust model: the opening hand-over is
+        // DST-11's.
+        let (_dir, case) = dust_box("dst10_ref_vent", false);
+        add_vent(&case, "5000");
+        let e = refusal(&case, &[]);
+        assert!(e.contains("vent"), "{e}");
+        // kOmegaSST without a dust block: the §158.6 lift is the model's
+        // only route in.
+        let (_dir, case) = tube("dst10_ref_sst");
+        edit(
+            &case,
+            r#""initial":"#,
+            r#""turbulence": {"kind":"RAS","model":"kOmegaSST","wallFunctions":{"kappa":0.41,"E":9.8}}, "initial":"#,
+        );
+        let e = refusal(&case, &[]);
+        assert!(e.contains("kOmegaSST") && e.contains("physics.turbulence"), "{e}");
+        // A compressible preset patch beside the dust model: the lowering
+        // refuses it, naming the preset rule (SPEC-LIT §158.6).
+        let (_dir, case) = dust_box("dst10_ref_farfield", false);
+        edit(
+            &case,
+            r#"  "patches": [
+    {
+      "match": ".*", "kind": "wall","#,
+            r#"  "patches": [
+    { "match": ".*", "kind": "farfield", "freestream": { "U": [0, 0, 0], "p": 0, "T": 273 } },
+    {
+      "match": ".*", "kind": "wall","#,
+        );
+        let e = refusal(&case, &[]);
+        assert!(e.contains("dust"), "{e}");
+        // -iters 1 at a dt whose PREDICTED Co_f exceeds the bound (155.9).
+        // The prediction is formed from the initial field's own |u| (the
+        // closures' U_t,ISP is zero at the box's zero turbulence), so the
+        // step that cannot be taken is the one whose flow Courant alone
+        // crosses the bar.
+        let (_dir, case) = dust_box("dst10_ref_courant", false);
+        edit(&case, r#""U": [0, 0, 0], "T": 273"#, r#""U": [50, 0, 0], "T": 273"#);
+        edit(&case, r#""deltaT": 1e-4"#, r#""deltaT": 1e-2"#);
+        let e = refusal(&case, &["-iters", "1"]);
+        assert!(e.contains("maxFlameCourant"), "{e}");
+        // The low-Mach loader refuses the gas block beside the model.
+        let (_dir, case) = dust_box("dst10_ref_loader", false);
+        let e = common::load_case_with(&case, true).err().expect("the gas block is refused");
+        assert!(e.to_string().contains("physics.compressible"), "{e}");
     }
 
     /// Turn a laminar cavity into the SA case of SPEC-LIT §127.1.2: the RAS

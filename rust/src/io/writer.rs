@@ -50,11 +50,12 @@
 
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::io::contract;
 use crate::io::fields::{RawScalarField, RawVectorField};
+use crate::io::output_plan::{IsaacKind, IsaacScaling, IsaacSpec};
 use crate::io::output_types::{FieldValues, OutputField};
-use crate::io::voxelmap::VoxelMap;
+use crate::io::voxelmap::{self, VoxelMap};
 use crate::io::{nvdb, usda, vdb, vtu};
 use crate::mesh::HostMesh;
 use crate::types::{to_vec3, DVec3};
@@ -305,6 +306,171 @@ impl ResultWriter for NvdbWriter {
     }
 }
 
+/// The Isaac density of one write (SPEC-LIT 117.9): the extinction
+/// coefficient `sigma` (1/m), one value per voxel, as the LAST grid
+/// `density` of the `.vdb`. Carries the held `([f64; 2], f64)` - the
+/// normalisation range and `D` of (117.11) - which the FIRST write at
+/// which `D > 0` fixes for the rest of the run (an explicit `range` is
+/// never replaced; only `D` is). A write at which `D = 0` is an all-zero
+/// grid and a printed note, not an error (117.9).
+pub struct IsaacDensity {
+    spec: IsaacSpec,
+    held: Option<([f64; 2], f64)>,
+}
+
+impl IsaacDensity {
+    pub fn new(spec: IsaacSpec) -> Self {
+        Self { spec, held: None }
+    }
+
+    /// The held `(range, D)`, once the first write with `D > 0` has fixed
+    /// them - `None` before it.
+    pub fn held(&self) -> Option<([f64; 2], f64)> {
+        self.held
+    }
+
+    /// The density of one write, one value per voxel of `ctx.vox`
+    /// (`VoxelMap::sample` of the field, the fluid mask of 117.10) or, when
+    /// `ctx.cart` is `Some`, per cell in the cart grid's `i + nx(j + ny k)`
+    /// order (values widened to f64, every voxel fluid, `h` the cart
+    /// spacing per axis - on a Cartesian box the cells ARE the voxels and
+    /// the spacing differs per axis). All f64 (117.2 item 2); the writer
+    /// rounds once.
+    pub fn grid(&mut self, ctx: &WriteCtx) -> Result<Vec<f64>> {
+        let vox = self.voxels(ctx, self.spec.field.as_str())?;
+        match self.spec.scaling {
+            IsaacScaling::Physical => {
+                // (117.14): rho_s is the field itself (kind density) or the
+                // field times the run's density field (massFraction).
+                let rho_s = match self.spec.kind {
+                    IsaacKind::Density => vox.f,
+                    IsaacKind::MassFraction => {
+                        let rho = self.voxels(ctx, "rho")?;
+                        vox.f.iter().zip(rho.f).map(|(y, r)| r * y).collect()
+                    }
+                };
+                let fluid = match vox.fluid {
+                    Some(mask) => Some(mask),
+                    None => None,
+                };
+                let (sigma, negatives) =
+                    voxelmap::physical_extinction(&rho_s, fluid.as_deref(), self.spec.km);
+                if negatives > 0 {
+                    println!(
+                        "output.visualisation.isaac: {negatives} fluid voxel(s) with a negative \
+                         rho_s written as 0 (SPEC-LIT 117.14)"
+                    );
+                }
+                Ok(sigma)
+            }
+            IsaacScaling::OpticalDepth => Ok(self.optical(vox, ctx.time as f64)),
+        }
+    }
+
+    /// The named field of one write, per voxel, with the geometry of the
+    /// volume being written: `(values, n, h, fluid mask)`.
+    fn voxels(&self, ctx: &WriteCtx, name: &str) -> Result<VoxelField> {
+        let field = ctx
+            .fields
+            .iter()
+            .find(|f| f.name == name)
+            .ok_or_else(|| Error::Config(format!(
+                "output.visualisation.isaac.field: \"{name}\" is not among the fields this write \
+                 carries ({}) - the density grid is made from the fields the write carries \
+                 (SPEC-LIT 117.9, 44.2)",
+                ctx.fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
+            )))?;
+        let values = match &field.values {
+            FieldValues::Scalar(v) => v,
+            FieldValues::Vector(_) | FieldValues::Tensor(_) => {
+                return Err(Error::Config(format!(
+                    "output.visualisation.isaac.field: \"{name}\" is not a scalar field - a \
+                     vector or tensor has no single density to make from (SPEC-LIT 117.9)"
+                )));
+            }
+        };
+        if let Some(cart) = ctx.cart {
+            if values.len() != cart.n() {
+                return Err(Error::Config(format!(
+                    "output.visualisation.isaac.field: \"{name}\" has {} values but the \
+                     Cartesian box has {} cells (SPEC-LIT 117.9)",
+                    values.len(),
+                    cart.n()
+                )));
+            }
+            // Every voxel is fluid, and the cells' spacing differs per
+            // axis: h_a of the line's own axis.
+            return Ok(VoxelField {
+                f: values.iter().map(|&s| s as f64).collect(),
+                n: [cart.nx, cart.ny, cart.nz],
+                h: [cart.spacing.x as f64, cart.spacing.y as f64, cart.spacing.z as f64],
+                fluid: None,
+            });
+        }
+        let Some(vm) = ctx.vox else {
+            return Err(Error::Config(format!(
+                "output.visualisation.isaac.field: neither a uniform Cartesian box nor a lattice \
+                 was laid, so \"{name}\" has no voxels to be sampled onto (no lattice, SPEC-LIT 117.9)"
+            )));
+        };
+        Ok(VoxelField {
+            f: vm.sample(values)?,
+            n: vm.n,
+            h: [vm.voxel; 3],
+            fluid: Some(vm.fluid_mask()),
+        })
+    }
+
+    /// (117.10)-(117.12) with the hold of 117.9: the default range and `D`
+    /// are taken at the FIRST write at which `D > 0` and held for the rest
+    /// of the run.
+    fn optical(&mut self, vox: VoxelField, t: f64) -> Vec<f64> {
+        let n = vox.n;
+        let len = vox.f.len();
+        let fluid = vox.fluid.as_deref();
+        let (range, held_d) = match self.held {
+            Some((range, d)) => (range, d),
+            None => {
+                let range = self
+                    .spec
+                    .range
+                    .unwrap_or_else(|| voxelmap::fluid_range(&vox.f, fluid).unwrap_or([0.0, 0.0]));
+                let f_hat = voxelmap::normalise_for_optical_depth(&vox.f, fluid, range);
+                let d = voxelmap::max_column_optical_depth(n, vox.h, &f_hat);
+                if d > 0.0 {
+                    self.held = Some((range, d));
+                    println!(
+                        "output.visualisation.isaac: optical depth held from this write on: \
+                         range [{:?}, {:?}], D = {d} m (tau = {:?}), at t = {t} s (SPEC-LIT 117.9)",
+                        range[0], range[1], self.spec.tau
+                    );
+                    (range, d)
+                } else {
+                    // The all-zero first frame of a transient run is
+                    // ordinary - a note, not an error (117.9).
+                    println!(
+                        "output.visualisation.isaac: D = 0 at t = {t} s - writing an all-zero \
+                         density grid (SPEC-LIT 117.9)"
+                    );
+                    return vec![0.0; len];
+                }
+            }
+        };
+        let f_hat = voxelmap::normalise_for_optical_depth(&vox.f, fluid, range);
+        voxelmap::optical_depth_sigma(&f_hat, self.spec.tau, held_d)
+    }
+}
+
+/// One write's field, sampled onto the voxels, with the geometry (117.11)
+/// needs: the voxel count per axis, the spacing per axis, and the fluid
+/// mask (`None` = every voxel).
+struct VoxelField {
+    f: Vec<f64>,
+    n: [usize; 3],
+    h: [f64; 3],
+    fluid: Option<Vec<bool>>,
+}
+
 /// Writes one OpenVDB (`.vdb`) file per step. Same choice as
 /// [`NvdbWriter`]: `ctx.cart`, else `ctx.vox` (`vdb::write_lattice`), else
 /// the same refusal.
@@ -314,10 +480,16 @@ impl ResultWriter for NvdbWriter {
 /// OpenVDB's `_HalfFloat` save preference (S45). It is carried the same way
 /// [`NvdbWriter`] already carried its own, so the two volume writers take
 /// the setting through the same door.
+///
+/// With an [`IsaacSpec`] in force (`with_isaac`, SPEC-LIT 117.9) the file
+/// gains one LAST grid, `density` - the extinction coefficient `sigma` of
+/// [`IsaacDensity`], background 0, the same active set - and nothing else
+/// about the file changes.
 pub struct VdbWriter {
     dir: PathBuf,
     stem: String,
     precision: nvdb::Precision,
+    isaac: Option<IsaacDensity>,
 }
 
 impl VdbWriter {
@@ -331,20 +503,52 @@ impl VdbWriter {
             path: dir.display().to_string(),
             source: e,
         })?;
-        Ok(Self { dir, stem: stem.into(), precision })
+        Ok(Self { dir, stem: stem.into(), precision, isaac: None })
+    }
+
+    /// The Isaac profile's writer (SPEC-LIT 117.9): every write carries the
+    /// `density` grid made from `isaac.field`.
+    pub fn with_isaac(
+        dir: impl Into<PathBuf>,
+        stem: impl Into<String>,
+        precision: nvdb::Precision,
+        isaac: IsaacSpec,
+    ) -> Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Io {
+            path: dir.display().to_string(),
+            source: e,
+        })?;
+        Ok(Self { dir, stem: stem.into(), precision, isaac: Some(IsaacDensity::new(isaac)) })
     }
 }
 
 impl ResultWriter for VdbWriter {
     fn write_step(&mut self, ctx: &WriteCtx) -> Result<()> {
         let path = self.dir.join(format!("{}_{:06}.vdb", self.stem, ctx.step));
-        let Some(cart) = ctx.cart else {
-            if let Some(vm) = ctx.vox {
-                return vdb::write_lattice(&path, vm, ctx.fields, self.precision);
-            }
-            return no_lattice("vdb");
+        let Some(isaac) = self.isaac.as_mut() else {
+            let Some(cart) = ctx.cart else {
+                if let Some(vm) = ctx.vox {
+                    return vdb::write_lattice(&path, vm, ctx.fields, self.precision);
+                }
+                return no_lattice("vdb");
+            };
+            return vdb::write(&path, cart, ctx.fields, self.precision);
         };
-        vdb::write(&path, cart, ctx.fields, self.precision)
+        let density = isaac.grid(ctx)?;
+        match (ctx.cart, ctx.vox) {
+            (Some(cart), _) => {
+                vdb::write_with_grids(&path, cart, ctx.fields, &[("density", &density)], self.precision)
+            }
+            (None, Some(vm)) => vdb::write_lattice_with_grids(
+                &path,
+                vm,
+                ctx.fields,
+                &[("density", &density)],
+                self.precision,
+            ),
+            (None, None) => no_lattice("vdb"),
+        }
     }
 }
 
@@ -376,6 +580,12 @@ pub struct UsdaWriter {
     /// field name (post `.x`/`.y`/`.z`/`.mag` split for a vector) -> frames.
     series: std::collections::BTreeMap<String, Vec<usda::VdbFrame>>,
     field_order: Vec<String>,
+    /// The Isaac profile in force (`with_isaac`, SPEC-LIT 117.9): the scene
+    /// is the Isaac one - the density prim (plus the pathtrace Looks
+    /// material), the boundary surface, nothing else - and this is its spec.
+    isaac: Option<IsaacSpec>,
+    /// The Isaac scene's one Series: every frame this writer has written.
+    frames: Vec<usda::VdbFrame>,
 }
 
 impl UsdaWriter {
@@ -394,6 +604,30 @@ impl UsdaWriter {
             vdb_ext,
             series: std::collections::BTreeMap::new(),
             field_order: Vec::new(),
+            isaac: None,
+            frames: Vec::new(),
+        }
+    }
+
+    /// The Isaac scene's writer (SPEC-LIT 117.9): one Series of frames
+    /// `./<vdb_dir>/<vdb_stem>_<step:06>.vdb` - the `.vdb`, always, since an
+    /// Isaac scene never references `.nvdb` - with the profile and stage of
+    /// `isaac`.
+    pub fn with_isaac(
+        path: impl Into<PathBuf>,
+        vdb_dir: impl Into<String>,
+        vdb_stem: impl Into<String>,
+        isaac: IsaacSpec,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            vdb_dir: vdb_dir.into(),
+            vdb_stem: vdb_stem.into(),
+            vdb_ext: "vdb",
+            series: std::collections::BTreeMap::new(),
+            field_order: Vec::new(),
+            isaac: Some(isaac),
+            frames: Vec::new(),
         }
     }
 
@@ -410,6 +644,28 @@ impl ResultWriter for UsdaWriter {
         let file = format!("./{}/{}_{:06}.{}", self.vdb_dir, self.vdb_stem, ctx.step, self.vdb_ext);
         let t = ctx.time as f64;
 
+        let Some(isaac) = &self.isaac else {
+            return self.write_per_field_scene(ctx, file, t);
+        };
+        // The Isaac scene (SPEC-LIT 117.9): one Series, the density prim,
+        // the boundary surface, nothing else.
+        self.frames.push(usda::VdbFrame { time: t, path: file });
+        let extent = isaac_extent(ctx, isaac.profile)?;
+        let scene = usda::IsaacScene {
+            profile: isaac.profile,
+            stage: isaac.stage.clone(),
+            vdb: usda::VdbSource::Series(self.frames.clone()),
+            extent,
+            boundary: Some(usda::boundary_surface(ctx.mesh)),
+        };
+        usda::write_isaac_scene(&self.path, &scene)
+    }
+}
+
+impl UsdaWriter {
+    /// The plain per-field scene, exactly what this writer wrote before the
+    /// Isaac profile existed - unchanged bytes.
+    fn write_per_field_scene(&mut self, ctx: &WriteCtx, file: String, t: f64) -> Result<()> {
         for f in ctx.fields {
             match &f.values {
                 FieldValues::Scalar(_) => {
@@ -444,6 +700,47 @@ impl ResultWriter for UsdaWriter {
 
         let spec = usda::SceneSpec { volumes, boundary: Some(usda::boundary_surface(ctx.mesh)) };
         usda::write_usda_scene(&self.path, &spec)
+    }
+}
+
+/// The extent box of the file the Isaac scene references (SPEC-LIT 117.9):
+/// the voxel box, in world f64. On the lattice it is `vm.lo` to
+/// `vm.lo + n h`; on a Cartesian box the cell CENTRES run from `origin` to
+/// `origin + (n - 1/2) spacing`, so the voxels - half a cell wider on each
+/// face - run from `origin - spacing/2` to `origin + (n - 1/2) spacing`.
+/// With neither a lattice nor a box there is no volume to point at.
+fn isaac_extent(ctx: &WriteCtx, profile: usda::IsaacProfile) -> Result<(DVec3, DVec3)> {
+    match (ctx.cart, ctx.vox) {
+        (Some(cart), _) => {
+            let o = cart.origin;
+            let s = cart.spacing;
+            let lo = DVec3::new(
+                o.x as f64 - s.x as f64 * 0.5,
+                o.y as f64 - s.y as f64 * 0.5,
+                o.z as f64 - s.z as f64 * 0.5,
+            );
+            let hi = DVec3::new(
+                o.x as f64 + s.x as f64 * (cart.nx as f64 - 0.5),
+                o.y as f64 + s.y as f64 * (cart.ny as f64 - 0.5),
+                o.z as f64 + s.z as f64 * (cart.nz as f64 - 0.5),
+            );
+            Ok((lo, hi))
+        }
+        (None, Some(vm)) => {
+            let lo = vm.lo;
+            let hi = DVec3::new(
+                lo.x + vm.voxel * vm.n[0] as f64,
+                lo.y + vm.voxel * vm.n[1] as f64,
+                lo.z + vm.voxel * vm.n[2] as f64,
+            );
+            Ok((lo, hi))
+        }
+        (None, None) => Err(Error::Config(format!(
+            "output.visualisation.isaac: the {} scene cannot be written - no lattice was laid \
+             and the mesh is not a uniform Cartesian box, so there is no volume box for the \
+             scene to name (no lattice)",
+            profile.name()
+        ))),
     }
 }
 
@@ -794,5 +1091,337 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- SPEC-LIT 117.9 - the Isaac profile (VIO-09) ---------------------
+
+    use crate::io::nvdb::lattice_fixture as lf;
+    use crate::io::voxelmap::{LatticeActivation, LatticeSample, LatticeSpec};
+
+    /// The 2:1 lattice, `h = 1/24`, `fluid` activation, and the Gaussian
+    /// plume about the mesh centre as cell values.
+    fn fluid_lattice_and_plume() -> (VoxelMap, Vec<Scalar>, HostMesh) {
+        let (raw, hm) = lf::refined();
+        let spec = LatticeSpec {
+            sample: LatticeSample::Cell,
+            activation: LatticeActivation::Fluid,
+            ..Default::default()
+        };
+        // h = 1/24 on the default box, like the voxelmap test's fixture.
+        let spec = LatticeSpec { voxel: Some(1.0 / 24.0), ..spec };
+        let vm = VoxelMap::build(&raw, &hm, &spec).expect("VoxelMap::build");
+        let g = hm.geom64();
+        let centre = DVec3::new(0.5, 0.5, 0.5);
+        let plume: Vec<Scalar> = (0..hm.n_cells)
+            .map(|c| {
+                let d = g.c[c] - centre;
+                (-(d.dot(d)) / 0.05).exp()
+            })
+            .collect();
+        (vm, plume, hm)
+    }
+
+    fn isaac_spec(field: &str) -> IsaacSpec {
+        IsaacSpec {
+            profile: usda::IsaacProfile::Index,
+            field: field.to_string(),
+            scaling: IsaacScaling::OpticalDepth,
+            tau: 2.0,
+            range: None,
+            km: voxelmap::SMOKE_SPECIFIC_EXTINCTION,
+            kind: IsaacKind::Density,
+            stage: usda::StageMeta::default(),
+        }
+    }
+
+    /// The test's own (117.11) over a dense value array, NaN slots (the
+    /// reader's inactive voxels, i.e. background 0 here) contributing 0.
+    fn own_max_column_skipping_nan(n: [usize; 3], h: [f64; 3], s: &[f64]) -> f64 {
+        let at = |i: usize, j: usize, k: usize| i + n[0] * (j + n[1] * k);
+        let mut best = 0.0f64;
+        for a in 0..3 {
+            let line_len = n[a];
+            let n_outer = n[(a + 1) % 3];
+            let n_inner = n[(a + 2) % 3];
+            for p in 0..n_outer {
+                for q in 0..n_inner {
+                    let mut sum = 0.0f64;
+                    for i in 0..line_len {
+                        let mut c = [0usize; 3];
+                        c[a] = i;
+                        c[(a + 1) % 3] = p;
+                        c[(a + 2) % 3] = q;
+                        let v = s[at(c[0], c[1], c[2])];
+                        if !v.is_nan() {
+                            sum += v;
+                        }
+                    }
+                    best = best.max(h[a] * sum);
+                }
+            }
+        }
+        best
+    }
+
+    /// VIO-09's gate on the FILE: with the Isaac spec in force the last
+    /// grid of the `.vdb` is `density`, the other grids keep
+    /// `VdbWriter::new`'s values exactly, and the max column optical depth
+    /// of the READ density - f32 or f16 rounded, as stored - is tau within
+    /// 1 % (117.9, 117.12).
+    #[test]
+    fn isaac_density_round_trip() {
+        let (vm, plume, hm) = fluid_lattice_and_plume();
+        let foam: [FoamField; 0] = [];
+        let n = vm.n;
+        let h = [vm.voxel; 3];
+        for precision in [nvdb::Precision::F32, nvdb::Precision::F16] {
+            let dir = tmp("isaac_round_trip");
+            let plain_dir = tmp("isaac_plain");
+            let fields = [OutputField::scalar("smoke", &plume)];
+            let ctx = WriteCtx {
+                time: 0.0,
+                step: 0,
+                name: "0",
+                mesh: &hm,
+                cart: None,
+                vox: Some(&vm),
+                fields: &fields,
+                foam: &foam,
+            };
+
+            let mut w =
+                VdbWriter::with_isaac(&dir, "isaac", precision, isaac_spec("smoke"))
+                    .expect("with_isaac");
+            w.write_step(&ctx).expect("write");
+
+            let mut plain = VdbWriter::new(&plain_dir, "isaac", precision).unwrap();
+            plain.write_step(&ctx).expect("write");
+
+            let grids =
+                vdb::reader::read_all(&std::fs::read(dir.join("isaac_000000.vdb")).unwrap());
+            let plain_grids = vdb::reader::read_all(
+                &std::fs::read(plain_dir.join("isaac_000000.vdb")).unwrap(),
+            );
+
+            assert_eq!(grids.len(), plain_grids.len() + 1, "one density grid added");
+            let density = grids.last().unwrap();
+            assert_eq!(density.name, "density", "the density grid is the LAST grid");
+            assert_eq!(density.background, 0.0, "the density grid's background is 0 (117.9)");
+            // The field grids keep VdbWriter::new's values exactly.
+            for (a, b) in grids[..grids.len() - 1].iter().zip(&plain_grids) {
+                assert_eq!(a.name, b.name);
+                assert_eq!(a.values.len(), b.values.len());
+                for (x, y) in a.values.iter().zip(&b.values) {
+                    assert!(
+                        (x.is_nan() && y.is_nan()) || x == y,
+                        "{}: a value changed with isaac in force",
+                        a.name
+                    );
+                }
+            }
+
+            let got = own_max_column_skipping_nan(n, h, &density.values);
+            let rel = ((got - 2.0) / 2.0).abs();
+            println!(
+                "isaac_density_round_trip: {precision:?} densest column {got}, relative error {rel:.3e}"
+            );
+            assert!(rel < 1e-2, "{precision:?}: relative error {rel} >= 1 %");
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&plain_dir);
+        }
+    }
+
+    /// The hold of 117.9: an explicit range is never replaced; `D` is taken
+    /// at the first write with `D > 0` and held, so doubling the field
+    /// doubles every column's optical depth. A first write of an all-zero
+    /// field holds nothing; the next write holds.
+    #[test]
+    fn isaac_density_holds_d() {
+        let (vm, plume, hm) = fluid_lattice_and_plume();
+        let vox = vm.sample(&plume).expect("sample");
+        let m = vox.iter().copied().fold(0.0f64, f64::max);
+        let spec = IsaacSpec { range: Some([0.0, 2.0 * m]), ..isaac_spec("smoke") };
+        let mut isaac = IsaacDensity::new(spec);
+        assert_eq!(isaac.held(), None);
+
+        let foam: [FoamField; 0] = [];
+        let doubled: Vec<Scalar> = plume.iter().map(|&v| 2.0 * v).collect();
+        let n = vm.n;
+        let h = [vm.voxel; 3];
+
+        let ctx1 = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "0",
+            mesh: &hm,
+            cart: None,
+            vox: Some(&vm),
+            fields: &[OutputField::scalar("smoke", &plume)],
+            foam: &foam,
+        };
+        let d1 = isaac.grid(&ctx1).expect("write 1");
+        let (_, held_d) = isaac.held().expect("write 1 holds D");
+        let got1 = own_max_column_skipping_nan(n, h, &d1);
+        let rel1 = ((got1 - 2.0) / 2.0).abs();
+        assert!(rel1 < 1e-12, "write 1: densest column {got1} vs tau, rel {rel1}");
+
+        let ctx2 = WriteCtx {
+            time: 1.0,
+            step: 1,
+            name: "1",
+            mesh: &hm,
+            cart: None,
+            vox: Some(&vm),
+            fields: &[OutputField::scalar("smoke", &doubled)],
+            foam: &foam,
+        };
+        let d2 = isaac.grid(&ctx2).expect("write 2");
+        let got2 = own_max_column_skipping_nan(n, h, &d2);
+        let rel2 = ((got2 - 2.0 * 2.0) / (2.0 * 2.0)).abs();
+        assert!(
+            rel2 < 1e-12,
+            "write 2: densest column {got2} vs 2 tau, rel {rel2} (held D {held_d})"
+        );
+
+        // An all-zero first write: all zeros, and nothing held.
+        let zero: Vec<Scalar> = vec![0.0; plume.len()];
+        let mut isaac = IsaacDensity::new(IsaacSpec {
+            range: Some([0.0, 2.0 * m]),
+            ..isaac_spec("smoke")
+        });
+        let ctx0 = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "0",
+            mesh: &hm,
+            cart: None,
+            vox: Some(&vm),
+            fields: &[OutputField::scalar("smoke", &zero)],
+            foam: &foam,
+        };
+        let d0 = isaac.grid(&ctx0).expect("write 0");
+        assert!(d0.iter().all(|&v| v == 0.0));
+        assert_eq!(isaac.held(), None, "D = 0 holds nothing");
+        let d1 = isaac.grid(&ctx1).expect("write 1");
+        assert!(isaac.held().is_some(), "the next write holds");
+        let got1 = own_max_column_skipping_nan(n, h, &d1);
+        assert!(((got1 - 2.0) / 2.0).abs() < 1e-12);
+    }
+
+    /// (117.14) with kind massFraction: sigma is `km * (rho_v * Y_v)` bit
+    /// for bit where the product is non-negative, 0 where it is negative,
+    /// with cell sampling on the lattice.
+    #[test]
+    fn isaac_physical_mass_fraction() {
+        let (vm, _, hm) = fluid_lattice_and_plume();
+        let y: Vec<Scalar> = (0..hm.n_cells).map(|c| ((37 * c) % 101) as Scalar * 0.005 - 0.25).collect();
+        let rho: Vec<Scalar> = (0..hm.n_cells).map(|c| 1.0 + (c % 7) as Scalar * 0.125).collect();
+        let spec = IsaacSpec {
+            scaling: IsaacScaling::Physical,
+            kind: IsaacKind::MassFraction,
+            field: "Y".to_string(),
+            ..isaac_spec("Y")
+        };
+        let mut isaac = IsaacDensity::new(spec);
+        let foam: [FoamField; 0] = [];
+        let fields = [OutputField::scalar("Y", &y), OutputField::scalar("rho", &rho)];
+        let ctx = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "0",
+            mesh: &hm,
+            cart: None,
+            vox: Some(&vm),
+            fields: &fields,
+            foam: &foam,
+        };
+        let sigma = isaac.grid(&ctx).expect("grid");
+
+        let y_v = vm.sample(&y).expect("sample Y");
+        let rho_v = vm.sample(&rho).expect("sample rho");
+        let mut negatives = 0usize;
+        for (v, ((&yv, &rv), &s)) in y_v.iter().zip(&rho_v).zip(&sigma).enumerate() {
+            let rho_s = rv * yv;
+            if rho_s < 0.0 {
+                negatives += 1;
+                assert_eq!(s, 0.0, "voxel {v}: a negative rho_s is written 0");
+            } else {
+                assert_eq!(s, voxelmap::SMOKE_SPECIFIC_EXTINCTION * rho_s, "voxel {v}: km * rho_s");
+            }
+        }
+        assert!(negatives > 0, "the fixture must have some negative Y");
+    }
+
+    /// The isaac field must be a scalar: a vector (or tensor, or a name the
+    /// write does not carry) is an `Err` naming the key.
+    #[test]
+    fn isaac_field_must_be_scalar() {
+        let (vm, _, hm) = fluid_lattice_and_plume();
+        let u: Vec<Vec3> = vec![Vec3::new(1.0, 0.0, 0.0); hm.n_cells];
+        let mut isaac = IsaacDensity::new(isaac_spec("U"));
+        let foam: [FoamField; 0] = [];
+        let fields = [OutputField::vector("U", &u)];
+        let ctx = WriteCtx {
+            time: 0.0,
+            step: 0,
+            name: "0",
+            mesh: &hm,
+            cart: None,
+            vox: Some(&vm),
+            fields: &fields,
+            foam: &foam,
+        };
+        let e = isaac.grid(&ctx).unwrap_err().to_string();
+        assert!(e.contains("output.visualisation.isaac.field") && e.contains("U"), "{e}");
+
+        // A name the write does not carry is the same refusal.
+        let mut isaac = IsaacDensity::new(isaac_spec("smoke"));
+        let e = isaac.grid(&ctx).unwrap_err().to_string();
+        assert!(e.contains("output.visualisation.isaac.field") && e.contains("smoke"), "{e}");
+    }
+
+    /// Both profiles' scenes from the writer: the extent is the voxel box
+    /// `(vm.lo, vm.lo + n h)`, the asset is `./VDB/<stem>_000000.vdb`, and
+    /// no `.nvdb` is ever named.
+    #[test]
+    fn usda_writer_isaac_scene() {
+        let (vm, plume, hm) = fluid_lattice_and_plume();
+        let foam: [FoamField; 0] = [];
+        let fields = [OutputField::scalar("smoke", &plume)];
+        for profile in [usda::IsaacProfile::Index, usda::IsaacProfile::Pathtrace] {
+            let dir = tmp("usda_writer_isaac");
+            let spec = IsaacSpec { profile, ..isaac_spec("smoke") };
+            let mut w = UsdaWriter::with_isaac(dir.join("isaac.usda"), "VDB", "isaac", spec);
+            let ctx = WriteCtx {
+                time: 0.0,
+                step: 0,
+                name: "0",
+                mesh: &hm,
+                cart: None,
+                vox: Some(&vm),
+                fields: &fields,
+                foam: &foam,
+            };
+            w.write_step(&ctx).expect("write");
+
+            let text = std::fs::read_to_string(dir.join("isaac.usda")).unwrap();
+            let hi = DVec3::new(
+                vm.lo.x + vm.voxel * vm.n[0] as f64,
+                vm.lo.y + vm.voxel * vm.n[1] as f64,
+                vm.lo.z + vm.voxel * vm.n[2] as f64,
+            );
+            let want = format!(
+                "float3[] extent = [({:?}, {:?}, {:?}), ({:?}, {:?}, {:?})]",
+                vm.lo.x, vm.lo.y, vm.lo.z, hi.x, hi.y, hi.z
+            );
+            assert!(text.contains(&want), "{profile:?}: extent: {text}");
+            assert!(text.contains("./VDB/isaac_000000.vdb"), "{profile:?}: asset");
+            assert!(!text.contains("nvdb"), "{profile:?}: never .nvdb");
+            match profile {
+                usda::IsaacProfile::Index => assert!(text.contains("def Volume \"density\"")),
+                usda::IsaacProfile::Pathtrace => assert!(text.contains("bool primvars:isVolume = 1")),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

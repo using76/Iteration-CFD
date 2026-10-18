@@ -93,3 +93,13 @@ pub(crate) mod rae2822;
 /// ERCOFTAC's measured free-stream Tu(x), onset ordering and spread held
 /// against Roach & Brierley (docs/17 VAL-35).
 pub(crate) mod t3_fitted;
+/// SPEC-LIT §157.5, Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb,
+/// four live runs of `ofgpu-lowmach`, against Bradley, Chen & Swithenbank
+/// (1989) via Huang et al. (2020) Fig. 9.
+pub(crate) mod dst_leeds;
+
+/// SPEC-LIT §157.6, Gate DST-VES: the closed vessels - the two thin-flame
+/// spheres against the host (157.4) integration, the constant-rho_u
+/// negative control, the cube-root law, and the REMBE closed stage
+/// against Huang, Bloching & Lipatnikov (2022) Fig. 10.
+pub(crate) mod dst_vessel;

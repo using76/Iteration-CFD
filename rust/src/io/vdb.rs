@@ -272,6 +272,21 @@ pub fn write(
     fields: &[OutputField],
     precision: Precision,
 ) -> Result<()> {
+    write_with_grids(path, grid, fields, &[], precision)
+}
+
+/// [`write`] plus the extra grids of the Isaac profile (SPEC-LIT 117.9):
+/// one grid per `extra` entry, each ONE VALUE PER VOXEL of `grid` (any
+/// other length is refused by name), written AFTER the field grids, with
+/// background 0 (not the volume's own) and the same active set. Without
+/// `extra` the bytes are exactly [`write`]'s.
+pub fn write_with_grids(
+    path: impl AsRef<Path>,
+    grid: &UniformGrid,
+    fields: &[OutputField],
+    extra: &[(&str, &[f64])],
+    precision: Precision,
+) -> Result<()> {
     let path = path.as_ref();
     if grid.nx == 0 || grid.ny == 0 || grid.nz == 0 {
         return Err(Error::Config(format!(
@@ -283,7 +298,9 @@ pub fn write(
         return Err(Error::Config("vdb: no fields to write".into()));
     }
     let vol = Volume::cartesian(grid);
-    write_volume(path, &vol, fields, grid.n(), precision, |v| Ok(v.iter().map(|&x| x as f64).collect()))
+    write_volume(path, &vol, fields, extra, grid.n(), precision, |v| {
+        Ok(v.iter().map(|&x| x as f64).collect())
+    })
 }
 
 /// Write `fields` - cell values, `vm.n_cells` per field - on the lattice of
@@ -302,28 +319,55 @@ pub fn write_lattice(
     fields: &[OutputField],
     precision: Precision,
 ) -> Result<()> {
+    write_lattice_with_grids(path, vm, fields, &[], precision)
+}
+
+/// [`write_lattice`] plus the Isaac density grids (SPEC-LIT 117.9), the
+/// same contract as [`write_with_grids`]: one value per VOXEL of `vm`
+/// (`vm.n_voxels()`), after the field grids, background 0, the same active
+/// set. Without `extra` the bytes are exactly [`write_lattice`]'s.
+pub fn write_lattice_with_grids(
+    path: impl AsRef<Path>,
+    vm: &VoxelMap,
+    fields: &[OutputField],
+    extra: &[(&str, &[f64])],
+    precision: Precision,
+) -> Result<()> {
     let path = path.as_ref();
     if fields.is_empty() {
         return Err(Error::Config("vdb: no fields to write".into()));
     }
     let active = lattice_active(vm);
     let vol = Volume::lattice(vm, active.as_deref());
-    write_volume(path, &vol, fields, vm.n_cells, precision, |v| vm.sample(v))
+    write_volume(path, &vol, fields, extra, vm.n_cells, precision, |v| vm.sample(v))
 }
 
 /// The archive both entry points write: the header, no file metadata, the
 /// grid count (patched once the grids are known) and one grid per scalar,
-/// each sampled by `sample` from its `n` source values, one at a time.
+/// each sampled by `sample` from its `n` source values, one at a time -
+/// then `extra`'s grids, the Isaac density (117.9), one f64 per voxel,
+/// background 0, the same active set. An `extra` grid whose length is not
+/// the voxel count is refused by name.
 fn write_volume(
     path: &Path,
     vol: &Volume,
     fields: &[OutputField],
+    extra: &[(&str, &[f64])],
     n: usize,
     precision: Precision,
     sample: impl Fn(&[Scalar]) -> Result<Vec<f64>>,
 ) -> Result<()> {
     let occ = Occupancy::new(vol);
     refuse_an_empty_fluid_lattice("vdb", &occ)?;
+    // The density grid's tree carries background 0, not the lattice's own
+    // (117.9): sigma is an extinction from 0, whatever `background` says.
+    let zero_background = Volume {
+        n: vol.n,
+        origin: vol.origin,
+        spacing: vol.spacing,
+        background: 0.0,
+        active: vol.active,
+    };
 
     let mut buf = Vec::new();
     write_header(&mut buf);
@@ -338,6 +382,18 @@ fn write_volume(
         count += 1;
         Ok(())
     })?;
+    for (name, values) in extra {
+        if values.len() != vol.n_voxels() {
+            return Err(Error::Config(format!(
+                "vdb: the extra grid \"{name}\" has {} values but the volume has {} voxels - one \
+                 per voxel is required (output.visualisation.isaac, SPEC-LIT 117.9)",
+                values.len(),
+                vol.n_voxels()
+            )));
+        }
+        write_grid(&mut buf, &zero_background, &occ, name, values, precision);
+        count += 1;
+    }
     buf[count_pos..count_pos + 4].copy_from_slice(&count.to_le_bytes());
 
     std::fs::write(path, &buf).path(path)
@@ -825,8 +881,10 @@ fn write_leaf_buffers(b: &mut Vec<u8>, t: &Tree, origin: [usize; 3]) {
 //  ceil-division formulas.
 // ============================================================================
 
+// `pub(crate)` (test-only): `writer.rs`'s Isaac round trips read the files
+// back through this reader (SPEC-LIT 117.9, VIO-09).
 #[cfg(test)]
-mod reader {
+pub(crate) mod reader {
     use super::*;
 
     pub struct ReadGrid {

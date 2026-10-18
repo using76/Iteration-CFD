@@ -1480,7 +1480,18 @@ impl BcKind {
                     &format!("{field}: boundaryField/{patch}/type"),
                     name,
                     &[],
-                    "activeBaffleVelocity opens a baffle during the run by turning its wall faces into coupled ones, a change of mesh topology this solver never makes while a case runs (SPEC-LIT §120)",
+                    "activeBaffleVelocity opens a baffle during the run by turning its wall faces into coupled ones, a change of mesh topology no boundary condition makes here; a membrane that opens once at a static pressure is the case's `vent` block, run by ofgpu-compressible (SPEC-LIT §158.8)",
+                    "calculated (a fixed value at whatever the file's `value` entry held)",
+                    Self::Calculated,
+                );
+            }
+
+            "activePressureForceBaffleVelocity" => {
+                return unsupported_note(
+                    &format!("{field}: boundaryField/{patch}/type"),
+                    name,
+                    &[],
+                    "activePressureForceBaffleVelocity opens a baffle when the pressure force on it crosses a threshold, a change of mesh topology no boundary condition makes here; a membrane that opens once at a static pressure is the case's `vent` block, run by ofgpu-compressible (SPEC-LIT §158.8)",
                     "calculated (a fixed value at whatever the file's `value` entry held)",
                     Self::Calculated,
                 );
@@ -1744,13 +1755,17 @@ impl GpuScalarField {
     /// silent Dirichlet condition on every patch.
     pub fn zeros(gpu: &Gpu, m: &GpuMesh, name: &str) -> Result<Self> {
         let kinds: Vec<Label> = kinds_from_patches(m);
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`), so a
+        // kernel's `psi[bNbrCell[f]]` on a decomposed part lands inside the
+        // buffer. Launches still count `n_cells` owned cells; the face
+        // buffers stay face-sized.
         Ok(Self {
             name: name.to_string(),
             n_cells: m.n_cells,
             n_boundary_faces: m.n_boundary_faces,
-            f: gpu.zeros(m.n_cells)?,
-            f0: gpu.zeros(m.n_cells)?,
-            f00: gpu.zeros(m.n_cells)?,
+            f: gpu.zeros(m.n_local())?,
+            f0: gpu.zeros(m.n_local())?,
+            f00: gpu.zeros(m.n_local())?,
             bf: gpu.zeros(m.n_boundary_faces)?,
             fr: gpu.zeros(m.n_boundary_faces)?,
             ref_value: gpu.zeros(m.n_boundary_faces)?,
@@ -1842,9 +1857,9 @@ impl GpuVectorField {
             name: name.to_string(),
             n_cells: m.n_cells,
             n_boundary_faces: m.n_boundary_faces,
-            f: gpu.zeros(m.n_cells)?,
-            f0: gpu.zeros(m.n_cells)?,
-            f00: gpu.zeros(m.n_cells)?,
+            f: gpu.zeros(m.n_local())?,
+            f0: gpu.zeros(m.n_local())?,
+            f00: gpu.zeros(m.n_local())?,
             bf: gpu.zeros(m.n_boundary_faces)?,
             fr: gpu.zeros(m.n_boundary_faces)?,
             ref_value: gpu.zeros(m.n_boundary_faces)?,
@@ -2118,7 +2133,7 @@ mod tests {
 
         let mut names: Vec<&str> = catalogue::CATALOGUE.iter().map(|e| e.name).collect();
         let n = names.len();
-        assert_eq!(n, 130, "the catalogue holds every public name");
+        assert_eq!(n, 131, "the catalogue holds every public name");
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), n, "catalogue names must be unique");
@@ -2133,7 +2148,7 @@ mod tests {
                 catalogue::Status::Refused { .. } => 4,
             }] += 1;
         }
-        assert_eq!(counts, [102, 5, 3, 10, 10], "the per-status counts");
+        assert_eq!(counts, [102, 5, 3, 10, 11], "the per-status counts");
         println!(
             "  [S120] {} names: {} implemented, {} alias, {} planned, {} owned, {} refused",
             n, counts[0], counts[1], counts[2], counts[3], counts[4]
@@ -2303,7 +2318,7 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.status, catalogue::Status::Refused { .. }))
             .collect();
-        assert_eq!(refused.len(), 10);
+        assert_eq!(refused.len(), 11);
 
         let mut probes = 0usize;
         for e in &refused {
@@ -2328,7 +2343,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(probes, 14);
+        assert_eq!(probes, 15);
 
         crate::io::contract::set_permissive(true);
         for e in &refused {
@@ -2396,7 +2411,7 @@ mod tests {
                 rows.push(cells);
             }
         }
-        assert_eq!(rows.len(), 130, "the §120 table must hold every catalogue row");
+        assert_eq!(rows.len(), 131, "the §120 table must hold every catalogue row");
 
         for (i, cells) in rows.iter().enumerate() {
             let e = &catalogue::CATALOGUE[i];

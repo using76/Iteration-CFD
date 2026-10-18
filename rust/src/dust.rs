@@ -45,17 +45,23 @@
 //!   NASA TM-4513 Table II through §128
 //! No GPL-licensed source was consulted.
 
+pub mod age;
 pub mod char;
 pub mod courant;
 pub mod device;
 pub mod fsc;
+pub mod gatemesh;
 pub mod ignition;
 pub mod laminar;
 pub mod particle;
 pub mod progress;
 pub mod psi;
+pub mod seeding;
+pub mod source;
 pub mod thermo;
 pub mod tube1d;
+pub mod vent;
+pub mod vessel0d;
 
 pub use fsc::{CombustionModel, FscConstants, FscInputs, FscOut, FscState};
 pub use ignition::IgnitionSource;

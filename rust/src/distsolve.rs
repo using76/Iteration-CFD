@@ -291,6 +291,149 @@ impl DistSystem {
         })
     }
 
+    /// Build ONE rank's system for a matrix ASSEMBLED ON THE PART (SPEC-LIT
+    /// §139.3, PAR-10b): part `comm.rank()` of `dec`, its mesh uploaded with
+    /// [`GpuMesh::upload_with_halo`](crate::mesh::GpuMesh::upload_with_halo),
+    /// and a zero [`GpuLduMatrix`] of that mesh for
+    /// [`Self::load_matrix`] to fill.
+    ///
+    /// [`Self::split_one`] splits a WHOLE-mesh assembly onto a rank. Here no
+    /// whole matrix exists: the flow path assembles on the part, so the shell
+    /// is built empty and the coefficients are copied in per solve. The mesh
+    /// carries its halo room because a part-assembled matrix and every field
+    /// buffer of the run are `n_cells + n_halo` long (SPEC-LIT §139.1). The
+    /// constraint arrays are filled by the exchange in `load_matrix`, not
+    /// here - there is no host copy of them to upload.
+    ///
+    /// Refused (`Error::Config`, starting `distsolve: `) when
+    /// `comm.size() != dec.n_parts`, naming both numbers, BEFORE any upload:
+    /// a failure here is per-rank and leaves no rank waiting in a collective.
+    pub fn for_rank(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<Self> {
+        if comm.size() != dec.n_parts {
+            return Err(Error::Config(format!(
+                "distsolve: for_rank needs one rank per part: the world has \
+                 {} ranks, the decomposition has {} parts",
+                comm.size(),
+                dec.n_parts
+            )));
+        }
+        let p = comm.rank();
+        let part = &dec.parts[p];
+        let mesh = GpuMesh::upload_with_halo(gpu, &part.mesh, part.n_halo)?;
+        let a = GpuLduMatrix::new(gpu, &mesh)?;
+        Ok(Self {
+            mesh: vec![mesh],
+            a: vec![a],
+            n: vec![part.mesh.n_cells],
+            n_local: vec![part.n_local()],
+            n_global_cells: dec.n_global_cells,
+            part: Some(p),
+        })
+    }
+
+    /// Copy a part-assembled matrix in, then fill the halo of `is_fixed`
+    /// (FIRST) and `fixed_value` (second) through `halo`, exactly as
+    /// [`Self::split_one`] fills them (SPEC-LIT §139.3, PAR-10b).
+    ///
+    /// Every cell-array copy is `0..n_cells`: the halo slots of `diag` and
+    /// `source` are never read (`lduAmul` launches over the owned rows and
+    /// `lduSetValues` reads only its own face's cells) and stay as they are.
+    /// The two constraint arrays ARE read at a halo index - at a coupled
+    /// face's neighbour - so they cross the exchange: `label` first and
+    /// `scalar` second, the order `split` and `split_one` use.
+    ///
+    /// Four refusals, in this order, all `Error::Config` starting
+    /// `distsolve: `, all BEFORE any copy or any exchange, so a rank that
+    /// refuses sends nothing: `self.part` is `None` (a system
+    /// [`Self::split`] built holds every part); `a.n_cells` differs from the
+    /// system's; `a.n_internal_faces` or `a.n_boundary_faces` differs; any
+    /// source buffer is shorter than what would be copied.
+    pub fn load_matrix(
+        &mut self,
+        gpu: &Gpu,
+        halo: &mut SpmdHalo,
+        comm: &dyn Comm,
+        a: &GpuLduMatrix,
+    ) -> Result<()> {
+        if self.part.is_none() {
+            return Err(Error::Config(
+                "distsolve: load_matrix needs the one-part system for_rank \
+                 builds; this system holds every part of one process and has \
+                 no rank's halo to fill"
+                    .to_string(),
+            ));
+        }
+        let n_cells = self.n[0];
+        let a0 = &mut self.a[0];
+        if a.n_cells != n_cells {
+            return Err(Error::Config(format!(
+                "distsolve: load_matrix's matrix has {} cells, the system \
+                 was built for {}; the matrix given must be the one \
+                 assembled on this rank's own part",
+                a.n_cells, n_cells
+            )));
+        }
+        if a.n_internal_faces != a0.n_internal_faces
+            || a.n_boundary_faces != a0.n_boundary_faces
+        {
+            return Err(Error::Config(format!(
+                "distsolve: load_matrix's matrix has {} internal and {} \
+                 boundary faces, the system was built for {} and {}; both \
+                 come from the same part's mesh and must agree",
+                a.n_internal_faces,
+                a.n_boundary_faces,
+                a0.n_internal_faces,
+                a0.n_boundary_faces
+            )));
+        }
+        let wants: [(&str, usize, usize); 8] = [
+            ("diag", a.diag.len(), n_cells),
+            ("source", a.source.len(), n_cells),
+            ("is_fixed", a.is_fixed.len(), n_cells),
+            ("fixed_value", a.fixed_value.len(), n_cells),
+            ("upper", a.upper.len(), a.n_internal_faces),
+            ("lower", a.lower.len(), a.n_internal_faces),
+            ("internal_coeffs", a.internal_coeffs.len(), a.n_boundary_faces),
+            ("boundary_coeffs", a.boundary_coeffs.len(), a.n_boundary_faces),
+        ];
+        for (name, got, need) in wants {
+            if got < need {
+                return Err(Error::Config(format!(
+                    "distsolve: load_matrix's source array {name} is {got} \
+                     long, the copy needs {need}"
+                )));
+            }
+        }
+
+        // Device-to-device on the solve's stream, the length actually
+        // carried - a zero-length face count copies nothing.
+        macro_rules! copy {
+            ($src:expr, $dst:expr, $k:expr) => {
+                if $k > 0 {
+                    gpu.stream()
+                        .memcpy_dtod(&$src.slice(0..$k), &mut $dst.slice_mut(0..$k))?;
+                }
+            };
+        }
+        copy!(a.diag, a0.diag, n_cells);
+        copy!(a.source, a0.source, n_cells);
+        copy!(a.is_fixed, a0.is_fixed, n_cells);
+        copy!(a.fixed_value, a0.fixed_value, n_cells);
+        let k = a.n_internal_faces;
+        copy!(a.upper, a0.upper, k);
+        copy!(a.lower, a0.lower, k);
+        let k = a.n_boundary_faces;
+        copy!(a.internal_coeffs, a0.internal_coeffs, k);
+        copy!(a.boundary_coeffs, a0.boundary_coeffs, k);
+
+        // The two constraint arrays are the only matrix state a kernel reads
+        // at a halo index, so they are the only ones the exchange has to
+        // fill - `is_fixed` FIRST and `fixed_value` second, exactly as
+        // `split` and `split_one` fill them.
+        halo.label(gpu, comm, &mut a0.is_fixed)?;
+        halo.scalar(gpu, comm, &mut a0.fixed_value)
+    }
+
     /// The part this system is, when [`Self::split_one`] built it - `None`
     /// for a system [`Self::split`] built, which holds every part.
     pub fn rank_part(&self) -> Option<usize> {

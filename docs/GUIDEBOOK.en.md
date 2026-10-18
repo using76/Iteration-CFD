@@ -928,6 +928,38 @@ coarser than the domain is deep, so state `voxel` there. `ofgpu-cht` lays one la
 whose default box is the region's own, and writes `VDB/<region>_000000.vdb` for each region. A
 multi-region `.usda` scene is not built, so that format refuses `usdScene`.
 
+### The Isaac Sim scene — `output.visualisation.isaac`
+
+An `isaac` block turns the volume output into what Isaac Sim renders: one `density` grid on
+the `.vdb`, and the `.usda` scene that references it. The block implies the scene - name
+`usda` or let it be appended; it does demand `vdb`, because an Isaac scene never references
+`.nvdb`.
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "isaac": { "profile": "index", "field": "smoke", "scaling": "opticalDepth", "tau": 2.0 } } }
+```
+
+| key | meaning | default |
+|---|---|---|
+| `profile` | `index` (NVIDIA IndeX, a `def Volume`) or `pathtrace` (the RTX path tracer, a volume `Mesh`) | `index` |
+| `field` | the cell field the density is made from | required |
+| `scaling` | `opticalDepth` or `physical` (`K_m rho_s`) | `opticalDepth` |
+| `tau` | the densest column's optical depth | `2.0` |
+| `range` | `[f_lo, f_hi]` of the normalisation | the field's min and max over the fluid |
+| `Km` | specific extinction, m^2/kg (`physical`) | `8700` (Mulholland & Croarkin 2000) |
+| `kind` | `density` or `massFraction` (then `rho_v f_v`) | `density` |
+| `upAxis`, `metersPerUnit` | the stage metadata | `"Z"`, `1.0` |
+
+`opticalDepth` scales the normalised field so the densest voxel column's optical depth is
+exactly `tau` - a plume that grows looks as if it grows, because the range and the scale are
+taken at the first write and held. `physical` writes the extinction of a real soot density
+instead. The profile owns the lattice `activation` (`index` -> `fluid`, `pathtrace` ->
+`dense`) unless the case states one, and one that contradicts is refused by name. The two
+refusals `-permissive` does not soften: an `isaac.field` the run does not have, and
+`massFraction` on a run with no `rho` - there is nothing to substitute with. `ofgpu-sample
+volume` takes the block as `-isaac JSON`, the same refusals included.
+
 ### The Studio 3D viewer
 
 Slices, arbitrary planes, iso-surfaces, streamlines and vector glyphs, drawn on

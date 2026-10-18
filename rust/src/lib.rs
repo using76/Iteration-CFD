@@ -56,6 +56,7 @@ pub mod adapt;
 pub mod automesher;
 pub mod decompose;
 pub mod device;
+pub mod distflow;
 pub mod distsolve;
 pub mod error;
 pub mod exactsum;

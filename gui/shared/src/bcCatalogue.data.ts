@@ -11,7 +11,7 @@ export const BC_CATALOGUE_DATA: BcCatalogue = {
     "implemented": 102,
     "owned": 10,
     "planned": 3,
-    "refused": 10
+    "refused": 11
   },
   "entries": [
     {
@@ -1093,7 +1093,16 @@ export const BC_CATALOGUE_DATA: BcCatalogue = {
       "field": "psi",
       "name": "activeBaffleVelocity",
       "probes": [],
-      "reason": "change of mesh topology",
+      "reason": "`vent` block",
+      "status": "refused"
+    },
+    {
+      "extendedBy": [],
+      "family": "refused",
+      "field": "psi",
+      "name": "activePressureForceBaffleVelocity",
+      "probes": [],
+      "reason": "`vent` block",
       "status": "refused"
     },
     {

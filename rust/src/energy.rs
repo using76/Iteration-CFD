@@ -1075,8 +1075,10 @@ impl<'m> GasState<'m> {
     /// The molar-change sum starts at zero.
     pub fn use_mixture(&mut self, gpu: &Gpu, table: GasMixture) -> Result<()> {
         let k = KernelSet::new(gpu, crate::kernels::ENERGY)?;
-        let n = self.m.n_cells.max(1);
-        let n_any = self.m.n_cells.max(self.m.n_boundary_faces).max(1);
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`); the
+        // scratch is at least n_local AND face-sized, whichever is bigger.
+        let n_local = self.m.n_local().max(1);
+        let n_any = n_local.max(self.m.n_boundary_faces).max(1);
         self.mix = Some(MixState {
             table,
             k: MixKernels {
@@ -1085,10 +1087,10 @@ impl<'m> GasState<'m> {
                 density: k.func("energyMixtureDensity")?,
                 round: k.func("energyRoundAcc")?,
             },
-            inv_w: gpu.zeros(n)?,
-            inv_w_s: gpu.zeros(n)?,
+            inv_w: gpu.zeros(n_local)?,
+            inv_w_s: gpu.zeros(n_local)?,
             scratch: gpu.zeros(n_any)?,
-            mol: gpu.zeros(n)?,
+            mol: gpu.zeros(n_local)?,
             formed: false,
         });
         Ok(())
@@ -1426,9 +1428,10 @@ pub fn refuse_above_low_mach(r: &MachReport, when: &str) -> Result<()> {
 /// any of them - which is the whole point (the module doc's hook that keeps
 /// those models out of this file).
 pub struct EnergySources {
-    /// `[n_cells]` W/m3, explicit - `q'''_c`, `-div(q_r)`, ...
+    /// `[n_local]` W/m3, explicit - `q'''_c`, `-div(q_r)`, ... (SPEC-LIT
+    /// 139.1: `n_cells + n_halo`, launched over the `n` owned cells).
     q: DevBuf<Scalar>,
-    /// `[n_cells]` W/(m3 K), implicit sink, `<= 0` per cell (Patankar S4.2).
+    /// `[n_local]` W/(m3 K), implicit sink, `<= 0` per cell (Patankar S4.2).
     /// The caller guarantees the sign; nothing here can check it without a
     /// device-side reduction on every registration, which would turn a
     /// cheap accumulate into a synchronising one.
@@ -1454,6 +1457,10 @@ pub struct EnergySources {
     meters: Option<[DevBuf<Scalar>; 2]>,
 
     n: usize,
+
+    /// SPEC-LIT 139.1: the buffer length the cell fields have -
+    /// `n_cells + n_halo`. Launches count `n` owned cells only.
+    n_local: usize,
 }
 
 const REDUCE_PARTIALS: usize = 1024;
@@ -1471,10 +1478,10 @@ enum Meter {
 impl EnergySources {
     pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
         let n = m.n_cells;
-        let one = |k: usize| k.max(1);
+        let n_local = m.n_local().max(1);
         Ok(Self {
-            q: gpu.zeros(one(n))?,
-            sp: gpu.zeros(one(n))?,
+            q: gpu.zeros(n_local)?,
+            sp: gpu.zeros(n_local)?,
             fldk: FieldKernels::new(gpu)?,
             ek: EnergyKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
@@ -1482,6 +1489,7 @@ impl EnergySources {
             partials: gpu.zeros(REDUCE_PARTIALS)?,
             meters: None,
             n,
+            n_local,
         })
     }
 
@@ -1505,8 +1513,9 @@ impl EnergySources {
     /// (SPEC-LIT §81); a second call keeps the meters it has.
     pub fn use_meters(&mut self, gpu: &Gpu) -> Result<()> {
         if self.meters.is_none() {
-            let one = self.n.max(1);
-            self.meters = Some([gpu.zeros(one)?, gpu.zeros(one)?]);
+            // SPEC-LIT 139.1: cell buffers, so they carry the halo like the
+            // accumulators they mirror.
+            self.meters = Some([gpu.zeros(self.n_local)?, gpu.zeros(self.n_local)?]);
         }
         Ok(())
     }
@@ -2140,10 +2149,12 @@ impl<'m> Energy<'m> {
         ctrl.validate()?;
         props.validate()?;
 
-        let n = m.n_cells;
         let nif = m.n_internal_faces;
         let nbf = m.n_boundary_faces;
         let one = |k: usize| k.max(1);
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`); the
+        // face buffers stay face-sized.
+        let n_local = m.n_local();
 
         let scheme = reconcile_ddt(ctrl.ddt.reconciled(ctrl.steady))?;
 
@@ -2167,10 +2178,10 @@ impl<'m> Energy<'m> {
             a: GpuLduMatrix::new(gpu, m)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
 
-            rho_cp: gpu.zeros(one(n))?,
-            rho_cp0: gpu.zeros(one(n))?,
-            rho_cp00: gpu.zeros(one(n))?,
-            t_star: gpu.zeros(one(n))?,
+            rho_cp: gpu.zeros(one(n_local))?,
+            rho_cp0: gpu.zeros(one(n_local))?,
+            rho_cp00: gpu.zeros(one(n_local))?,
+            t_star: gpu.zeros(one(n_local))?,
 
             rho_face: GpuSurfaceScalarField::zeros(gpu, m, "rhoTf")?,
             nut_face: GpuSurfaceScalarField::zeros(gpu, m, "nutTf")?,
@@ -2179,14 +2190,14 @@ impl<'m> Energy<'m> {
 
             phi_conv: GpuSurfaceScalarField::zeros(gpu, m, "phiEnergy")?,
             cond_flux: GpuSurfaceScalarField::zeros(gpu, m, "qCondEnergy")?,
-            cond_div: gpu.zeros(one(n))?,
+            cond_div: gpu.zeros(one(n_local))?,
 
             w: gpu.zeros(one(nif))?,
             bw: gpu.zeros(one(nbf))?,
-            grad_t: gpu.zeros(one(n))?,
+            grad_t: gpu.zeros(one(n_local))?,
 
-            dp0dt_su: gpu.zeros(one(n))?,
-            target_div: gpu.zeros(one(n))?,
+            dp0dt_su: gpu.zeros(one(n_local))?,
+            target_div: gpu.zeros(one(n_local))?,
 
             wall: WallFunctionCoeffs::default(),
             twd: None,
@@ -3562,7 +3573,9 @@ impl<'m> Energy<'m> {
     fn assembly_budget_impl(&mut self, gpu: &Gpu, gas: &GasState) -> Result<EnergyBudget> {
         let m = self.m;
         let n = m.n_cells;
-        let mut apsi: DevBuf<Scalar> = gpu.zeros(n)?;
+        // SPEC-LIT 139.1: `apsi` mirrors `t.f`, so it carries the halo too;
+        // its halo tail stays zero and the sums read owned cells only.
+        let mut apsi: DevBuf<Scalar> = gpu.zeros(m.n_local())?;
 
         const STAGES: [AssemblyStage; 7] = [
             AssemblyStage::Ddt,

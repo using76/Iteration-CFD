@@ -167,6 +167,26 @@ pub fn unsupported_note<T>(
     Ok(fallback)
 }
 
+/// A refusal `-permissive` does NOT soften: both modes get the same
+/// `Error::Refused`, naming the key, the value and what IS available.
+///
+/// For the rows where a substitution would be a lie - there is nothing to
+/// substitute WITH, as when the isaac field names a field the run does not
+/// carry, so §13.4's escape hatch has nothing honest to print. The printed
+/// line and the failure are the same fact in both modes.
+pub fn refused<T>(setting: &str, value: &str, available: &[&str], why: &str) -> Result<T> {
+    let menu = if available.is_empty() {
+        String::new()
+    } else {
+        format!("; available: {}", available.join(", "))
+    };
+
+    Err(Error::Refused(format!(
+        "{setting}: \"{value}\" is not supported by ofgpu{menu}
+           note: {why}"
+    )))
+}
+
 /// [`unsupported`] for an entry that could not be *parsed* at all, as opposed
 /// to one naming something off the menu: `nu banana`, `deltaT later`.
 ///
@@ -295,6 +315,17 @@ mod tests {
             unsupported_note("x", "y", &[], "note", "fb", ()).unwrap_err(),
             Error::Refused(_)
         ));
+        // `refused` refuses in BOTH modes - there is no fallback to take.
+        assert!(matches!(
+            refused::<()>("x", "y", &["a"], "why").unwrap_err(),
+            Error::Refused(_)
+        ));
+        set_permissive(true);
+        assert!(matches!(
+            refused::<()>("x", "y", &[], "why").unwrap_err(),
+            Error::Refused(_)
+        ));
+        set_permissive(false);
         // A parse failure is not a refusal - it stays `Config`, so §31.4's
         // exit-code mapping sends only refused-by-name settings to code 3.
         assert!(matches!(

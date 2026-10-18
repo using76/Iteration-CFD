@@ -103,6 +103,30 @@ use crate::solver::{self, SolverKernels, SolverPerformance, SolverWorkspace};
 use crate::{Label, Scalar, Tensor, Vec3};
 
 // ==========================================================================
+//  Where one component's system is solved - SPEC-LIT 139.3 (PAR-10b)
+// ==========================================================================
+
+/// Where one velocity component's system is solved.
+///
+/// `None` (the default, and every existing path) is [`solver::solve`], the
+/// call this module has always made, launch for launch. `Some` routes the
+/// solve elsewhere: a distributed run's
+/// [`SpmdMomentumRoute`](crate::distflow::SpmdMomentumRoute) puts the SPMD
+/// Krylov of SPEC-LIT 138.5/138.6 in its place, so the residual norms are
+/// the world's and every rank reports the same bits, instead of this rank's
+/// alone.
+pub trait ComponentRoute {
+    fn solve_component(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut DevBuf<Scalar>,
+        a: &GpuLduMatrix,
+        m: &GpuMesh,
+        ctrl: &SolverControls,
+    ) -> Result<SolverPerformance>;
+}
+
+// ==========================================================================
 //  Buoyancy - SPEC-LIT §9
 // ==========================================================================
 
@@ -715,10 +739,12 @@ pub struct MomentumSources {
 impl MomentumSources {
     pub fn new(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
         let n = m.n_cells;
-        let one = n.max(1);
+        // SPEC-LIT 139.1: the accumulators carry the halo (`n_local`); `n`
+        // stays the owned count the launches run over.
+        let n_local = m.n_local().max(1);
         Ok(Self {
-            su: gpu.zeros(one)?,
-            sp: gpu.zeros(one)?,
+            su: gpu.zeros(n_local)?,
+            sp: gpu.zeros(n_local)?,
             fldk: FieldKernels::new(gpu)?,
             registered: 0,
             n,
@@ -826,6 +852,11 @@ pub struct Momentum<'m> {
     a: GpuLduMatrix,
     ws: SolverWorkspace,
 
+    /// SPEC-LIT 139.3 (PAR-10b): where the three component systems are
+    /// solved. `None` - the default from [`Self::new`], and every path the
+    /// crate shipped before it - is [`solver::solve`], launch for launch.
+    route: Option<Box<dyn ComponentRoute + 'm>>,
+
     /// The scalar view of one velocity component; refilled per component.
     uc: GpuScalarField,
 
@@ -921,23 +952,25 @@ impl<'m> Momentum<'m> {
             }
         }
 
-        let n = m.n_cells;
         let nif = m.n_internal_faces;
         let nbf = m.n_boundary_faces;
 
         // A zero-length device allocation is an error rather than an empty
         // buffer, so degenerate counts get one element nothing reads.
+        // SPEC-LIT 139.1: the cell buffers carry the halo (`n_local`); the
+        // face buffers stay face-sized.
         let one = |k: usize| k.max(1);
+        let n_local = m.n_local();
 
-        let mut ones = gpu.zeros::<Scalar>(one(n))?;
-        gpu.write(&mut ones, &vec![1.0 as Scalar; one(n)])?;
+        let mut ones = gpu.zeros::<Scalar>(one(n_local))?;
+        gpu.write(&mut ones, &vec![1.0 as Scalar; one(n_local)])?;
 
         // SPEC-LIT 38.5(i): the laminar viscosity is a FIELD, seeded with the
         // case's own uniform `nu`. Under a Newtonian model nothing ever
         // rewrites it, and `nu_lam[i] + nu_t[i]` is then the same IEEE-754
         // addition `nu_t[i] + nu` was.
-        let mut nu_lam = gpu.zeros::<Scalar>(one(n))?;
-        gpu.write(&mut nu_lam, &vec![ctrl.nu; one(n)])?;
+        let mut nu_lam = gpu.zeros::<Scalar>(one(n_local))?;
+        gpu.write(&mut nu_lam, &vec![ctrl.nu; one(n_local)])?;
         let mut b_nu_lam = gpu.zeros::<Scalar>(one(nbf))?;
         gpu.write(&mut b_nu_lam, &vec![ctrl.nu; one(nbf)])?;
 
@@ -976,27 +1009,31 @@ impl<'m> Momentum<'m> {
             a: GpuLduMatrix::new(gpu, m)?,
             ws: SolverWorkspace::for_mesh(gpu, m)?,
 
+            // SPEC-LIT 139.3 (PAR-10b): unrouted. Nothing existing sets a
+            // route, so nothing existing changes what it launches.
+            route: None,
+
             uc: GpuScalarField::zeros(gpu, m, "Ucmpt")?,
 
-            su: gpu.zeros(one(n))?,
-            force: gpu.zeros(one(n))?,
-            hbya: gpu.zeros(one(n))?,
-            stress: gpu.zeros(one(n))?,
+            su: gpu.zeros(one(n_local))?,
+            force: gpu.zeros(one(n_local))?,
+            hbya: gpu.zeros(one(n_local))?,
+            stress: gpu.zeros(one(n_local))?,
 
-            rau: gpu.zeros(one(n))?,
+            rau: gpu.zeros(one(n_local))?,
             ones,
-            row_sum: gpu.zeros(one(n))?,
-            au: gpu.zeros(one(n))?,
-            tmp_cell: gpu.zeros(one(n))?,
+            row_sum: gpu.zeros(one(n_local))?,
+            au: gpu.zeros(one(n_local))?,
+            tmp_cell: gpu.zeros(one(n_local))?,
 
-            grad_uc: gpu.zeros(one(n))?,
-            grad_u: gpu.zeros(one(n))?,
-            grad_nu: gpu.zeros(one(n))?,
-            grad_p: gpu.zeros(one(n))?,
+            grad_uc: gpu.zeros(one(n_local))?,
+            grad_u: gpu.zeros(one(n_local))?,
+            grad_nu: gpu.zeros(one(n_local))?,
+            grad_p: gpu.zeros(one(n_local))?,
 
             nu_lam,
             b_nu_lam,
-            gdot: gpu.zeros(one(n))?,
+            gdot: gpu.zeros(one(n_local))?,
             b_gdot: gpu.zeros(one(nbf))?,
             rheok,
 
@@ -1005,7 +1042,7 @@ impl<'m> Momentum<'m> {
             nu_eff_mag_sf: GpuSurfaceScalarField::zeros(gpu, m, "nuEffMagSf")?,
 
             u_mag: GpuScalarField::zeros(gpu, m, "magU")?,
-            grad_u_mag: gpu.zeros(one(n))?,
+            grad_u_mag: gpu.zeros(one(n_local))?,
 
             w: gpu.zeros(one(nif))?,
             bw: gpu.zeros(one(nbf))?,
@@ -1110,6 +1147,19 @@ impl<'m> Momentum<'m> {
     /// `lower` are the ones all three components were solved with.
     pub fn matrix(&self) -> &GpuLduMatrix {
         &self.a
+    }
+
+    /// SPEC-LIT 139.3 (PAR-10b): set where the three component systems are
+    /// solved. `None` restores [`solver::solve`], launch for launch the call
+    /// this module always made.
+    pub fn set_route(&mut self, route: Option<Box<dyn ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// True when a route is set - the three component solves go through
+    /// [`ComponentRoute::solve_component`], not [`solver::solve`].
+    pub fn has_route(&self) -> bool {
+        self.route.is_some()
     }
 
     /// `rAU = V/diag`, or SIMPLEC's `rAtU`.
@@ -1707,17 +1757,16 @@ impl<'m> Momentum<'m> {
                 }
             }
 
-            let Self { solk, uc, a, ws, ctrl, .. } = self;
-            // SPEC-LIT 13.4: `solvers/U/solver`, honoured.
-            perf[c] = solver::solve(
-                gpu,
-                solk,
-                &mut uc.f,
-                a,
-                m,
-                ws,
-                &ctrl.u_solver,
-            )?;
+            let Self { solk, uc, a, ws, ctrl, route, .. } = self;
+            // SPEC-LIT 13.4: `solvers/U/solver`, honoured. SPEC-LIT 139.3
+            // (PAR-10b): `route` is `None` on every path the crate shipped
+            // before it, which keeps the call below launch for launch the
+            // same; `Some` hands the component system to the route instead -
+            // a part's solve, whose residual norms must be the world's.
+            perf[c] = match route {
+                Some(r) => r.solve_component(gpu, &mut uc.f, a, m, &ctrl.u_solver)?,
+                None => solver::solve(gpu, solk, &mut uc.f, a, m, ws, &ctrl.u_solver)?,
+            };
 
             {
                 let Self { mk, uc, .. } = self;
