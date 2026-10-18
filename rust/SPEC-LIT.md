@@ -39067,6 +39067,42 @@ The probe runs only on the supervisor's GPU box, with Isaac Sim's own Python. It
 `visible = true` for both profiles on the drone solve, each run taking 6 minutes or less. The
 31 997 vs 18 753 of §117.1 is the recorded failing "before".
 
+**As built (VIO-10).** `tools/isaac/probe.py` holds the rule and the framing; the code makes
+these choices where the text above leaves room.
+
+- **The views.** Three eyes, named `front34`, `side` and `back34`, sit in the directions
+  `(1, -1, 0.6)`, `(0, -1, 0)` and `(-1, 1, 0.6)` from the box centre, normalised, in a Z-up
+  frame. On a stage whose `upAxis` is `Y` a direction `(x, y, z)` becomes `(x, z, -y)`, which is
+  the rotation that takes `+z` to `+y`. An eye that looks along the up axis is refused by name.
+- **The lens.** The probe sets each auto-framed camera's lens so that its vertical field of
+  view is `theta_v` (`--vfov-deg`, default 60). With the apertures and the focal length in the
+  same unit, the `UsdGeom.Camera` schema gives
+
+```
+theta_v = 2 atan( V / (2 f) ) ,   f = V / ( 2 tan( theta_v / 2 ) ) ,   V = H height / width     (117.17a)
+```
+
+  with `H = 20.955`, the schema's default `horizontalAperture`. In a landscape frame
+  (`width >= height`) the horizontal field of view is the wider one, so `theta_v` of (117.17)
+  of SPEC-LIT 117.10 is the angle that binds. A portrait frame is refused by name.
+- **The box.** The box is `--box`, or else the world-aligned bound of the volume prim
+  (`UsdGeom.BBoxCache` over the `default` and `render` purposes), which reads the `extent` the
+  scenes of SPEC-LIT 117.9 write.
+- **The profile.** `--profile auto` reads the scene text before `SimulationApp` starts, because
+  the renderer is an argument of its constructor. A `primvars:isVolume = 1` line means
+  `pathtrace`. Otherwise a `def Volume` prim means `index`. A scene with neither is refused,
+  with `probe.json` written. `index` runs RaytracedLighting with no extra setting. `pathtrace`
+  runs PathTracing with `/rtx/raytracing/indexdirect/enabled` and `/rtx/index/compositeEnabled`
+  false and `/rtx/pathtracing/ptvol/enabled` and `/rtx/pathtracing/nonUniformVolumes` true. These
+  are the settings of the handoff's working path-traced scene.
+- **The volume prim.** The probe toggles the first prim that is a `UsdVol.Volume` or a
+  `UsdGeom.Mesh` with `primvars:isVolume` true, unless `--volume` names one.
+- **The drone caller.** `tools/drone/isaac_probe.py` loads the generic module by path. It keeps
+  only its `/World/Flow` staging (a `prepare` hook) and its three fixed eyes around `TARGET`,
+  with clipping `[0.01, 50]` and the USD default lens. Its selftest P1-P8 is byte for byte
+  unchanged. Its lights, eyes, clipping and render loop are those of run 3, and its
+  `probe.json` gains the generic keys `profile`, `volume_path` and `box`.
+
 ### 117.11 The offline path
 
 **Implemented by VIO-06.** `ofgpu-sample volume <case> <time> [-vdb] [-nvdb] [-usda]
@@ -39308,6 +39344,7 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-09 | the gate (117.12) at the file's precision, in both builds: the plume on the 2:1 mesh at `h` = 1/24, default range, `tau` = 2.0 and 0.5, `sigma` rounded to f32 | f64 build: densest column 2.0000000149 (`tau` 2.0) and 0.5000000037 (`tau` 0.5), relative error 7.451e-9 each; `single` build (the plume's cell values in f32): 2.0000000224 and 0.5000000056, relative error 1.118e-8 each; bar 1 %; in f64, 1e-12 or less, and no column above `tau` | this unit |
 | VIO-09 | the round trip (`writer::tests::isaac_density_round_trip`): one write of the 2:1 lattice at `h` = 1/24, field `smoke`, read back and re-measured at the stored precision | `F32`: densest column 2.0000000149, relative error 7.451e-9; `F16`: densest column 1.9993286133, relative error 3.357e-4; both bars 1 %. The other grids keep `VdbWriter::new`'s values bit for bit | this unit |
 | VIO-09 | the fixtures (`tests/isaac_profile.rs`, both builds): `build_writers_isaac` on the 2:1 mesh, `h` = 1/8 on the default box (8 x 8 x 8), compared byte for byte with `tools/isaac/fixtures/<profile>/`; and `usda_check.py --selftest` (pxr `Usd.Stage.Open`, `UsdVol`, `UsdGeom`, `UsdShade`, `UsdValidation`) | `index` scene 12 860 B, `pathtrace` scene 14 055 B (the `.vdb` each references, 318 359 B, is not kept: the selftest stages each scene with an empty placeholder at that path); the same bytes in both builds; both fixtures pass every check, and the four mutants (a `.nvdb` reference, `fieldName` `rho`, the `upAxis` line gone, `primvars:isVolume` gone) each fail on their own check | this unit |
+| VIO-10 | `python tools/isaac/probe.py --selftest` and `python tools/drone/isaac_probe.py --selftest`, plain Python (no Isaac) | `SELFTEST PASS 10/10` and `SELFTEST PASS 8/8`. P5: on the box `[0, 2]^3` at `theta_v` = 60 deg, `r` = 1.7320508075688772 and `R` = 3.8105117766515306 (117.17), clipping `[0.0381051, 55.4256]`. P6: on the drone lattice box `[-1.2, 0.6] x [-0.6, 0.6] x [-0.8, 0.4]`, the largest angle between a view axis and a box corner is 27.0179 deg, against the bound `asin( sin 30 deg / 1.1 )` = 27.0357 deg and the half-angle 30 deg. P8: `f` = 10.208003814170388 at 1280 x 720 (117.17a), and `theta_v` is recovered as 60 deg to 1e-12 | this unit |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
@@ -39340,6 +39377,9 @@ Crossref metadata was checked against the title, authors, year and pages given h
   The format `nvdb.rs` writes.
 - OpenUSD documentation, the `UsdVol`, `UsdGeom` and `UsdShade` schemas (Apache-2.0).
   <https://openusd.org/release/api/usd_vol_page_front.html>.
+- OpenUSD documentation, the `UsdGeom.Camera` schema (Apache-2.0): the apertures, the focal
+  length and the field of view of (117.17a).
+  <https://openusd.org/release/api/class_usd_geom_camera.html>.
 
 ## 118. Mixed precision — what is f64 in the f32 build, and why
 
