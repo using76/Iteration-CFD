@@ -34045,6 +34045,46 @@ plume_dT_z53_over_Q23 21.6
 buoyancy_constant 0.935
 ```
 
+**Leg 2 — the same plume with a participating medium (docs/17 VAL-54).** Leg 1 above is the hot-gas
+inlet with nothing radiating. Leg 2 is the same case with a radiative loss the run computes itself:
+`cases/plumeMcCaffreyRad.jsonc`, which is `cases/plumeMcCaffrey.jsonc` with three stated inputs and
+nothing else changed (the box, the burner window, the declared `Q = 57.5 kW` at `U_in = 2.3985 m/s`,
+k-ε, the numerics, and the mesh levels):
+
+1. `radiation: P1` (§135.7, run by `ofgpu-lowmach` as §137.8 builds it), grey, `absorption.kappa =
+   1.0` 1/m, no scattering, solved every iteration (PCG on DIC, `relTol 0.01`). A hot-gas inlet's gas
+   is air, which has no absorption coefficient of its own, so `κ` is SIZED, not a property. On leg 1's
+   own recorded fields (VAL-53, 4 000 iterations) the optically thin emission
+   `I = Σ_P 4σ(T_P^4 - T_inf^4) V_P` is 13 397 / 15 681 / 18 543 W per (1/m) at 0.10 / 0.05 /
+   0.025 m. The `κ` at which `κ I = 0.30 Q`, the midpoint of McCaffrey's 20-40 % radiant fraction,
+   is therefore 1.29 / 1.10 / 0.93 1/m, and 1.0 is that value rounded. It was fixed before any
+   radiating run.
+2. The five walls state `T fixedValue 293.15 K` (leg 1: `zeroGradient`). §137.8 balances an
+   adiabatic radiating wall: the radiation it receives goes back into the gas by conduction, so no
+   radiant power could leave the box. It also records that the balanced wall's explicit lag
+   diverges when the radiative conductance is far above the conductive one. A stated wall is not
+   balanced, and it is black at `T_inf`, so what the plume radiates to the walls leaves the box, as
+   it left the report's open laboratory.
+3. The inlet and the outlet are named in `radiation.open` at `Tinf 293.15 K`, black at ambient. The
+   burner window therefore adds no radiant power, and all of `Q` still enters as enthalpy.
+
+The bands are leg 1's, unchanged: P1-P4, the stations, the study functional, and the verdict words
+(a correlation: outside is OPEN). One number is added and asserted as nothing: the radiant fraction
+the run computes,
+
+```text
+chi_r = L / Q,   L = Σ_b (q_r·n)_b |S_b| over every boundary face                     (137.6)
+```
+
+`L` is the `walls` value of the driver's `radiation (137.3)` line, taken from the extra solve at the
+final `T`. It is printed beside McCaffrey's 20-40 % and beside P4's `chi_c`. With `κ = 1.0` the
+box's half-width is 1.65 optical depths, so the gas that surrounds the plume absorbs part of what the
+plume emits. A grey constant `κ` cannot make the plume emit and its surroundings transparent at the
+same time. That needs `κ` per cell (`κ(T, X)` on a products tracer, CHR-22's first open item, §137.8),
+which is named and not built. The gate is `src/bin/validate_gates/plume_rad.rs`. It replays its
+records in the `ofgpu-validate` section "Gate 110-C leg 2" through the same P1-P4 logic as leg 1, and
+loads the key through leg 1's `load_mc_key`, so the answer-key marker stays once.
+
 ### 110.5 The recipe, and the record
 
 **The channel.** `cases/channelDns{180,395,590}.jsonc` at `ofgpu-lowmach`, 40 000
@@ -34072,7 +34112,9 @@ at `x = -4H` the column starts at the first cell centre above the floor `y = 1H`
 `-check 500`. The sequence `cells [33,33,40] / [66,66,80] / [132,132,160]` — 0.10 /
 0.05 / 0.025 m — runs on scratch copies with only `cells` edited (the shipped file is
 the 66 level), and `ofgpu-sample column cases/plumeMcCaffrey.jsonc 4000 z 0 0 -at
-1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations.
+1.25,1.5,1.75,2.0,2.25,2.5` takes the six stations. Leg 2 (§110.4, docs/17 VAL-54) runs the same
+recipe on `cases/plumeMcCaffreyRad.jsonc`, and `ofgpu-sample` reads that case although it states
+`radiation` (below).
 
 **Placing a key.** All five keys have their manifest rows and their
 `// answer-key: <id>` markers at the `key::load_text` calls in `validate.rs` (docs/17
@@ -34157,6 +34199,7 @@ has been made, and no verdict in this table is a claim.
 | Gate 110-A Re_tau 587.19 | MKM99 `chan590`: U_b+ = 18.6539 (129 rows) | U_b+ = 19.4944 at N_y 128, E = +4.51 % of D; B2 = 1.0541 (at y+ 203.7); B3 = 4.90e-3 | 17.7837 / 18.9170 / 19.4944, monotone, p = 0.973, u_num = 0.7494 (4.02 % of D), u_input = 1.5e-6 relative | B1 OPEN (undecided); B2 MISSES; B3 holds; single build lands in every f64 band (class R holds) |
 | Gate 110-B reattachment | Driver & Seegmiller (1985) through the TMR: x_r/H = 6.26 +- 0.10 | x_r/H = 5.637 at dx 0.2H, the one level that converged, E = -0.623 (-9.9 % of D); delta_99/H at x = -4H = 1.674 (U_e 10.554 m/s) against approximately 1.5 | not formed: dx 0.1H stopped at step 1232 (M 3.615, cell 56) and dx 0.05H at step 30 (M 1.920, cell 917604), both on the Mach guard of §93.6 | MISSES (the study is not formed; the one converged level lies outside the band); class R MISSES (the single build stops at step 0 on all three levels) |
 | Gate 110-C plume centreline | McCaffrey Table 1, plume region, at the declared Q = 57.5 kW: dT_c(2.00 m) = 101.356 K, w_c(2.00 m) = 3.4311 m/s | dT_c(2.00 m) = 265.214 K, w_c = 5.9370 m/s at 0.025 m; P1 worst +212.6 % (z = 1.25 m), P2 worst +76.1 % (z = 1.75 m); P3 slope -2.130; P4 chi_c = 0.224 | 231.556 / 224.483 / 265.214 K, oscillatory diverging, p n/a, u_num = 144.1 K (142 % of D), u_input = 0 (Q declared) | P1 OPEN (outside); P2 OPEN (undecided at u_val/D = 1.422); P3 OPEN (outside -5/3 +- 0.25); class R holds |
+| Gate 110-C leg 2, radiating (P1, kappa 1.0 1/m) | the same correlation at the same declared Q; the run's radiant fraction beside McCaffrey's 0.20-0.40 | dT_c(2.00 m) = 236.986 K, w_c = 5.8776 m/s at 0.025 m; P1 worst +153.9 % (z = 1.50 m), P2 worst +73.6 % (z = 1.75 m); P3 slope -1.833; P4 chi_c = 0.278; chi_r = 0.061 / 0.068 / 0.077 | 48.138 / 107.037 / 236.986 K, monotone diverging, p n/a, u_num = 271.4 K (268 % of D), u_input = 0 (Q declared) | P3 holds; P1/P2 OPEN (undecided at u_val/D = 2.678); class R holds |
 
 **The record of Gate 110-A (docs/17 VAL-51).** The nine runs are §110.5's channel recipe as it
 stands, with nothing edited but `cells`: `cases/channelDns{180,395,590}.jsonc` (LaunderSharmaKE,
@@ -34332,6 +34375,76 @@ an outside-band result against a correlation. The P1/P2 headline names each leg'
 so a leg that is undecided is never reported as outside because the other one is. It also says
 whether a high miss lies inside what 20-40 % radiative loss accounts for. The class-R row follows
 Gate 110-A's (VAL-51). No band, tolerance or functional changed.
+
+**The record of Gate 110-C leg 2 (docs/17 VAL-54).** The three runs are §110.5's plume recipe with
+nothing edited but `cells`, on `cases/plumeMcCaffreyRad.jsonc` (§110.4's leg 2) instead of leg 1's
+file: `[33,33,40] / [66,66,80] / [132,132,160]`, each `ofgpu-lowmach -iters 4000 -check 500` in the
+f64 release build at `335c85a`, and each set of stations from `ofgpu-sample column <copy> 4000 z 0 0
+-at 1.25,1.5,1.75,2.0,2.25,2.5`. The single build ran the finest copy the same way. Until this unit
+the sampler refused the case: it loaded every case through the drivers' `load_case`, which refuses a
+`radiation` block in every driver but `ofgpu-lowmach` (§137.8). The sampler reads a run's mesh and
+fields and never runs its physics, so it now loads with the lowmach-only blocks let through
+(`load_sampled_case`). The coarse and medium stations were first taken through a copy of the case
+with the `radiation` block removed, the same mesh and the same output directory, and the fixed
+sampler reproduces those station lines byte for byte. The records are constants in
+`src/bin/validate_gates/plume_rad.rs`, printed from the runs' outputs by its ignored test
+`record_plume_rad`, and section "Gate 110-C leg 2" of `ofgpu-validate` replays them.
+
+Pricing came first, as VAL-50 priced leg 1: 200 timed iterations per level gave 26.0 / 61.6 /
+789.5 ms per iteration (mean; last window 26.8 / 50.0 / 773.8), projected at 1.8 / 4.2 / 52.9 min
+for 4 000 iterations. The fine level peaks at 8,074 MiB of pool (3,037 B/cell), against leg 1's
+7,177 MiB. The P1 solve every iteration roughly doubles the fine level's cost over leg 1's 425 ms. The
+recorded runs took 52 s, about 3 min and 44.9 min, and the single build's 25.8 min, beside the other
+lanes' jobs on the card. With the pricing, a coarse-level G-tolerance probe, and the medium and fine
+2 000-iteration checks, leg 2 used about 2 h of card time.
+
+| level | dT_c at z = 1.25 / 1.50 / 1.75 / 2.00 / 2.25 / 2.50 m (K) | w_c at the same stations (m/s) | P3 slope | chi_r = L/Q (L in W) |
+|---|---|---|---|---|
+| 0.10 m | 143.54 / 95.25 / 65.68 / 48.14 / 37.07 / 30.36 | 2.2349 / 1.6989 / 1.3393 / 1.1101 / 0.9601 / 0.8796 | -2.2704 | 0.061 (3 490) |
+| 0.05 m | 249.83 / 179.70 / 135.09 / 107.04 / 89.41 / 77.90 | 4.0624 / 3.6245 / 3.2658 / 3.0147 / 2.8649 / 2.7881 | -1.7021 | 0.068 (3 929) |
+| 0.025 m | 528.05 / 415.64 / 310.90 / 236.99 / 187.08 / 152.26 | 5.5887 / 6.1903 / 6.2282 / 5.8776 / 5.4746 / 5.1133 | -1.8326 | 0.077 (4 405) |
+| 0.025 m, single | 521.05 / 414.63 / 313.67 / 239.78 / 189.23 / 153.85 | 5.5601 / 6.1300 / 6.2319 / 5.9210 / 5.5242 / 5.1597 | -1.7971 | 0.076 (4 387) |
+| leg 1, 0.025 m | 693.55 / 511.25 / 361.31 / 265.21 / 204.15 / 163.25 | 5.4024 / 6.2163 / 6.3188 / 5.9370 / 5.4886 / 5.0914 | -2.1297 | 0 |
+| McCaffrey at Q = 57.5 kW | 221.84 / 163.71 / 126.62 / 101.36 / 83.29 / 69.88 | 4.0130 / 3.7764 / 3.5872 / 3.4311 / 3.2990 / 3.1851 | -5/3 | 0.20-0.40 |
+
+The conductive heat the stated walls take is 340 / 290 / 206 W, 0.6 % / 0.5 % / 0.4 % of `Q`. The
+radiation line closes (137.3) to 0.18 / 0.10 / 7e-4 W in f64 (the G solve runs at `relTol 0.01`) and
+to 7.4 W under single.
+
+What the record says. **The radiant fraction the run computes is 0.061 / 0.068 / 0.077**, against
+McCaffrey's 0.20-0.40 and against the 0.30 the sizing of `κ` aimed at. The optically thin estimate
+does not hold at `κ = 1.0`. On the finest level the gross volume emission `Σ κ 4σT^4 V` is about
+87 kW. It is formed from (137.6)'s `S` and `L`, with every boundary flux taken as outward. About 73 kW
+of it is the ambient gas's own `4σT_inf^4` over the 43.56 m3 box. The plume's excess, about 14 kW, is
+near the `0.30 Q` = 17 kW the sizing aimed at, but only `L` = 4.4 kW of it leaves the box. The gas
+around the plume absorbs the rest. The box's median cell temperature rises from 293.3 K in leg 1 to
+294.9 / 295.0 K on the coarse and medium levels. P4's implied convective fraction on the
+finest mesh is 0.278, beside the run's own `1 - chi_r = 0.923`, so the centreline excess is still
+not radiation's. On the finest mesh `dT_c` lies +117.9 % to +153.9 % above the correlation (leg 1:
++133.6 % to +212.6 %), and `w_c` +39.3 % to +73.6 % (leg 1: +34.6 % to +76.1 %). Radiation lowered the
+near field most, by 165 K at z = 1.25 m and 28 K at z = 2.00 m. **P3 holds** on the finest mesh:
+the slope is -1.833 against -5/3 ± 0.25, where leg 1's -2.130 was outside. **P1/P2 is OPEN,
+undecided.** It is judged as leg 1's is, at the study of `dT_c(2.00 m)`. That study runs 48.14,
+107.04 and 236.99 K over the three levels, monotone diverging, so `p` is not available and
+`u_num` = 271.4 K (268 % of D). `u_val/D` = 2.678 reaches past the 15 % edge from the worst station's
++153.9 %, and the band cannot decide. **Class R holds**: the single build's finest run lands in every
+band the f64 run lands in (P1 +153.27 %, P2 +73.72 %, slope -1.797, `chi_r` 0.076, `dT_c(2.00 m)`
+239.78 against 236.99 K, +1.2 %).
+
+The coarse and medium levels are not a plume on the axis. Their columns carry a cross velocity of
+0.3-0.4 m/s at the stations (`U_x` -0.37 and +0.35 m/s at z = 1.25 m). Leg 1 carried 2e-5 m/s on the
+coarse mesh and at most 0.06 m/s on the finest. The radiating plume leans, in a different direction on
+each level, and the fixed column samples its flank. The lean is not the G solve's: a coarse probe
+with G solved to `1e-14`, `relTol 0` (gap 8.8e-11 W) leans the same way, by 0.29 m/s. The medium
+level is also not converged in the iterations. Run to 2 000 iterations, it gives `dT_c(2.00 m)` =
+159.70 K, leaning along `-y`, against 107.04 K along `+x` at 4 000. The finest level is converged in the iterations to a few per cent. At 2 000 iterations it gives
+`dT_c(2.00 m)` = 232.79 K against 236.99 K at 4 000 (-1.8 %), its worst station 514.68 against
+528.05 K (-2.5 %), and its P3 slope -1.811 against -1.833. Its column carries at most 0.04 m/s
+across the axis. The study's divergence
+is therefore at least partly the coarse levels' leaning, wandering states. The candidates, none
+measured here, are the absorbing ambient's stratification against walls held at `T_inf`, and steady
+SIMPLE picking an asymmetric state of a symmetric box. Each cure changes the case or the model
+(per-cell `κ`, an open side boundary, a transient run), so none was tried (docs/17 review-later).
 
 ---
 

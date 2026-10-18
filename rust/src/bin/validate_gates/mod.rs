@@ -74,3 +74,9 @@ pub(crate) mod flame1d;
 /// SPEC-LIT §134.8, Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon
 /// C1 1.6, REDUCED on the true wedge, replayed from the recorded run (CHR-16).
 pub(crate) mod flame_d;
+
+/// SPEC-LIT §110.4 (leg 2 addendum)/§110.5, Gate 110-C leg 2: the radiating
+/// plume, P1 grey kappa 1.0 1/m, walls at T_inf, on
+/// cases/plumeMcCaffreyRad.jsonc at three levels, replayed through the same
+/// P1-P4 bands as leg 1 (docs/17 VAL-54).
+pub(crate) mod plume_rad;

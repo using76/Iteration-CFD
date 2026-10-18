@@ -3952,6 +3952,15 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_flame_d", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 110.4 leg 2 (docs/17 VAL-54) - Gate 110-C's second leg: the
+    // same plume on cases/plumeMcCaffreyRad.jsonc with P1 grey radiation
+    // (kappa 1.0 1/m), replayed through the SAME P1-P4 bands as leg 1.
+    if c.section("Gate 110-C leg 2: the radiating plume, P1 kappa 1.0 1/m, McCaffrey 1979, replayed (SPEC-LIT 110.4)") {
+    c.enter_gate(validate_gates::plume_rad::GATE);
+    let r = validate_gates::plume_rad::check_plume_rad(c);
+    c.ran("check_plume_rad", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }
@@ -14625,11 +14634,14 @@ fn backstep_class_r(
     }
 }
 
-/// Gate 110-C: load the McCaffrey key and the record slot, then hand the
-/// verdict to [`check_mccaffrey_plume_on`] (S7's split).
-fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
+/// The McCaffrey key, read, parsed and noted, or `None` with the reason
+/// noted. BOTH legs of Gate 110-C load the key through this one fn - leg 1's
+/// [`check_mccaffrey_plume`] and leg 2's `validate_gates::plume_rad` - so the
+/// `// answer-key:` marker below stays ONCE in this file: `validate_key`'s
+/// marker census counts 45 and refuses a duplicate (SPEC-LIT 110.1).
+fn load_mc_key(c: &mut Checks) -> Option<McCaffreyKey> {
     // answer-key: mccaffrey1979-table1
-    let key = match key::load_text(MC_KEY.0) {
+    match key::load_text(MC_KEY.0) {
         Ok((line, text)) => {
             c.note(&line);
             match parse_mc_key(&text) {
@@ -14644,7 +14656,13 @@ fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
             c.note(&answer_key_missing_line(MC_KEY.0, MC_KEY.1, &why));
             None
         }
-    };
+    }
+}
+
+/// Gate 110-C: load the McCaffrey key and the record slot, then hand the
+/// verdict to [`check_mccaffrey_plume_on`] (S7's split).
+fn check_mccaffrey_plume(c: &mut Checks) -> Result<()> {
+    let key = load_mc_key(c);
     // The single build's finest run of the same case (class R, docs/17
     // section 5.1 rule 4): a record, or the reason the run left none.
     let single = Some(
