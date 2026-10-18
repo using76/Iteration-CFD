@@ -975,6 +975,60 @@ extern "C" __global__ void turbGammaBoundaryCell
 }
 
 
+//- SPEC-LIT 139.6 (PAR-12): the blended diffusivity on the LISTED boundary
+//  faces - a decomposed run's PROCESSOR faces - interpolated as an internal
+//  face is, from the two cells the face couples.
+//
+//  Extended from:
+//    Menter, "Two-equation eddy-viscosity turbulence models for engineering
+//      applications", AIAA J. 32 (1994) 1598-1605
+//    Menter, Kuntz & Langtry, "Ten years of industrial experience with the
+//      SST turbulence model", Turbulence, Heat and Mass Transfer 4 (2003)
+//    Tucker, "Assessment of geometric multilevel convergence and a wall
+//      distance method for flows with multiple internal boundaries",
+//      Applied Mathematical Modelling 22 (1998) 293-305
+//    ofgpu SPEC-LIT.md sections 6.3 and 6.6
+//  No GPL-licensed source was consulted.
+//
+//  On the whole mesh a processor face IS an internal face, and
+//  turbGammaInternalCell would interpolate BOTH cells' blending factor. Cut,
+//  it becomes a boundary face of the part, and turbGammaBoundaryCell (the
+//  call face_diffusivity_cell makes on every boundary face) takes the OWNER's
+//  rSigma only - which with F1 varying is O(1e-3) wrong, not round-off. This
+//  kernel is turbGammaInternalCell's expression - the SAME gP/gN form and the
+//  SAME multiplication order - evaluated over the listed faces only, with the
+//  neighbour's nut and rSigma read at the halo cell the exchange has filled
+//  (SPEC-LIT 139.6's fixed-cell halo). k-epsilon's constant sigma makes the
+//  owner-only value algebraically equal there, so nothing calls this for it.
+extern "C" __global__ void turbGammaCoupledCell
+(
+    ofscalar* __restrict__ bGammaMagSf,
+    const ofscalar* __restrict__ nut,
+    const ofscalar* __restrict__ rSigma,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bWeights,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ faces,
+    ofscalar nu,
+    oflabel nFaces
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nFaces) return;
+
+    const oflabel b = faces[i];
+    const oflabel P = bFaceCells[b];
+    const oflabel N = bNbrCell[b];
+
+    const ofscalar w = bWeights[b];
+    const ofscalar gP = nu + rSigma[P]*nut[P];
+    const ofscalar gN = nu + rSigma[N]*nut[N];
+
+    bGammaMagSf[b] = (w*gP + ((ofscalar)1 - w)*gN)*bMagSf[b];
+}
+
+
 // ==========================================================================
 //  Affine diffusivity - SPEC-LIT 41.2
 //

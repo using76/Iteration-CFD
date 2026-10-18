@@ -53102,7 +53102,8 @@ contract (ORIGINAL). It has no external input.
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
-(§139.4, PAR-10c) and energy and scalars on a part (§139.5, PAR-11).
+(§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11), and
+k-epsilon and SST on a part (§139.6, PAR-12).
 
 This section defines no equation, so it carries no equation label.
 
@@ -53785,6 +53786,181 @@ Turbulence decomposed is PAR-12 - the gate's `nut` is the zero field, and
 only its length check was admitted above. The conjugate stack is refused.
 MPI and multi-GPU are deferred: the ranks are `ThreadComm` threads, each
 with its own `Gpu::new(0)` on one card.
+
+### 139.6 k-epsilon and SST decomposed (PAR-12)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** 139.4 runs `Simple` decomposed and 139.5 the scalars, but the two
+RANS models still solved rank-locally: `KEpsilon` and `KOmegaSst` fed
+`RasCore::solve_equation_with` its rank-local `solver::solve`, evaluated their
+k, epsilon/omega and `nut` boundary conditions on processor faces whose ghost
+cells held nothing of the neighbour rank, constrained their wall cells with
+a `lduSetValues` that read the neighbour rank's fixed flags from an empty
+halo, and - SST only - built a processor face's blended diffusivity from the
+OWNER cell's blend multiplier alone, where the whole mesh interpolates both
+cells' (`turbGammaBoundaryCell` against `turbGammaInternalCell`). On a part
+their k, epsilon/omega and `nut` were not the whole mesh's. This subsection gives the models the seams - a solve
+route, a field exchange, the constraint exchange and, for the blended
+diffusivity alone, a coupled-face kernel - and gates them on the periodic
+channel with wall functions.
+
+**The seams.** `RasCore` holds `exchange: Option<Box<dyn FlowExchange>>`,
+`route: Option<Box<dyn ComponentRoute>>` and the processor-face bookkeeping
+(`proc_faces`, `n_proc_faces`, `r_sigma_halo`) - private, at the end of the
+struct, `None`/empty in `new`, and every `None` arm is the call the module
+has always made, launch for launch:
+
+| seam | what it replaces when `None` | where it is called |
+|---|---|---|
+| `set_route` | `solver::solve` on k, epsilon/omega | `solve_equation_with`'s final solve, through `route.solve_component(..)` - the method's own `match` |
+| `correct_bc` / `correct_nut_bc` | `correct_boundary_conditions` on the equation field / on `nut` | the five boundary sites of `KEpsilon::correct` / `KOmegaSst::correct` |
+| `set_exchange`'s constraint exchange | `constrain_wall_cells` | every `constrain_walls` block of `solve_equation_with`: `mark_wall_cells`, then `cells_label` on `is_fixed` and `cells` on `fixed_value`, then `set_values` - the constraint arrays are per-cell, so a halo row must hold the neighbour rank's bit before `set_values` reads it |
+| `exchange.max` | the rank-local convergence measure | `convergence_measure`'s max, before the divide |
+| the blend multiplier's halo (`cells`) | nothing - `r_sigma` itself is the pass buffer | `assemble_transport_blended` (SST only), BEFORE the internal-face kernel: the owned `r_sigma` copied into the `n_local` room and `cells` exchanged into the halo - an internal face's N is a halo cell on a part, and `turbGammaInternalCell` reads `rSigma[N]`, so the owned buffer alone would hand every internal face a halo sigma of 0 |
+| `face_diffusivity_coupled_cell` | nothing - new, alongside `face_diffusivity_cell` | `assemble_transport_blended` (SST only), right after the internal-face kernel: the processor faces only, from the same exchanged room |
+
+The wall constraint is the one new `#[cfg]`-free launch: `mark_wall_cells`
+(wallfunctions.rs) writes `k.mark_fixed`/`wall_cell_value` into `is_fixed`/
+`fixed_value` at `wd.wall_cells` - what `constrain_wall_cells` computes inline
+- so the two arrays exist as buffers an exchange can carry.
+
+**The coupled diffusivity.** The internal faces keep
+`face_diffusivity_cell` bit for bit. The processor faces of a part get
+
+`Gamma_b |S_b| = (w_b g_P + (1 - w_b) g_N) |S_b|`, `g = nu + blend(sigma)
+nu_t`,
+
+`turbGammaCoupledCell` (cuda/turbulence.cu, next to `turbGammaBoundaryCell`):
+the blended diffusivity of SPEC-LIT 6.3 evaluated per side - `g_P` from the
+owner's `nut`, `g_N` from the HALO cell's exchanged `nut` - and blended by the
+face interpolation weight, exactly what `face_diffusivity_cell` computes on an
+internal face. The neighbour side reads the HALO cell's `nut` (exchanged by
+`correct_nut_bc`) and its blend multiplier (exchanged into `r_sigma_halo`
+just before, on every rank with an exchange, because the exchange is
+collective). k-epsilon's sigma is constant, so the owner-only boundary value
+`nu + sigma nu_t,b` with `nu_t,b = w nu_t,P + (1 - w) nu_t,N` is the internal
+value up to round-off and the coupled kernel is never launched for it. For
+SST the owner-only value differs from the internal one by the jump of
+`blend(sigma)` across the face - not round-off: on the gate's analytic fields
+the owner-only value misses the whole mesh's by 0.83-0.87 relative on the
+worst face, and the coupled value matches it to `roundoff_tol(1e-13)` (test
+3).
+
+**The fixed-cell halo.** `constrain_wall_cells` is `wfMarkFixed` then
+`lduSetValues`, and `lduSetValues` moves a fixed NEIGHBOUR's value into a
+free row's source by reading `isFixed[nbr]`/`fixedValue[nbr]` at a coupled
+face's neighbour - a halo cell on a part. The decomposed branch therefore
+marks (`mark_wall_cells`, the first half alone), exchanges `is_fixed`
+(`FlowExchange::cells_label`, new: `SpmdHalo::label`) and `fixed_value`
+(`cells`), and only then folds - so a free cell next to another rank's wall
+cell drops the same coupling the whole-mesh matrix drops. Every rank calls
+the two exchanges, wall cells or not.
+
+**The wall distance and the halo room.** The wall distance itself is not exchanged: SST builds
+its `y` by Tucker's Poisson distance of SPEC-LIT 6.6, solved on the WHOLE mesh
+by `channel_wall_distance` and split to the parts by `global_cell` - the split
+`y` is bitwise the whole-mesh `y` restricted (test 2). k-epsilon takes no `y`
+at all. `nut` carries the 139.1 halo already; the coupled kernel is what
+fills its processor faces. PAR-12 is the first DECOMPOSED run through the
+wall functions and the RAS assembly, and their per-cell length checks and
+allocations did not know the PAR-09 room: the wall-function entry points'
+checks (`k`, `epsilon`, `omega`, `G`, `U`) admit `n_local` now
+(`expect_cell_count`, the 139.5 move for `nut`); `RasCore::new` and the SST
+blend buffers allocate at `n_local`; and `turbulence_production` - which
+takes `n_cells` explicitly, no mesh - passes a buffer of `n_cells` OR of the
+room. The kernels read owned cells only on every one of them, so the halo
+room is admitted and never read, and a whole mesh has `n_local == n_cells`,
+so a serial run allocates, launches and passes exactly what it always did.
+
+**The refusals**, `Error::Config` starting `distflow: `, checked only when
+the exchange is `Some`:
+
+| refusal | names |
+|---|---|
+| `snGrad` not `uncorrected`, or `nNonOrthogonalCorrectors > 0` | "snGrad" and the count |
+| the k / epsilon-omega convection scheme neither `upwind` nor `central` | the scheme with `{:?}`; gradients have no halo on the turbulence path yet |
+| `gradScheme` not `Gauss` | the scheme's `describe()` |
+| buoyancy production attached (`set_buoyancy` called since) | "G_b"; a decomposed `RasCore` cannot build the buoyancy production |
+| SST with `f1Override`, DES, the LM or GM route | the option; the model's F1 variant is not routed by PAR-12 |
+| SST's rho-weighted form (SPEC-LIT 156, `correct_rho`) | the rho triple and mass flux with no halo; run the kinematic form |
+
+**The gate.** `tests/distflow_turb.rs`, in BOTH builds:
+`cases/channelPeriodicWF.jsonc` - the 8 x 6 x 4 (192-cell) channel, periodic
+in x, walls in y and z, `nu = 1.5e-5`, body force `(3.9, 0, 0)` (the
+driving per unit mass), `U` fixedValue 0 on the walls, wall functions `kappa
+= 0.41`, `E = 9.8`, relaxation `U` 0.5 and `p` 0.3, PBiCGStab over the
+Diagonal preconditioner, upwind convection, uncorrected snGrad, no
+non-orthogonal correctors, `Gauss` gradients - run serial by `channel_serial`
+and decomposed by `channel_part` on `ThreadComm` ranks, `KEpsilon` and
+`KOmegaSst` each with their own `SpmdMomentumRoute` and `RankCtx`, constructed
+in the same order on every rank (they are collective). The wall distance is
+solved ONCE on the whole mesh and split; the initial fields are `U` 3.0, `k`
+0.03, epsilon 0.3, `omega = epsilon/(betaStar k)`. The constants, FIXED
+BEFORE MEASURING:
+
+| class | constant | bound |
+|---|---|---|
+| R (decomposed against serial: U, k, epsilon/omega rel, `max|a-b| / max|serial|`, U componentwise) | `CHANNEL_TOL_SERIAL` | `roundoff_tol` of 1e-6 (1e-6 f64, 1e-5 under `single`) |
+| D (equal iterations, `converged` and residual bits on every rank; the parts covering the mesh once; the split `y` and the refusal table) | - | hard in BOTH builds |
+| the serial floor (a solver control, not a gate) | `CHANNEL_RESIDUAL` | 1e-7 f64, 1e-5 under `single` |
+
+The test `assert_eq!`s the constants to their literals before measuring, so
+nobody loosens them silently. The verify run is the SHORT trajectory -
+`CHANNEL_SHORT_OUTER` = 20 outer iterations with the convergence test off, so
+the comparison is at a FIXED iteration count and measures the seam, not the
+convergence - one test, both models, serial against P = 2 and P = 4 Hilbert.
+The R rows are hard `assert!`s in f64; under `single` a row above the
+roundoff PRINTS `[139.6] MISSED: <row> single build: <measured> > <tol>;
+cause: f32 round-off of the segregated solve order` and the test continues -
+the user's missed-gate rule - while the D rows (rank agreement, cover) stay
+hard in BOTH builds; a serial run that goes NaN under `single` prints
+`[139.6] MISSED: ... serial diverged at iteration N; cause: the open f32
+SIMPLE floor family on channelPeriodicWF (docs/17-review-later)` and returns.
+The plan's size - the FULL gate, `CHANNEL_MAX_OUTER` = 3000 with the
+convergence test on, serial then P = 4 Hilbert - runs as
+`the_channel_k_epsilon_gate` and `the_channel_sst_gate`, both `#[ignore]`d -
+the supervisor's run - printing the iterations, converged flag, residuals and
+wall time per row; an unconverged run is a `[139.6] MISSED` row with the
+residuals, hard in f64. `the_gate_constants_are_the_fixed_ones`,
+`the_split_wall_distance_is_the_whole_mesh_wall_distance` (P = 2, 3, 4,
+Linear AND Hilbert, `to_bits` per owned cell),
+`the_coupled_diffusivity_is_the_internal_face_diffusivity` (P = 2 Hilbert and
+P = 4 Linear, an analytic `nut`/`r_sigma`, `roundoff_tol` of 1e-13 against
+the whole-mesh kernel, and the owner-only miss shown above 1e-3 on at least
+one face) and `a_decomposed_model_refuses_what_it_cannot_run` (the refusal
+table on a 1-rank part) hold the rest.
+
+*Measured* (2026-10-19, supervisor, the shared RTX 5070 Ti). The short
+trajectory, f64: k-epsilon P = 2 U rel 1.841e-13, k 1.957e-10, epsilon
+1.251e-10; P = 4 U 1.232e-13, k 1.910e-10, epsilon 1.400e-10; SST P = 2 U
+3.465e-14, k 2.850e-12, omega 1.175e-12; P = 4 U 4.725e-14, k 4.039e-12,
+omega 1.665e-12 - every row HOLDS against 1e-6, 20 iterations on every rank
+of every world, about 1.1 s for a P = 4 world. Under `single` the U rows hold
+(1.4e-6 to 7.1e-6 against tol32 1e-5) and every k and epsilon/omega row
+MISSES and is printed: k-epsilon P = 2 k 1.618e-4, epsilon 2.435e-4; P = 4 k
+2.386e-4, epsilon 2.013e-4; SST P = 2 k 4.000e-4, omega 1.789e-4; P = 4 k
+7.829e-5, omega 6.974e-5. The f64 k and epsilon rows already sit three
+orders above the U rows after 20 iterations - the start-up transient (the
+initial k and epsilon are far from the wall functions' values) is the likely
+amplifier, not measured further - and the f32 unit round-off is amplified the
+same way; the bound stays where it was fixed
+and the miss is a recorded f32 finding. The split `y` is bitwise on every
+part of P = 2, 3, 4 under Linear and Hilbert; the coupled diffusivity holds
+on every processor face of P = 2 Hilbert and P = 4 Linear, where the
+owner-only value misses by 0.83-0.87. The plan-size gates (`--ignored`) have
+NOT RUN: the supervisor's run of them was refused by the session's
+permission system as a workload on the shared card, so they are a deferred
+item in both builds.
+
+**What this does not establish.** Gradients have no halo on the turbulence
+path: the limited and `linearUpwind` convection schemes and the
+non-orthogonal correction are refused by name, not run decomposed. The
+buoyancy production, the SST F1 variants and the rho-weighted form are
+refused. The wall distance is solved serial on the whole mesh and split - not
+solved decomposed. MPI and multi-GPU are deferred: the ranks are `ThreadComm`
+threads, each with its own `Gpu::new(0)` on one card.
 
 ---
 

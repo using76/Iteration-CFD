@@ -324,6 +324,11 @@ pub trait FlowExchange {
     fn cells(&mut self, gpu: &Gpu, v: &mut DevBuf<Scalar>) -> Result<()>;
     /// The same for a three-component cell buffer.
     fn cells_vector(&mut self, gpu: &Gpu, v: &mut DevBuf<Vec3>) -> Result<()>;
+    /// Halo of a raw Label cell buffer ([`SpmdHalo::label`]) - the integer
+    /// masks a coupled face's neighbour is tested for; no boundary evaluation.
+    /// SPEC-LIT 139.6 (PAR-12): what carries a constraint matrix's `is_fixed`
+    /// across the cut before `set_values` eliminates the marked columns.
+    fn cells_label(&mut self, gpu: &Gpu, v: &mut DevBuf<Label>) -> Result<()>;
     /// The world's max; NaN anywhere -> NaN on every rank
     /// ([`crate::simple::nan_propagating_max`]).
     fn max(&mut self, x: Scalar) -> Result<Scalar>;
@@ -370,6 +375,10 @@ impl FlowExchange for RankCtx<'_> {
 
     fn cells_vector(&mut self, gpu: &Gpu, v: &mut DevBuf<Vec3>) -> Result<()> {
         self.halo.vector(gpu, self.comm, v)
+    }
+
+    fn cells_label(&mut self, gpu: &Gpu, v: &mut DevBuf<Label>) -> Result<()> {
+        self.halo.label(gpu, self.comm, v)
     }
 
     fn max(&mut self, x: Scalar) -> Result<Scalar> {
@@ -1653,4 +1662,564 @@ pub fn dvd_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<DvdRu
         converged,
         residuals,
     })
+}
+
+// ==========================================================================
+//  The streamwise-periodic channel - SPEC-LIT 139.6 (PAR-12)
+// ==========================================================================
+
+use crate::field_setup::{NutRoughness, WallFaces};
+use crate::io::case::CaseControls;
+use crate::mesh::PatchKind;
+use crate::models::{KEpsilon, KEpsilonCoeffs, KOmegaSst, KOmegaSstCoeffs};
+use crate::sources::SourceSpec;
+
+/// The gate constants, FIXED BEFORE MEASURING (docs/17 §12, row PAR-12):
+/// neither the test nor the driver may loosen them, and a run that misses
+/// keeps the assert and reports its numbers.
+///
+/// The channel: the case `cases/channelPeriodicWF.jsonc` - a streamwise
+/// CYCLIC plane duct, 8 x 6 x 4 cells (192), the two `wallHot` and the two
+/// `wallSide` patches no-slip walls, the flow driven by the case's own
+/// `momentumSource` body force (3.9 m/s² along x) in place of an inlet, run
+/// with k-epsilon and with k-omega SST on the wall functions the case names
+/// (`kappa` 0.41, `E` 9.8).
+pub const CHANNEL_P: usize = 4;
+/// Class R: decomposed against serial, judged at
+/// [`crate::precision::roundoff_tol`] of this.
+pub const CHANNEL_TOL_SERIAL: f64 = 1e-6;
+/// The outer loop's hard ceiling of the plan's gate.
+pub const CHANNEL_MAX_OUTER: usize = 3000;
+/// The outer loop's hard ceiling of the short-trajectory verify run.
+pub const CHANNEL_SHORT_OUTER: usize = 20;
+/// The convergence ask on the four initial residuals - a SOLVER control, not
+/// a gate tolerance.
+pub const CHANNEL_RESIDUAL: Scalar = if cfg!(feature = "single") { 1e-5 } else { 1e-7 };
+/// The case's `numerics.relaxation`, verbatim.
+pub const CHANNEL_U_RELAX: Scalar = 0.5;
+pub const CHANNEL_P_RELAX: Scalar = 0.3;
+/// The case's `initial`, verbatim - and SST's `omega` from the same
+/// epsilon, `omega = epsilon/(beta_star k)`.
+pub const CHANNEL_U0: Scalar = 3.0;
+pub const CHANNEL_K0: Scalar = 0.03;
+pub const CHANNEL_EPS0: Scalar = 0.3;
+pub const CHANNEL_OMEGA0: Scalar = CHANNEL_EPS0 / (0.09 * CHANNEL_K0);
+
+/// Which turbulence model the channel runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelModel {
+    /// Standard k-epsilon (SPEC-LIT 6.1), constant sigma.
+    KEpsilon,
+    /// Menter k-omega SST (SPEC-LIT 6.3), blended sigma - the model the
+    /// coupled diffusivity exists for.
+    KOmegaSst,
+}
+
+impl ChannelModel {
+    /// The model, named as the case file names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::KEpsilon => "kEpsilon",
+            Self::KOmegaSst => "kOmegaSST",
+        }
+    }
+}
+
+/// The channel, as the case file lowers it: the host mesh, the case controls
+/// and the `sources[]` entries - the momentum body force a periodic domain
+/// uses in place of an inlet.
+pub struct ChannelCase {
+    pub hm: HostMesh,
+    pub cc: CaseControls,
+    pub sources: Vec<SourceSpec>,
+}
+
+/// Read and lower `cases/channelPeriodicWF.jsonc`.
+pub fn channel_case() -> Result<ChannelCase> {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../cases/channelPeriodicWF.jsonc"
+    ));
+    let lowered = crate::io::case_json::read_case_jsonc(path)?.lower()?;
+    let hm = lowered.build_host_mesh()?;
+    let cc = lowered.to_case_controls();
+    Ok(ChannelCase {
+        hm,
+        cc,
+        sources: lowered.sources,
+    })
+}
+
+/// The channel's flow controls: the case's own solvers and relaxations, with
+/// the numerics a decomposed run refuses (SPEC-LIT 139.4's refusal table)
+/// replaced by the SAME numerics on both sides of the comparison -
+/// `linearUpwind` -> `upwind` and `corrected` -> `uncorrected` snGrad (the
+/// mesh is orthogonal, where the correction is identically zero, so the
+/// substitution is exact on the serial side too), the pressure solve's `DIC`
+/// preconditioner -> `Diagonal` (cavity_controls' precedent), and the
+/// transpose-free stress. What one side may not run, neither runs.
+pub fn channel_controls(cc: &CaseControls) -> SimpleControls {
+    let mut p_solver = cc.p_solver;
+    p_solver.precon = Preconditioner::Diagonal;
+    if cfg!(feature = "single") {
+        p_solver.max_iter = p_solver.max_iter.min(300);
+    }
+    SimpleControls {
+        momentum: MomentumControls {
+            nu: cc.nu,
+            u_solver: cc.u_solver,
+            u_relax: CHANNEL_U_RELAX,
+            div_scheme: DivScheme::Upwind,
+            bounded_convection: false,
+            sn_grad: SnGradScheme::Uncorrected,
+            variable_viscosity_stress: false,
+            ..MomentumControls::default()
+        },
+        p_solver,
+        p_relax: CHANNEL_P_RELAX,
+        ..SimpleControls::default()
+    }
+}
+
+/// The channel's turbulence controls: the case's own, with `snGrad`
+/// `uncorrected` and zero non-orthogonal correctors - the two refusals of
+/// [`crate::turbulence::RasCore::set_exchange`]'s table, applied to the serial
+/// side too so the comparison runs one numerics.
+pub fn channel_turbulence(cc: &CaseControls) -> TurbulenceControls {
+    TurbulenceControls {
+        sn_grad: SnGradScheme::Uncorrected,
+        n_non_orth_correctors: 0,
+        ..cc.turb
+    }
+}
+
+/// A whole-mesh field restricted to a part's OWNED cells, local order:
+/// `whole[global_cell[i]]` for `i < part.mesh.n_cells`.
+pub fn split_cells(whole: &[Scalar], part: &PartMesh) -> Vec<Scalar> {
+    part.global_cell[..part.mesh.n_cells]
+        .iter()
+        .map(|&g| whole[g as usize])
+        .collect()
+}
+
+/// Tucker's Poisson wall distance of SPEC-LIT 6.6, solved on the WHOLE mesh -
+/// a decomposed run never solves it on a part; it splits this by
+/// [`split_cells`] instead. The first `hm.n_cells` values of `y.f`.
+pub fn channel_wall_distance(gpu: &Gpu, hm: &HostMesh, cc: &CaseControls) -> Result<Vec<Scalar>> {
+    let m = GpuMesh::upload(gpu, hm)?;
+    let wd = crate::walldistance::wall_distance(gpu, hm, &m, &cc.p_solver, 0)?;
+    let y = gpu.download(&wd.y.f)?;
+    Ok(y[..hm.n_cells].to_vec())
+}
+
+/// What one channel run reports - a serial run's whole mesh, a decomposed
+/// run's OWNED cells only (in the part's local order, `global_cell[i]` the
+/// whole-mesh id of owned cell `i`). `w` is `epsilon` or `omega`, whichever
+/// the model transports.
+pub struct ChannelRun {
+    pub global_cell: Vec<usize>,
+    pub u: Vec<Vec3>,
+    pub k: Vec<Scalar>,
+    pub w: Vec<Scalar>,
+    pub nut: Vec<Scalar>,
+    pub iterations: usize,
+    pub converged: bool,
+    pub diverged: bool,
+    /// U, p, k and w INITIAL residuals of the last iteration, in that order -
+    /// the four numbers the convergence test reads.
+    pub residuals: [Scalar; 4],
+}
+
+/// The channel's boundary conditions, on the whole mesh and on a part alike:
+/// `U` fixedValue 0 on every face of a `PatchKind::Wall` patch, and NOTHING
+/// else written - the cyclic pair's faces and every processor face keep the
+/// `Cyclic` kind `GpuVectorField::zeros` seeds them with (`fr` 0), and `p`,
+/// `k`, `epsilon`/`omega` and `nut` keep their zeroGradient walls: the wall
+/// functions own the wall cells, exactly as `cavity_bcs` writes walls only.
+pub fn channel_bcs(gpu: &Gpu, hm: &HostMesh, s: &mut Simple<'_>) -> Result<()> {
+    let mut ukind: Vec<Label> = gpu.download(&s.u().bc_kind)?;
+    let mut ufr: Vec<Scalar> = gpu.download(&s.u().fr)?;
+    let mut urv: Vec<Vec3> = gpu.download(&s.u().ref_value)?;
+    let urg: Vec<Vec3> = gpu.download(&s.u().ref_grad)?;
+    if ukind.len() != hm.n_boundary_faces {
+        return Err(Error::Config(format!(
+            "distflow: channel_bcs was given a host mesh of {} boundary faces \
+             and a Simple of {}",
+            hm.n_boundary_faces,
+            ukind.len()
+        )));
+    }
+    for (i, &k) in hm.b_kind.iter().enumerate() {
+        if k == PatchKind::Wall as Label {
+            ukind[i] = BcKind::FixedValue as Label;
+            ufr[i] = 1.0;
+            urv[i] = Vec3::ZERO;
+        }
+    }
+    let u = s.u_mut();
+    gpu.write(&mut u.bc_kind, &ukind)?;
+    gpu.write(&mut u.fr, &ufr)?;
+    gpu.write(&mut u.ref_value, &urv)?;
+    gpu.write(&mut u.ref_grad, &urg)
+}
+
+/// The initial value of a transported scalar, `f` AND `f0` - a steady run
+/// reads neither, and writing both is the one form of the seed.
+fn write_initial_scalar(gpu: &Gpu, f: &mut GpuScalarField, v: Scalar, n: usize) -> Result<()> {
+    gpu.write(&mut f.f, &vec![v; n])?;
+    gpu.write(&mut f.f0, &vec![v; n])
+}
+
+/// One channel model, as the shared outer loop sees it: the two transport
+/// equations behind one enum, so the loop is written once and the two models
+/// cannot drift apart in what one outer iteration does.
+enum ChannelTurb<'m> {
+    KE(Box<KEpsilon<'m>>),
+    SST(Box<KOmegaSst<'m>>),
+}
+
+impl<'m> ChannelTurb<'m> {
+    fn nut(&self) -> &GpuScalarField {
+        match self {
+            Self::KE(m) => m.nut(),
+            Self::SST(m) => m.nut(),
+        }
+    }
+
+    fn correct(
+        &mut self,
+        gpu: &Gpu,
+        flow: &FlowState<'_>,
+    ) -> Result<(SolverPerformance, SolverPerformance)> {
+        match self {
+            Self::KE(m) => m.correct(gpu, flow),
+            Self::SST(m) => m.correct(gpu, flow),
+        }
+    }
+
+    fn initialise(&mut self, gpu: &Gpu, flow: &FlowState<'_>) -> Result<()> {
+        match self {
+            Self::KE(m) => m.initialise(gpu, flow),
+            Self::SST(m) => m.initialise(gpu, flow),
+        }
+    }
+
+    fn k(&self) -> &GpuScalarField {
+        match self {
+            Self::KE(m) => m.k(),
+            Self::SST(m) => m.k(),
+        }
+    }
+
+    /// `epsilon` or `omega`, whichever the model transports.
+    fn w(&self) -> &GpuScalarField {
+        match self {
+            Self::KE(m) => m.epsilon(),
+            Self::SST(m) => m.omega(),
+        }
+    }
+}
+
+/// The outer loop both runners share: up to `outer` times
+/// `Simple::correct_outer` then the model's `correct`, stopping when the four
+/// initial residuals are all under [`CHANNEL_RESIDUAL`] (`stop`) or any of
+/// them is not finite (`diverged`). Returns (iterations, converged, diverged)
+/// and the last iteration's `[U, p, k, w]` residuals.
+fn channel_loop(
+    gpu: &Gpu,
+    s: &mut Simple<'_>,
+    backend: &mut dyn PressureBackend,
+    turb: &mut ChannelTurb<'_>,
+    t: &GpuScalarField,
+    outer: usize,
+    stop: bool,
+) -> Result<(usize, bool, bool, [Scalar; 4])> {
+    let mut iterations = 0usize;
+    let mut converged = false;
+    let mut diverged = false;
+    let mut last = [0.0 as Scalar; 4];
+    for _ in 0..outer {
+        let perf = s.correct_outer(gpu, backend, turb.nut(), t, false)?;
+        let flow = s.flow_state();
+        let (w_perf, k_perf) = turb.correct(gpu, &flow)?;
+        let u_res = perf
+            .u
+            .iter()
+            .map(|q| q.initial_residual)
+            .fold(0.0 as Scalar, Scalar::max);
+        last = [
+            u_res,
+            perf.p.initial_residual,
+            k_perf.initial_residual,
+            w_perf.initial_residual,
+        ];
+        iterations += 1;
+        if last.iter().any(|r| !r.is_finite()) {
+            diverged = true;
+            break;
+        }
+        if stop && last.iter().all(|&r| r < CHANNEL_RESIDUAL) {
+            converged = true;
+            break;
+        }
+    }
+    Ok((iterations, converged, diverged, last))
+}
+
+/// The run's report, OWNED cells only: `U`, `k`, `epsilon`/`omega` and `nut`
+/// of every cell this rank owns, local order.
+#[allow(clippy::too_many_arguments)]
+fn channel_report(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    s: &Simple<'_>,
+    turb: &ChannelTurb<'_>,
+    global_cell: Vec<usize>,
+    iterations: usize,
+    converged: bool,
+    diverged: bool,
+    residuals: [Scalar; 4],
+) -> Result<ChannelRun> {
+    let n = hm.n_cells;
+    Ok(ChannelRun {
+        global_cell,
+        u: gpu.download(&s.u().f)?[..n].to_vec(),
+        k: gpu.download(&turb.k().f)?[..n].to_vec(),
+        w: gpu.download(&turb.w().f)?[..n].to_vec(),
+        nut: gpu.download(&turb.nut().f)?[..n].to_vec(),
+        iterations,
+        converged,
+        diverged,
+        residuals,
+    })
+}
+
+/// Zero gravity - the case is forced convection only.
+fn channel_buoyancy() -> BuoyancyCoeffs {
+    BuoyancyCoeffs {
+        g: Vec3::ZERO,
+        ..BuoyancyCoeffs::default()
+    }
+}
+
+/// The wall-function face flags the fixture gives every model: the same
+/// `PatchKind::Wall` answer for both sets (the constrained cells and the
+/// `nut` faces), because a cartesian duct's walls are walls for everything.
+fn channel_wall_faces(hm: &HostMesh) -> (WallFaces, NutRoughness) {
+    let on: Vec<bool> = hm
+        .b_kind
+        .iter()
+        .map(|&k| k == PatchKind::Wall as Label)
+        .collect();
+    (
+        WallFaces { constrained_cells: on.clone(), nut: on },
+        NutRoughness::none(hm.n_boundary_faces),
+    )
+}
+
+/// The channel on the WHOLE mesh, on one card - the serial reference. No
+/// route, no exchange: the calls `Simple`, `KEpsilon` and `KOmegaSst` have
+/// always made.
+pub fn channel_serial(
+    gpu: &Gpu,
+    case: &ChannelCase,
+    model: ChannelModel,
+    outer: usize,
+    stop: bool,
+) -> Result<ChannelRun> {
+    let hm = &case.hm;
+    let m = GpuMesh::upload(gpu, hm)?;
+    let mut s = Simple::new(gpu, hm, &m, channel_controls(&case.cc), channel_buoyancy())?;
+    let mut backend = PbicgstabBackend::new(channel_controls(&case.cc).p_solver);
+    backend.setup(gpu, hm, &m, &SystemProbe::default())?;
+    channel_bcs(gpu, hm, &mut s)?;
+    for spec in &case.sources {
+        if spec.field == "U" {
+            let src = spec.build(gpu, hm)?;
+            s.momentum_mut().sources_mut().push(src);
+        }
+    }
+    gpu.write(&mut s.u_mut().f, &vec![Vec3::new(CHANNEL_U0, 0.0, 0.0); m.n_local()])?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let t = cavity_t(gpu, &m, &fk)?;
+
+    let (wall_faces, roughness) = channel_wall_faces(hm);
+    let n = m.n_cells;
+    let mut turb = match model {
+        ChannelModel::KEpsilon => {
+            let mut ke = KEpsilon::new(
+                gpu,
+                hm,
+                &m,
+                KEpsilonCoeffs::default(),
+                channel_turbulence(&case.cc),
+                case.cc.wall,
+                &wall_faces,
+                &roughness,
+            )?;
+            write_initial_scalar(gpu, ke.k_mut(), CHANNEL_K0, n)?;
+            write_initial_scalar(gpu, ke.epsilon_mut(), CHANNEL_EPS0, n)?;
+            ChannelTurb::KE(Box::new(ke))
+        }
+        ChannelModel::KOmegaSst => {
+            // Tucker's Poisson wall distance of SPEC-LIT 6.6, on the whole
+            // mesh, once.
+            let y_host = channel_wall_distance(gpu, hm, &case.cc)?;
+            let mut y = gpu.zeros(n)?;
+            gpu.write(&mut y, &y_host)?;
+            let mut sst = KOmegaSst::new(
+                gpu,
+                hm,
+                &m,
+                KOmegaSstCoeffs::default(),
+                channel_turbulence(&case.cc),
+                case.cc.wall,
+                &wall_faces,
+                &y,
+                &roughness,
+            )?;
+            write_initial_scalar(gpu, sst.k_mut(), CHANNEL_K0, n)?;
+            write_initial_scalar(gpu, sst.omega_mut(), CHANNEL_OMEGA0, n)?;
+            ChannelTurb::SST(Box::new(sst))
+        }
+    };
+    turb.initialise(gpu, &s.flow_state())?;
+
+    let (iterations, converged, diverged, residuals) =
+        channel_loop(gpu, &mut s, &mut backend, &mut turb, &t, outer, stop)?;
+    channel_report(
+        gpu,
+        hm,
+        &s,
+        &turb,
+        (0..hm.n_cells).collect(),
+        iterations,
+        converged,
+        diverged,
+        residuals,
+    )
+}
+
+/// The channel on rank `comm.rank()`'s part of `dec` - the decomposed run:
+/// `cavity_part`'s Simple (SPMD momentum route, SPMD pressure backend,
+/// exchange) plus, for the model, its own [`SpmdMomentumRoute`] through
+/// `set_route` and its own [`RankCtx`] through `set_exchange`, BEFORE the
+/// initial `k`/`epsilon`/`omega` are written and `initialise` runs - they are
+/// collective, and every rank constructs them in the same order. The wall
+/// distance comes in whole-mesh (`y_whole`) and is split by
+/// [`split_cells`]; no part ever solves for it.
+pub fn channel_part(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    dec: &Decomposition,
+    case: &ChannelCase,
+    model: ChannelModel,
+    y_whole: &[Scalar],
+    outer: usize,
+    stop: bool,
+) -> Result<ChannelRun> {
+    let part = &dec.parts[comm.rank()];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(gpu, hm, &gm, channel_controls(&case.cc), channel_buoyancy())?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend = SpmdPressureBackend::new(
+        gpu,
+        comm,
+        dec,
+        channel_controls(&case.cc).p_solver,
+        DistReduce::Exact,
+    )?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    channel_bcs(gpu, hm, &mut s)?;
+    for spec in &case.sources {
+        if spec.field == "U" {
+            let src = spec.build(gpu, hm)?;
+            s.momentum_mut().sources_mut().push(src);
+        }
+    }
+    gpu.write(&mut s.u_mut().f, &vec![Vec3::new(CHANNEL_U0, 0.0, 0.0); gm.n_local()])?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let t = cavity_t(gpu, &gm, &fk)?;
+
+    let (wall_faces, roughness) = channel_wall_faces(hm);
+    let n_local = gm.n_local();
+    let mut turb = match model {
+        ChannelModel::KEpsilon => {
+            let mut ke = KEpsilon::new(
+                gpu,
+                hm,
+                &gm,
+                KEpsilonCoeffs::default(),
+                channel_turbulence(&case.cc),
+                case.cc.wall,
+                &wall_faces,
+                &roughness,
+            )?;
+            ke.set_route(Some(Box::new(SpmdMomentumRoute::new(
+                gpu,
+                comm,
+                dec,
+                DistReduce::Exact,
+            )?)));
+            ke.set_exchange(gpu, hm, Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+            write_initial_scalar(gpu, ke.k_mut(), CHANNEL_K0, n_local)?;
+            write_initial_scalar(gpu, ke.epsilon_mut(), CHANNEL_EPS0, n_local)?;
+            ChannelTurb::KE(Box::new(ke))
+        }
+        ChannelModel::KOmegaSst => {
+            // The WHOLE mesh's wall distance, split to this part's owned
+            // cells - never solved here (SPEC-LIT 139.6).
+            let mut y = gpu.zeros(part.mesh.n_cells)?;
+            gpu.write(&mut y, &split_cells(y_whole, part))?;
+            let mut sst = KOmegaSst::new(
+                gpu,
+                hm,
+                &gm,
+                KOmegaSstCoeffs::default(),
+                channel_turbulence(&case.cc),
+                case.cc.wall,
+                &wall_faces,
+                &y,
+                &roughness,
+            )?;
+            sst.set_route(Some(Box::new(SpmdMomentumRoute::new(
+                gpu,
+                comm,
+                dec,
+                DistReduce::Exact,
+            )?)));
+            sst.set_exchange(gpu, hm, Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+            write_initial_scalar(gpu, sst.k_mut(), CHANNEL_K0, n_local)?;
+            write_initial_scalar(gpu, sst.omega_mut(), CHANNEL_OMEGA0, n_local)?;
+            ChannelTurb::SST(Box::new(sst))
+        }
+    };
+    turb.initialise(gpu, &s.flow_state())?;
+
+    let (iterations, converged, diverged, residuals) =
+        channel_loop(gpu, &mut s, &mut backend, &mut turb, &t, outer, stop)?;
+    channel_report(
+        gpu,
+        hm,
+        &s,
+        &turb,
+        part.global_cell[..hm.n_cells].iter().map(|&g| g as usize).collect(),
+        iterations,
+        converged,
+        diverged,
+        residuals,
+    )
 }

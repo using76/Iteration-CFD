@@ -68,14 +68,18 @@ impl SstKernels {
     }
 }
 
+/// The PAR-09 room (SPEC-LIT 139.6, PAR-12): a per-cell buffer on a part is
+/// `n_cells + n_halo` long and the blend kernels thread the owned cells
+/// only, so the room is admitted and never read; a whole mesh has
+/// `n_local == n_cells` and passes what it always passed.
 fn expect_len<T>(buf: &DevBuf<T>, want: usize, what: &str) -> Result<()> {
-    if buf.len() == want {
-        Ok(())
-    } else {
+    if buf.len() < want {
         Err(Error::Config(format!(
             "kOmegaSST: `{what}` has {} elements, expected {want}",
             buf.len()
         )))
+    } else {
+        Ok(())
     }
 }
 

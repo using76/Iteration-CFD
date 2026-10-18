@@ -56,7 +56,7 @@
 use crate::device::Gpu;
 use crate::error::Result;
 use crate::field::GpuScalarField;
-use crate::field_ops::{advance_time_levels, correct_boundary_conditions};
+use crate::field_ops::advance_time_levels;
 use crate::fv::{fvm_sp, fvm_su, fvm_susp};
 use crate::mesh::{GpuMesh, HostMesh};
 use crate::solver::SolverPerformance;
@@ -250,8 +250,8 @@ impl<'m> KEpsilon<'m> {
             n,
         )?;
 
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.k, self.core.mesh)?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.epsilon, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.k)?;
+        self.core.correct_bc(gpu, &mut self.epsilon)?;
 
         self.correct_nut(gpu, flow)?;
         self.core.store_k_prev(gpu, &self.k.f)?;
@@ -419,7 +419,7 @@ impl<'m> KEpsilon<'m> {
             ctrl.epsilon_min,
             n,
         )?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.epsilon, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.epsilon)?;
 
         // 5. k. Its source is G itself - no coefficient, no division - so it
         //    goes straight to fvm_su without passing through a kernel.
@@ -473,7 +473,7 @@ impl<'m> KEpsilon<'m> {
             .solve_equation(gpu, &mut self.k, ctrl.k_relax, &sc, false)?;
 
         bound_k(gpu, &self.core.turb, &mut self.k.f, ctrl.k_min, n)?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.k, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.k)?;
 
         // 6. nu_t.
         self.correct_nut(gpu, flow)?;
@@ -503,7 +503,7 @@ impl<'m> KEpsilon<'m> {
         // Faces with a triple first, then the ones the model owns, then the
         // wall faces - each stage overwriting only what the previous one had
         // no opinion about.
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.core.nut, self.core.mesh)?;
+        self.core.correct_nut_bc(gpu)?;
         nut_boundary(gpu, &self.core.turb, &mut self.core.nut, self.core.mesh)?;
         self.core.wd.update_nut(
             gpu,
@@ -523,6 +523,40 @@ impl<'m> KEpsilon<'m> {
     /// [`RasCore::convergence_measure`]; this is the one host round-trip.
     pub fn convergence_measure(&mut self, gpu: &Gpu) -> Result<Scalar> {
         self.core.convergence_measure(gpu, &self.k.f)
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.6 (PAR-12)
+// ==========================================================================
+
+impl<'m> KEpsilon<'m> {
+    /// Set the exchange a decomposed k-epsilon runs through - the scalar
+    /// halos and boundary evaluations of `k`, `epsilon` and `nut`, the wall
+    /// cell constraint across the cut, and the world's convergence maxima.
+    /// The refusals are [`RasCore::set_exchange`]'s (SPEC-LIT 139.6's table);
+    /// k-epsilon's constant `sigma` makes the coupled diffusivity algebraic,
+    /// so nothing else is refused here. `None` leaves every serial call
+    /// launch for launch.
+    pub fn set_exchange(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
+    ) -> Result<()> {
+        self.core.set_exchange(gpu, hm, x)
+    }
+
+    /// Set where `k` and `epsilon` are solved - the part's SPMD Krylov
+    /// behind [`crate::momentum::ComponentRoute`]; `None` keeps the
+    /// rank-local [`crate::solver::solve`], launch for launch.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.core.set_route(route)
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.core.has_exchange()
     }
 }
 

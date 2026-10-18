@@ -2603,9 +2603,19 @@ pub fn turbulence_production(
     grad_u: &DevBuf<Tensor>,
     n_cells: usize,
 ) -> Result<()> {
-    expect_len(out, n_cells, "out")?;
-    expect_len(nut, n_cells, "nut")?;
-    expect_len(grad_u, n_cells, "grad_u")?;
+    // The PAR-09 room (SPEC-LIT 139.6, PAR-12): a per-cell buffer on a part
+    // is `n_cells + n_halo` long, and the kernel threads the owned cells
+    // only, so the room is admitted and never read. A whole mesh has
+    // `n_local == n_cells`, so a serial run passes what it always passed.
+    if out.len() < n_cells {
+        expect_len(out, n_cells, "out")?;
+    }
+    if nut.len() < n_cells {
+        expect_len(nut, n_cells, "nut")?;
+    }
+    if grad_u.len() < n_cells {
+        expect_len(grad_u, n_cells, "grad_u")?;
+    }
 
     if n_cells == 0 {
         return Ok(());

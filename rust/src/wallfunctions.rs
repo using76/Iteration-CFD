@@ -962,7 +962,7 @@ impl WallData {
             return Ok(());
         }
         self.check(nut_bf.len(), k.len(), m)?;
-        expect_count(u.f.len(), m.n_cells, "U")?;
+        expect_cell_count(u.f.len(), m, "U")?;
         expect_count(u.bf.len(), m.n_boundary_faces, "U boundary values")?;
 
         let cmu25 = wc.cmu.powf(0.25);
@@ -1059,8 +1059,8 @@ impl WallData {
             return Ok(());
         }
         self.check(nut_bf.len(), k.len(), m)?;
-        expect_count(epsilon.len(), m.n_cells, "epsilon")?;
-        expect_count(g.len(), m.n_cells, "G")?;
+        expect_cell_count(epsilon.len(), m, "epsilon")?;
+        expect_cell_count(g.len(), m, "G")?;
 
         let cmu25 = wc.cmu.powf(0.25);
         let cmu75 = wc.cmu.powf(0.75);
@@ -1115,8 +1115,8 @@ impl WallData {
             return Ok(());
         }
         self.check(nut_bf.len(), k.len(), m)?;
-        expect_count(omega.len(), m.n_cells, "omega")?;
-        expect_count(g.len(), m.n_cells, "G")?;
+        expect_cell_count(omega.len(), m, "omega")?;
+        expect_cell_count(g.len(), m, "G")?;
 
         let cmu25 = wc.cmu.powf(0.25);
         let nl = n as Label;
@@ -1151,7 +1151,7 @@ impl WallData {
 
     fn check(&self, n_bf: usize, n_cells: usize, m: &GpuMesh) -> Result<()> {
         expect_count(n_bf, m.n_boundary_faces, "nut boundary values")?;
-        expect_count(n_cells, m.n_cells, "k")
+        expect_cell_count(n_cells, m, "k")
     }
 }
 
@@ -1163,6 +1163,18 @@ fn expect_count(got: usize, want: usize, what: &str) -> Result<()> {
             "wallfunctions: `{what}` has {got} elements, expected {want}"
         )))
     }
+}
+
+/// The PAR-09 room (SPEC-LIT 139.6, PAR-12): a per-cell buffer on a part is
+/// `n_cells + n_halo` long, and the wall kernels read wall-adjacent cells -
+/// owned, never halo - so the halo room is admitted and never read. A whole
+/// mesh has `n_local == n_cells`, so a serial run passes the same check it
+/// always passed.
+fn expect_cell_count(got: usize, m: &GpuMesh, what: &str) -> Result<()> {
+    if got == m.n_local() {
+        return Ok(());
+    }
+    expect_count(got, m.n_cells, what)
 }
 
 // ==========================================================================
@@ -1253,7 +1265,7 @@ impl WernerWengleData {
         }
         expect_count(nut_bf.len(), m.n_boundary_faces, "nut boundary values")?;
         expect_count(self.tau_w.len(), m.n_boundary_faces, "tau_w")?;
-        expect_count(u.f.len(), m.n_cells, "U")?;
+        expect_cell_count(u.f.len(), m, "U")?;
         expect_count(u.bf.len(), m.n_boundary_faces, "U boundary values")?;
 
         let nl = n as Label;
@@ -1332,6 +1344,60 @@ pub fn constrain_wall_cells(
     }
 
     set_values(gpu, k, a, m)
+}
+
+/// SPEC-LIT 139.6 (PAR-12): the MARKING half of [`constrain_wall_cells`],
+/// alone - the same early return, the same row check and the same `wfMarkFixed`
+/// launch, WITHOUT the final `set_values`.
+///
+/// A decomposed wall-function run has to cross the cut between the two halves:
+/// `set_values` eliminates a marked row's column by reading `is_fixed` at the
+/// COUPLED faces' neighbour cell, and on a part that neighbour is a halo cell -
+/// so the rank's `is_fixed` must carry the neighbour ranks' marks first
+/// (`FlowExchange::cells_label`), the way the whole mesh's single matrix never
+/// had to. The caller therefore exchanges and folds:
+///
+/// ```text
+/// mark_wall_cells(..)?;               // this rank's wall cells marked
+/// exchange.cells_label(&mut a.is_fixed)?;
+/// exchange.cells(&mut a.fixed_value)?; // and its values
+/// ldu_ops::set_values(..)?;            // then the fold sees both sides
+/// ```
+///
+/// A serial run calls [`constrain_wall_cells`], which is these two halves in
+/// one function and stays launch for launch what it always was.
+pub fn mark_wall_cells(
+    gpu: &Gpu,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    wd: &WallData,
+) -> Result<()> {
+    let n = wd.n_wall_cells;
+    if n == 0 {
+        return Ok(());
+    }
+    if a.n_cells != m.n_cells {
+        return Err(Error::Config(format!(
+            "mark_wall_cells: the matrix has {} rows, the mesh {} cells",
+            a.n_cells, m.n_cells
+        )));
+    }
+
+    let nl = n as Label;
+    let f = wd.k.mark_fixed.clone();
+
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.is_fixed)
+            .arg(&mut a.fixed_value)
+            .arg(&wd.wall_cells)
+            .arg(&wd.wall_cell_value)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+
+    Ok(())
 }
 
 // ==========================================================================
