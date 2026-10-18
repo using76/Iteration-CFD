@@ -1727,6 +1727,7 @@ mod tests {
     }
 
     #[test]
+    // f32 (F32-16): snap p99 residual 0.2 vs the 0.06 band; f32 geometry (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_sphere_is_snapped_onto_the_sphere() {
         let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
@@ -1777,9 +1778,9 @@ mod tests {
         let want = 512.0 - soup_volume(&sphere_soup(3.0, [4.0; 3]));
         eprintln!(
             "snap: kept volume {total:.6} vs the STL's own {want:.6} ({:.3} % off)",
-            100.0 * (total - want).abs() / want
+            100.0 * (total - want as f64).abs() / want as f64
         );
-        let rel = (total - want).abs() / want;
+        let rel = (total - want as f64).abs() / want as f64;
         assert!(
             rel < 0.01,
             "kept volume {total} vs the STL's own enclosed {want} ({:.2} % off)",
@@ -1931,7 +1932,7 @@ mod tests {
             for &p in &snapped.mesh.faces[f] {
                 assert_eq!(
                     snapped.mesh.points[p as usize].z.to_bits(),
-                    (0.0 as Scalar).to_bits(),
+                    (0.0 as Scalar as f64).to_bits(),
                     "point {p} of zMin face {f} left the box plane"
                 );
             }
@@ -2047,6 +2048,7 @@ mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the edge snap pull scales back; no point within 2 eps (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cube_off_the_lattice_gets_its_edges_and_corners() {
         let (surf, cast) = cube_case();
@@ -2077,7 +2079,7 @@ mod tests {
                 .mesh
                 .points
                 .iter()
-                .map(|p| seg_dist(*p, *a, *b))
+                .map(|p| seg_dist(to_vec3(*p), *a, *b))
                 .fold(Scalar::INFINITY, Scalar::min);
             assert!(
                 best <= 2e-3,
@@ -2090,8 +2092,8 @@ mod tests {
                 .mesh
                 .points
                 .iter()
-                .map(|p| (*p - *c).mag())
-                .fold(Scalar::INFINITY, Scalar::min);
+                .map(|p| (*p - to_dvec3(*c)).mag())
+                .fold(f64::INFINITY, f64::min);
             assert!(
                 best <= 2e-3,
                 "at the defaults no point within 2 eps of the corner {:?}: {:e}",
@@ -2122,7 +2124,7 @@ mod tests {
                 .mesh
                 .points
                 .iter()
-                .map(|p| seg_dist(*p, *a, *b))
+                .map(|p| seg_dist(to_vec3(*p), *a, *b))
                 .fold(Scalar::INFINITY, Scalar::min);
             assert!(
                 best <= 1e-6,
@@ -2135,8 +2137,8 @@ mod tests {
                 .mesh
                 .points
                 .iter()
-                .map(|p| (*p - *c).mag())
-                .fold(Scalar::INFINITY, Scalar::min);
+                .map(|p| (*p - to_dvec3(*c)).mag())
+                .fold(f64::INFINITY, f64::min);
             assert!(
                 best <= 1e-6,
                 "no point on the corner {:?}: closest {:e}",
@@ -2150,6 +2152,7 @@ mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the dead-band corner pull scales back; corner reads 0.35 away (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn with_feature_snapping_off_the_corners_are_not_occupied() {
         let (surf, cast) = cube_case();
@@ -2190,8 +2193,8 @@ mod tests {
                 .mesh
                 .points
                 .iter()
-                .map(|p| (*p - *c).mag())
-                .fold(Scalar::INFINITY, Scalar::min);
+                .map(|p| (*p - to_dvec3(*c)).mag())
+                .fold(f64::INFINITY, f64::min);
             if (*c - free).mag() < 1e-12 {
                 assert!(
                     best > 1e-6 && best <= 2e-3,
@@ -2719,11 +2722,11 @@ mod tests {
         let mid = Vec3::new(2.0, 1.0, 1.0);
         let i = (0..mesh.points.len())
             .min_by(|&a, &b| {
-                (mesh.points[a] - mid).mag().total_cmp(&(mesh.points[b] - mid).mag())
+                (mesh.points[a] - to_dvec3(mid)).mag().total_cmp(&(mesh.points[b] - to_dvec3(mid)).mag())
             })
             .expect("points");
-        assert!((mesh.points[i] - mid).mag() <= 1e-12, "no mesh point at the edge's middle");
-        mesh.points[i] = Vec3::new(2.0, 0.5, 0.5);
+        assert!((mesh.points[i] - to_dvec3(mid)).mag() <= 1e-12, "no mesh point at the edge's middle");
+        mesh.points[i] = to_dvec3(Vec3::new(2.0, 0.5, 0.5));
         let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
         eprintln!("pulled point capture {c:?}");
         assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");
@@ -2780,7 +2783,7 @@ mod tests {
     fn the_cover_test_needs_both_ends_near_and_the_direction_along() {
         let a = Vec3::new(0.0, 0.0, 0.0);
         let b = Vec3::new(1.0, 0.0, 0.0);
-        let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+        let v = |x: f64, y: f64| Vec3::new(x as Scalar, y as Scalar, 0.0);
         let cov = |p: Vec3, q: Vec3| covered_interval(p, q, a, b, 0.1);
         assert_eq!(cov(v(0.2, 0.05), v(0.6, -0.05)), Some((0.2, 0.6)));
         assert_eq!(cov(v(0.6, -0.05), v(0.2, 0.05)), Some((0.2, 0.6)));
@@ -2798,7 +2801,7 @@ mod tests {
         let mut pts = Vec::new();
         for k in 0..16 {
             let a = 2.0 * std::f64::consts::PI * (k as f64) / 16.0;
-            pts.push(Vec3::new(a.cos(), a.sin(), 0.0));
+            pts.push(Vec3::new(a.cos() as Scalar, a.sin() as Scalar, 0.0));
         }
         let mut pl: Vec<u32> = (0..16u32).collect();
         pl.push(0);
@@ -2833,7 +2836,7 @@ mod tests {
                 x[a] = g(a, u);
                 x[b] = g(b, v);
                 x[f] = if hi_f { hi[f] } else { lo[f] };
-                Vec3::new(x[0], x[1], x[2])
+                Vec3::new(x[0] as Scalar, x[1] as Scalar, x[2] as Scalar)
             };
             for i in 0..k {
                 for j in 0..k {
@@ -2895,7 +2898,7 @@ mod tests {
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(1.0, 0.0, 0.0),
                 Vec3::new(2.0, 0.0, 0.0),
-                Vec3::new(2.0 + s05, s05, 0.0),
+                Vec3::new((2.0 + s05) as Scalar, s05 as Scalar, 0.0),
             ],
             vec![0, 1, 2, 3],
         );
@@ -2934,7 +2937,7 @@ mod tests {
             assert!(w[0] < w[1], "arc not rising: {:?}", ch[0].arc);
         }
         let want = 32.0 * (std::f64::consts::PI / 16.0).sin();
-        assert!((ch[0].length() - want).abs() <= 1e-12, "{} vs {want}", ch[0].length());
+        assert!((ch[0].length() as f64 - want).abs() <= 1e-12, "{} vs {want}", ch[0].length());
         eprintln!("chain 16-gon: closed length {}", ch[0].length());
     }
 
@@ -2953,7 +2956,7 @@ mod tests {
         };
         let ch = &capture_chains(&fs)[0];
         let segs = [0usize];
-        let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+        let v = |x: f64, y: f64| Vec3::new(x as Scalar, y as Scalar, 0.0);
         let cases: [(Vec3, Vec3, Option<(f64, f64)>); 8] = [
             (v(0.2, 0.05), v(0.6, -0.05), Some((0.2, 0.6))),
             (v(0.6, -0.05), v(0.2, 0.05), Some((0.2, 0.6))),
@@ -2970,7 +2973,7 @@ mod tests {
             let got = chain_cover(p, q, fp, fq, ch, 0.1);
             match (got, want) {
                 (Some((s0, s1)), Some((t0, t1))) => {
-                    assert!((s0 - t0).abs() <= 1e-15 && (s1 - t1).abs() <= 1e-15, "{got:?}");
+                    assert!((s0 as f64 - t0).abs() <= 1e-15 && (s1 as f64 - t1).abs() <= 1e-15, "{got:?}");
                 }
                 (None, None) => {}
                 _ => panic!("cover {got:?} vs segment {want:?} for {p:?} {q:?}"),
@@ -3005,11 +3008,11 @@ mod tests {
         let fq = project_on_chain(q, ch, &segs).expect("q projects");
         assert!(fp.1 <= 1e-15, "{}", fp.1);
         assert!(fq.1 <= 1e-15, "{}", fq.1);
-        assert!((fp.0 - 15.5 * l).abs() <= 1e-12, "{} vs {}", fp.0, 15.5 * l);
-        assert!((fq.0 - 0.5 * l).abs() <= 1e-12, "{} vs {}", fq.0, 0.5 * l);
+        assert!((fp.0 as f64 - 15.5 * l).abs() <= 1e-12, "{} vs {}", fp.0, 15.5 * l);
+        assert!((fq.0 as f64 - 0.5 * l).abs() <= 1e-12, "{} vs {}", fq.0, 0.5 * l);
         let iv = chain_cover(p, q, fp, fq, ch, 0.05).expect("seam cover");
         assert!(
-            (iv.0 - 15.5 * l).abs() <= 1e-12 && (iv.1 - 16.5 * l).abs() <= 1e-12,
+            (iv.0 as f64 - 15.5 * l).abs() <= 1e-12 && (iv.1 as f64 - 16.5 * l).abs() <= 1e-12,
             "{iv:?}"
         );
         eprintln!("capture seam interval {iv:?} against L {}", ch.length());
@@ -3028,7 +3031,7 @@ mod tests {
             }
         }
         let total = union_length(&mut ivs);
-        assert!((total - 16.0 * l).abs() <= 1e-12, "{total} vs {}", 16.0 * l);
+        assert!((total as f64 - 16.0 * l).abs() <= 1e-12, "{total} vs {}", 16.0 * l);
         assert!((total - ch.length()).abs() <= 1e-12, "{total} vs {}", ch.length());
         eprintln!("capture seam loop: union {total} of L {}", ch.length());
     }
@@ -3040,7 +3043,7 @@ mod tests {
         let mut pts = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
         for j in 1..=8 {
             let a = (-90.0 + 22.5 * (j as f64)).to_radians();
-            pts.push(Vec3::new(1.0 + 0.04 * a.cos(), 0.04 + 0.04 * a.sin(), 0.0));
+            pts.push(Vec3::new((1.0 + 0.04 * a.cos()) as Scalar, (0.04 + 0.04 * a.sin()) as Scalar, 0.0));
         }
         pts.push(Vec3::new(0.0, 0.08, 0.0));
         assert_eq!(pts.len(), 11, "{} points", pts.len());
@@ -3139,11 +3142,11 @@ mod tests {
         let mid = Vec3::new(2.0, 1.0, 1.0);
         let i = (0..mesh.points.len())
             .min_by(|&a, &b| {
-                (mesh.points[a] - mid).mag().total_cmp(&(mesh.points[b] - mid).mag())
+                (mesh.points[a] - to_dvec3(mid)).mag().total_cmp(&(mesh.points[b] - to_dvec3(mid)).mag())
             })
             .expect("points");
-        assert!((mesh.points[i] - mid).mag() <= 1e-12, "no mesh point at the edge's middle");
-        mesh.points[i] = Vec3::new(2.0, 0.5, 0.5);
+        assert!((mesh.points[i] - to_dvec3(mid)).mag() <= 1e-12, "no mesh point at the edge's middle");
+        mesh.points[i] = to_dvec3(Vec3::new(2.0, 0.5, 0.5));
         let c = feature_capture(&mesh, &surf, None, 30.0, 0.1).expect("capture");
         eprintln!("subdivided pulled point capture {c:?}");
         assert!((c.sharp_length - 24.0).abs() <= 1e-12 * 24.0, "{c:?}");

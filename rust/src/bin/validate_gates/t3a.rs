@@ -179,22 +179,64 @@ pub(crate) mod runner {
     const MIN_ITERS: usize = 1000;
     const STOP_TOL: f64 = 1e-6;
 
-    /// The plate of one level: x_up 0.25 m (the rig's), L 3 m (`Re_L = 6e5`),
-    /// H 0.5 m, end-cell ratios 3 / 10 / 1000.
-    pub(crate) fn t3a_spec(n: (usize, usize, usize)) -> FlatPlateSpec {
+    /// The rig as inputs: the plate's leading edge and box, the end-cell
+    /// ratio in `y`, the viscosity, and the inflow state. `RigInputs::t3a()`
+    /// is §144.3's; `t3_fitted.rs` builds the T3B and T3A- rigs and the
+    /// refitted T3A one from it (SPEC-LIT §144.7).
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct RigInputs {
+        pub(crate) x_le: f64,
+        pub(crate) length: f64,
+        pub(crate) height: f64,
+        pub(crate) r_y: f64,
+        pub(crate) nu: f64,
+        /// %, for `re_thetat_inlet` and the record.
+        pub(crate) tu_in: f64,
+        pub(crate) k0: f64,
+        pub(crate) omega0: f64,
+    }
+
+    impl RigInputs {
+        /// §144.3's rig: `x_le` 0.25 m, `L` 3 m, `H` 0.5 m, `r_y` 1000,
+        /// `nu = 5e-6 m^2/s` at `U = 1 m/s`, and the NASA/TMBWG inflow state.
+        pub(crate) fn t3a() -> Self {
+            let (k0, omega0) = inflow(U_INF, NU);
+            Self {
+                x_le: X_LE,
+                length: 3.0,
+                height: 0.5,
+                r_y: 1000.0,
+                nu: NU,
+                tu_in: TU_IN,
+                k0,
+                omega0,
+            }
+        }
+    }
+
+    /// The plate of one level on `rig`: `x_up` the rig's leading edge, `L`,
+    /// `H` and `r_y` the rig's, end-cell ratios 3 / 10 / 1000, `u_inf` 1 m/s,
+    /// `nu` the rig's, `n` the level's counts.
+    pub(crate) fn rig_spec(rig: &RigInputs, n: (usize, usize, usize)) -> FlatPlateSpec {
         let mut spec = FlatPlateSpec::laminar();
-        spec.x_upstream = X_LE;
-        spec.length = 3.0;
-        spec.height = 0.5;
+        spec.x_upstream = rig.x_le;
+        spec.length = rig.length;
+        spec.height = rig.height;
         spec.n_upstream = n.0;
         spec.n_plate = n.1;
         spec.n_y = n.2;
         spec.r_upstream = 3.0;
         spec.r_plate = 10.0;
-        spec.r_y = 1000.0;
+        spec.r_y = rig.r_y;
         spec.u_inf = U_INF;
-        spec.nu = NU;
+        spec.nu = rig.nu;
         spec
+    }
+
+    /// The plate of one level on §144.3's rig: x_up 0.25 m (the rig's),
+    /// L 3 m (`Re_L = 6e5`), H 0.5 m, end-cell ratios 3 / 10 / 1000.
+    pub(crate) fn t3a_spec(n: (usize, usize, usize)) -> FlatPlateSpec {
+        rig_spec(&RigInputs::t3a(), n)
     }
 
     /// One field's boundary rules, as a driver would read them from `0/`.
@@ -287,7 +329,7 @@ pub(crate) mod runner {
     }
 
     /// `C_f` at `Re_x = re`, linear in `x` between the two faces bracketing it.
-    fn cf_interp(faces: &[WallFace], re: f64) -> f64 {
+    pub(crate) fn cf_interp(faces: &[WallFace], re: f64) -> f64 {
         for p in faces.windows(2) {
             if p[0].re_x <= re && re <= p[1].re_x {
                 let t = (re - p[0].re_x) / (p[1].re_x - p[0].re_x);
@@ -305,30 +347,51 @@ pub(crate) mod runner {
             .fold(0.0f64, |m, d| if m.is_nan() || d.is_nan() { f64::NAN } else { m.max(d) })
     }
 
-    /// Run one model on one level, steady, until the stopping rule or
-    /// `max_iters`. `progress` prints a line per check.
-    pub(crate) fn run_t3a(
+    /// What one run leaves behind, before the record's own grid: everything
+    /// [`run_t3a`] and `t3_fitted`'s `run_fitted` read at the end. `faces` is
+    /// the whole plate, in file order, for the caller's `C_f` grid.
+    pub(crate) struct RigRun {
+        pub(crate) n_cells: usize,
+        pub(crate) h: f64,
+        pub(crate) iterations: usize,
+        pub(crate) converged: bool,
+        pub(crate) last_change: f64,
+        pub(crate) tu_le: f64,
+        pub(crate) tu_le_min: f64,
+        pub(crate) tu_le_max: f64,
+        pub(crate) faces: Vec<WallFace>,
+        pub(crate) cf_min_re_x: f64,
+        pub(crate) cf_min: f64,
+        pub(crate) seconds: f64,
+    }
+
+    /// Run one model on one level of `rig`, steady, until the stopping rule or
+    /// `max_iters`. `progress` prints a line per check, led by `label`.
+    /// §144.3's own run is [`run_t3a`] (`rig = RigInputs::t3a()`).
+    pub(crate) fn run_rig(
         gpu: &Gpu,
+        rig: &RigInputs,
+        label: &str,
         model: T3aModel,
         n: (usize, usize, usize),
         max_iters: usize,
         progress: bool,
-    ) -> Result<T3aRecord> {
+    ) -> Result<RigRun> {
         let started = Instant::now();
-        let spec = t3a_spec(n);
+        let spec = rig_spec(rig, n);
         let re_l = spec.u_inf * spec.length / spec.nu;
         let hm = build_flat_plate_mesh(&spec)?;
         let plate = patch_index(&hm, "plate")?;
         let gm = GpuMesh::upload(gpu, &hm)?;
-        let ctrl = controls(NU);
+        let ctrl = controls(rig.nu);
         let mut sim = Simple::new(gpu, &hm, &gm, ctrl, BuoyancyCoeffs { g: Vec3::ZERO, ..BuoyancyCoeffs::default() })?;
         set_bcs(gpu, &mut sim, &hm, U_INF)?;
         seed_free_stream(gpu, &mut sim, &hm, U_INF)?;
         sim.initialise(gpu)?;
 
         // The inflow state and the six fields' rules (§89.1, §91.1, (143.8)).
-        let (k0, omega0) = inflow(U_INF, NU);
-        let re_t0 = w(re_thetat_inlet(TU_IN as Scalar));
+        let (k0, omega0) = (rig.k0, rig.omega0);
+        let re_t0 = w(re_thetat_inlet(rig.tu_in as Scalar));
         let raw_k = transported("k", k0, ("fixedValue", Some(0.0)));
         let raw_omega = transported("omega", omega0, ("omegaWallFunction", Some(omega0)));
         let raw_gamma = transported("gamma", 1.0, ("zeroGradient", None));
@@ -403,7 +466,7 @@ pub(crate) mod runner {
         backend.setup(gpu, &hm, &gm, &SystemProbe::default())?;
 
         let widen = |v: Vec<Scalar>| -> Vec<f64> { v.into_iter().map(w).collect() };
-        let mut last = wall_faces(&hm, plate, &gpu.download(&sim.u().f)?, U_INF, NU);
+        let mut last = wall_faces(&hm, plate, &gpu.download(&sim.u().f)?, U_INF, rig.nu);
         let (mut iterations, mut converged, mut last_change) = (max_iters, false, f64::INFINITY);
         for it in 1..=max_iters {
             let perf = sim.solve_step(gpu, &mut backend, m.nut(), &t)?;
@@ -420,18 +483,18 @@ pub(crate) mod runner {
             if !w(res).is_finite() {
                 return Err(Error::Diverged {
                     iteration: it,
-                    what: format!("T3A {} {n:?}: initial residual {}", model.name(), w(res)),
+                    what: format!("{label} {} {n:?}: initial residual {}", model.name(), w(res)),
                 });
             }
             if it % CHECK_EVERY == 0 {
-                let now = wall_faces(&hm, plate, &gpu.download(&sim.u().f)?, U_INF, NU);
+                let now = wall_faces(&hm, plate, &gpu.download(&sim.u().f)?, U_INF, rig.nu);
                 last_change = cf_change(&last, &now, re_l);
                 last = now;
                 if progress {
                     let k = widen(gpu.download(&m.k().f)?);
                     let (tu, _, _) = tu_at_le(&hm, &k, spec.height)?;
                     println!(
-                        "T3A {} {n:?} iter {it}/{max_iters} ({:.1} %): max res {:.3e}, C_f change {:.3e}, Tu_LE {:.5} %, {:.1} s",
+                        "{label} {} {n:?} iter {it}/{max_iters} ({:.1} %): max res {:.3e}, C_f change {:.3e}, Tu_LE {:.5} %, {:.1} s",
                         model.name(),
                         100.0 * it as f64 / max_iters as f64,
                         w(res),
@@ -449,13 +512,9 @@ pub(crate) mod runner {
         }
 
         let u = gpu.download(&sim.u().f)?;
-        let faces = wall_faces(&hm, plate, &u, U_INF, NU);
+        let faces = wall_faces(&hm, plate, &u, U_INF, rig.nu);
         let k = widen(gpu.download(&m.k().f)?);
         let (tu_le, tu_le_min, tu_le_max) = tu_at_le(&hm, &k, spec.height)?;
-        let mut cf = [f64::NAN; N_CF];
-        for (i, v) in cf.iter_mut().enumerate() {
-            *v = cf_interp(&faces, RE_GRID_STEP * (i + 1) as f64);
-        }
         let (cf_min_re_x, cf_min) = faces
             .iter()
             .filter(|f| f.re_x >= RE_X_LO && f.re_x <= re_l)
@@ -463,9 +522,7 @@ pub(crate) mod runner {
             .fold((f64::NAN, f64::INFINITY), |m, x| if x.1 < m.1 { x } else { m });
         let g = hm.geom64();
         let area: f64 = g.v.iter().sum::<f64>() / spec.depth;
-        Ok(T3aRecord {
-            model,
-            cells: n,
+        Ok(RigRun {
             n_cells: hm.n_cells,
             h: (area / hm.n_cells as f64).sqrt(),
             iterations,
@@ -474,10 +531,42 @@ pub(crate) mod runner {
             tu_le,
             tu_le_min,
             tu_le_max,
-            cf,
+            faces,
             cf_min_re_x,
             cf_min,
             seconds: started.elapsed().as_secs_f64(),
+        })
+    }
+
+    /// One run of one model on one level, on §144.3's rig and inflow: the
+    /// recorded run, and the shape the replay slots below hold.
+    pub(crate) fn run_t3a(
+        gpu: &Gpu,
+        model: T3aModel,
+        n: (usize, usize, usize),
+        max_iters: usize,
+        progress: bool,
+    ) -> Result<T3aRecord> {
+        let run = run_rig(gpu, &RigInputs::t3a(), "T3A", model, n, max_iters, progress)?;
+        let mut cf = [f64::NAN; N_CF];
+        for (i, v) in cf.iter_mut().enumerate() {
+            *v = cf_interp(&run.faces, RE_GRID_STEP * (i + 1) as f64);
+        }
+        Ok(T3aRecord {
+            model,
+            cells: n,
+            n_cells: run.n_cells,
+            h: run.h,
+            iterations: run.iterations,
+            converged: run.converged,
+            last_change: run.last_change,
+            tu_le: run.tu_le,
+            tu_le_min: run.tu_le_min,
+            tu_le_max: run.tu_le_max,
+            cf,
+            cf_min_re_x: run.cf_min_re_x,
+            cf_min: run.cf_min,
+            seconds: run.seconds,
             build: if cfg!(feature = "single") { "single" } else { "f64" },
             commit: "",
         })
@@ -831,15 +920,22 @@ pub(crate) fn read_key(st: &[(f64, f64)]) -> std::result::Result<Leg4Key, String
     }
     let peak = (least + 1..st.len()).reduce(|m, i| if st[i].1 > st[m].1 { i } else { m }).unwrap_or(least + 1);
     let ((x0, y0), (x1, y1), (x2, y2)) = (st[least - 1], st[least], st[least + 1]);
-    let num = (x1 - x0) * (x1 - x0) * (y1 - y2) - (x1 - x2) * (x1 - x2) * (y1 - y0);
-    let den = (x1 - x0) * (y1 - y2) - (x1 - x2) * (y1 - y0);
     Ok(Leg4Key {
-        onset_re_x: x1 - 0.5 * num / den,
+        onset_re_x: vertex((x0, y0), (x1, y1), (x2, y2)),
         least,
         peak,
         turbulent: st[peak..].to_vec(),
         laminar_hi: st[least - 1].0,
     })
+}
+
+/// (144.4a): the vertex of the parabola through three `(Re_x, C_f)` points
+/// - the key's least-`C_f` station's, and (144.7e)'s grid-minimum reading of
+/// a record whose least face is its trailing edge (t3_fitted.rs).
+pub(crate) fn vertex((x0, y0): (f64, f64), (x1, y1): (f64, f64), (x2, y2): (f64, f64)) -> f64 {
+    let num = (x1 - x0) * (x1 - x0) * (y1 - y2) - (x1 - x2) * (x1 - x2) * (y1 - y0);
+    let den = (x1 - x0) * (y1 - y2) - (x1 - x2) * (y1 - y0);
+    x1 - 0.5 * num / den
 }
 
 /// (144.4b): a record's `C_f` at `re_x`, interpolated as a power law between
@@ -873,8 +969,9 @@ fn laminar_points(r: &T3aRecord, k: &Leg4Key) -> Vec<usize> {
 }
 
 /// The worst `(where, signed error)` of a list, by magnitude; a NaN wins, so
-/// it reaches the check as a failure. An empty list is NaN.
-fn worst(v: impl Iterator<Item = (f64, f64)>) -> (f64, f64) {
+/// it reaches the check as a failure. An empty list is NaN. §144.7's leg 3
+/// reads it too (SPEC-LIT 144.7, t3_fitted.rs).
+pub(crate) fn worst(v: impl Iterator<Item = (f64, f64)>) -> (f64, f64) {
     v.fold((f64::NAN, f64::NAN), |m, x| {
         if m.1.is_nan() && !m.0.is_nan() {
             m

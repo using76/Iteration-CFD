@@ -108,7 +108,7 @@ use crate::ldu::GpuLduMatrix;
 use crate::ldu_ops::{self, LduKernels};
 use crate::mesh::ale::AleMesh;
 use crate::mesh::{GpuMesh, HostMesh};
-use crate::momentum::{BuoyancyCoeffs, Momentum, MomentumControls};
+use crate::momentum::{BuoyancyCoeffs, ComponentRoute, Momentum, MomentumControls};
 use crate::pressure::PressureBackend;
 use crate::solver::{self, SolverKernels, SolverPerformance};
 use crate::turbulence::FlowState;
@@ -451,8 +451,6 @@ impl<'m> Simple<'m> {
             )));
         }
 
-        let nc = m.n_cells.max(1);
-
         Ok(Self {
             m,
             ctrl,
@@ -464,8 +462,10 @@ impl<'m> Simple<'m> {
             phi: GpuSurfaceScalarField::zeros(gpu, m, "phi")?,
 
             a_p: GpuLduMatrix::new(gpu, m)?,
-            p_old: gpu.zeros(nc)?,
-            div_phi: gpu.zeros(nc)?,
+            // SPEC-LIT 139.1: cell buffers carry the halo; `red` is a device
+            // scalar, not a cell field.
+            p_old: gpu.zeros(m.n_local().max(1))?,
+            div_phi: gpu.zeros(m.n_local().max(1))?,
             red: gpu.zeros(1)?,
 
             residual_control: None,
@@ -653,6 +653,17 @@ impl<'m> Simple<'m> {
 
     pub fn momentum_mut(&mut self) -> &mut Momentum<'m> {
         &mut self.momentum
+    }
+
+    /// SPEC-LIT 139.3 (PAR-10b): set where the momentum predictor's three
+    /// component systems are solved - routing only, the loop itself does not
+    /// change. `None` (the default) keeps every component solve on
+    /// [`solver::solve`], launch for launch the call this module always made;
+    /// a distributed run sets a
+    /// [`SpmdMomentumRoute`](crate::distflow::SpmdMomentumRoute), whose
+    /// residual norms are the world's.
+    pub fn set_momentum_route(&mut self, route: Option<Box<dyn ComponentRoute + 'm>>) {
+        self.momentum.set_route(route)
     }
 
     /// What a turbulence model or a scalar transport equation needs from the

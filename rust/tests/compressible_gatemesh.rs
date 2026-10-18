@@ -5,10 +5,13 @@
 // See LICENSE at the repository root.
 // Provenance: see PROVENANCE.md. No GPL-licensed source was consulted.
 
-//! CMP-26's gate table, run in BOTH builds: the ten tests of
+//! CMP-26's gate table, run in BOTH builds: the first ten tests of
 //! `tests/shared/compressible_gatemesh_cases.rs` are SPEC-LIT §127.5.1's
 //! gate, verbatim, for the RAE 2822 airfoil C-mesh of the compressible
-//! unit. The same file is included by the lib tests of
+//! unit, CMP-21 appends §127.5.2's six duct tests behind them, CMP-23
+//! appends §127.5.3's five compression-ramp tests behind those, and CMP-24
+//! appends §127.5.4's six Ringleb tests behind everything. The
+//! same file is included by the lib tests of
 //! `src/compressible/gatemesh.rs`, where the gate sits beside the code.
 
 include!("shared/compressible_gatemesh_cases.rs");

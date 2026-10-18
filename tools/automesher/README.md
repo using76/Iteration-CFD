@@ -19,8 +19,13 @@ file to a `constant/polyMesh` a solver can be pointed at. Tranche 17 adds the
 recovery, Delaunay refinement, carve, optimisation, emission behind the same
 §92.3 gate). **The STL to tetrahedra path needs no gmsh** and no other
 external program: no GPL, LGPL or AGPL source or library is on it (§116.1).
-Prism layers on tet meshes (§116.15, TET-13b) and declared bodies (TET-19)
-are not built yet and are refused by name. The polyhedral path is §92.5,
+Prism layers on tet meshes (§116.15, TET-13b) grow by post-inflation from
+`layers` (`patches`, `n`, `first_thickness`, `growth`) and `tet.layers`.
+Declared bodies on the tet path are built (TET-19): each body is its own
+region, written as mesh/regions.json; no prism layers with bodies. Mind the
+band: with a refined band on the body's wall the interior refinement may not
+terminate yet (`tet.refine.max_inserted_points` bounds it with a `refine/cap`
+refusal; SPEC-LIT §116.18, TET-19's rows). The polyhedral path is §92.5,
 specified and not implemented.
 
 ## Usage
@@ -134,7 +139,7 @@ Both carry comments on every block. Every key of
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `$schema` | string | - | Accepted and ignored; points at the `-schema` output. |
-| `kind` | string | `"hexDominant"` | SPEC-LIT §116.3: `"hexDominant"` (this table's pipeline) or `"tet"` (§116). Absent is `"hexDominant"`, so every older config is unchanged. A `tet` config refuses, by name, a `snap` block other than the defaults, `domain.grading` other than `[1, 1, 1]`, a non-default `castellation.min_faces`, `castellation.bodies` and `layers.patches`. On the tet path `domain.base_size` is the largest size `H`, a `refinement` band is a size `H / 2^level` (§116.8) and `keep_region` picks the carve's start (§116.12). |
+| `kind` | string | `"hexDominant"` | SPEC-LIT §116.3: `"hexDominant"` (this table's pipeline) or `"tet"` (§116). Absent is `"hexDominant"`, so every older config is unchanged. A `tet` config refuses, by name, a `snap` block other than the defaults, `domain.grading` other than `[1, 1, 1]`, a non-default `castellation.min_faces`, `castellation.bodies`, and any `layers` key other than `patches`, `n`, `first_thickness` and `growth` that differs from its default. On the tet path `domain.base_size` is the largest size `H`, a `refinement` band is a size `H / 2^level` (§116.8) and `keep_region` picks the carve's start (§116.12). |
 | `tet` | object | `null` | `kind: "tet"` only (refused on a hex config): the tet path's own knobs, `size`, `recover`, `refine`, `optimise`, `layers`, every one defaulted, so `"tet": {}` is complete. The keys and defaults are SPEC-LIT §116.3's table. |
 | `input.surfaces` | array | *(required)* | The STL files the mesher casts against (stages 3-4). |
 | `input.surfaces[].path` | string | *(required)* | Path to one STL file. |

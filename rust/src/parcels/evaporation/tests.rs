@@ -41,6 +41,7 @@ fn water() -> EvaporationControls {
 /// the polynomial S54 evaluates - checked against a central difference of
 /// `psychro::p_ws` itself, so the duplicated coefficients cannot drift.
 #[test]
+// f32 (F32-16): central difference cancels in f32 at 250 K
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_hyland_wexler_slope_is_the_derivative_of_psychro() {
     let l = LiquidProperties::water();
@@ -98,6 +99,7 @@ fn the_two_saturation_curves_differ_by_a_measured_amount() {
 }
 
 #[test]
+// f32 (F32-16): 1e-6 abs on 373.15 is sub-ulp in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_boiling_temperature_is_the_root_of_the_saturation_curve() {
     let l = LiquidProperties::water();
@@ -139,6 +141,7 @@ fn a_pressure_with_no_boiling_point_is_refused() {
 // ======================================================================
 
 #[test]
+// f32 (F32-16): central difference of 2.4e6 J/kg cancels in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn watsons_latent_heat_matches_its_anchor_and_its_derivative() {
     let l = LiquidProperties::water();
@@ -162,7 +165,6 @@ fn watsons_latent_heat_matches_its_anchor_and_its_derivative() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_diffusivity_carries_its_temperature_and_pressure_dependence() {
     let l = LiquidProperties::water();
     // Marrero & Mason's own correlation, evaluated independently here.
@@ -171,7 +173,8 @@ fn the_diffusivity_carries_its_temperature_and_pressure_dependence() {
         let ours = diffusivity(&l, 101_325.0, t);
         let theirs = mm(t, 1.0);
         assert!(
-            (ours - theirs).abs() < 1e-9 * theirs,
+            ((ours - theirs).abs() as f64)
+                < crate::precision::roundoff_tol(1e-9) * theirs as f64,
             "D({t}) = {ours}, Marrero & Mason {theirs}"
         );
     }
@@ -207,7 +210,6 @@ fn the_blowing_factor_is_one_at_zero_and_smooth_across_the_series() {
 /// collapse as `B_M -> 0` is `spalding` against `abramzonSirignano`, which
 /// share a mass rate exactly and differ only in `F(B_T)` against `F(B_M)`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_blowing_models_differ_by_the_stefan_factor_and_by_f_of_b() {
     let gas = air(278.15, 0.99);
     let tb = water().boiling_temperature().unwrap();
@@ -228,7 +230,11 @@ fn the_blowing_models_differ_by_the_stefan_factor_and_by_f_of_b() {
     // is exactly that of those two numbers.
     let ratio = sp.mdot / rm.mdot;
     let want = sp.b_m.ln_1p() / (sp.y_surface - gas.y_vapour);
-    assert!((ratio - want).abs() < 1e-10 * want.abs(), "{ratio} vs {want}");
+    assert!(
+        ((ratio - want).abs() as f64)
+            < crate::precision::roundoff_tol(1e-10) * want.abs() as f64,
+        "{ratio} vs {want}"
+    );
 
     // Spalding and Abramzon-Sirignano share the mass rate BIT FOR BIT: the
     // heat transfer number never enters it.
@@ -237,7 +243,11 @@ fn the_blowing_models_differ_by_the_stefan_factor_and_by_f_of_b() {
     // ... and their conductances differ by exactly F(B_T)/F(B_M).
     let c_ratio = a_s.conductance / sp.conductance;
     let want_c = blowing_factor(a_s.b_t) / blowing_factor(sp.b_m);
-    assert!((c_ratio - want_c).abs() < 1e-10, "{c_ratio} vs {want_c}");
+    assert!(
+        ((c_ratio - want_c).abs() as f64)
+                < crate::precision::roundoff_tol(1e-10),
+        "{c_ratio} vs {want_c}"
+    );
     // which is within 1 % of one at this tiny B_M, and is what "the blowing
     // correction is negligible in the Ranz-Marshall data" means quantitatively.
     assert!((c_ratio - 1.0).abs() < 1e-2, "F(B_T)/F(B_M) = {c_ratio}");
@@ -246,7 +256,6 @@ fn the_blowing_models_differ_by_the_stefan_factor_and_by_f_of_b() {
 /// (76.11): the slope this module reports IS the textbook `d^2` law, checked
 /// against the closed form written out independently.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_d2_law_slope_is_the_textbook_closed_form() {
     let gas = air(298.15, 0.30);
     let ctrl = water();
@@ -269,14 +278,19 @@ fn the_d2_law_slope_is_the_textbook_closed_form() {
         r.b_m, t_p
     );
     assert!(
-        (ours - textbook).abs() <= 1e-12 * textbook,
+        (ours - textbook).abs() as f64
+            <= crate::precision::roundoff_tol(1e-12) * textbook as f64,
         "K {ours} against the closed form {textbook}"
     );
 
     // ... and it does not depend on d, which is the whole content of the law.
     for &d in &[1e-5, 1e-4, 1e-3, 3e-3] {
         let k = d2_law_slope(&ctrl, tb, 1000.0, d, t_p, &gas);
-        assert!((k - ours).abs() <= 1e-12 * ours, "K({d}) = {k}, K(1e-3) = {ours}");
+        assert!(
+            (k - ours).abs() as f64
+                <= crate::precision::roundoff_tol(1e-12) * ours as f64,
+            "K({d}) = {k}, K(1e-3) = {ours}"
+        );
     }
 }
 
@@ -301,6 +315,7 @@ fn the_ranz_marshall_slope_is_linear_in_the_driving_fraction() {
 /// (76.11): the steady temperature is where the residual vanishes, and the
 /// residual is the energy balance itself.
 #[test]
+// f32 (F32-16): steady-state residual 2.4e-5 rel in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_steady_temperature_is_where_the_residual_vanishes() {
     let ctrl = water();
@@ -337,7 +352,6 @@ fn the_steady_temperature_does_not_depend_on_the_diameter() {
 /// psychrometric wet bulb, and the gap is the Lewis number - measured here,
 /// across humidity, and printed with the factor that explains it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_steady_temperature_sits_below_the_psychrometric_wet_bulb() {
     let ctrl = water();
     let tb = ctrl.boiling_temperature().unwrap();
@@ -427,6 +441,7 @@ fn a_saturated_gas_stops_the_evaporation_and_a_wetter_one_reverses_it() {
 /// not, the property is plumbed in and ignored, which is the failure this
 /// test exists for.
 #[test]
+// f32 (F32-16): wVapour's effect sits below the f32 ulp of T
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn every_liquid_property_moves_the_answer() {
     let gas = air(320.0, 0.2);

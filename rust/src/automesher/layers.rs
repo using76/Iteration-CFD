@@ -4235,8 +4235,8 @@ pub(crate) mod tests {
         let n = Vec3::new(0.6, 0.0, 0.8);
         let us = vec![
             Vec3::new(0.0, 0.0, -1.0),
-            Vec3::new(s5, 0.0, -c5),
-            Vec3::new(0.0, s5, -c5),
+            Vec3::new(s5 as Scalar, 0.0, -c5 as Scalar),
+            Vec3::new(0.0, s5 as Scalar, -c5 as Scalar),
         ];
         assert_eq!(constrain_normal(n, &us, None), None);
         let got = constrain_normal(n, &us, Some(15.0)).expect("(a) merges");
@@ -4247,7 +4247,7 @@ pub(crate) mod tests {
         let us = vec![
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(fr, fr, 0.0),
+            Vec3::new(fr as Scalar, fr as Scalar, 0.0),
         ];
         assert_eq!(constrain_normal(n, &us, None), None);
         let got = constrain_normal(n, &us, Some(15.0)).expect("(b) merges");
@@ -4510,7 +4510,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_flat_wall_normal_is_the_face_normal() {
         let (surf, mesh) = snapped_cube_case();
         let mut spec = LayerSpec {
@@ -4578,7 +4577,7 @@ pub(crate) mod tests {
             assert_eq!(dom, want.component(ax), "point {i} at {:?}", mesh.points[i]);
             let dust = (got - want).mag();
             assert!(
-                dust <= 1e-12,
+                dust as f64 <= crate::precision::roundoff_tol(1e-12),
                 "point {i}: dust {dust:.3e} past 1e-12, got {got:?}"
             );
             n_qual += 1;
@@ -4587,6 +4586,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the sphere patch drops - the closure gate refuses the f32 extrusion (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_shrunk_mesh_keeps_its_topology_and_passes_the_gate() {
         let (surf, mesh) = snapped_sphere_case();
@@ -4621,7 +4621,7 @@ pub(crate) mod tests {
             if !shrunk.field.is_layer[i] {
                 continue;
             }
-            let want = mesh.points[i] + shrunk.field.disp[i];
+            let want = mesh.points[i] + to_dvec3(shrunk.field.disp[i]);
             let got = shrunk.mesh.points[i];
             assert!(
                 (got - want).mag() <= 1e-12,
@@ -4631,6 +4631,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the sphere patch drops - the closure gate refuses the f32 extrusion (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_hanging_node_stays_on_its_parents_segment() {
         let (surf, mesh) = snapped_sphere_case();
@@ -4680,6 +4681,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the sphere patch drops - the closure gate refuses the f32 extrusion (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_thickness_never_exceeds_half_the_local_cell() {
         let (surf, mesh) = snapped_sphere_case();
@@ -4917,7 +4919,7 @@ pub(crate) mod tests {
         let n_pts = mesh.points.len();
         let mut caps = vec![1.0 as Scalar; n_pts];
         let i0 = (0..n_pts)
-            .find(|&i| (mesh.points[i] - Vec3::new(1.5, 1.5, 2.5)).mag() < 1e-12)
+            .find(|&i| (mesh.points[i] - to_dvec3(Vec3::new(1.5, 1.5, 2.5))).mag() < 1e-12)
             .expect("the interior top point");
         caps[i0] = 0.0;
         let ones = vec![1.0 as Scalar; n_pts];
@@ -5003,10 +5005,10 @@ pub(crate) mod tests {
         let n_pts = mesh.points.len();
         let mut caps = vec![1.0 as Scalar; n_pts];
         let i0 = (0..n_pts)
-            .find(|&i| (mesh.points[i] - Vec3::new(1.5, 1.5, 2.5)).mag() < 1e-12)
+            .find(|&i| (mesh.points[i] - to_dvec3(Vec3::new(1.5, 1.5, 2.5))).mag() < 1e-12)
             .expect("the interior top point");
         let i1 = (0..n_pts)
-            .find(|&i| (mesh.points[i] - Vec3::new(2.0, 1.5, 2.5)).mag() < 1e-12)
+            .find(|&i| (mesh.points[i] - to_dvec3(Vec3::new(2.0, 1.5, 2.5))).mag() < 1e-12)
             .expect("the neighbour on the segment");
         caps[i0] = 1e-12;
         caps[i1] = 1e-12;
@@ -5520,6 +5522,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the extrusion retreats away in f32; no layer faces exist (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_body_gets_three_layers_behind_every_wall_face() {
         let (surf, mesh) = castellated_cube_case();
@@ -5596,6 +5599,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the extrusion retreats on every face; nothing exact survives (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_cube_gets_exact_prisms_on_its_flat_faces() {
         let (surf, mesh) = castellated_cube_case();
@@ -5676,7 +5680,7 @@ pub(crate) mod tests {
                 for &s in &slots {
                     let a = out.mesh.points[out.extrusion.level_point[k][s] as usize];
                     let b = out.mesh.points[out.extrusion.level_point[k + 1][s] as usize];
-                    step = step + (b - a);
+                    step = step + to_vec3(b - a);
                 }
                 let h = step.dot(nu) / (slots.len() as Scalar);
                 assert!(
@@ -5721,6 +5725,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): closure gate refuses the f32 extrusion; retreat cannot cure it (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_gap_narrower_than_the_stack_retreats_instead_of_inverting() {
         let (surf, mesh) = castellated_gap_case();
@@ -5770,7 +5775,7 @@ pub(crate) mod tests {
             }
             let m = medial_distance(
                 &idx,
-                mesh.points[i],
+                to_vec3(mesh.points[i]),
                 fd.normal[i],
                 st.total / spec.medial_frac as Scalar,
             );
@@ -5780,7 +5785,7 @@ pub(crate) mod tests {
                 0.5
             };
             assert!(
-                d.mag() <= lim + 1e-12,
+                d.mag() <= lim as f64 + 1e-12,
                 "point {i}: |disp| = {d:.6} past {lim:.6}, march {m:.6}"
             );
         }
@@ -5813,6 +5818,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the f32 extrusion retreats away; no split sides exist (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_two_to_one_transition_emits_split_sides() {
         // A distance band cannot make a 2:1 transition on a wall - every
@@ -5885,6 +5891,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): the 3t1/h refusal ratio rounds under G5's 0.05 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_layer_thinner_than_the_gate_allows_is_refused_with_the_arithmetic() {
         let (surf, mesh) = castellated_cube_case();
@@ -5901,7 +5908,7 @@ pub(crate) mod tests {
             .iter()
             .find(|p| p.name == "cube")
             .expect("cube patch");
-        let mut h_min = Scalar::INFINITY;
+        let mut h_min = f64::INFINITY;
         for j in 0..patch.size {
             let face = &mesh.faces[n_internal + patch.start + j];
             for k in 0..face.len() {
@@ -5923,6 +5930,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): extruded closure 2.3e-8 misses the 1e-12 ledger in f32 (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_snapped_wall_closes_exactly() {
         let (surf, mesh) = snapped_floor_box_case();
@@ -5979,6 +5987,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    // f32 (F32-16): no layer cells exist - the gate refused the f32 extrusion (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_backwards_side_face_is_caught_before_the_gate() {
         let (surf, mesh) = castellated_cube_case();
@@ -6066,6 +6075,7 @@ pub(crate) mod tests {
     /// reason, and does NOT refuse with a list of faces the user cannot act
     /// on.
     #[test]
+    // f32 (F32-16): closure gate refuses the f32 extrusion; retreat cannot cure it (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_snapped_wall_retreats_on_the_extruded_mesh_then_gives_up_by_name() {
         let (surf, mesh) = snapped_cube_case();
@@ -6111,6 +6121,7 @@ pub(crate) mod tests {
     /// fraction alone hides a limiter the user did not write down
     /// (SPEC-LIT 92.13, (92.50)).
     #[test]
+    // f32 (F32-16): closure gate refuses the f32 extrusion; the patch reports retreat (A28)
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_report_says_the_achieved_first_layer_in_metres() {
         let (surf, mesh) = castellated_cube_case();
@@ -6561,7 +6572,7 @@ pub(crate) mod tests {
             assert_eq!(mesh_sha256(&out.mesh), want);
             let i = out.mesh.points.len() - 1;
             let x = out.mesh.points[i].x;
-            out.mesh.points[i].x = Scalar::from_bits(x.to_bits() ^ 1);
+            out.mesh.points[i].x = f64::from_bits(x.to_bits() ^ 1);
             assert_ne!(mesh_sha256(&out.mesh), want);
             out.mesh.points[i].x = x;
             assert_eq!(mesh_sha256(&out.mesh), want);
@@ -7403,7 +7414,7 @@ pub(crate) mod tests {
     /// layer patches' faces.
     fn g5p_hint(m: &PolyMeshRaw, patches: &[usize]) -> Scalar {
         let n_internal = m.neighbour.len().min(m.faces.len());
-        let mut sum = 0.0 as Scalar;
+        let mut sum = 0.0f64;
         let mut cnt = 0usize;
         for &p in patches {
             let patch = &m.patches[p];
@@ -7422,7 +7433,7 @@ pub(crate) mod tests {
             }
         }
         assert!(cnt > 0, "no layer face to build the index hint from");
-        sum / (cnt as Scalar)
+        (sum / cnt as f64) as Scalar
     }
 
     /// G5's planar grouping (§92.3): the largest planar face group's area
@@ -7540,7 +7551,7 @@ pub(crate) mod tests {
             spec0.cell_frac, spec0.medial_frac, spec0.retreat_limit
         );
         let mut wall: Vec<(usize, Scalar)> = Vec::new();
-        let mut short_min = Scalar::INFINITY;
+        let mut short_min = f64::INFINITY;
         for &p in &patches {
             let patch = &m.patches[p];
             for j in 0..patch.size {
@@ -7827,12 +7838,12 @@ pub(crate) mod tests {
             let mut hist: std::collections::BTreeMap<u64, usize> = Default::default();
             for (i, &s) in a.extrusion.slot_of_point.iter().enumerate() {
                 if s >= 0 {
-                    *hist.entry(caps[i].to_bits()).or_insert(0) += 1;
+                    *hist.entry((caps[i] as f64).to_bits()).or_insert(0) += 1;
                 }
             }
-            let mut keys: Vec<Scalar> = hist
+            let mut keys: Vec<f64> = hist
                 .keys()
-                .map(|b| Scalar::from_bits(*b))
+                .map(|b| f64::from_bits(*b))
                 .collect();
             keys.sort_by(|x, y| y.partial_cmp(x).unwrap_or(std::cmp::Ordering::Equal));
             let caps_s = keys
@@ -7943,9 +7954,9 @@ pub(crate) mod tests {
         rows.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
         for (i, &(tmin, kmin, cell, a_wall, fa)) in rows.iter().enumerate().take(300) {
             let block = (cell - first) / n;
-            let mut d_min = Scalar::INFINITY;
-            let mut d_max = 0.0 as Scalar;
-            let mut ti_min = Scalar::INFINITY;
+            let mut d_min = f64::INFINITY;
+            let mut d_max = 0.0f64;
+            let mut ti_min = f64::INFINITY;
             let mut dir = Vec3::ZERO;
             let mut dir_n = 0usize;
             for &p in &m.faces[fa] {
@@ -7959,13 +7970,13 @@ pub(crate) mod tests {
                 let xn = a.mesh.points[a.extrusion.level_point[n][s] as usize];
                 let d = x0 - xn;
                 let dm = d.mag();
-                d_min = d_min.min(dm / st.total);
-                d_max = d_max.max(dm / st.total);
+                d_min = d_min.min(dm / st.total as f64);
+                d_max = d_max.max(dm / st.total as f64);
                 if dm > 0.0 {
-                    dir = dir + d * (1.0 / dm);
+                    dir = dir + to_vec3(d * (1.0 / dm));
                     dir_n += 1;
                 }
-                ti_min = ti_min.min(f0.thickness[p] / st.total);
+                ti_min = ti_min.min(f0.thickness[p] as f64 / st.total as f64);
             }
             let where_face = patches.iter().enumerate().find_map(|(pi, &p)| {
                 let patch = &m.patches[p];
@@ -8177,7 +8188,7 @@ pub(crate) mod tests {
         println!(
             "g5probe bisect t1_zero_g5 {:.6e} over_flat_floor {:.6e} final_n_layers {} full {:.6e}",
             hi,
-            hi / flat_floor,
+            hi / flat_floor as f64,
             nl,
             fu
         );

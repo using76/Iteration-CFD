@@ -772,7 +772,7 @@ pub fn fvm_ddt_euler(
     sign: Scalar,
 ) -> Result<()> {
     check_matrix(a, m)?;
-    expect_len(psi0, m.n_cells, "psi0")?;
+    expect_len(psi0, m.n_local(), "psi0")?;
 
     let n = m.n_cells;
     if n == 0 || r_delta_t == 0.0 {
@@ -797,8 +797,8 @@ pub fn fvm_ddt_euler(
             }
         }
         (Some(r), Some(r0)) => {
-            expect_len(r, n, "rho")?;
-            expect_len(r0, n, "rho0")?;
+            expect_len(r, m.n_local(), "rho")?;
+            expect_len(r0, m.n_local(), "rho0")?;
             let f = k.ddt_euler_rho.clone();
             unsafe {
                 gpu.stream()
@@ -853,8 +853,8 @@ pub fn fvm_ddt_bdf2(
     sign: Scalar,
 ) -> Result<()> {
     check_matrix(a, m)?;
-    expect_len(psi0, m.n_cells, "psi0")?;
-    expect_len(psi00, m.n_cells, "psi00")?;
+    expect_len(psi0, m.n_local(), "psi0")?;
+    expect_len(psi00, m.n_local(), "psi00")?;
 
     let n = m.n_cells;
     if n == 0 || r_delta_t == 0.0 {
@@ -880,9 +880,9 @@ pub fn fvm_ddt_bdf2(
             }
         }
         (Some(r), Some(r0), Some(r00)) => {
-            expect_len(r, n, "rho")?;
-            expect_len(r0, n, "rho0")?;
-            expect_len(r00, n, "rho00")?;
+            expect_len(r, m.n_local(), "rho")?;
+            expect_len(r0, m.n_local(), "rho0")?;
+            expect_len(r00, m.n_local(), "rho00")?;
             let f = k.ddt_bdf2_rho.clone();
             unsafe {
                 gpu.stream()
@@ -957,7 +957,7 @@ pub fn div_scheme_weights(
 
     expect_len(&phi.f, m.n_internal_faces, "phi.f")?;
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
 
     // Only a scheme whose WEIGHT is a function of r takes the limited kernel.
     // `linearUpwind` and `cubic` need a gradient too, but for their explicit
@@ -967,7 +967,7 @@ pub fn div_scheme_weights(
     let grad = match (scheme.weight_needs_gradient(), grad_psi) {
         (false, _) => None,
         (true, Some(g)) => {
-            expect_len(g, m.n_cells, "grad_psi")?;
+            expect_len(g, m.n_local(), "grad_psi")?;
             Some(g)
         }
         (true, None) => {
@@ -1222,7 +1222,7 @@ pub fn fvm_div_correction(
     check_matrix(a, m)?;
     expect_len(&phi.f, m.n_internal_faces, "phi.f")?;
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
-    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+    expect_len(grad_psi, m.n_local(), "grad_psi")?;
 
     let n = m.n_cells;
     if n == 0 {
@@ -1300,8 +1300,8 @@ pub fn div_scheme_face_value(
     expect_len(out, m.n_internal_faces, "out")?;
     expect_len(w, m.n_internal_faces, "w")?;
     expect_len(&phi.f, m.n_internal_faces, "phi.f")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
-    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
+    expect_len(grad_psi, m.n_local(), "grad_psi")?;
 
     let n = m.n_internal_faces;
     if n == 0 {
@@ -1559,9 +1559,9 @@ pub fn fvm_laplacian_non_orth_correction(
     check_matrix(a, m)?;
     expect_len(gamma_mag_sf, m.n_internal_faces, "gamma_mag_sf")?;
     expect_len(b_gamma_mag_sf, m.n_boundary_faces, "b_gamma_mag_sf")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
     expect_len(&psi.fr, m.n_boundary_faces, "psi.fr")?;
-    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+    expect_len(grad_psi, m.n_local(), "grad_psi")?;
 
     if !sn_grad.applies() {
         return Ok(());
@@ -1657,7 +1657,7 @@ pub fn fvm_laplacian_skew_correction(
 ) -> Result<()> {
     check_matrix(a, m)?;
     expect_len(gamma_mag_sf, m.n_internal_faces, "gamma_mag_sf")?;
-    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+    expect_len(grad_psi, m.n_local(), "grad_psi")?;
 
     let n = m.n_cells;
     if n == 0 || m.n_internal_faces == 0 {
@@ -1708,7 +1708,7 @@ pub fn fvm_sp(
     sign: Scalar,
 ) -> Result<()> {
     check_matrix(a, m)?;
-    expect_len(sp, m.n_cells, "sp")?;
+    expect_len(sp, m.n_local(), "sp")?;
 
     let n = m.n_cells;
     if n == 0 {
@@ -1757,8 +1757,8 @@ pub fn fvm_susp(
     sign: Scalar,
 ) -> Result<()> {
     check_matrix(a, m)?;
-    expect_len(susp, m.n_cells, "susp")?;
-    expect_len(psi, m.n_cells, "psi")?;
+    expect_len(susp, m.n_local(), "susp")?;
+    expect_len(psi, m.n_local(), "psi")?;
 
     let n = m.n_cells;
     if n == 0 {
@@ -1793,7 +1793,7 @@ pub fn fvm_su(
     sign: Scalar,
 ) -> Result<()> {
     check_matrix(a, m)?;
-    expect_len(su, m.n_cells, "su")?;
+    expect_len(su, m.n_local(), "su")?;
 
     let n = m.n_cells;
     if n == 0 {
@@ -1853,8 +1853,8 @@ pub fn fvc_grad_scalar_scheme(
     m: &GpuMesh,
     scheme: GradScheme,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(out, m.n_local(), "out")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
     expect_len(&psi.bf, m.n_boundary_faces, "psi.bf")?;
 
     let n = m.n_cells;
@@ -1960,8 +1960,8 @@ pub fn fvc_grad_vector_scheme(
     m: &GpuMesh,
     scheme: GradScheme,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
-    expect_len(&u.f, m.n_cells, "u.f")?;
+    expect_len(out, m.n_local(), "out")?;
+    expect_len(&u.f, m.n_local(), "u.f")?;
     expect_len(&u.bf, m.n_boundary_faces, "u.bf")?;
 
     let n = m.n_cells;
@@ -2099,8 +2099,8 @@ pub fn fvc_grad_scalar_skew_correction(
     grad_prev: &DevBuf<Vec3>,
     m: &GpuMesh,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
-    expect_len(grad_prev, m.n_cells, "grad_prev")?;
+    expect_len(out, m.n_local(), "out")?;
+    expect_len(grad_prev, m.n_local(), "grad_prev")?;
     let n = m.n_cells;
     if n == 0 || m.n_internal_faces == 0 {
         return Ok(());
@@ -2143,8 +2143,8 @@ pub fn fvc_grad_vector_skew_correction(
     grad_prev: &DevBuf<Tensor>,
     m: &GpuMesh,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
-    expect_len(grad_prev, m.n_cells, "grad_prev")?;
+    expect_len(out, m.n_local(), "out")?;
+    expect_len(grad_prev, m.n_local(), "grad_prev")?;
     let n = m.n_cells;
     if n == 0 || m.n_internal_faces == 0 {
         return Ok(());
@@ -2186,7 +2186,7 @@ pub fn fvc_div_surface(
     phi: &GpuSurfaceScalarField,
     m: &GpuMesh,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
+    expect_len(out, m.n_local(), "out")?;
     expect_len(&phi.f, m.n_internal_faces, "phi.f")?;
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
 
@@ -2228,7 +2228,7 @@ pub fn interpolate_linear(
 ) -> Result<()> {
     expect_len(&out.f, m.n_internal_faces, "out.f")?;
     expect_len(&out.bf, m.n_boundary_faces, "out.bf")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
     expect_len(&psi.bf, m.n_boundary_faces, "psi.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -2281,7 +2281,7 @@ pub fn interpolate_vector_flux(
 ) -> Result<()> {
     expect_len(&out.f, m.n_internal_faces, "out.f")?;
     expect_len(&out.bf, m.n_boundary_faces, "out.bf")?;
-    expect_len(&u.f, m.n_cells, "u.f")?;
+    expect_len(&u.f, m.n_local(), "u.f")?;
     expect_len(&u.bf, m.n_boundary_faces, "u.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -2343,7 +2343,7 @@ pub fn sn_grad_flux(
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
     expect_len(gamma_mag_sf, m.n_internal_faces, "gamma_mag_sf")?;
     expect_len(b_gamma_mag_sf, m.n_boundary_faces, "b_gamma_mag_sf")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
 
     if m.n_internal_faces > 0 {
         let n = m.n_internal_faces;
@@ -2420,9 +2420,9 @@ pub fn sn_grad_flux_correction(
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
     expect_len(gamma_mag_sf, m.n_internal_faces, "gamma_mag_sf")?;
     expect_len(b_gamma_mag_sf, m.n_boundary_faces, "b_gamma_mag_sf")?;
-    expect_len(&psi.f, m.n_cells, "psi.f")?;
+    expect_len(&psi.f, m.n_local(), "psi.f")?;
     expect_len(&psi.fr, m.n_boundary_faces, "psi.fr")?;
-    expect_len(grad_psi, m.n_cells, "grad_psi")?;
+    expect_len(grad_psi, m.n_local(), "grad_psi")?;
 
     // The same short-circuit as fvm_laplacian_non_orth_correction, and for the
     // same reason: the flux and the matrix must agree face for face, so the
@@ -2541,7 +2541,7 @@ pub fn fvc_reconstruct(
     phi: &GpuSurfaceScalarField,
     m: &GpuMesh,
 ) -> Result<()> {
-    expect_len(out, m.n_cells, "out")?;
+    expect_len(out, m.n_local(), "out")?;
     expect_len(&phi.f, m.n_internal_faces, "phi.f")?;
     expect_len(&phi.bf, m.n_boundary_faces, "phi.bf")?;
 

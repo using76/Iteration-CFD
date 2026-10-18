@@ -77,6 +77,7 @@ ofgpu-validate         1021 / 1026 checks passed           (2026-09-27, SPEC-LIT
                        the five failing rows: Gate 95-A's four, the cantilever at
                        5:1 and 10:1 (§109.7), and Gate 95-G's LE10 ring order row (§95.11)
                        then the list of every gate whose registered verdict is MISSES or OPEN
+ofgpu-validate         79 sections in run order            (2026-10-18, this tree's -sections listing)
 ```
 
 That list is not maintained by hand: it is **generated** from the registry each gate enters at the point it reports its own verdict (SPEC-LIT §69). Printing a verdict and registering one are the same call, so every registered verdict is named on every run and one more could not fail to appear. **Five of the 1026 rows `ofgpu-validate` runs fail — the block above names them — and every other row passes. That is a different statement from "this project reproduces every published benchmark it compares against", and the two must not be confused.**
@@ -107,7 +108,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other nineteen executables (`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
+The whole validation suite is `cargo run --release --bin ofgpu-validate`. The other nineteen executables (`ofgpu-lowmach`, `ofgpu-compressible`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, the benchmarks), the case file format and the command-line options are in the **user guide**. Cases are read and written either as a single JSONC file or as an OpenFOAM ASCII case directory — the latter for interoperability with existing tools such as ParaView and `foamToVTK`; meteor-cfd links against no part of OpenFOAM and contains none of its source.
 
 ---
 
@@ -157,7 +158,7 @@ The guide, the tool list, and what the server refuses to do:
 ## What it cannot do
 
 - **No MPI and no multi-GPU.** Decomposition, halos, decomposition-invariant reductions and distributed PCG/PBiCGStab are all implemented and gated (§71–§73), but they run in one process on one card. No communication library is linked and no strong-scaling number is published.
-- **No compressible or transonic flow.** The density-weighted time derivative is used by VOF, but the pressure equation is incompressible.
+- **Compressible flow is new, and several of its gates miss.** `ofgpu-compressible` solves the all-speed pressure-based equations (SPEC-LIT §122-§127). Gates CMP-LM, CMP-COU and CMP-OBL hold (CMP-OBL without meeting its field stop). CMP-SOD's PISO row, CMP-AC, CMP-NOZ, CMP-RING and CMP-RAE miss, and `ofgpu-validate` names each one (§127.6). `cases/sodShockTube.jsonc` and `cases/nozzle` are its two shipped cases.
 - **No finite-rate (Arrhenius) chemistry** — no stiff ODE integrator, no Jacobian, no reaction mechanism.
 - **Crank–Nicolson cannot be used with an under-relaxed equation** — it reports the reason as an error rather than silently falling back to Euler.
 - **Radiation here is surface-to-surface only.** §49/§50 solve grey diffuse exchange across a *transparent* medium; nothing in the volume absorbs, emits or scatters. The `radiationModel` selector recognises `viewFactor` (and `s2s`, the native spelling of the same model) and nothing else — any other value is an **unrecognised setting**, refused with the recognised set beside it rather than substituted for (§13.4). A `constant/radiationProperties` that exists and names no `radiationModel` is refused for the same reason: there is no default for the entry, and a reader that guessed would answer a question the case never asked.
@@ -188,7 +189,7 @@ What kind of verification each section is, **what it was compared against** (a p
 |---|---|
 | **User guide** (separate page) | Building, the case file, the settings contract, running, output, what it cannot do |
 | **Technical guidebook** (separate page) | Discretisation, boundary conditions, pressure–velocity, turbulence, low-Mach, surface-to-surface radiation, validation, GPU residency, mesh adaptation and performance |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 95 sections (numbered §0 to §113, with gaps), with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | The numerical specification, 138 sections (numbered §0 to §161, with gaps), with a citation for every formulation — both guides are drawn *from* it and neither replaces it |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | Per-file provenance and design decisions, the licence audit, third-party notices |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | Test case geometries, and the index to `docs/` — the model catalogue, GPU portability, the I/O redesign and the JSONC schema, and `ofgpu-lowmach`'s low-Mach formulation and wall-heat gate record |
 

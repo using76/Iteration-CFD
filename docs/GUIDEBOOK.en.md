@@ -44,12 +44,12 @@ The host is Rust 1.85, the kernels are CUDA C++, double precision by default
 (single via the `single` feature), and the dependencies are `cudarc` and
 `thiserror` — that is all (AMGX is optional).
 
-**What it is for**: incompressible and low-Mach flow. RANS/LES/hybrid turbulence,
+**What it is for**: incompressible, low-Mach and compressible flow. RANS/LES/hybrid turbulence,
 buoyant plumes, variable-density low-Mach, two-phase VOF, conjugate heat
 transfer, surface-to-surface radiation, Lagrangian sprays, and ventilation and
 data-centre airflow with fan curves and porous jumps.
 
-**What it is not**: a compressible or transonic solver. There is no finite-rate
+**What it is not**: a validated transonic solver: `ofgpu-compressible` is new, and its transonic gates miss (§12). There is no finite-rate
 chemistry. It publishes no multi-GPU scaling numbers. The full list is in
 [§12](#12-what-it-cannot-do).
 
@@ -80,7 +80,7 @@ A driver is enough.
 Take `iterations-*.exe` from the releases and run it. Tick the PATH option and
 `ofgpu-*` runs from any prompt.
 
-It installs the 16 solver binaries, the case definitions (`cases/*.jsonc`), the
+It installs the 22 `ofgpu-*` binaries, the case definitions (`cases/*.jsonc`), the
 race-car sample, `docs/` (this guide plus SPEC-LIT, PROVENANCE and the schema),
 and the licence documents.
 
@@ -762,6 +762,7 @@ field**.
 | `ofgpu-vof` | **U, p**, α — two-phase free surface | directory |
 | `ofgpu-cht` | multi-region conduction + conjugate natural convection + thermal stress | JSONC |
 | `ofgpu-datacentre` | data-centre room (fans, tiles, humidity, metrics) | JSONC |
+| `ofgpu-compressible` | **U, p, T** — compressible, all speeds (SPEC-LIT §122-§127) | directory / JSONC |
 
 If you want a velocity field, **pick one of the bold ones.**
 
@@ -927,6 +928,38 @@ coarser than the domain is deep, so state `voxel` there. `ofgpu-cht` lays one la
 whose default box is the region's own, and writes `VDB/<region>_000000.vdb` for each region. A
 multi-region `.usda` scene is not built, so that format refuses `usdScene`.
 
+### The Isaac Sim scene — `output.visualisation.isaac`
+
+An `isaac` block turns the volume output into what Isaac Sim renders: one `density` grid on
+the `.vdb`, and the `.usda` scene that references it. The block implies the scene - name
+`usda` or let it be appended; it does demand `vdb`, because an Isaac scene never references
+`.nvdb`.
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "isaac": { "profile": "index", "field": "smoke", "scaling": "opticalDepth", "tau": 2.0 } } }
+```
+
+| key | meaning | default |
+|---|---|---|
+| `profile` | `index` (NVIDIA IndeX, a `def Volume`) or `pathtrace` (the RTX path tracer, a volume `Mesh`) | `index` |
+| `field` | the cell field the density is made from | required |
+| `scaling` | `opticalDepth` or `physical` (`K_m rho_s`) | `opticalDepth` |
+| `tau` | the densest column's optical depth | `2.0` |
+| `range` | `[f_lo, f_hi]` of the normalisation | the field's min and max over the fluid |
+| `Km` | specific extinction, m^2/kg (`physical`) | `8700` (Mulholland & Croarkin 2000) |
+| `kind` | `density` or `massFraction` (then `rho_v f_v`) | `density` |
+| `upAxis`, `metersPerUnit` | the stage metadata | `"Z"`, `1.0` |
+
+`opticalDepth` scales the normalised field so the densest voxel column's optical depth is
+exactly `tau` - a plume that grows looks as if it grows, because the range and the scale are
+taken at the first write and held. `physical` writes the extinction of a real soot density
+instead. The profile owns the lattice `activation` (`index` -> `fluid`, `pathtrace` ->
+`dense`) unless the case states one, and one that contradicts is refused by name. The two
+refusals `-permissive` does not soften: an `isaac.field` the run does not have, and
+`massFraction` on a run with no `rho` - there is nothing to substitute with. `ofgpu-sample
+volume` takes the block as `-isaac JSON`, the same refusals included.
+
 ### The Studio 3D viewer
 
 Slices, arbitrary planes, iso-surfaces, streamlines and vector glyphs, drawn on
@@ -1082,7 +1115,7 @@ the eight names at the end of every `ofgpu-validate` run.
 | §88 Gate 88-T, §90 Gate 90-T — transition onset | OPEN | No measured onset Re_x for the T3A flat plate could be found to close the comparison; the free-stream decay matches the TMR's Tu 3.3 % | <https://tmbwg.github.io/turbmodels/> |
 | 78-D — the two splash criteria disagree | OPEN | The thresholds of Mundo et al. (1995) and Bai & Gosman (1995) differ by We × 4.78 for the same droplet | DOI 10.1016/0301-9322(94)00069-V; DOI 10.4271/950283 |
 
-The table was made from the `ofgpu-validate` output of 2026-09-09 (833/833, 37 sections)
+The table was made from the `ofgpu-validate` output of 2026-09-09 (833/833, 37 sections; this tree's run has 79, 2026-10-18)
 and the citations of [`README.md`](../README.en.md) "References" and
 [`rust/SPEC-LIT.md`](../rust/SPEC-LIT.md). Sources that were paywalled and not read (Kaminski
 & Prakash, Menter et al. 2015, Shur et al. 2008) and the places where a secondary source
@@ -1104,8 +1137,7 @@ is enforced by a test rather than by prose (`provenance_audit`).
   PCG/PBiCGStab are implemented and gated, but this runs in one process on one
   card. It links no communication library and publishes no strong-scaling
   numbers.
-- **No compressible or transonic flow.** The density-weighted time derivative is
-  used in VOF, but the pressure equation is incompressible.
+- **Compressible flow is new, and several of its gates miss.** `ofgpu-compressible` solves the all-speed pressure-based equations (SPEC-LIT §122-§127). Gates CMP-LM, CMP-COU and CMP-OBL hold (CMP-OBL without meeting its field stop). CMP-SOD's PISO row, CMP-AC, CMP-NOZ, CMP-RING and CMP-RAE miss, and `ofgpu-validate` names each one (§127.6). `cases/sodShockTube.jsonc` and `cases/nozzle` are its two shipped cases.
 - **No finite-rate (Arrhenius) chemistry** — no stiff ODE integrator, no
   reaction mechanisms.
 - **Radiation is surface-to-surface only.** Grey diffuse exchange across a

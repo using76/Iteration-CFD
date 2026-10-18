@@ -74,6 +74,8 @@ use crate::timescheme::DdtScheme;
 use crate::energy::PrtModel;
 use crate::{Label, Scalar, Vec3};
 
+use crate::types::GeomPoint;
+
 // ==========================================================================
 //  1. The JSON tree - mirrors docs/case-example.json field for field
 // ==========================================================================
@@ -113,8 +115,8 @@ pub struct JsonCase {
     pub motion: Option<JsonMotion>,
     /// SPEC-LIT §137.2: the parcel model (`crate::io::case_parcels`). Absent
     /// (the default) is every case this reader has ever built; present, it
-    /// lowers to [`LoweredCase::parcels`] and every driver refuses the case
-    /// until CHR-26 wires `ofgpu-lowmach` (§137.6).
+    /// lowers to [`LoweredCase::parcels`], `ofgpu-lowmach` runs it (§137.10)
+    /// and every other driver refuses the case (§137.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parcels: Option<crate::io::case_parcels::JsonParcels>,
     /// SPEC-LIT §137.2: the species set (`crate::io::case_chem`). Absent
@@ -135,6 +137,19 @@ pub struct JsonCase {
     /// fvDOM, §137.8) and every other driver refuses the case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radiation: Option<crate::io::case_rad::JsonRadiation>,
+    /// SPEC-LIT §157.4: the `dust` block (`crate::io::case_dust`), the
+    /// DST-06 equivalent-gas charge beside a `combustion.model` FSC/TFC.
+    /// Absent (the default) is every case this reader has ever built;
+    /// present, it lowers to [`LoweredCase::dust`] and every driver but
+    /// `ofgpu-lowmach` refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dust: Option<crate::io::case_dust::JsonDust>,
+    /// SPEC-LIT §158.8: the one-domain opening vent (DST-09). Absent is every
+    /// case this reader has built; present, it lowers to
+    /// [`LoweredCase::vent`] and every driver but `ofgpu-compressible`
+    /// refuses the case by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vent: Option<crate::dust::vent::JsonVent>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -374,6 +389,17 @@ pub struct JsonMesh {
     /// rule - a box has no wedge sides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedge: Option<JsonWedge>,
+    /// SPEC-LIT 157.3: presence makes the case a 1-D SPHERICAL SECTOR - the
+    /// REDUCED dust gates' mesh (DST-07). The x axis is the radius
+    /// (`bounds.max[0]` = R, `cells[0]` the uniform cell count), `xmin`
+    /// names the APEX, which has no faces exactly like a wedge pipe's axis,
+    /// `xmax` the outer square and ymin/ymax/zmin/zmax the four sides. The
+    /// reader lowers the case onto `crate::dust::gatemesh::SectorSpec` and
+    /// refuses everything a sector mesh cannot say (each a §13.4 error
+    /// naming the JSON path and SPEC-LIT 157.3). Absent: the case lowers
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector: Option<JsonSector>,
 }
 
 /// [`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL
@@ -383,6 +409,20 @@ pub struct JsonMesh {
 #[serde(deny_unknown_fields)]
 pub struct JsonWedge {
     pub angle: f64,
+}
+
+/// [`JsonMesh::sector`]'s one entry - SPEC-LIT 157.3. `angle` is the FULL
+/// angle between opposite side faces in degrees (finite, in `(0, 90]`),
+/// `fineRadius` the uniform spacing's end `r_f` in m (`0 < r_f <
+/// bounds.max[0]`) and `growth` the ratio of successive radial spacings
+/// beyond `r_f` (finite, in `[1, 1.2]`) - each checked with its JSON path
+/// named, in [`JsonCase::lower`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct JsonSector {
+    pub angle: f64,
+    pub fine_radius: f64,
+    pub growth: f64,
 }
 
 /// One `mesh.cyclic[]` entry - SPEC-LIT §31.1. `a` and `b` are two of the six
@@ -1055,6 +1095,34 @@ pub struct JsonInitial {
     pub omega: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nut: Option<f64>,
+    /// SPEC-LIT 125.8.1: `initial.regions`, the boxes that override `U`, `p`
+    /// and/or `T` in the cells whose centre lies in them. Only
+    /// `ofgpu-compressible` applies them, and [`JsonCase::lower`] refuses
+    /// them on a case without `physics.compressible`. Absent means uniform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<JsonInitialRegion>,
+}
+
+/// One `initial.regions` entry (SPEC-LIT 125.8.1): a box of cell centres,
+/// each stated field overriding the uniform `initial` value in the cells
+/// whose centre falls inside it. Only `ofgpu-compressible` applies a region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonInitialRegion {
+    /// The cell-centre box, in mesh coordinates, closed on both ends.
+    #[serde(rename = "box")]
+    pub bounds: JsonBounds,
+    /// The velocity the region's cells take, absent keeps `initial.U`.
+    #[serde(rename = "U", default, skip_serializing_if = "Option::is_none")]
+    pub u: Option<[f64; 3]>,
+    /// The gauge pressure the region's cells take, absent keeps `initial.p`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<f64>,
+    /// The temperature the region's cells take, absent keeps `initial.T`.
+    /// Requires `initial.T` on the case - the gas law has no state without
+    /// one to override.
+    #[serde(rename = "T", default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<f64>,
 }
 
 // ---- numerics ------------------------------------------------------------
@@ -1273,6 +1341,49 @@ pub struct JsonVisualisation {
     /// uniform Cartesian box is written on its own cells and never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lattice: Option<JsonLattice>,
+    /// The Isaac Sim profile - SPEC-LIT 117.9: one `density` grid on the
+    /// `.vdb` and the `.usda` scene. Absent writes exactly what this crate
+    /// has always written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isaac: Option<JsonIsaac>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+/// `output.visualisation.isaac` - SPEC-LIT 117.9's nine keys, `field`
+/// required, the rest optional. Resolved, and every 117.12 refusal raised,
+/// by [`crate::io::output_plan::OutputPlan::from_json`]; nothing here
+/// validates.
+pub struct JsonIsaac {
+    /// `index` (the default) or `pathtrace` - 117.9's two profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The cell field the density is made from. Required.
+    pub field: String,
+    /// `opticalDepth` (the default) or `physical` - 117.9's two scalings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<String>,
+    /// The target optical depth of the densest column (`opticalDepth`);
+    /// absent is 2.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tau: Option<f64>,
+    /// `[f_lo, f_hi]` of the normalisation (`opticalDepth`); absent is the
+    /// min and max of the field over the fluid voxels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[f64; 2]>,
+    /// Specific extinction, m^2/kg (`physical`); absent is 8700 - 117.14's
+    /// 8.7 m^2/g of Mulholland & Croarkin 2000.
+    #[serde(rename = "Km", default, skip_serializing_if = "Option::is_none")]
+    pub km: Option<f64>,
+    /// `density` (the default) or `massFraction` - what `rho_s` is (117.14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The stage's up axis; absent is `"Z"`.
+    #[serde(rename = "upAxis", default, skip_serializing_if = "Option::is_none")]
+    pub up_axis: Option<String>,
+    /// The stage's unit scale; absent is 1.0.
+    #[serde(rename = "metersPerUnit", default, skip_serializing_if = "Option::is_none")]
+    pub meters_per_unit: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1704,6 +1815,11 @@ pub struct LoweredCase {
     /// `mesh.wedge` - [`Self::build_host_mesh`] then builds exactly what
     /// `crate::blockgen::build_mesh(&self.block)` always built.
     pub wedge: Option<crate::blockgen::WedgeSpec>,
+    /// SPEC-LIT 157.3: `mesh.sector`, lowered onto the gatemesh
+    /// [`crate::dust::gatemesh::SectorSpec`]. `None` for every case without
+    /// `mesh.sector` - [`Self::build_host_mesh`] then builds exactly what it
+    /// always built.
+    pub sector: Option<crate::dust::gatemesh::SectorSpec>,
     /// SPEC-LIT §122.6: `physics.compressible`, lowered onto §122.1's gas and
     /// validated (the `cp` check included). `None` for every case without
     /// the block.
@@ -1721,6 +1837,35 @@ pub struct LoweredCase {
     /// names - kEpsilon only, in the case's (BTreeMap) order. Empty for
     /// every case that names no coefficients.
     pub turbulence_coeffs: Vec<(String, f64)>,
+    /// SPEC-LIT §157.4: the `dust` block beside a `combustion.model` FSC or
+    /// TFC, lowered onto the DST-06 config. `None` for every case that is
+    /// not a dust one - then [`Self::chem`] is exactly what it always was.
+    pub dust: Option<crate::io::case_dust::LoweredDust>,
+    /// SPEC-LIT §159.9: the `dust.cloud` block, lowered onto the cloud's
+    /// config (DST-14). `None` for every case without the block. No driver
+    /// runs it before DST-15, so [`Self::refuse_cloud`] refuses a case that
+    /// states one, in every driver.
+    pub cloud: Option<crate::io::case_dust::LoweredCloud>,
+    /// SPEC-LIT §158.8: the `vent` block, lowered onto the one-domain vent's
+    /// spec. `None` for every case without the block.
+    pub vent: Option<crate::dust::vent::VentSpec>,
+    /// SPEC-LIT 125.8.1: `initial.regions`, in file order - a later entry
+    /// overrides an earlier one where their boxes overlap. Empty for every
+    /// case without the block.
+    pub initial_regions: Vec<LoweredInitialRegion>,
+}
+
+/// One lowered `initial.regions` entry (SPEC-LIT 125.8.1): the cell-centre
+/// box and the fields it states, `f64` in BOTH builds - the override is
+/// decided and applied on the host, from f64 cell centres, before any GPU
+/// work, so the half-stated precision the `single` build runs at cannot
+/// move a cell between two regions.
+pub struct LoweredInitialRegion {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub u: Option<[f64; 3]>,
+    pub p: Option<f64>,
+    pub t: Option<f64>,
 }
 
 impl LoweredCase {
@@ -1734,14 +1879,56 @@ impl LoweredCase {
         }
     }
 
+    /// SPEC-LIT §157.4: a driver's refusal of a case that states the dust
+    /// model (DST-06). Every driver but `ofgpu-lowmach` (part 3 of that
+    /// unit) would ignore it; `Ok` for every case without the block.
+    pub fn refuse_dust(&self) -> Result<()> {
+        match self.dust {
+            Some(_) => Err(crate::io::case_dust::refuse_dust_case("dust")),
+            None => Ok(()),
+        }
+    }
+
+    /// SPEC-LIT §158.8: a driver's refusal of a case that states the
+    /// one-domain vent (DST-09). Every driver but `ofgpu-compressible` would
+    /// ignore it; `Ok` for every case without the block.
+    pub fn refuse_vent(&self) -> Result<()> {
+        match self.vent {
+            Some(_) => Err(Error::Refused(
+                "vent: the vent block is run by ofgpu-compressible only; this driver \
+                 would ignore it (SPEC-LIT §158.8)"
+                    .into(),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// SPEC-LIT §137.6: a driver's refusal of a case that states parcels.
-    /// No driver carries a case's parcels before CHR-26, so a run would
-    /// ignore them; `Ok` for every case without the block.
+    /// Only `ofgpu-lowmach` carries a case's parcels (§137.10, CHR-26), so a
+    /// run of any other driver would ignore them; `Ok` for every case without
+    /// the block. A case stating a dust cloud (§159.9) is refused too, by
+    /// [`Self::refuse_cloud`].
     pub fn refuse_parcels(&self) -> Result<()> {
+        self.refuse_cloud()?;
         match self.parcels {
             Some(_) => Err(crate::io::case_parcels::refuse_parcel_case("parcels")),
             None => Ok(()),
         }
+    }
+
+    /// SPEC-LIT §159.9: every driver's refusal of a case that states a dust
+    /// cloud - `ofgpu-lowmach`, which runs a case's parcels, included: no
+    /// driver runs Phase B before DST-15, so a run would ignore the cloud.
+    /// `Ok` for every case without the block.
+    pub fn refuse_cloud(&self) -> Result<()> {
+        if self.cloud.is_some() {
+            return Err(Error::Refused(
+                "dust.cloud: this case states a dust cloud; no driver runs Phase B before \
+                 DST-15 (SPEC-LIT §159.9)"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// SPEC-LIT §137.8: a driver's refusal of a case that states radiation.
@@ -1760,9 +1947,10 @@ impl LoweredCase {
     /// are the builder's; the map reads the faces and points only, in the
     /// mesh's own face order.
     pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
-        match &self.wedge {
-            None => crate::blockgen::raw_mesh(&self.block),
-            Some(w) => crate::blockgen::raw_wedge_mesh(w),
+        match (&self.wedge, &self.sector) {
+            (None, None) => crate::blockgen::raw_mesh(&self.block),
+            (Some(w), _) => crate::blockgen::raw_wedge_mesh(w),
+            (None, Some(s)) => crate::dust::gatemesh::raw_sector_mesh(s),
         }
     }
 
@@ -1777,6 +1965,12 @@ impl LoweredCase {
     /// and no lowered field carries a boundary entry under it.
     pub fn build_host_mesh(&self) -> Result<crate::mesh::HostMesh> {
         let Some(w) = &self.wedge else {
+            if let Some(s) = &self.sector {
+                // SPEC-LIT 157.3: the sector mesh; the case's own patch
+                // names and classes are already on the spec the lowering
+                // built, so the geometry comes back under them untouched.
+                return crate::dust::gatemesh::build_sector_mesh(s);
+            }
             return crate::blockgen::build_mesh(&self.block);
         };
         let mut hm = crate::blockgen::build_wedge_mesh(w)?;
@@ -1916,6 +2110,54 @@ LES {{ model {model}; }}
             }
         }
         c
+    }
+
+    /// SPEC-LIT 125.8.1: apply [`Self::initial_regions`] to the three initial
+    /// fields the driver has read, in order - a later region overrides an
+    /// earlier one where their boxes overlap - and return the selected cell
+    /// count of each region. Every cell `c` whose ABSOLUTE centre
+    /// `x = hm.origin + f64::from(hm.c[c])` lies inside the box, closed on
+    /// both ends (`min[k] <= x[k] <= max[k]`, each component widened to f64
+    /// before the compare), takes the region's stated values, `as Scalar` -
+    /// the same conversion every stated field value in this reader makes. A
+    /// region that selects no cell is refused: a box that misses the mesh
+    /// says a state the run will never see, which is the §13.4 defect in
+    /// region form.
+    pub fn apply_initial_regions(
+        &self,
+        hm: &crate::mesh::HostMesh,
+        u: &mut crate::io::fields::RawVectorField,
+        p: &mut crate::io::fields::RawScalarField,
+        t: &mut crate::io::fields::RawScalarField,
+    ) -> Result<Vec<usize>> {
+        let mut counts = Vec::with_capacity(self.initial_regions.len());
+        for (i, r) in self.initial_regions.iter().enumerate() {
+            let mut n = 0usize;
+            for c in 0..hm.n_cells {
+                let x = hm.origin + hm.c[c].to_dvec3();
+                let xr = [x.x, x.y, x.z];
+                if (0..3).any(|k| r.min[k] > xr[k] || xr[k] > r.max[k]) {
+                    continue;
+                }
+                if let Some(v) = r.u {
+                    u.internal[c] = Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar);
+                }
+                if let Some(v) = r.p {
+                    p.internal[c] = v as Scalar;
+                }
+                if let Some(v) = r.t {
+                    t.internal[c] = v as Scalar;
+                }
+                n += 1;
+            }
+            if n == 0 {
+                return Err(Error::Config(format!(
+                    "initial.regions[{i}]: the box selects no cell of this mesh (SPEC-LIT 125.8.1)"
+                )));
+            }
+            counts.push(n);
+        }
+        Ok(counts)
     }
 }
 
@@ -2418,6 +2660,140 @@ fn wedge_spec_of(
         z: block.z.clone(),
         theta_deg: w.angle,
         patch_type: [class(0)?, class(1)?, class(4)?, class(5)?],
+    }))
+}
+
+/// SPEC-LIT 157.3: `mesh.sector`, lowered onto the 157.3 `SectorSpec`
+/// (`None` for every case without it) - and the block's refusal list,
+/// checked BEFORE any mesh is built, every entry an `Error::Config` naming
+/// the JSON path and the section. A case without `mesh.sector` lowers
+/// exactly as before.
+fn sector_spec_of(
+    mesh: &JsonMesh,
+    patches: &[JsonPatchRule],
+) -> Result<Option<crate::dust::gatemesh::SectorSpec>> {
+    let Some(s) = &mesh.sector else { return Ok(None) };
+    let refused = |path: &str, detail: String| {
+        Error::Config(format!("{path}: {detail} (SPEC-LIT 157.3)"))
+    };
+    if mesh.bounds.min != [0.0, 0.0, 0.0] {
+        return Err(refused(
+            "mesh.bounds.min",
+            format!("must be [0, 0, 0] - the apex IS the origin, got {:?}", mesh.bounds.min),
+        ));
+    }
+    if mesh.bounds.max[1] != 0.0 || mesh.bounds.max[2] != 0.0 {
+        return Err(refused(
+            "mesh.bounds.max",
+            format!(
+                "max[1] = {} and max[2] = {} must both be 0 - the radius is the x axis \
+                 alone, and a second statement of the extent could only disagree",
+                mesh.bounds.max[1], mesh.bounds.max[2]
+            ),
+        ));
+    }
+    if !(s.fine_radius.is_finite() && s.fine_radius > 0.0) {
+        return Err(refused(
+            "mesh.sector.fineRadius",
+            format!("{} - must be finite and > 0", s.fine_radius),
+        ));
+    }
+    if !(mesh.bounds.max[0].is_finite() && mesh.bounds.max[0] > s.fine_radius) {
+        return Err(refused(
+            "mesh.bounds.max[0]",
+            format!(
+                "{} - must be finite and > mesh.sector.fineRadius = {}",
+                mesh.bounds.max[0], s.fine_radius
+            ),
+        ));
+    }
+    if mesh.cells[0] == 0 || mesh.cells[1] != 1 || mesh.cells[2] != 1 {
+        return Err(refused(
+            "mesh.cells",
+            format!(
+                "[{}, {}, {}] - a sector is one cell across y and z, and cells[0] is \
+                 the uniform radial count (>= 1)",
+                mesh.cells[0], mesh.cells[1], mesh.cells[2]
+            ),
+        ));
+    }
+    if !(s.growth.is_finite() && (1.0..=1.2).contains(&s.growth)) {
+        return Err(refused(
+            "mesh.sector.growth",
+            format!("{} - must be finite and in [1, 1.2]", s.growth),
+        ));
+    }
+    if !(s.angle.is_finite() && s.angle > 0.0 && s.angle <= 90.0) {
+        return Err(refused(
+            "mesh.sector.angle",
+            format!(
+                "{} - the FULL angle in degrees must be finite and in (0, 90]",
+                s.angle
+            ),
+        ));
+    }
+    if mesh.wedge.is_some() {
+        return Err(refused(
+            "mesh.wedge",
+            "stated beside mesh.sector - a case is one mesh, and these are two \
+             different meshes"
+                .to_string(),
+        ));
+    }
+    if !mesh.regions.is_empty() {
+        return Err(refused(
+            "mesh.regions",
+            format!(
+                "{} region(s) beside mesh.sector - a sector carries no region windows",
+                mesh.regions.len()
+            ),
+        ));
+    }
+    if !mesh.cyclic.is_empty() {
+        return Err(refused(
+            "mesh.cyclic",
+            format!(
+                "{} pair(s) beside mesh.sector - a sector carries no cyclic pair",
+                mesh.cyclic.len()
+            ),
+        ));
+    }
+    if mesh.grading.is_some() {
+        return Err(refused(
+            "mesh.grading",
+            "stated beside mesh.sector - the radial grading IS mesh.sector's \
+             fineRadius and growth, there is nothing else to state"
+                .to_string(),
+        ));
+    }
+    let names = [
+        mesh.boundaries.xmin.clone(),
+        mesh.boundaries.xmax.clone(),
+        mesh.boundaries.ymin.clone(),
+        mesh.boundaries.ymax.clone(),
+        mesh.boundaries.zmin.clone(),
+        mesh.boundaries.zmax.clone(),
+    ];
+    let class = |slot: usize| -> Result<String> {
+        Ok(patch_class(resolve_patch_rule(patches, &names[slot])?.kind).to_string())
+    };
+    Ok(Some(crate::dust::gatemesh::SectorSpec {
+        radius: mesh.bounds.max[0],
+        fine_radius: s.fine_radius,
+        n_fine: mesh.cells[0] as usize,
+        growth: s.growth,
+        angle_deg: s.angle,
+        // The sector's five patches are the case's OWN slots 1..5: xmax is
+        // the outer square, ymin/ymax/zmin/zmax the sides; `xmin` stands for
+        // the apex, which has no faces at all.
+        patch_name: [
+            names[1].clone(),
+            names[2].clone(),
+            names[3].clone(),
+            names[4].clone(),
+            names[5].clone(),
+        ],
+        patch_type: [class(1)?, class(2)?, class(3)?, class(4)?, class(5)?],
     }))
 }
 
@@ -3128,6 +3504,18 @@ fn solver_for(solvers: &[JsonSolverRule], var: &str) -> Result<SolverControls> {
 impl JsonCase {
     /// Map the parsed tree onto the solver's own control types.
     pub fn lower(&self) -> Result<LoweredCase> {
+        // SPEC-LIT 157.3: `mesh.sector` lowers onto the gatemesh
+        // `SectorSpec` and owns the mesh when it is present. Its refusal
+        // list runs BEFORE any mesh is built, so a sector case answers for
+        // itself and not as a box (or a wedge) first.
+        let sector = sector_spec_of(&self.mesh, &self.patches)?;
+        if sector.is_some() && self.motion.is_some() {
+            return Err(Error::Config(
+                "motion: a moving mesh beside mesh.sector is refused - a sector \
+                 case has no motion path (SPEC-LIT 157.3)"
+                    .to_string(),
+            ));
+        }
         let (block, windows) = build_block(&self.mesh, &self.patches)?;
 
         // SPEC-LIT 119.3: `mesh.wedge` lowers onto the 119.0 `WedgeSpec`
@@ -3360,6 +3748,65 @@ impl JsonCase {
         validate_freestream_rules(&self.patches, compressible.as_ref(), self.initial.t)?;
         validate_fixed_profile_rules(&self.patches)?;
 
+        // ---- SPEC-LIT 125.8.1: initial.regions --------------------------
+        // Lowered here, BEFORE any field, so a case that names a region it
+        // cannot state is refused before any GPU work - the same place the
+        // compressible presets' refusals run. Each region's own statement is
+        // checked first, and only then the driver gate - the one order in
+        // which every refusal below is reachable, since a compressible case
+        // without `initial.T` has already been refused above.
+        let mut initial_regions: Vec<LoweredInitialRegion> = Vec::with_capacity(self.initial.regions.len());
+        for (i, r) in self.initial.regions.iter().enumerate() {
+            if r.u.is_none() && r.p.is_none() && r.t.is_none() {
+                return Err(Error::Config(format!(
+                    "initial.regions[{i}]: the box states none of U, p or T - a region that \
+                     overrides nothing is not a setting (SPEC-LIT 125.8.1)"
+                )));
+            }
+            for k in 0..3 {
+                let (lo, hi) = (r.bounds.min[k], r.bounds.max[k]);
+                if !lo.is_finite() || !hi.is_finite() || lo > hi {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].box: min[{k}] {lo} > max[{k}] {hi} or a bound is \
+                         not finite - a region's box is a finite, ordered pair per axis \
+                         (SPEC-LIT 125.8.1)"
+                    )));
+                }
+            }
+            if let Some(t) = r.t {
+                if self.initial.t.is_none() {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].T: the case states no initial.T - there is no \
+                         temperature to override (SPEC-LIT 125.8.1)"
+                    )));
+                }
+                if t <= 0.0 {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].T {t} is not positive - the gas law has no state \
+                         at or below zero temperature (SPEC-LIT 125.8.1)"
+                    )));
+                }
+            }
+            initial_regions.push(LoweredInitialRegion {
+                min: r.bounds.min,
+                max: r.bounds.max,
+                u: r.u,
+                p: r.p,
+                t: r.t,
+            });
+        }
+        // The driver gate, after each stated region has been checked to
+        // state something a gas law could carry: ONLY `ofgpu-compressible`
+        // applies regions, so any other driver must not lower a case that
+        // names one - a run would silently ignore it.
+        if !initial_regions.is_empty() && compressible.is_none() {
+            return Err(Error::Config(
+                "initial.regions: only ofgpu-compressible applies regions - the case must \
+                 state physics.compressible for its gas law to carry them (SPEC-LIT 125.8.1)"
+                    .to_string(),
+            ));
+        }
+
         let mut names = mesh_patch_names(&block);
         // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
         // mesh writes no patch on the axis - the `xmin` name stands for no
@@ -3367,6 +3814,12 @@ impl JsonCase {
         // `mesh.regions` is refused on a wedge, so `names` is exactly the
         // six slot names in order here and `remove(0)` is the `xmin` one.
         if wedge.is_some() && self.mesh.bounds.min[0] == 0.0 {
+            names.remove(0);
+        }
+        // SPEC-LIT 157.3: on a sector mesh the `xmin` name stands for the
+        // APEX, which has no faces - exactly the wedge pipe's axis - so no
+        // lowered field may carry a boundary entry under it.
+        if sector.is_some() {
             names.remove(0);
         }
         let ambient_t = self.initial.t.map(|v| v as Scalar).unwrap_or(0.0);
@@ -3588,19 +4041,44 @@ impl JsonCase {
         }
 
         let motion = self.motion.as_ref().map(JsonMotion::lower).transpose()?;
+        // SPEC-LIT §157.4: the dust case lowers BEFORE the chemistry blocks
+        // and owns the case when it lowers at all - an FSC/TFC model's gas is
+        // its own two pseudo-species (§152.4), so a `Some` here means
+        // `lower_blocks` is not called: the case states neither species nor
+        // chemistry, and its combustion keys are the dust model's.
+        let cx = crate::io::case_dust::DustContext {
+            species: self.species.is_some(),
+            chemistry: self.chemistry.is_some(),
+            turbulence_kind,
+            turbulence_model: turbulence_model.as_deref(),
+            compressible: compressible.is_some(),
+            gravity: self.physics.gravity,
+            initial_t: self.initial.t,
+            patch_names: &names,
+            rules: &self.patches,
+        };
+        let dust = crate::io::case_dust::lower_dust(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
+        // SPEC-LIT §159.9: the `dust.cloud` block, against the same context
+        // - `lower_dust` has already refused a cloud beside the FSC/TFC
+        // model, so what reaches here lowers to the DST-15 seeding.
+        let cloud = crate::io::case_dust::lower_cloud(self.combustion.as_ref(), self.dust.as_ref(), &cx)?;
         // SPEC-LIT §137.2 and §137.7: the three chemistry blocks, one
         // lowering; each solved species' field is built on the same patch
-        // names and rules as `T`'s.
-        let chem = crate::io::case_chem::lower_blocks(
-            crate::io::case_chem::ChemBlocks {
-                species: self.species.as_ref(),
-                chemistry: self.chemistry.as_ref(),
-                combustion: self.combustion.as_ref(),
-            },
-            crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
-            compressible.is_some(),
-            Some((&names, &self.patches)),
-        )?;
+        // names and rules as `T`'s. A dust case skips it entirely.
+        let chem = if dust.is_some() {
+            None
+        } else {
+            crate::io::case_chem::lower_blocks(
+                crate::io::case_chem::ChemBlocks {
+                    species: self.species.as_ref(),
+                    chemistry: self.chemistry.as_ref(),
+                    combustion: self.combustion.as_ref(),
+                },
+                crate::io::case_chem::MixingKind::of_model(turbulence_kind, turbulence_model.as_deref()),
+                compressible.is_some(),
+                Some((&names, &self.patches)),
+            )?
+        };
         // SPEC-LIT §137.2: a mass coupling's vapour is checked against
         // `species.names` (refused without a species block); the parcels'
         // gravity, when the block states none, is the case's.
@@ -3614,6 +4092,17 @@ impl JsonCase {
         // SPEC-LIT §137.2 and §137.8: the radiation block, the one lowering
         // the JSONC and dictionary routes share.
         let radiation = self.radiation.as_ref().map(|r| r.lower()).transpose()?;
+        // SPEC-LIT §158.8: the one-domain vent (DST-09) lowers beside nothing
+        // that already owns the mesh - the vent splits a BLOCK mesh, and a
+        // wedge or a sector is another mesh builder's.
+        let vent = self.vent.as_ref().map(|v| v.lower()).transpose()?;
+        if vent.is_some() && (wedge.is_some() || sector.is_some()) {
+            return Err(Error::Refused(
+                "vent: a vent beside mesh.wedge or mesh.sector is not built - the one-domain \
+                 vent splits a block mesh (SPEC-LIT §158.8)"
+                    .into(),
+            ));
+        }
         Ok(LoweredCase {
             name: self.name.clone(),
             block,
@@ -3653,11 +4142,16 @@ impl JsonCase {
             sources,
             motion,
             wedge,
+            sector,
             compressible,
             parcels,
             chem,
             radiation,
             turbulence_coeffs,
+            dust,
+            cloud,
+            vent,
+            initial_regions,
         })
     }
 }
@@ -3730,6 +4224,7 @@ mod tests {
     /// axes (98 and 42 cells - see `blockgen.rs`'s `real` for the fix, 17
     /// digits).
     #[test]
+    // f32 (F32-16): mesh must be bit-identical; f32 paths differ by round-off
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn plume_jsonc_mesh_matches_the_generated_openfoam_case_exactly() {
         let jsonc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cases/plume.jsonc");
@@ -6649,5 +7144,261 @@ mod tests {
             assert_eq!(b.type_name, "fixedValue", "{name}");
             assert_eq!(b.value, vec![0.0 as Scalar], "{name}");
         }
+    }
+
+    /// SPEC-LIT 125.8.1: `initial.regions` lowers onto
+    /// [`LoweredCase::initial_regions`] in file order, and every refusal
+    /// names its JSON path - the compressibleTube-style 10-cell tube, two
+    /// regions, and the five ways a region can fail to state anything a gas
+    /// law could carry.
+    #[test]
+    fn initial_regions_lower_in_order_and_refuse_by_name() {
+        // The tube with (or without) `physics.compressible`, with (or
+        // without) `initial.T`, and the `regions` list appended to `initial`.
+        let case = |compressible: bool, initial_t: bool, regions: &str| {
+            let compressible = if compressible {
+                r#",
+                "compressible": {
+                    "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+                    "viscosity": { "model": "const", "mu": 0 },
+                    "pOperating": 1e5
+                }"#
+            } else {
+                ""
+            };
+            let initial_t = if initial_t { ", \"T\": 300.0" } else { "" };
+            format!(
+                r#"{{
+                "name": "regionsTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0, 0, 0], "max": [1, 0.1, 0.1] }},
+                    "cells": [10, 1, 1],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0, 0, 0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 }},
+                    "buoyancy": "densityRatio"{compressible}
+                }},
+                "patches": [
+                    {{ "match": "xa", "kind": "wall" }},
+                    {{ "match": "xb", "kind": "wall" }},
+                    {{ "match": ".*", "kind": "symmetry" }}
+                ],
+                "initial": {{ "U": [0, 0, 0], "p": 0.0{initial_t}{regions} }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 1 }},
+                    "ddt": "Euler",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1e-5, "deltaT": 1e-5 }}
+            }}"#
+            )
+        };
+        let lower =
+            |t: String| read_case_jsonc_str(&t, "regionsTest").and_then(|c| c.lower());
+        let two = r#",
+                "regions": [
+                    { "box": { "min": [0.5, -1, -1], "max": [1.5, 1, 1] },
+                      "p": -90000, "T": 278.69221457362016 },
+                    { "box": { "min": [0.25, 0, 0], "max": [0.75, 0.1, 0.1] },
+                      "U": [10, 0, 0], "p": -1 }
+                ]"#;
+        let l = lower(case(true, true, two)).expect("the two-region case lowers");
+        assert_eq!(l.initial_regions.len(), 2, "both regions lower, in order");
+        assert_eq!(l.initial_regions[0].min, [0.5, -1.0, -1.0]);
+        assert_eq!(l.initial_regions[0].max, [1.5, 1.0, 1.0]);
+        assert_eq!(l.initial_regions[0].u, None);
+        assert_eq!(l.initial_regions[0].p, Some(-90000.0));
+        assert_eq!(l.initial_regions[0].t, Some(278.69221457362016));
+        assert_eq!(l.initial_regions[1].min, [0.25, 0.0, 0.0]);
+        assert_eq!(l.initial_regions[1].max, [0.75, 0.1, 0.1]);
+        assert_eq!(l.initial_regions[1].u, Some([10.0, 0.0, 0.0]));
+        assert_eq!(l.initial_regions[1].p, Some(-1.0));
+        assert_eq!(l.initial_regions[1].t, None);
+
+        // (a) no `physics.compressible`: only one driver applies regions.
+        let e = lower(case(false, true, two))
+            .err().expect("regions without a gas law")
+            .to_string();
+        assert!(
+            e.contains("initial.regions") && e.contains("ofgpu-compressible") && e.contains("SPEC-LIT 125.8.1"),
+            "{e}"
+        );
+        // (b) none of U, p or T stated.
+        let e = lower(case(true, true, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] } } ]"#))
+            .err().expect("a region that overrides nothing")
+            .to_string();
+        assert!(e.contains("initial.regions[0]"), "{e}");
+        // (c) min[k] > max[k], and a non-finite bound - the same path.
+        let bad = |min: &str, max: &str| {
+            format!(
+                r#", "regions": [ {{ "box": {{ "min": {min}, "max": {max} }}, "p": 0 }} ]"#
+            )
+        };
+        let e = lower(case(true, true, &bad("[0.75, 0, 0]", "[0.25, 0.1, 0.1]")))
+            .err().expect("min above max")
+            .to_string();
+        assert!(e.contains("initial.regions[0].box"), "{e}");
+        let mut c = read_case_jsonc_str(&case(true, true, two), "regionsTest").expect("parses");
+        c.initial.regions[0].bounds.max[0] = f64::INFINITY;
+        let e = c
+            .lower()
+            .err().expect("a non-finite bound")
+            .to_string();
+        assert!(e.contains("initial.regions[0].box"), "{e}");
+        // (d) T stated while `initial.T` is absent - reachable on a
+        // non-compressible case only, so the per-region checks run before
+        // the driver gate.
+        let e = lower(case(false, false, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] }, "T": 300 } ]"#))
+            .err().expect("a region T without initial.T")
+            .to_string();
+        assert!(e.contains("initial.regions[0].T"), "{e}");
+        // (e) a stated T <= 0.
+        let e = lower(case(true, true, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] }, "T": 0 } ]"#))
+            .err().expect("a region at zero temperature")
+            .to_string();
+        assert!(e.contains("initial.regions[0].T"), "{e}");
+    }
+
+    /// SPEC-LIT 125.8.1: [`LoweredCase::apply_initial_regions`] selects by
+    /// ABSOLUTE cell centre, closed on both ends, a later region overriding
+    /// an earlier one where the boxes overlap, and refuses a box that
+    /// selects no cell.
+    #[test]
+    fn initial_regions_apply_by_cell_centre() {
+        let case = r#"{
+            "name": "applyTest",
+            "mesh": {
+                "kind": "cartesian",
+                "bounds": { "min": [0, 0, 0], "max": [1, 0.01, 0.01] },
+                "cells": [10, 1, 1],
+                "boundaries": {
+                    "xmin": "endA", "xmax": "endB", "ymin": "sideA",
+                    "ymax": "sideB", "zmin": "sideC", "zmax": "sideD"
+                }
+            },
+            "physics": {
+                "gravity": [0, 0, 0],
+                "fluid": { "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 },
+                "buoyancy": "densityRatio",
+                "compressible": {
+                    "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+                    "viscosity": { "model": "const", "mu": 0 },
+                    "pOperating": 1e5
+                }
+            },
+            "patches": [
+                { "match": "endA", "kind": "wall" },
+                { "match": "endB", "kind": "wall" },
+                { "match": "(sideA|sideB|sideC|sideD)", "kind": "symmetry" }
+            ],
+            "initial": { "U": [0, 0, 0], "p": 0.0, "T": 300.0 },
+            "numerics": {
+                "algorithm": { "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 1 },
+                "ddt": "Euler",
+                "div": { "default": "Gauss upwind" },
+                "grad": "Gauss linear",
+                "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+                "solvers": []
+            },
+            "run": { "endTime": 1e-5, "deltaT": 1e-5 }
+        }"#;
+        let lower = || {
+            read_case_jsonc_str(case, "applyTest")
+                .and_then(|c| c.lower())
+                .expect("the apply case lowers")
+        };
+        let hm = lower().build_host_mesh().expect("the tube meshes");
+        assert_eq!(hm.n_cells, 10);
+
+        // The two overlapping regions, in order.
+        let mut l = lower();
+        l.initial_regions = vec![
+            LoweredInitialRegion {
+                min: [0.5, -1.0, -1.0],
+                max: [1.5, 1.0, 1.0],
+                u: None,
+                p: Some(-90000.0),
+                t: Some(278.69221457362016),
+            },
+            LoweredInitialRegion {
+                min: [0.75, -1.0, -1.0],
+                max: [1.5, 1.0, 1.0],
+                u: Some([1.0, 0.0, 0.0]),
+                p: Some(-1.0),
+                t: None,
+            },
+        ];
+        let mut u = l.u_field.to_raw(hm.n_cells);
+        let mut p = l.p_field.to_raw(hm.n_cells);
+        let mut t = l.t_field.as_ref().expect("initial.T").to_raw(hm.n_cells);
+        let counts = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect("both regions select cells");
+        assert_eq!(counts, vec![5, 3], "x >= 0.5 is five cells, x >= 0.75 three");
+        // Cells 0..4 keep the uniform values.
+        for c in 0..5 {
+            assert_eq!(p.internal[c], 0.0 as Scalar, "cell {c} keeps the uniform p");
+            assert_eq!(t.internal[c], 300.0 as Scalar, "cell {c} keeps the uniform T");
+            assert_eq!(u.internal[c], Vec3::ZERO, "cell {c} keeps the uniform U");
+        }
+        // Cells 5 and 6 carry region 1 only; cells 7..9, region 2's override
+        // of p and U - and region 1's T, which region 2 does not state.
+        for c in 5..7 {
+            assert_eq!(p.internal[c], -90000.0 as Scalar, "cell {c} takes region 1's p");
+            assert_eq!(t.internal[c], 278.69221457362016 as Scalar, "cell {c} takes region 1's T");
+            assert_eq!(u.internal[c], Vec3::ZERO, "cell {c} keeps the uniform U");
+        }
+        for c in 7..10 {
+            assert_eq!(p.internal[c], -1.0 as Scalar, "cell {c} takes region 2's p");
+            assert_eq!(t.internal[c], 278.69221457362016 as Scalar, "cell {c} keeps region 1's T");
+            assert_eq!(u.internal[c].x, 1.0 as Scalar, "cell {c} takes region 2's U");
+        }
+
+        // A box off the mesh is refused by name.
+        l.initial_regions
+            .push(LoweredInitialRegion { min: [2.0; 3], max: [3.0; 3], u: None, p: Some(-1.0), t: None });
+        let e = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect_err("the off-mesh box")
+            .to_string();
+        assert!(e.contains("initial.regions[2]") && e.contains("selects no cell"), "{e}");
+
+        // No regions: nothing is touched, and nothing is asked.
+        l.initial_regions.clear();
+        let counts = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect("no regions at all");
+        assert!(counts.is_empty(), "no region, no count");
+    }
+
+    /// SPEC-LIT §158.8: a minimal case's `vent` block lowers onto the
+    /// [`crate::dust::vent::VentSpec`] (`wall` defaulting to `noSlip`), and
+    /// [`LoweredCase::refuse_vent`] names the one driver that runs it.
+    #[test]
+    fn the_vent_block_lowers_and_is_refused_beside_a_sector() {
+        let mut case = minimal_case_with_mesh("");
+        case.vent = Some(crate::dust::vent::JsonVent {
+            normal: [1.0, 0.0, 0.0],
+            p_stat: 1.0e4,
+            centre: Some([0.5, 0.5, 0.5]),
+            radius: Some(0.2),
+            faces: None,
+            wall: None,
+        });
+        let low = case.lower().expect("a vent case on a box lowers");
+        let v = low.vent.as_ref().expect("the block lowers onto a spec");
+        assert_eq!(v.p_stat, 1.0e4);
+        assert_eq!(v.wall, crate::dust::vent::MembraneWall::NoSlip);
+        let e = low.refuse_vent().err().expect("the vent is refused");
+        assert!(e.to_string().contains("ofgpu-compressible"), "{e}");
     }
 }

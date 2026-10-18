@@ -76,15 +76,19 @@ impl GpuLduMatrix {
             n_internal_faces: m.n_internal_faces,
             n_boundary_faces: m.n_boundary_faces,
 
-            diag: gpu.zeros(m.n_cells)?,
+            // SPEC-LIT 139.1: the cell-indexed arrays carry the halo
+            // (`n_local`) - `isFixed[nbr]` and every `diag[nbr]`-style read
+            // through a processor face's `b_nbr_cell` then lands inside the
+            // buffer. The row count stays `n_cells`.
+            diag: gpu.zeros(m.n_local())?,
             upper: gpu.zeros(m.n_internal_faces)?,
             lower: gpu.zeros(m.n_internal_faces)?,
-            source: gpu.zeros(m.n_cells)?,
+            source: gpu.zeros(m.n_local())?,
             internal_coeffs: gpu.zeros(m.n_boundary_faces)?,
             boundary_coeffs: gpu.zeros(m.n_boundary_faces)?,
 
-            is_fixed: gpu.zeros(m.n_cells)?,
-            fixed_value: gpu.zeros(m.n_cells)?,
+            is_fixed: gpu.zeros(m.n_local())?,
+            fixed_value: gpu.zeros(m.n_local())?,
         })
     }
 

@@ -189,6 +189,7 @@ fn no_two_parcels_can_share_an_identity() {
 /// join does NOT, which is a fact about Schiller-Naumann and is recorded
 /// rather than smoothed over.
 #[test]
+// f32 (F32-16): the 1e-12 join perturbation vanishes below f32 resolution
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_drag_law_joins_exactly_at_re_1_and_only_nearly_at_re_1000() {
     let (rho, mu, d) = (1.2 as Scalar, 1.8e-5 as Scalar, 1e-4 as Scalar);
@@ -228,7 +229,6 @@ fn the_drag_rate_is_finite_at_zero_relative_velocity() {
 /// satisfy the force balance it was derived from, to round-off, over four
 /// decades of diameter.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_terminal_velocity_satisfies_the_force_balance_it_came_from() {
     let (rho, rho_l, mu, g) = (1.2 as Scalar, 1000.0 as Scalar, 1.8e-5 as Scalar, 9.81 as Scalar);
     for d in [1e-5 as Scalar, 1e-4, 3e-4, 1e-3, 3e-3] {
@@ -240,7 +240,7 @@ fn the_terminal_velocity_satisfies_the_force_balance_it_came_from() {
         let lhs = k * ut * 0.75 / (rho_l * d);
         let rhs = g * (1.0 - rho / rho_l);
         assert!(
-            (lhs - rhs).abs() <= 1e-12 * rhs,
+            (lhs - rhs).abs() as f64 <= crate::precision::roundoff_tol(1e-12) * rhs as f64,
             "d = {d}: balance residual {} at u_t = {ut}",
             (lhs - rhs).abs() / rhs
         );
@@ -375,7 +375,6 @@ fn locate_cell_finds_the_cell_the_index_arithmetic_names() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_injection_weight_makes_the_emitted_mass_exact() {
     // (66.8): n_p = mdot dt stride / (n_per_event m_droplet), so
     // n_per_event * n_p * m_droplet is mdot dt stride identically - which is
@@ -391,7 +390,8 @@ fn the_injection_weight_makes_the_emitted_mass_exact() {
             let n_p = mdot * dt * stride / (n as Scalar * m_droplet);
             let emitted = n as Scalar * n_p * m_droplet;
             assert!(
-                (emitted - mdot * dt * stride).abs() <= 1e-15 * mdot * dt * stride,
+                (emitted - mdot * dt * stride).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-15) * (mdot * dt * stride) as f64,
                 "n = {n}, d = {d}: emitted {emitted}"
             );
         }
@@ -479,7 +479,6 @@ fn fall_to_terminal(
 /// (66.5) buys; an explicit Euler step at `dt = 1 s` has an amplification
 /// factor of `1 - dt/tau_p = -31` and diverges on the first step.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_66a_terminal_velocity_is_the_analytic_one_at_every_time_step() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([2, 2, 20], [1.0, 1.0, 10.0], ["patch"; 6]);
@@ -496,11 +495,14 @@ fn gate_66a_terminal_velocity_is_the_analytic_one_at_every_time_step() {
         let err = (u - analytic).abs() / analytic;
         worst = worst.max(err);
         assert!(
-            err < 1e-9,
+            (err as f64) < crate::precision::roundoff_tol(1e-9),
             "dt = {dt}: terminal speed {u} against the analytic {analytic} (rel {err})"
         );
     }
-    assert!(worst < 1e-9, "worst relative error over the dt sweep: {worst}");
+    assert!(
+        (worst as f64) < crate::precision::roundoff_tol(1e-9),
+        "worst relative error over the dt sweep: {worst}"
+    );
 }
 
 /// The same gate in the branch where the drag law is NONLINEAR in the speed,
@@ -508,7 +510,6 @@ fn gate_66a_terminal_velocity_is_the_analytic_one_at_every_time_step() {
 /// answer: a 300 um droplet sits at `Re ~ 25`, inside Schiller-Naumann's
 /// `24(0.85 + 0.15 Re^0.687)/Re` range.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_66a_holds_in_the_intermediate_reynolds_branch() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([2, 2, 20], [1.0, 1.0, 10.0], ["patch"; 6]);
@@ -522,7 +523,10 @@ fn gate_66a_holds_in_the_intermediate_reynolds_branch() {
     let u =
         fall_to_terminal(&gpu, &hm, &gm, d, 1e-3, 2.0, 1, DragModel::SchillerNaumann).unwrap();
     let err = (u - analytic).abs() / analytic;
-    assert!(err < 1e-6, "u = {u} against the analytic {analytic} (rel {err})");
+    assert!(
+        (err as f64) < crate::precision::roundoff_tol(1e-6),
+        "u = {u} against the analytic {analytic} (rel {err})"
+    );
 }
 
 /// **Gate 66-B.** A ballistic parcel crossing a known Cartesian mesh lands in
@@ -533,7 +537,6 @@ fn gate_66a_holds_in_the_intermediate_reynolds_branch() {
 /// no gravity the trajectory is a straight line whose endpoint is computed
 /// without the solver, so a disagreement is the walk's and nothing else's.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_66b_a_parcel_lands_in_the_cell_the_arithmetic_names() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let n = 10usize;
@@ -606,7 +609,7 @@ fn gate_66b_a_parcel_lands_in_the_cell_the_arithmetic_names() {
         // The walk must not move the parcel: it only decides which cell the
         // straight line ended in.
         assert!(
-            (s.x[i] - expect_x).mag() < 1e-13,
+            ((s.x[i] - expect_x).mag() as f64) < crate::precision::roundoff_tol(1e-13),
             "parcel {i}: position {:?} against the straight line {expect_x:?}",
             s.x[i]
         );
@@ -678,7 +681,6 @@ fn a_parcel_aimed_out_of_the_domain_escapes_at_the_face_and_is_counted() {
 /// analytic statement, so the reflection can be checked without trusting the
 /// solver twice.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_rebounding_parcel_follows_the_folded_straight_line() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([10, 4, 4], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -731,7 +733,8 @@ fn a_rebounding_parcel_follows_the_folded_straight_line() {
         let m = far % 2.0;
         let folded = if m > 1.0 { 2.0 - m } else { m };
         assert!(
-            (s.x[0].x - folded).abs() < 1e-11,
+            ((s.x[0].x - folded).abs() as f64)
+                < crate::precision::roundoff_tol(1e-11),
             "step {n}: x = {} against the folded straight line {folded}",
             s.x[0].x
         );
@@ -784,6 +787,7 @@ fn base_injector() -> Injector {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     }
 }
 
@@ -985,6 +989,7 @@ fn the_persistent_grid_geometry_does_not_change_the_answer() {
 /// `a_g dt q(beta)` with `beta = dt K/inertia`, so `K` is recoverable from the
 /// answer and can be compared with the host's [`drag_k`].
 #[test]
+// f32 (F32-16): device-host relax gap 1.0e-5 rel, at cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_device_enumerations_match_the_host() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1075,7 +1080,6 @@ fn the_device_identity_matches_the_host_identity() {
 /// because `n_p` is derived from the flow rate rather than the other way
 /// round.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_injector_discharges_exactly_the_mass_the_flow_rate_asks_for() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -1103,7 +1107,7 @@ fn the_injector_discharges_exactly_the_mass_the_flow_rate_asks_for() {
             let expect = mdot * BASE_DT * steps as Scalar;
             let got = s.liquid_mass(ctrl.rho_liquid);
             assert!(
-                (got - expect).abs() <= 1e-12 * expect,
+                (got - expect).abs() as f64 <= crate::precision::roundoff_tol(1e-12) * expect as f64,
                 "per_event = {per_event}, d = {d}: discharged {got} kg, asked for {expect}"
             );
         }
@@ -1417,6 +1421,7 @@ fn one_droplet<'m>(
 /// two sides, which is the only kind of error a `d^2` gate posed against the
 /// host closed form could not see.
 #[test]
+// f32 (F32-16): diameter change is 2 ulps of d; cancellation dominates in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_device_closure_is_the_host_closure() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1496,6 +1501,7 @@ fn the_device_closure_is_the_host_closure() {
 /// relaxes towards it. So "the temperature does not move" and "the slope is
 /// the closed form" are two independent statements and both are asserted.
 #[test]
+// f32 (F32-16): settled-T drift 5.6e-3 K, the f32 relaxation floor
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_76a_the_d2_law_holds_against_its_closed_form() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1541,6 +1547,7 @@ fn gate_76a_the_d2_law_holds_against_its_closed_form() {
 /// `dt` halves it. Without this, gate 76-A could be passed by an integrator
 /// that is wrong in a way the tolerance happens to admit.
 #[test]
+// f32 (F32-16): error identical across dt; f32 floor masks first-order slope
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_d2_law_error_is_first_order_in_the_step() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1583,6 +1590,7 @@ fn the_d2_law_error_is_first_order_in_the_step() {
 /// psychrometric ratio of one, and a droplet's balance carries the Lewis
 /// number instead. The gap is reported.
 #[test]
+// f32 (F32-16): settled 3.4e-4 K from the balance, f32 relaxation floor
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_76b_the_droplet_settles_at_its_wet_bulb_temperature() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1649,7 +1657,6 @@ fn gate_76b_the_droplet_settles_at_its_wet_bulb_temperature() {
 /// masses, one subtraction - so the only error here is the summation of the
 /// per-step numbers on the host.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_76c_the_parcel_conserves_its_own_mass() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     // Still gas and no drag, so the droplet does not move: an escaping
@@ -1689,7 +1696,10 @@ fn gate_76c_the_parcel_conserves_its_own_mass() {
         100.0 * given / m0
     );
     assert!(given > 0.5 * m0, "only {} of the mass evaporated", given / m0);
-    assert!(worst < 1e-13, "the parcel lost {worst} of its mass to bookkeeping");
+    assert!(
+        (worst as f64) < crate::precision::roundoff_tol(1e-13),
+        "the parcel lost {worst} of its mass to bookkeeping"
+    );
     // A droplet that runs out is REMOVED and counted, not left as a
     // zero-diameter parcel that every later kernel divides by.
     if s.live().is_empty() {
@@ -1862,6 +1872,7 @@ fn the_evaporation_settings_cannot_move_a_heating_parcel() {
 /// writes are the change in its own state, and the two energies it reports
 /// add up to what its temperature and mass actually did.
 #[test]
+// f32 (F32-16): droplet energy budget off 2.8e-3 in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_accumulators_are_the_change_in_the_parcels_own_state() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -1901,7 +1912,10 @@ fn the_accumulators_are_the_change_in_the_parcels_own_state() {
         "[76.10] mass accumulator against the state change: {worst_mass:.3e}; \
          the droplet energy budget closes to {worst_energy:.3e}"
     );
-    assert!(worst_mass < 1e-14, "the mass accumulator is off by {worst_mass}");
+    assert!(
+        worst_mass < 1e-14,
+        "the mass accumulator is off by {worst_mass}"
+    );
     assert!(worst_energy < 1e-5, "the droplet energy budget is off by {worst_energy}");
 }
 
@@ -2089,6 +2103,7 @@ fn energy_coupling_is_refused_for_an_evaporating_pool() {
 /// pins the host half; this pins the device half by selecting each value and
 /// showing the kernel behaved as that value and not as its neighbour.
 #[test]
+// f32 (F32-16): one-step mass lost sits at the f32 cancellation floor
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_device_evaporation_enumerations_match_the_host() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
@@ -2369,7 +2384,6 @@ fn gate_78a_the_device_and_host_maps_agree_over_the_whole_sweep() {
 /// than exactly, because the three sub-sums re-associate the one sum over the
 /// pool, and saying which of the two statements is exact is the point.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_78b_every_gram_that_hits_a_wall_is_still_accounted_for() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([10, 10, 10], [1.0, 1.0, 1.0], ["wall"; 6]);
@@ -2449,7 +2463,7 @@ fn gate_78b_every_gram_that_hits_a_wall_is_still_accounted_for() {
         // what stops the ledger from balancing around a leak upstream of it.
         let injected = (st.n_injected as Scalar) * want_np * m_droplet;
         assert!(
-            (pool - injected).abs() <= 1e-12 * injected,
+            (pool - injected).abs() as f64 <= crate::precision::roundoff_tol(1e-12) * injected as f64,
             "{}: the pool holds {pool} and the injector emitted {injected}",
             wall.name()
         );

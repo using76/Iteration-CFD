@@ -483,7 +483,10 @@ impl SolverWorkspace {
     /// allocation at all. It costs five device-to-host copies and an O(cells)
     /// greedy pass, once.
     pub fn for_mesh(gpu: &Gpu, m: &GpuMesh) -> Result<Self> {
-        let mut w = Self::new(gpu, m.n_cells)?;
+        // SPEC-LIT 139.1: the cell vectors get room for the halo (`n_local`)
+        // while `n` stays the owned count, because every solve still runs
+        // over `n` rows. On a whole mesh the two are the same.
+        let mut w = Self::new_with_local(gpu, m.n_cells, m.n_local())?;
         if m.n_cells > 0 {
             w.multicolour = Some(MultiColour::new(gpu, m)?);
         }
@@ -491,11 +494,19 @@ impl SolverWorkspace {
     }
 
     pub fn new(gpu: &Gpu, n_cells: usize) -> Result<Self> {
+        Self::new_with_local(gpu, n_cells, n_cells)
+    }
+
+    /// The workspace of [`Self::new`], its cell vectors `cell_room` long
+    /// (`n_cells + n_halo`, SPEC-LIT 139.1) while every solve still runs over
+    /// `n_cells` rows.
+    fn new_with_local(gpu: &Gpu, n_cells: usize, cell_room: usize) -> Result<Self> {
         to_label(n_cells)?;
+        debug_assert!(cell_room >= n_cells);
 
         // A zero-length device allocation is an error, not an empty buffer,
         // so degenerate meshes get one element they never read.
-        let n = n_cells.max(1);
+        let n_local = cell_room.max(1);
 
         // SAFETY: the single non-launch `unsafe` in this crate, and it is here
         // because cudarc offers no safe route to page-locked host memory.
@@ -511,19 +522,19 @@ impl SolverWorkspace {
         Ok(Self {
             n: n_cells,
 
-            r: gpu.zeros(n)?,
-            r0: gpu.zeros(n)?,
-            p: gpu.zeros(n)?,
-            v: gpu.zeros(n)?,
-            s: gpu.zeros(n)?,
-            t: gpu.zeros(n)?,
-            p_hat: gpu.zeros(n)?,
-            s_hat: gpu.zeros(n)?,
+            r: gpu.zeros(n_local)?,
+            r0: gpu.zeros(n_local)?,
+            p: gpu.zeros(n_local)?,
+            v: gpu.zeros(n_local)?,
+            s: gpu.zeros(n_local)?,
+            t: gpu.zeros(n_local)?,
+            p_hat: gpu.zeros(n_local)?,
+            s_hat: gpu.zeros(n_local)?,
 
-            apsi: gpu.zeros(n)?,
-            tmp: gpu.zeros(n)?,
-            y: gpu.zeros(n)?,
-            r_diag: gpu.zeros(n)?,
+            apsi: gpu.zeros(n_local)?,
+            tmp: gpu.zeros(n_local)?,
+            y: gpu.zeros(n_local)?,
+            r_diag: gpu.zeros(n_local)?,
             multicolour: None,
             gamg: None,
 
@@ -545,9 +556,9 @@ impl SolverWorkspace {
 
             #[cfg(feature = "single")]
             ir: Some(IrWorkspace {
-                x_hi: gpu.zeros::<f64>(n)?,
-                d: gpu.zeros(n)?,
-                b_in: gpu.zeros(n)?,
+                x_hi: gpu.zeros::<f64>(n_local)?,
+                d: gpu.zeros(n_local)?,
+                b_in: gpu.zeros(n_local)?,
                 scal: gpu.zeros::<f64>(4)?,
                 outer_steps: 0,
             }),

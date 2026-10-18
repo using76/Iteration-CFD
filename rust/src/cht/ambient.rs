@@ -477,7 +477,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_convective_triple_is_the_series_conductance() {
         let loss = ExternalLoss { h: 25.0, t_inf: 300.0, emissivity: 0.0, t_env: 0.0 };
         let c_b = 296.0;
@@ -498,38 +497,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_radiative_triple_is_the_tangent_and_its_residual_is_second_order() {
         let loss = ExternalLoss { h: 10.0, t_inf: 300.0, emissivity: 0.8, t_env: 290.0 };
         let t_star = 420.0;
         let (hh, t_ref) = loss.linearised(t_star);
         assert!(
-            (hh * (t_star - t_ref) / loss.q_out(t_star) - 1.0).abs() < 1e-12,
+            ((hh * (t_star - t_ref) / loss.q_out(t_star) - 1.0).abs() as f64)
+                < crate::precision::roundoff_tol(1e-12),
             "the tangent touches the quartic at T*: {} vs {}",
             hh * (t_star - t_ref),
             loss.q_out(t_star)
         );
         let slope = loss.h + 4.0 * loss.emissivity * SIGMA_SB * t_star.powi(3);
-        assert!((hh / slope - 1.0).abs() < 1e-14);
+        assert!(((hh / slope - 1.0).abs() as f64)
+            < crate::precision::roundoff_tol(1e-14));
         let err = |d: Scalar| loss.q_out(t_star + d) - hh * (t_star + d - t_ref);
         assert!(err(1.0) > 0.0, "the quartic lies above its tangent");
         assert!(((err(2.0) / err(1.0)) - 4.0).abs() < 0.05);
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_secant_h_r_reproduces_the_quartic_and_h_total_is_the_sum() {
         let loss = ExternalLoss { h: 10.0, t_inf: 300.0, emissivity: 0.9, t_env: 300.0 };
         let ts: [Scalar; 3] = [301.0, 350.0, 600.0];
         for t_b in ts {
             let q_r = loss.emissivity * SIGMA_SB * (t_b.powi(4) - loss.t_env.powi(4));
             assert!(
-                (loss.h_r(t_b) * (t_b - loss.t_env) / q_r - 1.0).abs() < 1e-12,
+                ((loss.h_r(t_b) * (t_b - loss.t_env) / q_r - 1.0).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-12),
                 "h_r (T_b - TEnv) = q_r at {t_b} K"
             );
             assert!(
-                (loss.h_total(t_b) * (t_b - loss.t_inf) / loss.q_out(t_b) - 1.0).abs()
-                    < 1e-12,
+                ((loss.h_total(t_b) * (t_b - loss.t_inf) / loss.q_out(t_b) - 1.0).abs() as f64)
+                    < crate::precision::roundoff_tol(1e-12),
                 "h_total (T_b - TInf) = q_out at {t_b} K"
             );
         }
@@ -569,14 +569,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_radiating_slab_root_converges_quadratically_to_the_quartic() {
         let s = radiating_slab_root(50.0, 500.0, 0.8, 300.0);
         assert!(s.root > 300.0 && s.root < 500.0);
         let es = 0.8 * SIGMA_SB;
         let f = es * (s.root.powi(4) - (300.0 as Scalar).powi(4)) - 50.0 * (500.0 - s.root);
         assert!(
-            f.abs() < 1e-9 * 50.0 * (500.0 - s.root),
+            (f.abs() as f64)
+                < crate::precision::roundoff_tol(1e-9) * 50.0 * (500.0 - s.root) as f64,
             "the root solves the quartic: f = {f:e}"
         );
         let d = &s.corrections;

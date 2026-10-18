@@ -766,7 +766,7 @@ mod tests {
             || {
                 let axis = |hi: f64, n: usize| GradedAxis {
                     lo: 0.0,
-                    hi,
+                    hi: hi as Scalar,
                     n,
                     expansion: 1.0,
                     two_sided: false,

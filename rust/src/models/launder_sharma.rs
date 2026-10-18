@@ -788,6 +788,7 @@ mod tests {
     /// value this kernel's DESIGN note uses), so its own Gauss gradient is
     /// zero and `E` vanishes with it.
     #[test]
+    // f32 (F32-16): E term 1.3e-12 on linear field, abs zero in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn e_term_is_zero_on_a_linear_velocity_field() -> Result<()> {
         let Some(gpu) = gpu() else {

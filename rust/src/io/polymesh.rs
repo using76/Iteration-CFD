@@ -1526,7 +1526,7 @@ FoamFile
         let raw = read_poly_mesh(&root)?;
 
         assert_eq!(raw.points.len(), 12);
-        assert_eq!(raw.points[11], Vec3::new(2.0, 1.0, 1.0));
+        assert_eq!(raw.points[11], DVec3::new(2.0, 1.0, 1.0));
         // The compact and the long face form must yield the same lists.
         assert_eq!(raw.faces, expected_faces());
         assert_eq!(raw.owner, vec![0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]);
@@ -1833,7 +1833,7 @@ $EndElements
             },
         ];
 
-        PolyMeshRaw { points, faces, owner, neighbour, patches }
+        PolyMeshRaw { points: points.iter().map(|&p| crate::types::to_dvec3(p)).collect(), faces, owner, neighbour, patches }
     }
 
     #[test]
@@ -1872,7 +1872,7 @@ $EndElements
     #[test]
     fn rejects_a_mesh_that_is_not_upper_triangular() {
         let raw = PolyMeshRaw {
-            points: vec![Vec3::ZERO; 4],
+            points: vec![DVec3::ZERO; 4],
             faces: vec![vec![0, 1, 2, 3]],
             owner: vec![1],
             neighbour: vec![0],

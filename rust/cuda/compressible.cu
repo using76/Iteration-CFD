@@ -1487,3 +1487,74 @@ extern "C" __global__ void cmpBcFreestreamPressure
     refValue[f] = value;
     refGrad[f] = (ofscalar)0;
 }
+
+
+/*
+  ==========================================================================
+  The dust model's mixture state (SPEC-LIT 158.4, DST-10). Three elementwise
+  kernels, launched only while a dust coupling is attached to the solver.
+  ==========================================================================
+*/
+
+//- (152.8) of SPEC-LIT 152.4 and (152.9) of SPEC-LIT 152.5 (the mixture of SPEC-LIT 158.4), elementwise: rs = rs_u + c drs
+//  (R_mix(c~) = R0/W(c~) per kg, W from (152.8)), then psi = 1/(rs T) and
+//  rho = psi (p + pop) - the same operation order as cmpGasState.
+extern "C" __global__ void cmpGasStateMix
+(
+    ofscalar* __restrict__ psi,
+    ofscalar* __restrict__ rho,
+    const ofscalar* __restrict__ p,
+    const ofscalar* __restrict__ T,
+    const ofscalar* __restrict__ c,
+    oflabel n,
+    ofscalar rs_u,
+    ofscalar drs,
+    ofscalar pop
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    const ofscalar rs = rs_u + c[i]*drs;
+    const ofscalar s = (ofscalar)1 / (rs * T[i]);
+    psi[i] = s;
+    rho[i] = s * (p[i] + pop);
+}
+
+//- (152.8)'s c_p(c~) times a carried field, elementwise: the energy
+//  equation's rho cp(c~) weights and face flux take a = rho (or 1 for a
+//  bare c_p), out = a (cp_u + c dcp).
+extern "C" __global__ void cmpScaleCp
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ a,
+    const ofscalar* __restrict__ c,
+    oflabel n,
+    ofscalar cp_u,
+    ofscalar dcp
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    out[i] = a[i]*(cp_u + c[i]*dcp);
+}
+
+//- (155.10) of SPEC-LIT 155.7 (local, SPEC-LIT 158.4), elementwise: the LOCAL unburned density the
+//  flame propagation reads is rho_u(p), so the propagation speed U_t is
+//  carried at the local pressure as U_t' = U_t ((p + pop)/p_init)^(1/gam_u)
+//  - the power formed in double (the host forms it in f64) and rounded
+//  once on the way out.
+extern "C" __global__ void cmpDustRhoURatio
+(
+    ofscalar* __restrict__ ut_out,
+    const ofscalar* __restrict__ ut,
+    const ofscalar* __restrict__ p,
+    oflabel n,
+    double pop,
+    double p_init,
+    double inv_gamma
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= n) return;
+    ut_out[i] = (ofscalar)((double)ut[i] * pow(((double)p[i] + pop)/p_init, inv_gamma));
+}

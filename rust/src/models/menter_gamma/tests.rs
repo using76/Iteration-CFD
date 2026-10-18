@@ -97,6 +97,7 @@ fn the_reference_f_pg_rows_reproduce_bit_for_bit() {
 }
 
 #[test]
+// f32 (F32-16): assert_eq on f_pg reference constant, one f32 ulp
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn c_pg3_is_live_below_the_knot_and_inert_from_it_up() {
     let c0 = GammaCoeffs::default();
@@ -116,7 +117,7 @@ fn c_pg3_is_live_below_the_knot_and_inert_from_it_up() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+#[cfg(not(feature = "single"))]
 fn the_reference_re_thetac_rows_reproduce() {
     let c = GammaCoeffs::default();
     // The reference's 11 rows. `exp` is not bit-pinned across languages, so
@@ -164,6 +165,7 @@ fn f_pg_at_zero_is_exactly_one_and_re_thetac_two_constant_there() {
 }
 
 #[test]
+// f32 (F32-16): 1e-12 offset below the knot is sub-ulp in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_positive_branch_reaches_its_cap_at_half_over_c_pg1() {
     let c = GammaCoeffs::default();
@@ -179,6 +181,7 @@ fn the_positive_branch_reaches_its_cap_at_half_over_c_pg1() {
 }
 
 #[test]
+// f32 (F32-16): 1e-9 offset below the knot is sub-ulp in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_negative_branch_reaches_its_cap_three() {
     let c = GammaCoeffs::default();
@@ -223,6 +226,7 @@ fn lambda_thl_is_clipped_at_both_ends() {
 }
 
 #[test]
+// f32 (F32-16): monotone tail sums equal to the last f32 ulp
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn re_thetac_is_monotone_decreasing_in_tu_l_and_bounded() {
     let c = GammaCoeffs::default();
@@ -315,7 +319,7 @@ fn the_reference_f_turb_f_onset3_and_f_on_lim_rows_reproduce() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+#[cfg(not(feature = "single"))]
 fn the_reference_tu_l_and_lambda_rows_reproduce_bit_for_bit() {
     // Tu_L's four rows: sqrt and the four operations are IEEE-pinned, so
     // bit equality - including both rows that sit ON the min(..., 100) cap,
@@ -343,6 +347,7 @@ fn the_reference_tu_l_and_lambda_rows_reproduce_bit_for_bit() {
 }
 
 #[test]
+// f32 (F32-16): split reconstruction close() sees NaN in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_split_never_sinks_negative_and_reconstructs_the_source() {
     // 90.11, split row - 90.5's sweep: sp >= 0 at every state, over gamma
@@ -478,7 +483,7 @@ fn p_k_lim_switches_itself_off_and_is_never_negative() {
 }
 
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
+#[cfg(not(feature = "single"))]
 fn f3_is_the_blending_floor_written_against_ry() {
     // (90.17): 88.6's F_3 to the character. 1 at the wall, e^-1 at
     // R_y = 120, monotone, and far below machine relevance by R_y = 240 -
@@ -621,6 +626,7 @@ fn block(n: usize) -> crate::mesh::HostMesh {
 /// one of them is visible only by measuring them against each other.
 /// (90.11): worst relative difference below 1e-13, per closed form.
 #[test]
+// f32 (F32-16): lambda_thL host-device 1.06e-5 rel, over cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_host_and_device_closed_forms_agree() {
     let Some(gpu) = gpu() else { return };
@@ -784,7 +790,6 @@ fn the_host_and_device_closed_forms_agree() {
 /// (`fma(t1, ftb, a)`) where rustc rounds twice. (§90.11: the halves
 /// reconstruct the source, and `Sp` never sinks negative.)
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_gamma_source_split_matches_the_host_split() {
     let Some(gpu) = gpu() else { return };
     let hm = block(6);
@@ -848,7 +853,8 @@ fn the_gamma_source_split_matches_the_host_split() {
         worst[0], worst[1]
     );
     assert!(
-        worst[0] < 1e-15 && worst[1] < 1e-15,
+        (worst[0] as f64) < crate::precision::roundoff_tol(1e-15)
+            && (worst[1] as f64) < crate::precision::roundoff_tol(1e-15),
         "the device split disagrees with the host split by {:e} / {:e} relative",
         worst[0],
         worst[1]
@@ -879,7 +885,6 @@ fn the_gamma_source_split_matches_the_host_split() {
 /// `gamma = 1` toward the laminar fixed point `1/c_e2` is left to the
 /// wiring unit.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_cell_at_zero_intermittency_stays_at_zero_and_one_decays_toward_the_fixed_point() {
     let Some(gpu) = gpu() else { return };
     let hm = block(6);
@@ -928,7 +933,7 @@ fn a_cell_at_zero_intermittency_stays_at_zero_and_one_decays_toward_the_fixed_po
         susp_min = susp_min.min(got_susp[i]);
     }
     assert!(
-        worst < 1e-15,
+        (worst as f64) < crate::precision::roundoff_tol(1e-15),
         "susp disagrees with -(A + B) by {worst:.3e} relative - beyond the \
          contraction's last bit"
     );

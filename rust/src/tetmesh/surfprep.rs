@@ -323,12 +323,32 @@ pub struct PreparedSurface {
 //  The §116.9 pass
 // ==========================================================================
 
+/// What SPEC-LIT §116.9's order 5 does with a cavity shell (`V_s < 0` by
+/// (116.13a)) - TET-14.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cavity {
+    /// §116.9 as written: every shell must enclose a positive volume, so a
+    /// shell with `V_s <= 0` is refused (`surface/inward`). This is
+    /// [`prepare`]'s rule, and the hull start's (`§116.12` would find its
+    /// hull region solid).
+    Refuse,
+    /// The lift a seed carve needs: an inward-wound shell is the wall of an
+    /// internal flow whose fluid §116.12 keeps from the seed, so a shell is
+    /// refused only when `V_s == 0.0`; `V_s < 0` passes, and the report
+    /// keeps the signed value.
+    Allow,
+}
+
 /// Runs §116.9's table in order - the angle, the input, the degenerates,
 /// closedness, orientation, the enclosed volumes, self-intersection - and
 /// returns the first failure, named. On success everything the later units
 /// hold: the shells, the feature edges and seams, the corners, the
-/// polylines, and the report.
-pub fn prepare(surf: &TetSurface, feature_angle_deg: f64) -> Result<PreparedSurface> {
+/// polylines, and the report. `cavity` picks order 5's rule (TET-14).
+pub fn prepare_with(
+    surf: &TetSurface,
+    feature_angle_deg: f64,
+    cavity: Cavity,
+) -> Result<PreparedSurface> {
     // Order 0: the angle.
     if !feature_angle_deg.is_finite() || feature_angle_deg <= 0.0 || feature_angle_deg >= 180.0 {
         return Err(Error::Refused(format!(
@@ -527,13 +547,20 @@ pub fn prepare(surf: &TetSurface, feature_angle_deg: f64) -> Result<PreparedSurf
             )));
         }
     }
-    // Order 5: every shell encloses a positive volume, (116.13a).
+    // Order 5: every shell encloses a positive volume, (116.13a). With
+    // `Cavity::Allow` (TET-14) a cavity shell - `V_s < 0`, its normals into
+    // the cavity - is the wall of an internal flow, so only an exactly zero
+    // volume is refused; the report keeps the signed value either way.
     let mut shell_volumes = Vec::with_capacity(shells.len());
     for members in &shells {
         shell_volumes.push(shell_volume(&surf.points, &surf.tris, members));
     }
     for (s, members) in shells.iter().enumerate() {
-        if shell_volumes[s] <= 0.0 {
+        let bad = match cavity {
+            Cavity::Refuse => shell_volumes[s] <= 0.0,
+            Cavity::Allow => shell_volumes[s] == 0.0,
+        };
+        if bad {
             let lo = members[0];
             let name = &surf.patch_names[surf.tri_patch[lo as usize] as usize];
             return Err(Error::Refused(format!(
@@ -799,6 +826,13 @@ pub fn prepare(surf: &TetSurface, feature_angle_deg: f64) -> Result<PreparedSurf
         corners,
         report,
     })
+}
+
+/// §116.9's pass as the table states it: `Cavity::Refuse`'s order 5, so a
+/// shell whose enclosed volume is not positive is refused. Every existing
+/// caller and result is unchanged.
+pub fn prepare(surf: &TetSurface, feature_angle_deg: f64) -> Result<PreparedSurface> {
+    prepare_with(surf, feature_angle_deg, Cavity::Refuse)
 }
 
 // ==========================================================================
@@ -1157,6 +1191,30 @@ mod tests {
             30.0,
             &["surface/orientation", "shell 0", "non-orientable"],
         );
+    }
+
+    /// TET-14: the inverted cube is a cavity shell, so `prepare_with` with
+    /// [`Cavity::Allow`] takes it and reports the signed volume, while
+    /// [`Cavity::Refuse`] and [`prepare`] refuse it exactly as before.
+    #[test]
+    fn cavity_allowed_with_seed() {
+        let (pts, mut tris) = cube([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 0);
+        for t in tris.iter_mut() {
+            t.reverse();
+        }
+        let s = tet(pts, tris, &[0; 12], &["box"]);
+        let p = prepare_with(&s, 30.0, Cavity::Allow).expect("a cavity shell passes with a seed");
+        assert_eq!(p.report.shell_volumes, vec![-1.0]);
+        for r in [prepare_with(&s, 30.0, Cavity::Refuse), prepare(&s, 30.0)] {
+            match r {
+                Err(Error::Refused(m)) => {
+                    for t in ["surface/inward", "shell 0", "lowest triangle 0"] {
+                        assert!(m.contains(t), "refusal lacks {t:?}: {m}");
+                    }
+                }
+                other => panic!("expected the inverted cube's refusal, got {other:?}"),
+            }
+        }
     }
 
     /// Two bodies, the first patch 0 "a", the second patch 1 "b".

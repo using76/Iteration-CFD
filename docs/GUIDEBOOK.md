@@ -42,11 +42,11 @@ English: [`GUIDEBOOK.en.md`](GUIDEBOOK.en.md)
 호스트는 Rust 1.85, 커널은 CUDA C++, 기본 정밀도는 배정밀도(`single` 기능으로
 단정밀도), 의존성은 `cudarc`와 `thiserror` 둘뿐입니다(AMGX는 선택 기능).
 
-**쓰임새**는 비압축성·저마하 유동입니다. RANS/LES/하이브리드 난류, 부력 플룸,
+**쓰임새**는 비압축성·저마하·압축성 유동입니다. RANS/LES/하이브리드 난류, 부력 플룸,
 가변밀도 저마하, 2상 VOF, 켤레 열전달, 면대면 복사, 라그랑주 분무, 팬과 다공성
 점프를 갖춘 환기·데이터센터 기류.
 
-**아닌 것**: 압축성·천음속 해석기가 아닙니다. 유한율 화학이 없습니다. 다중 GPU
+**아닌 것**: 검증된 천음속 해석기가 아닙니다. `ofgpu-compressible`는 새로 들어왔고 천음속 게이트가 미달입니다(§12). 유한율 화학이 없습니다. 다중 GPU
 확장성 수치를 발표하지 않습니다. 자세한 목록은 [§12](#12-할-수-없는-것).
 
 그리고 하나 더 — **비교가 불충분합니다. 많은 도움 부탁드립니다.** 검증은
@@ -75,7 +75,7 @@ CUDA Toolkit을 따로 깔 필요가 없습니다. 드라이버만 있으면 됩
 릴리스에서 `iterations-*.exe`를 받아 실행합니다. `bin`을 PATH에 넣는 옵션을
 켜면 어느 프롬프트에서든 `ofgpu-*`가 돕니다.
 
-설치되는 것: 솔버 바이너리 16개, 케이스 정의(`cases/*.jsonc`), 경주차 샘플,
+설치되는 것: `ofgpu-*` 바이너리 22개, 케이스 정의(`cases/*.jsonc`), 경주차 샘플,
 `docs/`(이 문서와 SPEC-LIT, PROVENANCE, 스키마), 라이선스 문서.
 
 ### 소스에서 빌드
@@ -709,6 +709,7 @@ python tools\mesh\fluent_check.py tester_ours.msh tester_tet_geometry.json
 | `ofgpu-vof` | **U, p**, α — 2상 자유표면 | 디렉터리 |
 | `ofgpu-cht` | 다영역 전도 + 켤레 자연대류 + 열응력 | JSONC |
 | `ofgpu-datacentre` | 데이터센터 룸(팬·타일·습공기·지표) | JSONC |
+| `ofgpu-compressible` | **U, p, T** — 압축성, 전속도(SPEC-LIT §122-§127) | 디렉터리 / JSONC |
 
 속도장이 필요하면 **굵게 표시된 것 중에서 고르십시오.**
 
@@ -869,6 +870,38 @@ error: solution diverged (NaN/Inf)
 `VDB/<영역>_000000.vdb`를 씁니다. 여러 영역을 담는 `.usda` 장면은 만들지 않으므로 이 형식에서는
 `usdScene`을 거절합니다.
 
+### Isaac Sim 장면 — `output.visualisation.isaac`
+
+`isaac` 블록은 볼륨 출력을 Isaac Sim이 그리는 형태로 바꿉니다. `.vdb` 위에 `density`
+격자 하나, 그것을 가리키는 `.usda` 장면 하나입니다. 이 블록은 장면을 함축합니다 — `usda`를
+적거나 붙게 두십시오. 다만 `vdb`는 요구합니다. Isaac 장면은 절대 `.nvdb`를 가리키지
+않기 때문입니다.
+
+```jsonc
+"output": { "visualisation": { "format": "vdb",
+  "isaac": { "profile": "index", "field": "smoke", "scaling": "opticalDepth", "tau": 2.0 } } }
+```
+
+| 키 | 뜻 | 기본값 |
+|---|---|---|
+| `profile` | `index`(NVIDIA IndeX, `def Volume`) 또는 `pathtrace`(RTX 경로 추적기, 볼륨 `Mesh`) | `index` |
+| `field` | 밀도를 만들 셀 필드 | 필수 |
+| `scaling` | `opticalDepth` 또는 `physical`(`K_m rho_s`) | `opticalDepth` |
+| `tau` | 가장 짙은 열의 광학 두께 | `2.0` |
+| `range` | 정규화의 `[f_lo, f_hi]` | 유체 위에서 필드의 최소·최대 |
+| `Km` | 비소광계수, m^2/kg(`physical`) | `8700`(Mulholland & Croarkin 2000) |
+| `kind` | `density` 또는 `massFraction`(이때 `rho_v f_v`) | `density` |
+| `upAxis`, `metersPerUnit` | 스테이지 메타데이터 | `"Z"`, `1.0` |
+
+`opticalDepth`는 정규화된 필드에 배율을 맞춰 가장 짙은 복셀 열의 광학 두께가 정확히
+`tau`가 되게 합니다. 범위와 배율을 첫 쓰기에서 잡아 두므로 자라는 플룸은 자라는 것처럼
+보입니다.
+`physical`은 대신 실제 그을음 밀도의 소광을 씁니다. 격자 `activation`은 케이스가 적지
+않았다면 프로파일이 정합니다(`index` -> `fluid`, `pathtrace` -> `dense`), 어긋나는 값은
+이름을 대고 거절합니다. `-permissive`가 누그러뜨리지 않는 두 거절이 있습니다: 실행에 없는
+`isaac.field`, 그리고 `rho`가 없는 실행의 `massFraction` — 대신할 것이 없기 때문입니다.
+`ofgpu-sample volume`은 같은 블록을 `-isaac JSON`으로 받고, 같은 거절을 그대로 적용합니다.
+
 ### Studio 3D 뷰어
 
 절단면, 임의 평면, 등가면, 유선, 벡터 글리프를 그 자리에서 그립니다. WebGPU로
@@ -1018,7 +1051,7 @@ ofgpu-validate
 | §88 Gate 88-T, §90 Gate 90-T — 천이 위치 | OPEN | T3A 평판의 측정된 천이 개시 Re_x를 구하지 못해 비교를 닫지 못함; 자유류 감쇠는 TMR의 Tu 3.3 %에 맞춤 | <https://tmbwg.github.io/turbmodels/> |
 | 78-D — 두 스플래시 기준의 불일치 | OPEN | Mundo 등 (1995)와 Bai & Gosman (1995)의 문턱이 같은 액적에서 We 4.78배 서로 어긋남 | DOI 10.1016/0301-9322(94)00069-V; DOI 10.4271/950283 |
 
-이 표는 2026-09-09의 `ofgpu-validate` 출력(833/833, 37개 절)과
+이 표는 2026-09-09의 `ofgpu-validate` 출력(833/833, 37개 절; 이 트리의 실행은 79개 절, 2026-10-18)과
 [`README.md`](../README.md) 「참고문헌」·[`rust/SPEC-LIT.md`](../rust/SPEC-LIT.md)의
 인용으로 만들었습니다. 유료라 읽지 못한 출처(Kaminski & Prakash, Menter 등 2015, Shur 등
 2008)와 2차 출처로 대신한 곳은 표에 그대로 적었습니다.
@@ -1038,8 +1071,7 @@ ofgpu-validate
 - **MPI·다중 GPU 없음.** 분할·헤일로·분산 PCG/PBiCGStab이 구현되고 게이트되어
   있으나 한 장의 카드 위 한 프로세스에서 돕니다. 통신 라이브러리를 링크하지
   않으며 강한 확장성 수치도 발표하지 않습니다.
-- **압축성·천음속 없음.** 밀도 가중 시간미분은 VOF에서 쓰이지만 압력 방정식은
-  비압축성입니다.
+- **압축성 유동은 새로 들어왔고, 그 게이트 몇 개가 미달입니다.** `ofgpu-compressible`가 전속도 압력 기반 방정식을 풉니다(SPEC-LIT §122-§127). Gate CMP-LM, CMP-COU, CMP-OBL은 통과합니다(CMP-OBL은 수렴 정지 조건을 채우지 못한 채). CMP-SOD의 PISO 행, CMP-AC, CMP-NOZ, CMP-RING, CMP-RAE는 미달이며 `ofgpu-validate`가 매 실행마다 이름을 댑니다(§127.6). 동봉 케이스는 `cases/sodShockTube.jsonc`와 `cases/nozzle` 두 개입니다.
 - **유한율(아레니우스) 화학 없음** — 경직 ODE 적분기도, 반응 메커니즘도 없습니다.
 - **복사는 면대면만.** 투명 매질을 가로지르는 회색 확산 교환이며, 체적 안에서
   흡수·방출·산란하는 것은 없습니다.

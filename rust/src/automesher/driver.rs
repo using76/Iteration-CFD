@@ -939,7 +939,7 @@ pub struct TetOutput {
     /// One row per stage of [`TET_STAGES`].
     pub stages: Vec<TetStageTiming>,
     pub n_tets: usize,
-    /// 0 until the prism layers of §116.15 (TET-13b).
+    /// The prism count of §116.15 (TET-13b), 0 without layers.
     pub n_prisms: usize,
     /// The smallest and the largest dihedral angle of the emitted cells,
     /// degrees, evaluated in f64 (§116.2).
@@ -948,6 +948,12 @@ pub struct TetOutput {
     /// The Steiner counts: `recover`, `refine` and `total`.
     pub steiner: serde_json::Value,
     pub total_seconds: f64,
+    /// The regions, when `castellation.bodies` is not empty: the fluid
+    /// first, then the bodies in config order (docs/17 TET-19, SPEC-LIT
+    /// §116.12). `None` without bodies. `mesh` and `quality` above are the
+    /// FLUID region's when this is `Some`, as [`PipelineOutput`]'s are on a
+    /// split run.
+    pub layout: Option<LayoutOutput>,
 }
 
 /// The box side `2 axis + (0 low, 1 high)` that holds all three points of
@@ -1002,17 +1008,18 @@ pub fn run_tet(
     surf: &Surface,
     progress: &mut dyn FnMut(&str),
 ) -> Result<TetOutput> {
-    use crate::tetmesh::carve::CarveStart;
-    use crate::tetmesh::emit::{carved_boundary, emit, EmitPatch};
+    use crate::tetmesh::carve::{zones_of, CarveBody, CarveStart};
+    use crate::tetmesh::emit::{carved_boundary, emit, emit_mixed, EmitPatch};
+    use crate::tetmesh::inflate::{inflate, LayerStack};
     use crate::tetmesh::optimise::{dihedral_extremes, freedoms, optimise};
     use crate::tetmesh::recover::recover_faces;
-    use crate::tetmesh::refine::refine;
+    use crate::tetmesh::refine::refine_bodies;
     use crate::tetmesh::remesh::{remesh, RemeshOptions};
     use crate::tetmesh::sizefield::{
         sources_from_refinement, surface_sources, GapSide, OctreeOptions, PatchTris, SizeField,
         SizeParams,
     };
-    use crate::tetmesh::surfprep::{prepare, TetSurface};
+    use crate::tetmesh::surfprep::{prepare_with, Cavity, TetSurface};
     use crate::tetmesh::Point;
 
     if cfg.kind != MeshKind::Tet {
@@ -1054,10 +1061,72 @@ pub fn run_tet(
             domain_names.join(", ")
         )));
     }
+    // The prism layers (§116.15, TET-13b): the layered patches are the
+    // surface patches named in layers.patches, and the stack is layers.n,
+    // layers.first_thickness and layers.growth. A name that is no surface
+    // patch is refused before any stage runs.
+    let layers_on = cfg.layers.n > 0 && !cfg.layers.patches.is_empty();
+    let mut layered_surf: Vec<bool> = Vec::new();
+    if layers_on {
+        for name in &cfg.layers.patches {
+            if !ts.patch_names.contains(name) {
+                return Err(Error::Mesh(format!(
+                    "tet/layers: layers.patches names \"{name}\", which is no surface patch ({})",
+                    ts.patch_names.join(", ")
+                )));
+            }
+        }
+        layered_surf = ts
+            .patch_names
+            .iter()
+            .map(|n| cfg.layers.patches.contains(n))
+            .collect();
+    }
 
-    // ---- stage 1: surface preparation (§116.9).
+    // The declared bodies (docs/17 TET-19, SPEC-LIT §116.12): each patch
+    // name becomes its index into the surface's patch names, the list the
+    // carve and the emit read. A name that is no surface patch is refused
+    // before any stage runs; validate has already refused bodies together
+    // with prism layers.
+    let bodies: Vec<CarveBody> = if cfg.castellation.bodies.is_empty() {
+        Vec::new()
+    } else {
+        cfg.castellation
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let patches: Vec<u32> = b
+                    .patches
+                    .iter()
+                    .map(|p| {
+                        Ok(
+                            ts.patch_names.iter().position(|n| n == p).ok_or_else(|| {
+                                Error::Mesh(format!(
+                                    "tet/bodies: castellation.bodies[{i}] (\"{}\") names patch \
+                                     \"{}\", which is no surface patch ({})",
+                                    b.name,
+                                    p,
+                                    ts.patch_names.join(", ")
+                                ))
+                            })? as u32,
+                        )
+                    })
+                    .collect::<Result<Vec<u32>>>()?;
+                Ok(CarveBody { name: b.name.clone(), patches })
+            })
+            .collect::<Result<Vec<CarveBody>>>()?
+    };
+
+    // ---- stage 1: surface preparation (§116.9). With a seed carve
+    // (TET-14) a cavity shell holds the fluid of an internal flow, so the
+    // order-5 refusal is lifted for `V_s < 0`; the hull start keeps it.
     let started = tet_begin(progress, 0);
-    let prep = prepare(&ts, feature)?;
+    let cavity = match cfg.castellation.keep_region {
+        KeepRegion::Seed => Cavity::Allow,
+        KeepRegion::Largest => Cavity::Refuse,
+    };
+    let prep = prepare_with(&ts, feature, cavity)?;
     let r = &prep.report;
     let counts = json!({
         "n_points": r.n_points, "n_tris": r.n_tris, "n_shells": r.n_shells,
@@ -1128,6 +1197,17 @@ pub fn run_tet(
     });
     tet_end(progress, &mut stages, 2, started, line, counts);
 
+    // The bodies' patch ids index the remeshed surface's patch names: the
+    // remesh renames nothing, so the lists must be equal. If they ever
+    // differ, refuse rather than guess (it should never happen).
+    if !bodies.is_empty() && rm.surface.patch_names != ts.patch_names {
+        return Err(Error::Mesh(format!(
+            "tet/bodies: the remeshed surface's patch names {:?} differ from the input's \
+             {:?}; the ids of castellation.bodies would not name the same patches",
+            rm.surface.patch_names, ts.patch_names
+        )));
+    }
+
     // ---- stage 4: recovery in the domain box (§116.11). The box's eight
     // corners join the points, so the hull is the domain box.
     let started = tet_begin(progress, 3);
@@ -1171,7 +1251,7 @@ pub fn run_tet(
             CarveStart::Seed(p)
         }
     };
-    let refined = refine(&surf2, fr, &start, &spec.refine, &h)?;
+    let refined = refine_bodies(&surf2, fr, &start, &bodies, &spec.refine, &h)?;
     let rs = &refined.stats;
     let refine_json = json!({
         "interior": rs.interior, "segment_splits": rs.segment_splits,
@@ -1231,6 +1311,15 @@ pub fn run_tet(
     });
     tet_end(progress, &mut stages, 5, started, line, counts);
 
+    // The zones (116.16c) on the OPTIMISED tetrahedra: a flood fill whose
+    // components are the zones, because a flip never crosses a frozen
+    // subtriangle (docs/17 TET-19). Only read by the split below.
+    let zone = if bodies.is_empty() {
+        Vec::new()
+    } else {
+        zones_of(&o.points, &o.tets, &refined.recovery.subtris, &refined.carved.sub_zone)?
+    };
+
     // ---- stage 7: emission, (116.26) and §92.3 (§116.16), then (92.56).
     let started = tet_begin(progress, 6);
     let n_domain = domain_names.len() as u32;
@@ -1256,17 +1345,139 @@ pub fn run_tet(
             .iter()
             .map(|name| EmitPatch { name: name.clone(), type_name: "wall".to_string() }),
     );
-    let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
-    let mut mesh = emitted.raw;
-    rename_patches(&mut mesh, &cfg.output.patch_names)?;
+    // The inflation of §116.15 runs here, before the emission, when
+    // layers.n > 0 and layers.patches is not empty.
+    let (mut mesh, mut quality, n_prisms, n_layer_points, inflate_rounds, n_cut, n_collapsed, n_tapered, coverage) =
+        if layers_on {
+            let mut layered = vec![false; domain_names.len()];
+            layered.extend(layered_surf.iter().copied());
+            let stack = LayerStack {
+                n: cfg.layers.n,
+                first_thickness: cfg.layers.first_thickness,
+                growth: cfg.layers.growth,
+            };
+            let inf = inflate(&o.points, &o.tets, &bnd, &layered, &stack, &spec.layers, feature)?;
+            let (emitted, quality) =
+                emit_mixed(&inf.points, &inf.tets, &inf.prisms, &inf.boundary, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (
+                mesh,
+                quality,
+                inf.prisms.len(),
+                inf.points.len() - o.points.len(),
+                inf.rounds,
+                inf.n_cut,
+                inf.collapsed.len(),
+                inf.tapered.len(),
+                inf.coverage(),
+            )
+        } else {
+            let (emitted, quality) = emit(&o.points, &o.tets, &bnd, &patches, &thr)?;
+            let mut mesh = emitted.raw;
+            rename_patches(&mut mesh, &cfg.output.patch_names)?;
+            (mesh, quality, 0usize, 0usize, 1usize, 0usize, 0usize, 0usize, 1.0f64)
+        };
+    // The split of §92.15.4 (docs/17 TET-19): one standalone mesh per zone,
+    // the fluid first, the bodies in config order, each gated on its own.
+    // The interface subtriangles are internal to the union mesh, so
+    // `split_by_zones` makes them the pair of interface patches
+    // `fluid_to_<b>` / `<b>_to_fluid`, both sides sharing their points.
+    let mut layout: Option<LayoutOutput> = None;
+    let mut split_report = String::new();
+    let mut split_counts: Vec<(String, serde_json::Value)> = Vec::new();
+    if !bodies.is_empty() {
+        let mut zones: Vec<(String, Vec<crate::Label>)> =
+            vec![("fluid".to_string(), Vec::new())];
+        for (c, &z) in zone.iter().enumerate() {
+            if z == 0 {
+                zones[0].1.push(c as crate::Label);
+            }
+        }
+        for (k, b) in bodies.iter().enumerate() {
+            let cells: Vec<crate::Label> = zone
+                .iter()
+                .enumerate()
+                .filter(|(_, &z)| z == k as u32 + 1)
+                .map(|(c, _)| c as crate::Label)
+                .collect();
+            zones.push((b.name.clone(), cells));
+        }
+        let (parts, ifaces) = crate::io::regions::split_by_zones(&mesh, &zones)?;
+        let mut regions: Vec<RegionOutput> = Vec::with_capacity(parts.len());
+        let mut region_counts: Vec<serde_json::Value> = Vec::new();
+        for (i, (name, m)) in parts.into_iter().enumerate() {
+            let q = super::quality::check(&m, &thr)
+                .map_err(|e| Error::Mesh(format!("tet/split: region \"{name}\": {e}")))?;
+            let kind_word = if i == 0 { "fluid" } else { "solid" };
+            split_report.push_str(&format!(
+                "split: region \"{name}\" ({kind_word}): {} cells, {} patches\n",
+                q.n_cells,
+                m.patches.len()
+            ));
+            region_counts.push(json!({
+                "name": name, "kind": kind_word, "n_cells": q.n_cells,
+            }));
+            let kind = if i == 0 {
+                crate::cht::RegionKind::Fluid
+            } else {
+                crate::cht::RegionKind::Solid
+            };
+            regions.push(RegionOutput { name, kind, mesh: m, quality: q });
+        }
+        let interfaces_json: Vec<serde_json::Value> = ifaces
+            .iter()
+            .map(|i| {
+                split_report.push_str(&format!(
+                    "split: interface {} <-> {}: {} faces ({} / {})\n",
+                    regions[i.region_a].name,
+                    regions[i.region_b].name,
+                    i.n_faces,
+                    i.patch_a,
+                    i.patch_b
+                ));
+                json!({
+                    "patches": [i.patch_a.clone(), i.patch_b.clone()],
+                    "faces": i.n_faces,
+                })
+            })
+            .collect();
+        split_counts.push(("n_regions".to_string(), json!(regions.len())));
+        split_counts.push(("regions".to_string(), json!(region_counts)));
+        split_counts.push(("interfaces".to_string(), json!(interfaces_json)));
+        layout = Some(LayoutOutput { regions, interfaces: ifaces });
+        mesh = layout.as_ref().unwrap().regions[0].mesh.clone();
+        quality = layout.as_ref().unwrap().regions[0].quality.clone();
+    }
     let line = quality.summary();
-    let counts = json!({
+    let mut counts = json!({
         "n_cells": quality.n_cells, "n_points": mesh.points.len(),
         "n_internal_faces": mesh.neighbour.len(),
         "n_boundary_faces": mesh.faces.len() - mesh.neighbour.len(),
         "gate_passed": quality.passed(),
+        "n_prisms": n_prisms, "n_layer_points": n_layer_points,
+        "inflate_rounds": inflate_rounds, "n_cut": n_cut,
+        "n_collapsed": n_collapsed, "n_tapered": n_tapered, "coverage": coverage,
     });
-    tet_end(progress, &mut stages, 6, started, line, counts);
+    if let serde_json::Value::Object(m) = &mut counts {
+        for (k, v) in split_counts {
+            m.insert(k, v);
+        }
+    }
+    let mut report = line;
+    // The gate summary ends without a newline; the split's lines start
+    // their own (a run without bodies has none, and its report is as before).
+    if !split_report.is_empty() && !report.ends_with('\n') {
+        report.push('\n');
+    }
+    report.push_str(&split_report);
+    for r in layout.as_ref().map(|l| &l.regions).into_iter().flatten() {
+        report.push_str(&r.quality.summary());
+        if !report.ends_with('\n') {
+            report.push('\n');
+        }
+    }
+    tet_end(progress, &mut stages, 6, started, report, counts);
 
     let steiner = json!({
         "recover": recover_json,
@@ -1278,19 +1489,62 @@ pub fn run_tet(
         quality,
         stages,
         n_tets: o.tets.len(),
-        n_prisms: 0,
+        n_prisms,
         min_dihedral_deg: dmin,
         max_dihedral_deg: dmax,
         steiner,
         total_seconds: t0.elapsed().as_secs_f64(),
+        layout,
+    })
+}
+
+/// (92.57)'s `layout` object - the written layout's own shape (§92.15.6):
+/// per region the counts and its OWN gate report, and the interface pairs
+/// as the manifest carries them. Shared by the hex and the tet summary.
+fn layout_json(l: &LayoutOutput) -> serde_json::Value {
+    let regions: Vec<serde_json::Value> = l
+        .regions
+        .iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "kind": kind_word(r.kind),
+                "n_points": r.mesh.points.len(),
+                "n_cells": r.quality.n_cells,
+                "n_internal_faces": r.mesh.neighbour.len(),
+                "n_boundary_faces": r.mesh.faces.len() - r.mesh.neighbour.len(),
+                "patches": r.mesh.patches.iter().map(|p| json!({
+                    "name": p.name, "kind": p.type_name, "size": p.size,
+                })).collect::<Vec<serde_json::Value>>(),
+                "quality": quality_json(&r.quality),
+            })
+        })
+        .collect();
+    let interfaces: Vec<serde_json::Value> = l
+        .interfaces
+        .iter()
+        .map(|i| {
+            json!({
+                "regions": [l.regions[i.region_a].name, l.regions[i.region_b].name],
+                "patches": [i.patch_a, i.patch_b],
+                "faces": i.n_faces,
+            })
+        })
+        .collect();
+    json!({
+        "manifest": "mesh/regions.json",
+        "regions": regions,
+        "interfaces": interfaces,
     })
 }
 
 /// SPEC-LIT §116.16's summary of a `kind: "tet"` run: (92.57)'s keys, with
 /// `kind: "tet"`, the seven stage rows of [`TET_STAGES`], and the `tet`
 /// block - the tetrahedron and prism counts, the dihedral extremes, the
-/// Steiner counts and the timings. `stopped_after` and `layout` are always
-/// `null`: the tet path has no stop rule and no split yet.
+/// Steiner counts and the timings. `stopped_after` is always `null`: the
+/// tet path has no stop rule. `layout` is `null` without declared bodies,
+/// and with them the written layout's own block, as (92.57)'s is (TET-19,
+/// §92.15.6).
 pub fn tet_summary_json(
     cfg: &AutomeshConfig,
     config_path: &str,
@@ -1355,7 +1609,7 @@ pub fn tet_summary_json(
             "patches": mesh_patches,
         },
         "quality": quality_json(&out.quality),
-        "layout": serde_json::Value::Null,
+        "layout": out.layout.as_ref().map(layout_json).unwrap_or(serde_json::Value::Null),
         "total_seconds": out.total_seconds,
         "config": serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
         "identity": ident.to_json(),
@@ -1448,47 +1702,8 @@ pub fn summary_json(
 
     let q = &out.quality;
     // (92.57)'s `layout` block: `null` unless the split stage ran, and then
-    // the written layout's own shape - per region the counts and its OWN
-    // gate report, and the interface pairs as the manifest carries them.
-    let layout_json = match &out.layout {
-        None => serde_json::Value::Null,
-        Some(l) => {
-            let regions: Vec<serde_json::Value> = l
-                .regions
-                .iter()
-                .map(|r| {
-                    json!({
-                        "name": r.name,
-                        "kind": kind_word(r.kind),
-                        "n_points": r.mesh.points.len(),
-                        "n_cells": r.quality.n_cells,
-                        "n_internal_faces": r.mesh.neighbour.len(),
-                        "n_boundary_faces": r.mesh.faces.len() - r.mesh.neighbour.len(),
-                        "patches": r.mesh.patches.iter().map(|p| json!({
-                            "name": p.name, "kind": p.type_name, "size": p.size,
-                        })).collect::<Vec<serde_json::Value>>(),
-                        "quality": quality_json(&r.quality),
-                    })
-                })
-                .collect();
-            let interfaces: Vec<serde_json::Value> = l
-                .interfaces
-                .iter()
-                .map(|i| {
-                    json!({
-                        "regions": [l.regions[i.region_a].name, l.regions[i.region_b].name],
-                        "patches": [i.patch_a, i.patch_b],
-                        "faces": i.n_faces,
-                    })
-                })
-                .collect();
-            json!({
-                "manifest": "mesh/regions.json",
-                "regions": regions,
-                "interfaces": interfaces,
-            })
-        }
-    };
+    // the written layout's own shape, as [`layout_json`] builds it.
+    let layout = out.layout.as_ref().map(layout_json).unwrap_or(serde_json::Value::Null);
     json!({
         "tool": "ofgpu-automesher",
         "config_path": config_path,
@@ -1513,7 +1728,7 @@ pub fn summary_json(
             "patches": mesh_patches,
         },
         "quality": quality_json(q),
-        "layout": layout_json,
+        "layout": layout,
         "total_seconds": out.total_seconds,
         "config": serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null),
         "identity": ident.to_json(),
@@ -2332,7 +2547,7 @@ mod tests {
                 "region \"{}\" layer rows sum to {sum:.9} (STL area {a_stl:.9})",
                 r["name"].as_str().unwrap()
             );
-            assert!(((sum - a_stl) / a_stl).abs() <= 1e-12, "{sum} vs {a_stl}");
+            assert!(((sum - a_stl as f64) / a_stl as f64).abs() <= 1e-12, "{sum} vs {a_stl}");
         }
     }
 

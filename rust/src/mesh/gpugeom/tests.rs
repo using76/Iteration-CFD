@@ -60,7 +60,7 @@ pub(crate) fn fixtures() -> Vec<Fixture> {
     b.set_cyclic_axis(2).expect("z is cyclic");
     let raw = crate::blockgen::raw_mesh(&b).expect("graded cyclic block");
     let m = crate::io::polymesh::build_host_mesh(&raw).expect("graded cyclic host mesh");
-    out.push(("graded 8x6x4, z cyclic".to_string(), m, raw.points, raw.faces));
+    out.push(("graded 8x6x4, z cyclic".to_string(), m, raw.points.iter().map(|&p| crate::types::to_vec3(p)).collect(), raw.faces));
 
     // (d) The 2:1 box again with every point displaced.
     //

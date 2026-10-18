@@ -71,6 +71,7 @@ ofgpu-validate         1021 / 1026 checks passed           (2026-09-27, SPEC-LIT
                        실패하는 다섯 행: Gate 95-A의 네 행(5:1·10:1 캔틸레버, §109.7)과
                        Gate 95-G의 LE10 링 차수 행(§95.11)
                        이어서 판정이 MISSES 또는 OPEN으로 등록된 게이트 전부를 이름으로 부르는 목록
+ofgpu-validate         79 sections in run order            (2026-10-18, this tree's -sections listing)
 ```
 
 그 목록은 손으로 유지되는 것이 아니라, 게이트가 자신의 판정을 보고하는 바로 그 지점에서 들어가는 레지스트리로부터 **생성**됩니다(SPEC-LIT §69). 판정을 출력하는 것과 등록하는 것이 같은 호출이므로 등록된 판정은 전부 매 실행 이름으로 불리며, 하나가 더 생기더라도 목록에서 빠질 수 없습니다. **`ofgpu-validate`가 실행하는 1026행 가운데 다섯 행은 실패합니다 — 위 블록이 그 다섯 행의 이름을 적어 둡니다 — 그 외의 모든 행은 통과합니다. 그것은 "이 프로젝트가 비교하는 모든 발표된 벤치마크를 재현한다"와 다른 진술이며, 둘을 혼동해서는 안 됩니다.**
@@ -99,7 +100,7 @@ cargo run --release --bin ofgpu-generate-mesh -- channel ..\cases\channel 200 12
 cargo run --release --bin ofgpu-k-epsilon     -- ..\cases\channel -iters 4000 -check 400
 ```
 
-검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열아홉 개 실행 파일(`ofgpu-lowmach`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
+검증 전체는 `cargo run --release --bin ofgpu-validate`입니다. 나머지 열아홉 개 실행 파일(`ofgpu-lowmach`, `ofgpu-compressible`, `ofgpu-vof`, `ofgpu-cht`, `ofgpu-datacentre`, `ofgpu-decompose`, 벤치마크들), 케이스 파일 형식, 명령행 옵션은 **사용자 안내서**에 있습니다. 케이스는 JSONC 한 파일 또는 OpenFOAM ASCII 케이스 디렉터리로 읽고 씁니다 — 후자는 ParaView·`foamToVTK` 같은 기존 도구와의 상호운용을 위한 것이며, meteor-cfd는 OpenFOAM의 어떤 부분과도 링크하지 않고 그 소스를 포함하지 않습니다.
 
 ---
 
@@ -147,7 +148,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 ## 할 수 없는 것
 
 - **MPI·다중 GPU 없음.** 분할·헤일로·분할 불변 축약·분산 PCG/PBiCGStab이 모두 구현되고 게이트되어 있으나(§71–§73) 한 장의 카드 위 한 프로세스에서 돕니다. 통신 라이브러리를 링크하지 않으며 강한 확장성 수치도 발표하지 않습니다.
-- **압축성·천음속 없음.** 밀도 가중 시간미분은 VOF에서 쓰이지만 압력 방정식은 비압축성입니다.
+- **압축성 유동은 새로 들어왔고, 그 게이트 몇 개가 미달입니다.** `ofgpu-compressible`가 전속도 압력 기반 방정식을 풉니다(SPEC-LIT §122-§127). Gate CMP-LM, CMP-COU, CMP-OBL은 통과합니다(CMP-OBL은 수렴 정지 조건을 채우지 못한 채). CMP-SOD의 PISO 행, CMP-AC, CMP-NOZ, CMP-RING, CMP-RAE는 미달이며 `ofgpu-validate`가 매 실행마다 이름을 댑니다(§127.6). 동봉 케이스는 `cases/sodShockTube.jsonc`와 `cases/nozzle` 두 개입니다.
 - **유한율(아레니우스) 화학 없음** — 경직 ODE 적분기도, 야코비안도, 반응 메커니즘도 없습니다.
 - **Crank–Nicolson은 저완화 방정식과 함께 쓸 수 없습니다** — 묵시적으로 Euler로 대체하지 않고 사유를 오류로 보고합니다.
 - **복사는 면대면(surface-to-surface)만 있습니다.** §49/§50은 *투명* 매질을 가로지르는 회색 확산 교환을 풀며, 체적 안에서 흡수·방출·산란하는 것은 없습니다. `radiationModel` 선택기는 `viewFactor`(그리고 같은 모델의 고유 표기 `s2s`)만 **인식**하고 그 밖의 값은 **인식되지 않는 설정**으로, 인식되는 집합을 함께 제시하며 거부됩니다 — 조용한 대체는 없습니다(§13.4). `constant/radiationProperties`가 존재하는데 `radiationModel`을 이름하지 않는 경우도 같은 이유로 거부됩니다: 그 항목에는 기본값이 없으며, 추측하는 리더는 케이스가 묻지 않은 질문에 답하는 셈이기 때문입니다.
@@ -178,7 +179,7 @@ claude mcp add ofgpu -- node mcp\server.mjs
 |---|---|
 | **사용자 안내서** (별도 페이지) | 빌드, 케이스 파일, 설정 계약, 실행, 출력, 못 하는 것 |
 | **기술 안내서** (별도 페이지) | 이산화, 경계조건, 압력–속도, 난류, 저마하, 면대면 복사, 검증, GPU 상주·메쉬 적응·성능 |
-| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 95개 절(§0~§113, 번호 사이 빈 곳 있음). 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
+| [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) | 수치 명세 138개 절(§0~§161, 번호 사이 빈 곳 있음). 모든 수식의 원논문 인용 포함 — 두 안내서는 여기서 뽑아낸 것이며 이것을 대체하지 않습니다 |
 | [`rust/PROVENANCE.md`](rust/PROVENANCE.md) · [`LICENSING.md`](LICENSING.md) · [`NOTICE`](NOTICE) | 파일별 출처와 설계 결정, 라이선스 감사 기록, 서드파티 고지 |
 | [`cases/README.md`](cases/README.md) · [`docs/README.md`](docs/README.md) | 시험 케이스 형상, 그리고 `docs/`의 색인 — 모델 카탈로그, GPU 이식성, 입출력 재설계와 JSONC 스키마, 그리고 `ofgpu-lowmach`의 저-마하 정식화와 벽 열전달 게이트 기록 |
 

@@ -385,7 +385,6 @@ fn an_empty_pool_deposits_zero_and_needs_no_special_case() {
 ///   measured gap is asserted at `1e-15` relative and reported by
 ///   `ofgpu-validate`.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_67b_what_was_deposited_is_exactly_what_was_put_in() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let n = 4usize;
@@ -450,7 +449,10 @@ fn gate_67b_what_was_deposited_is_exactly_what_was_put_in() {
             ("mass", got.mass[c], want.mass[c]),
         ] {
             let e = if b == 0.0 { (a - b).abs() } else { (a - b).abs() / b.abs() };
-            assert!(e <= 1e-15, "cell {c} {name}: {a} against {b}, relative {e}");
+            assert!(
+                e as f64 <= crate::precision::roundoff_tol(1e-15),
+                "cell {c} {name}: {a} against {b}, relative {e}"
+            );
         }
     }
 
@@ -469,9 +471,17 @@ fn gate_67b_what_was_deposited_is_exactly_what_was_put_in() {
             v += pool.n_p[p] * pi6 * d * d * d;
         }
         let e = (got.volume_fraction[c] - v / cell_v).abs() / (v / cell_v);
-        assert!(e <= 1e-15, "cell {c}: alpha_p {} against {}", got.volume_fraction[c], v / cell_v);
+        assert!(
+            e as f64 <= crate::precision::roundoff_tol(1e-15),
+            "cell {c}: alpha_p {} against {}",
+            got.volume_fraction[c],
+            v / cell_v
+        );
         let em = (got.mass[c] - ctrl.rho_liquid * v).abs() / (ctrl.rho_liquid * v);
-        assert!(em <= 1e-15, "cell {c}: mass");
+        assert!(
+            em as f64 <= crate::precision::roundoff_tol(1e-15),
+            "cell {c}: mass"
+        );
     }
 }
 
@@ -481,7 +491,6 @@ fn gate_67b_what_was_deposited_is_exactly_what_was_put_in() {
 /// exactly once. This is the conservation statement in the form a running
 /// case can check, with no dyadic weights to help it.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_spray_deposits_every_live_parcel_exactly_once() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block(10);
@@ -505,6 +514,7 @@ fn a_spray_deposits_every_live_parcel_exactly_once() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let mut p = Parcels::new(&gpu, &hm, &gm, ctrl, &[inj], dt).unwrap();
@@ -601,6 +611,7 @@ fn the_sort_holds_at_twenty_thousand_parcels_and_thirty_two_tiles() {
                 mass_flow: 1e-3,
                 parcels_per_event: 125,
                 interval: 0.0,
+                size: crate::parcels::SizeDistribution::Monodisperse,
             }
         })
         .collect();
@@ -814,6 +825,7 @@ fn shifting_every_injected_parcel_into_a_different_slot_moves_no_bit() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
 
@@ -975,6 +987,7 @@ fn the_pool_grid_geometry_does_not_move_the_deposition() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
 
@@ -1040,6 +1053,7 @@ fn the_sort_and_the_gather_capture_once_and_replay() {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 15usize;
@@ -1194,6 +1208,7 @@ fn the_cost_of_the_sort_at_a_million_slots() {
         mass_flow: 1e-3,
         parcels_per_event: per_event,
         interval: 0.0,
+        size: crate::parcels::SizeDistribution::Monodisperse,
     };
 
     // TWO occupancies of the SAME pool, because the load-bearing statement is

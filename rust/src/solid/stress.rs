@@ -489,7 +489,6 @@ mod tests {
     /// normalised by its own field's largest magnitude; the symmetry of
     /// sigma asserted bitwise on both sides.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_stress_kernels_match_the_host_mirrors() {
         let Some(gpu) = gpu() else { return };
         let mat = rnd_material();
@@ -526,7 +525,7 @@ mod tests {
             mat.mu(), mat.lambda()
         );
         for (what, e) in [("sigma", e_s), ("von_mises", e_vm), ("principal", e_pr), ("hyd", e_h), ("dev", e_d), ("mag", e_m)] {
-            assert!(e <= 1e-12, "{what} differs by {e:e} relative");
+            assert!((e as f64) <= crate::precision::roundoff_tol(1e-12), "{what} differs by {e:e} relative");
         }
     }
 
@@ -579,7 +578,6 @@ mod tests {
     /// descending, and a hydrostatic one comes back exactly itself - the
     /// `p == 0` branch taken, host and kernel.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn principal_stresses_of_a_diagonal_tensor_are_its_diagonal() {
         let mut tensors: Vec<Tensor> = Vec::new();
         let mut expected: Vec<Vec3> = Vec::new();
@@ -601,7 +599,8 @@ mod tests {
             let m = s.xx.abs().max(s.yy.abs()).max(s.zz.abs()).max(1.0);
             for j in 0..3 {
                 assert!(
-                    (got.component(j) - expected[i].component(j)).abs() <= 1e-14 * m,
+                    ((got.component(j) - expected[i].component(j)).abs() as f64)
+                        <= crate::precision::roundoff_tol(1e-14) * m as f64,
                     "host diagonal case {i}: {got:?} vs {:?}",
                     expected[i]
                 );
@@ -638,8 +637,8 @@ mod tests {
             let m = s.xx.abs().max(s.yy.abs()).max(s.zz.abs()).max(1.0);
             for cpt in 0..3 {
                 assert!(
-                    (got[qs.len() + j].component(cpt) - expected[j].component(cpt)).abs()
-                        <= 1e-14 * m,
+                    ((got[qs.len() + j].component(cpt) - expected[j].component(cpt)).abs() as f64)
+                        <= crate::precision::roundoff_tol(1e-14) * m as f64,
                     "device diagonal case {j}"
                 );
             }
@@ -652,7 +651,6 @@ mod tests {
     /// accurate, so its two zero eigenvalues are held to 1e-7, while the
     /// extreme root is held to 1e-13.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn principal_stresses_of_a_rotated_tensor_are_the_eigenvalues() {
         let (c30, s30) = (30.0f64.to_radians().cos(), 30.0f64.to_radians().sin());
         let (c20, s20) = (20.0f64.to_radians().cos(), 20.0f64.to_radians().sin());
@@ -685,7 +683,8 @@ mod tests {
         let got = principal(rotate([5.0, -2.0, 1.0]));
         for (i, want) in [5.0, 1.0, -2.0].into_iter().enumerate() {
             assert!(
-                (got.component(i) - want).abs() <= 1e-13 * 5.0,
+                ((got.component(i) - want).abs() as f64)
+                    <= crate::precision::roundoff_tol(1e-13) * 5.0,
                 "eigenvalue {i}: {} vs {want}", got.component(i)
             );
         }
@@ -706,7 +705,6 @@ mod tests {
     /// that cancels to 1e-3 M carries rounding of size eps M, so no
     /// per-component bound is achievable.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_split_reassembles_the_stress() {
         let (grad, t, _u) = pseudo_case();
         let mat = rnd_material();
@@ -737,9 +735,9 @@ mod tests {
             "split: reassemble={:.3e} M, |tr dev|={:.3e} M, vm cross={:.3e} (M = {m:.3e})",
             worst_re / m, worst_tr / m, worst_vm
         );
-        assert!(worst_re <= 1e-15 * m, "reassembly off by {worst_re:e}");
-        assert!(worst_tr <= 1e-15 * m, "deviator trace {worst_tr:e}");
-        assert!(worst_vm <= 1e-14, "von Mises cross-check off by {worst_vm:e}");
+        assert!((worst_re as f64) <= crate::precision::roundoff_tol(1e-15) * m as f64, "reassembly off by {worst_re:e}");
+        assert!((worst_tr as f64) <= crate::precision::roundoff_tol(1e-15) * m as f64, "deviator trace {worst_tr:e}");
+        assert!((worst_vm as f64) <= crate::precision::roundoff_tol(1e-14), "von Mises cross-check off by {worst_vm:e}");
     }
 
     /// The five numbers of the free-expansion gate, all on the
@@ -795,6 +793,7 @@ mod tests {
     /// gradient) and of the SOLVED state (the outer loop's fixed point,
     /// whose own last act is the boundary correction) both say so.
     #[test]
+    // f32 (F32-16): outer loop fails to converge in 600 iters in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn free_expansion_carries_no_stress_on_the_device() {
         let Some(gpu) = gpu() else { return };
@@ -865,7 +864,6 @@ mod tests {
     /// surrounding cell centres average to the point itself. Boundary
     /// points have a one-sided stencil; their error is printed, not held.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn point_displacement_of_a_linear_field_is_exact_inside() {
         let axis = GradedAxis { lo: 0.0, hi: 1.0, n: 8, expansion: 1.0, two_sided: false };
         let raw =
@@ -883,7 +881,7 @@ mod tests {
         let mut worst_in = 0.0 as Scalar;
         let mut worst_b = 0.0 as Scalar;
         for (i, p) in raw.points.iter().enumerate() {
-            let want = matvec(a, *p);
+            let want = matvec(a, crate::types::to_vec3(*p));
             let err = (up[i] - want).mag();
             if on_boundary[i] {
                 worst_b = worst_b.max(err);
@@ -894,7 +892,7 @@ mod tests {
         println!(
             "point displacement: interior max rel = {worst_in:.3e}, boundary max abs = {worst_b:.3e}"
         );
-        assert!(worst_in <= 1e-12, "interior points off by {worst_in:e} relative");
+        assert!((worst_in as f64) <= crate::precision::roundoff_tol(1e-12), "interior points off by {worst_in:e} relative");
     }
 
     /// The whole chain on the coarsest quarter ring: the temperature through
@@ -906,6 +904,7 @@ mod tests {
     /// the cost, and the place a wrong patch statement or a wrong reference
     /// temperature fails first, in seconds.
     #[test]
+    // f32 (F32-16): no convergence in 400 outer iterations in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_thick_cylinder_chain_runs_on_the_coarsest_mesh() {
         use crate::cht::{

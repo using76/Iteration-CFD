@@ -511,7 +511,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn every_restated_body_closes_and_has_positive_volume() {
         let le1 = le1_membrane(8, 16).unwrap();
         let r = le1.mesh.check();
@@ -549,11 +548,11 @@ mod tests {
     #[test]
     fn the_elliptic_bodies_carry_the_published_area_and_patches() {
         let v_ref = |th: Scalar| FRAC_PI_4 as Scalar * (3.25 * 2.75 - 2.0 * 1.0) * th;
-        let mut e: Vec<Scalar> = Vec::new();
+        let mut e: Vec<f64> = Vec::new();
         for (nt, nphi) in [(8usize, 16usize), (16, 32)] {
             let b = le1_membrane(nt, nphi).unwrap();
             let r = b.mesh.check();
-            e.push((r.total_volume - v_ref(0.1)).abs() / v_ref(0.1));
+            e.push((r.total_volume - f64::from(v_ref(0.1))).abs() / f64::from(v_ref(0.1)));
         }
         println!("LE1 volume errors: coarse {:e} fine {:e}", e[0], e[1]);
         assert!(e[1] <= 1e-2, "fine-mesh volume error {:e}", e[1]);
@@ -617,7 +616,6 @@ mod tests {
         println!("cut0/cut90 face centres exact on y = 0 and x = 0 for LE1 and LE10");
     }
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn le11_is_the_published_section_revolved() {
         let bore = FRAC_1_SQRT_2 as Scalar;
         let (r, z) = le11_inner(0.0);
@@ -637,7 +635,8 @@ mod tests {
         let (r, z) = le11_outer(arc / total);
         assert!((r - cr).abs() <= 1e-12 && (z - cz).abs() <= 1e-12, "C");
         let (r, z) = le11_outer((arc + taper) / total);
-        assert!((r - 1.0).abs() <= 1e-12 && (z - LE11_TAPER_TOP).abs() <= 1e-12, "G");
+        assert!(((r - 1.0).abs() as f64) <= crate::precision::roundoff_tol(1e-12)
+            && ((z - LE11_TAPER_TOP).abs() as f64) <= crate::precision::roundoff_tol(1e-12), "G");
         println!("inner A-H and outer B-C-G-I endpoints, C and G within 1e-12");
         let b = le11_body(8, 16, 32).unwrap();
         for p in b.mesh.patches.iter() {
@@ -678,7 +677,7 @@ mod tests {
         v *= h / 3.0;
         let v_ref = FRAC_PI_4 as Scalar * v;
         let r = b.mesh.check();
-        let gap = (r.total_volume - v_ref).abs() / v_ref;
+        let gap = (r.total_volume - v_ref as f64).abs() / v_ref as f64;
         println!(
             "LE11 volume: mesh {:.6} reference {:.6} relative gap {:e}",
             r.total_volume, v_ref, gap
@@ -686,7 +685,6 @@ mod tests {
         assert!(gap <= 1e-2, "LE11 volume off by {gap:e} relative");
     }
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_linear_field_is_carried_to_the_point_exactly() {
         for name in ["LE1", "LE10", "LE11", "Lame"] {
             let b = match name {
@@ -705,7 +703,8 @@ mod tests {
             let want = 3.0 + 2.0 * b.target.x - 5.0 * b.target.y + 7.0 * b.target.z;
             println!("{name}: fit {got:.12} exact {want:.12}");
             assert!(
-                (got - want).abs() <= 1e-10 * (1.0 + want.abs()),
+                ((got - want).abs() as f64)
+                    <= crate::precision::roundoff_tol(1e-10) * (1.0 + want.abs()) as f64,
                 "{name}: {got} against {want}"
             );
         }
@@ -774,18 +773,19 @@ mod tests {
         println!("refusals: does-not-span, cannot-carry, wrong-length values");
     }
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_membrane_material_has_plane_stress_in_plane_law() {
         let m = le1_plane_strain_material();
         println!("E* {:.6e} nu* {:.6}", m.e, m.nu);
         assert!(
-            (m.e / (1.0 - m.nu * m.nu) - NAFEMS_E).abs() <= 1e-12 * NAFEMS_E,
+            ((m.e / (1.0 - m.nu * m.nu) - NAFEMS_E).abs() as f64)
+                <= crate::precision::roundoff_tol(1e-12) * NAFEMS_E as f64,
             "E*/(1 - nu*^2) = {} against {}",
             m.e / (1.0 - m.nu * m.nu),
             NAFEMS_E
         );
         assert!(
-            (m.nu / (1.0 - m.nu) - NAFEMS_NU).abs() <= 1e-12,
+            ((m.nu / (1.0 - m.nu) - NAFEMS_NU).abs() as f64)
+                <= crate::precision::roundoff_tol(1e-12),
             "nu*/(1 - nu*) = {} against {}",
             m.nu / (1.0 - m.nu),
             NAFEMS_NU

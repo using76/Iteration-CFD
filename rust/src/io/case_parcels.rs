@@ -433,6 +433,10 @@ impl JsonParcels {
                 mass_flow: j.mass_flow as Scalar,
                 parcels_per_event: j.parcels_per_event.unwrap_or(di.parcels_per_event),
                 interval: sc(j.interval, di.interval),
+                // SPEC-LIT 147.1: the case blocks of §137.6 do not reach
+                // the size distribution yet; it is a library field, and an
+                // injector read from a case is Monodisperse.
+                size: di.size,
             })
             .collect();
 
@@ -571,6 +575,47 @@ fn entry_value(what: &str, key: &str, leaf: &str, raw: &str) -> Result<serde_jso
     Ok(Value::String(t.to_string()))
 }
 
+/// One dictionary as the JSON object tree the JSONC route reads: every
+/// entry keyed by its flattened path, `FoamFile` excluded, an `(a b c)`
+/// list a number array, a switch a bool, a number a number, anything else a
+/// word. Shared by the `parcels` block's own lowering and the cloud's
+/// `dustCloud` route (`case_dust::dust_cloud_of_dict`), so the two cannot
+/// drift (SPEC-LIT §159.9). The `injectors` and `dustCloud`
+/// sub-dictionaries are left as the plain objects they arrive as.
+pub(crate) fn dict_tree(
+    d: &FoamDict,
+    what: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    use serde_json::{Map, Value};
+    let mut root = Map::new();
+    for (key, raw) in &d.entries {
+        if key == "FoamFile" || key.starts_with("FoamFile/") {
+            continue;
+        }
+        let parts: Vec<&str> = key.split('/').filter(|s| !s.is_empty()).collect();
+        let Some((leaf, dirs)) = parts.split_last() else { continue };
+        let mut node = &mut root;
+        for dir in dirs {
+            let slot = node.entry((*dir).to_string()).or_insert_with(|| Value::Object(Map::new()));
+            node = match slot {
+                Value::Object(m) => m,
+                _ => {
+                    return Err(Error::Config(format!(
+                        "{what}: {dir} is both an entry and a sub-dictionary (SPEC-LIT §137.6)"
+                    )))
+                }
+            };
+        }
+        if key.ends_with('/') {
+            // An empty sub-dictionary's marker.
+            node.entry((*leaf).to_string()).or_insert_with(|| Value::Object(Map::new()));
+            continue;
+        }
+        node.insert((*leaf).to_string(), entry_value(what, key, leaf, raw)?);
+    }
+    Ok(root)
+}
+
 impl JsonParcels {
     pub fn read(path: &Path) -> Result<Self> {
         let d = FoamDict::read(path)?;
@@ -584,35 +629,15 @@ impl JsonParcels {
 
     /// The dictionary as the JSONC block, through the same deserialiser:
     /// an unknown key is refused by the same `deny_unknown_fields`. The
-    /// `injectors` sub-dictionaries are taken in their name order.
+    /// `injectors` sub-dictionaries are taken in their name order. A
+    /// `dustCloud` sub-dictionary is NOT part of this block - it is the
+    /// cloud's route (SPEC-LIT §159.9, `case_dust::dust_cloud_of_dict`) -
+    /// so it is removed before the deserialiser, whose
+    /// `deny_unknown_fields` would refuse it here.
     pub fn from_dict(d: &FoamDict, what: &str) -> Result<Self> {
-        use serde_json::{Map, Value};
-        let mut root = Map::new();
-        for (key, raw) in &d.entries {
-            if key == "FoamFile" || key.starts_with("FoamFile/") {
-                continue;
-            }
-            let parts: Vec<&str> = key.split('/').filter(|s| !s.is_empty()).collect();
-            let Some((leaf, dirs)) = parts.split_last() else { continue };
-            let mut node = &mut root;
-            for dir in dirs {
-                let slot = node.entry((*dir).to_string()).or_insert_with(|| Value::Object(Map::new()));
-                node = match slot {
-                    Value::Object(m) => m,
-                    _ => {
-                        return Err(Error::Config(format!(
-                            "{what}: {dir} is both an entry and a sub-dictionary (SPEC-LIT §137.6)"
-                        )))
-                    }
-                };
-            }
-            if key.ends_with('/') {
-                // An empty sub-dictionary's marker.
-                node.entry((*leaf).to_string()).or_insert_with(|| Value::Object(Map::new()));
-                continue;
-            }
-            node.insert((*leaf).to_string(), entry_value(what, key, leaf, raw)?);
-        }
+        use serde_json::Value;
+        let mut root = dict_tree(d, what)?;
+        root.remove("dustCloud");
         if let Some(inj) = root.remove("injectors") {
             let list = match inj {
                 Value::Object(m) => m.into_iter().map(|(_, v)| v).collect(),
@@ -630,13 +655,30 @@ impl JsonParcels {
     }
 }
 
+/// The `parcels` block on the dictionary route, ignoring the cloud's
+/// `dustCloud` sub-dictionary (SPEC-LIT §159.9): `None` when the file
+/// states no `parcels` keys at all beside `dustCloud` - a file that states
+/// only `dustCloud` has no `parcels` block - else the same lowering
+/// `JsonParcels::from_dict` gives.
+pub fn parcels_of_dict(d: &FoamDict, what: &str) -> Result<Option<JsonParcels>> {
+    let mut root = dict_tree(d, what)?;
+    root.remove("dustCloud");
+    if root.is_empty() {
+        return Ok(None);
+    }
+    JsonParcels::from_dict(d, what).map(Some)
+}
+
 /// The dictionary route: `constant/cloudProperties` when the case has one.
+/// A file holding only the cloud's `dustCloud` is `Ok(None)` here -
+/// `case_dust::read_dust_cloud` reads that one.
 pub fn read_cloud_properties(case_dir: &Path) -> Result<Option<JsonParcels>> {
     let p = case_dir.join(FILE);
     if !p.exists() {
         return Ok(None);
     }
-    JsonParcels::read(&p).map(Some)
+    let d = FoamDict::read(&p)?;
+    parcels_of_dict(&d, &p.display().to_string())
 }
 
 #[cfg(test)]
@@ -770,6 +812,7 @@ injectors
                     mass_flow: s(1e-3),
                     parcels_per_event: 4,
                     interval: s(0.01),
+                    size: crate::parcels::SizeDistribution::Monodisperse,
                 },
                 Injector { position: v(0.5, 0.5, 0.5), mass_flow: s(2e-3), ..di },
             ],

@@ -3932,6 +3932,79 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_couette", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 127.6 - Gate CMP-NOZ: the quasi-1-D nozzle, subsonic,
+    // supersonic started and shocked, on the 200-cell duct of
+    // src/compressible/gatemesh.rs (SPEC-LIT 127.5.2), live, in
+    // src/bin/validate_gates/nozzle.rs (CMP-21).
+    if c.section("Gate CMP-NOZ: the quasi-1-D nozzle, subsonic, supersonic started and shocked, 200 cells (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::nozzle::GATE);
+    let r = validate_gates::nozzle::check_nozzle(c, &gpu);
+    c.ran("check_nozzle", r)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 127.6 - Gate CMP-OBL: the oblique shock on the 2-D
+    // compression ramp of src/compressible/gatemesh.rs (SPEC-LIT
+    // 127.5.3) at M 2, 10 degrees, against NACA 1135's theta-beta-M
+    // (127.4), live, in src/bin/validate_gates/oblique.rs (CMP-23).
+    if c.section("Gate CMP-OBL: the oblique shock on a 10-degree ramp at M 2, 90 x 60 cells (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::oblique::GATE);
+    let r = validate_gates::oblique::check_oblique(c, &gpu);
+    c.ran("check_oblique", r)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 127.6 - Gate CMP-RING: Ringleb's transonic smooth flow on
+    // the three meshes h, h/2, h/4 of src/compressible/gatemesh.rs
+    // (SPEC-LIT 127.5.4), the observed order of the L2 entropy error
+    // against the isentropic key (127.8)-(127.11a), live, in
+    // src/bin/validate_gates/ringleb.rs (CMP-24).
+    if c.section("Gate CMP-RING: Ringleb's transonic flow on three meshes, h, h/2, h/4 (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::ringleb::GATE);
+    let r = validate_gates::ringleb::check_ringleb(c, &gpu);
+    c.ran("check_ringleb", r)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 127.6 - Gate CMP-RAE: RAE 2822 Case 6 (AGARD AR-138, the
+    // NPARC archive's corrected conditions M 0.729, alpha 2.31 deg,
+    // Re 6.5e6) with Spalart-Allmaras on the three C-meshes of
+    // src/compressible/gatemesh.rs (SPEC-LIT 127.5.1), against the
+    // measured Cp key rae2822-cp-case6: a live coarse smoke and the
+    // recorded runs replayed, in src/bin/validate_gates/rae2822.rs
+    // (CMP-27).
+    if c.section("Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras against AR-138, a live coarse smoke and the three recorded C-meshes, replayed (SPEC-LIT 127.6)") {
+    c.enter_gate(validate_gates::rae2822::GATE);
+    let r = validate_gates::rae2822::check_rae2822(c, &gpu);
+    c.ran("check_rae2822", r)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 116.17 - Gate 116-P: Hagen-Poiseuille on tetrahedra and
+    // prisms, the L1 pipe at Re 100 (TET-14), the fitted dp/dx of
+    // cases/pipe_tet_L1 against (116.27), replayed, in
+    // src/bin/validate_gates/pipe_tet.rs.
+    if c.section("Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17)") {
+    validate_gates::pipe_tet::check_pipe_tet(c)?;
+    }
+    // SPEC-LIT 144.7 - Gates 88-T and 90-T leg 3: T3B and T3A- (and T3A
+    // refitted) on the flat-plate harness with a per-case inflow omega fitted
+    // to ERCOFTAC's measured free-stream Tu(x), the fit held as an input
+    // check, onset ordering and spread against Roach & Brierley, replayed,
+    // in src/bin/validate_gates/t3_fitted.rs (docs/17 VAL-35).
+    if c.section("Gate 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to ERCOFTAC's measured Tu(x), onset ordering and spread, replayed (SPEC-LIT 144.7)") {
+    validate_gates::t3_fitted::check_t3_fitted(c)?;
+    }
+    // SPEC-LIT 157.5 - Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb,
+    // four live runs of ofgpu-lowmach, in src/bin/validate_gates/dst_leeds.rs.
+    if c.section("Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb, S_t,b against Bradley, Chen & Swithenbank 1989 via Huang et al. 2020 Fig. 9 (SPEC-LIT 157.5)") {
+    c.enter_gate(validate_gates::dst_leeds::GATE);
+    validate_gates::dst_leeds::check_dst_leeds(c)?;
+    c.leave_gate();
+    }
+    // SPEC-LIT 157.6 - Gate DST-VES: the closed vessels, the thin-flame
+    // spheres and the REMBE closed stage, in src/bin/validate_gates/dst_vessel.rs.
+    if c.section("Gate DST-VES: closed vessels, thin-flame spheres against (157.4) and the REMBE closed stage against Huang et al. 2022 Fig. 10 (SPEC-LIT 157.6)") {
+    c.enter_gate(validate_gates::dst_vessel::GATE);
+    validate_gates::dst_vessel::check_dst_vessel(c)?;
+    c.leave_gate();
+    }
     // SPEC-LIT 133.12 - Gate CHR-13: the 1-D freely propagating CH4-air
     // flame, BFER phi 1.0, S_L by the 1500 K isotherm on three meshes,
     // replayed from the recorded runs of src/bin/validate_gates/flame1d.rs
@@ -8227,6 +8300,7 @@ fn check_output_pipeline(c: &mut Checks) -> Result<()> {
         precision: precision.map(str::to_string),
         usd_scene: false,
         lattice: None,
+        isaac: None,
     };
 
     // ---- the three columns, and the wrong-column refusals (44.1) ---------
@@ -16457,7 +16531,7 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::couple::{CouplingControls, CouplingMode, MassCoupling, ParcelCoupling};
     use ofgpu::parcels::{
         DragModel, EvaporationControls, Injector, ParcelControls, ParcelDeposition,
-        ParcelPhysics, Parcels, SeedParcel, WallAction,
+        ParcelPhysics, Parcels, SeedParcel, SizeDistribution, WallAction,
     };
     use ofgpu::momentum::{BuoyancyCoeffs, Momentum, MomentumControls};
     use ofgpu::timescheme::DdtScheme;
@@ -16778,6 +16852,7 @@ fn theobald_gate(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow,
         parcels_per_event: 2,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
 
     let coupled_range = |couple: bool| -> Result<(Scalar, Scalar)> {
@@ -19142,7 +19217,8 @@ fn dc_chain(n: usize) -> Result<HostMesh> {
 fn check_parcels(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         drag_k, parcel_uid, terminal_velocity, DragModel, EvaporationControls, Injector,
-        ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels, SeedParcel, WallAction,
+        ParcelControls, ParcelPhysics, ParcelSnapshot, Parcels, SeedParcel, SizeDistribution,
+        WallAction,
     };
 
     let uniform = |n: [usize; 3], hi: [Scalar; 3], t: [&str; 6]| -> Result<HostMesh> {
@@ -19364,6 +19440,7 @@ fn check_parcels(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 20usize;
@@ -19480,7 +19557,7 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         parcel_uid, DepositSnapshot, DeviceScan, DragModel, EvaporationControls, Injector,
         ParcelControls, ParcelCsrSnapshot, ParcelDeposition, ParcelPhysics, ParcelSnapshot,
-        Parcels, SeedParcel, WallAction,
+        Parcels, SeedParcel, SizeDistribution, WallAction,
     };
 
     let uniform = |n: usize| -> Result<HostMesh> {
@@ -19821,6 +19898,7 @@ fn check_parcel_deposition(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 8,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let dt: Scalar = 0.05;
     let steps = 20usize;
@@ -20892,8 +20970,8 @@ fn check_parcel_vapour_coupling(c: &mut Checks, gpu: &Gpu) -> Result<()> {
 fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
     use ofgpu::parcels::{
         surface_tension, DragModel, Injector, ParcelControls, ParcelPhysics, Parcels, SeedParcel,
-        SplashCriterion, SurfaceTension, WallAction, WallImpactControls, WallRegime,
-        FLAG_DEPOSITED,
+        SizeDistribution, SplashCriterion, SurfaceTension, WallAction, WallImpactControls,
+        WallRegime, FLAG_DEPOSITED,
     };
 
     // ---- (78.2): the surface tension, against IAPWS R1-76's own table ---
@@ -21095,6 +21173,7 @@ fn check_droplet_wall_impact(c: &mut Checks, gpu: &Gpu) -> Result<()> {
         mass_flow: 1e-3,
         parcels_per_event: 2,
         interval: 0.0,
+        size: SizeDistribution::Monodisperse,
     };
     let spray = |wall: WallAction| ParcelControls {
         capacity: 4096,

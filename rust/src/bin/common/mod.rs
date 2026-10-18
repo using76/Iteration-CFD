@@ -100,9 +100,35 @@ pub fn load_case_with(
     case_path: &Path,
     allow_chemistry: bool,
 ) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    load_case_inner(case_path, allow_chemistry, false, allow_chemistry)
+}
+
+/// [`load_case`], with a JSONC case's `vent` block AND its `dust` block let
+/// through - SPEC-LIT §158.8: `ofgpu-compressible` is the one driver of the
+/// vent, and SPEC-LIT §158.6 makes it the one driver of the dust model on
+/// the mixture gas, so this loader is that driver's alone. The chemistry
+/// refusal stays: the two combustions never share a case.
+pub fn load_case_vented(
+    case_path: &Path,
+) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
+    load_case_inner(case_path, false, true, true)
+}
+
+/// [`load_case_with`]'s body, with the vent refusal of its own key and the
+/// dust seam's own.
+fn load_case_inner(
+    case_path: &Path,
+    allow_chemistry: bool,
+    allow_vent: bool,
+    allow_dust: bool,
+) -> Result<(HostMesh, CaseControls, Option<LoweredCase>)> {
     if is_json_case(case_path) {
         let json = read_case_jsonc(case_path)?;
         let lowered = json.lower()?;
+        // SPEC-LIT §159.9: a dust cloud is refused by every driver, the one
+        // that runs a case's parcels included (no driver runs it before
+        // DST-15).
+        lowered.refuse_cloud()?;
         // SPEC-LIT §137.6/§137.10: parcels are run by ofgpu-lowmach only (the
         // same flag).
         // SPEC-LIT §137.7: a case's chemistry is refused by every driver but
@@ -112,6 +138,30 @@ pub fn load_case_with(
             lowered.refuse_parcels()?;
             lowered.refuse_chemistry()?;
             lowered.refuse_radiation()?;
+        }
+        // SPEC-LIT §157.4: a case's dust model is refused the same way -
+        // DST-06's part 3 wires it into ofgpu-lowmach, DST-10's part 3 into
+        // ofgpu-compressible, and every other driver refuses it here.
+        if allow_chemistry {
+            // SPEC-LIT §158.6: ofgpu-lowmach's route runs the dust model on
+            // its OWN two pseudo-species; a gas block beside the model would
+            // be lowered here and then ignored, which is the substitution
+            // §13.4 exists to stop.
+            if lowered.dust.is_some() && lowered.compressible.is_some() {
+                return Err(Error::Refused(
+                    "physics.compressible: a dust case with a gas block runs on \
+                     ofgpu-compressible (SPEC-LIT §158.6); ofgpu-lowmach would ignore \
+                     the gas"
+                        .into(),
+                ));
+            }
+        } else if !allow_dust {
+            lowered.refuse_dust()?;
+        }
+        // SPEC-LIT §158.8: a case's vent block is refused the same way -
+        // DST-09's part 3 wires it into ofgpu-compressible only.
+        if !allow_vent {
+            lowered.refuse_vent()?;
         }
         // SPEC-LIT 119.3: `build_host_mesh` is `blockgen::build_mesh` for
         // every case without `mesh.wedge` (bit for bit what the line below

@@ -14,7 +14,7 @@ export const CASE_BLOCK_CHOICES: Record<string, string[]> = {
   'species.transport.model': ['lewis'],
   'chemistry.integrator': ['rodas3', 'ros3'],
   'chemistry.splitting': ['lie', 'strang'],
-  'combustion.model': ['laminar', 'EDM', 'EDC', 'PaSR'],
+  'combustion.model': ['laminar', 'EDM', 'EDC', 'PaSR', 'FSC', 'TFC'],
   'combustion.variant': ['1989', '1996', '2005'],
   'radiation.absorption.model': ['constant', 'wsgg', 'wsggGrey'],
   'radiation.model': ['P1', 'fvDOM', 's2s', 'viewFactor'],

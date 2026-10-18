@@ -533,11 +533,12 @@ mod tests {
 
     /// `n = beta*/beta`, straight from the coefficients.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_decay_exponent_is_beta_star_over_beta() {
         let c = KOmegaCoeffs::default();
-        assert!((c.decay_exponent() - 0.09 / 0.072).abs() < 1e-13);
-        assert!((c.decay_exponent() - 1.25).abs() < 1e-13);
+        assert!(((c.decay_exponent() - 0.09 / 0.072).abs() as f64)
+            < crate::precision::roundoff_tol(1e-13));
+        assert!(((c.decay_exponent() - 1.25).abs() as f64)
+            < crate::precision::roundoff_tol(1e-13));
     }
 
     /// Decaying homogeneous isotropic turbulence for the omega form.
@@ -554,7 +555,6 @@ mod tests {
     /// numerical solution rather than assumed. Repeated with a second `beta`
     /// so that the fit is measuring the coefficient.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn decaying_isotropic_turbulence_follows_beta_star_over_beta() -> Result<()> {
         let Some(gpu) = gpu() else {
             return Ok(());
@@ -614,7 +614,8 @@ mod tests {
 
             for (i, &v) in k_num.iter().enumerate() {
                 assert!(
-                    (v - k_end).abs() <= 1e-12 * k_end,
+                    ((v - k_end).abs() as f64)
+                        <= crate::precision::roundoff_tol(1e-12) * k_end as f64,
                     "beta {beta}: cell {i} holds k = {v}, cell 0 holds {k_end}"
                 );
             }

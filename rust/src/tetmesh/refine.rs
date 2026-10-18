@@ -39,7 +39,7 @@
 //! the concentric shells); the choices are derived in SPEC-LIT §116.13. No
 //! GPL-licensed source was consulted.
 
-use super::carve::{carve, CarveStart, Carved};
+use super::carve::{carve_bodies, CarveStart, Carved};
 use super::delaunay::{Delaunay, INF};
 use super::recover::{
     circumcentre2, circumsphere3, delaunay_edges, delaunay_faces, key, lerp, orient2,
@@ -561,6 +561,25 @@ pub fn refine(
     spec: &TetRefineSpec,
     h: &dyn Fn(Point) -> f64,
 ) -> Result<Refined> {
+    refine_bodies(surf, fr, start, &[], spec, h)
+}
+
+/// [`refine`] as TET-19 builds it: the declared bodies are kept beside the
+/// fluid by [`carve_bodies`](super::carve::carve_bodies), so every pass's
+/// quality gate reads the bodies' tetrahedra too - a body's tets are
+/// refined to the size field like the fluid's, and a kept tetrahedron whose
+/// circumcentre is already a point of the triangulation is exempt and
+/// reported (a duplicate insertion is refused, and a body's interior
+/// refines for the first time here). [`refine`] is this with `bodies`
+/// empty.
+pub fn refine_bodies(
+    surf: &TetSurface,
+    fr: FaceRecovery,
+    start: &CarveStart,
+    bodies: &[super::carve::CarveBody],
+    spec: &TetRefineSpec,
+    h: &dyn Fn(Point) -> f64,
+) -> Result<Refined> {
     if !(spec.radius_edge >= 2.0 && spec.radius_edge.is_finite()) {
         return Err(Error::Refused(format!(
             "tet.refine.radius_edge: must be >= 2 (Shewchuk 1998's termination bound, SPEC-LIT §116.13), got {}",
@@ -588,7 +607,7 @@ pub fn refine(
             hi[k] = hi[k].max(p[k]);
         }
     }
-    let have: HashSet<[u64; 3]> = fr.points.iter().map(|&p| bits(p)).collect();
+    let mut have: HashSet<[u64; 3]> = fr.points.iter().map(|&p| bits(p)).collect();
     for m in 0..8u32 {
         let c = [0, 1, 2].map(|k| if (m >> k) & 1 == 1 { hi[k] } else { lo[k] });
         if !have.contains(&bits(c)) {
@@ -656,6 +675,9 @@ pub fn refine(
     let mut stats = RefineStats::default();
     loop {
         stats.passes += 1;
+        // The circumcentres planned THIS pass, so two bad tetrahedra that
+        // share one circumsphere exempt the second instead of refusing.
+        let mut planned: HashSet<[u64; 3]> = HashSet::new();
         let facets = build_facets(&cx, &fr.chains, &chain_t, &interior)?;
         fr.subtris.clear();
         fr.sub_parent.clear();
@@ -735,7 +757,7 @@ pub fn refine(
         }
         // 3. Quality.
         if plan.len() == 0 {
-            let c = carve(surf, &fr, start)?;
+            let c = carve_bodies(surf, &fr, start, bodies)?;
             let mut bad: Vec<(f64, usize, TetQuality)> = Vec::new();
             for (ki, (&slot, &t)) in c.kept_slots.iter().zip(&c.tets).enumerate() {
                 let p = tet_points(&fr.points, t);
@@ -755,6 +777,21 @@ pub fn refine(
                     continue;
                 }
                 if p.iter().any(|&x| near_ball(&fr.points, x)) || near_ball(&fr.points, q.centre) {
+                    exempt.push(ki);
+                    continue;
+                }
+                // The circumcentre is a point of the triangulation already,
+                // or another bad tetrahedron of this pass has it: inserting
+                // it would be refused as a duplicate, and the point being
+                // there is what the split would have put there. Exempt and
+                // reported, as the protected ones are - TET-19's bodies
+                // refine the inside of a closed body, where a lat/lon
+                // sphere's cospherical rings plan one centre twice. Only a
+                // run with declared bodies takes this branch, so a run
+                // without them refines bit for bit as before TET-19.
+                if !bodies.is_empty()
+                    && (have.contains(&bits(q.centre)) || !planned.insert(bits(q.centre)))
+                {
                     exempt.push(ki);
                     continue;
                 }
@@ -899,6 +936,7 @@ pub fn refine(
             let id = fr.delaunay.insert_point(x)?;
             debug_assert_eq!(id as usize, fr.points.len());
             fr.points.push(x);
+            have.insert(bits(x));
             fr.sites.push(SteinerSite::Volume);
             stats.interior += 1;
         }

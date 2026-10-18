@@ -102,7 +102,6 @@ fn the_constant_model_ignores_the_droplet_temperature() {
 /// three of diameter, because an identity that only holds near one operating
 /// point is a coincidence.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_four_groups_satisfy_their_algebraic_identities() {
     let c = water();
     let rho = 1000.0;
@@ -118,12 +117,24 @@ fn the_four_groups_satisfy_their_algebraic_identities() {
             worst = (worst.0.max(e_oh), worst.1.max(e_la), worst.2.max(e_k4));
         }
     }
-    assert!(worst.0 < 1e-14, "Oh = sqrt(We)/Re to {}", worst.0);
-    assert!(worst.1 < 1e-14, "La = 1/Oh^2 to {}", worst.1);
+    assert!(
+        (worst.0 as f64) < crate::precision::roundoff_tol(1e-14),
+        "Oh = sqrt(We)/Re to {}",
+        worst.0
+    );
+    assert!(
+        (worst.1 as f64) < crate::precision::roundoff_tol(1e-14),
+        "La = 1/Oh^2 to {}",
+        worst.1
+    );
     // `k` is formed with `powf` and `k4` without, so the two agree to the
     // accuracy of `powf` rather than to round-off. That gap is the REASON
     // (78.4b) exists and is measured here rather than assumed away.
-    assert!(worst.2 < 1e-13, "K^4 = We^2 Re to {}", worst.2);
+    assert!(
+        (worst.2 as f64) < crate::precision::roundoff_tol(1e-13),
+        "K^4 = We^2 Re to {}",
+        worst.2
+    );
 }
 
 /// Mundo's parameter at a condition the paper's own regime plot covers: a

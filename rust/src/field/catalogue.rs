@@ -205,7 +205,7 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "radiation", name: "wideBandDiffusiveRadiation", status: Status::Owned { unit: "CHR-23" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "species", name: "semiPermeableBaffleMassFraction", status: Status::Owned { unit: "CHR-29" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "species", name: "specieTransfer", status: Status::Owned { unit: "CHR-29" }, field: "psi", extended_by: &[], probes: &[] },
-    // ---- refused (10), permanently ----------------------------------------
+    // ---- refused (11), permanently ----------------------------------------
     Entry { family: "refused", name: "coded*", status: Status::Refused { key: "loads no user code" }, field: "psi", extended_by: &[], probes: &["codedFixedValue", "codedMixed"] },
     Entry { family: "refused", name: "#codeStream", status: Status::Refused { key: "loads no user code" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "refused", name: "cyclicACMI", status: Status::Refused { key: "partly overlap" }, field: "psi", extended_by: &[], probes: &[] },
@@ -214,6 +214,7 @@ pub(crate) const CATALOGUE: &[Entry] = &[
     Entry { family: "refused", name: "v2WallFunction", status: Status::Refused { key: "v2-f turbulence model" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "refused", name: "fWallFunction", status: Status::Refused { key: "v2-f turbulence model" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "refused", name: "wave*", status: Status::Refused { key: "no wave model" }, field: "psi", extended_by: &[], probes: &["waveAlpha", "waveVelocity"] },
-    Entry { family: "refused", name: "activeBaffleVelocity", status: Status::Refused { key: "change of mesh topology" }, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "refused", name: "activeBaffleVelocity", status: Status::Refused { key: "`vent` block" }, field: "psi", extended_by: &[], probes: &[] },
+    Entry { family: "refused", name: "activePressureForceBaffleVelocity", status: Status::Refused { key: "`vent` block" }, field: "psi", extended_by: &[], probes: &[] },
     Entry { family: "refused", name: "compressible::turbulentTemperatureRadCoupledMixed", status: Status::Refused { key: "never both" }, field: "T", extended_by: &[], probes: &[] },
 ];

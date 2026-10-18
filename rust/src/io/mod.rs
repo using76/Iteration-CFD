@@ -76,6 +76,7 @@ pub mod thermo_dict;
 pub mod case_parcels;
 pub mod case_chem;
 pub mod case_rad;
+pub mod case_dust;
 
 pub use writer::{
     cartesian_info, CartesianInfo, FoamField, FoamPayload, FoamWriter, NvdbWriter, ResultWriter,
@@ -83,7 +84,8 @@ pub use writer::{
 };
 pub use output_types::{FieldValues, OutputField};
 pub use output_plan::{
-    build_writers, has_volume_format, parse_output_formats, refuse_output_named_twice, volume_target,
+    build_writers, build_writers_isaac, has_volume_format, isaac_formats,
+    parse_output_formats, refuse_output_named_twice, volume_target,
     ExactSpec, FieldSelection, OutputFormat, OutputPipeline, OutputPlan, RestartSpec, VisSpec,
     VolumeTarget, OUTPUT_FORMAT_NAMES,
 };

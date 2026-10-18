@@ -1572,6 +1572,7 @@ mod tests {
     /// which - because the whole failure mode SPEC-LIT §40.2 warns about is a
     /// `sqrt(2)` in the wrong place, which changes nothing structural.
     #[test]
+    // f32 (F32-16): u_star NaN at k/eps 1e-6 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_three_strain_invariants_are_not_the_same_number() {
         for (name, g) in gradients() {
@@ -1700,6 +1701,7 @@ mod tests {
     /// composed the wrong way round, fails here rather than silently loosening
     /// the realizability margin by a constant factor.
     #[test]
+    // f32 (F32-16): closed-form eigenvalue cancels to 2e-4 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_closed_form_eigenvalue_is_the_real_one() {
         for (name, g) in gradients() {
@@ -1764,6 +1766,7 @@ mod tests {
     /// they must differ, by exactly `(div u)^2/3` in `Stil^2` - otherwise the
     /// `dev` is not being taken at all.
     #[test]
+    // f32 (F32-16): deviatoric identity residual ~1e-7, f32 cancellation
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_deviatoric_invariants_reduce_on_a_solenoidal_field() {
         for (name, g) in gradients() {
@@ -1831,6 +1834,7 @@ mod tests {
     /// 3. a CONSTANT `C_mu = 0.09` violates it, at exactly the published
     ///    threshold `lambda_max k/eps = 1/(3 x 0.09) = 3.7037`.
     #[test]
+    // f32 (F32-16): realizability number NaN at k/eps 1e-6 in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn realizability_holds_for_the_variable_cmu_and_fails_for_the_constant_one() {
         let a0 = RealizableKeCoeffs::default().a0;
@@ -1894,7 +1898,6 @@ mod tests {
     /// number the design note recommended defaulting to and the reason it is
     /// not the default here.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a0_is_the_value_that_calibrates_the_log_layer_cmu_to_009() {
         let exact = a0_calibrated_for(0.09);
         assert!(
@@ -1903,7 +1906,8 @@ mod tests {
         );
 
         // The closed form and its inverse must be inverse.
-        assert!((log_layer_cmu(exact) - 0.09).abs() < 1e-14);
+        assert!(((log_layer_cmu(exact) - 0.09).abs() as f64)
+            < crate::precision::roundoff_tol(1e-14));
 
         let at_404 = log_layer_cmu(4.04);
         let at_40 = log_layer_cmu(4.0);
@@ -1964,6 +1968,7 @@ mod tests {
     /// here, at `S k/eps ~ 6`; that paper was NOT read, so the direction is
     /// stated and no tolerance is hung on it.
     #[test]
+    // f32 (F32-16): root balance residual f32 noise vs abs 1e-10
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_homogeneous_shear_fixed_points() {
         let ke = KEpsilonCoeffs::default();
@@ -2071,6 +2076,7 @@ mod tests {
     /// the kernel. Every gradient, at four `k/eps` ratios, host against
     /// device.
     #[test]
+    // f32 (F32-16): device S 0 against host 0, rel NaN in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_agrees_with_the_host() -> Result<()> {
         let Some(gpu) = gpu() else {
