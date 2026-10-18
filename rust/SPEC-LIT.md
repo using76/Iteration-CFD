@@ -53101,7 +53101,8 @@ contract (ORIGINAL). It has no external input.
 §71 cuts the mesh and §73 solves a linear system across the cut. §138 moves
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
-(§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b) and the decomposed SIMPLE (§139.4, PAR-10c).
+(§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
+(§139.4, PAR-10c) and energy and scalars on a part (§139.5, PAR-11).
 
 This section defines no equation, so it carries no equation label.
 
@@ -53626,6 +53627,164 @@ shares the exchange points above but is not gated here - the gate runs
 `nCorrectors 1`, SIMPLE. Energy and scalar transport decomposed are PAR-11,
 turbulence PAR-12. MPI and multi-GPU are deferred: the ranks are
 `ThreadComm` threads, each with its own `Gpu::new(0)` on one card.
+
+### 139.5 Energy, Boussinesq and a passive scalar decomposed (PAR-11)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** 139.4 runs `Simple` decomposed, but the two scalar equations the loop
+feeds still solved rank-locally: `Energy`'s `T` and a passive
+`ScalarTransport` took the rank-local `solver::solve`, and their boundary
+evaluation ran on processor faces whose ghost cells held nothing of the
+neighbour rank. On a part their `T` and `s` were not the whole mesh's `T` and
+`s`. This subsection gives both equations the same two seams 139.3 and 139.4
+gave the flow path - a solve route and a field exchange - and gates them on
+the differentially heated cavity.
+
+**The seams.** `Energy` and `ScalarTransport` each hold `route: Option<Box<dyn
+ComponentRoute>>` and `exchange: Option<Box<dyn FlowExchange>>` - private, at
+the end of the struct, `None` in `new`, and every `None` arm is the call the
+module has always made, launch for launch:
+
+| seam | what it replaces when `None` | where it is called |
+|---|---|---|
+| `Energy::set_route` / `ScalarTransport::set_route` | `solver::solve` on `T` / on `psi` | `Energy::correct`, each non-orthogonal pass, through `route.solve_component(..)`; the scalar through `RasCore::solve_equation_route`, from `correct_inner` |
+| `Energy::set_exchange` / `ScalarTransport::set_exchange` | `correct_boundary_conditions` on `T` / on `psi` | each `initialise`, and each `correct` (`exchange.field(..)`) |
+
+`RasCore::solve_equation_route` (new, next to `solve_equation_with`, whose
+body is untouched) is that method with the FINAL solve routed: the same relax
+/ constrain_wall_cells / add_boundary_contributions / set_values steps, then
+`route.solve_component(..)` when the route is `Some` and the rank-local
+`solver::solve` when it is `None`. The scalar's `nut` has carried the 139.1
+halo since PAR-09, and the four length checks that still demanded exactly
+`n_cells` of it - `face_diffusivity`, `face_diffusivity_affine`,
+`face_diffusivity_cell` and `nut_boundary` - admit `n_local` now
+(`expect_nut_cells`); the kernels read owned cells on internal faces and `bf`
+on the boundary ones, so the halo room is admitted and never read, and no
+launch moves.
+
+**The refusals**, `Error::Config` starting `distflow: `, checked only when the
+exchange is `Some`:
+
+| refusal | names |
+|---|---|
+| `divScheme` neither `upwind` nor `central` (`Energy`'s `div_scheme.scheme`, the scalar's `conv.scheme`) | the scheme with `{:?}`; gradients have no halo on the thermal or scalar path yet |
+| `snGrad` not `uncorrected`, or `nNonOrthogonalCorrectors > 0` (both) | "snGrad" |
+| the conjugate stack attached (`Energy` - at `set_exchange` AND at the top of every `correct`, for a stack attached since) | "conjugate" |
+| mass weighting on (`ScalarTransport` - at `set_exchange` AND at a `use_mass_weighting` called since; the halo of `rho` has no exchange yet) | "mass-weighted" |
+
+**The gate.** `tests/distflow_thermal.rs`, in BOTH builds: the differentially
+heated cavity of **G. de Vahl Davis, Int. J. Numer. Meth. Fluids 3 (1983)
+249-264, DOI 10.1002/fld.1650030305** at `Ra = g beta DeltaT L^3/(nu alpha) =
+1e4` under the Boussinesq body force (the face flux (121.3) of SPEC-LIT 121.1, `beta DeltaT = 0.03` as Gate
+CMP-B), run serial by `dvd_serial` and decomposed by `dvd_part` on P = 1
+(Linear), 2 and 4 (Hilbert) `ThreadComm` ranks - `Simple`, `Energy` and
+`ScalarTransport` each its own `SpmdMomentumRoute` and `RankCtx`, constructed
+in the same order on every rank (they are collective). The fixture is
+`distflow.rs`'s own: `cavity_mesh`, the cube 0..0.1 m (`L = 0.1`), `leftWall`
+hot at 304.5 K, `rightWall` cold at 295.5 K (`DeltaT = 9`),
+`fixedWall`/`movingWall` insulated (zeroGradient), front/back empty;
+`nu = 0.71e-3`, `alpha = 1e-3` (`Pr = 0.71`), `T_ref = 300`, `beta = 1/300`;
+the gas pinned to `rho = 1 kg/m^3` at 300 K (`W = R T_ref/p0`, `cp = 1`,
+`k = 1e-3`, `p0 = 1e5`), its density from the seed field ONCE - Boussinesq
+pins it (SPEC-LIT 121.7); `g = Ra nu alpha/(beta DeltaT L^3) = 236.666...`, computed
+in the constant, never rounded; `U` fixedValue 0 on ALL FOUR walls - written
+by the fixture's own `dvd_bcs`, NOT by `cavity_bcs`: the lid motion
+`cavity_bcs` writes on `movingWall` turned the run into a lid-driven buoyant
+cavity, whose serial Nu at 20 x 20 was 3.345 against the true 2.297 -
+`p` zeroGradient, every `Empty` face `Empty` and every processor face
+`Cyclic` (`fr 0`), the same stance; the gas state is `DomainKind::Open`, as
+Gate CMP-B's driver has it, not `Sealed`. A passive scalar `s` (diffusivity
+`nu/Pr = alpha`, `Pr_t 0.85`) rides the same loop: 1 on the hot wall, 0 on
+the cold one, insulated on the other two, initial 0. The loop is
+`correct_outer` - `Energy::correct` - `ScalarTransport::correct` per outer
+iteration, converged when the worst U initial residual and the p, T and s
+initial residuals are ALL under `DVD_RESIDUAL` (1e-7 f64, 1e-5 under
+`single` - a solver control, not a gate). T and s: PBiCGStab over the
+Diagonal preconditioner, 1e-10 in 200 iterations in f64 and 1e-6 in 200
+under `single`, checked every 5, relaxation 0.7, central bounded convection,
+uncorrected snGrad, steady. U and p: `cavity_controls` (139.4) at the
+Boussinesq `nu`, except that under `single` the pressure solve's float body
+is capped at 100 iterations instead of 300 - at 40 x 40 the 300 cap let the
+f32 PBiCGStab degenerate (NaN in U and p at outer 22), the raw float floor
+of 141.9, and 141.9's cure is an input control; caps 100 and 200 both
+converge (Nu 2.25837 and 2.25889), and at 20 x 20 the cap changes no bit.
+Nu is (121.9) of SPEC-LIT 121.8 over the `leftWall` faces of the gathered
+whole-mesh `T`. The constants, FIXED BEFORE MEASURING:
+
+| class | constant | bound |
+|---|---|---|
+| P (the serial Nu against the published mean hot-wall Nu) | `DVD_NU_BAND` | 1 % of `DVD_NU_PUBLISHED` = 2.243 |
+| R (decomposed against serial: Nu, T, s, U and p L_inf rel, each scaled as the test defines) | `DVD_TOL_SERIAL` | `roundoff_tol` of 1e-6 (1e-6 f64, 1e-5 under `single`) |
+| D (equal iterations on every rank and within the band of the serial count; equal `converged` and `residuals` bits) | `DVD_ITER_BAND` | 0.02 |
+
+The test `assert_eq!`s the constants to their literals before measuring, so
+nobody loosens them silently. The verify run is the REDUCED cavity,
+`DVD_N_REDUCED` = 20 cells per side with the gate's constants unchanged (the
+size is reduced, never a tolerance), SPLIT one test per rank count -
+`a_reduced_cavity_on_one_rank`, `a_reduced_cavity_on_two_ranks`,
+`a_reduced_cavity_on_four_ranks` (P = 1 Linear, 2 and 4 Hilbert) - each its
+own serial run then its one `ThreadComm::run` world over one shared helper,
+so one verify command stays inside the 10-minute budget on the shared card.
+The R rows are hard `assert!`s in f64; under `single` a row above the
+roundoff PRINTS `[139.5] MISSED: <row> single build: <measured> > <tol>;
+cause: f32 round-off of the segregated solve order; T rel is normalised by
+DeltaT = 9 K, so 1e-5 is about 3 f32 ulps of T at 300 K` and the test
+continues - the user's missed-gate rule - while the D rows (rank agreement,
+cover, iteration band) stay hard in BOTH builds. The plan's size `DVD_N` = 40
+runs as `the_serial_plan_size_nusselt`, serial alone, which PRINTS the 1 % row
+- `[139.5] PASS` or `[139.5] MISSED: Gate PAR-11 Nu within 1 % of 2.243: ...
+cause: the discretisation, not the decomposition` - and fails on nothing for
+it: at this size the grid, not the seam, sets the error against the published
+2.243, and the seam's own rows are the R and D ones; an unconverged run
+prints MISSED too and does not fail on that alone. The decomposed half of the
+plan's gate, `the_plan_size_cavity_gate` (serial then P = 4 Hilbert, the same
+rows as the verify tests plus the 1 % row), is `#[ignore]`d - the 40 x 40
+P = 4 world runs over the verify budget on the shared card - and is the
+supervisor's run. `the_decomposed_energy_and_scalar_refuse_by_name` holds the
+refusal table on a 1-rank 4 x 4 part.
+
+**Measured (2026-10-18/19, RTX 5070 Ti, the card shared with two other
+lane sessions; the wall times are inflated and noisy - never the numbers).**
+
+*The verify runs, 20 x 20.* f64: the serial cavity converges in 629 outer
+iterations (worst residuals U 2.37e-12, p 6.42e-11, T 9.05e-11, s 9.88e-8),
+Nu 2.29677 (+2.40 % of 2.243 - the 20 x 20 grid, informational at this
+size). P = 1, 2, 4 land on 629 on every rank with the same `converged` and
+`residuals` bits, and against the serial run: Nu rel 1.591e-13 / 5.801e-15 /
+4.389e-14, T rel 1.642e-13 / 5.684e-14 / 8.211e-14, s rel 2.306e-13 /
+1.388e-14 / 2.959e-14, U rel 9.601e-13 / 4.770e-14 / 1.109e-13, p rel
+9.723e-13 / 1.591e-13 / 2.611e-13 against 1e-6 - the R rows hold by six to
+eight orders of magnitude; 21 s, 80 s and 95 s per world. `single`: serial
+386 iterations, Nu 2.29671; P = 1, 2, 4 land on 386 on every rank. P = 1
+holds every R row (Nu rel 2.953e-6, T 6.782e-6, s 5.364e-7, U 3.603e-6,
+p 2.531e-6 against tol32 1e-5). P = 2 and P = 4 MISS four of the five R rows
+and the test prints them: P = 2 Nu rel 1.772e-5, T 1.695e-5, U 1.045e-5,
+p 1.979e-5 (s 2.086e-6 holds); P = 4 Nu rel 2.658e-5, T 1.356e-5, U
+1.083e-5, p 4.560e-5 (s 3.517e-6 holds). The f64 differences are 1e-13 -
+hundreds of f64 ulps after 629 coupled iterations - and the same
+amplification of the f32 unit round-off lands just above the 84-ulp cap of
+(118.14.1); the bound stays where it was fixed and the miss is a recorded
+f32 finding.
+
+*The plan's size, 40 x 40.* `the_serial_plan_size_nusselt`: f64 Nu 2.25773
+(+0.66 %) in 2256 iterations, 78 s - the 1 % row PASSES; `single` Nu
+2.25837 (+0.69 %) in 1287 iterations, 23 s - PASSES. The ignored
+`the_plan_size_cavity_gate` was run once in f64: serial 2256 iterations, P
+= 4 Hilbert 2256 on every rank, Nu rel 2.577e-13, T rel 1.137e-13, s rel
+6.217e-14, U rel 2.251e-12, p rel 4.031e-12 against 1e-6, Nu 2.25773 (+0.66
+%) - the plan's gate HOLDS in f64; 733 s for the P = 4 world, 838 s for the
+test, over the verify budget, which is why it stays ignored. Its `single`
+run is a deferred item.
+
+**What this does not establish.** Gradients have no halo on the thermal or
+scalar path: the limited and `linearUpwind` convection schemes and the
+non-orthogonal correction are refused by name, not run decomposed.
+Turbulence decomposed is PAR-12 - the gate's `nut` is the zero field, and
+only its length check was admitted above. The conjugate stack is refused.
+MPI and multi-GPU are deferred: the ranks are `ThreadComm` threads, each
+with its own `Gpu::new(0)` on one card.
 
 ---
 

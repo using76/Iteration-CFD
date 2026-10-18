@@ -251,6 +251,15 @@ pub struct ScalarTransport<'m> {
     /// next would have an `f0` in the wrong currency, and the two would be
     /// indistinguishable afterwards.
     mass: Option<MassState>,
+
+    /// SPEC-LIT 139.5 (PAR-11): this equation's solve through a part's SPMD
+    /// Krylov. `None` keeps [`crate::solver::solve`], and every launch this
+    /// struct ever made, bit for bit.
+    route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>,
+    /// SPEC-LIT 139.5: this field's halo + boundary evaluation on a part,
+    /// over [`crate::distflow::RankCtx`]. `None` keeps the rank-local
+    /// `correct_boundary_conditions` this struct always ran.
+    exchange: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
 }
 
 impl<'m> ScalarTransport<'m> {
@@ -293,6 +302,8 @@ impl<'m> ScalarTransport<'m> {
             sources: crate::sources::SourceSet::new(),
             srck: crate::sources::SourceKernels::new(gpu)?,
             mass: None,
+            route: None,
+            exchange: None,
         })
     }
 
@@ -318,6 +329,16 @@ impl<'m> ScalarTransport<'m> {
     pub fn use_mass_weighting(&mut self, gpu: &Gpu) -> Result<()> {
         if self.mass.is_some() {
             return Ok(());
+        }
+        // SPEC-LIT 139.5 (PAR-11): the same refusal `set_exchange` makes,
+        // for a weighting asked for after the exchange was set.
+        if self.exchange.is_some() {
+            return Err(Error::Config(
+                "distflow: a decomposed ScalarTransport cannot run the \
+                 mass-weighted equation - rho's halo has no exchange yet \
+                 (PAR-11)"
+                    .to_string(),
+            ));
         }
         let m = self.core.mesh;
         self.mass = Some(MassState {
@@ -394,7 +415,17 @@ impl<'m> ScalarTransport<'m> {
     /// whatever `f0` was allocated with - zero - and a 1173 K inlet arrives as
     /// an enormous spurious ddt source.
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
-        field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut self.psi, self.core.mesh)?;
+        // SPEC-LIT 139.5: the part's halo + boundary evaluation when an
+        // exchange is set, the rank-local call otherwise.
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.field(gpu, &self.core.fld, &mut self.psi, self.core.mesh)?,
+            None => field_ops::correct_boundary_conditions(
+                gpu,
+                &self.core.fld,
+                &mut self.psi,
+                self.core.mesh,
+            )?,
+        }
         field_ops::store_old_time(gpu, &self.core.fld, &mut self.psi)
     }
 
@@ -650,19 +681,92 @@ impl<'m> ScalarTransport<'m> {
                 crate::fv::fvm_su(gpu, fv, a, m, su, 1.0)?;
             }
 
-            perf = self.core.solve_equation_with(
+            // SPEC-LIT 139.5: the solve through the part's SPMD Krylov when
+            // a route is set, the rank-local `solver::solve` otherwise.
+            perf = self.core.solve_equation_route(
                 gpu,
                 &mut self.psi,
                 alpha,
                 &sc,
                 false,
                 self.sources.has_constraints(),
+                self.route.as_deref_mut(),
             )?;
 
-            field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut self.psi, m)?;
+            // SPEC-LIT 139.5: the halo, then the boundary evaluation - or,
+            // serially, exactly the `correct_boundary_conditions` call this
+            // struct always made.
+            match self.exchange.as_deref_mut() {
+                Some(x) => x.field(gpu, &self.core.fld, &mut self.psi, m)?,
+                None => {
+                    field_ops::correct_boundary_conditions(gpu, &self.core.fld, &mut self.psi, m)?
+                }
+            }
         }
 
         Ok(perf)
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.5 (PAR-11)
+// ==========================================================================
+
+impl<'m> ScalarTransport<'m> {
+    /// SPEC-LIT 139.5 (PAR-11): this equation's solve through a part's SPMD
+    /// Krylov; `None` = [`crate::solver::solve`] as today.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// SPEC-LIT 139.5: this field's halo + boundary evaluation on a part.
+    /// Refusals ([`Error::Config`], message starts `distflow: `), checked
+    /// only when `x` is `Some`: a convection scheme that needs a far-cell
+    /// gradient, a snGrad / corrector count that needs one too, and the
+    /// mass weighting - the halo of `rho` has no exchange yet.
+    pub fn set_exchange(
+        &mut self,
+        x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
+    ) -> Result<()> {
+        if let Some(_) = &x {
+            match self.conv.scheme {
+                crate::fv::DivScheme::Upwind | crate::fv::DivScheme::Central => {}
+                other => {
+                    return Err(Error::Config(format!(
+                        "distflow: divScheme {other:?} needs a cell gradient \
+                         at the far cell of a face, and gradients have no \
+                         halo on the scalar path yet (PAR-11); a decomposed \
+                         ScalarTransport runs upwind or central convection only"
+                    )));
+                }
+            }
+            if self.core.ctrl.sn_grad != crate::fv::SnGradScheme::Uncorrected
+                || self.core.ctrl.n_non_orth_correctors > 0
+            {
+                return Err(Error::Config(format!(
+                    "distflow: snGrad {:?} with {} non-orthogonal corrector(s) \
+                     adds the correction at the far cell of a face; a \
+                     decomposed ScalarTransport runs snGrad uncorrected and \
+                     zero correctors only",
+                    self.core.ctrl.sn_grad, self.core.ctrl.n_non_orth_correctors
+                )));
+            }
+            if self.mass.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed ScalarTransport cannot run the \
+                     mass-weighted equation - rho's halo has no exchange yet \
+                     (PAR-11)"
+                        .to_string(),
+                ));
+            }
+        }
+        self.exchange = x;
+        Ok(())
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
     }
 }
 

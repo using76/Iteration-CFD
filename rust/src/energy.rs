@@ -2128,6 +2128,15 @@ pub struct Energy<'m> {
     /// built the first time [`Self::update_target_divergence`] meets a gas
     /// with a mixture. `None` until then.
     mix: Option<MixConstraint>,
+
+    /// SPEC-LIT 139.5 (PAR-11): `T`'s solve through a part's SPMD Krylov.
+    /// `None` keeps [`crate::solver::solve`], and every launch this module
+    /// ever made, bit for bit.
+    route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>,
+    /// SPEC-LIT 139.5: `T`'s halo + boundary evaluation on a part, over
+    /// [`crate::distflow::RankCtx`]. `None` keeps the rank-local
+    /// `correct_boundary_conditions` this module always ran.
+    exchange: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
 }
 
 /// [`Energy`]'s half of SPEC-LIT 133.10: `energyMixtureConstraint`, the
@@ -2210,6 +2219,8 @@ impl<'m> Energy<'m> {
             k_curve: None,
             cp_field: None,
             mix: None,
+            route: None,
+            exchange: None,
         })
     }
 
@@ -3114,7 +3125,14 @@ impl<'m> Energy<'m> {
     /// Evaluate the boundary faces and seed both old time levels from the
     /// initial field - call once, before the first [`GasState::update_density`].
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
-        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, self.m)?;
+        // SPEC-LIT 139.5: the part's halo + boundary evaluation when an
+        // exchange is set, the rank-local call otherwise.
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.field(gpu, &self.fldk, &mut self.t, self.m)?,
+            None => {
+                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, self.m)?
+            }
+        }
         field_ops::seed_old_time(gpu, &self.fldk, &mut self.t)
     }
 
@@ -4078,6 +4096,16 @@ impl<'m> Energy<'m> {
         if n == 0 {
             return Ok(SolverPerformance::default());
         }
+        // SPEC-LIT 139.5: a conjugate stack attached SINCE `set_exchange`
+        // would run `update_conjugate_interface`'s rank-local boundary
+        // evaluation across a part's processor faces.
+        if self.exchange.is_some() && self.cht.is_some() {
+            return Err(Error::Config(
+                "distflow: a conjugate stack was attached to a decomposed \
+                 Energy - the interface update has no exchange yet (PAR-11)"
+                    .to_string(),
+            ));
+        }
         // SPEC-LIT 120.8: a lumped step is assembled from the coefficients
         // `advance_lumped_masses` uploaded for THIS step; solving with the
         // seed triple instead would freeze the lump at its `T_m^0`.
@@ -4106,9 +4134,21 @@ impl<'m> Energy<'m> {
             ldu_ops::relax(gpu, &self.lduk, &mut self.a, m, &self.t.f, alpha)?;
             ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
 
-            perf = solver::solve(gpu, &self.solk, &mut self.t.f, &self.a, m, &mut self.ws, &sc)?;
+            // SPEC-LIT 139.5: the solve through the part's SPMD Krylov when
+            // a route is set, the rank-local `solver::solve` otherwise -
+            // the same launches, whichever way.
+            perf = match self.route.as_deref_mut() {
+                Some(r) => r.solve_component(gpu, &mut self.t.f, &self.a, m, &sc)?,
+                None => solver::solve(gpu, &self.solk, &mut self.t.f, &self.a, m, &mut self.ws, &sc)?,
+            };
 
-            field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?;
+            // SPEC-LIT 139.5: the halo, then the boundary evaluation - or,
+            // serially, exactly the `correct_boundary_conditions` call this
+            // module always made.
+            match self.exchange.as_deref_mut() {
+                Some(x) => x.field(gpu, &self.fldk, &mut self.t, m)?,
+                None => field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?,
+            }
         }
 
         // SPEC-LIT §47.2: the interface triple assembled with was built from
@@ -4123,6 +4163,64 @@ impl<'m> Energy<'m> {
         self.update_conjugate_interface(gpu)?;
 
         Ok(perf)
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.5 (PAR-11)
+// ==========================================================================
+
+impl<'m> Energy<'m> {
+    /// SPEC-LIT 139.5 (PAR-11): `T`'s solve through a part's SPMD Krylov;
+    /// `None` = [`crate::solver::solve`] as today.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// SPEC-LIT 139.5: `T`'s halo + boundary evaluation on a part. Refusals
+    /// ([`Error::Config`], message starts `distflow: `), checked only when
+    /// `x` is `Some`: a convection scheme that needs a far-cell gradient,
+    /// a snGrad / corrector count that needs one too, and the conjugate
+    /// stack - gradients have no halo on the flow path yet.
+    pub fn set_exchange(&mut self, x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>) -> Result<()> {
+        if let Some(_) = &x {
+            match self.ctrl.div_scheme.scheme {
+                DivScheme::Upwind | DivScheme::Central => {}
+                other => {
+                    return Err(Error::Config(format!(
+                        "distflow: divScheme {other:?} needs a cell gradient \
+                         at the far cell of a face, and gradients have no \
+                         halo on the thermal path yet (PAR-11); a decomposed \
+                         Energy runs upwind or central convection only"
+                    )));
+                }
+            }
+            if self.ctrl.sn_grad != SnGradScheme::Uncorrected
+                || self.ctrl.n_non_orth_correctors > 0
+            {
+                return Err(Error::Config(format!(
+                    "distflow: snGrad {:?} with {} non-orthogonal corrector(s) \
+                     adds the correction at the far cell of a face; a \
+                     decomposed Energy runs snGrad uncorrected and zero \
+                     correctors only",
+                    self.ctrl.sn_grad, self.ctrl.n_non_orth_correctors
+                )));
+            }
+            if self.cht.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Energy cannot run the conjugate \
+                     stack - the interface update has no exchange yet (PAR-11)"
+                        .to_string(),
+                ));
+            }
+        }
+        self.exchange = x;
+        Ok(())
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
     }
 }
 

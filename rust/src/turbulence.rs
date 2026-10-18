@@ -231,6 +231,19 @@ fn expect_len<T>(buf: &DevBuf<T>, want: usize, what: &str) -> Result<()> {
     }
 }
 
+/// SPEC-LIT 139.5 (PAR-11): `nut.f` may be the bare `n_cells` buffer a
+/// serial run always had, or the 139.1 halo-carrying cell buffer
+/// (`n_local`) a decomposed `ScalarTransport` carries - RasCore's own `nut`
+/// has carried the halo since 139.1. Both index exactly the cells the
+/// kernels read: owned cells on the internal faces, `bf` on the boundary
+/// ones, so the halo room is admitted and never read.
+fn expect_nut_cells(nut_f: &DevBuf<Scalar>, m: &GpuMesh) -> Result<()> {
+    if nut_f.len() == m.n_local() {
+        return Ok(());
+    }
+    expect_len(nut_f, m.n_cells, "nut.f")
+}
+
 // ==========================================================================
 //  Launchers
 // ==========================================================================
@@ -253,7 +266,7 @@ pub fn face_diffusivity(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -324,7 +337,7 @@ pub fn face_diffusivity_affine(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -392,7 +405,7 @@ pub fn face_diffusivity_cell(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
     expect_len(r_sigma, m.n_cells, "r_sigma")?;
 
@@ -547,7 +560,7 @@ pub fn nut_boundary(
         return Ok(());
     }
     expect_len(&nut.bf, n, "nut.bf")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
 
     let nl = n as Label;
     let f = kern.nut_boundary.clone();
@@ -2264,6 +2277,45 @@ impl<'m> RasCore<'m> {
         // asymmetric, so `solver PCG;` on one is now refused instead of
         // running BiCGStab and saying nothing.
         crate::solver::solve(gpu, &self.sol, &mut psi.f, &self.a, self.mesh, &mut self.ws, sc)
+    }
+
+    /// SPEC-LIT 139.5 (PAR-11): [`Self::solve_equation_with`], with the final
+    /// solve through `route` when `Some`.
+    ///
+    /// `None` -> exactly `self.solve_equation_with(gpu, psi, alpha, sc,
+    /// constrain_walls, constrain_fixed)`, launch for launch. `Some` runs the
+    /// same relax / constrain_wall_cells / add_boundary_contributions /
+    /// set_values steps and hands the assembled system to the part's SPMD
+    /// Krylov instead of the rank-local one - the seam
+    /// `ScalarTransport::set_route` (PAR-11) drives.
+    pub fn solve_equation_route(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut GpuScalarField,
+        alpha: Scalar,
+        sc: &SolverControls,
+        constrain_walls: bool,
+        constrain_fixed: bool,
+        route: Option<&mut (dyn crate::momentum::ComponentRoute + '_)>,
+    ) -> Result<SolverPerformance> {
+        relax(gpu, &self.ldu, &mut self.a, self.mesh, &psi.f, alpha)?;
+
+        if constrain_walls {
+            constrain_wall_cells(gpu, &self.ldu, &mut self.a, self.mesh, &self.wd)?;
+        }
+
+        add_boundary_contributions(gpu, &self.ldu, &mut self.a, self.mesh)?;
+
+        if constrain_fixed {
+            crate::ldu_ops::set_values(gpu, &self.ldu, &mut self.a, self.mesh)?;
+        }
+
+        match route {
+            Some(r) => r.solve_component(gpu, &mut psi.f, &self.a, self.mesh, sc),
+            None => {
+                crate::solver::solve(gpu, &self.sol, &mut psi.f, &self.a, self.mesh, &mut self.ws, sc)
+            }
+        }
     }
 
     /// `k_prev <- k`. Called at the top of every `correct`, so that

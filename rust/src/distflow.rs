@@ -65,8 +65,20 @@
 //! decomposed by [`cavity_serial`] and [`cavity_part`] - which is the gate
 //! `tests/distflow_simple.rs` and `ofgpu-par -solve simple` measure.
 //!
+//! SPEC-LIT 139.5 (PAR-11) hands the energy equation and a passive scalar
+//! the same two seams - `Energy::set_route` / `ScalarTransport::set_route`
+//! (the SPMD Krylov behind [`ComponentRoute`]) and `Energy::set_exchange` /
+//! `ScalarTransport::set_exchange` (the same [`FlowExchange`], now carried
+//! by two more structs) - and this module the gate they answer to: the
+//! differentially heated cavity of **G. de Vahl Davis, Int. J. Numer. Meth.
+//! Fluids 3 (1983) 249-264** (DOI 10.1002/fld.1650030305) at `Ra = 1e4`
+//! under the Boussinesq body force (SPEC-LIT 121), run serial and
+//! decomposed by [`dvd_serial`] and [`dvd_part`] - the gate
+//! `tests/distflow_thermal.rs` measures.
+//!
 //! Provenance: ORIGINAL - the exchange points are this project's own design
-//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c) over the SPMD
+//! (SPEC-LIT 139.2, PAR-10a; 139.3, PAR-10b; 139.4, PAR-10c; 139.5, PAR-11)
+//! over the SPMD
 //! exchange of 138.3 (PAR-02), the boundary evaluation this crate already
 //! ships and the SPMD Krylov of 138.5/138.6 (PAR-04a/b); no kernel is
 //! launched here and no existing numerics change. No external source. No
@@ -77,19 +89,23 @@ use crate::comm::Comm;
 use crate::decompose::{Decomposition, PartMesh};
 use crate::device::{DevBuf, Gpu};
 use crate::distsolve::{spmd_solve, DistPerformance, DistReduce, DistSystem, SpmdWorkspace};
+use crate::energy::{DomainKind, Energy, EnergyControls, GasProperties, GasState};
 use crate::error::{Error, Result};
 use crate::exactsum::SpmdReduction;
 use crate::field::{BcKind, GpuScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
-use crate::fv::SnGradScheme;
+use crate::fv::{DivScheme, SnGradScheme};
 use crate::halo::SpmdHalo;
-use crate::io::case::{ResidualControl, SolverControls};
+use crate::io::case::{ResidualControl, SolverControls, TurbulenceControls};
 use crate::io::dict::FoamDict;
+use crate::io::schemes::DivEntry;
 use crate::ldu::GpuLduMatrix;
 use crate::mesh::GpuMesh;
-use crate::momentum::{BuoyancyCoeffs, ComponentRoute, MomentumControls};
+use crate::momentum::{BuoyancyCoeffs, BuoyancyForm, ComponentRoute, MomentumControls};
 use crate::pressure::{PbicgstabBackend, PressureBackend, SystemProbe};
+use crate::scalar_transport::{ScalarTransport, ScalarTransportCoeffs};
 use crate::simple::{Simple, SimpleControls};
+use crate::turbulence::FlowState;
 use crate::solver::{
     LinearSolverKind, Preconditioner, SolverKernels, SolverPerformance,
 };
@@ -1183,5 +1199,458 @@ pub fn cavity_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<Ca
         converged,
         u_residual,
         continuity,
+    })
+}
+
+// ==========================================================================
+//  The differentially heated cavity - SPEC-LIT 139.5 (PAR-11)
+// ==========================================================================
+
+/// The gate constants, FIXED BEFORE MEASURING (docs/17 §12, row PAR-11):
+/// neither the test nor the driver may loosen them, and a run that misses
+/// keeps the assert and reports its numbers.
+///
+/// The cavity: 40 cells per side, the differentially heated square of
+/// **G. de Vahl Davis, Int. J. Numer. Meth. Fluids 3 (1983) 249-264**, DOI
+/// 10.1002/fld.1650030305, at `Ra = g beta DeltaT L^3/(nu alpha) = 1e4`
+/// under the Boussinesq body force (SPEC-LIT 121): `leftWall` hot at
+/// 304.5 K, `rightWall` cold at 295.5 K, the horizontal walls insulated,
+/// side 0.1 m, the mean hot-wall Nusselt number 2.243 (read, as SPEC-LIT
+/// 121.8 reads it, from Qi et al., Nanoscale Research Letters 8 (2013) 56,
+/// Table 3, open access).
+pub const DVD_N: usize = 40;
+/// The REDUCED cavity of the verify run: the same gate constants at 20
+/// cells per side - the size is reduced, never a tolerance.
+pub const DVD_N_REDUCED: usize = 20;
+pub const DVD_RA: f64 = 1.0e4;
+/// de Vahl Davis (1983)'s mean hot-wall Nusselt number, as SPEC-LIT 121.8
+/// reads it.
+pub const DVD_NU_PUBLISHED: f64 = 2.243;
+/// Class P: the serial run's Nu within this of the published 2.243, the
+/// same check in both builds.
+pub const DVD_NU_BAND: f64 = 0.01;
+/// Class R: decomposed against serial, judged at
+/// [`crate::precision::roundoff_tol`] of this.
+pub const DVD_TOL_SERIAL: f64 = 1e-6;
+/// Class D: the outer iteration count may move by this much of the serial
+/// count.
+pub const DVD_ITER_BAND: f64 = 0.02;
+/// The outer loop's hard ceiling; the run stops on its residuals long
+/// before it.
+pub const DVD_MAX_OUTER: usize = 3000;
+/// The convergence ask on the four initial residuals - a SOLVER control,
+/// not a gate tolerance.
+pub const DVD_RESIDUAL: Scalar = if cfg!(feature = "single") { 1e-5 } else { 1e-7 };
+
+/// The fixture's physical numbers, in f64: side, the two wall temperatures,
+/// their difference, the reference, `beta = 1/T_ref` (so `beta DeltaT =
+/// 0.03`, as Gate CMP-B's), `nu` and `alpha` (`Pr = 0.71`, air at the
+/// reference).
+pub const DVD_L: f64 = 0.1;
+pub const DVD_T_HOT: f64 = 304.5;
+pub const DVD_T_COLD: f64 = 295.5;
+pub const DVD_DELTA_T: f64 = DVD_T_HOT - DVD_T_COLD;
+pub const DVD_T_REF: f64 = 300.0;
+pub const DVD_BETA: f64 = 1.0 / 300.0;
+pub const DVD_NU: f64 = 0.71e-3;
+pub const DVD_ALPHA: f64 = 1.0e-3;
+/// The Boussinesq body force's magnitude that REALISES the Rayleigh number:
+/// `Ra = g beta DeltaT L^3/(nu alpha)` solved for
+/// `g = Ra nu alpha/(beta DeltaT L^3)` - 236.666... , computed here, never
+/// rounded.
+pub const DVD_G_Y: f64 =
+    DVD_RA * DVD_NU * DVD_ALPHA / (DVD_BETA * DVD_DELTA_T * DVD_L * DVD_L * DVD_L);
+
+/// What one heated-cavity run reports - a serial run's whole mesh, a
+/// decomposed run's OWNED cells only (in the part's local order,
+/// `global_cell[i]` the whole-mesh id of owned cell `i`).
+pub struct DvdRun {
+    pub global_cell: Vec<usize>,
+    pub u: Vec<Vec3>,
+    pub p: Vec<Scalar>,
+    pub t: Vec<Scalar>,
+    pub s: Vec<Scalar>,
+    pub iterations: usize,
+    pub converged: bool,
+    /// U, p, T and s INITIAL residuals of the last iteration, in that
+    /// order - the four numbers the convergence test reads.
+    pub residuals: [Scalar; 4],
+}
+
+/// (121.9) of SPEC-LIT 121.8 on the whole mesh, in f64: the mean hot-wall
+/// Nusselt number
+///
+/// ```text
+/// Nu = L * sum_b (T_h - T_P(b)) delta_b |S_b| / (DeltaT * sum_b |S_b|)
+/// ```
+///
+/// over the faces `b` of patch `leftWall`, `T_P(b)` the hot wall's
+/// neighbour cell (`t[hm.b_face_cells[b]]`), `delta_b = hm.b_delta_coeffs`
+/// and `|S_b| = hm.b_mag_sf`. The caller hands the WHOLE mesh's field - a
+/// decomposed run gathers its owned cells first.
+pub fn dvd_nusselt(hm: &HostMesh, t: &[Scalar]) -> f64 {
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for pi in &hm.patches {
+        if pi.name != "leftWall" {
+            continue;
+        }
+        for b in pi.start..pi.start + pi.size {
+            let t_p = t[hm.b_face_cells[b] as usize] as f64;
+            let delta = hm.b_delta_coeffs[b] as f64;
+            let mag_sf = hm.b_mag_sf[b] as f64;
+            num += (DVD_T_HOT - t_p) * delta * mag_sf;
+            den += mag_sf;
+        }
+    }
+    DVD_L * num / (DVD_DELTA_T * den)
+}
+
+/// The heated cavity's controls: [`cavity_controls`]' central, bounded,
+/// uncorrected PBiCGStab-Diagonal momentum at the Boussinesq `nu` that
+/// realises `Ra = 1e4` with `alpha = 1e-3`.
+///
+/// Under `single` the pressure solve's float body is capped at 100
+/// iterations instead of the cavity's 300: at 40 x 40 the 300 cap let the
+/// f32 PBiCGStab degenerate (NaN in U and p at outer 22), the raw float
+/// floor SPEC-LIT 141.9 names, and its cure - an input control, the
+/// reachable `1e-6` inside the cap with 118.4's refinement carrying the
+/// accuracy. The f64 build keeps `cavity_controls`' ask unchanged.
+pub fn dvd_controls() -> SimpleControls {
+    let mut c = cavity_controls();
+    c.momentum.nu = DVD_NU as Scalar;
+    #[cfg(feature = "single")]
+    {
+        c.p_solver.max_iter = 100;
+    }
+    c
+}
+
+/// The T and s linear solves: PBiCGStab over the default Diagonal
+/// preconditioner, `1e-10` in f64 and `1e-6` under `single`, 200 iterations,
+/// checked every 5 - solver controls, not gate tolerances.
+fn dvd_transport_solver() -> SolverControls {
+    SolverControls {
+        tolerance: if cfg!(feature = "single") { 1e-6 } else { 1e-10 },
+        max_iter: 200,
+        check_interval: 5,
+        ..SolverControls::default()
+    }
+}
+
+/// The T equation's controls: relaxation 0.7, central bounded convection,
+/// snGrad uncorrected, steady - exactly what a decomposed run may run
+/// (SPEC-LIT 139.5's refusal table).
+fn dvd_energy_controls() -> EnergyControls {
+    EnergyControls {
+        t_solver: dvd_transport_solver(),
+        div_scheme: DivEntry { scheme: DivScheme::Central, bounded: true },
+        sn_grad: SnGradScheme::Uncorrected,
+        ..EnergyControls::default()
+    }
+}
+
+/// The scalar's controls: the same asks as T's, on the k-entry struct the
+/// scalar reads them from.
+fn dvd_scalar_controls() -> TurbulenceControls {
+    TurbulenceControls {
+        k_solver: dvd_transport_solver(),
+        div_scheme: DivScheme::Central,
+        bounded_convection: true,
+        sn_grad: SnGradScheme::Uncorrected,
+        ..TurbulenceControls::default()
+    }
+}
+
+/// The gas: ideal-gas properties pinned so `rho = p0/(R_s T_ref) = 1
+/// kg/m^3` (`W = R rho_ref T_ref/p0`), `cp = 1`, `k = 1e-3` - so the
+/// thermal diffusity `k/(rho cp)` IS the `alpha = 1e-3` the Rayleigh
+/// number asks for - and `Pr = 0.71`.
+pub fn dvd_props() -> GasProperties {
+    GasProperties {
+        w: 8.314_462_618 * 1.0 * 300.0 / 1e5,
+        cp: 1.0,
+        k: 1e-3,
+        pr: 0.71,
+        ..GasProperties::default()
+    }
+}
+
+/// The Boussinesq body force (SPEC-LIT 121.3): gravity down `-y` at
+/// [`DVD_G_Y`], reference 300 K, `beta = 1/300`.
+pub fn dvd_buoyancy() -> BuoyancyCoeffs {
+    BuoyancyCoeffs {
+        g: Vec3::new(0.0, -(DVD_G_Y as Scalar), 0.0),
+        t_ref: DVD_T_REF as Scalar,
+        form: BuoyancyForm::Boussinesq { beta: DVD_BETA as Scalar },
+        ..BuoyancyCoeffs::default()
+    }
+}
+
+/// The two isothermal (hot `leftWall`, cold `rightWall`) patches of a
+/// scalar field, on the whole mesh and on a part alike, BY PATCH NAME:
+/// `fixedValue` at `hot` / `cold`, the horizontal walls left at the
+/// zeroGradient `GpuScalarField::zeros` seeded, and `Empty`/`Cyclic` faces
+/// untouched - the same by-patch-name stance `cavity_bcs` takes.
+fn dvd_wall_values(
+    gpu: &Gpu,
+    hm: &HostMesh,
+    f: &mut GpuScalarField,
+    hot: Scalar,
+    cold: Scalar,
+) -> Result<()> {
+    let owner = patch_of(hm);
+    let mut kind: Vec<Label> = gpu.download(&f.bc_kind)?;
+    let mut fr: Vec<Scalar> = gpu.download(&f.fr)?;
+    let mut rv: Vec<Scalar> = gpu.download(&f.ref_value)?;
+    for (i, &p) in owner.iter().enumerate() {
+        let value = match hm.patches[p].name.as_str() {
+            "leftWall" => hot,
+            "rightWall" => cold,
+            _ => continue,
+        };
+        kind[i] = BcKind::FixedValue as Label;
+        fr[i] = 1.0;
+        rv[i] = value;
+    }
+    gpu.write(&mut f.bc_kind, &kind)?;
+    gpu.write(&mut f.fr, &fr)?;
+    gpu.write(&mut f.ref_value, &rv)
+}
+
+/// The heated cavity's boundary conditions, on the whole mesh and on a part
+/// alike, BY PATCH NAME: `U` fixedValue (0,0,0) (`fr` 1) on ALL FOUR walls -
+/// de Vahl Davis's cavity is driven by buoyancy alone, and the lid motion
+/// [`cavity_bcs`] writes on `movingWall` would run a lid-driven buoyant
+/// cavity instead - and `p` left at the zeroGradient seed. `Empty` patches
+/// stay `Empty` and processor patches stay `Cyclic` with `fr` 0 - what
+/// `GpuScalarField`/`GpuVectorField::zeros` seed them with - so this writes
+/// the wall faces only.
+pub fn dvd_bcs(gpu: &Gpu, hm: &HostMesh, s: &mut Simple<'_>) -> Result<()> {
+    let owner = patch_of(hm);
+
+    // Start from what `GpuVectorField::zeros` seeded - `Empty` on the empty
+    // patches, `Cyclic` (fr 0) on every processor patch, zeroGradient
+    // elsewhere - and overwrite the four walls only: a processor face
+    // written zeroGradient would leave the coupled branch every kernel tests.
+    let mut ukind: Vec<crate::Label> = gpu.download(&s.u().bc_kind)?;
+    let mut ufr: Vec<Scalar> = gpu.download(&s.u().fr)?;
+    let mut urv: Vec<Vec3> = gpu.download(&s.u().ref_value)?;
+    let urg: Vec<Vec3> = gpu.download(&s.u().ref_grad)?;
+    if ukind.len() != hm.n_boundary_faces {
+        return Err(Error::Config(format!(
+            "distflow: dvd_bcs was given a host mesh of {} boundary faces and a Simple of {}",
+            hm.n_boundary_faces,
+            ukind.len()
+        )));
+    }
+    for (i, &p) in owner.iter().enumerate() {
+        let wall = matches!(
+            hm.patches[p].name.as_str(),
+            "movingWall" | "leftWall" | "rightWall" | "fixedWall"
+        );
+        if wall {
+            ukind[i] = BcKind::FixedValue as crate::Label;
+            ufr[i] = 1.0;
+            urv[i] = Vec3::ZERO;
+        }
+    }
+    let u = s.u_mut();
+    gpu.write(&mut u.bc_kind, &ukind)?;
+    gpu.write(&mut u.fr, &ufr)?;
+    gpu.write(&mut u.ref_value, &urv)?;
+    gpu.write(&mut u.ref_grad, &urg)
+}
+
+/// One outer iteration of the heated cavity, and the convergence test over
+/// it: SIMPLE's momentum predictor + pressure equation, then `T`, then the
+/// passive scalar `s`; converged when the worst U initial residual and the
+/// p, T and s initial residuals are ALL under [`DVD_RESIDUAL`]. Returns
+/// `(iterations, converged, [U, p, T, s])` with the residuals of the last
+/// iteration.
+#[allow(clippy::too_many_arguments)]
+fn dvd_loop(
+    gpu: &Gpu,
+    s: &mut Simple<'_>,
+    backend: &mut dyn PressureBackend,
+    energy: &mut Energy<'_>,
+    gas: &GasState<'_>,
+    scalar: &mut ScalarTransport<'_>,
+    nut: &GpuScalarField,
+    tke: &DevBuf<Scalar>,
+    nu: Scalar,
+) -> Result<(usize, bool, [Scalar; 4])> {
+    let mut iterations = 0usize;
+    let mut converged = false;
+    let mut last = [0.0 as Scalar; 4];
+    for _ in 0..DVD_MAX_OUTER {
+        let perf = s.correct_outer(gpu, backend, nut, energy.field(), false)?;
+        let e_perf = energy.correct(gpu, s.convective_flux(), nut, tke, nu, gas)?;
+        let flow = FlowState { u: s.u(), phi: s.convective_flux(), nu };
+        let s_perf = scalar.correct(gpu, &flow, nut)?;
+        let u_res = perf
+            .u
+            .iter()
+            .map(|q| q.initial_residual)
+            .fold(0.0 as Scalar, Scalar::max);
+        last = [u_res, perf.p.initial_residual, e_perf.initial_residual, s_perf.initial_residual];
+        iterations += 1;
+        if last.iter().all(|&r| r < DVD_RESIDUAL) {
+            converged = true;
+            break;
+        }
+    }
+    Ok((iterations, converged, last))
+}
+
+/// The heated cavity on the WHOLE mesh, on one card - the serial reference.
+/// No route, no exchange on `T` or `s`: the calls `Energy` and
+/// `ScalarTransport` have always made.
+pub fn dvd_serial(gpu: &Gpu, hm: &HostMesh) -> Result<DvdRun> {
+    let m = GpuMesh::upload(gpu, hm)?;
+    let mut s = Simple::new(gpu, hm, &m, dvd_controls(), dvd_buoyancy())?;
+    dvd_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let mut backend = PbicgstabBackend::new(dvd_controls().p_solver);
+    backend.setup(gpu, hm, &m, &SystemProbe::default())?;
+
+    let props = dvd_props();
+    let mut energy = Energy::new(gpu, &m, dvd_energy_controls(), props)?;
+    let mut gas = GasState::new(gpu, &m, props, DomainKind::Open, 1e5)?;
+    let mut scalar = ScalarTransport::new(
+        gpu,
+        hm,
+        &m,
+        "s",
+        ScalarTransportCoeffs { pr: 0.71, prt: 0.85 },
+        dvd_scalar_controls(),
+    )?;
+
+    let nut = cavity_nut(gpu, &m)?;
+    let tke = gpu.zeros(m.n_local())?;
+
+    // T: uniform at the reference, then the two isothermal walls, then the
+    // boundary evaluation and the old-time seed - `initialise`. The gas
+    // state's density comes from it ONCE: Boussinesq pins it (SPEC-LIT
+    // 121.7), and the density-ratio divide never runs on this force law.
+    gpu.write(&mut energy.field_mut().f, &vec![DVD_T_REF as Scalar; m.n_local()])?;
+    dvd_wall_values(gpu, hm, energy.field_mut(), DVD_T_HOT as Scalar, DVD_T_COLD as Scalar)?;
+    energy.initialise(gpu)?;
+    gas.update_density(gpu, energy.field())?;
+
+    // s: zero everywhere (`zeros`' seed), hot on `leftWall`, cold on
+    // `rightWall`.
+    dvd_wall_values(gpu, hm, scalar.field_mut(), 1.0, 0.0)?;
+    scalar.initialise(gpu)?;
+
+    let (iterations, converged, residuals) = dvd_loop(
+        gpu,
+        &mut s,
+        &mut backend,
+        &mut energy,
+        &gas,
+        &mut scalar,
+        &nut,
+        &tke,
+        DVD_NU as Scalar,
+    )?;
+    let n = hm.n_cells;
+    Ok(DvdRun {
+        global_cell: (0..n).collect(),
+        u: gpu.download(&s.u().f)?,
+        p: gpu.download(&s.p().f)?,
+        t: gpu.download(&energy.field().f)?,
+        s: gpu.download(&scalar.field().f)?,
+        iterations,
+        converged,
+        residuals,
+    })
+}
+
+/// The heated cavity on rank `comm.rank()`'s part of `dec` - the decomposed
+/// run: `cavity_part`'s Simple except the walls (`dvd_bcs`: all four
+/// no-slip, buoyancy-driven) - SPMD momentum route, SPMD pressure backend,
+/// exchange - plus, for `T` and for `s` each, its own
+/// [`SpmdMomentumRoute`] through `set_route` and its own [`RankCtx`] through
+/// `set_exchange` (SPEC-LIT 139.5). Every rank constructs them in the same
+/// order - they are collective.
+pub fn dvd_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<DvdRun> {
+    let part = &dec.parts[comm.rank()];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(gpu, hm, &gm, dvd_controls(), dvd_buoyancy())?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, dvd_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    dvd_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let props = dvd_props();
+    let mut energy = Energy::new(gpu, &gm, dvd_energy_controls(), props)?;
+    let mut gas = GasState::new(gpu, &gm, props, DomainKind::Open, 1e5)?;
+    energy.set_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    energy.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+    let mut scalar = ScalarTransport::new(
+        gpu,
+        hm,
+        &gm,
+        "s",
+        ScalarTransportCoeffs { pr: 0.71, prt: 0.85 },
+        dvd_scalar_controls(),
+    )?;
+    scalar.set_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    scalar.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let nut = cavity_nut(gpu, &gm)?;
+    let tke = gpu.zeros(gm.n_local())?;
+
+    gpu.write(&mut energy.field_mut().f, &vec![DVD_T_REF as Scalar; gm.n_local()])?;
+    dvd_wall_values(gpu, hm, energy.field_mut(), DVD_T_HOT as Scalar, DVD_T_COLD as Scalar)?;
+    energy.initialise(gpu)?;
+    gas.update_density(gpu, energy.field())?;
+    dvd_wall_values(gpu, hm, scalar.field_mut(), 1.0, 0.0)?;
+    scalar.initialise(gpu)?;
+
+    let (iterations, converged, residuals) = dvd_loop(
+        gpu,
+        &mut s,
+        &mut backend,
+        &mut energy,
+        &gas,
+        &mut scalar,
+        &nut,
+        &tke,
+        DVD_NU as Scalar,
+    )?;
+    let n = hm.n_cells;
+    Ok(DvdRun {
+        global_cell: part.global_cell[..n].iter().map(|&g| g as usize).collect(),
+        u: gpu.download(&s.u().f)?[..n].to_vec(),
+        p: gpu.download(&s.p().f)?[..n].to_vec(),
+        t: gpu.download(&energy.field().f)?[..n].to_vec(),
+        s: gpu.download(&scalar.field().f)?[..n].to_vec(),
+        iterations,
+        converged,
+        residuals,
     })
 }
