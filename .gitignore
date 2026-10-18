@@ -94,6 +94,16 @@ cases/pipe_tet_L1/*
 !cases/pipe_tet_L1/constant/
 cases/pipe_tet_L1/constant/polyMesh/
 !cases/pipe_tet_L1/system/
+# docs/17 CMP-28: Gate CMP-NOZ's subsonic duct as a shipped OpenFOAM case.
+# The dicts, the README and the polyMesh pinned to gatemesh::nozzle_duct are
+# a few kB of text each and are tracked; the solver's time directories are
+# generated, not kept.
+!cases/nozzle/
+cases/nozzle/*
+!cases/nozzle/README.md
+!cases/nozzle/0/
+!cases/nozzle/constant/
+!cases/nozzle/system/
 
 # ------------------------------------------------------------- results -----
 *.png

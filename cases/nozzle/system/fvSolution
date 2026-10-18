@@ -1,0 +1,70 @@
+/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Gate CMP-NOZ's linear solvers and coupling (SPEC-LIT 127.6.5): one outer
+// corrector, no residualControl - the march stops at endTime's iteration
+// count - and the measured relaxation p 0.3, U 0.7, T 0.7.
+solvers
+{
+    p
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-10;
+        relTol          0.001;
+        maxIter         1000;
+    }
+    U
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-09;
+        relTol          0.01;
+        maxIter         1000;
+    }
+    T
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-09;
+        relTol          0.01;
+        maxIter         1000;
+    }
+}
+
+PIMPLE
+{
+    nCorrectors        2;
+    nOuterCorrectors   1;
+    nNonOrthogonalCorrectors 0;
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p               0.3;
+    }
+    equations
+    {
+        U               0.7;
+        T               0.7;
+    }
+}
+
+
+// ************************************************************************* //

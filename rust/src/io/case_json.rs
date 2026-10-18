@@ -74,6 +74,8 @@ use crate::timescheme::DdtScheme;
 use crate::energy::PrtModel;
 use crate::{Label, Scalar, Vec3};
 
+use crate::types::GeomPoint;
+
 // ==========================================================================
 //  1. The JSON tree - mirrors docs/case-example.json field for field
 // ==========================================================================
@@ -1017,6 +1019,34 @@ pub struct JsonInitial {
     pub omega: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nut: Option<f64>,
+    /// SPEC-LIT 125.8.1: `initial.regions`, the boxes that override `U`, `p`
+    /// and/or `T` in the cells whose centre lies in them. Only
+    /// `ofgpu-compressible` applies them, and [`JsonCase::lower`] refuses
+    /// them on a case without `physics.compressible`. Absent means uniform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<JsonInitialRegion>,
+}
+
+/// One `initial.regions` entry (SPEC-LIT 125.8.1): a box of cell centres,
+/// each stated field overriding the uniform `initial` value in the cells
+/// whose centre falls inside it. Only `ofgpu-compressible` applies a region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonInitialRegion {
+    /// The cell-centre box, in mesh coordinates, closed on both ends.
+    #[serde(rename = "box")]
+    pub bounds: JsonBounds,
+    /// The velocity the region's cells take, absent keeps `initial.U`.
+    #[serde(rename = "U", default, skip_serializing_if = "Option::is_none")]
+    pub u: Option<[f64; 3]>,
+    /// The gauge pressure the region's cells take, absent keeps `initial.p`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<f64>,
+    /// The temperature the region's cells take, absent keeps `initial.T`.
+    /// Requires `initial.T` on the case - the gas law has no state without
+    /// one to override.
+    #[serde(rename = "T", default, skip_serializing_if = "Option::is_none")]
+    pub t: Option<f64>,
 }
 
 // ---- numerics ------------------------------------------------------------
@@ -1676,6 +1706,23 @@ pub struct LoweredCase {
     /// SPEC-LIT §137.2: the `species`, `chemistry` and `combustion` blocks,
     /// lowered onto one config (§137.7). `None` for every case without them.
     pub chem: Option<crate::io::case_chem::LoweredChem>,
+    /// SPEC-LIT 125.8.1: `initial.regions`, in file order - a later entry
+    /// overrides an earlier one where their boxes overlap. Empty for every
+    /// case without the block.
+    pub initial_regions: Vec<LoweredInitialRegion>,
+}
+
+/// One lowered `initial.regions` entry (SPEC-LIT 125.8.1): the cell-centre
+/// box and the fields it states, `f64` in BOTH builds - the override is
+/// decided and applied on the host, from f64 cell centres, before any GPU
+/// work, so the half-stated precision the `single` build runs at cannot
+/// move a cell between two regions.
+pub struct LoweredInitialRegion {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub u: Option<[f64; 3]>,
+    pub p: Option<f64>,
+    pub t: Option<f64>,
 }
 
 impl LoweredCase {
@@ -1841,6 +1888,54 @@ LES {{ model {model}; }}
             }
         }
         c
+    }
+
+    /// SPEC-LIT 125.8.1: apply [`Self::initial_regions`] to the three initial
+    /// fields the driver has read, in order - a later region overrides an
+    /// earlier one where their boxes overlap - and return the selected cell
+    /// count of each region. Every cell `c` whose ABSOLUTE centre
+    /// `x = hm.origin + f64::from(hm.c[c])` lies inside the box, closed on
+    /// both ends (`min[k] <= x[k] <= max[k]`, each component widened to f64
+    /// before the compare), takes the region's stated values, `as Scalar` -
+    /// the same conversion every stated field value in this reader makes. A
+    /// region that selects no cell is refused: a box that misses the mesh
+    /// says a state the run will never see, which is the §13.4 defect in
+    /// region form.
+    pub fn apply_initial_regions(
+        &self,
+        hm: &crate::mesh::HostMesh,
+        u: &mut crate::io::fields::RawVectorField,
+        p: &mut crate::io::fields::RawScalarField,
+        t: &mut crate::io::fields::RawScalarField,
+    ) -> Result<Vec<usize>> {
+        let mut counts = Vec::with_capacity(self.initial_regions.len());
+        for (i, r) in self.initial_regions.iter().enumerate() {
+            let mut n = 0usize;
+            for c in 0..hm.n_cells {
+                let x = hm.origin + hm.c[c].to_dvec3();
+                let xr = [x.x, x.y, x.z];
+                if (0..3).any(|k| r.min[k] > xr[k] || xr[k] > r.max[k]) {
+                    continue;
+                }
+                if let Some(v) = r.u {
+                    u.internal[c] = Vec3::new(v[0] as Scalar, v[1] as Scalar, v[2] as Scalar);
+                }
+                if let Some(v) = r.p {
+                    p.internal[c] = v as Scalar;
+                }
+                if let Some(v) = r.t {
+                    t.internal[c] = v as Scalar;
+                }
+                n += 1;
+            }
+            if n == 0 {
+                return Err(Error::Config(format!(
+                    "initial.regions[{i}]: the box selects no cell of this mesh (SPEC-LIT 125.8.1)"
+                )));
+            }
+            counts.push(n);
+        }
+        Ok(counts)
     }
 }
 
@@ -3118,6 +3213,65 @@ impl JsonCase {
         let compressible = self.physics.compressible.as_ref().map(|c| c.gas()).transpose()?;
         validate_freestream_rules(&self.patches, compressible.as_ref(), self.initial.t)?;
 
+        // ---- SPEC-LIT 125.8.1: initial.regions --------------------------
+        // Lowered here, BEFORE any field, so a case that names a region it
+        // cannot state is refused before any GPU work - the same place the
+        // compressible presets' refusals run. Each region's own statement is
+        // checked first, and only then the driver gate - the one order in
+        // which every refusal below is reachable, since a compressible case
+        // without `initial.T` has already been refused above.
+        let mut initial_regions: Vec<LoweredInitialRegion> = Vec::with_capacity(self.initial.regions.len());
+        for (i, r) in self.initial.regions.iter().enumerate() {
+            if r.u.is_none() && r.p.is_none() && r.t.is_none() {
+                return Err(Error::Config(format!(
+                    "initial.regions[{i}]: the box states none of U, p or T - a region that \
+                     overrides nothing is not a setting (SPEC-LIT 125.8.1)"
+                )));
+            }
+            for k in 0..3 {
+                let (lo, hi) = (r.bounds.min[k], r.bounds.max[k]);
+                if !lo.is_finite() || !hi.is_finite() || lo > hi {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].box: min[{k}] {lo} > max[{k}] {hi} or a bound is \
+                         not finite - a region's box is a finite, ordered pair per axis \
+                         (SPEC-LIT 125.8.1)"
+                    )));
+                }
+            }
+            if let Some(t) = r.t {
+                if self.initial.t.is_none() {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].T: the case states no initial.T - there is no \
+                         temperature to override (SPEC-LIT 125.8.1)"
+                    )));
+                }
+                if t <= 0.0 {
+                    return Err(Error::Config(format!(
+                        "initial.regions[{i}].T {t} is not positive - the gas law has no state \
+                         at or below zero temperature (SPEC-LIT 125.8.1)"
+                    )));
+                }
+            }
+            initial_regions.push(LoweredInitialRegion {
+                min: r.bounds.min,
+                max: r.bounds.max,
+                u: r.u,
+                p: r.p,
+                t: r.t,
+            });
+        }
+        // The driver gate, after each stated region has been checked to
+        // state something a gas law could carry: ONLY `ofgpu-compressible`
+        // applies regions, so any other driver must not lower a case that
+        // names one - a run would silently ignore it.
+        if !initial_regions.is_empty() && compressible.is_none() {
+            return Err(Error::Config(
+                "initial.regions: only ofgpu-compressible applies regions - the case must \
+                 state physics.compressible for its gas law to carry them (SPEC-LIT 125.8.1)"
+                    .to_string(),
+            ));
+        }
+
         let mut names = mesh_patch_names(&block);
         // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
         // mesh writes no patch on the axis - the `xmin` name stands for no
@@ -3411,6 +3565,7 @@ impl JsonCase {
             compressible,
             parcels,
             chem,
+            initial_regions,
         })
     }
 }
@@ -6111,5 +6266,239 @@ mod tests {
                 .to_string();
             assert!(e.contains(needle) && e.contains("numerics.solvers"), "{block}: {e}");
         }
+    }
+
+    /// SPEC-LIT 125.8.1: `initial.regions` lowers onto
+    /// [`LoweredCase::initial_regions`] in file order, and every refusal
+    /// names its JSON path - the compressibleTube-style 10-cell tube, two
+    /// regions, and the five ways a region can fail to state anything a gas
+    /// law could carry.
+    #[test]
+    fn initial_regions_lower_in_order_and_refuse_by_name() {
+        // The tube with (or without) `physics.compressible`, with (or
+        // without) `initial.T`, and the `regions` list appended to `initial`.
+        let case = |compressible: bool, initial_t: bool, regions: &str| {
+            let compressible = if compressible {
+                r#",
+                "compressible": {
+                    "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+                    "viscosity": { "model": "const", "mu": 0 },
+                    "pOperating": 1e5
+                }"#
+            } else {
+                ""
+            };
+            let initial_t = if initial_t { ", \"T\": 300.0" } else { "" };
+            format!(
+                r#"{{
+                "name": "regionsTest",
+                "mesh": {{
+                    "kind": "cartesian",
+                    "bounds": {{ "min": [0, 0, 0], "max": [1, 0.1, 0.1] }},
+                    "cells": [10, 1, 1],
+                    "boundaries": {{
+                        "xmin": "xa", "xmax": "xb", "ymin": "ya",
+                        "ymax": "yb", "zmin": "za", "zmax": "zb"
+                    }}
+                }},
+                "physics": {{
+                    "gravity": [0, 0, 0],
+                    "fluid": {{ "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 }},
+                    "buoyancy": "densityRatio"{compressible}
+                }},
+                "patches": [
+                    {{ "match": "xa", "kind": "wall" }},
+                    {{ "match": "xb", "kind": "wall" }},
+                    {{ "match": ".*", "kind": "symmetry" }}
+                ],
+                "initial": {{ "U": [0, 0, 0], "p": 0.0{initial_t}{regions} }},
+                "numerics": {{
+                    "algorithm": {{ "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 1 }},
+                    "ddt": "Euler",
+                    "div": {{ "default": "Gauss upwind" }},
+                    "grad": "Gauss linear",
+                    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+                    "solvers": []
+                }},
+                "run": {{ "endTime": 1e-5, "deltaT": 1e-5 }}
+            }}"#
+            )
+        };
+        let lower =
+            |t: String| read_case_jsonc_str(&t, "regionsTest").and_then(|c| c.lower());
+        let two = r#",
+                "regions": [
+                    { "box": { "min": [0.5, -1, -1], "max": [1.5, 1, 1] },
+                      "p": -90000, "T": 278.69221457362016 },
+                    { "box": { "min": [0.25, 0, 0], "max": [0.75, 0.1, 0.1] },
+                      "U": [10, 0, 0], "p": -1 }
+                ]"#;
+        let l = lower(case(true, true, two)).expect("the two-region case lowers");
+        assert_eq!(l.initial_regions.len(), 2, "both regions lower, in order");
+        assert_eq!(l.initial_regions[0].min, [0.5, -1.0, -1.0]);
+        assert_eq!(l.initial_regions[0].max, [1.5, 1.0, 1.0]);
+        assert_eq!(l.initial_regions[0].u, None);
+        assert_eq!(l.initial_regions[0].p, Some(-90000.0));
+        assert_eq!(l.initial_regions[0].t, Some(278.69221457362016));
+        assert_eq!(l.initial_regions[1].min, [0.25, 0.0, 0.0]);
+        assert_eq!(l.initial_regions[1].max, [0.75, 0.1, 0.1]);
+        assert_eq!(l.initial_regions[1].u, Some([10.0, 0.0, 0.0]));
+        assert_eq!(l.initial_regions[1].p, Some(-1.0));
+        assert_eq!(l.initial_regions[1].t, None);
+
+        // (a) no `physics.compressible`: only one driver applies regions.
+        let e = lower(case(false, true, two))
+            .err().expect("regions without a gas law")
+            .to_string();
+        assert!(
+            e.contains("initial.regions") && e.contains("ofgpu-compressible") && e.contains("SPEC-LIT 125.8.1"),
+            "{e}"
+        );
+        // (b) none of U, p or T stated.
+        let e = lower(case(true, true, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] } } ]"#))
+            .err().expect("a region that overrides nothing")
+            .to_string();
+        assert!(e.contains("initial.regions[0]"), "{e}");
+        // (c) min[k] > max[k], and a non-finite bound - the same path.
+        let bad = |min: &str, max: &str| {
+            format!(
+                r#", "regions": [ {{ "box": {{ "min": {min}, "max": {max} }}, "p": 0 }} ]"#
+            )
+        };
+        let e = lower(case(true, true, &bad("[0.75, 0, 0]", "[0.25, 0.1, 0.1]")))
+            .err().expect("min above max")
+            .to_string();
+        assert!(e.contains("initial.regions[0].box"), "{e}");
+        let mut c = read_case_jsonc_str(&case(true, true, two), "regionsTest").expect("parses");
+        c.initial.regions[0].bounds.max[0] = f64::INFINITY;
+        let e = c
+            .lower()
+            .err().expect("a non-finite bound")
+            .to_string();
+        assert!(e.contains("initial.regions[0].box"), "{e}");
+        // (d) T stated while `initial.T` is absent - reachable on a
+        // non-compressible case only, so the per-region checks run before
+        // the driver gate.
+        let e = lower(case(false, false, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] }, "T": 300 } ]"#))
+            .err().expect("a region T without initial.T")
+            .to_string();
+        assert!(e.contains("initial.regions[0].T"), "{e}");
+        // (e) a stated T <= 0.
+        let e = lower(case(true, true, r#", "regions": [ { "box": { "min": [0, 0, 0], "max": [1, 1, 1] }, "T": 0 } ]"#))
+            .err().expect("a region at zero temperature")
+            .to_string();
+        assert!(e.contains("initial.regions[0].T"), "{e}");
+    }
+
+    /// SPEC-LIT 125.8.1: [`LoweredCase::apply_initial_regions`] selects by
+    /// ABSOLUTE cell centre, closed on both ends, a later region overriding
+    /// an earlier one where the boxes overlap, and refuses a box that
+    /// selects no cell.
+    #[test]
+    fn initial_regions_apply_by_cell_centre() {
+        let case = r#"{
+            "name": "applyTest",
+            "mesh": {
+                "kind": "cartesian",
+                "bounds": { "min": [0, 0, 0], "max": [1, 0.01, 0.01] },
+                "cells": [10, 1, 1],
+                "boundaries": {
+                    "xmin": "endA", "xmax": "endB", "ymin": "sideA",
+                    "ymax": "sideB", "zmin": "sideC", "zmax": "sideD"
+                }
+            },
+            "physics": {
+                "gravity": [0, 0, 0],
+                "fluid": { "nu": 1e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 },
+                "buoyancy": "densityRatio",
+                "compressible": {
+                    "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+                    "viscosity": { "model": "const", "mu": 0 },
+                    "pOperating": 1e5
+                }
+            },
+            "patches": [
+                { "match": "endA", "kind": "wall" },
+                { "match": "endB", "kind": "wall" },
+                { "match": "(sideA|sideB|sideC|sideD)", "kind": "symmetry" }
+            ],
+            "initial": { "U": [0, 0, 0], "p": 0.0, "T": 300.0 },
+            "numerics": {
+                "algorithm": { "kind": "PIMPLE", "correctors": 2, "outerCorrectors": 1 },
+                "ddt": "Euler",
+                "div": { "default": "Gauss upwind" },
+                "grad": "Gauss linear",
+                "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+                "solvers": []
+            },
+            "run": { "endTime": 1e-5, "deltaT": 1e-5 }
+        }"#;
+        let lower = || {
+            read_case_jsonc_str(case, "applyTest")
+                .and_then(|c| c.lower())
+                .expect("the apply case lowers")
+        };
+        let hm = lower().build_host_mesh().expect("the tube meshes");
+        assert_eq!(hm.n_cells, 10);
+
+        // The two overlapping regions, in order.
+        let mut l = lower();
+        l.initial_regions = vec![
+            LoweredInitialRegion {
+                min: [0.5, -1.0, -1.0],
+                max: [1.5, 1.0, 1.0],
+                u: None,
+                p: Some(-90000.0),
+                t: Some(278.69221457362016),
+            },
+            LoweredInitialRegion {
+                min: [0.75, -1.0, -1.0],
+                max: [1.5, 1.0, 1.0],
+                u: Some([1.0, 0.0, 0.0]),
+                p: Some(-1.0),
+                t: None,
+            },
+        ];
+        let mut u = l.u_field.to_raw(hm.n_cells);
+        let mut p = l.p_field.to_raw(hm.n_cells);
+        let mut t = l.t_field.as_ref().expect("initial.T").to_raw(hm.n_cells);
+        let counts = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect("both regions select cells");
+        assert_eq!(counts, vec![5, 3], "x >= 0.5 is five cells, x >= 0.75 three");
+        // Cells 0..4 keep the uniform values.
+        for c in 0..5 {
+            assert_eq!(p.internal[c], 0.0 as Scalar, "cell {c} keeps the uniform p");
+            assert_eq!(t.internal[c], 300.0 as Scalar, "cell {c} keeps the uniform T");
+            assert_eq!(u.internal[c], Vec3::ZERO, "cell {c} keeps the uniform U");
+        }
+        // Cells 5 and 6 carry region 1 only; cells 7..9, region 2's override
+        // of p and U - and region 1's T, which region 2 does not state.
+        for c in 5..7 {
+            assert_eq!(p.internal[c], -90000.0 as Scalar, "cell {c} takes region 1's p");
+            assert_eq!(t.internal[c], 278.69221457362016 as Scalar, "cell {c} takes region 1's T");
+            assert_eq!(u.internal[c], Vec3::ZERO, "cell {c} keeps the uniform U");
+        }
+        for c in 7..10 {
+            assert_eq!(p.internal[c], -1.0 as Scalar, "cell {c} takes region 2's p");
+            assert_eq!(t.internal[c], 278.69221457362016 as Scalar, "cell {c} keeps region 1's T");
+            assert_eq!(u.internal[c].x, 1.0 as Scalar, "cell {c} takes region 2's U");
+        }
+
+        // A box off the mesh is refused by name.
+        l.initial_regions
+            .push(LoweredInitialRegion { min: [2.0; 3], max: [3.0; 3], u: None, p: Some(-1.0), t: None });
+        let e = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect_err("the off-mesh box")
+            .to_string();
+        assert!(e.contains("initial.regions[2]") && e.contains("selects no cell"), "{e}");
+
+        // No regions: nothing is touched, and nothing is asked.
+        l.initial_regions.clear();
+        let counts = l
+            .apply_initial_regions(&hm, &mut u, &mut p, &mut t)
+            .expect("no regions at all");
+        assert!(counts.is_empty(), "no region, no count");
     }
 }

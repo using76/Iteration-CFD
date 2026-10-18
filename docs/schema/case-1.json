@@ -935,12 +935,62 @@
         "p": {
           "type": "number",
           "format": "double"
+        },
+        "regions": {
+          "description": "SPEC-LIT 125.8.1: `initial.regions`, the boxes that override `U`, `p`\nand/or `T` in the cells whose centre lies in them. Only\n`ofgpu-compressible` applies them, and [`JsonCase::lower`] refuses\nthem on a case without `physics.compressible`. Absent means uniform.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonInitialRegion"
+          }
         }
       },
       "additionalProperties": false,
       "required": [
         "U",
         "p"
+      ]
+    },
+    "JsonInitialRegion": {
+      "description": "One `initial.regions` entry (SPEC-LIT 125.8.1): a box of cell centres,\neach stated field overriding the uniform `initial` value in the cells\nwhose centre falls inside it. Only `ofgpu-compressible` applies a region.",
+      "type": "object",
+      "properties": {
+        "T": {
+          "description": "The temperature the region's cells take, absent keeps `initial.T`.\nRequires `initial.T` on the case - the gas law has no state without\none to override.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "U": {
+          "description": "The velocity the region's cells take, absent keeps `initial.U`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "box": {
+          "description": "The cell-centre box, in mesh coordinates, closed on both ends.",
+          "$ref": "#/$defs/JsonBounds"
+        },
+        "p": {
+          "description": "The gauge pressure the region's cells take, absent keeps `initial.p`.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "box"
       ]
     },
     "JsonInjector": {

@@ -1,0 +1,41 @@
+/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      thermophysicalProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Gate CMP-NOZ's gas (SPEC-LIT 127.6.5): dry air as a perfect gas, the
+// inviscid constant-mu 0 closure the duct's slip walls assume.
+thermoType
+{
+    type            hePsiThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectGas;
+    specie          specie;
+    energy          sensibleInternalEnergy;
+}
+
+mixture
+{
+    specie { molWeight 28.9647; }
+    thermodynamics { Cp 1004.692579691832; Hf 0; }
+    transport { mu 0; }
+}
+
+pOperating [1 -1 -2 0 0 0 0] 1e5;
+
+
+// ************************************************************************* //

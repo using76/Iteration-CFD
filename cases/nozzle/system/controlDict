@@ -1,0 +1,48 @@
+/*---------------------------------------------------------------------------*\
+| ofgpu  --  GPU-native finite volume CFD                                     |
+|                                                                             |
+| Written in the OpenFOAM ASCII case format so that existing pre- and         |
+| post-processing tools can read it. A file format is not a work: ofgpu is    |
+| an independent implementation, neither derived from nor affiliated with     |
+| OpenFOAM.                                                                   |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+application     foamRun;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+// A steady run on localEuler: endTime counts ITERATIONS here, and 15000 is
+// Gate CMP-NOZ's march to its field stop (SPEC-LIT 127.6.5).
+endTime         15000;
+
+deltaT          1;
+
+// localEuler's pseudo-time-step bound, SPEC-LIT 125.7.
+maxCo           1;
+
+writeFormat     ascii;
+
+writePrecision  6;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+
+// ************************************************************************* //

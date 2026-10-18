@@ -41,8 +41,8 @@ cargo test --release --lib provenance_audit
 ```
 cargo test --release   1,645 passed, 0 failed, 4 ignored (lib 크레이트)
                        1,774 passed, 0 failed, 6 ignored (모든 타깃 합계)
-cargo test --release --features single --target-dir target/single   1,577 passed, 0 failed, 442 ignored (lib, f32 — SPEC-LIT §112.3)
-ofgpu-validate         833 / 833 checks passed
+cargo test --release --features single --target-dir target/single   1,577 passed, 0 failed, 442 ignored (lib, f32, 2026-09-24; F32-16 이후 f32 무시 표시는 303개 — SPEC-LIT §112.3)
+ofgpu-validate         833 / 833 checks passed (2026-09-09); 이 트리는 79개 절 (2026-10-18)
                        (788개는 실시간 계산, 45개는 기록된 측정값 재생)
 ```
 
@@ -104,7 +104,7 @@ cargo test --release --features single --target-dir target/single
 
 ## 실행
 
-바이너리는 19개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
+바이너리는 22개입니다(`Cargo.toml`의 `[[bin]]` 항목이 전부).
 
 ```bash
 cargo run --release --bin ofgpu-generate-mesh -- channel ../cases/ch 200 120 1
@@ -167,13 +167,13 @@ rust/
     ├── vof.rs                                 2상 VOF
     ├── blockgen.rs restart.rs potential_flow.rs
     ├── reference.rs                           독립 CPU 구현 (검증 전용)
-    └── bin/                                   바이너리 19개
+    └── bin/                                   바이너리 22개
 ```
 
 ## 알려진 제약
 
 [`../README.md`](../README.md)의 "제한사항"이 그대로 적용됩니다 — 단일 GPU 전용,
-AMGX 기본 비활성, 저이완 방정식에서의 Crank–Nicolson, 압축성 미지원,
+AMGX 기본 비활성, 저이완 방정식에서의 Crank–Nicolson, 압축성은 `ofgpu-compressible`(게이트 일부 미달, §127.6),
 복사는 면대면(§49/§50)만 — `radiationModel`은 `viewFactor`/`s2s`만 인식하고
 그 밖의 값은 인식되는 집합과 함께 거부됩니다.
 

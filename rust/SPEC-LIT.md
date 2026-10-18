@@ -34491,6 +34491,7 @@ for byte.
 | `OFGPU_ADAPT_TINY`, `cuda/adapt.cu` | the band in which the transfer limiter leaves a cell alone | `1e-300` | `1e-30f` |
 | `OFGPU_S2S_HUGE`, `cuda/s2s.cu` | the start of the two half-space maxima | `1e300` | `1e30f` |
 | `OFGPU_DBL_MIN`, `cuda/solid.cu` | `Vec3::normalised`'s threshold | `2.2250738585072014e-308` | `1.17549435e-38f` |
+| `cuda/compressible.cu` (CMP-28) | nothing: the file defines no floor. Each kernel's header says "no floor and no clip", and a `T <= 0`, `p_abs <= 0` or `rho <= 0` is counted, never clipped (§122.3) | - | - |
 
 The host twins follow: `adapt::transfer::LIMITER_FLOOR` is `SCALAR_FLOOR`, and the host
 floors in `src/fan.rs`, `src/wallfunctions.rs`, `src/s2s.rs`, `ofgpu-lowmach` and the
@@ -34501,6 +34502,8 @@ are finite, non-zero and invertible in the build being tested and that the f64 v
 are the historical ones, and a scan of `cuda/` refuses a `1e-300`, `1e300` or
 `2.2250738585072014e-308` anywhere but the double arm of an `#ifdef OFGPU_SINGLE`
 block.
+
+CMP-28 adds a third test for the one kernel unit that has no floor at all. `compressible::tests::the_compressible_kernels_carry_no_double_only_literal` strips the comments from `cuda/compressible.cu` and refuses `1e-300`, `1e300`, `1e+300`, `2.2250738585072014e-308`, `DBL_MIN` and `DBL_MAX` anywhere in it, in a pair or not. It passes in both builds.
 
 ### 112.2 The build, the second invocation, and the rule that keeps f64 bitwise
 
@@ -34684,6 +34687,45 @@ pass in one filtered run per module: io 37 in 442 s, solid 35 in 593 s, models 1
 automesher in under 10 s each. Two of solid's tests take nearly all of solid's time. They are F32-15's
 `gate_95_e_the_bimetal_curvature_is_timoshenko_s` and `the_linear_bond_leaves_an_interface_stress_the_series_bond_removes`,
 which now finish and pass as they stand, with the GPU shared by three lanes.
+
+**CMP-28 (2026-10-18): the compressible solver at f32, every floor and every row with both values.**
+`cuda/compressible.cu` has no floor (§112.1, §122.3). Its host-side constants are formed in f64 in both builds: §126.11's direction threshold `tmin = 1e-6` and §122.1's `c_p` check at `1e-6` relative. Three single-build floors were measured by the units that own them. Each is printed beside its f64 value; only CMP-NR's is held to a bar.
+
+| floor | unit | f64 | f32 |
+|---|---|---|---|
+| CMP-NR long-time outlet mean over `A` (bar `<= 1e-3`, §126.9) | CMP-17 | 2.57e-4 | 1.102e-3, **MISSED** |
+| CMP-RING error floor `E_min` on the finest mesh (printed, never checked, §127.6.7) | CMP-24 | - | 4.396e-8 |
+| SA conservative form, closed-box identity `E` (class R, `tol_r(1e-12)`, §127.1.1) | CMP-25 | 1.50e-16 | 1.54e-8 |
+
+Every compressible row of `ofgpu-validate`, and Gate CMP-NR (a library test, §126.9), with both values. The sections are this tree's run order. `target/single/release/ofgpu-validate.exe -sections 999` lists all 79 sections in the single build, and every CMP section is among them: CMP-B 61, CMP-SOD 70, CMP-AC 71, CMP-LM 72, CMP-COU 73, CMP-NOZ 74, CMP-OBL 75, CMP-RING 76 and CMP-RAE 77. A section that misses is still listed and still runs.
+
+| section | row (bar) | class | f64 | f32 | verdict |
+|---|---|---|---|---|---|
+| 61 CMP-B | Nu_cold, runs 1-3 (2 % of the published value, §121.8) | P | +0.06 / +0.34 / +0.59 % | +0.37 / +0.26 / +0.64 % | holds in both |
+| 61 CMP-B | `w` and `s`, runs 1-3 (`1e-5`) | R | 1.9e-13 to 8.8e-12 | about 1e-3 | **FAIL** at f32 (§121.8; SIMPLE does not reach `1e-9`); run 4 is a `skip` row under `single` |
+| 70 CMP-SOD | PISO, 800 cells, worst plateau (1 %) | P | 45.98 % | 45.95 % | **MISSED** (§127.6.1) |
+| 70 CMP-SOD | PISO, shock position (0.5 % of the length) | P | not found in the tube | not found in the tube | **MISSED** |
+| 70 CMP-SOD | PISO, observed L1(`rho`) order (`>= 0.6`) | P | 0.015 | 0.015 | **MISSED** |
+| 70 CMP-SOD | PIMPLE leg, printed only: plateau / shock / order | - | 0.31 % / 0.132 % / 0.696 | 0.30 % / 0.131 % / 0.700 | meets every bar in both |
+| 71 CMP-AC | pulse speed over `c_0` (within 1 %) | P | 1.18949 | 1.18934 | **MISSED** (§127.6.2); PIMPLE printed 0.99692 / 0.99666 |
+| 72 CMP-LM | worst `u/U` against Ghia (0.02) | P | 2.716e-3 | 2.718e-3 | holds in both |
+| 72 CMP-LM | worst `v/U` against Ghia (0.02) | P | 7.255e-3 | 7.257e-3 | holds in both |
+| 73 CMP-COU | adiabatic-wall rise (0.5 %) | P | 1.103e-4 | 5.842e-4 | holds in both |
+| 73 CMP-COU | `T` profile L-infinity (0.5 %) | P | 1.541e-4 | 4.935e-4 | holds in both |
+| 74 CMP-NOZ | subsonic `M(x)` (0.5 %) | P | 6.001e-3 | 6.002e-3 | **MISSED** (§127.6.5) |
+| 74 CMP-NOZ | subsonic exit `p` (0.5 %) | P | 8.366e-5 | 8.365e-5 | holds in both |
+| 74 CMP-NOZ | supersonic and shocked, five rows | P | NaN (bound at step 76 / 866) | NaN (bound at step 292 / 1883) | **MISSED** |
+| 75 CMP-OBL | `p_2/p_1` (1 %) | P | 1.036e-3 | 9.957e-4 | holds in both, field stop not met (§127.6.6) |
+| 75 CMP-OBL | shock angle (0.5 degrees) | P | 0.1441 | 0.1414 | holds in both, field stop not met |
+| 75 CMP-OBL | `M_2` (1 %) | P | 3.694e-4 | 3.582e-4 | holds in both, field stop not met |
+| 76 CMP-RING | observed order of the L2 entropy error (`>= 1.5`, f64 only) | P (f64), measured (f32) | 0.456 | 0.469, not checked | **MISSED** in f64 (§127.6.7) |
+| 76 CMP-RING | the three runs stop on no bound | D | pass | pass | holds in both |
+| 77 CMP-RAE | shock `x/c`, lower-surface Cp RMS, `Cl` (replayed) | P | no field: every run stopped on a bound | the same | **MISSED** (§127.6.8) |
+| 77 CMP-RAE | coarse smoke stops on no bound | D | pass (2000 iterations) | bound at step 13 | **MISSED** at f32 |
+| - CMP-NR | reflection, `waveTransmissive` (`<= 0.05`) | P | 0.1821 | 0.1828 | **MISSED** (§126.9) |
+| - CMP-NR | reflection, fixed `p` (`>= 0.9`) | P | 0.9776 | 0.9778 | holds in both |
+
+The two shipped compressible cases of §125.8.1 and §125.8.2 run in both builds (measured there). CMP-28's three library tests and five binary tests carry no attribute, so neither bold count moves: the library count stays 303 and the binary count 17. One binary test that predates CMP-28 fails under `single` and carries no attribute: `compressible::every_knob_changes_the_run`, whose `numerics.solvers U` and `numerics.solvers T` tolerance knobs write bit-identical fields in the f32 tube. It fails the same way on the tree before CMP-28. It is left for F32-17 and docs/17-review-later.md and is not marked here.
 
 ### 112.4 `ofgpu-validate` at f32, section by section
 
@@ -44888,9 +44930,7 @@ it is not (§125.8).
 
 ### 122.3 Floors, bounds and what is never clipped
 
-* Device floors in `cuda/compressible.cu` use `OFGPU_CMP_TINY`, `1e-30f` under
-  `OFGPU_SINGLE` and `1e-300` otherwise; host floors use `SCALAR_FLOOR`. That is
-  §112.1's rule, and CMP-28 extends §112.1's table with this row.
+* `cuda/compressible.cu` defines no floor. No `OFGPU_CMP_TINY` exists, and each kernel's header says "no floor and no clip". The one host threshold its kernels receive, §126.11's direction threshold `tmin = 1e-6`, is formed in f64 on the host and is not a floor. §112.1's table carries the row (CMP-28), and `compressible::tests::the_compressible_kernels_carry_no_double_only_literal` holds it. A host floor that a later unit adds uses `SCALAR_FLOOR` (§112.1).
 * **Bounds are counted, never clipped.** After each solve of an outer iteration the
   driver counts the cells with `T <= 0`, `p_abs <= 0` or `rho <= 0`, and records the
   first such cell and its value. A nonzero count is printed on the iteration line. The
@@ -45959,6 +45999,42 @@ is involved.
 The smoke run took `0.22` s for its 30 steps (bar 30 s), and `M_max` was `0.1440`. The
 single-precision binary runs the same tube in `0.31` s with `M_max` `0.1440` (reported, not a
 test row).
+
+#### 125.8.1 A non-uniform start in a JSONC case: `initial.regions` (CMP-28)
+
+`No GPL-licensed source was consulted.` A JSONC `initial` block states one uniform value per field, so a shock tube's two states could not be written as a case (docs/17-review-later.md, CMP-29's row). `initial.regions` is a list of boxes. Each box states any of `U`, `p` and `T`, and those values replace the uniform ones in the cells whose centre lies in the box. The rule is ORIGINAL, this tree's choice:
+
+```
+S_r = { c : min_r,k <= x_c,k <= max_r,k for k = 1, 2, 3 },   x_c = origin + c_c, widened to f64      (125.5)
+phi_c := phi_r  for every c in S_r and every phi in {U, p, T} that region r states, r = 0, 1, ... in file order   (125.6)
+```
+
+The box is closed, so a centre on a face of it is inside. A later region overrides an earlier one where they overlap. The values reach the fields `as Scalar`, the same conversion every stated value takes. The selection is made on the host, in f64 in both builds, before any GPU work.
+
+`JsonCase::lower` refuses a region, by its JSON path, when it states none of `U`, `p` and `T` (`initial.regions[i]`); when a box bound is not finite or `min > max` (`initial.regions[i].box`); when it states `T` while the case has no `initial.T`, or a `T <= 0` (`initial.regions[i].T`). It refuses any region on a case without `physics.compressible`, because only `ofgpu-compressible` applies them. `LoweredCase::apply_initial_regions` refuses a box that selects no cell of the mesh. The driver prints one line per region: `initial.regions[i]: N cells (SPEC-LIT 125.8.1)`.
+
+**`cases/sodShockTube.jsonc`** states Sod's problem (Sod 1978, doi:10.1016/0021-9991(78)90023-2) as Gate CMP-SOD sets it up (§127.6.1): 200 cells, air with `mu = 0`, `p_op = p_L = 1e5` Pa, the left state `p = 0`, `T = 348.36526821702523` K, and one region `x >= 0.5` with `p = -90000`, `T = 278.69221457362016` K, both ends closed walls. It runs to `t = 0.2 L/sqrt(p_L/rho_L) = 6.324555320336759e-4` s in 176 steps, with the gate's PIMPLE leg (5 outer iterations, `p` unrelaxed, van Leer on the three convections). That leg meets the gate's bars; the gate's own PISO row misses them. The case is not a gate, and no test checks its numbers against the exact solution.
+
+| test | class | what it holds |
+|---|---|---|
+| `io::case_json::tests::initial_regions_lower_in_order_and_refuse_by_name` | D | two regions lower in file order with their stated values; the five refusals, each by its path |
+| `io::case_json::tests::initial_regions_apply_by_cell_centre` | D | 10 cells: `x >= 0.5` selects 5 cells and `x >= 0.75` 3, the later region wins on `p` and `U` and keeps the earlier `T`; a box off the mesh is refused; no regions touches nothing |
+| `the_shipped_sod_case_states_the_gate_pimple_controls` (bin) | D | `driver_controls` of the shipped case is Gate CMP-SOD's PIMPLE leg, setting by setting |
+| `the_shipped_sod_case_runs` (bin) | P | the shipped case runs 176 steps with no bound, writes the five fields, and its final `p` is not uniform |
+
+**Measured** (2026-10-18, this tree, the RTX 5070 Ti shared with two other jobs): `ofgpu-compressible cases/sodShockTube.jsonc` prints `initial.regions[0]: 100 cells` and runs 176 steps with no bound, in 25.3 s (f64; final `M_max` 0.9918) and 39.3 s (f32; final `M_max` 0.9930).
+
+#### 125.8.2 The nozzle recipe: `cases/nozzle` (CMP-28)
+
+`No GPL-licensed source was consulted.` A JSONC mesh is a box, so Gate CMP-NOZ's duct (§127.5.2) ships as an OpenFOAM case directory. Its `constant/polyMesh` is what `write_poly_mesh_raw` writes for `nozzle_duct(&DuctSpec::default())`: 200 cells, patches `inlet`, `outlet`, `walls` and `frontAndBack`. The test `the_shipped_nozzle_case_is_the_generated_one` pins it to that builder, and with `OFGPU_WRITE_NOZZLE_CASE=1` the same test rewrites it. The case is the gate's subsonic regime: air with `mu = 0` and `p_op = 1e5` Pa, a `totalPressure` inlet (`p0 = 0` gauge, so `p_t1 = p_op`) with `totalTemperature` `T0 = 300` K, a fixed outlet `p = -5000` Pa (`p_b/p_t1 = 0.95`), and `symmetry` walls. It starts at rest at `T = 300` K, with a gauge `p` of `-25 (2i + 1)/2` Pa in cell `i`: the gate's linear start, taken at each cell's axial midpoint (ORIGINAL). It runs the gate's controls: `localEuler` at `maxCo 1`, one outer corrector, van Leer on the three convections, relaxation `p` 0.3, `U` 0.7 and `T` 0.7, and 15000 iterations. `cases/nozzle/README.md` is the recipe. The gate MISSES its `M(x)` bar on this duct (§127.6.5), and the case reproduces that run; it does not claim a pass.
+
+| test | class | what it holds |
+|---|---|---|
+| `the_shipped_nozzle_case_is_the_generated_one` (bin) | D | the five polyMesh files and `0/p`'s internal list are the generated ones |
+| `the_shipped_nozzle_case_states_the_gate_controls` (bin) | D | `driver_controls` of the case is Gate CMP-NOZ's, setting by setting |
+| `the_shipped_nozzle_recipe_runs` (bin) | P | `-iters 200` runs 200 iterations with no bound |
+
+**Measured** (2026-10-18, the shared RTX 5070 Ti): as written, f64, 15000 iterations in 463 s, no bound, final `M_max` 0.6736 and `M_mean` 0.4503. The single build's `-iters 200` smoke ran in 10.2 s with no bound. Its 15000-iteration run was not made under the 10-minute rule. All 19 of `ofgpu-compressible`'s tests pass in f64. Under `single`, 18 pass, and the one failure is the pre-existing `every_knob_changes_the_run` of §112.3.
 
 ---
 
@@ -56612,7 +56688,7 @@ The 2-D `Tu_LE` reproduces the fit's `Tu_LE` (`6.086009`, `0.910763 %`) to
 - Earlier wave runs keep their numbers; nothing in §144.3/§144.4 moves.
 
 **The replay** (the finest f64 record of each case and model, read on
-`ofgpu-validate -sections 78`; the onset E against the key's own (144.4a)
+`ofgpu-validate -sections 79`; the onset E against the key's own (144.4a)
 onset, `5.642944e4` for T3B and `1.443366e6` for T3A-):
 
 | case model | onset Re_x (kind) | onset E | worst turbulent C_f E (at) | worst laminar E (at) |

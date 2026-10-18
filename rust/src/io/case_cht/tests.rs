@@ -4694,7 +4694,7 @@ mod conduction {
     }
 
     #[test]
-    // f32 (F32-16): externalSlab outer loop misses the 1e-10 S100.7 bar in f32
+    // f32 (F32-16): externalSlab outer loop misses the 1e-10 §100.7 bar in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn pair_a_conductivity_curve_bends_the_profile_and_keeps_kirchhoffs_heat_flow() {
         let Some(gpu) = gpu() else { return };
@@ -4743,7 +4743,7 @@ mod conduction {
     }
 
     #[test]
-    // f32 (F32-16): externalSlab outer loop misses the 1e-10 S100.7 bar in f32
+    // f32 (F32-16): externalSlab outer loop misses the 1e-10 §100.7 bar in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_fixed_flux_face_delivers_its_q_through_a_conductivity_curve() {
         let Some(gpu) = gpu() else { return };
@@ -4769,7 +4769,7 @@ mod conduction {
     }
 
     #[test]
-    // f32 (F32-16): externalSlab outer loop misses the 1e-10 S100.7 bar in f32
+    // f32 (F32-16): externalSlab outer loop misses the 1e-10 §100.7 bar in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_convective_face_meets_its_robin_identity_through_a_conductivity_curve() {
         let Some(gpu) = gpu() else { return };
@@ -4797,7 +4797,7 @@ mod conduction {
     }
 
     #[test]
-    // f32 (F32-16): externalSlab outer loop misses the 1e-10 S100.7 bar in f32
+    // f32 (F32-16): externalSlab outer loop misses the 1e-10 §100.7 bar in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_radiating_face_and_a_conductivity_curve_share_one_loop() {
         let Some(gpu) = gpu() else { return };
@@ -4865,7 +4865,7 @@ mod conduction {
     }
 
     #[test]
-    // f32 (F32-16): externalSlab outer loop misses the 1e-10 S100.7 bar in f32
+    // f32 (F32-16): externalSlab outer loop misses the 1e-10 §100.7 bar in f32
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn pair_a_heat_capacity_curve_moves_a_transient_and_its_flat_twin_does_not() {
         let Some(gpu) = gpu() else { return };
