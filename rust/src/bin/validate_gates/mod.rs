@@ -166,3 +166,7 @@ pub(crate) mod chr_cube;
 /// synthetic four-gas set - the per-gas fvDOM and P1 sums and the grey
 /// mean; Smith 1982 and Bordbar 2014 named and NOT RUN (docs/17 CHR-27).
 pub(crate) mod chr_wsgg;
+
+/// SPEC-LIT §159.11, Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame
+/// against the gas flame of its volatile.
+pub(crate) mod dst_b_laminar;

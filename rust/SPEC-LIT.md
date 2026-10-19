@@ -62667,6 +62667,185 @@ on all four members, and (137.9) moves the target divergence within 4.2e−16 (f
 (`single`) of `Σ_k R T ṁ_k/(p0 W_k)`. Before the fix of the molar loop, which added ṁ instead of
 the factor term, it missed at 2.08.
 
+### 159.11 Gate DST-B-LAM as built (DST-16)
+
+`No GPL-licensed source was consulted.` DST-16 holds the Phase B cloud of §159.10 against the gas
+flame of its own volatile in `ofgpu-lowmach`: (i) the fine-particle limit, (ii) the size order,
+(iii) the measured flame speed, named. Files: `src/bin/validate_gates/dst_b_laminar.rs` (new),
+`cases/dust/flame1dCloud.jsonc` (new), `src/bin/validate.rs` (one section),
+`src/bin/validate_gates/mod.rs`, `src/bin/lowmach_cloud/mod.rs` and its tests, a report line and
+the write clock in `src/bin/lowmach.rs`, and the volatile stage end of `src/dust/particle.rs` and
+`cuda/dustparticle.cu` with two tests in `tests/shared/dust_particle_cases.rs`. The specification was informed by a review of FSCDustFoam (Huang &
+Lipatnikov, GPL) and no code was copied; the equations are §152's, §159.10's, (133.25) of SPEC-LIT
+133.12 and the derivations given here.
+
+**The tube** (`cases/dust/flame1dCloud.jsonc`). 120 cells over 6 mm (dx = 50 µm), one cell of
+250 µm across, closed at x = 0 by an adiabatic no-slip wall and open at x = 6 mm (`p` 0, `U`
+zeroGradient, `T` and `Y` inletOutlet). The four sides are symmetry planes, except one igniter
+window: the `ymin` face over x ∈ [5.5, 6] mm is a no-slip wall held at 2000 K. The tube starts at
+rest at 300 K and 101 325 Pa. The flame lights at the window and runs toward the closed end into
+the quiescent mixture; the burned gas leaves through the open end. **Why this tube** (decision
+taken by recommendation): the finite-rate path of `ofgpu-lowmach` has no ignition source, its JSONC
+route has uniform initial fields only (`initial.regions` is `ofgpu-compressible`'s, §125.8), and
+an inflow tube would need parcels injected at its inlet, which a cloud's pool does not do (it
+holds the seeding only, §159.10). The hot window lights both flames the same way. In a 1-D low-Mach
+tube the gas between the closed end and the flame is at rest where its density is uniform
+(`div u = 0` there and `u = 0` at the wall), so the front's speed is the flame's speed into the
+fresh mixture:
+
+```
+  S_L = − dx_f/dt ,   x_f(t) the first crossing of T_iso = 1000 K counted from the closed end,
+        linear between cell centres; the slope by least squares over the writes of [t_a, t_end]   (159.23)
+```
+
+with t_a = 20 ms, t_end = 40 ms and a write every 0.5 ms (41 fronts). This is (133.25) of SPEC-LIT
+133.12 with the inflow speed 0 and the front moving toward −x. The cell crossing time dx/S_L is
+about 0.85 ms, so the 0.5 ms writes do not alias with it.
+
+**The mixture.** φ = 0.62 of (152.1)'s stoichiometry, the stream's reference corn-starch mixture
+(§151.5) and the one (iii) names: C = 0.15418 kg/m3 of dust in air (`O2` 0.233, `N2` the inert).
+The gas variant is the same case with its `dust` block removed and the cloud's mass put in the gas
+as `VOL`, so the gas flame burns the same VOL-to-air mass ratio the converted cloud leaves:
+
+```
+  ρ_air = p_0 W_air / (R0 T_0) ,   1/W_air = 0.233/W_O2 + 0.767/W_N2
+  Y_VOL = C / (ρ_air + C) ,   Y_O2 = 0.233 ρ_air / (ρ_air + C) ,   N2 the rest                      (159.24)
+```
+
+with the case's mechanism records' molar masses, p_0 = 101 325 Pa and T_0 = 300 K. **Transport.**
+ν = 5.747e−5 m2/s by CHR-13's rule (§133.12 (e)): `Pr k/(ρ c_p)` of the φ = 0.62 complete-combustion
+products at 1500 K and 1 atm (TM-4513 c_p, W_b 29.517 g/mol, c_p,b 1320.6 J/(kg K), ρ_b 0.23981
+kg/m3), so the species and thermal diffusivities are equal there. `species.transport` gives VOL
+**Le_VOL = 2** (every other species 1), so `D_VOL = ν/(Pr Le_VOL) = 4.1e−5 m2/s`. The particles'
+gas constants follow §159.10 (`μ = ν ρ_0` with ρ_0 the closed end's cell). **Why Le_VOL = 2**
+(decision taken by recommendation, AFTER cloud probes, all at Δt = 5e−5, f64, recorded here because
+the choice was not blind): with Le_VOL = 1 the driver's constant `D = ν/Pr = 8.2e−5 m2/s` is 4.4
+times the fresh gas's thermal diffusivity, the volatile a cloud releases runs `D/S_L ≈ 2.5 mm`
+ahead of its flame, and filling that precursor takes `D/S_L² ≈ 75 ms`, longer than any run this
+gate can afford. That probe's cloud flame (1 µm) ran at 0.0328 m/s against the gas flame's 0.0533
+m/s over [10, 30] ms (ratio 0.616), with O2 at 0.1115 behind it against 0.0782 for complete burning:
+the precursor was still filling. With Le_VOL = 4.4 (`D_VOL` equal to the fresh gas's thermal
+diffusivity) the gas flame ran steadily at 0.0713 m/s, but the cloud flame pulsated (0.067-0.084 m/s
+between writes) and stopped at step 516. Le_VOL = 2 lies between: both flames run to their end and
+hold their speed over the window. Both designs that were tried miss (i), so the choice did not
+select a pass.
+
+**The cloud** (the shipped case is run (i)): d = 1 µm, K = 1, composition {0, 1, 0, 0}, ρ_p = 1500,
+C_p = 1500, ε_0 = 0.9, devolatilisation A = 1.5e7 1/s (100 × §159.10's 1.5e5), E_a = 7.4e4 J/mol,
+dH = 0. **Decisions taken by recommendation.** f_VM0 = 1 and dH = 0, because the gas flame it is
+held against burns VOL vapour with no moisture, char, ash or devolatilisation heat; any of them
+would make the limit a different flame. (ii) runs at the same A × 100 and changes d alone, so the
+series is d = 1, 5, 10, 20, 40 µm with (i)'s run as its first member. (i)-(ii) use φ = 0.62 rather
+than a faster mixture, because it is the mixture (iii) would be measured at.
+
+**Numerics.** Euler, Δt = 5e−5 s to 40 ms (800 steps), PIMPLE with 2 correctors, upwind, `p` by
+PCG with DIC, `U`/`T`/`Yi` by PBiCGStab with DILU, `p`/`U`/`T` to 1e−8 and `Yi` to 1e−10. **Why PCG
+for `p`** (decision taken by recommendation): with PBiCGStab on `p` the single build broke down on
+this tube - the gate's own gas run went non-finite at step 340 and its 10 µm run reached Mach 95 at
+step 109, and two of three gas runs whose initial Y_VOL differed in the 8th digit stopped at Mach 3
+in cell 15 (the cold gas by the closed end) at step 305, while the third ran to its end. PCG ran
+all of them to their end. In the f64 build the six speeds are the same to six digits either way. Probes of the gas flame alone (Le_VOL = 1, to
+30 ms) measured S_L over [10, 30] ms at 0.053255 m/s with Δt = 5e−5 and 0.051429 m/s with Δt =
+2.5e−5 (first order: about 0.0496 m/s as Δt → 0). The Lie split's error is of the same kind in the
+gas and the cloud runs, which is what the identity compares. The probe's burned gas behind the
+flame sat at about 1955 K, 155 K above the isobaric burned state of §152.5 for this mixture
+(1800.4 K, a host bisection on the same TM-4513 and (159.16) records). The cause is not separated.
+A candidate is the driver's temperature form without the species-enthalpy diffusion term
+`− Σ_k c_p,k J_k · ∇T`, with VOL's large `c_p` and unequal diffusivities. Both flames carry it.
+
+**A parcel that leaves through an open patch** **[derived from (159.19)]**. Before DST-16 the
+cloud refused the run when the walk reported a parcel outside the mesh. A tube with an open end
+loses the parcels the burned gas carries out, so the cloud now RETIRES such a parcel at the step
+the walk reports it: its stored state is booked into an outflow ledger, its four mass words are
+set to zero (the kernel skips a parcel with no mass) and its gather state is the zero state, so it
+gives the gas nothing from then on:
+
+```
+  M_p(0) = Σ_live n_p m_p(t) + Σ_k ΔM_k + M_out ,   M_out = Σ_retired n_p m_p at the step it left
+  E_p(0) = Σ_live n_p E_p(t) + ΔE + E_out ,         E_out = Σ_retired n_p E_p at the step it left    (159.25)
+```
+
+Σ_k ΔM_k and ΔE are (159.19)'s ledgers over the run. Each term is a stored word widened to f64, so
+(159.25) closes to round-off in both builds. A run in which no parcel leaves is unchanged bit for
+bit (`no_cloud_no_change` and `dust_b_case_equals_library` keep their pins). The run's end report
+prints one line: the retired parcels, their mass and their energy.
+
+**Two bugs the tube found, fixed with failing tests first.** (1) **An all-volatile particle turned
+NaN in the f64 build.** The volatile stage of §159.7 ends when `m_v` falls to `STAGE_END = 1e−6` of
+the parcel's remaining mass; with no moisture, char or ash that remaining mass IS `m_v`, so (159.4)
+ran `m_v` into the subnormal range and the segment's `tseg/m c_p` overflowed (the test saw `T = −inf`
+at step 132; the 40 µm tube run stopped at step 506 with a NaN pressure). The stage now also ends
+when the remnant falls below the smallest normal number of the stored word: the smallest normal
+double in the host step (both builds) and in the f64 kernel, and FLT_MIN in the `single` kernel,
+whose stored `m_v` is a float (`dust::particle::STAGE_END`'s doc; `DUSTP_MASS_FLOOR` in
+`cuda/dustparticle.cu`, an `OFGPU_SINGLE` pair). A parcel with any
+moisture, char or ash never reaches it, so every earlier result is unchanged bit for bit. Tests
+`all_volatile_burns_out` and `device_all_volatile_burns_out` (`tests/shared/dust_particle_cases.rs`,
+both builds). The char stage of a char-only parcel with no ash has the same shape and is not
+changed here. (2) **The single build skipped a due write and then failed writing the parcels.**
+`ofgpu-lowmach`'s time loop asked the output pipeline `any_due(t_phys)` on the f64 clock while
+`write_time` writes at `f64::from(t_phys as Scalar)`; under `single` the rounded time fell just
+short of 16 ms, nothing was written, and the parcels' `<time>/parcels.vtp` found no directory. The
+loop now asks with the same rounded time (the same words in the f64 build). Test
+`lowmach_cloud::tests::dust_b_writes_every_due_time` (both builds).
+
+**Rows** (section 92 of `ofgpu-validate`, after the CHEMRAD sections; six live runs of the sibling
+`ofgpu-lowmach`, each to 40 ms):
+
+| row | class | bar |
+|---|---|---|
+| each run completes with the driver's normal end and gives ≥ 4 fronts in [t_a, t_end] | D | exact |
+| (i) `|S_L,B(1 µm)/S_L,gas − 1|` | P | 2 % |
+| (ii) `S_L,B(d_{j+1}) ≤ S_L,B(d_j)` for d = 5 → 10 → 20 → 40 µm, err the relative rise | D | 0 |
+| (iii) S_L against Dahoe et al. 2002 via (152.13), 0.241 m/s at φ = 0.62 | — | **NAMED and NOT RUN** (§151.8: no open corn-starch devolatilisation kinetics) |
+
+Tests: `lowmach_cloud::tests::dust_b_outflow_retires` (a short open tube where the parcels leave:
+the run completes, at least one parcel retires, (159.25)'s two rows close to 1e−12 relative, A,
+both builds), `lowmach_cloud::tests::dust_b_writes_every_due_time` and `dst_b_laminar::tests::{the_cloud_case_lowers_to_the_gate_inputs,
+the_gas_variant_carries_the_cloud_as_vol, the_front_speed_of_a_ramp_is_exact,
+the_size_rows_count_a_rise}` of `ofgpu-validate`.
+
+**Measured** (RTX 5070 Ti, 2026-10-19, `ofgpu-validate -sections 92`; the GPU was shared with two
+other lanes' runs). Each of the six runs completes and gives 41 fronts in [20, 40] ms.
+
+| run | S_L, f64 (m/s) | S_L, `single` (m/s) |
+|---|---|---|
+| gas (159.24) | 0.058418 | 0.058416 |
+| 1 µm | 0.061051 | 0.061048 |
+| 5 µm | 0.060956 | 0.060957 |
+| 10 µm | 0.061044 | 0.061067 |
+| 20 µm | 0.060776 | 0.060765 |
+| 40 µm | 0.060385 | 0.060385 |
+
+* **(i) is MISSED**: `|S_L(1 µm)/S_L(gas) − 1|` = 4.507e−2 (f64) and 4.506e−2 (`single`) against 2 %. The
+  cloud flame runs 4.5 % faster than the gas flame of its own volatile.
+* **(ii) is MISSED on its first row**: S_L(10 µm) is above S_L(5 µm) by 1.447e−3 (f64) and 1.808e−3
+  (`single`) against a rise of 0. The 10 → 20 and 20 → 40 µm rows pass. The series is flat to
+  0.2 % from 1 to 10 µm and falls 1.1 % by 40 µm. The same order (10 µm a little above 5 µm) held
+  in the probes' [15, 35] and [25, 50] ms windows.
+* **The causes, as measured.** (1) A × 100 is not the limit. The cloud still releases its volatile
+  inside the preheat zone: in the 50 ms probe, VOL peaks at Y = 0.058 near 1150 K ahead of the 1 µm
+  flame, where the gas flame carries 0.116 premixed. The reaction zone is fed a released fuel, not
+  a premixed one. (2) The burned states differ. In that probe the gas flame leaves 1850 K and O2
+  0.0841 behind it, and the cloud flame 1878 K and O2 0.0822. Both are above the isobaric 1800.4 K,
+  through the temperature form noted above, which acts on two different VOL diffusion fields.
+  (3) Particle heating does not set the release; devolatilisation kinetics do. τ_T of (159.6) is
+  0.048 ms at 5 µm and 0.19 ms at 10 µm (`k_g` = 0.097 W/(m K) of §159.10's `μ c_p,g/Pr`), and 3.1 ms
+  at 40 µm, against a flame time δ/S_L ≈ 7.5 ms. So the size order is resolved only above 10 µm.
+  A cure for (1) changes the gate's inputs and a cure for (2) changes the driver's numerics. Both
+  are the user's decision, and neither is built.
+* **Runtime**: the section took 224.7 s in f64 and 287.4 s in `single` with the GPU free, and 350.4 s
+  and 491.7 s while other lanes' runs shared it. The plan's 8 min per build holds with the GPU free;
+  `single` exceeded it by 12 s when the GPU was shared. The `single` numbers above are from the final
+  kernel (the FLT_MIN floor), and they are the same to six digits as the run before it.
+* `lowmach_cloud::tests` (9 in each build), `tests/dust_particle.rs` (8 in each build) and
+  `dst_b_laminar::tests` (4) pass. `dust_b_outflow_retires` retired 16 of 20 parcels, and (159.25)
+  closed to 1.1e−16 (mass) and 6.1e−17 (energy) in f64, and 3.2e−16 and 5.6e−16 in `single`.
+  `dust_b_writes_every_due_time` found 34 time directories holding both `parcels.vtp` and `T`.
+
+
+Labels: (159.23)-(159.25).
+
 ---
 
 ## 160. The flame-age option and the studio surface

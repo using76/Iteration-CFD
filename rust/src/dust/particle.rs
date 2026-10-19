@@ -53,7 +53,10 @@ pub const R0: f64 = 8.314_462_618_153_24;
 /// |beta| below which (159.3)'s factor is its series (SPEC-LIT §159.1).
 pub const BIRD_SERIES: f64 = 1.0e-3;
 /// The volatile stage ends when m_v falls to this fraction of the parcel's
-/// remaining mass; the remnant leaves in that step (SPEC-LIT §159.7).
+/// remaining mass; the remnant leaves in that step (SPEC-LIT §159.7). An
+/// all-volatile parcel never meets the fraction - its remaining mass IS
+/// m_v - so the stage also ends when the remnant drops below the smallest
+/// normal double.
 pub const STAGE_END: f64 = 1.0e-6;
 /// Segments one step may take: drying sub-cooled, boiling, volatiles and
 /// the inert rest need four; the rest is headroom (SPEC-LIT §159.7).
@@ -483,7 +486,7 @@ pub fn step(p: &ParticleProps, s: &ParticleState, gas: &GasAtParcel, dt: f64) ->
             let e = -(-k * rem).exp_m1();
             let mut dm = st.m_v * e;
             let mut mv = st.m_v - dm;
-            if mv <= STAGE_END * (st.mass() - dm) {
+            if mv <= STAGE_END * (st.mass() - dm) || mv < f64::MIN_POSITIVE {
                 dm = st.m_v;
                 mv = 0.0;
             }

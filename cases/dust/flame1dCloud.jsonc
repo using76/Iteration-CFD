@@ -1,0 +1,80 @@
+// Gate DST-B-LAM's tube (SPEC-LIT 159.11; docs/17 DST-16): the Phase B dust
+// cloud's 1-D laminar flame in ofgpu-lowmach, and as the gate edits it, the
+// gas flame of the same volatile mixture. 120 cells over 6 mm (dx 50 um),
+// closed at x = 0 (adiabatic wall), open at x = 6 mm; an igniter window on
+// the ymin face over x in [5.5, 6] mm is a wall at 2000 K. The flame lights
+// there and runs toward the closed end into the quiescent mixture, so
+// S_L = -dx_f/dt of the 1000 K isotherm ((159.23) of SPEC-LIT 159.11).
+// The mixture is phi = 0.62 of (152.1): C = 0.15418 kg/m3 of dust in air
+// (O2 0.233, N2 the inert). The cloud is run (i)'s: d = 1 um, all volatile,
+// devolatilisation A = 1.5e7 1/s (100 x SPEC-LIT 159.10's 1.5e5), Ea 7.4e4
+// J/mol, dH 0 - authored inputs, not a starch's measured kinetics (SPEC-LIT 151.8).
+// nu = Pr k/(rho cp) of the phi = 0.62 complete-combustion products at
+// 1500 K and 1 atm (CHR-13's rule, SPEC-LIT 133.12 (e)).
+// VOL's Lewis number is 2 (SPEC-LIT 159.11: with 1 the released volatile
+// fills a precursor longer than any affordable run; 4.4 pulsates). 40 ms
+// at dt 5e-5, S_L fitted over [20, 40] ms.
+// p solves by PCG: PBiCGStab broke down on this tube in the single
+// build (SPEC-LIT 159.11).
+// The specification was informed by a review of FSCDustFoam (Huang &
+// Lipatnikov, GPL) and no code was copied.
+// No GPL-licensed source was consulted.
+{
+  "name": "flame1dCloud",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.006, 0.00025, 0.00025] },
+    "cells": [120, 1, 1],
+    "boundaries": { "xmin": "closed", "xmax": "outlet", "ymin": "sideA", "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" },
+    "regions": [ { "name": "igniter", "on": "ymin", "shape": { "kind": "box", "min": [0.0055, -1, -1], "max": [0.007, 1, 1] } } ]
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 5.747e-5, "Pr": 0.7, "Prt": 0.85, "TRef": 300.0 },
+    "buoyancy": "densityRatio"
+  },
+  "patches": [
+    { "match": "closed", "kind": "wall", "U": { "type": "fixedValue", "value": [0, 0, 0] }, "p": { "type": "zeroGradient" }, "T": { "type": "zeroGradient" } },
+    { "match": "igniter", "kind": "wall", "U": { "type": "fixedValue", "value": [0, 0, 0] }, "p": { "type": "zeroGradient" }, "T": { "type": "fixedValue", "value": 2000.0 } },
+    { "match": "outlet", "kind": "open", "U": { "type": "zeroGradient" }, "p": { "type": "fixedValue", "value": 0.0 }, "T": { "type": "inletOutlet", "inletValue": 300.0 } },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 300.0, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0, "Yi": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "Yi", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-10, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.04, "deltaT": 5e-5 },
+  "species": {
+    "names": ["VOL", "O2", "H2O", "CO2", "N2"],
+    "inert": "N2",
+    "transport": { "model": "lewis", "Le": { "VOL": 2.0 } },
+    "initial": { "VOL": 0.0, "O2": 0.233, "H2O": 0.0, "CO2": 0.0 },
+    "patches": [
+      { "match": "outlet", "Y": {
+        "VOL": { "type": "inletOutlet", "inletValue": 0.0 },
+        "O2": { "type": "inletOutlet", "inletValue": 0.233 },
+        "H2O": { "type": "inletOutlet", "inletValue": 0.0 },
+        "CO2": { "type": "inletOutlet", "inletValue": 0.0 }
+      } }
+    ]
+  },
+  "chemistry": { "mechanism": "../mech/volatile1.ck", "thermo": "../mech/tm4513_thermo.dat", "rtol": 1e-6, "atol": 1e-10 },
+  "combustion": { "model": "laminar" },
+  "dust": { "cloud": {
+    "concentration": 0.15418, "diameter": 1e-6, "parcelsPerCell": 1,
+    "composition": { "moisture": 0.0, "volatile": 1.0, "char": 0.0, "ash": 0.0 },
+    "rhoP": 1500, "cpP": 1500, "emissivity": 0.9,
+    "devolatilisation": { "A": 1.5e7, "Ea": 7.4e4, "dH": 0.0 }
+  } }
+}

@@ -4243,6 +4243,15 @@ fn run(c: &mut Checks) -> Result<()> {
     c.leave_gate();
     c.chemrad_end("WSGG", mark);
     }
+    // SPEC-LIT 159.11 - Gate DST-B-LAM: the Phase B cloud's 1-D laminar
+    // flame, six live runs of ofgpu-lowmach, in
+    // src/bin/validate_gates/dst_b_laminar.rs.
+    if c.section("Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame against the gas flame of its volatile, the fine-particle limit and the size order (SPEC-LIT 159.11)") {
+    c.enter_gate(validate_gates::dst_b_laminar::GATE);
+    let r = validate_gates::dst_b_laminar::check_dst_b_laminar(c);
+    c.ran("check_dst_b_laminar", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

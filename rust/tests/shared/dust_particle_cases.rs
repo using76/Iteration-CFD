@@ -587,3 +587,116 @@ fn particle_refusals() {
         other => panic!("a short buffer must be refused, got {other:?}"),
     }
 }
+
+// ==========================================================================
+//  DST-16 part 2, bug A: the all-volatile particle's NaN (SPEC-LIT 159.11)
+// ==========================================================================
+
+/// `props(0.9, 0.0)` with the tube's kinetics (159.11): A = 1.5e7 1/s and
+/// E_a = 7.4e4 J/mol, dH 0 - the authored inputs, not a starch's measured
+/// ones.
+fn tube_props() -> ParticleProps {
+    ParticleProps::new(&ParticleInputs {
+        cp: 1500.0,
+        emissivity: 0.9,
+        devol_a: 1.5e7,
+        devol_e_a: 7.4e4,
+        devol_dh: 0.0,
+        cp_volatile: 1100.0,
+        drying: Drying::water(101_325.0).expect("water at 1 atm"),
+        mu: 1.8e-5,
+        k_g: 0.06,
+        cp_g: 1100.0,
+        char_rate: CharInputs::inert(),
+    })
+    .expect("tube props")
+}
+
+/// The tube's frozen gas: 1800 K, no water, no oxygen (the char stays
+/// inert), radiation of a 1800 K black enclosure.
+fn tube_gas() -> GasAtParcel {
+    GasAtParcel {
+        t: 1800.0,
+        y_w: 0.0,
+        rho: 0.196,
+        g: 4.0 * SIGMA_SB * 1800.0f64.powi(4),
+        u_rel: 0.0,
+        p_o2: 0.0,
+    }
+}
+
+/// A particle of nothing but volatile never meets `STAGE_END`'s fraction -
+/// the remaining mass IS `m_v` - so the stage must still end when the
+/// remnant drops below the smallest normal double. Before that, (159.4)
+/// runs `m_v` into the subnormals, the segment's `tt = tseg / mc`
+/// overflows to infinity and `num * tt * p1` is `inf * 0 = NaN`.
+#[test]
+fn all_volatile_burns_out() {
+    let p = tube_props();
+    let mut s = particle(1e-6, 1500.0, (0.0, 1.0, 0.0), 300.0);
+    let m_v0 = s.m_v;
+    let gas = tube_gas();
+    let dt = 5.0e-5;
+    let mut given = 0.0;
+    for j in 1..=400 {
+        let (s1, ex) = step(&p, &s, &gas, dt).expect("step");
+        for (name, v) in
+            [("m_w", s1.m_w), ("m_v", s1.m_v), ("m_c", s1.m_c), ("m_a", s1.m_a), ("t", s1.t), ("d", s1.d)]
+        {
+            assert!(v.is_finite(), "step {j}: state {name} is not finite ({v:e})");
+        }
+        for (name, v) in [
+            ("m_w", ex.m_w),
+            ("m_v", ex.m_v),
+            ("mt_w", ex.mt_w),
+            ("mt_v", ex.mt_v),
+            ("q_conv", ex.q_conv),
+            ("q_rad", ex.q_rad),
+            ("m_c", ex.m_c),
+            ("m_o2", ex.m_o2),
+            ("m_co2", ex.m_co2),
+            ("mt_c", ex.mt_c),
+            ("q_char", ex.q_char),
+        ] {
+            assert!(v.is_finite(), "step {j}: exchange {name} is not finite ({v:e})");
+        }
+        given += ex.m_v;
+        s = s1;
+    }
+    assert_eq!(s.m_v, 0.0, "the volatile stage must end at exactly 0");
+    let drift = (given - m_v0).abs() / m_v0;
+    assert!(drift <= 1e-12, "|sum ex.m_v - m_v0|/m_v0 = {drift:e} against 1e-12");
+    println!("  [159.11] all-volatile host: m_v0 {m_v0:.6e} kg in 400 steps, end T {:.3} K", s.t);
+}
+
+/// The same particle and gas through the device kernel, one parcel in one
+/// cell, 400 launches of dt 5e-5. The kernel's `ofacc` is double in BOTH
+/// builds, so before the fix the f64 build turns NaN the same way the host
+/// does; under `single` the stored word underflows to 0 first and the test
+/// passes there either way.
+#[test]
+fn device_all_volatile_burns_out() {
+    let Some(g) = gpu("device_all_volatile_burns_out") else { return };
+    let p = tube_props();
+    let s0 = rounded(&particle(1e-6, 1500.0, (0.0, 1.0, 0.0), 300.0));
+    let mut gas = tube_gas();
+    gas.t = r(gas.t);
+    gas.rho = r(gas.rho);
+    gas.g = r(gas.g);
+    let dt = 5.0e-5;
+    let mut pool = Pool::new(&g, &[s0], &[0], &[0.0], &[gas]);
+    for j in 1..=400 {
+        pool.step(&g, &p, dt).expect("device step");
+        let st = pool.states(&g);
+        let s = &st[0];
+        for (name, v) in
+            [("m_w", s.m_w), ("m_v", s.m_v), ("m_c", s.m_c), ("m_a", s.m_a), ("t", s.t), ("d", s.d)]
+        {
+            assert!(v.is_finite(), "launch {j}: state {name} is not finite ({v:e})");
+        }
+    }
+    let st = pool.states(&g);
+    let s = &st[0];
+    assert_eq!(s.m_v, 0.0, "the volatile stage must end at exactly 0");
+    println!("  [159.11] all-volatile device: end T {:.3} K, m_v {}", s.t, s.m_v);
+}

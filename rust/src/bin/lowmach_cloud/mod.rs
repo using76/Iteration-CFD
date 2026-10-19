@@ -33,7 +33,9 @@
 
 use ofgpu::chem::{ElementTable, Mechanism, ThermoSet};
 use ofgpu::device::DevBuf;
-use ofgpu::dust::cloud::{gather, sources, CloudSources, CloudThermo, StageDatums, MEMBERS};
+use ofgpu::dust::cloud::{
+    gather, particle_enthalpy, sources, CloudSources, CloudThermo, StageDatums, MEMBERS,
+};
 use ofgpu::dust::device::{
     particle_step, ExchangeFields, ParticleFields, ParticleGasDev, ParticleKernels,
 };
@@ -237,6 +239,16 @@ pub struct CloudEnd {
     pub last_sources: Option<CloudSources>,
     /// The time steps taken with the cloud in the pool.
     pub steps: usize,
+    /// SPEC-LIT §159.11 (159.25): `M_out`, kg - the mass the parcels retired
+    /// through open patches carried out, Σ_retired n_p m_p at the step each
+    /// left.
+    pub left_mass: f64,
+    /// SPEC-LIT §159.11 (159.25): `E_out`, J - the enthalpy they carried
+    /// out, Σ_retired n_p E_p at the step each left.
+    pub left_e: f64,
+    /// SPEC-LIT §159.11 (159.25): how many parcels retired through open
+    /// patches over the run.
+    pub n_left: usize,
 }
 
 /// One run's dust cloud: the seeding, the pool's words of it, the particle
@@ -316,6 +328,19 @@ pub struct CaseCloud {
     /// the step-opening `Y` and handed to [`Reacting`] through
     /// `set_dilution_sources`.
     dil: Vec<DevBuf<Scalar>>,
+    /// SPEC-LIT §159.11 (159.25): the slots the walk has reported outside
+    /// the pool's mesh - each retired at the step it left through an open
+    /// patch, one flag per slot, never cleared.
+    retired: Vec<bool>,
+    /// SPEC-LIT §159.11 (159.25): `M_out`, kg - the mass the retired parcels
+    /// carried out, Σ_retired n_p m_p at the step it left.
+    left_mass: f64,
+    /// SPEC-LIT §159.11 (159.25): `E_out`, J - the enthalpy they carried
+    /// out, Σ_retired n_p E_p at the step it left.
+    left_e: f64,
+    /// SPEC-LIT §159.11 (159.25): how many parcels retired through open
+    /// patches so far.
+    n_left: usize,
 }
 
 impl CaseCloud {
@@ -474,6 +499,10 @@ impl CaseCloud {
             last_sources: None,
             steps: 0,
             dil,
+            retired: vec![false; n],
+            left_mass: 0.0,
+            left_e: 0.0,
+            n_left: 0,
         })
     }
 
@@ -505,21 +534,63 @@ impl CaseCloud {
         dt: Scalar,
     ) -> Result<()> {
         let n = self.n;
-        // 1. The pool's walk: every parcel must still sit in a cell, and the
-        // kernel reads each parcel's speed against its cell's gas.
+        // 1. The pool's walk: a parcel the walk reports outside the mesh has
+        // left through an open patch and retires here - §159.11 (159.25);
+        // the kernel reads each parcel's speed against its cell's gas.
         let snap = pc.parcels().snapshot(gpu)?;
-        for i in 0..n {
-            if snap.cell[i] < 0 {
-                return Err(Error::Refused(format!(
-                    "dust.cloud: parcel {i} left the pool's mesh this step; a cloud's \
-                     particles stay in the box they seed (SPEC-LIT §159.10)"
-                )));
+        let left_now: Vec<usize> = (0..n)
+            .filter(|&i| snap.cell[i] < 0 && !self.retired[i])
+            .collect();
+        if !left_now.is_empty() {
+            // The stored state is booked into the outflow ledger, the four
+            // mass words go to zero (the kernel skips a parcel with no mass)
+            // and the state the gather sees is the zero state, so the parcel
+            // gives the gas nothing from then on (159.25).
+            for &i in &left_now {
+                let b = self.before[i];
+                self.left_mass += self.n_p[i] * (b.m_w + b.m_v + b.m_c + b.m_a);
+                self.left_e += self.n_p[i] * particle_enthalpy(&b, self.cp, &self.datums);
+                self.retired[i] = true;
+                self.n_left += 1;
+                self.before[i] = ParticleState {
+                    m_w: 0.0,
+                    m_v: 0.0,
+                    m_c: 0.0,
+                    m_a: 0.0,
+                    t: b.t,
+                    d: b.d,
+                };
             }
+            let (mut mw, mut mv, mut mc, mut ma) = (
+                gpu.download(&self.m_w)?,
+                gpu.download(&self.m_v)?,
+                gpu.download(&self.m_c)?,
+                gpu.download(&self.m_a)?,
+            );
+            for &i in &left_now {
+                mw[i] = 0.0 as Scalar;
+                mv[i] = 0.0 as Scalar;
+                mc[i] = 0.0 as Scalar;
+                ma[i] = 0.0 as Scalar;
+            }
+            gpu.write(&mut self.m_w, &mw)?;
+            gpu.write(&mut self.m_v, &mv)?;
+            gpu.write(&mut self.m_c, &mc)?;
+            gpu.write(&mut self.m_a, &ma)?;
         }
         let u_gas = gpu.download(&u.f)?;
         let mut u_rel = vec![0.0 as Scalar; n];
         let mut cells: Vec<Label> = vec![0; n];
         for i in 0..n {
+            if snap.cell[i] < 0 {
+                // Retired (this step or earlier): it gives the gas nothing,
+                // so it flies no relative speed and reads its last cell -
+                // the kernel never reads it, the masses are 0 (§159.11);
+                // the pool's own cell word is left as it was.
+                u_rel[i] = 0.0;
+                cells[i] = self.cell[i] as Label;
+                continue;
+            }
             let c = snap.cell[i] as usize;
             let (up, ug) = (&snap.u[i], &u_gas[c]);
             let (dx, dy, dz) = (
@@ -721,6 +792,9 @@ impl CaseCloud {
             given_e: self.given_e,
             last_sources: self.last_sources.clone(),
             steps: self.steps,
+            left_mass: self.left_mass,
+            left_e: self.left_e,
+            n_left: self.n_left,
         }
     }
 

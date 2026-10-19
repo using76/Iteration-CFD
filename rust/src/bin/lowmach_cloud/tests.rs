@@ -112,6 +112,72 @@ fn box_case(t_init: &str, gravity: &str, cloud: &str) -> String {
     )
 }
 
+/// The open tube of the §159.11 gate: 1 cm of 10 cells driven at 1 m/s and
+/// 1500 K from `inlet` (x = 0) through an open `outlet` (`p` 0) at x = 1 cm,
+/// the four sides symmetry - the moving gas carries the 10 um parcels out of
+/// the pool's mesh, which is what (159.25)'s outflow ledger books. Open
+/// everywhere it needs to be, so `p` solves with PBiCGStab (no PCG pin).
+fn tube_case() -> String {
+    format!(
+        r#"{{
+  "name": "cloudTube",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [0.01, 0.001, 0.001] }},
+    "cells": [10, 1, 1],
+    "boundaries": {{ "xmin": "inlet", "xmax": "outlet", "ymin": "sideA",
+      "ymax": "sideB", "zmin": "sideC", "zmax": "sideD" }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": "inlet", "kind": "inlet",
+      "U": {{ "type": "fixedValue", "value": [1, 0, 0] }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "fixedValue", "value": 1500 }}
+    }},
+    {{
+      "match": "outlet", "kind": "open",
+      "U": {{ "type": "zeroGradient" }},
+      "p": {{ "type": "fixedValue", "value": 0.0 }},
+      "T": {{ "type": "inletOutlet", "inletValue": 1500 }}
+    }},
+    {{ "match": "side.*", "kind": "symmetry" }}
+  ],
+  "initial": {{ "U": [1, 0, 0], "T": 1500, "p": 0.0 }},
+  "species": {{
+    "names": ["VOL", "O2", "H2O", "CO2", "N2"], "inert": "N2",
+    "initial": {{ "VOL": 0.0, "O2": 0.233, "H2O": 0.0, "CO2": 0.0 }},
+    "patches": [
+      {{ "match": "inlet", "Y": {{
+        "VOL": {{ "type": "fixedValue", "value": 0.0 }},
+        "O2": {{ "type": "fixedValue", "value": 0.233 }},
+        "H2O": {{ "type": "fixedValue", "value": 0.0 }},
+        "CO2": {{ "type": "fixedValue", "value": 0.0 }}
+      }} }},
+      {{ "match": "outlet", "Y": {{
+        "VOL": {{ "type": "inletOutlet", "inletValue": 0.0 }},
+        "O2": {{ "type": "inletOutlet", "inletValue": 0.233 }},
+        "H2O": {{ "type": "inletOutlet", "inletValue": 0.0 }},
+        "CO2": {{ "type": "inletOutlet", "inletValue": 0.0 }}
+      }} }}
+    ]
+  }},
+  "chemistry": {{ "mechanism": "volatile1.ck", "thermo": "tm4513_thermo.dat" }},
+  "combustion": {{ "model": "laminar" }},
+  "dust": {{ "cloud": {{ {cloud} }} }},
+{numerics},
+  "run": {{ "endTime": 0.01, "deltaT": 1e-4 }}
+}}"#,
+        cloud = CLOUD,
+        numerics = NUMERICS,
+    )
+}
+
 fn scratch_dir(tag: &str) -> PathBuf {
     static N: AtomicUsize = AtomicUsize::new(0);
     let d = std::env::temp_dir().join(format!(
@@ -1360,4 +1426,139 @@ fn dust_b_case_equals_library() {
         np, n_cells, dt_f, mism_state, mism_src, mism_dil,
     );
     assert!(missed.is_empty(), "[159.10] MISSED: {}", missed.join(", "));
+}
+
+// ==========================================================================
+//  dust_b_outflow_retires
+// ==========================================================================
+
+/// **SPEC-LIT §159.11, the retirement of a parcel that left through an open
+/// patch (159.25), rows D and A.** The tube's moving gas carries 10 um
+/// parcels out of the pool's mesh: the run completes where the pre-DST-16
+/// cloud refused, every retired slot sits at exactly (0, 0, 0, 0) kg and so
+/// gives the gas nothing, and (159.25)'s two ledgers close to round-off -
+/// `M_p(0) = Σ_live n_p m_p(t) + Σ_k ΔM_k + M_out` and the same for E,
+/// class A, both builds.
+#[test]
+fn dust_b_outflow_retires() {
+    let Ok(_g) = Gpu::new(0) else { return };
+    let path = write_case("b_outflow", &tube_case());
+    let end = run_case(
+        &path,
+        &["-endTime", "1e-2", "-deltaT", "1e-4", "-check", "1000"],
+    )
+    .expect("the cloud tube runs");
+    assert_eq!(end.steps, 100, "100 steps asked, {} run", end.steps);
+    let pe = end.parcels.as_ref().expect("the run carried its parcels end");
+    let ce = pe.cloud.as_ref().expect("the run carried its cloud end");
+    assert_eq!(ce.steps, 100, "the cloud stepped every step");
+    println!("  [159.11] steps: run {}, cloud {}", end.steps, ce.steps);
+    assert!(
+        (1..=ce.n_p.len()).contains(&ce.n_left),
+        "n_left {} outside 1..={}",
+        ce.n_left,
+        ce.n_p.len()
+    );
+    println!(
+        "  [159.11] retired: {} of {} parcels left through the open outlet",
+        ce.n_left,
+        ce.n_p.len()
+    );
+    let m = |s: &ParticleState| s.m_w + s.m_v + s.m_c + s.m_a;
+    let zeros = ce
+        .last
+        .iter()
+        .filter(|s| s.m_w == 0.0 && s.m_v == 0.0 && s.m_c == 0.0 && s.m_a == 0.0)
+        .count();
+    assert!(
+        zeros >= ce.n_left,
+        "{zeros} slots at exactly (0, 0, 0, 0) kg, n_left {}",
+        ce.n_left
+    );
+    println!(
+        "  [159.11] retired states: {zeros} slots at exactly (0, 0, 0, 0) kg (n_left {})",
+        ce.n_left
+    );
+    let m0: f64 = ce.initial.iter().zip(&ce.n_p).map(|(s, &np)| np * m(s)).sum();
+    let ml: f64 = ce.last.iter().zip(&ce.n_p).map(|(s, &np)| np * m(s)).sum();
+    let given: f64 = ce.given.iter().sum();
+    let mass = (m0 - ml - given - ce.left_mass).abs() / m0;
+    assert!(mass <= 1e-12, "(159.25) mass: {mass:e} against 1e-12");
+    println!(
+        "  [159.11] mass (159.25): m0 {m0:.6e} kg = live {ml:.6e} + given {given:.6e} + \
+         out {:.6e}, relative defect {:.3e} (bar 1e-12)",
+        ce.left_mass, mass
+    );
+    let ep = |s: &ParticleState| particle_enthalpy(s, ce.cp, &ce.datums);
+    let e0: f64 = ce.initial.iter().zip(&ce.n_p).map(|(s, &np)| np * ep(s)).sum();
+    let el: f64 = ce.last.iter().zip(&ce.n_p).map(|(s, &np)| np * ep(s)).sum();
+    let scale: f64 = ce.initial.iter().zip(&ce.n_p).map(|(s, &np)| np * ep(s).abs()).sum();
+    let energy = (e0 - el - ce.given_e - ce.left_e).abs() / scale;
+    assert!(energy <= 1e-12, "(159.25) energy: {energy:e} against 1e-12");
+    println!(
+        "  [159.11] energy (159.25): e0 {e0:.6e} J = live {el:.6e} + given {:.6e} + \
+         out {:.6e}, relative defect {:.3e} (bar 1e-12)",
+        ce.given_e, ce.left_e, energy
+    );
+}
+
+// ==========================================================================
+//  DST-16 part 2, bug B: the single build's skipped due write (159.11)
+// ==========================================================================
+
+/// The loop's due check and `write_time` must ask the pipeline at the SAME
+/// instant: `write_time` writes with `f64::from(t_phys as Scalar)`, so
+/// asking `any_due` with the f64 `t_phys` lets the single build's rounded
+/// time fall just short of the due time - nothing is written, the time
+/// directory never exists, and the parcels' `write_vtp` into it fails
+/// (os error 3). The f64 build rounds nothing, so it never missed.
+#[test]
+fn dust_b_writes_every_due_time() {
+    let Ok(_g) = Gpu::new(0) else { return };
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../cases/dust/flame1dCloud.jsonc");
+    let text = std::fs::read_to_string(&src).expect("the tube case reads");
+    // write_case places the two mechanism files beside the case, so the
+    // cloud's `../mech/` paths become bare names.
+    let path = write_case("b_writes", &text.replace("../mech/", ""));
+    let end = run_case(
+        &path,
+        &[
+            "-p0",
+            "101325",
+            "-endTime",
+            "1.7e-2",
+            "-deltaT",
+            "5e-5",
+            "-check",
+            "1000",
+            "-writeInterval",
+            "5e-4",
+        ],
+    )
+    .expect("the tube runs to its end, writing every due time");
+    assert_eq!(end.steps, 340, "340 steps asked, {} run", end.steps);
+    let root = crate::common::output_root(&path);
+    let (mut parcels, mut t_dirs) = (0usize, 0usize);
+    for entry in std::fs::read_dir(&root).expect("the output root lists") {
+        let entry = entry.expect("entry");
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.parse::<f64>().is_err() {
+            continue; // not a time directory
+        }
+        let has = |f: &str| dir.join(f).exists();
+        if has("parcels.vtp") {
+            parcels += 1;
+        }
+        if has("T") {
+            t_dirs += 1;
+        }
+        assert!(!has("parcels.vtp") || has("T"), "time {name} holds parcels.vtp but no T");
+    }
+    println!("  [159.11] wrote: {parcels} time dirs hold parcels.vtp, {t_dirs} hold T (bar 34)");
+    assert!(t_dirs >= 34, "{t_dirs} time dirs hold T against at least 34 due writes");
 }

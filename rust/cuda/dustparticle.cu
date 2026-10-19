@@ -46,6 +46,16 @@
 #define DUSTP_SIGMA       5.670374419e-8
 #define DUSTP_BIRD_SERIES 1.0e-3
 #define DUSTP_STAGE_END   1.0e-6
+// An all-volatile parcel never meets DUSTP_STAGE_END's fraction (its
+// remaining mass IS m_v), so the volatile stage also ends when the remnant
+// drops below the smallest normal number of the stored word: the smallest
+// normal double in the f64 build; under OFGPU_SINGLE the stored m_v is a
+// float, so FLT_MIN (SPEC-LIT 159.11).
+#ifdef OFGPU_SINGLE
+#define DUSTP_MASS_FLOOR  1.17549435e-38
+#else
+#define DUSTP_MASS_FLOOR  2.2250738585072014e-308
+#endif
 #define DUSTP_MAX_SEG     8
 #define DUSTP_PHI_SERIES  1.0
 
@@ -313,7 +323,7 @@ extern "C" __global__ void dustParticleStep
             const ofacc e = -expm1(-k * rem);
             ofacc dm = m_v * e;
             ofacc mvn = m_v - dm;
-            if (mvn <= DUSTP_STAGE_END * ((m_w + m_v + m_c + m_a) - dm)) { dm = m_v; mvn = 0.0; }
+            if (mvn <= DUSTP_STAGE_END * ((m_w + m_v + m_c + m_a) - dm) || mvn < DUSTP_MASS_FLOOR) { dm = m_v; mvn = 0.0; }
             const ofacc mdot = dm / rem;
             const ofacc a = a0 * dustpBird(cpVol * mdot / a0);
             const ofacc sv = -mdot * devDh;

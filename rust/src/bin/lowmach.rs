@@ -3506,7 +3506,7 @@ fn run(o: &Options) -> Result<RunEnd> {
         // a transient run, the iteration count on a steady one. A steady
         // run with no `-writeEvery` has a 0 interval, which `any_due`
         // never fires on.
-        if pipeline.any_due(t_phys) {
+        if pipeline.any_due(f64::from(t_phys as Scalar)) {
             write_time(
                 &gpu,
                 &s,
@@ -3633,6 +3633,17 @@ fn run(o: &Options) -> Result<RunEnd> {
     // ledgers of (159.19), the seeded and final states, the last (159.20).
     if let (Some(end), Some(cl)) = (parcels_end.as_mut(), cloud.as_ref()) {
         end.cloud = Some(cl.end());
+        // SPEC-LIT §159.11 (159.25): the parcels an open patch took out of
+        // the pool's mesh, with the mass and enthalpy they carried - the
+        // run's outflow ledger, booked at the step each left.
+        let ce = end.cloud.as_ref().expect("the cloud end was just stored");
+        println!(
+            "dust cloud (SPEC-LIT 159.11): {} parcels retired through open patches, \
+             carrying {} kg and {} J",
+            ce.n_left,
+            g(ce.left_mass),
+            g(ce.left_e),
+        );
     }
     // Gate 68-B's readout, full precision, test builds only - it feeds no
     // output.
