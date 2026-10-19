@@ -398,11 +398,50 @@ describe("the Boundary editor's condition types (BC-22)", () => {
       want[f] = def.oneOf!.map((o) => ({ type: o.properties.type.const, entries: (o.required ?? []).filter((r) => r !== 'type') }))
     }
     expect(jsoncConditionTypes()).toEqual(want)
-    expect(want.U.map((t) => t.type)).toEqual(['fixedValue', 'inletOutlet', 'zeroGradient'])
+    expect(want.U.map((t) => t.type)).toEqual(['fixedValue', 'inletOutlet', 'zeroGradient', 'fixedProfile'])
     expect(want.T.find((t) => t.type === 'fixedFluxTemperature')?.entries).toEqual(['q'])
+    expect(want.T.find((t) => t.type === 'fixedProfile')?.entries).toEqual(['direction', 'profile'])
     for (const types of Object.values(want)) for (const t of types) expect(IMPLEMENTED_BC_TYPES, t.type).toContain(t.type)
     const table = boundaryTable(parse(plumeText, [], { allowTrailingComma: true }), 'cases/plume.jsonc')
     expect(table.conditionTypes).toEqual(want)
+  })
+
+  it('fixedProfile writes through on U and T: the rule keeps the exact bc, origin included', async () => {
+    const { abs, c } = await openCopy('bc22fp')
+    const U = { type: 'fixedProfile', direction: [1, 0, 0], profile: [[0, [0, 0, 1]], [0.5, [0, 0, 2]]] }
+    expect((await runTool('gui_control', setPatch({ patch: 'inlet', field: 'U', bc: U }), c)).ok).toBe(true)
+    expect(rulesOf(await fsp.readFile(abs, 'utf8'))[0]).toEqual({ ...rulesOf(plumeText)[0], U })
+    const T = { type: 'fixedProfile', direction: [0, 1, 0], origin: 0.25, profile: [[0, 300], [1, 350]] }
+    expect((await runTool('gui_control', setPatch({ patch: 'inlet', field: 'T', bc: T }), c)).ok).toBe(true)
+    const rule = rulesOf(await fsp.readFile(abs, 'utf8'))[0]
+    expect(rule.T).toEqual(T)
+    expect(rule.U).toEqual(U)
+  })
+
+  it('a wrong fixedProfile is PATCH_FIELD naming the member; k does not carry the type at all', async () => {
+    const { abs, c } = await openCopy('bc22fpbad')
+    const dir = 'fixedProfile on U needs direction as [x, y, z], not all zero'
+    const uWhy = 'fixedProfile on U needs profile as at least two [s, v] points, s strictly increasing, v [x, y, z]'
+    const tWhy = 'fixedProfile on T needs profile as at least two [s, v] points, s strictly increasing, v one number'
+    const cases: Array<[SetPatch, string]> = [
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile', direction: [0, 0, 0] } }), dir],
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile', direction: [1, 0] } }), dir],
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile' } }), dir],
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile', direction: [1, 0, 0], profile: [[0, [0, 0, 1]]] } }), uWhy],
+      [setPatch({ patch: 'inlet', field: 'T', bc: { type: 'fixedProfile', direction: [0, 1, 0], profile: [[0, 300], [0, 310]] } }), tWhy],
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile', direction: [1, 0, 0], profile: [[0, 1], [1, 2]] } }), uWhy],
+      [setPatch({ patch: 'inlet', field: 'T', bc: { type: 'fixedProfile', direction: [0, 1, 0], profile: [[0, [1, 2, 3]], [1, [1, 2, 3]]] } }), tWhy],
+      [setPatch({ patch: 'inlet', field: 'U', bc: { type: 'fixedProfile', direction: [1, 0, 0] } }), uWhy],
+    ]
+    for (const [cmd, message] of cases) {
+      const r = await runTool('gui_control', cmd, c)
+      expect(r.error?.code, JSON.stringify(cmd)).toBe('PATCH_FIELD')
+      expect(r.error?.message, JSON.stringify(cmd)).toBe(message)
+    }
+    const k = await runTool('gui_control', setPatch({ patch: 'inlet', field: 'k', bc: { type: 'fixedProfile', direction: [1, 0, 0], profile: [[0, 1], [1, 2]] } }), c)
+    expect(k.error?.code).toBe('PATCH_FIELD')
+    expect(k.error?.message).toContain('not fixedProfile (')
+    expect(await fsp.readFile(abs, 'utf8')).toBe(plumeText)
   })
 
   it('a condition a .jsonc field does not carry is PATCH_FIELD naming what the solver does with the name', async () => {

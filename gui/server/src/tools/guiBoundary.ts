@@ -52,29 +52,29 @@ const PRESET_KIND: Record<PatchPresetId, string> = {
   wedge: 'wedge',
 }
 
-/** Condition type -> the member it requires (null: none), per field family, as docs/schema/case-1.json's VectorBc / ScalarBc / TurbBc spell them. */
-const VECTOR_BC: Record<string, string | null> = { fixedValue: 'value', inletOutlet: 'inletValue', zeroGradient: null }
-const SCALAR_BC: Record<string, string | null> = { fixedValue: 'value', inletOutlet: 'inletValue', zeroGradient: null, thermalWallFunction: 'value', fixedFluxTemperature: 'q' }
-const TURB_BC: Record<string, string | null> = {
-  fixedValue: 'value',
-  zeroGradient: null,
-  calculated: 'value',
-  kqRWallFunction: 'value',
-  epsilonWallFunction: 'value',
-  omegaWallFunction: 'value',
-  nutkWallFunction: 'value',
-  nutUWallFunction: 'value',
-  nutLowReWallFunction: 'value',
-  kLowReWallFunction: 'value',
+/** Condition type -> the members it requires ([]: none), in the schema's order, per field family, as docs/schema/case-1.json's VectorBc / ScalarBc / TurbBc spell them. */
+const VECTOR_BC: Record<string, string[]> = { fixedValue: ['value'], inletOutlet: ['inletValue'], zeroGradient: [], fixedProfile: ['direction', 'profile'] }
+const SCALAR_BC: Record<string, string[]> = { fixedValue: ['value'], inletOutlet: ['inletValue'], zeroGradient: [], thermalWallFunction: ['value'], fixedFluxTemperature: ['q'], fixedProfile: ['direction', 'profile'] }
+const TURB_BC: Record<string, string[]> = {
+  fixedValue: ['value'],
+  zeroGradient: [],
+  calculated: ['value'],
+  kqRWallFunction: ['value'],
+  epsilonWallFunction: ['value'],
+  omegaWallFunction: ['value'],
+  nutkWallFunction: ['value'],
+  nutUWallFunction: ['value'],
+  nutLowReWallFunction: ['value'],
+  kLowReWallFunction: ['value'],
 }
-const BC_TABLE: Record<PatchField, Record<string, string | null>> = { U: VECTOR_BC, p: SCALAR_BC, T: SCALAR_BC, k: TURB_BC, epsilon: TURB_BC, omega: TURB_BC, nut: TURB_BC }
+const BC_TABLE: Record<PatchField, Record<string, string[]>> = { U: VECTOR_BC, p: SCALAR_BC, T: SCALAR_BC, k: TURB_BC, epsilon: TURB_BC, omega: TURB_BC, nut: TURB_BC }
 
 const NO_SLIP = { type: 'fixedValue', value: [0, 0, 0] }
 
-/** Field -> the condition types a .jsonc case's picker offers, each with the member it requires (docs/17 BC-22). Held to docs/schema/case-1.json by guiBoundary.test.ts. */
+/** Field -> the condition types a .jsonc case's picker offers, each with the members it requires (docs/17 BC-22). Held to docs/schema/case-1.json by guiBoundary.test.ts. */
 export function jsoncConditionTypes(): Record<PatchField, BoundaryConditionType[]> {
   const out = {} as Record<PatchField, BoundaryConditionType[]>
-  for (const f of PATCH_FIELDS) out[f] = Object.entries(BC_TABLE[f]).map(([type, member]) => ({ type, entries: member === null ? [] : [member] }))
+  for (const f of PATCH_FIELDS) out[f] = Object.entries(BC_TABLE[f]).map(([type, members]) => ({ type, entries: members }))
   return out
 }
 
@@ -162,8 +162,10 @@ function kindRefusal(mesh: Json, name: string, kind: string, relPath: string): s
 function checkCondition(field: PatchField, bc: PatchBc): { bc: Json } | { error: string } {
   const table = BC_TABLE[field]
   if (!Object.hasOwn(table, bc.type)) return { error: `${field} takes ${Object.keys(table).join(', ')}; not ${bc.type} (${describeBcType(bc.type)}; a .jsonc case's ${field} condition does not carry it)` }
-  const member = table[bc.type]
-  if (member === null) return { bc: { type: bc.type } }
+  const members = table[bc.type]
+  if (members.length === 0) return { bc: { type: bc.type } }
+  if (bc.type === 'fixedProfile') return checkFixedProfile(field, bc)
+  const member = members[0]
   const raw = (bc as Record<string, unknown>)[member]
   if (raw == null) return { error: `${bc.type} on ${field} needs ${member}` }
   if (member === 'q') return { bc: { type: bc.type, q: raw } }
@@ -174,6 +176,34 @@ function checkCondition(field: PatchField, bc: PatchBc): { bc: Json } | { error:
   const n = Array.isArray(raw) && raw.length === 1 ? raw[0] : raw
   if (typeof n !== 'number' || !Number.isFinite(n)) return { error: `${bc.type} on ${field} needs ${member} as one number` }
   return { bc: { type: bc.type, [member]: n } }
+}
+
+/** fixedProfile's shape (SPEC-LIT §120.1): a direction, an optional origin and a profile of [s, v]
+ *  points - the refusals rust/src/io/case_json.rs's refuse_bad_fixed_profile gives, by name. */
+function checkFixedProfile(field: PatchField, bc: PatchBc): { bc: Json } | { error: string } {
+  const d = bc.direction
+  if (!Array.isArray(d) || d.length !== 3 || !d.every((x) => typeof x === 'number' && Number.isFinite(x)) || d.every((x) => x === 0)) return { error: `fixedProfile on ${field} needs direction as [x, y, z], not all zero` }
+  const out: Json = { type: 'fixedProfile', direction: d }
+  if (bc.origin != null) {
+    if (typeof bc.origin !== 'number' || !Number.isFinite(bc.origin)) return { error: `fixedProfile on ${field} needs origin as one number` }
+    out.origin = bc.origin
+  }
+  const why = `fixedProfile on ${field} needs profile as at least two [s, v] points, s strictly increasing, v ${field === 'U' ? '[x, y, z]' : 'one number'}`
+  const raw = bc.profile
+  if (!Array.isArray(raw) || raw.length < 2) return { error: why }
+  let last: number | null = null
+  for (const point of raw) {
+    if (!Array.isArray(point) || point.length !== 2) return { error: why }
+    const [s, v] = point
+    if (typeof s !== 'number' || !Number.isFinite(s)) return { error: why }
+    if (last !== null && !(s > last)) return { error: why }
+    if (field === 'U') {
+      if (!Array.isArray(v) || v.length !== 3 || !v.every((x) => typeof x === 'number' && Number.isFinite(x))) return { error: why }
+    } else if (typeof v !== 'number' || !Number.isFinite(v)) return { error: why }
+    last = s
+  }
+  out.profile = raw
+  return { bc: out }
 }
 
 function refusal(code: string, message: string, extra: Json = {}): { refusal: ToolResult } {

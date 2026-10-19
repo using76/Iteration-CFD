@@ -384,16 +384,22 @@ const NumberOrVector = z.union([z.array(z.coerce.number()), z.coerce.number()])
 /** One per-field condition as the case carries it; nulls a weaker model sends for absent keys are dropped. */
 export const PatchBcSchema = z
   .object({
-    type: z.string().describe('Condition type: fixedValue, zeroGradient, inletOutlet, fixedFluxTemperature, thermalWallFunction, calculated or a wall function'),
+    type: z.string().describe('Condition type: fixedValue, zeroGradient, inletOutlet, fixedFluxTemperature, thermalWallFunction, fixedProfile, calculated or a wall function'),
     value: NumberOrVector.nullish(),
     inletValue: NumberOrVector.nullish(),
     q: z.coerce.number().nullish().describe('Heat flux (W/m²) for fixedFluxTemperature'),
+    direction: z.array(z.coerce.number()).nullish().describe('Profile direction [x, y, z] for fixedProfile'),
+    origin: z.coerce.number().nullish().describe('Profile origin for fixedProfile (the schema defaults it to 0)'),
+    profile: z.array(z.unknown()).nullish().describe('Profile points [s, v] for fixedProfile; the server checks the shape'),
   })
   .transform((b) => {
-    const out: { type: string; value?: number | number[]; inletValue?: number | number[]; q?: number } = { type: b.type }
+    const out: { type: string; value?: number | number[]; inletValue?: number | number[]; q?: number; direction?: number[]; origin?: number; profile?: unknown[] } = { type: b.type }
     if (b.value != null) out.value = b.value
     if (b.inletValue != null) out.inletValue = b.inletValue
     if (b.q != null) out.q = b.q
+    if (b.direction != null) out.direction = b.direction
+    if (b.origin != null) out.origin = b.origin
+    if (b.profile != null) out.profile = b.profile
     return out
   })
 export type PatchBc = z.infer<typeof PatchBcSchema>
@@ -403,6 +409,9 @@ export interface BoundaryCondition {
   value?: number | number[] | string
   inletValue?: number | number[] | string
   q?: number | string
+  direction?: number[] | string
+  origin?: number | string
+  profile?: unknown[] | string
 }
 /** One patch row of the Boundary editor (GET /api/case/boundary, server/src/tools/guiBoundary.ts). */
 export interface BoundaryPatchRow {
