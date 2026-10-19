@@ -63609,8 +63609,9 @@ vent with r_v >= R.
 recorded for when the geometry is obtained: H22's 0.06 bar initial overpressure needs a
 non-uniform initial p, which DST-10's driver refuses for a dust case (§158.9); and H22's
 half-by-symmetry box cannot come from the automesher's stage-0 margin rule, so the placeholder
-box is full width. Parts 2 and 3 of DST-11 (the driver beside a vent, the probe series, the mass
-budget, `cases/dust/rembeVented.jsonc` and the validate gate with its REDUCED smoke) follow.
+box is full width. Part 2 of DST-11 (the driver beside a vent, the probe series, the mass
+budget) is below; part 3 (`cases/dust/rembeVented.jsonc` and the validate gate with its REDUCED
+smoke) follows.
 
 **Decisions (TAKEN, by recommendation).** D1: the W4 supervisor's mesh (castellation only,
 29,662 cells), the closed 0.2 m wall shell with the vent cut through, the membrane plane x = 5.425
@@ -63620,6 +63621,81 @@ row did not list, kept). D4: the studio's pick-list of mesh kinds follows the re
 in lane G (a hand-off; its pinned `['cartesian']` gains `polymesh`).
 
 Labels: (158.10a)-(158.10e).
+
+**Part 2: the dust coupling beside a vent, the probe history and the mass budget (DST-11
+part 2).** `ofgpu-compressible` now runs a dust case with a `vent` block; the refusal of §158.9
+("the hand-over of c~ and the closures on opening is DST-11's") is lifted, and the §126-rule,
+non-Euler ddt and steady refusals stay. No kernel, no `.cu` file and no solver algorithm changed;
+a run without a vent, and a vent run without dust, make the same library calls as before
+(`no_dust_no_change` and DST-09's and DST-10's tests unchanged).
+
+- *The closed stage.* With a vent, the run's first coupling is built on the SPLIT mesh, with
+  c~, k, omega and nut passed through `vent::closed_scalar`: the case's field plus
+  `zeroGradient` under `ventIn` and `ventOut`, the treatment `closed_lowered` gives p and T, and
+  `closed_lowered`'s refusals (a stated vent key; a pattern that would govern a vent patch).
+  DECISION (TAKEN by the supervisor): the membrane carries zeroGradient c~, k, omega and nut and
+  no wall function while closed; its two patches stay wall-kind, so the split mesh's SST wall
+  distance counts them.
+- *The opening.* `vent::open_onto_dust` is `open_onto` with the coupling attached BEFORE
+  `initialise`, in a fixed order: the merged state and solver; `carried` = the closed run's
+  coupling when it has taken a step (`None` at n = 0; a stepped run with no coupling refused by
+  name); the merged coupling from a closure; `attach_dust`; then `open_onto`'s body. Opened at
+  n = 0, the coupling is built fresh on the merged mesh, so the run is the unvented one bit for
+  bit. Otherwise `CompressibleDust::hand_over` builds a coupling on the merged mesh (the case's
+  own c~ field, a turbulence model freshly built there, whose wall distance is its own) and
+  carries, bit for bit: c~'s `f`, `f0`, `f00` and the shared boundary prefix of `bf`, `fr`,
+  `ref_value`, `ref_grad`, and its ddt clock (`ProgressEquation::carry_from`); with the local
+  flame age, alpha the same way and the age clock's `t_prev`, `delta`, `delta_prev`, `pending`,
+  `last`; the model's k, omega and nut; `last`; and U_t', q, wdot, the flame-Courant buffer and
+  lambda, which the driver's writer reads between steps. The SST's own ddt clock is not carried
+  (a dust run is Euler only, §158.6, and Euler's coefficients read only dt); `closure_age`,
+  `sua`, `spa` and every other per-step buffer are written before they are read in a step.
+- *The probe history.* With `vent.probes`, the gauge p at each probe's nearest cell on the CASE's
+  host mesh (the same cells on either mesh) is read on the t_0 state and after every step, after
+  the membrane check: a stdout line `probes: t ... P1=... P2=...` at the report cadence, and,
+  when the run writes, `probes.csv` (`t,<names>`, then one row at t_0 and one per step, every
+  value `{:.12e}`, flushed).
+- *The mass budget.* A transient run with a vent or a dust block keeps `vent::MassBudget`
+  (bookkeeping, not physics). V_i is the cell volume of the CASE's host mesh throughout; rho^n
+  is the solver's `rho.f` after step n; mdot_f^n is the boundary face mass flux `mdot.bf` after
+  step n on whichever mesh the run is on (the split mesh's vent faces included; outflow is
+  positive, S_f pointing out):
+
+```
+  M(t_n) = sum_i  rho_i^n V_i                    (f64, i in cell order)                       (158.10f)
+  B(t_n) = sum_{k=1..n}  dt * ( sum_{f in boundary} mdot_f^k )   (inner sum in face order, then x dt) (158.10g)
+  r      = ( M(t_n) - M(t_0) + B(t_n) ) / M(t_0)                                               (158.10h)
+```
+
+  t_0 is the state the first step starts from (after `initialise` and the n = 0 membrane check;
+  the merged state when the membrane opens at n = 0). B is accumulated straight after each step,
+  before the membrane check, so a step on the split mesh counts the split mdot. The driver prints
+  `mass budget: M0 ..., M ..., boundary outflow ..., residual ...` and returns (M0, M, B, r) in
+  `RunEnd::mass`.
+
+**Gates, measured 2026-10-20** (GPU; the 200-cell tube of §158.9's flame rows, dx = 1e-3 m,
+dt = 1e-6 s; the DST-10 dust box).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `dust_vent_open_at_zero_is_the_unvented_run` | pStat 0 opens at n = 0; 20 steps against the merged run with no vent: U, p, T, rho (`f`, `f0`, `f00`, `bf`), c~ (the same four), `mdot` | bitwise | D | holds | holds |
+| `dust_vent_hand_over_keeps_every_cell`, the carry | pStat 1e30, 10 closed steps, the opening by hand: step count, both ddt clocks, c~ (and alpha with FSC `flameAge: "local"`), the last c~ solve, U, p, T, rho, `mdot` at the kept faces, M's face 0.0; 10 more steps finite | bitwise | D | holds (TFC and FSC local) | holds (both) |
+| `dust_vent_hand_over_keeps_every_cell`, the residual r | the 20-step r, TFC / FSC local | 1e-10 relative | A | 3.727e-41 (M == M0 bitwise) / 2.872e-15 | **MISSED** 1.042e-7 / 1.060e-7 (f32 rho and mdot rounded every step; DST-09's closed tube measured 8.7e-7) |
+| `a_dust_vent_case_opens_and_reports_probes` (driver) | the laminar dust box, vent on x = 0.005, pStat 4.7e-6 Pa (chosen by measurement: dp first reaches it after step 4), 20 steps; `probes.csv` `t,P1,P2` + 21 finite rows from t = 0; r | opens in [1, 19]; r 1e-10 | D, A | opens after step 4; r 5.549e-14 | not run (bin tests run f64) |
+| `a_dust_sst_vent_case_hands_over` (driver) | the kOmegaSST dust box, pStat 3.7e-6 Pa (dp first reaches it after step 3), 5 steps; every written field finite; r | opens in [1, 4]; r 1e-10 | D, A | opens after step 3; r 1.160e-14 | not run |
+
+DST-09's vented tube now prints its budget too (r 3.07e-16 closed, 4.39e-16 opened, f64).
+
+**Decisions (TAKEN, by recommendation).** D5: the closed-stage membrane treatment above (the
+supervisor's). D6: `hand_over` also carries U_t', q, wdot, the flame-Courant buffer and lambda,
+because the driver's writer reads them between steps (a state written at the opening step is the
+closed run's last one); it changes no step's arithmetic. D7: `carry_from` refuses an `n_bf` that
+is not the target field's boundary length (stricter than "longer than either"). D8:
+`closed_scalar` reuses `closed_lowered`'s refusal texts (§158.8) with the field's name. D9: the
+two pStat values are inputs chosen by measurement on the micro-pascal dp of a box lit almost at
+once, not tolerances.
+
+Labels: (158.10a)-(158.10h).
 
 ---
 

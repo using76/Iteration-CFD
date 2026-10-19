@@ -37,10 +37,11 @@
 use crate::compressible::bc::Lowered;
 use crate::compressible::{Compressible, CompressibleControls, CompressibleState};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::dust::source::CompressibleDust;
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuVectorField};
 use crate::field_setup::{setup_scalar_field, setup_vector_field};
-use crate::io::fields::PatchFieldSpec;
+use crate::io::fields::{PatchFieldSpec, RawScalarField};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::{DVec3, Label, Scalar};
@@ -595,6 +596,50 @@ pub fn closed_lowered(low: &Lowered, wall: MembraneWall) -> Result<Lowered> {
     Ok(out)
 }
 
+/// The closed-stage copy of a dust-side scalar field (c~, k, omega, nut):
+/// `raw` plus `zeroGradient` under [`VENT_IN`] and [`VENT_OUT`], the treatment
+/// [`closed_lowered`] gives p and T (SPEC-LIT §158.10). DECISION (TAKEN by the
+/// supervisor): during the closed stage the membrane carries zeroGradient c~,
+/// k, omega and nut and no wall function. It exists only until pStat, and a
+/// wall function on it would need the case to name one. Its two patches are
+/// still wall-kind, so the split mesh's SST wall distance counts them.
+/// Refused by name, with [`closed_lowered`]'s texts and the field's name: a
+/// `ventIn`/`ventOut` key already in `raw.boundary`, and a pattern of
+/// `raw.boundary_patterns` that would govern a vent patch.
+pub fn closed_scalar(raw: &RawScalarField) -> Result<RawScalarField> {
+    let mut out = raw.clone();
+    for key in [VENT_IN, VENT_OUT] {
+        if raw.boundary.contains_key(key) {
+            return Err(Error::Refused(format!(
+                "vent: the case already states a boundaryField entry for \
+                 {key} on {} (SPEC-LIT §158.8)",
+                raw.name
+            )));
+        }
+    }
+    for key in [VENT_IN, VENT_OUT] {
+        out.boundary.insert(
+            key.to_string(),
+            PatchFieldSpec { type_name: "zeroGradient".to_string(), ..Default::default() },
+        );
+    }
+    // As `closed_lowered`: the exact keys now exist, so the precedence the
+    // run rests on is checked, not assumed.
+    for key in [VENT_IN, VENT_OUT] {
+        match crate::io::fields::governing_key(&out.boundary, &out.boundary_patterns, key)? {
+            Some(k) if k == key => {}
+            Some(k) => {
+                return Err(Error::Refused(format!(
+                    "vent: the pattern {k} would govern {key}; state the \
+                     patch explicitly (SPEC-LIT §158.8)"
+                )));
+            }
+            None => {}
+        }
+    }
+    Ok(out)
+}
+
 /// The state a step reads, on either mesh: the lowered U/p/T built as
 /// `src/bin/compressible.rs` builds the case's own state, and the derived
 /// fields allocated as zeros for [`Compressible::initialise`] to fill.
@@ -858,7 +903,7 @@ impl Membrane {
 
 /// Copy one scalar field by host round trip: `f`, `f0` and `f00` whole, and
 /// the first `n_bf` entries of every `[n_bf]` value buffer the struct has.
-fn hand_over_scalar(
+pub(crate) fn hand_over_scalar(
     gpu: &Gpu,
     from: &GpuScalarField,
     to: &mut GpuScalarField,
@@ -1018,6 +1063,121 @@ pub fn open_onto<'m>(
     hand_over_state(gpu, split, from_state, &mut state)?;
     hand_over_solver(from, &mut solver);
     Ok((solver, state))
+}
+
+/// [`open_onto`] for a run that carries a dust coupling (SPEC-LIT §158.10).
+/// The order is fixed: the merged state is set up and the merged solver built
+/// (as [`open_onto`]); the closed run's coupling is `carried` when it has taken
+/// a step, `None` when the membrane opens on the initial state; `make` builds
+/// the merged coupling from the merged state and `carried`, and it is attached
+/// BEFORE `initialise`, so the gas state is the mixture law as on the no-vent
+/// path; the rest is [`open_onto`]'s body exactly - at step 0 `initialise` only,
+/// otherwise `hand_over_state`, `initialise`, `hand_over_state`,
+/// `hand_over_solver`. Refused by name: a closed run that has taken a step and
+/// carries no dust coupling.
+#[allow(clippy::too_many_arguments)]
+pub fn open_onto_dust<'m, F>(
+    gpu: &Gpu,
+    split: &VentSplit,
+    from: &Compressible<'_>,
+    from_state: &CompressibleState,
+    merged: &'m GpuMesh,
+    merged_hm: &HostMesh,
+    ctrl: CompressibleControls,
+    low: &Lowered,
+    make: F,
+) -> Result<(Compressible<'m>, CompressibleState)>
+where
+    F: FnOnce(&CompressibleState, Option<&CompressibleDust<'_>>) -> Result<CompressibleDust<'m>>,
+{
+    let mut state = setup_state(gpu, merged, merged_hm, low)?;
+    let mut solver = build_solver(gpu, merged, ctrl, low)?;
+    let carried = if from.steps_taken() > 0 {
+        Some(from.dust().ok_or_else(|| {
+            Error::Refused(
+                "dust::vent::open_onto_dust: the closed run has taken steps and carries no \
+                 dust coupling to hand over; use open_onto (SPEC-LIT §158.10)"
+                    .into(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let dust = make(&state, carried)?;
+    solver.attach_dust(gpu, dust)?;
+    if from.steps_taken() == 0 {
+        solver.initialise(gpu, &mut state)?;
+        return Ok((solver, state));
+    }
+    hand_over_state(gpu, split, from_state, &mut state)?;
+    solver.initialise(gpu, &mut state)?;
+    hand_over_state(gpu, split, from_state, &mut state)?;
+    hand_over_solver(from, &mut solver);
+    Ok((solver, state))
+}
+
+// ==========================================================================
+//  The mass budget (SPEC-LIT §158.10)
+// ==========================================================================
+
+/// The run's mass budget (SPEC-LIT §158.10), bookkeeping and not physics.
+/// `M` is the host sum `sum_i rho_i V_i` of (158.10f) of SPEC-LIT 158.10 over the
+/// case's cell volumes `V`, in f64 and cell order. `outflow` accumulates
+/// (158.10g) of SPEC-LIT 158.10: after every step `dt` times the sum, in face
+/// order, of the boundary face mass flux `mdot.bf` - outflow is positive. The
+/// residual (158.10h) of SPEC-LIT 158.10 is
+/// `(M(t_n) - M(t_0) + B(t_n)) / M(t_0)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MassBudget {
+    /// kg, `M(t_0)`.
+    pub m0: f64,
+    /// kg, `B(t_n)`: the boundary outflow accumulated so far.
+    pub outflow: f64,
+}
+
+impl MassBudget {
+    /// (158.10f) of SPEC-LIT 158.10: `sum_i rho_i V_i` over `v.len()` cells, f64,
+    /// in cell order, from the downloaded `rho.f`. Refused by name: a `v` longer
+    /// than the field's cells.
+    pub fn mass(gpu: &Gpu, s: &CompressibleState, v: &[Scalar]) -> Result<f64> {
+        if v.len() > s.rho.n_cells {
+            return Err(Error::Refused(format!(
+                "dust::vent::MassBudget::mass: {} cell volumes for a rho field of {} cells \
+                 (SPEC-LIT §158.10)",
+                v.len(),
+                s.rho.n_cells
+            )));
+        }
+        let rho = gpu.download(&s.rho.f)?;
+        let mut m = 0.0f64;
+        for i in 0..v.len() {
+            m += f64::from(rho[i]) * f64::from(v[i]);
+        }
+        Ok(m)
+    }
+
+    /// `M(t_0)` on the state the first step starts from, outflow 0.
+    pub fn start(gpu: &Gpu, s: &CompressibleState, v: &[Scalar]) -> Result<Self> {
+        Ok(Self { m0: Self::mass(gpu, s, v)?, outflow: 0.0 })
+    }
+
+    /// (158.10g) of SPEC-LIT 158.10: add `dt` times the sum of the boundary face
+    /// mass flux `mdot.bf` of the step just taken, summed in face order.
+    pub fn after_step(&mut self, gpu: &Gpu, s: &CompressibleState, dt: f64) -> Result<()> {
+        let bf = gpu.download(&s.mdot.bf)?;
+        let mut sum = 0.0f64;
+        for x in &bf {
+            sum += f64::from(*x);
+        }
+        self.outflow += dt * sum;
+        Ok(())
+    }
+
+    /// (158.10h) of SPEC-LIT 158.10: `(m - M(t_0) + B) / M(t_0)` for the mass `m`
+    /// of the current state.
+    pub fn residual(&self, m: f64) -> f64 {
+        (m - self.m0 + self.outflow) / self.m0
+    }
 }
 
 #[cfg(test)]

@@ -95,6 +95,7 @@ use crate::{Acc, Scalar, Vec3};
 /// from the lowered blocks at the initial pressure `p_init` and the energy
 /// equation's molecular conductivity `k_mol` (W/(m K)) - SPEC-LIT §157.4's
 /// stated inputs and the derived state of (152.10), (153.2), (155.10).
+#[derive(Clone)]
 pub struct DustSetup {
     /// The equivalent gas at the lowered thermo (§152.4, §152.9).
     pub gas: EquivalentGas,
@@ -1122,6 +1123,113 @@ impl<'m> CompressibleDust<'m> {
     /// The attached turbulence model, if any.
     pub fn turbulence(&self) -> Option<&(dyn CoupledTurbulence + 'm)> {
         self.turb.as_deref()
+    }
+
+    /// The flame-age field alpha of (160.4), when the local flame age is on
+    /// (SPEC-LIT §160.5); `None` with the global clock.
+    pub fn progress_age(&self) -> Option<&GpuScalarField> {
+        self.progress.age_field()
+    }
+
+    /// The vent's opening (SPEC-LIT §158.10): the coupling of a closed run,
+    /// carried onto the merged mesh. `hm`, `m` and `raw_c` are the MERGED
+    /// (case) mesh and the case's own c~ field, as the no-vent path passes
+    /// them, and `turb` is a model freshly built on that mesh (or `None` for
+    /// a laminar case, on both sides alike). The new coupling is built with
+    /// [`Self::new`] on this one's setup, c~ controls and `nu_ref`; c~
+    /// (`f`, `f0`, `f00` and the shared boundary prefix), the ddt clock and
+    /// the flame age's clock are carried by
+    /// [`ProgressEquation::carry_from`]; each field of this coupling's
+    /// turbulence model (k, omega and nut for the SST) is copied into the
+    /// same-named field of the new model with
+    /// [`crate::dust::vent::hand_over_scalar`], and `last` is copied. The new
+    /// model's wall distance is its own: it was built on the merged mesh,
+    /// where the membrane is no longer a wall. The SST's ddt clock is not
+    /// carried: a dust run is Euler only (SPEC-LIT §158.6), and Euler's
+    /// coefficients read only `dt` (`DdtScheme::coeffs`).
+    ///
+    /// Every other buffer is per-step scratch, written before it is read in
+    /// a step (`open_step`, `update_mu_eff`, `before_energy` and
+    /// `correct_turbulence` of the loop), and is not carried - except the
+    /// five that a driver reads BETWEEN steps for its written fields and
+    /// reports: `U_t'`, the heat release `q`, the net rate `wdot`, the
+    /// flame-Courant buffer and `lambda`, which are carried so that a state
+    /// written at the opening step is the closed run's last one. Refused by
+    /// name (SPEC-LIT §158.10): different cell counts, a merged boundary
+    /// longer than this coupling's (the merged arrays must be a prefix),
+    /// `turb` present on one side only, and a field of this coupling's model
+    /// that the new one lacks.
+    pub fn hand_over<'n>(
+        &self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        m: &'n GpuMesh,
+        raw_c: &RawScalarField,
+        turb: Option<Box<dyn CoupledTurbulence + 'n>>,
+    ) -> Result<CompressibleDust<'n>> {
+        const W: &str = "dust::source::CompressibleDust::hand_over";
+        if m.n_cells != self.n {
+            return Err(Error::Refused(format!(
+                "{W}: the merged mesh holds {} cells, this coupling {} (SPEC-LIT §158.10)",
+                m.n_cells, self.n
+            )));
+        }
+        if m.n_boundary_faces > self.nb {
+            return Err(Error::Refused(format!(
+                "{W}: the merged boundary holds {} faces, longer than this coupling's {}; \
+                 the merged arrays must be a prefix (SPEC-LIT §158.10)",
+                m.n_boundary_faces, self.nb
+            )));
+        }
+        if self.turb.is_some() != turb.is_some() {
+            return Err(Error::Refused(format!(
+                "{W}: a turbulence model is attached on {} side only; the closed and the \
+                 merged coupling carry one alike (SPEC-LIT §158.10)",
+                if self.turb.is_some() { "the closed" } else { "the merged" }
+            )));
+        }
+        if let (Some(old), Some(new)) = (&self.turb, &turb) {
+            let have = new.output_fields();
+            for (name, _) in old.output_fields() {
+                if !have.iter().any(|(n, _)| *n == name) {
+                    return Err(Error::Refused(format!(
+                        "{W}: the new turbulence model carries no field {name}, which the \
+                         closed one does (SPEC-LIT §158.10)"
+                    )));
+                }
+            }
+        }
+        let mut new = CompressibleDust::new(
+            gpu,
+            hm,
+            m,
+            self.setup.clone(),
+            raw_c,
+            *self.progress.controls(),
+            turb,
+            self.nu_ref,
+        )?;
+        new.progress.carry_from(gpu, &self.progress, m.n_boundary_faces)?;
+        if let (Some(old), Some(model)) = (&self.turb, &mut new.turb) {
+            let mut to = model.output_fields_mut();
+            for (name, from) in old.output_fields() {
+                if let Some((_, field)) = to.iter_mut().find(|(n, _)| *n == name) {
+                    crate::dust::vent::hand_over_scalar(gpu, from, field, m.n_boundary_faces)?;
+                }
+            }
+        }
+        // The between-step reads: U_t', q, wdot, the flame-Courant buffer.
+        for (from, to) in [
+            (&self.u_t, &mut new.u_t),
+            (&self.q, &mut new.q),
+            (&self.wdot, &mut new.wdot),
+            (&self.co, &mut new.co),
+        ] {
+            gpu.write(to, &gpu.download(from)?)?;
+        }
+        crate::dust::vent::hand_over_scalar(gpu, &self.lambda, &mut new.lambda, m.n_boundary_faces)?;
+        new.last = self.last;
+        Ok(new)
     }
 
     /// Starts a time step: the c~ equation's old level and its step-long
