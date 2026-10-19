@@ -24,7 +24,8 @@
 //! shrunken char diameter goes back into the pool's own `d`, whose drag the
 //! next step reads. The ledgers of the run are the sums of the gather's
 //! gains, so they telescope to the cloud's losses, as (77.4)-(77.5) do for
-//! a vapour.
+//! a vapour. Under a P1 `radiation` block the parcels see P1's `G`
+//! (SPEC-LIT 159.13).
 //!
 //! Written from SPEC-LIT §159.7-§159.10, §137.10 and §68.
 //! The specification was informed by a review of FSCDustFoam (Huang &
@@ -75,6 +76,9 @@ pub struct CloudRunShape<'a> {
     /// `species_controls`): the dilution (159.22) is the bounded equation's,
     /// so a cloud beside an unbounded one is refused.
     pub species_bounded: bool,
+    /// The radiation block is P1, the one model DST-18 couples (SPEC-LIT
+    /// 159.13); a cloud beside fvDOM or s2s stays refused by name.
+    pub radiation_p1: bool,
 }
 
 fn refused(key: &str, msg: &str) -> Error {
@@ -120,11 +124,11 @@ pub fn refuse_settings(shape: &CloudRunShape<'_>) -> Result<()> {
              one pool per run",
         ));
     }
-    if shape.radiation {
+    if shape.radiation && !shape.radiation_p1 {
         return Err(refused(
             "dust.cloud",
-            "beside a radiation block: a parcel's incident G is an enclosure at its \
-             cell's gas temperature until DST-18 couples P1's",
+            "beside a radiation block other than P1 (fvDOM or s2s): DST-18 couples a \
+             cloud to P1 only (SPEC-LIT 159.13)",
         ));
     }
     if !shape.transient {
@@ -265,6 +269,14 @@ pub struct CloudEnd {
     pub ign_cells: usize,
     /// SPEC-LIT 159.12 (159.26): how many steps the igniter was active at.
     pub ign_steps: usize,
+    /// SPEC-LIT 159.13: J, sum over the coupled steps of `n_p q_rad`, slot
+    /// order: what P1's field gave the parcels.
+    pub radiation_e: f64,
+    /// SPEC-LIT 159.13: J, the same energy as the gas's cloud source carried
+    /// it, cell order.
+    pub radiation_q_e: f64,
+    /// SPEC-LIT 159.13: how many steps ran coupled to P1's `G`.
+    pub radiation_steps: usize,
 }
 
 /// One run's dust cloud: the seeding, the pool's words of it, the particle
@@ -370,6 +382,18 @@ pub struct CaseCloud {
     ign_e: f64,
     /// SPEC-LIT 159.12 (159.26): how many steps the igniter was active at.
     ign_steps: usize,
+    /// SPEC-LIT 159.13: the incident radiation the parcels see this step -
+    /// P1's last-solved `G`, per cell, once P1 has solved at least once in
+    /// the run; `None` is the enclosure `4 sigma T^4` exactly as before.
+    rad_g: Option<Vec<Scalar>>,
+    /// SPEC-LIT 159.13: J, Σ over the coupled steps of `n_p q_rad`, slot
+    /// order - what P1's field gave the parcels.
+    rad_e: f64,
+    /// SPEC-LIT 159.13: J, the same energy as the gas's cloud source carried
+    /// it back, cell order.
+    rad_q_e: f64,
+    /// SPEC-LIT 159.13: how many steps ran coupled to P1's `G`.
+    rad_steps: usize,
 }
 
 impl CaseCloud {
@@ -592,6 +616,10 @@ impl CaseCloud {
             ign_duration,
             ign_e: 0.0,
             ign_steps: 0,
+            rad_g: None,
+            rad_e: 0.0,
+            rad_q_e: 0.0,
+            rad_steps: 0,
         })
     }
 
@@ -604,6 +632,26 @@ impl CaseCloud {
     /// handoff, at rest, each word rounded to `Scalar` once.
     pub fn seeds(&self) -> Vec<SeedParcel> {
         self.seeded.iter().map(|p| p.seed_parcel()).collect()
+    }
+
+    /// SPEC-LIT 159.13: the incident radiation the NEXT step's parcels see,
+    /// per cell - P1's last-solved `G`, handed in before the step, when P1
+    /// has solved at least once in the run; `None` leaves the enclosure
+    /// `G = 4 sigma T^4` exactly as before. A length other than the cell
+    /// count is refused by name.
+    pub fn set_incident(&mut self, g: Option<Vec<Scalar>>) -> Result<()> {
+        if let Some(gr) = &g {
+            if gr.len() != self.n_cells {
+                return Err(Error::Config(format!(
+                    "dust.cloud.set_incident: {} values of incident G against {} cells - \
+                     the parcels read one G per cell (SPEC-LIT 159.13)",
+                    gr.len(),
+                    self.n_cells
+                )));
+            }
+        }
+        self.rad_g = g;
+        Ok(())
     }
 
     /// One step of Phase B, once per time step, after [`CaseParcels::step`]
@@ -722,6 +770,11 @@ impl CaseCloud {
             let x_o2 = (y_o2[c] / self.w[self.k_o2]) / sum_w[c];
             po2_h[c] = (x_o2 * p0) as Scalar;
         }
+        // SPEC-LIT 159.13: when P1 has solved, the parcels see P1's `G`, not
+        // the enclosure at the gas temperature.
+        if let Some(gr) = &self.rad_g {
+            g_h.copy_from_slice(gr);
+        }
         gpu.write(&mut self.g, &g_h)?;
         gpu.write(&mut self.p_o2, &po2_h)?;
         // 3. The kernel: §159.7's drying, devolatilisation and radiation and
@@ -805,6 +858,33 @@ impl CaseCloud {
             &self.th,
         )?;
         let src = sources(&gains, &self.volume, &t_f64, f64::from(dt), &self.th)?;
+        // SPEC-LIT 159.13: when the parcels saw P1's `G` this step, their
+        // radiative heat `q_rad` (the kernel's `acc_qr`, J) came from the
+        // radiation field, not from the gas - the gas's energy source gains
+        // it back: per cell `R_c = sum_{i in c, not retired} n_p q_rad` (J),
+        // and `q_c <- q_c + R_c/(V_c dt)` before the igniter's addition.
+        // `rad_e` books the field's gift in slot order, `rad_q_e` the same
+        // energy as the source carried it, cell order.
+        let mut rq: Option<Vec<f64>> = None;
+        if self.rad_g.is_some() {
+            let acc_qr: Vec<Acc> = gpu.download(&self.acc_qr)?;
+            let mut r_c = vec![0.0f64; self.n_cells];
+            for i in 0..n {
+                if self.retired[i] {
+                    continue;
+                }
+                r_c[self.cell[i]] += self.n_p[i] * acc_qr[i];
+                self.rad_e += self.n_p[i] * acc_qr[i];
+            }
+            let mut buf = Vec::with_capacity(self.n_cells);
+            for c in 0..self.n_cells {
+                let rc = r_c[c] / (self.volume[c] * f64::from(dt));
+                self.rad_q_e += rc * self.volume[c] * f64::from(dt);
+                buf.push(rc);
+            }
+            self.rad_steps += 1;
+            rq = Some(buf);
+        }
         // 6. The gas's share: the four mdot''' into the reactor, the (137.9)
         // factors with them, and q onto the registry's buffer.
         for k in 0..4 {
@@ -849,10 +929,17 @@ impl CaseCloud {
         // cell, in ascending cell order. Without an igniter, or past
         // tau_ig, this path is exactly the one it was; `last_sources` keeps
         // the cloud's own src, without the igniter.
+        // The step's q for the registry: (159.20)'s q, plus the radiation
+        // give-back when the parcels saw P1's `G` (SPEC-LIT 159.13) - summed
+        // in f64, before any rounding to `Scalar`.
+        let q_base: Vec<f64> = match &rq {
+            Some(r) => src.q.iter().zip(r.iter()).map(|(&x, &v)| x + v).collect(),
+            None => src.q.clone(),
+        };
         let ign_on =
             !self.ign_cells.is_empty() && self.steps as f64 * f64::from(dt) < self.ign_duration;
         let q: Vec<Scalar> = if ign_on {
-            let mut q = src.q.clone();
+            let mut q = q_base;
             for &c in &self.ign_cells {
                 q[c] += self.ign_power;
                 self.ign_e += self.ign_power * self.volume[c] * f64::from(dt);
@@ -860,7 +947,7 @@ impl CaseCloud {
             self.ign_steps += 1;
             q.iter().map(|&x| x as Scalar).collect()
         } else {
-            src.q.iter().map(|&x| x as Scalar).collect()
+            q_base.iter().map(|&x| x as Scalar).collect()
         };
         let cq = pc.cloud_energy_mut().expect("the cloud's energy buffer was enabled");
         gpu.write(cq, &q)?;
@@ -875,6 +962,46 @@ impl CaseCloud {
         self.before = after;
         self.steps += 1;
         Ok(())
+    }
+
+    /// SPEC-LIT 159.13: the END-of-step cloud's per-cell absorption `a_p`
+    /// (1/m) and grey emission `e_p` (W/m3) of (159.7) of SPEC-LIT 159.4,
+    /// from the parcels that radiate - the live slots (`!retired`) with
+    /// `mass() > 0` and `d > 0` - for
+    /// [`ofgpu::radiation::p1::P1::set_particles`]. Each value is rounded to
+    /// [`Scalar`] once.
+    pub fn particle_radiation(&self) -> Result<(Vec<Scalar>, Vec<Scalar>)> {
+        let (mut n_p, mut d, mut t_p, mut cell) = (
+            Vec::with_capacity(self.n),
+            Vec::with_capacity(self.n),
+            Vec::with_capacity(self.n),
+            Vec::with_capacity(self.n),
+        );
+        for i in 0..self.n {
+            if self.retired[i] {
+                continue;
+            }
+            let s = &self.before[i];
+            if s.mass() <= 0.0 || s.d <= 0.0 {
+                continue;
+            }
+            n_p.push(self.n_p[i]);
+            d.push(s.d);
+            t_p.push(s.t);
+            cell.push(self.cell[i]);
+        }
+        let cr = ofgpu::dust::particle::cloud_radiation(
+            self.props.emissivity,
+            &n_p,
+            &d,
+            &t_p,
+            &cell,
+            &self.volume,
+        )?;
+        Ok((
+            cr.a_p.iter().map(|&x| x as Scalar).collect(),
+            cr.e_p.iter().map(|&x| x as Scalar).collect(),
+        ))
     }
 
     /// The dilution buffers, per solved species in index order - for
@@ -909,6 +1036,9 @@ impl CaseCloud {
             ign_e: self.ign_e,
             ign_cells: self.ign_cells.len(),
             ign_steps: self.ign_steps,
+            radiation_e: self.rad_e,
+            radiation_q_e: self.rad_q_e,
+            radiation_steps: self.rad_steps,
         }
     }
 

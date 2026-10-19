@@ -27,6 +27,7 @@
 //!   SPEC-LIT §159.2 - (159.4) SFOM devolatilisation
 //!   SPEC-LIT §159.3 - (159.6) the closed forms the gates hold
 //!   SPEC-LIT §159.4 - (159.7) the radiation temperature
+//!   SPEC-LIT §159.4 - (159.7) the cloud's a_p and e_p per cell (DST-18)
 //!   SPEC-LIT §159.7 - the stages, the segment integrator and the
 //!     accumulators (derived here)
 //!   SPEC-LIT §159.8 - the char stage, its accumulators and the stop on a
@@ -537,6 +538,95 @@ pub fn step(p: &ParticleProps, s: &ParticleState, gas: &GasAtParcel, dt: f64) ->
     ex.mt_v = ex.m_v * t_end;
     ex.mt_c = ex.m_c * t_end;
     Ok((st, ex))
+}
+
+/// (159.7) of SPEC-LIT 159.4 per cell, from a cloud's parcels: `a_p` (1/m)
+/// and `e_p` (W/m3), the absorption the cloud adds to P1's and the grey
+/// emission the parcels' own temperatures send into `G`'s equation - what
+/// [`crate::radiation::p1::P1::set_particles`] hands the solve. A cell
+/// with no parcel carries 0 in both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudRadiation {
+    pub a_p: Vec<f64>,
+    pub e_p: Vec<f64>,
+}
+
+/// (159.7) of SPEC-LIT 159.4 per cell from one cloud's parcels, in f64 in
+/// both builds: `a_p[c] = sum_parcels n_p eps_0 pi d_p^2 / 4 / V_c` (1/m),
+/// the absorption P1 adds to the gas's, and `e_p[c] = sum n_p pi d_p^2
+/// eps_0 sigma_SB T_p^4 / V_c` (W/m3), the emission of the parcels' own
+/// temperatures. `volume.len()` is the cell count; THE CALLER passes only
+/// the parcels that radiate (mass > 0, d > 0), one entry per parcel, in
+/// slot order. `ar` is the SAME expression and order `step` uses.
+pub fn cloud_radiation(
+    emissivity: f64,
+    n_p: &[f64],
+    d: &[f64],
+    t_p: &[f64],
+    cell: &[usize],
+    volume: &[f64],
+) -> Result<CloudRadiation> {
+    if !(n_p.len() == d.len() && d.len() == t_p.len() && t_p.len() == cell.len()) {
+        return Err(refuse(
+            "cloud_radiation",
+            format!(
+                "the lengths of n_p ({}), d ({}), t_p ({}) and cell ({}) are \
+                 not all equal",
+                n_p.len(),
+                d.len(),
+                t_p.len(),
+                cell.len()
+            ),
+        ));
+    }
+    for i in 0..n_p.len() {
+        if cell[i] >= volume.len() {
+            return Err(refuse(
+                "cloud_radiation",
+                format!(
+                    "cell[{i}] = {} is not a cell of a {}-cell volume",
+                    cell[i],
+                    volume.len()
+                ),
+            ));
+        }
+    }
+    for (c, &v) in volume.iter().enumerate() {
+        if !(v.is_finite() && v > 0.0) {
+            return Err(refuse(
+                "cloud_radiation",
+                format!("volume[{c}] = {v} must be finite and > 0"),
+            ));
+        }
+    }
+    for i in 0..n_p.len() {
+        for (name, v) in [("n_p", n_p[i]), ("d", d[i]), ("t_p", t_p[i])] {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(refuse(
+                    "cloud_radiation",
+                    format!("{name}[{i}] = {v} must be finite and >= 0"),
+                ));
+            }
+        }
+    }
+    if !(emissivity >= 0.0 && emissivity <= 1.0) {
+        return Err(refuse(
+            "cloud_radiation",
+            format!("emissivity = {emissivity} must lie in [0, 1]"),
+        ));
+    }
+    let mut sa = vec![0.0; volume.len()];
+    let mut se = vec![0.0; volume.len()];
+    for i in 0..n_p.len() {
+        let ar_i = PI * d[i] * d[i] * emissivity;
+        let t3 = t_p[i] * t_p[i] * t_p[i];
+        let c = cell[i];
+        sa[c] += n_p[i] * ar_i;
+        se[c] += n_p[i] * ar_i * SIGMA_SB * t3 * t_p[i];
+    }
+    let a_p = sa.iter().zip(volume).map(|(&s, &v)| 0.25 * s / v).collect();
+    let e_p = se.iter().zip(volume).map(|(&s, &v)| s / v).collect();
+    Ok(CloudRadiation { a_p, e_p })
 }
 
 #[cfg(test)]

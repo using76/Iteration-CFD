@@ -2375,6 +2375,13 @@ fn run(o: &Options) -> Result<RunEnd> {
             } else {
                 true
             },
+            // SPEC-LIT 159.13: DST-18 couples a cloud to P1 only - a
+            // radiation block beside it is refused when it is any other
+            // model, fvDOM or an s2s enclosure.
+            radiation_p1: lowered
+                .as_ref()
+                .and_then(|l| l.radiation.as_ref())
+                .is_some_and(|r| r.s2s.is_none() && r.config.model == ofgpu::radiation::RadiationModel::P1),
         })?;
     }
 
@@ -3383,7 +3390,19 @@ fn run(o: &Options) -> Result<RunEnd> {
         // iteration below reads are this step's.
         if let (Some(cl), Some(pc), Some(r)) = (cloud.as_mut(), parcels.as_mut(), reacting.as_mut())
         {
+            // SPEC-LIT 159.13: BEFORE the cloud's step the parcels see P1's
+            // last-solved G - never before P1's first solve in the run - and
+            // AFTER it the cloud's own a_p and e_p go into P1, so every
+            // solve of this step's outer iterations carries them.
+            cl.set_incident(match rad.as_ref() {
+                Some(x) => x.incident_g(&gpu)?,
+                None => None,
+            })?;
             cl.step(&gpu, pc, s.u(), &gas, energy.field(), r, dt)?;
+            if let Some(x) = rad.as_mut() {
+                let (a_p, e_p) = cl.particle_radiation()?;
+                x.set_particles(&gpu, &a_p, &e_p)?;
+            }
         }
 
         let flow = FlowState::new(s.u(), s.convective_flux(), cc.nu);
@@ -3667,6 +3686,16 @@ fn run(o: &Options) -> Result<RunEnd> {
                 ce.ign_steps,
                 ce.ign_cells,
                 g(ce.ign_e)
+            );
+        }
+        // SPEC-LIT 159.13: the coupled steps' ledger - what P1's field gave
+        // the parcels, carried back to the gas as the cloud's energy source.
+        if ce.radiation_steps > 0 {
+            println!(
+                "dust cloud radiation (SPEC-LIT 159.13): {} coupled steps, P1's field gave \
+                 the parcels {} J",
+                ce.radiation_steps,
+                g(ce.radiation_e)
             );
         }
     }

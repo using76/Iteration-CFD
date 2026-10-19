@@ -11,6 +11,8 @@
 //! volatiles -> char, and the device step against its host twin (§159.5).
 //! The same case file runs as the unit tests `dust::particle::tests`, so
 //! both builds run it.
+//! DST-18 adds the particle-radiation rows of SPEC-LIT 159.13: a cloud in
+//! P1, the uniform-field heating, the energy closure and the off switch.
 //!
 //! An integration test, so it links the build's library: under `single`
 //! the device state is float.

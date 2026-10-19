@@ -134,6 +134,7 @@ struct RadiationKernels {
     source_pair: CudaFunction,
     wall_flux: CudaFunction,
     qr_scale: CudaFunction,
+    gamma_cells_particles: CudaFunction,
 }
 
 impl RadiationKernels {
@@ -148,6 +149,7 @@ impl RadiationKernels {
             source_pair: k.func("radSourcePair")?,
             wall_flux: k.func("radWallFlux")?,
             qr_scale: k.func("radQrScale")?,
+            gamma_cells_particles: k.func("radGammaCellsParticles")?,
         })
     }
 }
@@ -217,6 +219,12 @@ pub struct P1 {
     fldk: FieldKernels,
     solk: SolverKernels,
     ctrl: SolverControls,
+
+    /// The cloud's per-cell absorption `a_p` (1/m) and grey emission `e_p`
+    /// (W/m3) of (159.7) of SPEC-LIT 159.4, `[n_cells]` each, when a Phase
+    /// B dust cloud is handed in with [`P1::set_particles`]; `None` is the
+    /// solve that runs without one.
+    particles: Option<(DevBuf<Scalar>, DevBuf<Scalar>)>,
 }
 
 impl P1 {
@@ -339,6 +347,7 @@ impl P1 {
             fldk: FieldKernels::new(gpu)?,
             solk: SolverKernels::new(gpu)?,
             ctrl,
+            particles: None,
         })
     }
 
@@ -465,15 +474,34 @@ impl P1 {
         // its owner's cell value. Then (135.13)'s two face products. All
         // four launches are idempotent overwrites, so re-solving with a new
         // `t` cannot inherit anything from the last one.
-        unsafe {
-            gpu.stream()
-                .launch_builder(&self.k.gamma_cells)
-                .arg(&mut self.gamma_cells)
-                .arg(&kappa)
-                .arg(&sigma_s)
-                .arg(&a1)
-                .arg(&nl)
-                .launch(cfg_for(n))?;
+        //
+        // (159.7) of SPEC-LIT 159.4: a set cloud's absorption joins the
+        // medium, so beta = kappa + a_p + sigma_s and the SAME per-cell
+        // Gamma buffer the Marshak triple, the matrix and q_r all read is
+        // written from it. Without a cloud the launch is exactly the one
+        // that always ran.
+        match &self.particles {
+            Some((a_p, _e_p)) => unsafe {
+                gpu.stream()
+                    .launch_builder(&self.k.gamma_cells_particles)
+                    .arg(&mut self.gamma_cells)
+                    .arg(a_p)
+                    .arg(&kappa)
+                    .arg(&sigma_s)
+                    .arg(&a1)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            },
+            None => unsafe {
+                gpu.stream()
+                    .launch_builder(&self.k.gamma_cells)
+                    .arg(&mut self.gamma_cells)
+                    .arg(&kappa)
+                    .arg(&sigma_s)
+                    .arg(&a1)
+                    .arg(&nl)
+                    .launch(cfg_for(n))?;
+            },
         }
         unsafe {
             gpu.stream()
@@ -540,7 +568,19 @@ impl P1 {
         self.a.zero(gpu)?;
         fv::fvm_laplacian(gpu, &self.fvk, &mut self.a, m, &self.gamma_if, &self.gamma_bf, &self.g, -1.0)?;
         fv::fvm_sp(gpu, &self.fvk, &mut self.a, m, &self.kappa_cells, 1.0)?;
+        // (159.7) of SPEC-LIT 159.4: a set cloud adds its absorption `a_p`
+        // to the diagonal, `diag += a_p V_P`, and - below, after the gas's
+        // emission - its grey emission `e_p` to the source,
+        // `source += e_p V_P`, both per cell. The gas's own (137.2) energy
+        // source is NOT touched: the gas term is `kappa` alone, and the
+        // particles' side of the exchange is the parcels' own energy.
+        if let Some((a_p, _e_p)) = &self.particles {
+            fv::fvm_sp(gpu, &self.fvk, &mut self.a, m, a_p, 1.0)?;
+        }
         fv::fvm_su(gpu, &self.fvk, &mut self.a, m, &self.su, 1.0)?;
+        if let Some((_a_p, e_p)) = &self.particles {
+            fv::fvm_su(gpu, &self.fvk, &mut self.a, m, e_p, 1.0)?;
+        }
         ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
 
         // §118.4-refined under `single` when the controls let it be. The
@@ -602,6 +642,10 @@ impl P1 {
     ///
     /// Two launches plus the registry's own two accumulations, no host
     /// round-trip, so the registration captures with the rest of the step.
+    ///
+    /// The gas term is `kappa` alone: a set cloud's exchange with the gas
+    /// is the PARCELS' own energy (SPEC-LIT 159.4), which the particle step
+    /// carries - this registration never sees it.
     pub fn register_energy_source(
         &mut self,
         gpu: &Gpu,
@@ -627,6 +671,80 @@ impl P1 {
         sources.register_explicit(gpu, &self.q_src)?;
         sources.register_implicit_sink(gpu, &self.sp_src)?;
         Ok(())
+    }
+
+    /// Hand the solve one cloud: `a_p` and `e_p`, `[n_cells]` each, the
+    /// per-cell absorption and grey emission of (159.7) of SPEC-LIT 159.4
+    /// - the output of [`crate::dust::particle::cloud_radiation`],
+    /// uploaded. From the next [`P1::solve`] on, `a_p` joins the medium in
+    /// (135.7) of SPEC-LIT 135.3 and the diagonal, and `e_p` joins the
+    /// source; the (137.2) energy source the gas registers stays `kappa`
+    /// alone - the particles' side of the exchange is the parcels' own.
+    ///
+    /// Refused, naming the argument and SPEC-LIT 159.4: a length other than
+    /// the mesh's cell count, any value that is not finite or is negative,
+    /// and any call at all when the solve is ONE grey gas of a WSGG sum
+    /// (`weight != 1`): the particles' grey emission is not split over the
+    /// gases.
+    ///
+    /// This UPLOADS, so it must never be called inside a CUDA-graph capture
+    /// (SPEC-LIT 81): set the cloud, or swap its buffers, outside the
+    /// capture.
+    pub fn set_particles(&mut self, gpu: &Gpu, a_p: &[Scalar], e_p: &[Scalar]) -> Result<()> {
+        if a_p.len() != self.n_cells || e_p.len() != self.n_cells {
+            return Err(Error::Config(format!(
+                "radiation::p1::P1::set_particles: a_p holds {} values and \
+                 e_p {}, the mesh has {} cells - one absorption and one \
+                 emission per cell (SPEC-LIT 159.4)",
+                a_p.len(),
+                e_p.len(),
+                self.n_cells
+            )));
+        }
+        for (name, v) in a_p
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (format!("a_p[{i}]"), x))
+            .chain(e_p.iter().enumerate().map(|(i, &x)| (format!("e_p[{i}]"), x)))
+        {
+            if !v.is_finite() || v < 0.0 {
+                return Err(Error::Config(format!(
+                    "radiation::p1::P1::set_particles: {name} = {v} is \
+                     refused - a cloud's absorption and emission are finite \
+                     and >= 0 (SPEC-LIT 159.4)"
+                )));
+            }
+        }
+        if self.weight != 1.0 {
+            return Err(Error::Config(format!(
+                "radiation::p1::P1::set_particles: the grey gas's weight {} \
+                 is refused - a WSGG sum is a superposition of grey solves, \
+                 and the particles' grey emission is not split over its \
+                 gases (SPEC-LIT 159.4)",
+                self.weight
+            )));
+        }
+        match &mut self.particles {
+            Some((a, e)) => {
+                gpu.write(a, a_p)?;
+                gpu.write(e, e_p)?;
+            }
+            slot => {
+                *slot = Some((gpu.upload(a_p)?, gpu.upload(e_p)?));
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the cloud: the next [`P1::solve`] is exactly the solve that
+    /// runs without one.
+    pub fn clear_particles(&mut self) {
+        self.particles = None;
+    }
+
+    /// The cloud's `(a_p, e_p)` buffers, when one is set.
+    pub fn particles(&self) -> Option<(&DevBuf<Scalar>, &DevBuf<Scalar>)> {
+        self.particles.as_ref().map(|(a, e)| (a, e))
     }
 
     /// Make the solve ONE grey gas of a weighted sum (SPEC-LIT §136.4,

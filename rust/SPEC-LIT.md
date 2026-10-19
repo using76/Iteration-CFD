@@ -63025,6 +63025,117 @@ finite-rate path at the igniter, not this tube's mesh.
 
 Labels: (159.26)-(159.30).
 
+### 159.13 Particle radiation in `ofgpu-lowmach` as built (DST-18)
+
+`No GPL-licensed source was consulted.` DST-18 couples the cloud of §159.10 to CHR-18's P1 (§135.7)
+as (159.7) of SPEC-LIT 159.4 states it: the parcels see P1's `G`, the cloud's absorption joins
+P1's coefficient, and the parcels' radiative exchange leaves `G`'s equation and enters the parcels'
+own energy. Files: `src/dust/particle.rs` (`cloud_radiation`), `src/radiation/p1.rs`
+(`P1::set_particles`, `clear_particles`, `particles`), `cuda/radiation.cu` (`radGammaCellsParticles`),
+`src/bin/lowmach_cloud/mod.rs`, `src/bin/lowmach_rad/mod.rs`, `src/bin/lowmach.rs`, and the tests
+named below. The specification was informed by a review of FSCDustFoam (Huang & Lipatnikov, GPL) and
+no code was copied; the equations are (159.1), (159.7), §135.3-§135.7, (137.2) and (137.6), and the
+derivations here.
+
+**Plan against tree (the tree wins).** The plan's row names `cuda/dustparticle.cu`; DST-12's kernel
+already reads one `G` per cell and integrates (159.1)'s radiation term, so it is unchanged. The P1
+side lives in `src/radiation/p1.rs` and `cuda/radiation.cu`, which the row does not name, and the
+driver wiring in `src/bin/lowmach_cloud/` and `src/bin/lowmach_rad/` beside `src/bin/lowmach.rs`.
+The plan's test path `dust::particle::tests` is kept for the library rows (the shared case file
+`tests/shared/dust_particle_cases.rs`, so `tests/dust_particle.rs` runs them in both builds); the
+driver rows are `lowmach_cloud::tests`. §159.10's refusal of a cloud beside a radiation block is
+narrowed: a cloud beside P1 runs; beside fvDOM or an s2s enclosure it is still refused by name
+(key `dust.cloud`).
+
+**P1 with a cloud** **[derived from (159.7) and (135.7)-(135.8)]**. Per cell, from the parcels that
+radiate (live, `m > 0`, `d > 0`), in slot order, in f64:
+
+```
+  a_p = Σ n_p ε_0 π d_p² / (4 V_c) ,     e_p = Σ n_p ε_0 π d_p² σ_SB T_p⁴ / V_c
+  −∇·(Γ ∇G) + (κ + a_p) G = 4 κ σ_SB T⁴ + e_p ,     Γ = 1 / (3 (κ + a_p + σ_s) − A_1 σ_s)            (159.31)
+```
+
+`e_p = 4 a_p σ_SB T_p⁴` for an isothermal cloud. The gas's own (137.2) source is unchanged (κ
+alone). `a_p` enters Γ as the extinction it is: the cloud attenuates as well as it absorbs. `e_p` and
+`a_p` are rounded once to `Scalar` and uploaded; without a cloud `P1::solve` launches exactly what it
+did before. `set_particles` refuses a length other than the cell count, a value that is not finite
+or is negative, and a grey gas of a WSGG sum (`weight ≠ 1`; the particles' grey emission is not
+split over the gases).
+
+**The parcels' exchange** **[derived from (159.1) and (159.20)]**. Without P1 a parcel sees
+`G = 4 σ_SB T_P⁴`, an enclosure at its cell's gas temperature, and its exchange is the gas's, inside
+ΔE_P of (159.19). With P1 its exchange `q_rad` (the kernel's per-particle accumulator, J, the
+segment integral of `ε_0 π d² (G/4 − σ_SB T_p⁴)`) comes from the field, so the gas's cloud source
+gives it back:
+
+```
+  R_P = Σ_{i in P, live} n_p,i q_rad,i ,      q_P ← q_P + R_P / (V_P Δt)                           (159.32)
+```
+
+in f64 before the rounding to `Scalar` and before the igniter's (159.26). The gas then gains what the
+parcels lost to it (ΔE_P less their radiative gain), the parcels gain `q_rad` from the field, and the
+field loses (159.7)'s `S_rad` through `G`'s equation: particles, gas and radiation close.
+
+**The order (DESIGN, taken by recommendation).** Each time step, before the cloud's step, the
+parcels are handed P1's last-solved `G`, but only once P1 has solved in the run: the first time step
+runs before any solve and its parcels see `4 σ_SB T⁴`, exactly as without radiation, with no
+give-back. After the cloud's step, `a_p` and `e_p` of the end-of-step states go into P1, so every
+solve of the step's outer iterations carries them (the parcels' `T_p` is lagged one step, as the
+gas's `T*` is in (137.2)). The (137.6) report gains the cloud's rows:
+
+```
+  R += Σ_c (e_p,c − a_p,c G_c) V_c ,      S += Σ_c (e_p,c + a_p,c G_c) V_c                           (159.33)
+```
+
+`CloudEnd` books `radiation_e = Σ_steps Σ_i n_p q_rad` (slot order), `radiation_q_e = Σ_steps Σ_c
+R_c` as the source carried it (cell order), and the coupled step count; the run prints them.
+
+**Gates.** Library rows (`dust::particle::tests`, and `tests/dust_particle.rs` in both builds):
+
+| row | measure | bar | class |
+|---|---|---|---|
+| `thin_cloud_emission` | CHR-18's slab (16 cells, 1 m), gas κ 1e−9 at 0 K, black walls at 0 K, one parcel per cell, `a_p L = 1e−3`, T_p 1500 K: the walls' power L against `E = Σ e_p V` | 1 % | P |
+| `uniform_field_heating` | an ash parcel, `k_g = 1e−30` (no convection), T_p 800 K in `G = 4σ_SB 1200⁴`: `(T_1 − T_0)/(Δt φ_1)` against (159.1)'s radiation term over `m C_p`; `q_rad` against `m C_p ΔT`; the device twin | 1e−10, 1e−10, 4 ulp | R |
+| `radiation_energy_closes` | the slab, κ 0.5, walls ε 0.8 at 400 K, gas 600-1350 K, 32 parcels: (137.6) with (159.33), `|L − R| ≤ 8 ε S`; per cell, the parcels' gain `Σ n_p ε π d² (G/4 − σT_p⁴)` against `(a_p G − e_p) V` | 8 ε S; 1e−12 | A |
+| `radiation_off_bitwise` | a P1 given a cloud, cleared and reset (`set_grey_gas(κ, 1)`, which zeroes `G`) solves bit for bit as a P1 never given one | 0 words | D |
+| `particle_radiation_refusals` | every refusal of `cloud_radiation` and `set_particles`, by name | refused | D |
+
+Driver rows (`lowmach_cloud::tests`, both builds): `dust_b_radiation_off_bitwise` (D), the 20-step
+cloud box of §159.10 without radiation writes the pre-DST-18 bytes (pins measured on the tree before
+the unit: 943 bytes, FNV-1a `0xe11f4a766f0766be` in f64; 495 bytes, `0x9706328099d82cbe` under
+`single`); `dust_b_radiation_couples` (A), the same box with P1 (κ 0.5), its walls stated
+`fixedValue` 300 K (CHR-23's balanced adiabatic walls diverge, §137.8), `G` solved by PCG to 1e−30
+(1e−6 under `single`, §137.8), 5 steps: 4 coupled, `|radiation_e − radiation_q_e| ≤ 1e−12
+|radiation_e|`, (137.6) with (159.33) to 8 ε S, and DST-15's energy ledger to 1e−12;
+`dust_b_cloud_refuses_dom` (D).
+
+**Measured** (RTX 5070 Ti, 2026-10-19).
+
+* `thin_cloud_emission`: L/E = 0.99900075 in f64 (`|L/E − 1|` = 9.993e−4, the thin limit's
+  `1 − τ`), 0.99995315 under `single`; the definitions' identity 2.2e−16 and 0. Under `single` the
+  P1 solve runs at §137.8's 1e−6: at 1e−12 f32 PCG stalls at 1.3e−11 after 88 iterations, because
+  the cloud's `a_p V` (9.8e−7) is below an f32 ulp of the diagonal (about 167), so the stored
+  operator does not carry the absorption; the emission it does carry.
+* `uniform_field_heating`: 3.1e−15, 3.2e−15, `|q_conv|` 7.1e−37 against `|q_rad|` 6.65e−7 J;
+  device 0 ulp in both builds.
+* `radiation_energy_closes`: gap/(ε S) = 4.99 (f64) and 6.59 (`single`); the per-cell parcel row
+  1.7e−16 and 1.3e−16.
+* `radiation_off_bitwise`: the cloud moves 16 of 16 cells of `G`; after the clear and reset, 0
+  differing words in both builds. Without the reset the cleared solve warm-starts from the cloud's
+  `G` and ends 32 words away (PCG converges in 16 iterations either way, from different starts):
+  the reset is part of the row, not a tolerance.
+* `dust_b_radiation_off_bitwise`: both pins hold.
+* `dust_b_radiation_couples`: 5 steps, 4 coupled; `radiation_e` = −8.633e−7 J (f64) and −1.122e−6 J
+  (`single`; the parcels sit at the boiling point while they dry, so the net exchange is a small
+  difference); give-back 1.2e−16 and 0; ledger 5.2e−17 and 4.7e−16. **(137.6) with (159.33) is
+  MISSED in f64**: gap 1.055e−14 W against S = 1.351 W, gap/(ε S) = 35.15 (bar 8); `single` 7.04.
+  Cause, measured: the box is optically thin (κ Δx = 0.0025), so P1's diffusion rows are about 5e4
+  times the volume terms S sums, and their round-off floor exceeds 8 ε S; the same case at κ 50
+  (κ Δx = 0.25, a probe, not a row) closes with a gap of 0. The row is kept as written; a scale
+  that counts the diffusion rows is a change to (137.6)'s bar, the user's decision.
+
+Labels: (159.31)-(159.33).
+
 ---
 
 ## 160. The flame-age option and the studio surface

@@ -67,6 +67,25 @@ extern "C" __global__ void radGammaCells
     gamma[c] = (ofscalar)1 / ((ofscalar)3 * (kappa + sigma_s) - a1 * sigma_s);
 }
 
+//- (135.7) of SPEC-LIT 135.3 with the cloud's own absorption a_p of
+//  (159.7) of SPEC-LIT 159.4 added to the gas's kappa, one thread per
+//  cell: beta = kappa + a_p + sigma_s. kappa > 0 (a refusal at P1::new),
+//  so the denominator is strictly positive and the divide is safe. -
+extern "C" __global__ void radGammaCellsParticles
+(
+    ofscalar* __restrict__ gamma,
+    const ofscalar* __restrict__ a_p,
+    ofscalar kappa,
+    ofscalar sigma_s,
+    ofscalar a1,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+    gamma[c] = (ofscalar)1 / ((ofscalar)3 * ((kappa + a_p[c]) + sigma_s) - a1 * sigma_s);
+}
+
 //- (135.13): gamma_f |Sf| on the internal faces, the linear interpolation
 //  of the two cell values with the mesh's own weights (the weight of the
 //  OWNER), times the face area. -

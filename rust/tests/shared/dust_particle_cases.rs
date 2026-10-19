@@ -29,6 +29,14 @@ use ofgpu::dust::particle::{
 use ofgpu::error::Error;
 use ofgpu::{Acc, Label, Scalar};
 
+// DST-18's imports: names the lines above do not carry.
+use ofgpu::blockgen::{self, BlockSpec, GradedAxis};
+use ofgpu::dust::particle::{cloud_radiation, CloudRadiation};
+use ofgpu::radiation::p1::{MarshakPatch, P1, P1Medium, WallTemperature};
+use ofgpu::radiation::SIGMA_SB as RAD_SIGMA;
+use ofgpu::solver::{SolverControls, LinearSolverKind::PCG};
+use ofgpu::{GpuMesh, GpuScalarField, HostMesh};
+
 /// The device ulp bar of §159.5, the same count in both builds.
 const ULPS: u64 = 4;
 
@@ -699,4 +707,430 @@ fn device_all_volatile_burns_out() {
     let s = &st[0];
     assert_eq!(s.m_v, 0.0, "the volatile stage must end at exactly 0");
     println!("  [159.11] all-volatile device: end T {:.3} K, m_v {}", s.t, s.m_v);
+}
+
+// ==========================================================================
+//  DST-18: particle radiation coupled to P1 (SPEC-LIT 159.4, 159.13)
+// ==========================================================================
+
+/// The DST-18 slab: x in [0, 1] m with `n` cells, one cell each in y and z
+/// over [0, 0.125]; Marshak walls at xMin and xMax, the four other slots
+/// empty. Copied from tests/radiation_p1.rs: 0.125 makes every
+/// cross-section coordinate a binary fraction, exact under `single`.
+fn rad_slab_spec(n: usize) -> BlockSpec {
+    let axis = |lo: f64, hi: f64, cells: usize| GradedAxis {
+        lo: lo as Scalar,
+        hi: hi as Scalar,
+        n: cells,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    BlockSpec {
+        x: axis(0.0, 1.0, n),
+        y: axis(0.0, 0.125, 1),
+        z: axis(0.0, 0.125, 1),
+        patch_name: BlockSpec::default().patch_name,
+        patch_type: ["wall", "wall", "empty", "empty", "empty", "empty"].map(String::from),
+        windows: Vec::new(),
+        cyclic: Vec::new(),
+    }
+}
+
+/// The mesh is uploaded on the CALLER's device: a second `Gpu::new(0)` has
+/// its own stream, and stream-ordered allocations are only ordered within
+/// one stream - a mesh uploaded on another stream races every kernel
+/// launched here.
+fn rad_slab(g: &Gpu, n: usize) -> Result<(HostMesh, GpuMesh), Error> {
+    let hm = blockgen::build_mesh(&rad_slab_spec(n)).expect("mesh");
+    let m = GpuMesh::upload(g, &hm).expect("upload");
+    Ok((hm, m))
+}
+
+/// PCG with `tol`, rel_tol 0, max_iter 5000, in BOTH builds.
+fn rad_controls(tol: f64) -> SolverControls {
+    SolverControls {
+        solver: PCG,
+        tolerance: tol as Scalar,
+        rel_tol: 0.0,
+        max_iter: 5000,
+        ..SolverControls::default()
+    }
+}
+
+/// Both x walls at one emissivity and one fixed temperature.
+fn rad_walls(emissivity: f64, tw: f64) -> Vec<MarshakPatch> {
+    vec![
+        MarshakPatch {
+            patch: "xMin".into(),
+            emissivity,
+            temperature: WallTemperature::Fixed(tw),
+        },
+        MarshakPatch {
+            patch: "xMax".into(),
+            emissivity,
+            temperature: WallTemperature::Fixed(tw),
+        },
+    ]
+}
+
+/// `props(0.9, 0.0)` with `k_g = 1e-30`: convection is switched off, so a
+/// step moves T_p by radiation alone and the closed forms are exact.
+fn rad_props() -> ParticleProps {
+    ParticleProps::new(&ParticleInputs {
+        cp: 1500.0,
+        emissivity: 0.9,
+        devol_a: 1000.0,
+        devol_e_a: 3.0e4,
+        devol_dh: 0.0,
+        cp_volatile: 1100.0,
+        drying: Drying::water(101_325.0).expect("water at 1 atm"),
+        mu: 1.8e-5,
+        k_g: 1.0e-30,
+        cp_g: 1100.0,
+        char_rate: CharInputs::inert(),
+    })
+    .expect("rad props")
+}
+
+/// An optically thin isothermal cloud, tau = 1e-3, in a gas that neither
+/// absorbs nor emits (kappa 1e-9) between two 0 K black walls: the walls
+/// take what the cloud emits. (a) E = 4 sum a_p V sigma T_p^4 - the
+/// definitions' identity of (159.7) of SPEC-LIT 159.4, bar 1e-12; (b)
+/// L/E -> 1 - tau (bar 1e-2).
+#[test]
+fn thin_cloud_emission() {
+    let Some(g) = gpu("thin_cloud_emission") else { return };
+    let (hm, m) = rad_slab(&g, 16).expect("mesh");
+    let mut t = GpuScalarField::zeros(&g, &m, "T").expect("T");
+    g.write(&mut t.f, &vec![0.0 as Scalar; m.n_cells]).expect("T cells");
+    g.write(&mut t.bf, &vec![0.0 as Scalar; m.n_boundary_faces]).expect("T faces");
+    let medium = P1Medium { kappa: 1.0e-9, sigma_s: 0.0, a1: 0.0 };
+    // PCG tolerance 1e-12, rel 0, max_iter 5000, asserted converged - the
+    // f64 build's number. Under `single` the refined solve's attainable
+    // residual on this operator stalls at 1.313e-11, one order above the
+    // 1e-12 target (the cloud's a_p V = 9.77e-7 rides a diagonal of
+    // ~166.7, below its own f32 ulp), so this build takes SPEC-LIT 137.8's
+    // single tolerance, 1e-6 - the same number radiation_energy_closes
+    // solves its P1 under.
+    let tol_c = if cfg!(feature = "single") { 1.0e-6 } else { 1.0e-12 };
+    let mut p1 =
+        P1::new(&g, &hm, &m, &medium, &rad_walls(1.0, 0.0), rad_controls(tol_c)).expect("P1");
+    let n = m.n_cells;
+    let (d, eps, tp, a_target) = (1.0e-5, 0.9, 1500.0, 1.0e-3);
+    let vol: Vec<f64> = hm.v.iter().map(|&v| v as f64).collect();
+    let cell: Vec<usize> = (0..n).collect();
+    let n_p: Vec<f64> = (0..n)
+        .map(|c| a_target * vol[c] / (eps * std::f64::consts::PI * d * d / 4.0))
+        .collect();
+    let cr = cloud_radiation(eps, &n_p, &vec![d; n], &vec![tp; n], &cell, &vol)
+        .expect("cloud_radiation");
+    let (mut e_sum, mut a_sum) = (0.0, 0.0);
+    for c in 0..n {
+        e_sum += cr.e_p[c] * vol[c];
+        a_sum += cr.a_p[c] * vol[c];
+    }
+    let ident = e_sum / (4.0 * a_sum * SIGMA_SB * tp * tp * tp * tp) - 1.0;
+    println!(
+        "  thin cloud (a) E = {e_sum:.6e} W, tau = {:.3e}, \
+         |E/(4 sum a_p V sigma T_p^4) - 1| = {:.3e} (bar 1e-12)",
+        a_sum / (hm.v.iter().map(|&v| v as f64).sum::<f64>()),
+        ident.abs()
+    );
+    assert!(ident.abs() <= 1.0e-12, "the emission is not 4 a_p sigma T_p^4: {ident:e}");
+    let a_ps: Vec<Scalar> = cr.a_p.iter().map(|&x| x as Scalar).collect();
+    let e_ps: Vec<Scalar> = cr.e_p.iter().map(|&x| x as Scalar).collect();
+    p1.set_particles(&g, &a_ps, &e_ps).expect("set_particles");
+    let perf = p1.solve(&g, &m, &t).expect("solve");
+    println!(
+        "  thin cloud solve: iters {}, residual {:.3e} -> {:.3e} (scaled), converged {}",
+        perf.n_iterations, perf.initial_residual, perf.final_residual, perf.converged
+    );
+    assert!(perf.converged, "the PCG solve must converge");
+    let q = g.download(p1.wall_flux()).expect("wall flux");
+    let mut l = 0.0;
+    for bf in 0..hm.n_boundary_faces {
+        l += q[bf] as f64 * (hm.b_mag_sf[bf] as f64).abs();
+    }
+    let le = l / e_sum;
+    println!(
+        "  thin cloud (b) L = {l:.6e} W, L/E = {le:.8} (1 - tau = 0.999), \
+         |L/E - 1| = {:.3e} (bar 1e-2)",
+        (le - 1.0).abs()
+    );
+    assert!((le - 1.0).abs() <= 1.0e-2, "the walls do not take what the cloud emits: L/E = {le}");
+}
+
+/// One ash parcel in a uniform field, convection off (k_g = 1e-30): at the
+/// opening dT_p/dt is the radiation term of (159.1) of SPEC-LIT 159.1
+/// (bar 1e-10), the ledger's q_rad is m C_p dT_p (bar 1e-10) and q_conv is
+/// 1e-12 of it. The device twin matches the host step, run on the same
+/// rounded inputs, within `ULPS` ulp of T_p.
+#[test]
+fn uniform_field_heating() {
+    let p = rad_props();
+    let s = particle(5.0e-5, 1500.0, (0.0, 0.0, 0.0), 800.0);
+    let gas = GasAtParcel {
+        t: 800.0,
+        y_w: 0.0,
+        rho: 0.4,
+        g: 4.0 * SIGMA_SB * 1200.0 * 1200.0 * 1200.0 * 1200.0,
+        u_rel: 0.0,
+        p_o2: 0.0,
+    };
+    let dt = 1.0e-3;
+    let (s1, ex) = step(&p, &s, &gas, dt).expect("host step");
+    let mc = s.mass() * 1500.0;
+    let ar = std::f64::consts::PI * s.d * s.d * 0.9;
+    let t3 = 800.0 * 800.0 * 800.0;
+    let b = 4.0 * ar * SIGMA_SB * t3;
+    let (phi1, _) = phi_g(b * dt / mc);
+    let rad = ar * (0.25 * gas.g - SIGMA_SB * t3 * 800.0);
+    let ra = (s1.t - 800.0) / (dt * phi1) / (rad / mc) - 1.0;
+    println!(
+        "  uniform heating (a) T_p 800 -> {:.6} K, \
+         |(dT_p/dt) / ((159.1) of SPEC-LIT 159.1)'s term - 1| = {:.3e} (bar 1e-10)",
+        s1.t,
+        ra.abs()
+    );
+    assert!(ra.abs() <= 1.0e-10, "dT_p/dt is not the radiation term: {ra:e}");
+    let rb = ex.q_rad / (mc * (s1.t - 800.0)) - 1.0;
+    println!(
+        "  uniform heating (b) q_rad = {:.6e} J, |q_rad/(m C dT_p) - 1| = {:.3e} (bar 1e-10)",
+        ex.q_rad,
+        rb.abs()
+    );
+    assert!(rb.abs() <= 1.0e-10, "q_rad is not m C dT_p: {rb:e}");
+    println!(
+        "  uniform heating (c) |q_conv| = {:.3e} W, bar 1e-12 |q_rad| = {:.3e}",
+        ex.q_conv.abs(),
+        1.0e-12 * ex.q_rad.abs()
+    );
+    assert!(ex.q_conv.abs() <= 1.0e-12 * ex.q_rad.abs(), "q_conv is not off");
+
+    let Some(g) = gpu("uniform_field_heating") else { return };
+    let sr = rounded(&s);
+    let gas_r = GasAtParcel {
+        t: r(gas.t),
+        y_w: gas.y_w,
+        rho: r(gas.rho),
+        g: r(gas.g),
+        u_rel: gas.u_rel,
+        p_o2: gas.p_o2,
+    };
+    let (sh, _) = step(&p, &sr, &gas_r, dt).expect("host step on rounded inputs");
+    let mut pool = Pool::new(&g, &[sr], &[0], &[0.0], &[gas_r]);
+    pool.step(&g, &p, dt).expect("device step");
+    let sd = pool.states(&g);
+    let u = ulps_at(sd[0].t, sh.t, sh.t, true);
+    println!(
+        "  uniform heating (d) device T {:.6} vs host T {:.6}: {u} ulp (bar {ULPS})",
+        sd[0].t, sh.t
+    );
+    assert!(u <= ULPS, "the device twin is {u} ulp from its host (bar {ULPS})");
+}
+
+/// The cloud ON, kappa 0.5, walls 0.8 / 400 K, gas 600 + 50 c K, two
+/// parcels per cell: the discrete balance of (135.8) of SPEC-LIT 135.3
+/// with (159.7) of SPEC-LIT 159.4's a_p and e_p closes over the wall flux
+/// - row (a), |L - R| <= 8 eps S - and per cell what the parcels gain is
+/// what G's equation loses - row (b), host f64 in both builds, bar 1e-12
+/// of the cell's scale.
+#[test]
+fn radiation_energy_closes() {
+    let Some(g) = gpu("radiation_energy_closes") else { return };
+    let (hm, m) = rad_slab(&g, 16).expect("mesh");
+    let medium = P1Medium { kappa: 0.5, sigma_s: 0.0, a1: 0.0 };
+    let tol_c = if cfg!(feature = "single") { 1.0e-6 } else { 1.0e-30 };
+    let mut p1 =
+        P1::new(&g, &hm, &m, &medium, &rad_walls(0.8, 400.0), rad_controls(tol_c)).expect("P1");
+    let n = m.n_cells;
+    let mut t = GpuScalarField::zeros(&g, &m, "T").expect("T");
+    let tv: Vec<Scalar> = (0..n).map(|c| (600.0 + 50.0 * c as f64) as Scalar).collect();
+    g.write(&mut t.f, &tv).expect("T cells");
+    g.write(&mut t.bf, &vec![600.0 as Scalar; m.n_boundary_faces]).expect("T faces");
+    let (eps, np) = (0.9, 2 * n);
+    let d_v: Vec<f64> = (0..np).map(|i| 1.0e-5 * (1.0 + 0.1 * (i % 3) as f64)).collect();
+    let t_pv: Vec<f64> = (0..np).map(|i| 900.0 + 37.0 * i as f64).collect();
+    let n_p: Vec<f64> = (0..np).map(|i| 1.0e6 * (1.0 + (i % 5) as f64)).collect();
+    let cell: Vec<usize> = (0..np).map(|i| i / 2).collect();
+    let vol: Vec<f64> = hm.v.iter().map(|&v| v as f64).collect();
+    let cr = cloud_radiation(eps, &n_p, &d_v, &t_pv, &cell, &vol).expect("cloud_radiation");
+    let a_ps: Vec<Scalar> = cr.a_p.iter().map(|&x| x as Scalar).collect();
+    let e_ps: Vec<Scalar> = cr.e_p.iter().map(|&x| x as Scalar).collect();
+    p1.set_particles(&g, &a_ps, &e_ps).expect("set_particles");
+    p1.solve(&g, &m, &t).expect("solve");
+    let gv: Vec<Scalar> = g.download(&p1.g().f).expect("G");
+    let q = g.download(p1.wall_flux()).expect("wall flux");
+    let sg = RAD_SIGMA as f64;
+    let eps_b = Scalar::EPSILON as f64;
+    let (mut l, mut s) = (0.0, 0.0);
+    for bf in 0..hm.n_boundary_faces {
+        let (qb, ab) = (q[bf] as f64, (hm.b_mag_sf[bf] as f64).abs());
+        l += qb * ab;
+        s += qb.abs() * ab;
+    }
+    let mut r = 0.0;
+    for c in 0..n {
+        let (gc, vc) = (gv[c] as f64, vol[c]);
+        let tc = 600.0 + 50.0 * c as f64;
+        let t4 = tc * tc * tc * tc;
+        let (ap, ep) = (a_ps[c] as f64, e_ps[c] as f64);
+        r += (0.5 * (4.0 * sg * t4 - gc) + (ep - ap * gc)) * vc;
+        s += (0.5 * (4.0 * sg * t4 + gc) + (ep + ap * gc)) * vc;
+    }
+    println!(
+        "  closure (a) L = {l:.9e}, R = {r:.9e}, S = {s:.9e}, \
+         |L - R|/(eps S) = {:.3e} (bar 8)",
+        (l - r).abs() / (eps_b * s)
+    );
+    assert!(
+        (l - r).abs() <= 8.0 * eps_b * s,
+        "the balance is off by {:.3e} against {:.3e}",
+        (l - r).abs(),
+        8.0 * eps_b * s
+    );
+    for c in 0..n {
+        let gc = gv[c] as f64;
+        let (mut p_c, mut scale) = (0.0, 0.0);
+        for i in 0..np {
+            if cell[i] != c {
+                continue;
+            }
+            let ari = std::f64::consts::PI * d_v[i] * d_v[i] * eps;
+            let ti4 = t_pv[i] * t_pv[i] * t_pv[i] * t_pv[i];
+            p_c += n_p[i] * ari * (gc / 4.0 - SIGMA_SB * ti4);
+            scale += n_p[i] * ari * (gc / 4.0 + SIGMA_SB * ti4);
+        }
+        let side = (cr.a_p[c] * gc - cr.e_p[c]) * vol[c];
+        println!(
+            "  closure (b) cell {c}: |P - (a_p G - e_p) V|/scale = {:.3e} (bar 1e-12)",
+            (p_c - side).abs() / scale
+        );
+        assert!(
+            (p_c - side).abs() <= 1.0e-12 * scale,
+            "cell {c}: the parcels gain {p_c:e}, G's equation loses {side:e}"
+        );
+    }
+}
+
+/// The cloud OFF is bitwise the solve that always ran: with
+/// `radiation_energy_closes`' slab, medium, walls, T and parcels, the
+/// cloud moves G (P1 b against P1 a), and after `clear_particles` - and
+/// `set_grey_gas`' documented reset of `G`, so b starts where a started,
+/// the cold line: PCG from a warm field stops a few ulp away, and this
+/// gate compares bits - b's G, wall flux and q_r equal a's BIT FOR BIT -
+/// 0 differing words.
+#[test]
+fn radiation_off_bitwise() {
+    let Some(g) = gpu("radiation_off_bitwise") else { return };
+    let (hm, m) = rad_slab(&g, 16).expect("mesh");
+    let medium = P1Medium { kappa: 0.5, sigma_s: 0.0, a1: 0.0 };
+    let n = m.n_cells;
+    let mut t = GpuScalarField::zeros(&g, &m, "T").expect("T");
+    let tv: Vec<Scalar> = (0..n).map(|c| (600.0 + 50.0 * c as f64) as Scalar).collect();
+    g.write(&mut t.f, &tv).expect("T cells");
+    g.write(&mut t.bf, &vec![600.0 as Scalar; m.n_boundary_faces]).expect("T faces");
+    let (eps, np) = (0.9, 2 * n);
+    let d_v: Vec<f64> = (0..np).map(|i| 1.0e-5 * (1.0 + 0.1 * (i % 3) as f64)).collect();
+    let t_pv: Vec<f64> = (0..np).map(|i| 900.0 + 37.0 * i as f64).collect();
+    let n_p: Vec<f64> = (0..np).map(|i| 1.0e6 * (1.0 + (i % 5) as f64)).collect();
+    let cell: Vec<usize> = (0..np).map(|i| i / 2).collect();
+    let vol: Vec<f64> = hm.v.iter().map(|&v| v as f64).collect();
+    let cr = cloud_radiation(eps, &n_p, &d_v, &t_pv, &cell, &vol).expect("cloud_radiation");
+    let a_ps: Vec<Scalar> = cr.a_p.iter().map(|&x| x as Scalar).collect();
+    let e_ps: Vec<Scalar> = cr.e_p.iter().map(|&x| x as Scalar).collect();
+    let mut a =
+        P1::new(&g, &hm, &m, &medium, &rad_walls(0.8, 400.0), rad_controls(1.0e-12)).expect("P1 a");
+    a.solve(&g, &m, &t).expect("solve a");
+    let mut b =
+        P1::new(&g, &hm, &m, &medium, &rad_walls(0.8, 400.0), rad_controls(1.0e-12)).expect("P1 b");
+    b.set_particles(&g, &a_ps, &e_ps).expect("set_particles");
+    b.solve(&g, &m, &t).expect("solve b with the cloud");
+    let (ga, gb) = (g.download(&a.g().f).expect("G a"), g.download(&b.g().f).expect("G b"));
+    let moved = ga.iter().zip(&gb).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+    println!("  cloud off: G cells the cloud moved = {moved}");
+    assert!(moved > 0, "the cloud did not move G");
+    b.clear_particles();
+    // The solve warm-starts from the `G` it is handed - PCG from the
+    // cloud's field stops a few ulps from where the cold solve stops, and
+    // this gate compares BITS. So b is put back on a's own starting line
+    // first: `set_grey_gas` at b's own `kappa` and weight 1 is the
+    // documented reset ("`G` is zeroed, so the next solve is the solve a
+    // fresh `P1::new` would run"), and what the gate then holds is the
+    // LAUNCHES - with the cloud unset, every launch is the one that always
+    // ran, so the whole solve reproduces `a`'s bit for bit.
+    b.set_grey_gas(&g, medium.kappa, 1.0).expect("reset G");
+    b.solve(&g, &m, &t).expect("solve b cleared");
+    let (ga2, gb2) = (g.download(&a.g().f).expect("G a"), g.download(&b.g().f).expect("G b"));
+    let (qa, qb) = (
+        g.download(a.wall_flux()).expect("flux a"),
+        g.download(b.wall_flux()).expect("flux b"),
+    );
+    let (ra_, rb_) = (g.download(a.qr()).expect("qr a"), g.download(b.qr()).expect("qr b"));
+    let mut words = 0usize;
+    for (x, y) in ga2.iter().zip(&gb2) {
+        words += (x.to_bits() != y.to_bits()) as usize;
+    }
+    for (x, y) in qa.iter().zip(&qb) {
+        words += (x.to_bits() != y.to_bits()) as usize;
+    }
+    for (x, y) in ra_.iter().zip(rb_.iter()) {
+        words += (x.x.to_bits() != y.x.to_bits()) as usize;
+        words += (x.y.to_bits() != y.y.to_bits()) as usize;
+        words += (x.z.to_bits() != y.z.to_bits()) as usize;
+    }
+    println!("  cloud off: differing words after clear_particles = {words}");
+    assert_eq!(words, 0, "the cloud-off solve is not the solve that always ran");
+}
+
+/// Every refusal of section 1's `cloud_radiation` names itself and the
+/// argument it is about; `set_particles` refuses a wrong length, a NaN, a
+/// negative value, and any call at all once the solve is one grey gas of a
+/// WSGG sum.
+#[test]
+fn particle_radiation_refusals() {
+    let vol = vec![1.0e-3; 4];
+    let refused = |r: Result<CloudRadiation, Error>, what: &str| match r {
+        Err(Error::Refused(m)) => {
+            assert!(m.contains("cloud_radiation") && m.contains(what), "{what}: {m}");
+        }
+        other => panic!("{what} must be refused, got {other:?}"),
+    };
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5, 1.0e-5], &[1500.0], &[0], &vol), "n_p");
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5], &[1500.0], &[7], &vol), "cell");
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5], &[1500.0], &[0], &[0.0]), "volume");
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5], &[1500.0], &[0], &[f64::NAN]), "volume");
+    refused(cloud_radiation(0.9, &[-1.0], &[1.0e-5], &[1500.0], &[0], &vol), "n_p");
+    refused(cloud_radiation(0.9, &[1.0], &[f64::NAN], &[1500.0], &[0], &vol), "d");
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5], &[-1.0], &[0], &vol), "t_p");
+    refused(cloud_radiation(0.9, &[1.0], &[1.0e-5], &[f64::NAN], &[0], &vol), "t_p");
+    refused(cloud_radiation(1.5, &[1.0], &[1.0e-5], &[1500.0], &[0], &vol), "emissivity");
+    refused(cloud_radiation(-0.1, &[1.0], &[1.0e-5], &[1500.0], &[0], &vol), "emissivity");
+    println!("  refusals: cloud_radiation refused all ten by name");
+
+    let Some(g) = gpu("particle_radiation_refusals") else { return };
+    let (hm, m) = rad_slab(&g, 8).expect("mesh");
+    let medium = P1Medium { kappa: 1.0, sigma_s: 0.0, a1: 0.0 };
+    let mut p1 =
+        P1::new(&g, &hm, &m, &medium, &rad_walls(1.0, 0.0), rad_controls(1.0e-12)).expect("P1");
+    let refused_sp = |r: Result<(), Error>, what: &str| match r {
+        Err(Error::Config(m)) => {
+            assert!(m.contains("set_particles") && m.contains(what), "{what}: {m}");
+        }
+        other => panic!("{what} must be refused, got {other:?}"),
+    };
+    let ok_a = vec![0.0 as Scalar; m.n_cells];
+    let ok_e = vec![0.0 as Scalar; m.n_cells];
+    let long = vec![0.0 as Scalar; m.n_cells + 1];
+    let mut nan_a = ok_a.clone();
+    nan_a[0] = Scalar::NAN;
+    let mut neg_e = ok_e.clone();
+    neg_e[1] = -1.0;
+    refused_sp(p1.set_particles(&g, &long, &ok_e), "a_p");
+    refused_sp(p1.set_particles(&g, &ok_a, &long), "e_p");
+    refused_sp(p1.set_particles(&g, &nan_a, &ok_e), "a_p[0]");
+    refused_sp(p1.set_particles(&g, &ok_a, &neg_e), "e_p[1]");
+    p1.set_grey_gas(&g, 0.5, 0.3).expect("set_grey_gas");
+    refused_sp(p1.set_particles(&g, &ok_a, &ok_e), "weight");
+    println!("  refusals: set_particles refused the length, the NaN, the negative and the grey gas");
 }

@@ -95,6 +95,10 @@ pub struct CaseRadiation {
     sp_src: DevBuf<Scalar>,
     source_pair: CudaFunction,
     n: usize,
+    /// SPEC-LIT 159.13: the host copies of the Phase B cloud's per-cell
+    /// absorption `a_p` (1/m) and grey emission `e_p` (W/m3) last handed to
+    /// P1, when a cloud set them - (137.6)'s particle rows in [`Self::finish`].
+    particles_host: Option<(Vec<Scalar>, Vec<Scalar>)>,
 }
 
 impl CaseRadiation {
@@ -195,6 +199,7 @@ impl CaseRadiation {
             sp_src: gpu.zeros(n.max(1))?,
             source_pair,
             n,
+            particles_host: None,
         };
         rad_case.claim_walls(gpu, hm, t)?;
         Ok(rad_case)
@@ -332,6 +337,37 @@ impl CaseRadiation {
         self.solves
     }
 
+    /// SPEC-LIT 159.13: the Phase B dust cloud's per-cell absorption `a_p`
+    /// (1/m) and grey emission `e_p` (W/m3) of (159.7) of SPEC-LIT 159.4 go
+    /// into P1, so every solve from here on carries them; the host copies
+    /// feed (137.6)'s particle rows in [`Self::finish`]. fvDOM is refused by
+    /// name - DST-18 couples a cloud to P1 only.
+    pub fn set_particles(&mut self, gpu: &Gpu, a_p: &[Scalar], e_p: &[Scalar]) -> Result<()> {
+        match &mut self.solver {
+            Solver::P1(p) => p.set_particles(gpu, a_p, e_p)?,
+            Solver::Dom(_) => {
+                return Err(Error::Config(
+                    "radiation: fvDOM carries no particle cloud - DST-18 couples \
+                     P1 only (SPEC-LIT 159.13)"
+                        .to_string(),
+                ));
+            }
+        }
+        self.particles_host = Some((a_p.to_vec(), e_p.to_vec()));
+        Ok(())
+    }
+
+    /// SPEC-LIT 159.13: P1's last-solved `G`, per cell, for the cloud's
+    /// parcels - but only once P1 has solved at least once in the run, so
+    /// the FIRST time step's parcels see `4 sigma T^4` exactly as before.
+    /// `None` without P1.
+    pub fn incident_g(&self, gpu: &Gpu) -> Result<Option<Vec<Scalar>>> {
+        match &self.solver {
+            Solver::P1(p) if self.solves >= 1 => Ok(Some(gpu.download(&p.g().f)?)),
+            _ => Ok(None),
+        }
+    }
+
     fn wall_flux(&self, gpu: &Gpu) -> Result<Vec<Scalar>> {
         match &self.solver {
             Solver::P1(p) => gpu.download(p.wall_flux()),
@@ -375,6 +411,22 @@ impl CaseRadiation {
             let v = f64::from(hm.v[c]);
             volume.push((kappa * (emission - f64::from(g_host[c])) * v) as Scalar);
             scale_cells.push((kappa * (emission + f64::from(g_host[c])) * v) as Scalar);
+        }
+        // SPEC-LIT 159.13: (137.6)'s sums gain the particles when a Phase B
+        // cloud set them - the cloud's own grey emission `e_p`, and its
+        // absorption `a_p` of the gas's `G`, per cell, the same f64 from the
+        // widened words, rounded once.
+        if let Some((ap, ep)) = &self.particles_host {
+            for c in 0..hm.n_cells {
+                let (apc, epc, gc, v) = (
+                    f64::from(ap[c]),
+                    f64::from(ep[c]),
+                    f64::from(g_host[c]),
+                    f64::from(hm.v[c]),
+                );
+                volume.push(((epc - apc * gc) * v) as Scalar);
+                scale_cells.push(((epc + apc * gc) * v) as Scalar);
+            }
         }
         let mut scale = scale_faces;
         scale.extend(scale_cells);
