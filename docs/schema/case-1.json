@@ -1561,6 +1561,17 @@
           "maxItems": 3,
           "minItems": 3
         },
+        "size": {
+          "description": "SPEC-LIT 147.1/147.2: the droplet size distribution; absent is\nmonodisperse at `diameter`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonSize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "speed": {
           "description": "m/s.",
           "type": [
@@ -1669,6 +1680,21 @@
       "additionalProperties": false,
       "required": [
         "field"
+      ]
+    },
+    "JsonLanding": {
+      "description": "`parcels.landing` - SPEC-LIT 147.2: the horizontal plane z = const whose\ndownward crossings the driver records - the throw of Gate 68-C.",
+      "type": "object",
+      "properties": {
+        "z": {
+          "description": "m, the plane's height.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "z"
       ]
     },
     "JsonLaplacian": {
@@ -2127,6 +2153,17 @@
             "null"
           ],
           "format": "double"
+        },
+        "landing": {
+          "description": "SPEC-LIT 147.2: the horizontal plane z = const whose downward\ncrossings the driver records - the throw of Gate 68-C.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonLanding"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "maxSubsteps": {
           "type": [
@@ -3001,6 +3038,58 @@
             "kind",
             "min",
             "max"
+          ]
+        }
+      ]
+    },
+    "JsonSize": {
+      "description": "`injectors[].size` - SPEC-LIT 147.1: how the injector's droplet\ndiameters are chosen. Internally tagged by `kind`; the payloads are\nstructs of their own so an unknown key INSIDE the size object is\nrefused by name - serde's internally-tagged struct variants cannot\ncarry `deny_unknown_fields` themselves.",
+      "oneOf": [
+        {
+          "description": "Every droplet has `Injector::diameter` (SPEC-LIT 66.8) - the\nbehaviour an injector without a `size` key has always had.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "monodisperse"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "SPEC-LIT (147.1)-(147.5): the Rosin-Rammler distribution.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "rosinRammler"
+            },
+            "q": {
+              "description": "The spread `q` of (147.1).",
+              "type": "number",
+              "format": "double"
+            },
+            "seed": {
+              "description": "The draw's key of (147.4).",
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "x": {
+              "description": "m, the characteristic diameter `X` of (147.1).",
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "x",
+            "q",
+            "seed"
           ]
         }
       ]

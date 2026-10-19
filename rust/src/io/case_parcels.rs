@@ -43,7 +43,9 @@ use crate::parcels::evaporation::{
     EvaporationControls, LiquidProperties, MassTransfer, SaturationCurve,
 };
 use crate::parcels::impact::{SplashCriterion, SurfaceTension, WallImpactControls};
-use crate::parcels::{DragModel, Injector, ParcelControls, ParcelPhysics, WallAction};
+use crate::parcels::{
+    DragModel, Injector, ParcelControls, ParcelPhysics, RosinRammler, SizeDistribution, WallAction,
+};
 use crate::{Scalar, Vec3};
 
 /// The dictionary route's file inside a case directory.
@@ -114,6 +116,10 @@ pub struct JsonParcels {
     pub coupling: Option<JsonCoupling>,
     /// One entry per nozzle, at least one (SPEC-LIT §66.8).
     pub injectors: Vec<JsonInjector>,
+    /// SPEC-LIT 147.2: the horizontal plane z = const whose downward
+    /// crossings the driver records - the throw of Gate 68-C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<JsonLanding>,
 }
 
 /// `parcels.evaporation` - `EvaporationControls`, field by field.
@@ -250,6 +256,52 @@ pub struct JsonInjector {
     /// s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval: Option<f64>,
+    /// SPEC-LIT 147.1/147.2: the droplet size distribution; absent is
+    /// monodisperse at `diameter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<JsonSize>,
+}
+
+/// `injectors[].size` - SPEC-LIT 147.1: how the injector's droplet
+/// diameters are chosen. Internally tagged by `kind`; the payloads are
+/// structs of their own so an unknown key INSIDE the size object is
+/// refused by name - serde's internally-tagged struct variants cannot
+/// carry `deny_unknown_fields` themselves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum JsonSize {
+    /// Every droplet has `Injector::diameter` (SPEC-LIT 66.8) - the
+    /// behaviour an injector without a `size` key has always had.
+    Monodisperse(JsonMonodisperse),
+    /// SPEC-LIT (147.1)-(147.5): the Rosin-Rammler distribution.
+    RosinRammler(JsonRosinRammler),
+}
+
+/// `size.kind monodisperse`'s empty payload - refused anything else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonMonodisperse {}
+
+/// `size.kind rosinRammler`'s payload - (147.1)'s two parameters plus the
+/// draw's key of (147.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonRosinRammler {
+    /// m, the characteristic diameter `X` of (147.1).
+    pub x: f64,
+    /// The spread `q` of (147.1).
+    pub q: f64,
+    /// The draw's key of (147.4).
+    pub seed: u64,
+}
+
+/// `parcels.landing` - SPEC-LIT 147.2: the horizontal plane z = const whose
+/// downward crossings the driver records - the throw of Gate 68-C.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonLanding {
+    /// m, the plane's height.
+    pub z: f64,
 }
 
 /// What [`JsonParcels::lower`] produces: the library's three settings, and
@@ -261,6 +313,10 @@ pub struct LoweredParcels {
     pub coupling: CouplingControls,
     /// `coupling.vapour`; `Some` exactly when `coupling.mass` is on.
     pub vapour: Option<String>,
+    /// SPEC-LIT 147.2: the horizontal plane z = const whose downward
+    /// crossings the driver records - the throw of Gate 68-C. `f64` in both
+    /// builds: it is compared with the snapshot's f64 world positions.
+    pub landing: Option<f64>,
 }
 
 /// The refusal every driver gives a case that states parcels (SPEC-LIT
@@ -433,14 +489,30 @@ impl JsonParcels {
                 mass_flow: j.mass_flow as Scalar,
                 parcels_per_event: j.parcels_per_event.unwrap_or(di.parcels_per_event),
                 interval: sc(j.interval, di.interval),
-                // SPEC-LIT 147.1: the case blocks of §137.6 do not reach
-                // the size distribution yet; it is a library field, and an
-                // injector read from a case is Monodisperse.
-                size: di.size,
+                // SPEC-LIT 147.1: absent or `monodisperse` is the §66.8
+                // injector, bit for bit; `rosinRammler` lowers onto the
+                // library's own distribution, whose refusals at
+                // `Parcels::new` stay the only range checks.
+                size: match &j.size {
+                    None | Some(JsonSize::Monodisperse(_)) => SizeDistribution::Monodisperse,
+                    Some(JsonSize::RosinRammler(rr)) => {
+                        SizeDistribution::RosinRammler(RosinRammler {
+                            x: rr.x as Scalar,
+                            q: rr.q as Scalar,
+                            seed: rr.seed,
+                        })
+                    }
+                },
             })
             .collect();
 
-        Ok(LoweredParcels { controls, injectors, coupling, vapour })
+        Ok(LoweredParcels {
+            controls,
+            injectors,
+            coupling,
+            vapour,
+            landing: self.landing.as_ref().map(|l| l.z),
+        })
     }
 
     fn lower_coupling(
@@ -822,6 +894,7 @@ injectors
                 mass: MassCoupling::Evaporation,
             },
             vapour: Some("H2O".to_string()),
+            landing: None,
         }
     }
 

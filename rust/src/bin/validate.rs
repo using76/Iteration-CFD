@@ -4261,6 +4261,16 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_dst_b_vessel", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 147.2 - Gate 68-C's coupled leg (docs/17 VAL-72b): the
+    // generated Theobald test case through ofgpu-lowmach with
+    // Rosin-Rammler sizes, replayed from its records, in
+    // src/bin/validate_gates/theobald_coupled.rs. No GPU is used.
+    if c.section("Gate 68-C coupled leg: Theobald test 3 through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its records (SPEC-LIT 147.2)") {
+    c.enter_gate(validate_gates::theobald_coupled::GATE);
+    let r = validate_gates::theobald_coupled::check_theobald_coupled(c);
+    c.ran("check_theobald_coupled", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

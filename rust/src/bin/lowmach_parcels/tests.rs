@@ -719,3 +719,292 @@ fn lowmach_parcels_refusals_name_the_setting() {
          load_case says 137.10"
     );
 }
+
+// ==========================================================================
+//  The landing ledger - SPEC-LIT 147.2
+// ==========================================================================
+
+/// **SPEC-LIT 147.2, row D.** `plane_crossing`'s exact contract: the
+/// interpolated x of a downward crossing, and `None` for a start on the
+/// plane or a step that never comes down through it.
+#[test]
+fn plane_crossing_is_exact() {
+    assert_eq!(super::plane_crossing(2.0, 1.0, -2.0, 5.0, 0.0), Some(3.0));
+    assert_eq!(super::plane_crossing(1.0, 0.0, 0.0, 4.0, 0.0), Some(4.0));
+    assert_eq!(super::plane_crossing(0.0, 0.0, -1.0, 1.0, 0.0), None);
+    assert_eq!(super::plane_crossing(2.0, 0.0, 1.0, 1.0, 0.0), None);
+}
+
+/// **SPEC-LIT 147.2, row D.** `mass_percentile`'s exact contract: the
+/// smallest x whose running mass reaches q of the total, `None` with no
+/// hits or no mass.
+#[test]
+fn mass_percentile_is_exact() {
+    let hits = [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)];
+    assert_eq!(super::mass_percentile(&hits, 0.25), Some(1.0));
+    assert_eq!(super::mass_percentile(&hits, 0.5), Some(2.0));
+    assert_eq!(super::mass_percentile(&hits, 0.9), Some(4.0));
+    assert_eq!(super::mass_percentile(&hits, 0.99), Some(4.0));
+    assert_eq!(super::mass_percentile(&[], 0.5), None);
+    assert_eq!(super::mass_percentile(&[(1.0, 0.0), (2.0, 0.0)], 0.5), None);
+}
+
+/// The 1 m x 0.25 m x 1 m all-wall box the landing tests walk in.
+fn landing_box() -> ofgpu::HostMesh {
+    let axis = |lo: Scalar, hi: Scalar, n: usize| ofgpu::blockgen::GradedAxis {
+        lo,
+        hi,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let spec = |x: ofgpu::blockgen::GradedAxis| ofgpu::blockgen::BlockSpec {
+        x,
+        y: axis(0.0, 0.25, 2),
+        z: axis(0.0, 1.0, 10),
+        windows: Vec::new(),
+        patch_name: ofgpu::blockgen::BlockSpec::default().patch_name,
+        patch_type: ["patch"; 6].map(String::from),
+        cyclic: Vec::new(),
+    };
+    ofgpu::blockgen::build_mesh(&spec(axis(0.0, 1.0, 10))).expect("the box")
+}
+
+/// The same box widened to 1.6 m in x (the 64-parcel throw reaches
+/// ~1.17 m) and with a WALL floor: `patch_type[4]`, the `-z` face in
+/// blockgen's `-x +x -y +y -z +z` order. The floor is the box's only
+/// wall and is the landing plane, so every wall end is a landing.
+fn landing_floor_box() -> ofgpu::HostMesh {
+    let axis = |lo: Scalar, hi: Scalar, n: usize| ofgpu::blockgen::GradedAxis {
+        lo,
+        hi,
+        n,
+        expansion: 1.0,
+        two_sided: false,
+    };
+    let mut patch_type = ["patch"; 6].map(String::from);
+    patch_type[4] = "wall".to_string();
+    let spec = |x: ofgpu::blockgen::GradedAxis| ofgpu::blockgen::BlockSpec {
+        x,
+        y: axis(0.0, 0.25, 2),
+        z: axis(0.0, 1.0, 10),
+        windows: Vec::new(),
+        patch_name: ofgpu::blockgen::BlockSpec::default().patch_name,
+        patch_type,
+        cyclic: Vec::new(),
+    };
+    ofgpu::blockgen::build_mesh(&spec(axis(0.0, 1.6, 16))).expect("the box")
+}
+
+/// **SPEC-LIT 147.2, row R.** One seeded ballistic parcel - drag none, the
+/// gas at rest, no coupling - crossing the recorded plane: the ledger
+/// counts exactly one landing and its x is the closed-form parabola's,
+/// 0.1 + sqrt(2 * 0.5 / 9.81) m, to 2e-3 m.
+#[test]
+fn a_landing_ledger_finds_the_ballistic_throw() {
+    use ofgpu::io::case_parcels::LoweredParcels;
+    use ofgpu::parcels::{SeedParcel, WallAction};
+    let Ok(g) = Gpu::new(0) else { return };
+    let hm = landing_box();
+    let m = GpuMesh::upload(&g, &hm).expect("upload");
+    let lp = LoweredParcels {
+        controls: ParcelControls {
+            capacity: 16,
+            drag: DragModel::None,
+            physics: ParcelPhysics::Inert,
+            wall: WallAction::Remove,
+            gravity: Vec3::new(0.0, 0.0, -9.81),
+            ..ParcelControls::default()
+        },
+        injectors: Vec::new(),
+        coupling: CouplingControls {
+            momentum: CouplingMode::Off,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        },
+        vapour: None,
+        landing: Some(0.25),
+    };
+    let dt = 1e-3 as Scalar;
+    let mut pc = CaseParcels::new(&g, &hm, &m, &lp, dt, None).expect("the pool");
+    pc.seed(
+        &g,
+        &hm,
+        &[SeedParcel {
+            position: Vec3::new(0.1, 0.125, 0.75),
+            velocity: Vec3::new(1.0, 0.0, 0.0),
+            diameter: 1e-3,
+            temperature: 293.15,
+            n_p: 1.0,
+            uid: Some(1),
+        }],
+    )
+    .expect("the seed");
+    let u = GpuVectorField::zeros(&g, &m, "U").expect("U");
+    let rho = g.upload(&vec![1.2 as Scalar; hm.n_cells]).expect("rho");
+    let t = g.upload(&vec![293.15 as Scalar; hm.n_cells]).expect("T");
+    let want = 0.1 + (2.0 * 0.5_f64 / 9.81).sqrt();
+    let mut got = None;
+    for _ in 0..1000 {
+        pc.step(&g, &u, &rho, &t, None, dt).expect("the step");
+        match pc.landing_summary() {
+            Some(s) if s.crossings > 0 => {
+                got = Some(s);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let s = got.expect("the parcel never crossed the plane");
+    assert_eq!(s.crossings, 1, "one parcel, one landing: {s:?}");
+    let err = (s.farthest.expect("a farthest") - want).abs();
+    println!(
+        "  [147.2] ballistic landing: farthest {} m against the closed form {want} m, \
+         error {err:.3e} m",
+        s.farthest.unwrap()
+    );
+    assert!(err <= 2e-3, "farthest {} against {want}, error {err:.3e} m", s.farthest.unwrap());
+}
+
+/// **SPEC-LIT 147.2, row D.** A pool whose case states no landing plane:
+/// `landing_summary` is `None` and the report line is the one this driver
+/// has always printed - the word "landing" appears nowhere in it.
+#[test]
+fn no_landing_no_report_change() {
+    use ofgpu::io::case_parcels::LoweredParcels;
+    use ofgpu::parcels::{SeedParcel, WallAction};
+    let Ok(g) = Gpu::new(0) else { return };
+    let hm = landing_box();
+    let m = GpuMesh::upload(&g, &hm).expect("upload");
+    let lp = LoweredParcels {
+        controls: ParcelControls {
+            capacity: 16,
+            drag: DragModel::None,
+            physics: ParcelPhysics::Inert,
+            wall: WallAction::Remove,
+            gravity: Vec3::new(0.0, 0.0, -9.81),
+            ..ParcelControls::default()
+        },
+        injectors: Vec::new(),
+        coupling: CouplingControls {
+            momentum: CouplingMode::Off,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        },
+        vapour: None,
+        landing: None,
+    };
+    let dt = 1e-3 as Scalar;
+    let mut pc = CaseParcels::new(&g, &hm, &m, &lp, dt, None).expect("the pool");
+    pc.seed(
+        &g,
+        &hm,
+        &[SeedParcel {
+            position: Vec3::new(0.1, 0.125, 0.75),
+            velocity: Vec3::new(1.0, 0.0, 0.0),
+            diameter: 1e-3,
+            temperature: 293.15,
+            n_p: 1.0,
+            uid: Some(1),
+        }],
+    )
+    .expect("the seed");
+    let u = GpuVectorField::zeros(&g, &m, "U").expect("U");
+    let rho = g.upload(&vec![1.2 as Scalar; hm.n_cells]).expect("rho");
+    let t = g.upload(&vec![293.15 as Scalar; hm.n_cells]).expect("T");
+    pc.step(&g, &u, &rho, &t, None, dt).expect("the step");
+    assert!(pc.landing_summary().is_none(), "no plane, no summary");
+    let line = pc.report_line(&g).expect("the report line");
+    assert!(!line.contains("landing"), "{line}");
+}
+
+/// **SPEC-LIT 147.2, row R.** Sixty-four seeded ballistic parcels fall onto
+/// a floor that IS the landing plane (`zmin` is the box's only wall and
+/// the plane is z = 0): the ledger must count every wall end as a landing.
+/// A parcel removed at the wall stops at the face point, a few ulps either
+/// side of the plane in position precision, and the ledger takes a stop
+/// within `ON_PLANE` above the plane as ON it. Each crossing x is held to
+/// the closed form `x0 + vx sqrt(2 z0 / 9.81)` to 2e-3 m.
+#[test]
+fn a_floor_at_the_plane_counts_every_landing() {
+    use ofgpu::io::case_parcels::LoweredParcels;
+    use ofgpu::parcels::{SeedParcel, WallAction};
+    let Ok(g) = Gpu::new(0) else { return };
+    let hm = landing_floor_box();
+    let m = GpuMesh::upload(&g, &hm).expect("upload");
+    let lp = LoweredParcels {
+        controls: ParcelControls {
+            capacity: 128,
+            drag: DragModel::None,
+            physics: ParcelPhysics::Inert,
+            wall: WallAction::Remove,
+            gravity: Vec3::new(0.0, 0.0, -9.81),
+            ..ParcelControls::default()
+        },
+        injectors: Vec::new(),
+        coupling: CouplingControls {
+            momentum: CouplingMode::Off,
+            energy: CouplingMode::Off,
+            mass: MassCoupling::None,
+        },
+        vapour: None,
+        landing: Some(0.0),
+    };
+    let dt = 1e-3 as Scalar;
+    let mut pc = CaseParcels::new(&g, &hm, &m, &lp, dt, None).expect("the pool");
+    let seeds: Vec<SeedParcel> = (0..64u32)
+        .map(|k| {
+            let k = f64::from(k);
+            SeedParcel {
+                position: Vec3::new(
+                    (0.05 + 0.0113 * k) as Scalar,
+                    0.125,
+                    (0.61 + 0.0047 * k) as Scalar,
+                ),
+                velocity: Vec3::new((0.37 + 0.0091 * k) as Scalar, 0.0, 0.0),
+                diameter: 1e-3,
+                temperature: 293.15,
+                n_p: 1.0,
+                uid: None,
+            }
+        })
+        .collect();
+    pc.seed(&g, &hm, &seeds).expect("the seed");
+    let u = GpuVectorField::zeros(&g, &m, "U").expect("U");
+    let rho = g.upload(&vec![1.2 as Scalar; hm.n_cells]).expect("rho");
+    let t = g.upload(&vec![293.15 as Scalar; hm.n_cells]).expect("T");
+    let mut n_wall = 0;
+    for _ in 0..2000 {
+        pc.step(&g, &u, &rho, &t, None, dt).expect("the step");
+        n_wall = pc.parcels().stats(&g).expect("the stats").n_wall;
+        if n_wall == 64 {
+            break;
+        }
+    }
+    let sum = pc.landing_summary().expect("the summary");
+    println!(
+        "  [147.2] floor at the plane: wall {n_wall} against crossings {}",
+        sum.crossings
+    );
+    assert_eq!(n_wall, 64, "every parcel reaches the floor");
+    assert_eq!(sum.crossings, 64, "the ledger counts every landing: {sum:?}");
+    assert_eq!(sum.crossings as i64, n_wall, "crossings = wall at the end");
+    // The closed-form throw of each seed, in the order the ledger's hits
+    // come back in: x order - here also k order, the throw grows with k.
+    let mut want: Vec<(u32, f64)> = (0..64u32)
+        .map(|k| {
+            let kf = f64::from(k);
+            let z0 = 0.61 + 0.0047 * kf;
+            let x0 = 0.05 + 0.0113 * kf;
+            let vx = 0.37 + 0.0091 * kf;
+            (k, x0 + vx * (2.0 * z0 / 9.81).sqrt())
+        })
+        .collect();
+    want.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("a finite throw"));
+    let hits = pc.landing_hits();
+    assert_eq!(hits.len(), 64, "one hit per parcel, none twice: {sum:?}");
+    for ((x, _), (k, wx)) in hits.iter().zip(&want) {
+        let err = (x - wx).abs();
+        assert!(err <= 2e-3, "parcel {k}: x {x} against {wx}, error {err:.3e} m");
+    }
+}

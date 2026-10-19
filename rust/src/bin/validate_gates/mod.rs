@@ -174,3 +174,8 @@ pub(crate) mod dst_b_laminar;
 /// SPEC-LIT §159.12, Gate DST-B-VES: the Phase B cloud in a closed 20 L
 /// sphere, replayed from its records.
 pub(crate) mod dst_b_vessel;
+
+/// SPEC-LIT §147.2, Gate 68-C's coupled leg: the generated Theobald test
+/// case through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its
+/// records (docs/17 VAL-72b).
+pub(crate) mod theobald_coupled;

@@ -198,6 +198,7 @@ pub fn cloud_pool(lc: &LoweredCloud, n_cells: usize, gravity: Vec3, mu: f64) -> 
             mass: MassCoupling::None,
         },
         vapour: None,
+        landing: None,
     }
 }
 

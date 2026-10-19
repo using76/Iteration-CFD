@@ -16,7 +16,7 @@
 //! No GPL-licensed source was consulted.
 
 use ofgpu::io::case_parcels::JsonParcels;
-use ofgpu::parcels::{ParcelPhysics, WallAction};
+use ofgpu::parcels::{ParcelPhysics, SizeDistribution, WallAction};
 use ofgpu::{Scalar, Vec3};
 
 const JSONC: &str = r#"{
@@ -64,4 +64,68 @@ fn case_parcels_refuses_film_in_both_builds() {
     .expect("parses");
     let e = j.lower(None, None).unwrap_err().to_string();
     assert!(e.contains("parcels.wall") && e.contains("78.11"), "{e}");
+}
+
+/// SPEC-LIT 147.1: an injector's `size` lowers onto the library's own
+/// distribution - `rosinRammler` through with its seed, absent and
+/// `monodisperse` both `Monodisperse`, and anything else (an unknown kind,
+/// an extra key inside the size object) refused at the serde gate.
+#[test]
+fn injector_size_rosin_rammler_lowers() {
+    let block = |size: &str| {
+        format!(
+            r#"{{ "capacity": 4, "injectors": [ {{ "position": [0,0,0], "massFlow": 0.0, "size": {size} }} ] }}"#
+        )
+    };
+    let p: JsonParcels = serde_json::from_str(&block(
+        r#"{"kind": "rosinRammler", "x": 1.5e-3, "q": 2.4, "seed": 4}"#,
+    ))
+    .expect("the rosinRammler block parses");
+    let l = p.lower(None, None).expect("the rosinRammler block lowers");
+    match l.injectors[0].size {
+        SizeDistribution::RosinRammler(rr) => {
+            assert_eq!(rr.x, 1.5e-3 as Scalar);
+            assert_eq!(rr.q, 2.4 as Scalar);
+            assert_eq!(rr.seed, 4);
+        }
+        other => panic!("not RosinRammler: {other:?}"),
+    }
+
+    // Absent, and the explicit `monodisperse`, are the same Monodisperse.
+    let plain: JsonParcels = serde_json::from_str(
+        r#"{ "capacity": 4, "injectors": [ { "position": [0,0,0], "massFlow": 0.0 } ] }"#,
+    )
+    .expect("the plain block parses");
+    let mono: JsonParcels =
+        serde_json::from_str(&block(r#"{"kind": "monodisperse"}"#)).expect("parses");
+    assert_eq!(plain.lower(None, None).expect("lowers").injectors[0].size, SizeDistribution::Monodisperse);
+    assert_eq!(mono.lower(None, None).expect("lowers").injectors[0].size, SizeDistribution::Monodisperse);
+
+    // An unknown kind, and an extra key inside the size object: refused.
+    for bad in [r#"{"kind": "lognormal"}"#, r#"{"kind": "monodisperse", "bogus": 1}"#] {
+        let e = serde_json::from_str::<JsonParcels>(&block(bad)).expect_err(bad).to_string();
+        assert!(e.contains("bogus") || e.contains("lognormal") || e.contains("unknown variant"), "{e}");
+    }
+}
+
+/// SPEC-LIT 147.2: the landing plane lowers onto `LoweredParcels.landing`
+/// as the f64 height; absent is `None`; anything beside `z` inside the
+/// object is refused.
+#[test]
+fn landing_plane_lowers() {
+    let block = |landing: &str| {
+        format!(
+            r#"{{ "capacity": 4, "injectors": [ {{ "position": [0,0,0], "massFlow": 0.0 }} ]{landing} }}"#
+        )
+    };
+    let p: JsonParcels = serde_json::from_str(&block(r#", "landing": {"z": 0.0}"#))
+        .expect("the landing block parses");
+    assert_eq!(p.lower(None, None).expect("lowers").landing, Some(0.0));
+    let plain: JsonParcels =
+        serde_json::from_str(&block("")).expect("the plain block parses");
+    assert_eq!(plain.lower(None, None).expect("lowers").landing, None);
+    let e = serde_json::from_str::<JsonParcels>(&block(r#", "landing": {"z": 0, "x": 1}"#))
+        .expect_err("an extra key in the plane is refused")
+        .to_string();
+    assert!(e.contains("x"), "{e}");
 }

@@ -132,6 +132,70 @@ pub fn vapour_member(mix: &GasMixture, name: &str) -> Result<(usize, Scalar)> {
     Ok((k, (inv_wn / c) as Scalar))
 }
 
+/// SPEC-LIT 147.2: the stop point of a parcel that ended on a face within
+/// this distance above the plane is ON the plane. Far below any length of
+/// the case, far above the position round-off of a face point, about 1e-14
+/// m at 50 m.
+pub(crate) const ON_PLANE: f64 = 1.0e-9;
+
+/// SPEC-LIT 147.2: the x of a parcel's DOWNWARD crossing of the plane
+/// `z = zp`, linear between the two endpoints of the step - `Some(x)` iff
+/// the parcel was above the plane and is not, `None` otherwise. Pure and
+/// host-side, so the tests hold it exactly.
+pub(crate) fn plane_crossing(z0: f64, x0: f64, z1: f64, x1: f64, zp: f64) -> Option<f64> {
+    if z0 > zp && z1 <= zp {
+        Some(x0 + (z0 - zp) / (z0 - z1) * (x1 - x0))
+    } else {
+        None
+    }
+}
+
+/// SPEC-LIT 147.2: the smallest `x` in `hits` (given in x order, each
+/// `(x, liquid mass kg)`) whose running mass sum reaches `q` of the total -
+/// the landed mass's percentile. `None` for no hits, or a total mass of 0.
+pub(crate) fn mass_percentile(hits_sorted_by_x: &[(f64, f64)], q: f64) -> Option<f64> {
+    let total: f64 = hits_sorted_by_x.iter().map(|(_, m)| m).sum();
+    if hits_sorted_by_x.is_empty() || total == 0.0 {
+        return None;
+    }
+    let mut sum = 0.0;
+    for (x, m) in hits_sorted_by_x {
+        sum += m;
+        if sum >= q * total {
+            return Some(*x);
+        }
+    }
+    None
+}
+
+/// SPEC-LIT 147.2: the landing ledger one pool keeps when its case states a
+/// plane - the plane itself, every slot's previous state
+/// `(x, z, live)` from the snapshot's f64 world positions, and the hits
+/// `(crossing x, liquid mass kg)` recorded so far.
+struct Landing {
+    z: f64,
+    prev: Vec<(f64, f64, bool)>,
+    hits: Vec<(f64, f64)>,
+}
+
+/// SPEC-LIT 147.2: the throw a landing ledger has recorded - the crossing
+/// count, the farthest x and the landed liquid's mass percentiles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LandingSummary {
+    /// The plane the crossings were recorded on, m.
+    pub z: f64,
+    /// How many downward crossings the pool has recorded.
+    pub crossings: usize,
+    /// The farthest crossing's x, m.
+    pub farthest: Option<f64>,
+    /// The mass median landing x, m - 50 % of the landed mass at or below.
+    pub x50: Option<f64>,
+    /// The 90 % mass percentile of the landed x, m.
+    pub x90: Option<f64>,
+    /// The 99 % mass percentile of the landed x, m.
+    pub x99: Option<f64>,
+}
+
 /// One run's parcel pool, its deposit and its coupling, run in §68.7's
 /// order. The pool is built for one `dt` (SPEC-LIT 66.8) and one fixed
 /// mesh; the vapour holds the reacting case's end of the mass coupling.
@@ -147,6 +211,10 @@ pub struct CaseParcels<'m> {
     /// beside this step's (68.9). `None` for every case without a cloud,
     /// which registers exactly what it always registered.
     cloud_q: Option<DevBuf<Scalar>>,
+    /// SPEC-LIT 147.2: the landing ledger when the case states a plane.
+    /// `None` changes nothing at all - no extra read-back in the step and
+    /// not one byte in the reports.
+    landing: Option<Landing>,
 }
 
 impl<'m> CaseParcels<'m> {
@@ -174,7 +242,15 @@ impl<'m> CaseParcels<'m> {
         let parcels = Parcels::new(gpu, hm, m, lp.controls.clone(), &lp.injectors, dt)?;
         let dep = ParcelDeposition::new(gpu, &parcels)?;
         let cp = ParcelCoupling::new(gpu, &parcels, lp.coupling)?;
-        Ok(Self { parcels, dep, cp, vapour, steps: 0, cloud_q: None })
+        Ok(Self {
+            parcels,
+            dep,
+            cp,
+            vapour,
+            steps: 0,
+            cloud_q: None,
+            landing: lp.landing.map(|z| Landing { z, prev: Vec::new(), hits: Vec::new() }),
+        })
     }
 
     /// Place parcels directly, at setup, with no injector - the seeding
@@ -237,6 +313,49 @@ impl<'m> CaseParcels<'m> {
             if evap { y_vapour } else { None },
             dt,
         )?;
+        // SPEC-LIT 147.2: the landing ledger, from this step's own snapshot.
+        // Only where the case states a plane; a pool without one makes no
+        // extra read-back and records nothing. A slot whose previous state
+        // was live and came down through the plane adds its crossing with
+        // the liquid mass it carries; then every slot stores this step's
+        // state. A parcel removed at a wall keeps the face point as its
+        // position, so a floor AT the plane counts its landing.
+        if self.landing.is_some() {
+            let s = self.parcels.snapshot(gpu)?;
+            let rho_l = f64::from(self.parcels.controls().rho_liquid);
+            let ledger = self.landing.as_mut().expect("the landing ledger");
+            if ledger.prev.len() < s.n_slots {
+                ledger.prev.resize(s.n_slots, (0.0, 0.0, false));
+            }
+            for i in 0..s.n_slots {
+                // SPEC-LIT 147.2: a slot still live keeps the exact test -
+                // no tolerance, so no parcel can be counted twice. A slot
+                // that ended this step on a face stops at the face point,
+                // computed in position precision, a few ulps either side
+                // of the plane; a stop within ON_PLANE above the plane is
+                // ON it, so the ledger takes its height as the plane.
+                let now_live = s.cell[i] >= 0;
+                let z_stop = if !now_live && s.x64[i].z - ledger.z <= ON_PLANE {
+                    ledger.z.min(s.x64[i].z)
+                } else {
+                    s.x64[i].z
+                };
+                if let Some(&(x0, z0, true)) = ledger.prev.get(i) {
+                    if let Some(x) = plane_crossing(z0, x0, z_stop, s.x64[i].x, ledger.z) {
+                        let d = f64::from(s.d[i]);
+                        let mass = f64::from(s.n_p[i])
+                            * rho_l
+                            * std::f64::consts::PI
+                            / 6.0
+                            * d
+                            * d
+                            * d;
+                        ledger.hits.push((x, mass));
+                    }
+                }
+                ledger.prev[i] = (s.x64[i].x, s.x64[i].z, now_live);
+            }
+        }
         self.dep.update(gpu, &self.parcels)?;
         self.cp.update(
             gpu,
@@ -297,12 +416,51 @@ impl<'m> CaseParcels<'m> {
 
     /// One line for the periodic report. `slots` is `ParcelStats::n_slots`,
     /// the pool's high-water mark (dead slots included), not a live count.
+    /// With a landing plane (SPEC-LIT 147.2) the throw's tail is appended,
+    /// exactly the format the supervisor's record parser reads; without
+    /// one the line is byte for byte what this driver has always printed.
     pub fn report_line(&self, gpu: &Gpu) -> Result<String> {
         let s = self.parcels.stats(gpu)?;
-        Ok(format!(
+        let mut line = format!(
             "parcels: slots {} | injected {} | escaped {} | wall {} | evaporated {} | lost {}",
             s.n_slots, s.n_injected, s.n_escaped, s.n_wall, s.n_evaporated, s.n_lost
-        ))
+        );
+        if let Some(sum) = self.landing_summary() {
+            let n = |v: Option<f64>| v.map_or("-".to_string(), |x| x.to_string());
+            line.push_str(&format!(
+                " | landing z {}: crossings {} | farthest {} m | x50 {} m | x90 {} m | x99 {} m",
+                sum.z, sum.crossings, n(sum.farthest), n(sum.x50), n(sum.x90), n(sum.x99)
+            ));
+        }
+        Ok(line)
+    }
+
+    /// SPEC-LIT 147.2: the throw recorded so far, `None` without a landing
+    /// plane. The percentiles are [`mass_percentile`] at 0.5, 0.9 and 0.99
+    /// over the hits taken in x order.
+    pub fn landing_summary(&self) -> Option<LandingSummary> {
+        let l = self.landing.as_ref()?;
+        let mut hits = l.hits.clone();
+        hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let p = |q: f64| mass_percentile(&hits, q);
+        Some(LandingSummary {
+            z: l.z,
+            crossings: l.hits.len(),
+            farthest: l.hits.iter().map(|(x, _)| *x).reduce(f64::max),
+            x50: p(0.5),
+            x90: p(0.9),
+            x99: p(0.99),
+        })
+    }
+
+    /// SPEC-LIT 147.2: the raw hits `(crossing x, liquid mass kg)` in x
+    /// order - the tests' look at the ledger's book, `None`'s twin of
+    /// [`Self::landing_summary`].
+    #[cfg(test)]
+    pub(crate) fn landing_hits(&self) -> Vec<(f64, f64)> {
+        let mut hits = self.landing.as_ref().map_or(Vec::new(), |l| l.hits.clone());
+        hits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        hits
     }
 
     /// The banner's parcels lines: the pool's own settings, then the

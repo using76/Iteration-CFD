@@ -14381,6 +14381,14 @@ modelling in it at all; the measured ranges rise with hose pressure, which is
 the transcription guard; entrained air moves the throw the right way; and the
 coupled stream is thrown further than the uncoupled one.
 
+**Addendum (VAL-72b, §147.2).** The coupled leg now runs through the pressure-coupled driver
+`ofgpu-lowmach`, with the Rosin-Rammler sizes of §147.1, and is replayed from recorded runs. Test 3
+at 0.25 m cells lands at 27.81 m in both builds, 14 % past the measured 24.4 m (from 11.6 m in still
+air and 15.4 m coupled without continuity), so the coupling now carries the stream too far rather
+than too short; the mass percentiles x90 and x99 are 2.4 % and 8.0 % past it. The test-3 row is
+MISSED, the all-90 batch is NOT RUN (48.8 h projected at that mesh) and the stream-resolving leg is
+NOT RUN; §147.2 records why.
+
 ### 68.13 What this section does not do
 
 * **Evaporate.** No `dm_p/dt`, so no species source, no `D_src` in
@@ -53266,6 +53274,10 @@ CHR-26 replaces the refusal on `ofgpu-lowmach`'s path.
 
 No labels.
 
+VAL-72b adds two keys to the block, both absent by default and bit for bit inert when absent:
+`injectors[].size` (monodisperse or Rosin-Rammler, §147.1) and `landing` (the plane whose crossings
+`ofgpu-lowmach` records), §147.2.
+
 ### 137.7 The `species`, `chemistry` and `combustion` blocks as built (CHR-12a)
 
 `src/io/case_chem.rs` builds §137.2's three tables. This subsection records
@@ -59147,9 +59159,143 @@ The default is checked by construction and by measurement: the monodisperse bran
 is the §66.8 code unchanged, and `ofgpu-validate -sections 35-40` (§66-§68, §76-§78) gives the
 same rows bit for bit before and after (`tools/f64_identity.py rows`).
 
-**Not here.** The case blocks of §137.6 do not reach the distribution yet: it is a library field
-(`Injector::size`), which VAL-72b builds in code as §68 does. FDS's lognormal lower branch
-(Chan 1994) and the `D_v50 ~ We^(-1/3)` correlation (Yu 1986) are not built.
+**Not here.** VAL-72b gives the case blocks of §137.6 the distribution as `injectors[].size`
+(§147.2). FDS's lognormal lower branch (Chan 1994) and the `D_v50 ~ We^(-1/3)` correlation
+(Yu 1986) are not built.
+
+### 147.2 Gate 68-C's coupled leg through `ofgpu-lowmach` (VAL-72b)
+
+**What runs.** Theobald test 3 (nozzle 7, 13 mm, 2.1 bar, 35°, measured 24.4 m) runs in the
+pressure-coupled driver `ofgpu-lowmach` from a GENERATED JSONC case, with the Rosin-Rammler sizes of
+§147.1 and the parcels' momentum coupled semi-implicitly through (68.10). `ofgpu-validate`'s section
+"Gate 68-C coupled leg" (`src/bin/validate_gates/theobald_coupled.rs`) REPLAYS the supervisor's
+recorded runs (`cases/theobald/records/test03.f64.json`, `test03.single.json`); it runs nothing on the
+GPU. The still-air leg of §68.12 is unchanged and still MISSES. The generator is
+`case_jsonc(test, level)` in the same file; `cases/theobald/test03.jsonc` is its output for test 3 at
+level L1, pinned byte for byte by a test and by FNV-1a in the record.
+
+**Two case keys** (`src/io/case_parcels.rs`, `docs/schema/case-1.json`):
+
+* `parcels.injectors[].size`: `{"kind": "monodisperse"}` or `{"kind": "rosinRammler", "x": X,
+  "q": q, "seed": s}`, lowered onto `SizeDistribution` of §147.1. Absent is monodisperse at
+  `diameter`, the §66.8 injector bit for bit. The library's own refusals at `Parcels::new` are the
+  only range checks.
+* `parcels.landing`: `{"z": z_p}`, the horizontal plane whose downward crossings `ofgpu-lowmach`
+  records (the landing ledger below). Absent: no extra read-back, and the report line is byte for
+  byte what it was.
+
+**The inputs**, transcribed from the FDS validation deck `Theobald_Test_3.fds` and its generator
+`build_input_files.py` (NIST, US-government public domain, read in a local FDS clone that this
+repository does not carry), with the FDS defaults read in FDS's own `read.f90` (public domain):
+
+```
+  mdot = rho_l v pi b^2 / 4,          rho_l = 1000 kg/m3, b = the bore              (147.6)
+  X    = d_v50 (ln 2)^(-1/q),          d_v50 = b/10, q = 2.4                         (147.7)
+```
+
+(147.6) is the deck's `FLOW_RATE` (163.06 L/min for test 3, 2.7177 kg/s). FDS's `DIAMETER` is the
+volume (mass) median `d_v50`, and its default `GAMMA_D` is 2.4, so (147.7) is the inverse of (147.2)
+at that spread; FDS's lognormal lower branch is not built (§147.1), so the drops below the median
+differ, and the throw is set by the drops above it. The coherent core is §68.12's: the injector sits
+where the vacuum parabola of the core ends, pointing along its velocity there. The domain is the
+deck's: the nozzle 3 m above the floor, which is the measuring plane (`z_p = 0`, where FDS's AMPUA
+devices sit), 20 m tall, `y` in [-10, 10] m, and `x` from -5 m to `5 ceil((x_vac + 5)/5)` m, with
+`x_vac` the vacuum range of the stream; the five other sides are open (`p` fixed, `inletOutlet`).
+These are this unit's choices, not the deck's: the k-epsilon model (FDS runs LES), PIMPLE with 2
+correctors, implicit Euler, `dt` = 5 ms, 12 s of flow (FDS runs 60 s), 8 parcels per step, no
+turbulent dispersion of the parcels.
+
+**Three mesh levels**, graded cartesian boxes (the `y` axis two-sided, finest at the stream's plane):
+
+| level | `h` (x, z), m | `y` cells, centre/wall ratio | cells, test 3 |
+|---|---|---|---|
+| L0 | 0.5 (FDS's own cell) | 41, 1 | 180,400 |
+| L1 | 0.25 | 61, 0.2 | 1,073,600 |
+| L2 | 0.125 | 61, 0.1 | 4,294,400 |
+
+**The landing ledger** (`src/bin/lowmach_parcels/mod.rs`). Every step it reads the pool's snapshot and,
+for each slot that was live at the previous step,
+
+```
+  x_c = x0 + (z0 - z_p) / (z0 - z1) (x1 - x0),    counted iff z0 > z_p >= z1             (147.8)
+  x_q = min { x_k : sum_{j <= k} m_j >= q sum_j m_j },   hits in x order,
+        m = n_p rho_l (pi/6) d^3                                                          (147.9)
+```
+
+with `(x0, z0)` and `(x1, z1)` the slot's world positions (f64) before and after the step. A parcel
+that ENDED this step on a face stops at the face point, whose `z` is computed in position precision
+and lands a few ulps above or below the plane, so its stop height is taken as `z_p` when it is within
+`ON_PLANE = 1e-9 m` above it; a live parcel keeps the exact test, so none can be counted twice. That
+rule is a fix: the first recorded run counted 7,426 landings of 14,813 floor ends, and the test
+`a_floor_at_the_plane_counts_every_landing` (64 parcels onto a wall floor at the plane) failed with
+29 of 64 before it and passes with 64 of 64 after it. The report line carries the crossings, the
+farthest `x_c` and (147.9) at q = 0.5, 0.9 and 0.99.
+
+**The costing and the batch.** 200 timed steps per level (`-endTime 1 -deltaT 0.005`), RTX 5070 Ti
+shared with two other lanes, s/step = the driver's own `done in` wall over its steps:
+
+| level | f64 s/step | single s/step | peak device memory |
+|---|---|---|---|
+| L0 | 0.0583 | - | - |
+| L1 | 0.513 | 0.427 | - |
+| L2 | 3.625 | - | 13,530 MiB (3,304 B/cell) |
+
+The all-90 batch is projected as
+
+```
+  T_batch = sum_{i=0}^{89} (N_i / N_3) s_step 2400                                        (147.10)
+```
+
+(`N_i` the cells of stream `i` at the level, 2400 the steps of 12 s): 5.5 h at L0, 48.8 h at L1 (40.6 h
+from the single costing) and 345 h at L2, against the unit's 3 h card budget. **The batch is NOT RUN**,
+and the replay holds that it is absent only because its projection is over the budget. Test 3 at L2
+alone would take 3.625 s x 2400 = 2.4 h, more than the budget left after the runs below: **NOT RUN**.
+
+**The rows**, in both builds, from the build's own record:
+
+| row | measure | tolerance | class |
+|---|---|---|---|
+| the record reads, its build, its FNV-1a pin of `test03.jsonc` | - | exact | D |
+| the committed case is the generator's output at the record's level | text identity | 0 | D |
+| the batch is NOT RUN only because (147.10) exceeds the budget | - | exact | D |
+| test 3's run ended on its budget | the end line | exact | D |
+| the ledger counts every floor landing | crossings - wall ends at the end | 0 | D |
+| the farthest landing is stationary | (F(t_end) - F(t_end - 3 s)) / F(t_end) | 0.01 | P |
+| test 3 alone against the gate's bias bar | abs(F / 24.4 - 1) | 0.10 | P |
+| the throw is inside its vacuum bracket | 0 < F <= x_vac | - | D |
+| the all-90 mean and 2-sigma scatter | §68.12's bars | 0.10, 0.30 | P (only with a batch) |
+
+**Measured** (test 3 at L1, 2400 steps, 19,200 parcels injected, 14,813 floor landings, all on the
+ledger):
+
+| build | wall | F, m | F/24.4 | x50, m | x90, m | x99, m |
+|---|---|---|---|---|---|---|
+| f64 | 851 s | 27.8086 | 1.1397 | 21.510 | 24.986 | 26.353 |
+| single | 886 s | 27.8087 | 1.1397 | 21.510 | 24.986 | 26.354 |
+| f64, L0 | 82 s | 29.132 | 1.1939 | 19.229 | 23.111 | 24.945 |
+
+The farthest landing reached 27.8086 m at t = 7.6 s and did not move over the last 4.4 s (drift 0
+against 0.01). The single build lands within 2.9e-6 of the f64 build. Against §68.12's numbers for the
+same stream - 11.6 m in still air, 15.4 m coupled without continuity, 44.06 m in vacuum - the
+pressure-coupled solve with Rosin-Rammler sizes carries the stream past the measurement.
+
+**VERDICT: MISSED** in both builds. Test 3 alone: |F/24.4 - 1| = 0.1397 against 0.10. Measured
+causes, not cured here:
+
+1. **The statistic.** F is the farthest single parcel, an extreme of the upper tail of (147.1): each
+   event's largest parcel comes from the top stratum `u` in (7/8, 1) of (147.4), and the farthest of
+   2400 events keeps the largest drops the run happened to draw. The mass percentiles are not
+   extremes: x90 is 2.4 % past the measurement and x99 8.0 %. Which statistic matches Theobald's
+   "maximum throw" (or FDS's AMPUA read-out, whose post-processing is not in the clone) is a gate
+   definition, and changing it is the user's decision.
+2. **The mesh.** L0 to L1 moves x50 by +11.9 %, x90 by +8.1 %, x99 by +5.6 % and F by -4.5 %: the
+   throw is not mesh-converged at L1, and L2 is NOT RUN on the budget. The uncertainty is one mesh.
+3. **The stream-resolving leg is NOT RUN**: `ofgpu-lowmach` has no adapt option (§75's adapt is not
+   wired into it) and a JSONC case has no refinement box, so the finest mesh this tree can give the driver
+   is the graded box of L2, 0.125 m cells against a 13 mm jet.
+
+**Not claimed.** No pass of Gate 68-C: the all-90 bar is NOT RUN. The k-epsilon model and 12 s of
+flow are inputs, not a calibration; no input was tuned toward 24.4 m.
 
 ---
 
