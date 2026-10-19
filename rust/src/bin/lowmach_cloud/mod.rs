@@ -249,6 +249,22 @@ pub struct CloudEnd {
     /// SPEC-LIT §159.11 (159.25): how many parcels retired through open
     /// patches over the run.
     pub n_left: usize,
+    /// (159.10)'s gas constant `cp_g`: the initial mixture's `cp` at T_0,
+    /// J/(kg K), as the driver summed it.
+    pub cp_g: f64,
+    /// (159.10)'s gas constant `k_g = mu_g cp_g / Pr`, W/(m K).
+    pub k_g: f64,
+    /// The `mu = nu rho_0` (Pa s) (159.10)'s `k_g` was built from.
+    pub mu_g: f64,
+    /// The fluid `Pr` (159.10)'s `k_g` was built from.
+    pub pr: f64,
+    /// SPEC-LIT 159.12 (159.26): `E_ign`, J - the igniter's ledger, Σ over
+    /// the active steps and selected cells of P V_c dt.
+    pub ign_e: f64,
+    /// SPEC-LIT 159.12 (159.26): how many cells the igniter selected.
+    pub ign_cells: usize,
+    /// SPEC-LIT 159.12 (159.26): how many steps the igniter was active at.
+    pub ign_steps: usize,
 }
 
 /// One run's dust cloud: the seeding, the pool's words of it, the particle
@@ -278,6 +294,7 @@ pub struct CaseCloud {
     mu: f64,
     k_g: f64,
     cp_g: f64,
+    pr: f64,
     cp_vol: f64,
     /// The lowered block, kept for [`Self::pool_block`].
     lc: LoweredCloud,
@@ -341,17 +358,30 @@ pub struct CaseCloud {
     /// SPEC-LIT §159.11 (159.25): how many parcels retired through open
     /// patches so far.
     n_left: usize,
+    /// SPEC-LIT 159.12 (159.26): the igniter's selected cells, ascending -
+    /// empty without an igniter, and every igniter field is inert then.
+    ign_cells: Vec<usize>,
+    /// SPEC-LIT 159.12 (159.26): the stated power P, W/m3.
+    ign_power: f64,
+    /// SPEC-LIT 159.12 (159.26): the stated duration tau_ig, s.
+    ign_duration: f64,
+    /// SPEC-LIT 159.12 (159.26): `E_ign`, J - Σ over the active steps and
+    /// selected cells of P V_c dt, booked in ascending cell order.
+    ign_e: f64,
+    /// SPEC-LIT 159.12 (159.26): how many steps the igniter was active at.
+    ign_steps: usize,
 }
 
 impl CaseCloud {
     /// Build the cloud from the lowered block and the reacting case it
     /// burns in - §159.10's decisions: the four members' records out of the
     /// mechanism's thermo, their solved indices and (137.9) factors out of
-    /// the mixture, the gas-side constants off cell 0 of the run's initial
-    /// fields (`mu = nu rho_0`, `k_g = mu cp_g/Pr`, `cp_g` the initial
-    /// mixture's at `T_0`, `cp_VOL` the volatile record's, the drying
-    /// pressure the initial `p0`), then the seeding's pool words and the
-    /// kernel.
+    /// the mixture, the gas-side constants off the run's initial fields at
+    /// the reference cell, the FIRST cell whose initial T word is the case's
+    /// `initial.T` (SPEC-LIT 159.12; cell 0 without regions) (`mu = nu
+    /// rho_0`, `k_g = mu cp_g/Pr`, `cp_g` the initial mixture's at `T_0`,
+    /// `cp_VOL` the volatile record's, the drying pressure the initial
+    /// `p0`), then the seeding's pool words and the kernel.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &Gpu,
@@ -378,23 +408,38 @@ impl CaseCloud {
             *slot = (i, f);
         }
         let n_cells = hm.n_cells;
-        let t0 = f64::from(gpu.download(&t.f)?[0]);
-        let rho0 = f64::from(gpu.download(&gas.rho().f)?[0]);
+        // SPEC-LIT 159.12: the constants are read at the REFERENCE cell, the
+        // first cell whose initial T word is the case's `initial.T` - with an
+        // `initial.regions` kernel at the apex, cell 0 is IN the kernel, and a
+        // 2000 K cell's mu, cp_g, cp_VOL are not the cloud's. A case without
+        // regions finds `c_ref == 0` and reads bit for bit as before.
+        let t_word = lc.t_init as Scalar;
+        let t_all = gpu.download(&t.f)?;
+        let c_ref = t_all.iter().position(|&c| c == t_word).ok_or_else(|| {
+            Error::Config(format!(
+                "dust.cloud: no cell starts at the case's initial.T = {} K; the cloud's gas \
+                 constants are read there (SPEC-LIT 159.12)",
+                lc.t_init
+            ))
+        })?;
+        let t0 = f64::from(t_all[c_ref]);
+        let rho0 = f64::from(gpu.download(&gas.rho().f)?[c_ref]);
         let mut ys = Vec::with_capacity(r.species.n_solved());
         let mut w = Vec::with_capacity(r.species.n_solved());
         for i in 0..r.species.n_solved() {
             let f = r.species.get(i).expect("i < n_solved").field();
-            ys.push(f64::from(gpu.download(&f.f)?[0]));
+            ys.push(f64::from(gpu.download(&f.f)?[c_ref]));
             w.push(record_w(set, &r.species.names()[i])?);
         }
         let w_inert = record_w(set, r.species.inert_name())?;
-        let y_inert = f64::from(gpu.download(&r.species.inert().f)?[0]);
-        // J/(kg K): the initial mixture's at T_0, (159.10)'s cp_g.
+        let y_inert = f64::from(gpu.download(&r.species.inert().f)?[c_ref]);
+        // J/(kg K): the initial mixture's at T_0, (159.10)'s cp_g -
+        // `record_cp_mass` already divides by the record's molar mass.
         let mut cp_g = 0.0;
         for (i, name) in r.species.names().iter().enumerate() {
-            cp_g += ys[i] * record_cp_mass(set, name, t0)? / w[i];
+            cp_g += ys[i] * record_cp_mass(set, name, t0)?;
         }
-        cp_g += y_inert * record_cp_mass(set, r.species.inert_name(), t0)? / w_inert;
+        cp_g += y_inert * record_cp_mass(set, r.species.inert_name(), t0)?;
         let mu = nu * rho0;
         let k_g = mu * cp_g / pr;
         let cp_vol = th.vol.cp(t0)? / th.vol.molar_mass;
@@ -421,11 +466,21 @@ impl CaseCloud {
         let mut before = Vec::with_capacity(n);
         for p in &seeded {
             let sp = p.seed_parcel();
+            // SPEC-LIT 159.12: a parcel seeded IN a kernel cell starts at
+            // that cell's T word - a 1 um parcel at 300 K in a 2000 K cell
+            // takes, within one step of the frozen-gas particle step, more
+            // heat than the hot gas holds. Any other parcel keeps the seed's
+            // own T (a case without regions: bit for bit).
+            let t_p = if t_all[p.cell] == t_word {
+                p.particle.t
+            } else {
+                f64::from(t_all[p.cell])
+            };
             m_w.push(p.particle.m_w as Scalar);
             m_v.push(p.particle.m_v as Scalar);
             m_c.push(p.particle.m_c as Scalar);
             m_a.push(p.particle.m_a as Scalar);
-            t_h.push(p.particle.t as Scalar);
+            t_h.push(t_p as Scalar);
             d_h.push(p.particle.d as Scalar);
             n_p.push(f64::from(sp.n_p));
             cell.push(p.cell);
@@ -434,7 +489,7 @@ impl CaseCloud {
                 m_v: f64::from(p.particle.m_v as Scalar),
                 m_c: f64::from(p.particle.m_c as Scalar),
                 m_a: f64::from(p.particle.m_a as Scalar),
-                t: f64::from(p.particle.t as Scalar),
+                t: f64::from(t_p as Scalar),
                 d: f64::from(p.particle.d as Scalar),
             });
         }
@@ -448,6 +503,34 @@ impl CaseCloud {
         for _ in 0..w.len() {
             dil.push(zg()?);
         }
+        // SPEC-LIT 159.12 (159.26): the igniter's cells, by the distance
+        // test on the cell centres' ABSOLUTE positions - `hm.origin +
+        // hm.c[c]`, widened to f64 - against the stated radius. A cloud
+        // without an igniter selects nothing and runs bit for bit as
+        // before.
+        let (ign_cells, ign_power, ign_duration) = match &lc.igniter {
+            None => (Vec::new(), 0.0, 0.0),
+            Some(ig) => {
+                let x_ig = DVec3::new(ig.point[0], ig.point[1], ig.point[2]);
+                let cells: Vec<usize> = (0..n_cells)
+                    .filter(|&c| (to_dvec3(hm.c[c]) + hm.origin - x_ig).mag() <= ig.radius)
+                    .collect();
+                if cells.is_empty() {
+                    return Err(Error::Config(format!(
+                        "dust.cloud.igniter: no cell centre lies within radius {} m of \
+                         {:?} (SPEC-LIT 159.12)",
+                        ig.radius, ig.point
+                    )));
+                }
+                println!(
+                    "dust cloud igniter (SPEC-LIT 159.12): {} cells, {} W/m3 until {} s",
+                    cells.len(),
+                    ig.power,
+                    ig.duration
+                );
+                (cells, ig.power, ig.duration)
+            }
+        };
         Ok(Self {
             th,
             props,
@@ -465,6 +548,7 @@ impl CaseCloud {
             mu,
             k_g,
             cp_g,
+            pr,
             cp_vol,
             lc: lc.clone(),
             m_w: gpu.upload(&m_w)?,
@@ -503,6 +587,11 @@ impl CaseCloud {
             left_mass: 0.0,
             left_e: 0.0,
             n_left: 0,
+            ign_cells,
+            ign_power,
+            ign_duration,
+            ign_e: 0.0,
+            ign_steps: 0,
         })
     }
 
@@ -754,7 +843,25 @@ impl CaseCloud {
         let dil_refs: Vec<(usize, &DevBuf<Scalar>)> =
             self.dil.iter().enumerate().map(|(i, b)| (i, b)).collect();
         r.set_dilution_sources(gpu, &dil_refs)?;
-        let q: Vec<Scalar> = src.q.iter().map(|&x| x as Scalar).collect();
+        // SPEC-LIT 159.12 (159.26): the igniter's q_ign, added to (159.20)'s
+        // q only while it is active - the step's opening count n with
+        // `n dt < tau_ig` - and booked into `E_ign`, P V_c dt per selected
+        // cell, in ascending cell order. Without an igniter, or past
+        // tau_ig, this path is exactly the one it was; `last_sources` keeps
+        // the cloud's own src, without the igniter.
+        let ign_on =
+            !self.ign_cells.is_empty() && self.steps as f64 * f64::from(dt) < self.ign_duration;
+        let q: Vec<Scalar> = if ign_on {
+            let mut q = src.q.clone();
+            for &c in &self.ign_cells {
+                q[c] += self.ign_power;
+                self.ign_e += self.ign_power * self.volume[c] * f64::from(dt);
+            }
+            self.ign_steps += 1;
+            q.iter().map(|&x| x as Scalar).collect()
+        } else {
+            src.q.iter().map(|&x| x as Scalar).collect()
+        };
         let cq = pc.cloud_energy_mut().expect("the cloud's energy buffer was enabled");
         gpu.write(cq, &q)?;
         // 7. The drag of the next step reads the shrunken char diameter.
@@ -795,6 +902,13 @@ impl CaseCloud {
             left_mass: self.left_mass,
             left_e: self.left_e,
             n_left: self.n_left,
+            cp_g: self.cp_g,
+            k_g: self.k_g,
+            mu_g: self.mu,
+            pr: self.pr,
+            ign_e: self.ign_e,
+            ign_cells: self.ign_cells.len(),
+            ign_steps: self.ign_steps,
         }
     }
 

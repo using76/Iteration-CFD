@@ -811,6 +811,28 @@ pub struct JsonDustCloud {
     /// The char reaction (159.5); only with char > 0, absent is inert.
     #[serde(rename = "char", default, skip_serializing_if = "Option::is_none")]
     pub char_burn: Option<JsonCloudChar>,
+    /// SPEC-LIT 159.12 (159.26)'s igniter: a volumetric heat source of
+    /// `power` W/m3 in every cell whose centre lies within `radius` m of
+    /// `point`, for `duration` s of the cloud's own step count; absent is
+    /// no igniter, and the cloud runs bit for bit as without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub igniter: Option<JsonCloudIgniter>,
+}
+
+/// `dust.cloud.igniter` - the cloud's igniter of SPEC-LIT 159.12, (159.26):
+/// `q_ign = P` in the cells the radius selects, while the cloud's step
+/// count is inside `duration`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonCloudIgniter {
+    /// m, the ignition point x_ig, absolute.
+    pub point: [f64; 3],
+    /// m, the radius r_ig about x_ig that selects the cells.
+    pub radius: f64,
+    /// W/m3, the stated volumetric power P.
+    pub power: f64,
+    /// s, how long the source burns, tau_ig.
+    pub duration: f64,
 }
 
 /// `dust.cloud.rosinRammler` - (147.1)'s two constants.
@@ -934,6 +956,22 @@ pub struct LoweredCloud {
     /// K entries of (159.12) - band j's mass-weighted mean diameter - or
     /// the one diameter repeated K times for a monodisperse cloud.
     pub diameters: Vec<f64>,
+    /// SPEC-LIT 159.12 (159.26)'s igniter, lowered; `None` without one.
+    pub igniter: Option<CloudIgniter>,
+}
+
+/// The cloud's igniter, lowered - (159.26)'s four constants, f64
+/// throughout, both builds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloudIgniter {
+    /// m, the ignition point x_ig, absolute.
+    pub point: [f64; 3],
+    /// m, the radius r_ig that selects the cells.
+    pub radius: f64,
+    /// W/m3, the volumetric power P.
+    pub power: f64,
+    /// s, the duration tau_ig.
+    pub duration: f64,
 }
 
 /// The gas-side inputs [`ParticleInputs`] needs and the cloud does not own
@@ -999,6 +1037,21 @@ fn cloud_unit_interval(key: &str, v: f64) -> Result<f64> {
         Ok(v)
     } else {
         Err(cloud_refused(key, &format!("{v} is not a finite fraction in [0, 1]")))
+    }
+}
+
+/// The igniter's refusal: [`Error::Config`] naming `key`, to its own
+/// section (SPEC-LIT 159.12).
+fn igniter_refused(key: &str, msg: &str) -> Error {
+    Error::Config(format!("{key}: {msg} (SPEC-LIT 159.12)"))
+}
+
+/// A finite number above zero, or the igniter's refusal naming `key`.
+fn igniter_positive(key: &str, v: f64) -> Result<f64> {
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(igniter_refused(key, &format!("{v} is not a finite number above zero")))
     }
 }
 
@@ -1117,6 +1170,27 @@ impl JsonDustCloud {
                 rosin_rammler_bands(*d_bar, *n, parcels_per_cell)?
             }
         };
+        // SPEC-LIT 159.12 (159.26): the igniter's four constants, each
+        // value refused by its own key.
+        let igniter = match &self.igniter {
+            None => None,
+            Some(ig) => {
+                for (i, v) in ig.point.iter().enumerate() {
+                    if !v.is_finite() {
+                        return Err(igniter_refused(
+                            "dust.cloud.igniter.point",
+                            &format!("component {i} = {v} is not finite"),
+                        ));
+                    }
+                }
+                Some(CloudIgniter {
+                    point: ig.point,
+                    radius: igniter_positive("dust.cloud.igniter.radius", ig.radius)?,
+                    power: igniter_positive("dust.cloud.igniter.power", ig.power)?,
+                    duration: igniter_positive("dust.cloud.igniter.duration", ig.duration)?,
+                })
+            }
+        };
         Ok(LoweredCloud {
             concentration,
             size,
@@ -1129,6 +1203,7 @@ impl JsonDustCloud {
             char_rate,
             t_init,
             diameters,
+            igniter,
         })
     }
 }

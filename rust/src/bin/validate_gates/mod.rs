@@ -170,3 +170,7 @@ pub(crate) mod chr_wsgg;
 /// SPEC-LIT §159.11, Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame
 /// against the gas flame of its volatile.
 pub(crate) mod dst_b_laminar;
+
+/// SPEC-LIT §159.12, Gate DST-B-VES: the Phase B cloud in a closed 20 L
+/// sphere, replayed from its records.
+pub(crate) mod dst_b_vessel;

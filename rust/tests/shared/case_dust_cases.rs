@@ -1021,6 +1021,78 @@ fn cloud_refusals() {
     assert!(e.to_string().contains("dust.cloud"), "{e}");
 }
 
+/// **SPEC-LIT 159.12 `cloud_igniter_lowers_and_refuses` (D).** The
+/// igniter lowers to its four values exactly; each bad value - radius,
+/// power or duration not a finite number above zero, a point component
+/// not finite - is refused by name, and an unknown key inside the
+/// igniter is named by the deserialiser.
+#[test]
+fn cloud_igniter_lowers_and_refuses() {
+    let base = r#""concentration": 0.5, "diameter": 4e-5,
+        "composition": { "moisture": 0.1, "volatile": 0.6, "char": 0.25, "ash": 0.05 },
+        "rhoP": 1500, "cpP": 1800, "emissivity": 0.9,
+        "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 }"#;
+    let with = |igniter: &str| {
+        cloud_lowered(&format!("{{{base}, \"igniter\": {igniter}}}"), 300.0)
+    };
+    // One case lowers with the four values exactly.
+    let l = with(
+        r#"{ "point": [0.001, 0.002, 0.003], "radius": 0.0021, "power": 1e9,
+            "duration": 4.5e-5 }"#,
+    )
+    .expect("the cloud with its igniter lowers");
+    let ig = l.igniter.as_ref().expect("the igniter lowered");
+    assert_eq!(ig.point, [0.001, 0.002, 0.003]);
+    assert_eq!(ig.radius, 0.0021);
+    assert_eq!(ig.power, 1e9);
+    assert_eq!(ig.duration, 4.5e-5);
+    // A cloud without an igniter lowers to None.
+    assert!(cloud_lowered(&format!("{{{base}}}"), 300.0)
+        .expect("the bare cloud lowers")
+        .igniter
+        .is_none());
+    // Each value refusal names its key.
+    let refuses_igniter = |r: Result<LoweredCloud, Error>, key: &str| {
+        let e = r.expect_err(&format!("the igniter is refused, naming {key}"));
+        assert!(e.to_string().contains(key), "the refusal does not name {key}: {e}");
+    };
+    for (igniter, key) in [
+        (
+            r#"{ "point": [0, 0, 0], "radius": 0, "power": 1e9, "duration": 4.5e-5 }"#,
+            "dust.cloud.igniter.radius",
+        ),
+        (
+            r#"{ "point": [0, 0, 0], "radius": 0.0021, "power": -1, "duration": 4.5e-5 }"#,
+            "dust.cloud.igniter.power",
+        ),
+        (
+            r#"{ "point": [0, 0, 0], "radius": 0.0021, "power": 1e9, "duration": 0 }"#,
+            "dust.cloud.igniter.duration",
+        ),
+    ] {
+        refuses_igniter(with(igniter), key);
+    }
+    // A point component that is not finite cannot ride through JSON, so it
+    // lowers directly off the parsed cloud.
+    let mut nan_point: JsonDustCloud =
+        serde_json::from_str(&format!("{{{base}}}")).expect("the bare cloud parses");
+    nan_point.igniter = Some(ofgpu::io::case_dust::JsonCloudIgniter {
+        point: [f64::NAN, 0.0, 0.0],
+        radius: 0.0021,
+        power: 1e9,
+        duration: 4.5e-5,
+    });
+    refuses_igniter(nan_point.lower(300.0), "dust.cloud.igniter.point");
+    // An unknown key inside the igniter is named by the deserialiser.
+    let e = serde_json::from_str::<JsonDustCloud>(&format!(
+        "{{{base}, \"igniter\": {{ \"point\": [0, 0, 0], \"radius\": 0.0021, \
+         \"power\": 1e9, \"duration\": 4.5e-5, \"energy\": 1 }} }}"
+    ))
+    .expect_err("the unknown key is refused")
+    .to_string();
+    assert!(e.contains("energy"), "{e}");
+}
+
 // ==========================================================================
 //  DST-20: the flame-age clock (SPEC-LIT §160.5)
 // ==========================================================================

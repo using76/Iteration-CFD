@@ -4252,6 +4252,15 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_dst_b_laminar", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 159.12 - Gate DST-B-VES: the Phase B cloud in a closed 20 L
+    // sphere, replayed from the recorded runs, in
+    // src/bin/validate_gates/dst_b_vessel.rs.
+    if c.section("Gate DST-B-VES: the Phase B cloud in a closed 20 L sphere, replayed from its records - the AICC end pressure and the thin-flame half time (SPEC-LIT 159.12)") {
+    c.enter_gate(validate_gates::dst_b_vessel::GATE);
+    let r = validate_gates::dst_b_vessel::check_dst_b_vessel(c);
+    c.ran("check_dst_b_vessel", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

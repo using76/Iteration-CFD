@@ -62667,6 +62667,9 @@ on all four members, and (137.9) moves the target divergence within 4.2e−16 (f
 (`single`) of `Σ_k R T ṁ_k/(p0 W_k)`. Before the fix of the molar loop, which added ṁ instead of
 the factor term, it missed at 2.08.
 
+**After DST-17** (§159.12): `c_p,g` was summed with a second division by the molar mass (`k_g`
+34.8 times too large); the fix and the rows it moved are in §159.12.
+
 ### 159.11 Gate DST-B-LAM as built (DST-16)
 
 `No GPL-licensed source was consulted.` DST-16 holds the Phase B cloud of §159.10 against the gas
@@ -62842,9 +62845,185 @@ other lanes' runs). Each of the six runs completes and gives 41 fronts in [20, 4
   `dst_b_laminar::tests` (4) pass. `dust_b_outflow_retires` retired 16 of 20 parcels, and (159.25)
   closed to 1.1e−16 (mass) and 6.1e−17 (energy) in f64, and 3.2e−16 and 5.6e−16 in `single`.
   `dust_b_writes_every_due_time` found 34 time directories holding both `parcels.vtp` and `T`.
+* **After DST-17's `k_g` fix** (§159.12) the six speeds were measured again: (i) is unchanged at
+  4.507e−2 and (ii) now holds on all three rows; the table above is the run before the fix.
 
 
 Labels: (159.23)-(159.25).
+
+### 159.12 Gate DST-B-VES as built (DST-17)
+
+`No GPL-licensed source was consulted.` DST-17 holds the Phase B cloud of §159.10 in a closed
+20 L sphere (§159.6): (a) the end pressure against the cloud's host AICC (159.21), (b) the time to
+`(p_0 + p_e)/2` against the thin-flame pressure equation (157.4) of SPEC-LIT 157.2 with S_u(p) from
+the 1-D Phase B flame of §159.11 at p/p_0 = 1, 3 and 6, and (c) K_st, reported, with the measured
+200 bar m/s ± 15 % (H22 §2) **NAMED and NOT RUN**. Files: `src/bin/validate_gates/dst_b_vessel.rs`
+(new), `cases/dust/sphere20LCloud.jsonc` and `cases/dust/tube20LCloud.jsonc` (new), the two
+records `cases/dust/records/sphere20LCloud.{f64,single}.json` (new), `src/bin/validate.rs` (one
+section), `src/bin/validate_gates/mod.rs`, `src/bin/lowmach_cloud/mod.rs` and its tests,
+`src/bin/lowmach.rs` (the regions' application and one report line), `src/io/case_json.rs` (the
+regions' driver gate), `src/io/case_dust.rs` (the igniter key), `tests/shared/case_dust_cases.rs` and
+`docs/schema/case-1.json` (regenerated). The specification was informed by a review of FSCDustFoam
+(Huang & Lipatnikov, GPL) and no code was copied; the equations are §152's, §157.2's, §159.10's,
+§159.11's and the derivations given here.
+
+**A units error in the cloud's gas constants, fixed with a failing test first.** §159.10 states
+`k_g = μ c_p,g/Pr` with c_p,g the initial mixture's `Σ_k Y_k c_p,k(T_0)/W_k` in J/(kg K). The driver
+summed `Y_k (c_p,k/W_k)/W_k`: the record's per-kilogram value divided by the molar mass a second
+time. Air at 300 K printed `cp_g 35153.9 J/(kg K)` and `k_g 3.38 W/(m K)` (expected 1011.4 and
+0.097 on the tube's ν), so every particle exchanged heat 34.8 times too fast. The hand-built
+constants of `dust_b_case_equals_library` mirrored the same double division, so that test held.
+Test `lowmach_cloud::tests::dust_b_gas_constants_are_per_kilogram` (both builds; `CloudEnd` now carries
+`cp_g`, `k_g`, `mu_g` and `pr`) failed at 35153.86 against 1011.43 and passes after the fix, to 1e−15
+(f64) and 1.6e−8 (`single`, the downloaded `Y` words are f32). What the fix moved, re-measured:
+
+* §159.10's box: `dust_b_box_ends_at_aicc` still holds, now at 0.174 % (p0 ends at 160 915.2 Pa
+  against p_v = 160 635.1 Pa; 0.286 % before); `dust_b_box_conserves`'s six MISSED rows
+  fall to mass 6.97e−4 and energy 2.93e−3 (f64; 6.82e−4 and 2.96e−3 `single`) from 9.60e−4 and
+  4.71e−3, with the same first-order trend (ratios 1.60, 1.58, 1.73 from dt 2e−4 to 1e−4).
+* §159.11's gate, f64 (`single` in brackets): gas 0.058418 [0.058416], 1 µm 0.061051 [stops at step 34, a cell at −56 K], 5 µm
+  0.060699 [0.060698], 10 µm 0.060371 [0.060371], 20 µm 0.058694 [0.058726], 40 µm 0.046596 [0.046597] m/s. **(i) is
+  still MISSED** at 4.507e−2 in f64; in `single` the 1 µm run stops (next item), so (i) has no value there; **(ii) now holds on all three rows** in both builds: with the particles' true
+  heat exchange the size order is resolved from 5 µm on (40 µm falls 24 % below 1 µm). The section
+  took 588 s (f64) and 437 s (`single`) on the shared card.
+* `dust_b_writes_every_due_time` in the `single` build: the shipped tube now stops at step 34 with a
+  cell at −56.1 K (`species VOL: T = −56.09 K lies outside its range`), the f32 flow path's family
+  (§157.7 item (iii)); f64 runs its 340 steps. Reverting only the two bug lines lets it run, so the
+  35-fold heat exchange had masked it. The test asserts and prints it as MISSED in `single` and still
+  checks the write invariant on the directories written before the stop (3 of 3 hold `T`).
+
+**Central ignition, and why it is an igniter.** The finite-rate path has no ignition source and a
+`mesh.sector` carries no region windows (§157.3), so DST-17 built two inputs, in this order.
+(1) `initial.regions` (SPEC-LIT 125.8.1), applied by `ofgpu-lowmach` to a case that states a
+`dust.cloud` (every other driver refuses a cloud by name, so only this one can reach it). A parcel
+seeded in a cell whose initial T is not the case's `initial.T` starts at that cell's T, and the
+cloud's gas constants are read at the first cell that starts at `initial.T` (cell 0 without regions,
+so every earlier result is bit for bit unchanged). Tests `dust_b_hot_kernel_ignites` (the 2 mm kernel
+at 2000 K burns: cell 0 ends at 2170 K) and `dust_b_kernel_seeds_hot` (4 parcels at 2000 K, 16 at
+300 K, constants equal bit for bit with and without the kernel), both builds. **Measured: a hot
+kernel does not light the φ = 0.62 cloud.** A 2 mm kernel at 2000 K in the 1 atm tube drove its gas
+to −3141 K in the first step. The 1 µm parcels release all their volatile within one step at 2000 K,
+and VOL's enthalpy from 298 K to 2000 K on its record (159.16), about 9.9 MJ/kg, is far more than the
+hot, thin kernel gas holds, which the explicit exchange of (159.20) books in one step. (2) The cloud's
+igniter, a timed volumetric heat source added to the cloud's energy source (159.20) **[stated input]**:
+
+```
+  q_ign(c, n) = P   if |x_c − x_ig| <= r_ig  and  n Δt < τ_ig ,  else 0
+  E_ign = Σ_active n Σ_selected c  P V_c Δt                                                     (159.26)
+```
+
+with x_c the absolute cell centre, n the cloud's step count at the step's opening, and the ledger
+E_ign in `CloudEnd` and the end report. Key `dust.cloud.igniter { point, radius, power, duration }`,
+each refused by name when not finite or not positive; an igniter that selects no cell is refused
+(`dust.cloud.igniter`). JSONC only: the dictionary route of §137.2 does not carry it. Tests
+`io::case_dust::tests::cloud_igniter_lowers_and_refuses` (`tests/shared/case_dust_cases.rs`),
+`lowmach_cloud::tests::{dust_b_igniter_heats_its_cells, dust_b_igniter_refuses_an_empty_selection}`
+(E_ign exact to 1e−12 against `P (V_0 + V_1) 5 Δt`, both builds). **Measured: the igniter does not
+light it either.** Every setting tried stops on the reactor's guards (§133.11) as the kernel lights,
+at Δt 5e−5 s unless stated:
+
+| where | P (W/m3) | τ_ig | r_ig | stop |
+|---|---|---|---|---|
+| tube, at the open end | 3e8, 2e8, 1e8, 5e7 | 10, 5, 10, 20 ms | 2.1 mm | BELOW_NEGATIVE_ATOL, outlet cells, steps 50-300 |
+| tube, 3 mm inside | 1e8, 5e7 | 10, 20 ms | 2.1 mm | BELOW_NEGATIVE_ATOL, cells 117-119 |
+| sphere | 1e8; 1e9; 3e9; 1e9 | 10; 2; 1; 4 ms | 2.1; 2.1; 2.1; 4.2 mm | BELOW_NEGATIVE_ATOL; OUTSIDE_THERMO_RANGE; BAD_TEMPERATURE |
+| sphere | 1e9 | 0.6, 0.75 ms | 2.1 mm | BELOW_NEGATIVE_ATOL, cells 3 and 6 |
+| sphere, Δt 1e−5 and 2.5e−5 s | 1e9, 3e8 | 2, 5 ms | 2.1 mm | BELOW_NEGATIVE_ATOL, cells 8-9 |
+| sphere, `chemistry.atol` 1e−8, 1e−6 | 1e9 | 2 ms | 2.1 mm | BELOW_NEGATIVE_ATOL; BAD_TEMPERATURE |
+| sphere | 3e7; 1e8 | 100; 20 ms | 2.1; 4.2 mm | BELOW_NEGATIVE_ATOL, cells 2 and 19 |
+
+At 1e9 W/m3 the kernel climbs 120 K per step, lights at step 15 and reaches 4293 K by step 19:
+the volatile released while it heats burns all at once against a kernel whose gas, thinned by the
+heat, holds about 0.15 kg/m3 of dust for 0.18 kg/m3 of air (local φ near 4). A tube lit by DST-16's
+2000 K igniter WALL runs (below); no volumetric igniter did. The shipped sphere keeps the moderate
+setting (P = 1e8 W/m3, τ_ig = 10 ms, r_ig = 2.1 mm; decision taken by recommendation), and the record
+shows where it stops.
+
+**The cases.** `sphere20LCloud`: R = 0.1684 m (the 20 L equal-volume radius of §157.6), the sector of
+§157.3 with 800 uniform cells of 0.2102 mm to 0.16819 m and one more to the wall; DST-16's cloud and
+tube inputs (d = 1 µm, f_VM0 = 1, A = 1.5e7 1/s, dH = 0, ν = 5.747e−5 m2/s, Le_VOL = 2, PCG on `p`);
+`-sealed -p0 101325`, Δt = 5e−5 s to 0.6 s; the igniter above at the apex. `tube20LCloud`: DST-16's
+tube at the sphere's dx and Δt (120 cells of 0.21 mm over 25.2 mm, the 2000 K igniter window on
+x ∈ [24.7, 25.2] mm), so S_u(p) and the sphere would share one discretisation (decision taken by
+recommendation; at DST-16's 50 µm the same mixture gave 0.061051 m/s, at 0.21 mm 0.067045, 9.8 %
+apart). Its speed is (159.23) fitted over the fronts at x_f ∈ [0.2 L, 0.7 L], a window by position
+because the run is 0.4 s long (37 fronts at 1 atm).
+
+**The compressed states** **[derived]**. Ahead of the flame the gas and the 1 µm cloud move
+together and share one temperature, so the unburned charge is compressed along the isentrope of a
+gas with an inert heat capacity in it. With C/ρ_g fixed under compression, `(ρ_g c_v,g + C c_P) dT =
+(p/ρ_g) dρ_g` integrates to (155.10)'s form with
+
+```
+  γ_u = (ρ_g0 c_p,g + C c_P) / (ρ_g0 c_v,g + C c_P) ,   c_v,g = c_p,g − R0 Σ_k Y_k/W_k          (159.27)
+  T_u(p) = T_0 (p/p_0)^((γ_u − 1)/γ_u) ,   C(p) = C_0 (p/p_0)^(1/γ_u)                            (159.28)
+```
+
+γ_u = 1.31305 for this charge (the gas alone has 1.39847), so the tube runs at p/p_0 = 3 and 6
+start at 389.83 K with C = 0.35596 kg/m3 and at 459.88 K with C = 0.60347 kg/m3. The particles'
+own volume is neglected, as in (159.21).
+
+**The reference** **[derived]**. S_u(p) between the three tube speeds is log-log linear (a power
+law on each segment, (157.9)'s form with α = 0), extended past the end nodes with the end segment's
+exponent:
+
+```
+  S_u(p) = S_i (p/p_i)^{n_i} ,   n_i = ln(S_{i+1}/S_i) / ln(p_{i+1}/p_i)                         (159.29)
+  t_half,ref = t_s + ∫_{p_s}^{p_half} dp / (dp/dt)_(157.4)(p) ,   p_half = (p_0 + p_e)/2           (159.30)
+```
+
+with (t_s, p_s) the anchor (157.11) of SPEC-LIT 157.9 and p_e the cloud's AICC p_v of (159.21). The
+integral is split at the table nodes inside it and taken by composite Simpson at 4096 intervals a
+piece; on an exact power law it equals `dust::vessel0d`'s RK4-plus-Simpson half time to 1e−8
+(`the_reference_half_time_is_vessel0d_s`). The run's own half time is the first upward crossing of
+p_half, linear between the logged steps.
+
+**The gate is a replay.** The long runs were made once, by the supervisor, and recorded:
+`cases/dust/records/sphere20LCloud.{f64,single}.json` hold, per build, the sphere's every logged
+step (t, p0, dp0/dt), each tube's every written 1000 K front, every run's end line and wall time,
+and the FNV-1a 64 of the case file each was made from. Section 93 of `ofgpu-validate` recomputes
+every row from them and the shipped cases in seconds, so it holds the plan's 8 minutes per build.
+A changed case no longer matches its record's hash, and that row fails until the runs are made again.
+
+**Rows** (section 93; the record of the build that runs it):
+
+| row | class | bar |
+|---|---|---|
+| the record reads, is this build's, and was made from the shipped sphere and tube cases | D | exact |
+| per tube p/p_0 = 1, 3, 6: T_u and C are (159.28)'s; the run completes; ≥ 4 fronts in the window | D | 1e−9; exact |
+| the sphere's run completes | D | exact |
+| `|p_end/p_v − 1|` | P | 0.5 % |
+| `|t_half,run/t_half,ref − 1|` | P | 5 % |
+| K_st,run = (dp/dt)_max V^{1/3}, and (157.5)'s K_st with S_u(p_e) | — | reported |
+| K_st against 200 bar m/s ± 15 % (H22 §2) | — | **NAMED and NOT RUN** |
+
+**Measured** (RTX 5070 Ti, 2026-10-19, shared with two other lanes; card time for the recorded runs
+26.6 min, for every probe about 35 min).
+
+| run | f64 | `single` |
+|---|---|---|
+| tube p/p_0 = 1 | completes, 8000 steps, 37 fronts, **S_u = 0.067045 m/s** (563 s) | completes, 37 fronts, **S_u = 0.067307 m/s** (980 s) |
+| tube p/p_0 = 3 | **stops** at the igniter after step 100: BAD_TEMPERATURE, cell 117 (16 s) | **stops**: OUTSIDE_THERMO_RANGE, cell 117 (10 s) |
+| tube p/p_0 = 6 | **stops** at the igniter: BAD_TEMPERATURE, cell 119 (5 s) | **stops**: BAD_TEMPERATURE, cell 119 (3 s) |
+| sphere | **stops** at step ≈ 135 as the kernel lights (T max 2616 K at step 130): BELOW_NEGATIVE_ATOL, cell 3 (16 s) | **stops** at step 2: Mach 6.2 in cell 4 (4 s) |
+
+DST-16's own 50 µm tube stops the same way at p/p_0 = 3 (BELOW_NEGATIVE_ATOL, cell 118) and 6
+(BAD_TEMPERATURE, cell 119) with its 2000 K wall, so the elevated-pressure stop is the Phase B
+finite-rate path at the igniter, not this tube's mesh.
+
+* **(a) p_end is MISSED**, both builds: the sphere does not complete. Had it burned, DST-08's sealed
+  sphere (§157.9 (iii)) predicts a miss as well: the explicit sealed p0 loses 5.5 % of the charge at
+  a pressure ratio of 9.4.
+* **(b) t_half is MISSED**, both builds: the table has S_u at p/p_0 = 1 only, and the sphere does not
+  reach p_half.
+* **(c)** K_st is not reported (no run burned); the measured 200 bar m/s is NAMED and NOT RUN.
+* **The cures, named and not built.** Lighting the sphere as the tube is lit needs a wall at its
+  centre: a hollow sector (an inner radius with a 2000 K inner wall, a mesh input) — new geometry
+  for §157.3's generator. The reactor's stops at the igniter at elevated pressure and in a
+  volumetrically heated kernel, and the single build's Mach stop, are the finite-rate path's and the
+  f32 flow path's numerics: the user's decision.
+
+Labels: (159.26)-(159.30).
 
 ---
 

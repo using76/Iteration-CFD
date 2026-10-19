@@ -365,6 +365,44 @@
         "hs"
       ]
     },
+    "JsonCloudIgniter": {
+      "description": "`dust.cloud.igniter` - the cloud's igniter of SPEC-LIT 159.12, (159.26):\n`q_ign = P` in the cells the radius selects, while the cloud's step\ncount is inside `duration`.",
+      "type": "object",
+      "properties": {
+        "duration": {
+          "description": "s, how long the source burns, tau_ig.",
+          "type": "number",
+          "format": "double"
+        },
+        "point": {
+          "description": "m, the ignition point x_ig, absolute.",
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "power": {
+          "description": "W/m3, the stated volumetric power P.",
+          "type": "number",
+          "format": "double"
+        },
+        "radius": {
+          "description": "m, the radius r_ig about x_ig that selects the cells.",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "point",
+        "radius",
+        "power",
+        "duration"
+      ]
+    },
     "JsonCombustion": {
       "description": "The `combustion` block (SPEC-LIT §137.2; the closures are §134).",
       "type": "object",
@@ -868,6 +906,17 @@
           "description": "epsilon_0 of (159.1), in [0, 1].",
           "type": "number",
           "format": "double"
+        },
+        "igniter": {
+          "description": "SPEC-LIT 159.12 (159.26)'s igniter: a volumetric heat source of\n`power` W/m3 in every cell whose centre lies within `radius` m of\n`point`, for `duration` s of the cloud's own step count; absent is\nno igniter, and the cloud runs bit for bit as without one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonCloudIgniter"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "parcelsPerCell": {
           "description": "Parcels per cell, the K of (159.12); absent is 1.",

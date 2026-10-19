@@ -1,0 +1,74 @@
+// Gate DST-B-VES's closed 20 L sphere (SPEC-LIT 159.12; docs/17 DST-17): the
+// Phase B dust cloud of DST-16's tube (cases/dust/flame1dCloud.jsonc, SPEC-LIT
+// 159.11) in a closed adiabatic 20 L sphere, laminar, centrally ignited, run
+// with -sealed -p0 101325. The equal-volume radius R = 0.1684 m on the 1-D
+// spherical sector of SPEC-LIT 157.3: 800 uniform cells of 0.21 mm out to
+// 0.16819 m and one more to the wall - the tube20LCloud.jsonc tube's dx, so
+// the sphere and its S_u(p) share one discretisation. The mixture is
+// phi = 0.62 of (152.1): C = 0.15418 kg/m3 of dust in air (O2 0.233, N2 the
+// inert). The cloud: d = 1 um, all volatile (f_VM0 = 1, no char, no ash),
+// devolatilisation A = 1.5e7 1/s, Ea 7.4e4 J/mol, dH 0 - authored inputs,
+// not a starch's measured kinetics (SPEC-LIT 151.8). nu, Le_VOL and the
+// numerics are the tube's (SPEC-LIT 133.12 (e), 159.11).
+// The sector has no wall at its centre, so the cloud's igniter lights it:
+// (159.26) of SPEC-LIT 159.12, 1e8 W/m3 in the cells within 2.1 mm of the
+// apex for the first 10 ms. As recorded (SPEC-LIT 159.12) this run stops on
+// the chemistry's negativity guard as the kernel lights; no input this gate
+// may change lit it.
+// The specification was informed by a review of FSCDustFoam (Huang &
+// Lipatnikov, GPL) and no code was copied.
+// No GPL-licensed source was consulted.
+{
+  "name": "sphere20LCloud",
+  "mesh": {
+    "kind": "cartesian",
+    "bounds": { "min": [0, 0, 0], "max": [0.1684, 0, 0] },
+    "cells": [800, 1, 1],
+    "boundaries": { "xmin": "apex", "xmax": "vessel", "ymin": "sideYmin",
+      "ymax": "sideYmax", "zmin": "sideZmin", "zmax": "sideZmax" },
+    "sector": { "angle": 90, "fineRadius": 0.16819, "growth": 1.0 }
+  },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 5.747e-5, "Pr": 0.7, "Prt": 0.85, "TRef": 300.0 },
+    "buoyancy": "densityRatio"
+  },
+  "patches": [
+    // The apex has no faces; it only needs a rule so every boundary name
+    // resolves (SPEC-LIT 157.3).
+    { "match": "apex", "kind": "symmetry" },
+    { "match": "vessel", "kind": "wall", "U": { "type": "fixedValue", "value": [0, 0, 0] }, "p": { "type": "zeroGradient" }, "T": { "type": "zeroGradient" } },
+    { "match": "side.*", "kind": "symmetry" }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 300.0, "p": 0.0 },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0, "Yi": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-8, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "Yi", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-10, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.6, "deltaT": 5e-5 },
+  "species": {
+    "names": ["VOL", "O2", "H2O", "CO2", "N2"],
+    "inert": "N2",
+    "transport": { "model": "lewis", "Le": { "VOL": 2.0 } },
+    "initial": { "VOL": 0.0, "O2": 0.233, "H2O": 0.0, "CO2": 0.0 }
+  },
+  "chemistry": { "mechanism": "../mech/volatile1.ck", "thermo": "../mech/tm4513_thermo.dat", "rtol": 1e-6, "atol": 1e-10 },
+  "combustion": { "model": "laminar" },
+  "dust": { "cloud": {
+    "concentration": 0.15418, "diameter": 1e-6, "parcelsPerCell": 1,
+    "composition": { "moisture": 0.0, "volatile": 1.0, "char": 0.0, "ash": 0.0 },
+    "rhoP": 1500, "cpP": 1500, "emissivity": 0.9,
+    "devolatilisation": { "A": 1.5e7, "Ea": 7.4e4, "dH": 0.0 },
+    "igniter": { "point": [0, 0, 0], "radius": 0.0021, "power": 1e8, "duration": 0.01 }
+  } }
+}

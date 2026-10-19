@@ -3799,11 +3799,15 @@ impl JsonCase {
         // The driver gate, after each stated region has been checked to
         // state something a gas law could carry: ONLY `ofgpu-compressible`
         // applies regions, so any other driver must not lower a case that
-        // names one - a run would silently ignore it.
-        if !initial_regions.is_empty() && compressible.is_none() {
+        // names one - a run would silently ignore it. SPEC-LIT 159.12: the
+        // exception is a case that states a dust.cloud - `ofgpu-lowmach`
+        // applies its regions as the hot kernel that lights the cloud.
+        let cloud_stated = self.dust.as_ref().and_then(|d| d.cloud.as_ref()).is_some();
+        if !initial_regions.is_empty() && compressible.is_none() && !cloud_stated {
             return Err(Error::Config(
                 "initial.regions: only ofgpu-compressible applies regions - the case must \
-                 state physics.compressible for its gas law to carry them (SPEC-LIT 125.8.1)"
+                 state physics.compressible for its gas law to carry them (SPEC-LIT 125.8.1); \
+                 ofgpu-lowmach applies them to a case that states a dust.cloud (SPEC-LIT 159.12)."
                     .to_string(),
             ));
         }
@@ -7267,6 +7271,101 @@ mod tests {
             .err().expect("a region at zero temperature")
             .to_string();
         assert!(e.contains("initial.regions[0].T"), "{e}");
+    }
+
+    /// SPEC-LIT 159.12: `initial.regions` lowers beside a `dust.cloud` -
+    /// the hot kernel `ofgpu-lowmach` lights a Phase B cloud with - while
+    /// the same regions without the cloud are still refused, the message
+    /// now naming the cloud exception.
+    #[test]
+    fn initial_regions_lower_beside_a_cloud() {
+        // The 4x1x1 box, non-compressible, all-wall: the species,
+        // chemistry and combustion blocks exactly as
+        // `lowmach_cloud::tests::box_case` states them, `dust` either the
+        // cloud block or gone, `regions` inside `initial`.
+        let cloud = r#""concentration": 0.012, "diameter": 1e-5, "parcelsPerCell": 2,
+    "composition": { "moisture": 0.05, "volatile": 0.75, "char": 0.15, "ash": 0.05 },
+    "rhoP": 1500, "cpP": 1500, "emissivity": 0.9,
+    "devolatilisation": { "A": 1.5e5, "Ea": 7.4e4, "dH": 1e5 },
+    "char": { "C0": 5e-12, "A": 2e-3, "Ea": 7.9e4, "hs": 0.3 }"#;
+        let regions = r#",
+                "regions": [ { "box": { "min": [-1, -1, -1], "max": [0.0015, 1, 1] }, "T": 2000 } ]"#;
+        let case = |dust: &str| {
+            format!(
+                r#"{{
+  "name": "cloudKernel",
+  "mesh": {{
+    "kind": "cartesian",
+    "bounds": {{ "min": [0, 0, 0], "max": [0.004, 0.001, 0.001] }},
+    "cells": [4, 1, 1],
+    "boundaries": {{ "xmin": "wallX0", "xmax": "wallX1", "ymin": "wallY0",
+      "ymax": "wallY1", "zmin": "wallZ0", "zmax": "wallZ1" }}
+  }},
+  "physics": {{
+    "gravity": [0, 0, 0],
+    "fluid": {{ "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 293.15 }},
+    "buoyancy": "densityRatio"
+  }},
+  "patches": [
+    {{
+      "match": ".*", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": [0, 0, 0] }},
+      "p": {{ "type": "zeroGradient" }},
+      "T": {{ "type": "zeroGradient" }}
+    }}
+  ],
+  "initial": {{ "U": [0, 0, 0], "T": 300, "p": 0.0{regions} }},
+  "species": {{
+    "names": ["VOL", "O2", "H2O", "CO2", "N2"], "inert": "N2",
+    "initial": {{ "VOL": 0.0, "O2": 0.233, "H2O": 0.0, "CO2": 0.0 }}, "patches": []
+  }},
+  "chemistry": {{ "mechanism": "volatile1.ck", "thermo": "tm4513_thermo.dat" }},
+  "combustion": {{ "model": "laminar" }},
+{dust}
+  "numerics": {{
+    "algorithm": {{ "kind": "PIMPLE", "correctors": 2 }},
+    "ddt": "Euler",
+    "div": {{ "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" }},
+    "grad": "Gauss linear",
+    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+    "relaxation": {{ "U": 1.0, "p": 1.0, "T": 1.0, "Yi": 1.0 }},
+    "solvers": [
+      {{ "match": "p", "solver": "PCG", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "Yi", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-14, "relTol": 0.0, "maxIter": 2000 }}
+    ]
+  }},
+  "run": {{ "endTime": 2e-4, "deltaT": 1e-5 }}
+}}"#,
+                regions = regions,
+                dust = dust,
+            )
+        };
+        let with = |dust: &str| {
+            read_case_jsonc_str(&case(dust), "cloudKernel").and_then(|c| c.lower())
+        };
+        let dust = format!(r#"  "dust": {{ "cloud": {{ {cloud} }} }},"#, cloud = cloud);
+        let l = with(&dust).expect("the kernel lowers beside the cloud");
+        assert_eq!(l.initial_regions.len(), 1, "the kernel lowers");
+        assert_eq!(l.initial_regions[0].min, [-1.0, -1.0, -1.0]);
+        assert_eq!(l.initial_regions[0].max, [0.0015, 1.0, 1.0]);
+        assert_eq!(l.initial_regions[0].t, Some(2000.0));
+        assert_eq!(l.initial_regions[0].u, None);
+        assert_eq!(l.initial_regions[0].p, None);
+        assert!(l.cloud.is_some(), "the cloud lowers beside the kernel");
+        // The same text without the `dust` key: the regions are still the
+        // compressible driver's alone, and the refusal names the exception.
+        let e = with("")
+            .err()
+            .expect("regions without the cloud stay refused")
+            .to_string();
+        assert!(
+            e.contains("initial.regions")
+                && e.contains("ofgpu-compressible")
+                && e.contains("SPEC-LIT 159.12"),
+            "{e}"
+        );
     }
 
     /// SPEC-LIT 125.8.1: [`LoweredCase::apply_initial_regions`] selects by

@@ -1268,7 +1268,7 @@ fn load_initial_fields(
             Some(other) => unreachable!("RasModel::dissipation_field only names epsilon/omega, got {other}"),
             None => (None, None),
         };
-        let fields = InitialFields {
+        let mut fields = InitialFields {
             u: lowered.u_field.to_raw(hm.n_cells),
             p: lowered.p_field.to_raw(hm.n_cells),
             t: need("T", &lowered.t_field)?,
@@ -1276,6 +1276,20 @@ fn load_initial_fields(
             diss,
             nut: lowered.nut_field.as_ref().map(|f| f.to_raw(hm.n_cells)),
         };
+        // SPEC-LIT 159.12: a case that states a dust.cloud may state a hot
+        // initial kernel - `initial.regions` (SPEC-LIT 125.8.1), which the
+        // lowering allows only beside a cloud for this driver. (159.12
+        // records that a 2000 K kernel does not light the phi = 0.62 cloud;
+        // the 20 L sphere uses the cloud's igniter, (159.26).) A case
+        // without regions takes this branch not at all, and runs bit for
+        // bit as before.
+        if !lowered.initial_regions.is_empty() {
+            let counts =
+                lowered.apply_initial_regions(hm, &mut fields.u, &mut fields.p, &mut fields.t)?;
+            for (i, n) in counts.iter().enumerate() {
+                println!("initial.regions[{i}]: {n} cells (SPEC-LIT 125.8.1, 159.12)");
+            }
+        }
         Ok((fields, Some(lowered)))
     } else {
         let t_name = find_start_time(case_path)?;
@@ -3644,6 +3658,17 @@ fn run(o: &Options) -> Result<RunEnd> {
             g(ce.left_mass),
             g(ce.left_e),
         );
+        // SPEC-LIT 159.12 (159.26): the igniter's ledger, beside the
+        // outflow's - the steps it burned, the cells it selected and the
+        // energy it put in.
+        if ce.ign_steps > 0 {
+            println!(
+                "dust cloud igniter (SPEC-LIT 159.12): {} steps over {} cells gave {} J",
+                ce.ign_steps,
+                ce.ign_cells,
+                g(ce.ign_e)
+            );
+        }
     }
     // Gate 68-B's readout, full precision, test builds only - it feeds no
     // output.
