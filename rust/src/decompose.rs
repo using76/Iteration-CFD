@@ -928,6 +928,11 @@ impl PartBuild<'_> {
         let mut b_weights = Vec::with_capacity(n_bf);
         let mut b_kind = Vec::with_capacity(n_bf);
         let mut b_patch = Vec::with_capacity(n_bf);
+        // SPEC-LIT 139.8 (PAR-13a): the processor-face marks and the stored
+        // WHOLE-mesh weights. Filled face by face with the arrays above, so
+        // they stay the same length by construction.
+        let mut b_proc = Vec::with_capacity(n_bf);
+        let mut b_proc_w = Vec::with_capacity(n_bf);
         let mut global_face: Vec<Label> = Vec::with_capacity(n_if + n_bf);
         global_face.extend(interior.iter().copied());
         let mut patches: Vec<PatchInfo> = Vec::new();
@@ -992,6 +997,11 @@ impl PartBuild<'_> {
                 b_weights.push(pick(&m.b_weights, bf, 1.0));
                 b_kind.push(pick(&m.b_kind, bf, pi.kind as Label));
                 b_patch.push(k as Label);
+                // An INHERITED face is a real boundary face of the whole mesh
+                // (or a cyclic couple the cut left whole): no processor face,
+                // no stored weight. SPEC-LIT 139.8.
+                b_proc.push(-1);
+                b_proc_w.push(0.0);
 
                 // The coupled neighbour: still owned here, or now in the halo.
                 let nc = m.b_nbr_cell[bf];
@@ -1067,6 +1077,12 @@ impl PartBuild<'_> {
                 } else {
                     crate::mesh::geometry::weight_from_offsets(b, a)
                 });
+                // SPEC-LIT 139.8: the side, and the WHOLE mesh's owner-side
+                // weight - stored, because the `weight_from_offsets` value
+                // just pushed cannot give it back (`1 - (1 - w)` is not `w`
+                // in floating point).
+                b_proc.push(if owns { 1 } else { 0 });
+                b_proc_w.push(m.weights[f]);
                 b_nbr_cell.push(self.halo_of[there]);
                 b_nbr_face.push(-1);
                 // Cyclic, NOT Processor. `PatchKind::Processor` is a host-side
@@ -1103,6 +1119,8 @@ impl PartBuild<'_> {
         pm.b_weights = b_weights;
         pm.b_kind = b_kind;
         pm.b_patch = b_patch;
+        pm.b_proc = b_proc;
+        pm.b_proc_w = b_proc_w;
         pm.patches = patches;
         pm.global_face = global_face;
 

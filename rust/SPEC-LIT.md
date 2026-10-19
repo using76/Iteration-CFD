@@ -54895,9 +54895,10 @@ contract (ORIGINAL). It has no external input.
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
-(§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11), and
-k-epsilon and SST on a part (§139.6, PAR-12), and decomposed I/O (§139.7,
-PAR-15).
+(§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11),
+k-epsilon and SST on a part (§139.6, PAR-12), decomposed I/O (§139.7,
+PAR-15), and the partition-invariant laplacian and Gauss gradients (§139.8,
+PAR-13a).
 
 This section defines no equation, so it carries no equation label.
 
@@ -55105,7 +55106,8 @@ interpolated face value itself differs in the last bits. Where a cell's
 Green-Gauss sum nearly cancels - a smooth field's gradient is small next to
 its face fluxes - a few reordered additions show up as many ulps of the
 result. The conditioning check is what shows the miss is the order of
-rounding and not a wrong value. PAR-13a makes the gradients bitwise. A
+rounding and not a wrong value. PAR-13a makes the gradients bitwise
+(§139.8: since then this gate measures 0 ulp in both builds). A
 part's p and momentum solves go through the SPMD Krylov solvers in §139.3
 (PAR-10b). No decomposed SIMPLE is gated here: that is PAR-10c.
 
@@ -55884,6 +55886,188 @@ view - it does not feed a solve. There is no parallel FILE system: every
 rank writes its own directory of one shared case, on one disk. MPI and
 multi-GPU are deferred: the ranks are `ThreadComm` threads, each with its
 own `Gpu::new(0)` on one card.
+
+### 139.8 The partition-invariant laplacian and Gauss gradients (PAR-13a)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §70 gave every row one global-face-ordered list so that APPLYING a
+matrix sums it in an order no partition can move, and §71.6 defined what a
+cut face's coefficients must BE: `internal_coeffs = 0`,
+`boundary_coeffs = -upper[g]` (this part owns `g`) or `-lower[g]`. ASSEMBLING
+on a part still went through the two old loops, and on a processor face that
+is different arithmetic four times over. §70.5's table names the assembly
+kernels and declines to convert them, on the ground that the boundary path's
+operands are not the internal path's; §71.3's part build removed that ground
+for the processor patches - every metric they carry is a copy or an exact
+negation of the whole mesh's - so only the loop and the weight were left.
+§139.2 measured the damage: the part gradients missed the whole mesh's by up
+to 82 ulp (f64) and 305 ulp (single) under the round robin, every miss on a
+cell touching a processor face, with the conditioning check showing each miss
+was the order of rounding and not a wrong value.
+
+Four facts, all measured on this tree (§70.5's table; §139.2's miss; the
+summation-order cost is Higham, *Accuracy and Stability of Numerical
+Algorithms*, 2nd ed., SIAM 2002, ch. 4, and exact negation is *IEEE Standard
+for Floating-Point Arithmetic*, IEEE Std 754-2019 - the two citations §70
+rests on):
+
+1. A processor face is a boundary face of kind `Cyclic` whose `b_nbr_cell`
+   is a halo cell. The Gauss gradient and `fvLapNonOrth` add its term in the
+   BOUNDARY loop - after all internal faces - while the whole mesh added the
+   same term in the INTERNAL loop at the face's global position, and float
+   addition is not associative (§70.1).
+2. On the side that does NOT own the global face, `b_weights` is
+   `weight_from_offsets(b, a)` (§71.3), not the whole mesh's `w_g`; and
+   `1 - (1 - w)` is not `w` in floating point, so `w_g` cannot be recovered
+   from the part's own array and has to be STORED.
+3. `fvLapBoundary` puts a coupled face's diagonal share in
+   `internal_coeffs`, which `lduAddBoundaryContributions` folds into `diag`
+   LATER, after the whole diagonal sum - while the whole mesh put the cut
+   face's share in `diag` inside `fvLapDiag`'s sum, at the face's place
+   among the internal faces. `split_matrix` (§71.6) defines the target: on a
+   cut face `internal_coeffs = 0` and `boundary_coeffs = -upper[g]` (this
+   part owns `g`) or `-lower[g]`.
+4. Everything else on a processor face is already exact:
+   `b_sf = owns ? sf[g] : -sf[g]`, `b_delta_coeffs = delta_coeffs[g]`,
+   `b_non_orth_corr = owns ? k[g] : -k[g]`, `b_mag_sf = mag_sf[g]` (§71.3);
+   IEEE negation is exact, so the operands only had to be PUT BACK.
+
+**What a part carries.** Two new per-boundary-face arrays on `HostMesh`,
+filled by `PartBuild::build` face by face with the rest, and one count on
+`GpuMesh`:
+
+| array | length | meaning |
+|---|---|---|
+| `b_proc` | `[n_bf]` or EMPTY | `-1` not a processor face (a real boundary face, or an inherited cyclic couple); `1` a processor face whose GLOBAL owner cell is on this part; `0` a processor face whose global owner is on the other part (this part's cell is the whole mesh's neighbour) |
+| `b_proc_w` | `[n_bf]` or EMPTY | the WHOLE mesh's `weights[g]` of a processor face - the owner-side weight, whichever side of the cut this part is on; `0` on every other face |
+| `n_proc_faces` | count | the entries of `b_proc` that are `>= 0`, counted once at upload |
+
+EMPTY means "no processor face", which is every mesh except a decomposed
+part - so every mesh that predates this subsection means what it always
+meant, and `GpuMesh::upload` fills an EMPTY `b_proc` with `-1` and a `0.0`
+`b_proc_w` of the right length. A `b_proc` of any other length is refused by
+name (`mesh: b_proc`), and a full `b_proc` beside a short `b_proc_w` is
+refused by name (`mesh: b_proc_w`), because the kernels read both arrays face
+by face and a short one is a read out of bounds rather than an error.
+
+**The rule.** The five twins appended to `cuda/fv.cu` each obey one rule:
+one thread per owned cell `c`, walking the MERGED row `j in [rf_offset[c],
+rf_offset[c+1])`, `f = rf_face[j]`, `fl = rf_flags[j]`, skipping `f < 0`.
+The row is ascending in GLOBAL face id, so the entries that are internal
+faces (`!(fl & RF_BOUNDARY)`) and processor faces (`fl & RF_BOUNDARY` and
+`b_proc[f] >= 0`) come first, in exactly the order the whole mesh's internal
+(cf) loop visits them, and the other boundary faces come after, in the whole
+mesh's boundary (bcf) order. For an internal entry, `owns = (fl & RF_OWNS)
+!= 0` and the term is computed by the SAME source expression, operand for
+operand and in the same written order, as the old kernel's internal loop -
+the expression is copied verbatim, which keeps nvcc's FMA contraction the
+same. For a processor entry `b`, the term is that SAME internal-face
+expression evaluated with the whole mesh's operands, rebuilt exactly from
+the part's arrays:
+
+| quantity | rebuild | why it is exact |
+|---|---|---|
+| `owns` | `b_proc[b] == 1` | the stored side |
+| `o_g` | `owns ? c : b_nbr_cell[b]` | this part's cell, or the ghost its exchange filled (§139.2: bitwise the owner's) |
+| `n_g` | `owns ? b_nbr_cell[b] : c` | the same two cells, seen from the other side |
+| `w_g` | `b_proc_w[b]` | STORED - fact 2, `1 - (1 - w)` is not `w` |
+| `Sf_g` | `owns ? b_sf[b] : -b_sf[b]` | IEEE negation is exact |
+| `k_g` | `owns ? b_non_orth_corr[b] : -b_non_orth_corr[b]` | the same |
+| `delta`, `gamma` | `b_delta_coeffs[b]`, `b_gamma_mag_sf[b]` ¹ | copies (§71.3) |
+
+and then `owns` plays the role `cf_own[j]` played. Every other boundary
+entry is the old kernel's boundary-loop body, unchanged, and after the loop
+comes the old kernel's final statement, unchanged.
+
+¹ the caller's boundary gamma on a processor face must be the whole mesh's
+INTERNAL-face `gamma_mag_sf[g]` - the value `gammaMagSf[g]` had when the
+whole mesh assembled. That is a CONVENTION on the caller (§139.4's decomposed
+SIMPLE does not carry it yet; that is PAR-14's); the tests below feed it
+directly.
+
+**The five twins.** Appended at the end of `cuda/fv.cu`; the old kernels are
+untouched, byte for byte:
+
+| old kernel | twin | what differs on a processor entry |
+|---|---|---|
+| `fvLapDiag` | `fvLapDiagPart` | the share `acc += bGammaMagSf*bDeltaCoeffs` joins the merged-row sum, at the face's global place among the internal faces, instead of coming through the fold |
+| `fvLapBoundary` | `fvLapBoundaryPart` | `coef = sign*g*delta` goes to `boundary_coeffs` ONLY; `internal_coeffs` stays at the zero the matrix was zeroed with. Every other face: fvLapBoundary's body unchanged (the processor check is FIRST - a processor face's kind is `Cyclic` and would otherwise take the coupled branch) |
+| `fvLapNonOrth` | `fvLapNonOrthPart` | the internal-face expression on `o_g, n_g, w_g, k_g, delta, gamma` - NO jump, NO `b_weights`, which an internal face never read - in place of the coupled branch |
+| `fvGradScalar` | `fvGradScalarPart` | `pf = w_g psi_o_g + (1 - w_g) psi_n_g` on the whole mesh's cells and weight, `Sf_g`, and NOT `bpsi[b]`: the evaluated boundary value of a processor face is the INTERPOLATED one, a different number from what the whole mesh's internal loop formed |
+| `fvGradVector` | `fvGradVectorPart` | the same, through all nine components, with `sg = owns ? 1 : -1` exactly as the internal loop's |
+
+`fvLapNonOrthPart`, `fvGradScalarPart` and `fvGradVectorPart` also take
+`b_nbr_cell` (the ghost index the rebuild table needs); each is launched with
+the mesh's `rf_offset`/`rf_face`/`rf_flags`, `b_proc` and `b_proc_w` in place
+of the cf/bcf CSR the old kernel took.
+
+**Why `internal_coeffs` is 0 on a processor face.** Because the whole mesh
+already put that face's diagonal share in `diag`, at the face's place in
+`fvLapDiag`'s sum - `fvLapDiagPart` puts the part's share in exactly that
+place of the merged row - and adding it again through the fold would double
+it. This is `split_matrix`'s own rule (§71.6), and it makes the fold
+(`lduAddBoundaryContributions`) a no-op on the face: with
+`internal_coeffs = 0` the fold adds `+0` after the inherited faces, and
+`x + 0.0` changes no bit (the fold's accumulator starts at `+0` and a sum
+that cancels to zero rounds to `+0`, so `x` is never `-0` there). So a part may be folded before or after it is
+split, and the folded comparison below holds bitwise as the unfolded one
+does.
+
+**The selection rule, and why the serial path cannot move.** `src/fv.rs`
+switches on `m.n_proc_faces > 0`:
+
+| call site | switch |
+|---|---|
+| `fvm_laplacian`, the diagonal block | `part_lap_diag` when `m.n_proc_faces > 0 && m.n_cells > 0`, else the old `fvLapDiag` launch |
+| `fvm_laplacian`, the boundary block | `part_lap_boundary` when `m.n_proc_faces > 0 && m.n_boundary_faces > 0`, else the old `fvLapBoundary` launch |
+| `fvm_laplacian_non_orth_correction` | `part_lap_non_orth`, then the skew step as before, then return; else the old launch |
+| `fvc_grad_scalar_scheme` / `fvc_grad_vector_scheme` | a new arm `GradBase::Gauss if m.n_proc_faces > 0` before the old `Gauss` arm; the limiter block after the match runs as before |
+
+No whole mesh and no P = 1 part has a processor face - `b_proc` is EMPTY or
+all `-1`, so `n_proc_faces` is 0 - so every existing launch runs exactly as
+today, and the twins launch ONLY on a part of a real cut. The `upper`/`lower`
+pass (`fvLapFaces`) is not switched: an internal face's coefficient is the
+same number on both sides of the cut already (§71.3).
+
+**The tests.** `tests/distflow_invariant.rs`, in BOTH builds, over both gate
+meshes of §139.2, P = 2, 3, 4, Hilbert, Linear and round robin, every rank a
+`ThreadComm` thread with its own `Gpu`:
+
+| test | what it holds |
+|---|---|
+| `processor_faces_carry_the_whole_mesh_side_and_weight` | host: the whole mesh's `b_proc` is empty; every part's `b_proc`/`b_proc_w` are face-sized; a cut face's mark is the side and its stored weight is bitwise the whole mesh's `weights[g]`; an inherited face is `-1`/`0`; the parts' processor faces total `2 n_cut_faces`. Device: a whole mesh uploads `n_proc_faces == 0`, each part's `n_proc_faces` is its mark count, and a part whose `b_proc_w` was truncated by one is refused with text starting `mesh: b_proc_w` |
+| `the_part_gradients_are_the_whole_mesh_gradients` | the §139.2 gradient run, compared BITWISE on every owned AND ghost cell, all 3 + 9 components, against the whole gradient at `global_cell[i]`; the count and the FIRST difference printed, and on any difference one `MISSED` line, not a panic. Asserted: components compared > 0, ghosts compared > 0, every rank `Ok` |
+| `the_part_laplacian_is_split_matrix_of_the_whole` | the whole mesh assembles a laplacian with even non-coupled faces `FixedValue` of the smooth psi and face gamma `mag_sf (2 + sin(3 x))`, runs the non-orthogonal correction against its own gradient, and downloads the matrix folded and unfolded; each rank assembles the same problem on its part (the boundary state copied onto inherited faces, gamma mapped through `global_face`, a processor face taking the whole mesh's INTERNAL gamma, the gradient HANDED over as `full_of` - not recomputed, so the test isolates the assembly) and both its matrices are BITWISE `split_matrix` of the whole's - `diag`/`source` on the owned cells, the rest whole. Differences print one `MISSED` line with the first coefficient; asserted: coefficients compared > 0, every rank `Ok` |
+
+**Measured (2026-10-19, RTX 5070 Ti, f64 and single alike).**
+`tests/distflow_invariant.rs`: 389 844 gradient components on 32 487 owned and
+ghost cells, **0 differ**; 345 480 laplacian coefficients, unfolded and
+folded, **0 differ**. §139.2's own gate (`tests/distflow.rs`) now holds its
+4-ulp line at **0 ulp** on all 211 680 owned components, normalised error 0,
+so the miss §139.2 records is closed. The serial path did not move: the
+golden hash of `ofgpu-validate -sections 1-10,13,16` - SHA-256 over every
+row's `kind, what, err, tol, ok, replayed, why, nonFinite, gate`, the fields
+`tools/f64_identity.py rows` compares - is `ec7face0...c587` (344 rows) in
+f64 and `1b12f14f...f084` (350 rows) in single, identical before and after
+this unit and stable over two runs each, and `f64_identity.py rows` reports
+the rows identical in both builds. In the f64 build the SASS of all 42
+pre-existing `cuda/fv.cu` kernels is identical function by function, and
+every other cubin is unchanged.
+
+**What this does not do.** The least-squares gradients and the
+skew-corrected gradient corrections are not switched by this unit: on a part
+their processor faces still take the coupled branch with the part's own
+`b_weights`, so they are not bitwise; the min/max limiters are already
+invariant (§70.5). The convection and flux
+kernels are PAR-13b. A bitwise decomposed SIMPLE is PAR-14: the laminar
+SIMPLE's own `b_gamma_mag_sf` on a processor face is still the interpolated
+one today, so a decomposed SIMPLE run is NOT bitwise through these kernels
+alone. And `lduNegSumDiag` / `lduAddBoundaryContributions`, which the plan
+row names, are not edited: the first is called only by tests, and the fold
+needs no change once a processor face's `internal_coeffs` is 0 - it adds
+`+0` there, which changes no bit.
 
 ---
 

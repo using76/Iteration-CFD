@@ -651,6 +651,15 @@ pub struct FvKernels {
     sn_grad_skew_internal: CudaFunction,
     reconstruct: CudaFunction,
     production: CudaFunction,
+
+    // SPEC-LIT 139.8 (PAR-13a): the part twins, launched ONLY on a mesh with
+    // processor faces (`GpuMesh::n_proc_faces > 0`), where they assemble the
+    // laplacian and both Gauss gradients bitwise as the whole mesh did.
+    lap_diag_part: CudaFunction,
+    lap_boundary_part: CudaFunction,
+    lap_non_orth_part: CudaFunction,
+    grad_scalar_part: CudaFunction,
+    grad_vector_part: CudaFunction,
 }
 
 impl FvKernels {
@@ -704,6 +713,12 @@ impl FvKernels {
             sn_grad_skew_internal: k.func("fvSnGradSkewInternal")?,
             reconstruct: k.func("fvReconstruct")?,
             production: k.func("fvProduction")?,
+
+            lap_diag_part: k.func("fvLapDiagPart")?,
+            lap_boundary_part: k.func("fvLapBoundaryPart")?,
+            lap_non_orth_part: k.func("fvLapNonOrthPart")?,
+            grad_scalar_part: k.func("fvGradScalarPart")?,
+            grad_vector_part: k.func("fvGradVectorPart")?,
         })
     }
 }
@@ -1445,7 +1460,13 @@ pub fn fvm_laplacian(
         }
     }
 
-    if m.n_cells > 0 {
+    // SPEC-LIT 139.8 (PAR-13a): on a part the diagonal is summed over the
+    // MERGED row, so a processor face's share lands where the whole mesh put
+    // it - inside fvLapDiag's sum. A whole mesh has no processor face and
+    // takes the path below, unchanged.
+    if m.n_proc_faces > 0 && m.n_cells > 0 {
+        part_lap_diag(gpu, k, a, m, gamma_mag_sf, b_gamma_mag_sf, sign)?;
+    } else if m.n_cells > 0 {
         let n = m.n_cells;
         let nl = n as Label;
         let f = k.lap_diag.clone();
@@ -1464,7 +1485,12 @@ pub fn fvm_laplacian(
         }
     }
 
-    if m.n_boundary_faces > 0 {
+    // The same selection for the boundary pass: on a part the processor
+    // faces' `internal_coeffs` stay 0 (split_matrix's rule, SPEC-LIT 71.6)
+    // and only `boundary_coeffs` is written.
+    if m.n_proc_faces > 0 && m.n_boundary_faces > 0 {
+        part_lap_boundary(gpu, k, a, m, b_gamma_mag_sf, psi, sign)?;
+    } else if m.n_boundary_faces > 0 {
         let n = m.n_boundary_faces;
         let nl = n as Label;
         let f = k.lap_boundary.clone();
@@ -1573,6 +1599,20 @@ pub fn fvm_laplacian_non_orth_correction(
     }
     let nl = n as Label;
     let alpha = sn_grad.alpha();
+
+    // SPEC-LIT 139.8 (PAR-13a): on a part the correction is summed over the
+    // MERGED row, so a processor face's term is the internal-face expression
+    // on the whole mesh's operands, in the whole mesh's place in the row -
+    // not the coupled branch a folded-in-half cyclic couple takes. The skew
+    // step (internal faces only) runs after it exactly as before, and
+    // nothing else in this function runs.
+    if m.n_proc_faces > 0 {
+        part_lap_non_orth(gpu, k, a, m, gamma_mag_sf, b_gamma_mag_sf, psi, grad_psi, alpha, sign)?;
+        if sn_grad.skew() {
+            fvm_laplacian_skew_correction(gpu, k, a, m, gamma_mag_sf, grad_psi, sign)?;
+        }
+        return Ok(());
+    }
 
     let f = k.lap_non_orth.clone();
     unsafe {
@@ -1864,6 +1904,13 @@ pub fn fvc_grad_scalar_scheme(
     let nl = n as Label;
 
     match scheme.base {
+        // SPEC-LIT 139.8 (PAR-13a): on a part, Gauss over the MERGED row, so
+        // a processor face's face value is formed from the whole mesh's
+        // weight and the whole mesh's two cells - the internal-face
+        // arithmetic - and lands in the whole mesh's place in the sum.
+        GradBase::Gauss if m.n_proc_faces > 0 => {
+            part_grad_scalar(gpu, k, out, psi, m)?;
+        }
         GradBase::Gauss => {
             let f = k.grad_scalar.clone();
             unsafe {
@@ -1971,6 +2018,10 @@ pub fn fvc_grad_vector_scheme(
     let nl = n as Label;
 
     match scheme.base {
+        // SPEC-LIT 139.8 (PAR-13a): the vector twin - see the scalar arm.
+        GradBase::Gauss if m.n_proc_faces > 0 => {
+            part_grad_vector(gpu, k, out, u, m)?;
+        }
         GradBase::Gauss => {
             let f = k.grad_vector.clone();
             unsafe {
@@ -2633,6 +2684,207 @@ pub fn turbulence_production(
             .launch(cfg_for(n_cells))?;
     }
 
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT 139.8 (PAR-13a): the part launches
+//
+//  Private, and called only under the `n_proc_faces > 0` selection above: a
+//  whole mesh and every P = 1 part has no processor face, so no existing
+//  caller ever reaches these. Each passes the mesh's merged row map and the
+//  processor-face marks; the operands land on the twins in the order the
+//  kernels declare them.
+// ==========================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn part_lap_diag(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    gamma_mag_sf: &DevBuf<Scalar>,
+    b_gamma_mag_sf: &DevBuf<Scalar>,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.lap_diag_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.diag)
+            .arg(gamma_mag_sf)
+            .arg(&m.delta_coeffs)
+            .arg(b_gamma_mag_sf)
+            .arg(&m.b_delta_coeffs)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_lap_boundary(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    b_gamma_mag_sf: &DevBuf<Scalar>,
+    psi: &GpuScalarField,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_boundary_faces;
+    let nl = n as Label;
+    let f = k.lap_boundary_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.internal_coeffs)
+            .arg(&mut a.boundary_coeffs)
+            .arg(b_gamma_mag_sf)
+            .arg(&m.b_delta_coeffs)
+            .arg(&psi.fr)
+            .arg(&psi.ref_value)
+            .arg(&psi.ref_grad)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_lap_non_orth(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    gamma_mag_sf: &DevBuf<Scalar>,
+    b_gamma_mag_sf: &DevBuf<Scalar>,
+    psi: &GpuScalarField,
+    grad_psi: &DevBuf<Vec3>,
+    alpha: Scalar,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.lap_non_orth_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.source)
+            .arg(gamma_mag_sf)
+            .arg(&m.non_orth_corr)
+            .arg(&m.weights)
+            .arg(&m.delta_coeffs)
+            .arg(&psi.f)
+            .arg(grad_psi)
+            .arg(b_gamma_mag_sf)
+            .arg(&m.b_sf)
+            .arg(&m.b_mag_sf)
+            .arg(&m.b_cf)
+            .arg(&m.b_delta_coeffs)
+            .arg(&m.b_non_orth_corr)
+            .arg(&m.b_nbr_cell)
+            .arg(&psi.jump)
+            .arg(&m.b_weights)
+            .arg(&psi.fr)
+            .arg(&psi.ref_value)
+            .arg(&psi.ref_grad)
+            .arg(&m.c)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.b_proc_w)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&alpha)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_grad_scalar(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Vec3>,
+    psi: &GpuScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.grad_scalar_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(&psi.f)
+            .arg(&psi.bf)
+            .arg(&m.weights)
+            .arg(&m.sf)
+            .arg(&m.b_sf)
+            .arg(&m.v)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.b_nbr_cell)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.b_proc_w)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_grad_vector(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Tensor>,
+    u: &GpuVectorField,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.grad_vector_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(&u.f)
+            .arg(&u.bf)
+            .arg(&m.weights)
+            .arg(&m.sf)
+            .arg(&m.b_sf)
+            .arg(&m.v)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.b_nbr_cell)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.b_proc_w)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
     Ok(())
 }
 

@@ -2842,3 +2842,501 @@ extern "C" __global__ void fvProduction
 
     G[c] = nut[c]*(dd - ((ofscalar)2/(ofscalar)3)*tr*tr);
 }
+
+
+// ==========================================================================
+//  SPEC-LIT 139.8 (PAR-13a): the part twins
+// ==========================================================================
+//
+//  Five kernels that re-express the ASSEMBLY sums above over the merged row
+//  map of SPEC-LIT S70, so a decomposed part assembles the laplacian and both
+//  Gauss gradients BITWISE as the whole mesh did. The rule every twin obeys:
+//
+//  One thread per owned cell c, walking the MERGED row j in
+//  [rfOffset[c], rfOffset[c+1]), f = rfFace[j], fl = rfFlags[j], skipping
+//  f < 0. The row is ascending in GLOBAL face id, so the entries that are
+//  internal faces (!(fl & OFGPU_RF_BOUNDARY)) and processor faces
+//  (fl & OFGPU_RF_BOUNDARY and bProc[f] >= 0) come first, in exactly the
+//  order the whole mesh's internal (cf) loop visits them, and the other
+//  boundary faces come after, in the whole mesh's boundary (bcf) order.
+//
+//  For an internal entry, owns = (fl & OFGPU_RF_OWNS) != 0 and the term is
+//  computed by the SAME source expression, operand for operand and in the
+//  same written order, as the old kernel's internal loop (the expression is
+//  copied, which keeps nvcc's FMA contraction the same). For a processor
+//  entry b, the term is that SAME internal-face expression evaluated with
+//  the whole mesh's operands, rebuilt exactly from the part's arrays:
+//
+//      owns  = (bProc[b] == 1)    this part holds the whole mesh's OWNER cell
+//      n     = bNbrCell[b]        the ghost (halo) cell
+//      o_g   = owns ? c : n       the whole mesh's owner cell, LOCAL index
+//      n_g   = owns ? n : c       the whole mesh's neighbour cell, LOCAL index
+//      w_g   = bProcW[b]          the whole mesh's weight (STORED, not
+//                                 recovered: 1 - (1 - w) is not w)
+//      Sf_g  = owns ? bSf[b] : -bSf[b]          (exact: IEEE negation)
+//      k_g   = owns ? bNonOrthCorr[b] : -bNonOrthCorr[b]
+//      delta = bDeltaCoeffs[b]    gamma = bGammaMagSf[b]
+//
+//  and then `owns` plays the role `cfOwn[j]` played. Every other boundary
+//  entry is the old kernel's boundary-loop body, unchanged. After the loop,
+//  the old kernel's final statement, unchanged.
+//
+//  Launched ONLY when the mesh has processor faces (GpuMesh::n_proc_faces
+//  > 0); a whole mesh and every P = 1 part never reach them, so the serial
+//  path cannot move by one bit.
+
+//- fvLapDiag's twin: the diagonal, with a processor face's share folded into
+//  the SAME sum the whole mesh folded it into, at the same place in the row.
+extern "C" __global__ void fvLapDiagPart
+(
+    ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ gammaMagSf,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofscalar* __restrict__ bGammaMagSf,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            acc += gammaMagSf[f]*deltaCoeffs[f];
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The whole mesh's internal face g: fvLapDiag's cf loop added
+            // this share there, so the part adds it here - same operands,
+            // same place in the row.
+            acc += bGammaMagSf[f]*bDeltaCoeffs[f];
+        }
+        // Every other boundary face: nothing, exactly as fvLapDiag's cf loop
+        // never saw it. Its diagonal share (if any) belongs to
+        // fvLapBoundary/part and the fold, not here.
+    }
+
+    diag[c] -= sign*acc;
+}
+
+
+//- fvLapBoundary's twin: one thread per boundary face, the same body, except
+//  that a processor face writes ONLY its boundary_coeffs - the off-diagonal
+//  half, `-coef`, exactly the whole mesh's upper[g]/lower[g] negated, which
+//  is split_matrix's rule (SPEC-LIT 71.6). Its internal_coeffs stays at the zero the
+//  matrix was zeroed with: the diagonal share is already in `diag` through
+//  fvLapDiagPart, and lduAddBoundaryContributions then folds a +0 there,
+//  which changes no bit.
+extern "C" __global__ void fvLapBoundaryPart
+(
+    ofscalar* __restrict__ internalCoeffs,
+    ofscalar* __restrict__ boundaryCoeffs,
+    const ofscalar* __restrict__ bGammaMagSf,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofscalar* __restrict__ fr,
+    const ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ refGrad,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    ofscalar sign,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+
+    // FIRST: a processor face is of kind Cyclic and would otherwise take the
+    // coupled branch below. It is not a couple - it is the whole mesh's
+    // internal face g, and its target shape is split_matrix's.
+    if (bProc[i] >= 0)
+    {
+        const ofscalar g = bGammaMagSf[i];
+        const ofscalar delta = bDeltaCoeffs[i];
+
+        const ofscalar coef = sign*g*delta;
+        boundaryCoeffs[i] += -coef;
+        return;
+    }
+
+    // From here, fvLapBoundary's body unchanged.
+    const oflabel kind = bKind[i];
+    if (kind == OFPATCH_EMPTY) return;
+
+    const ofscalar g = bGammaMagSf[i];
+    const ofscalar delta = bDeltaCoeffs[i];
+
+    if (kind == OFPATCH_CYCLIC)
+    {
+        // snGrad = Delta_b (psi_nbr - psi_P) across the couple; see
+        // fvLapBoundary for the reasoning.
+        const ofscalar coef = sign*g*delta;
+        internalCoeffs[i] += -coef;
+        boundaryCoeffs[i] += -coef;
+        return;
+    }
+
+    if (kind == OFPATCH_INTERFACE)
+    {
+        // SPEC-LIT 47.3: the series conductance taken DIRECTLY; see
+        // fvLapBoundary.
+        const ofscalar coef = sign*g;
+        internalCoeffs[i] += -coef;
+        boundaryCoeffs[i] += -coef;
+        return;
+    }
+
+    const ofscalar f0 = fr[i];
+    internalCoeffs[i] += sign*g*bcGradInternal(f0, delta);
+    boundaryCoeffs[i] += -sign*g*bcGradBoundary(f0, refValue[i], refGrad[i], delta);
+}
+
+
+//- fvLapNonOrth's twin: the explicit non-orthogonal correction over the
+//  merged row. A processor face takes the INTERNAL-face expression on the
+//  whole mesh's operands (the table above) - NOT the coupled branch, which is
+//  the arithmetic a folded-in-half couple gets and not the arithmetic the
+//  whole mesh applied to this face when it was internal. No jump, no
+//  bWeights: internal faces read neither.
+extern "C" __global__ void fvLapNonOrthPart
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ gammaMagSf,
+    const ofvec3* __restrict__ nonOrthCorr,
+    const ofscalar* __restrict__ w,
+    const ofscalar* __restrict__ deltaCoeffs,
+    const ofscalar* __restrict__ psi,
+    const ofvec3* __restrict__ gradPsi,
+    const ofscalar* __restrict__ bGammaMagSf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const ofvec3* __restrict__ bCf,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofvec3* __restrict__ bNonOrthCorr,
+    const oflabel* __restrict__ bNbrCell,
+    const ofscalar* __restrict__ bJump,
+    const ofscalar* __restrict__ bWeights,
+    const ofscalar* __restrict__ fr,
+    const ofscalar* __restrict__ refValue,
+    const ofscalar* __restrict__ refGrad,
+    const ofvec3* __restrict__ C,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    ofscalar alpha,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    // fvLapNonOrth declares this between its two loops; the merged row has
+    // one loop, so it is declared here. The same load, the same value.
+    const ofvec3 gP = gradPsi[c];
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvLapNonOrth's internal-loop body, verbatim.
+            const oflabel o = owner[f];
+            const oflabel n = neighbour[f];
+
+            const ofvec3 gf = faceGrad(gradPsi[o], gradPsi[n], w[f]);
+
+            const ofscalar corr = dot3(nonOrthCorr[f], gf);
+            const ofscalar orth = deltaCoeffs[f]*(psi[n] - psi[o]);
+
+            const ofscalar t =
+                gammaMagSf[f]*snGradLimitScale(alpha, orth, corr)*corr;
+
+            acc += (fl & OFGPU_RF_OWNS) ? t : -t;
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same expression, on the whole mesh's operands (139.8).
+            const oflabel owns = (bProc[f] == 1);
+            const oflabel n = bNbrCell[f];
+            const oflabel o_g = owns ? c : n;
+            const oflabel n_g = owns ? n : c;
+            const ofscalar w_g = bProcW[f];
+
+            const ofvec3 gf = faceGrad(gradPsi[o_g], gradPsi[n_g], w_g);
+
+            const ofvec3 k0 = bNonOrthCorr[f];
+            const ofvec3 kg = owns ? k0 : mkvec(-k0.x, -k0.y, -k0.z);
+
+            const ofscalar corr = dot3(kg, gf);
+            const ofscalar orth = bDeltaCoeffs[f]*(psi[n_g] - psi[o_g]);
+
+            const ofscalar t =
+                bGammaMagSf[f]*snGradLimitScale(alpha, orth, corr)*corr;
+
+            acc += owns ? t : -t;
+        }
+        else
+        {
+            // fvLapNonOrth's boundary-loop body, unchanged.
+            const oflabel b = f;
+            const oflabel kind = bKind[b];
+            if (kind == OFPATCH_EMPTY) continue;
+
+            //- SPEC-LIT 47.3: a conjugate interface is skipped; see
+            //  fvLapNonOrth.
+            if (kind == OFPATCH_INTERFACE) continue;
+
+            ofscalar corr;
+            ofscalar orth;
+
+            if (kind == OFPATCH_CYCLIC)
+            {
+                const oflabel n = bNbrCell[b];
+                if (n < 0) continue;   // named but not yet paired
+
+                const ofvec3 gf = faceGrad(gP, gradPsi[n], bWeights[b]);
+
+                corr = dot3(bNonOrthCorr[b], gf);
+                orth = bDeltaCoeffs[b]*(fvCoupledNbr(psi[n], bJump[b]) - psi[c]);
+            }
+            else
+            {
+                const ofvec3 kb = boundaryCorrVector
+                (
+                    bSf[b], bMagSf[b], bCf[b], C[c], bDeltaCoeffs[b]
+                );
+
+                corr = fr[b]*dot3(kb, gP);
+
+                orth =
+                    bcGradInternal(fr[b], bDeltaCoeffs[b])*psi[c]
+                  + bcGradBoundary(fr[b], refValue[b], refGrad[b], bDeltaCoeffs[b]);
+            }
+
+            acc += bGammaMagSf[b]*snGradLimitScale(alpha, orth, corr)*corr;
+        }
+    }
+
+    source[c] -= sign*acc;
+}
+
+
+//- fvGradScalar's twin: the Green-Gauss SCALAR gradient over the merged row.
+//  A processor face's face value is `w_g psi_o_g + (1 - w_g) psi_n_g` - the
+//  whole mesh's weight on the whole mesh's two cells - and it must NOT read
+//  `bpsi[b]` there: the evaluated boundary value of a processor face is the
+//  INTERPOLATED one, which is a different number from what the whole mesh's
+//  internal loop formed.
+extern "C" __global__ void fvGradScalarPart
+(
+    ofvec3* __restrict__ g,
+    const ofscalar* __restrict__ psi,
+    const ofscalar* __restrict__ bpsi,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ Sf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar ax = 0, ay = 0, az = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvGradScalar's internal-loop body, verbatim.
+            const ofscalar wf = w[f];
+            const ofscalar pf = wf*psi[owner[f]] + (1 - wf)*psi[neighbour[f]];
+
+            const ofvec3 s = Sf[f];
+            const ofscalar v = (fl & OFGPU_RF_OWNS) ? pf : -pf;
+
+            ax += s.x*v; ay += s.y*v; az += s.z*v;
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same expression on the whole mesh's operands (139.8).
+            const oflabel owns = (bProc[f] == 1);
+            const oflabel n = bNbrCell[f];
+            const oflabel o_g = owns ? c : n;
+            const oflabel n_g = owns ? n : c;
+            const ofscalar w_g = bProcW[f];
+
+            const ofscalar pf = w_g*psi[o_g] + (1 - w_g)*psi[n_g];
+
+            const ofvec3 s0 = bSf[f];
+            const ofvec3 s = owns ? s0 : mkvec(-s0.x, -s0.y, -s0.z);
+            const ofscalar v = owns ? pf : -pf;
+
+            ax += s.x*v; ay += s.y*v; az += s.z*v;
+        }
+        else
+        {
+            // fvGradScalar's boundary-loop body, unchanged.
+            if (bKind[f] == OFPATCH_EMPTY) continue;
+
+            const ofvec3 s = bSf[f];
+            const ofscalar pf = bpsi[f];
+
+            ax += s.x*pf; ay += s.y*pf; az += s.z*pf;
+        }
+    }
+
+    const ofscalar rv = 1/V[c];
+    g[c] = mkvec(ax*rv, ay*rv, az*rv);
+}
+
+
+//- fvGradVector's twin: the Green-Gauss VECTOR gradient over the merged row,
+//  the same rule as fvGradScalarPart with the nine components.
+extern "C" __global__ void fvGradVectorPart
+(
+    oftensor* __restrict__ g,
+    const ofvec3* __restrict__ u,
+    const ofvec3* __restrict__ bu,
+    const ofscalar* __restrict__ w,
+    const ofvec3* __restrict__ Sf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    oftensor t;
+    t.xx = 0; t.xy = 0; t.xz = 0;
+    t.yx = 0; t.yy = 0; t.yz = 0;
+    t.zx = 0; t.zy = 0; t.zz = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvGradVector's internal-loop body, verbatim.
+            const ofscalar wf = w[f];
+
+            const ofvec3 uo = u[owner[f]];
+            const ofvec3 un = u[neighbour[f]];
+            const ofvec3 uf = mkvec
+            (
+                wf*uo.x + (1 - wf)*un.x,
+                wf*uo.y + (1 - wf)*un.y,
+                wf*uo.z + (1 - wf)*un.z
+            );
+
+            const ofvec3 s0 = Sf[f];
+            const ofscalar sg = (fl & OFGPU_RF_OWNS) ? (ofscalar)1 : (ofscalar)-1;
+            const ofvec3 s = mkvec(sg*s0.x, sg*s0.y, sg*s0.z);
+
+            t.xx += s.x*uf.x; t.xy += s.x*uf.y; t.xz += s.x*uf.z;
+            t.yx += s.y*uf.x; t.yy += s.y*uf.y; t.yz += s.y*uf.z;
+            t.zx += s.z*uf.x; t.zy += s.z*uf.y; t.zz += s.z*uf.z;
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same expression on the whole mesh's operands (139.8).
+            const oflabel owns = (bProc[f] == 1);
+            const oflabel n = bNbrCell[f];
+            const oflabel o_g = owns ? c : n;
+            const oflabel n_g = owns ? n : c;
+            const ofscalar w_g = bProcW[f];
+
+            const ofvec3 uo = u[o_g];
+            const ofvec3 un = u[n_g];
+            const ofvec3 uf = mkvec
+            (
+                w_g*uo.x + (1 - w_g)*un.x,
+                w_g*uo.y + (1 - w_g)*un.y,
+                w_g*uo.z + (1 - w_g)*un.z
+            );
+
+            const ofvec3 s0 = owns
+                ? bSf[f]
+                : mkvec(-bSf[f].x, -bSf[f].y, -bSf[f].z);
+            const ofscalar sg = owns ? (ofscalar)1 : (ofscalar)-1;
+            const ofvec3 s = mkvec(sg*s0.x, sg*s0.y, sg*s0.z);
+
+            t.xx += s.x*uf.x; t.xy += s.x*uf.y; t.xz += s.x*uf.z;
+            t.yx += s.y*uf.x; t.yy += s.y*uf.y; t.yz += s.y*uf.z;
+            t.zx += s.z*uf.x; t.zy += s.z*uf.y; t.zz += s.z*uf.z;
+        }
+        else
+        {
+            // fvGradVector's boundary-loop body, unchanged.
+            if (bKind[f] == OFPATCH_EMPTY) continue;
+
+            const ofvec3 s = bSf[f];
+            const ofvec3 uf = bu[f];
+
+            t.xx += s.x*uf.x; t.xy += s.x*uf.y; t.xz += s.x*uf.z;
+            t.yx += s.y*uf.x; t.yy += s.y*uf.y; t.yz += s.y*uf.z;
+            t.zx += s.z*uf.x; t.zy += s.z*uf.y; t.zz += s.z*uf.z;
+        }
+    }
+
+    const ofscalar rv = 1/V[c];
+
+    t.xx *= rv; t.xy *= rv; t.xz *= rv;
+    t.yx *= rv; t.yy *= rv; t.yz *= rv;
+    t.zx *= rv; t.zy *= rv; t.zz *= rv;
+
+    g[c] = t;
+}
