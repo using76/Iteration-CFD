@@ -667,7 +667,6 @@ mod tests {
     /// `coarsen_then_refine_loses_information_at_the_order_the_prolongation_promises`
     /// measures it.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn refine_then_coarsen_returns_the_field_to_round_off() {
         for mode in [Prolongation::Constant, Prolongation::LimitedLinear] {
             let f = Forest::uniform([8, 8, 8], CUBE).unwrap();
@@ -697,7 +696,8 @@ mod tests {
                 worst_rho = worst_rho.max((down.rho[c] - rho[c]).abs() / rho[c].abs());
             }
             assert!(
-                worst_phi < 1e-14 && worst_rho < 1e-14,
+                (worst_phi as f64) < crate::precision::roundoff_tol(1e-14)
+                    && (worst_rho as f64) < crate::precision::roundoff_tol(1e-14),
                 "{mode:?}: the round trip is not round-off: phi {worst_phi:e}, \
                  rho {worst_rho:e}"
             );
@@ -793,7 +793,6 @@ mod tests {
     /// rescale divides by (near) zero; the recentred reconstruction is exact
     /// and finite on the same data.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_multiplicative_rescale_is_singular_where_the_recentred_form_is_not() {
         let f = Forest::uniform([4, 4, 4], CUBE).unwrap();
         let r = f.build().unwrap();
@@ -840,7 +839,6 @@ mod tests {
     /// whole conservation argument, so it is asserted directly rather than
     /// only through its consequences.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_conservative_weights_sum_to_one() {
         let f = Forest::uniform([6, 6, 6], CUBE).unwrap();
         let r = f.build().unwrap();

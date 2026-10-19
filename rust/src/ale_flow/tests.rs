@@ -82,6 +82,7 @@ fn seat_stroke(
 /// F1 - the OPEN piston keeps its uniform state through the whole SIMPLE
 /// loop, euler and backward, in both convective forms.
 #[test]
+// f32 (F32-17): the uniform state error 2.5e-5 is past the 1e-5 cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_piston_keeps_the_uniform_state_through_the_simple_loop() {
     let Some(gpu) = gpu() else { return };
@@ -128,6 +129,7 @@ fn the_piston_keeps_the_uniform_state_through_the_simple_loop() {
 /// F2 - the stroking outlet's time order, three step counts through the grid
 /// study, and the extrapolation toward the exact value.
 #[test]
+// f32 (F32-17): an observed order band, 2.74 against 2, is a physics band
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_105b_the_stroking_outlet_has_the_scheme_time_order() {
     let Some(gpu) = gpu() else { return };
@@ -232,7 +234,6 @@ fn the_relative_flux_and_the_wall_value_are_what_they_say_bitwise() {
 /// F4 - a mesh that is attached and NEVER moves gives the static answer: the
 /// same ten steps with and without a motion, fields agreeing to 1e-12.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_mesh_that_is_attached_and_never_moves_gives_the_static_answer() {
     let Some(gpu) = gpu() else { return };
     let rig = stroke_rig(PatchMotion::Fixed).expect("never-moving rig");
@@ -309,9 +310,9 @@ fn a_mesh_that_is_attached_and_never_moves_gives_the_static_answer() {
     let r_p = rel_s(&a.1, &b.1);
     let r_phi = rel_s(&a.2, &b.2).max(rel_s(&a.3, &b.3));
     println!("  static vs never-moving: U {r_u:.3e}, p {r_p:.3e}, phi {r_phi:.3e}");
-    assert!(r_u <= 1e-12, "U {r_u:.3e}");
-    assert!(r_p <= 1e-12, "p {r_p:.3e}");
-    assert!(r_phi <= 1e-12, "phi {r_phi:.3e}");
+    assert!((r_u as f64) <= crate::precision::roundoff_tol(1e-12), "U {r_u:.3e}");
+    assert!((r_p as f64) <= crate::precision::roundoff_tol(1e-12), "p {r_p:.3e}");
+    assert!((r_phi as f64) <= crate::precision::roundoff_tol(1e-12), "phi {r_phi:.3e}");
 }
 
 /// F5 - `attach_motion` and `move_mesh` refuse, each by name. (c) - the fan

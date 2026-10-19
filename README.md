@@ -10,7 +10,7 @@
 
 시간 적분 루프 전체가 GPU에 머무르도록 설계된 비정렬 격자 유한체적 CFD 솔버입니다. 메쉬와 필드를 한 번 업로드한 뒤에는 시간 루프 안에서 장치 메모리 할당도, 필드 데이터의 호스트 전송도 발생하지 않습니다. **단일 GPU 전용**이며, 쓰임새는 비압축성·저마하 유동입니다 — RANS/LES/하이브리드 난류, 부력 플룸, 가변밀도 저마하 유동, 2상 VOF, 켤레 열전달, 면대면 복사, 라그랑주 분무, 팬과 다공성 점프를 갖춘 환기 및 데이터센터 기류. 수치 코어 전체를 공개 문헌으로부터 직접 구현했으며 모든 수식은 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md)에 원논문 인용과 함께 명세되어 있습니다. 검증은 인위해법(MMS), 해석해, 공개 벤치마크를 사용합니다. **비교가 불충분합니다. 많은 도움 부탁드립니다.**
 
-Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으로 단정밀도), 대상은 NVIDIA GPU 한 장. 직접 의존성은 일곱 크레이트 — `cudarc`, `jsonc-parser`, `schemars`, `serde`, `serde_json`, `serde_path_to_error`, `thiserror`(`rust/Cargo.toml`의 `[dependencies]`; 빌드 스크립트에는 `anyhow`가 하나 더 붙습니다) — 이며, 해석된 그래프는 27개 패키지(이 크레이트에 26개를 더한 수)로 전부 [`NOTICE`](NOTICE)에 각자가 실리는 조항과 함께 이름이 올라 있습니다. AMGX는 여전히 선택 기능입니다.
+Rust 1.85 호스트에 CUDA C++ 커널, 배정밀도 기본(`single` 기능으로 단정밀도 — 지원 구성이며, 섹션별 측정·열린 결함·속도와 메모리는 [`rust/SPEC-LIT.md`](rust/SPEC-LIT.md) §112.4–112.6), 대상은 NVIDIA GPU 한 장. 직접 의존성은 일곱 크레이트 — `cudarc`, `jsonc-parser`, `schemars`, `serde`, `serde_json`, `serde_path_to_error`, `thiserror`(`rust/Cargo.toml`의 `[dependencies]`; 빌드 스크립트에는 `anyhow`가 하나 더 붙습니다) — 이며, 해석된 그래프는 27개 패키지(이 크레이트에 26개를 더한 수)로 전부 [`NOTICE`](NOTICE)에 각자가 실리는 조항과 함께 이름이 올라 있습니다. AMGX는 여전히 선택 기능입니다.
 
 ---
 

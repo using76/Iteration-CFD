@@ -2169,6 +2169,15 @@ pub struct Energy<'m> {
     /// built the first time [`Self::update_target_divergence`] meets a gas
     /// with a mixture. `None` until then.
     mix: Option<MixConstraint>,
+
+    /// SPEC-LIT 139.5 (PAR-11): `T`'s solve through a part's SPMD Krylov.
+    /// `None` keeps [`crate::solver::solve`], and every launch this module
+    /// ever made, bit for bit.
+    route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>,
+    /// SPEC-LIT 139.5: `T`'s halo + boundary evaluation on a part, over
+    /// [`crate::distflow::RankCtx`]. `None` keeps the rank-local
+    /// `correct_boundary_conditions` this module always ran.
+    exchange: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
 }
 
 /// [`Energy`]'s half of SPEC-LIT 133.10: `energyMixtureConstraint`, the
@@ -2251,6 +2260,8 @@ impl<'m> Energy<'m> {
             k_curve: None,
             cp_field: None,
             mix: None,
+            route: None,
+            exchange: None,
         })
     }
 
@@ -3155,7 +3166,14 @@ impl<'m> Energy<'m> {
     /// Evaluate the boundary faces and seed both old time levels from the
     /// initial field - call once, before the first [`GasState::update_density`].
     pub fn initialise(&mut self, gpu: &Gpu) -> Result<()> {
-        field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, self.m)?;
+        // SPEC-LIT 139.5: the part's halo + boundary evaluation when an
+        // exchange is set, the rank-local call otherwise.
+        match self.exchange.as_deref_mut() {
+            Some(x) => x.field(gpu, &self.fldk, &mut self.t, self.m)?,
+            None => {
+                field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, self.m)?
+            }
+        }
         field_ops::seed_old_time(gpu, &self.fldk, &mut self.t)
     }
 
@@ -4123,6 +4141,16 @@ impl<'m> Energy<'m> {
         if n == 0 {
             return Ok(SolverPerformance::default());
         }
+        // SPEC-LIT 139.5: a conjugate stack attached SINCE `set_exchange`
+        // would run `update_conjugate_interface`'s rank-local boundary
+        // evaluation across a part's processor faces.
+        if self.exchange.is_some() && self.cht.is_some() {
+            return Err(Error::Config(
+                "distflow: a conjugate stack was attached to a decomposed \
+                 Energy - the interface update has no exchange yet (PAR-11)"
+                    .to_string(),
+            ));
+        }
         // SPEC-LIT 120.8: a lumped step is assembled from the coefficients
         // `advance_lumped_masses` uploaded for THIS step; solving with the
         // seed triple instead would freeze the lump at its `T_m^0`.
@@ -4151,9 +4179,21 @@ impl<'m> Energy<'m> {
             ldu_ops::relax(gpu, &self.lduk, &mut self.a, m, &self.t.f, alpha)?;
             ldu_ops::add_boundary_contributions(gpu, &self.lduk, &mut self.a, m)?;
 
-            perf = solver::solve(gpu, &self.solk, &mut self.t.f, &self.a, m, &mut self.ws, &sc)?;
+            // SPEC-LIT 139.5: the solve through the part's SPMD Krylov when
+            // a route is set, the rank-local `solver::solve` otherwise -
+            // the same launches, whichever way.
+            perf = match self.route.as_deref_mut() {
+                Some(r) => r.solve_component(gpu, &mut self.t.f, &self.a, m, &sc)?,
+                None => solver::solve(gpu, &self.solk, &mut self.t.f, &self.a, m, &mut self.ws, &sc)?,
+            };
 
-            field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?;
+            // SPEC-LIT 139.5: the halo, then the boundary evaluation - or,
+            // serially, exactly the `correct_boundary_conditions` call this
+            // module always made.
+            match self.exchange.as_deref_mut() {
+                Some(x) => x.field(gpu, &self.fldk, &mut self.t, m)?,
+                None => field_ops::correct_boundary_conditions(gpu, &self.fldk, &mut self.t, m)?,
+            }
         }
 
         // SPEC-LIT §47.2: the interface triple assembled with was built from
@@ -4168,6 +4208,64 @@ impl<'m> Energy<'m> {
         self.update_conjugate_interface(gpu)?;
 
         Ok(perf)
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.5 (PAR-11)
+// ==========================================================================
+
+impl<'m> Energy<'m> {
+    /// SPEC-LIT 139.5 (PAR-11): `T`'s solve through a part's SPMD Krylov;
+    /// `None` = [`crate::solver::solve`] as today.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// SPEC-LIT 139.5: `T`'s halo + boundary evaluation on a part. Refusals
+    /// ([`Error::Config`], message starts `distflow: `), checked only when
+    /// `x` is `Some`: a convection scheme that needs a far-cell gradient,
+    /// a snGrad / corrector count that needs one too, and the conjugate
+    /// stack - gradients have no halo on the flow path yet.
+    pub fn set_exchange(&mut self, x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>) -> Result<()> {
+        if let Some(_) = &x {
+            match self.ctrl.div_scheme.scheme {
+                DivScheme::Upwind | DivScheme::Central => {}
+                other => {
+                    return Err(Error::Config(format!(
+                        "distflow: divScheme {other:?} needs a cell gradient \
+                         at the far cell of a face, and gradients have no \
+                         halo on the thermal path yet (PAR-11); a decomposed \
+                         Energy runs upwind or central convection only"
+                    )));
+                }
+            }
+            if self.ctrl.sn_grad != SnGradScheme::Uncorrected
+                || self.ctrl.n_non_orth_correctors > 0
+            {
+                return Err(Error::Config(format!(
+                    "distflow: snGrad {:?} with {} non-orthogonal corrector(s) \
+                     adds the correction at the far cell of a face; a \
+                     decomposed Energy runs snGrad uncorrected and zero \
+                     correctors only",
+                    self.ctrl.sn_grad, self.ctrl.n_non_orth_correctors
+                )));
+            }
+            if self.cht.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed Energy cannot run the conjugate \
+                     stack - the interface update has no exchange yet (PAR-11)"
+                        .to_string(),
+                ));
+            }
+        }
+        self.exchange = x;
+        Ok(())
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
     }
 }
 
@@ -4291,7 +4389,6 @@ mod tests {
     /// the free-stream value, approached FROM ABOVE at the rate S37.2
     /// derives - `Pr_t = Pr_t_inf (1 + 1/(6 sqrt(Pr_t_inf) C Pe_t)) + O(Pe_t^-2)`.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn kays_crawford_at_large_peclet_approaches_the_free_stream_value_from_above() {
         let (c, p_inf) = (KAYS_CRAWFORD_C, 0.85 as Scalar);
         for pe_t in [1e3 as Scalar, 1e4, 1e5, 1e6] {
@@ -4301,7 +4398,7 @@ mod tests {
             // The next term is O(Pe_t^-2), so the first-order estimate has to
             // agree to better than that.
             assert!(
-                (got - want).abs() < 10.0 / (pe_t * pe_t),
+                ((got - want).abs() as f64) < crate::precision::roundoff_tol(10.0 / (pe_t * pe_t) as f64),
                 "Pe_t = {pe_t}: {got} against the asymptote {want}"
             );
         }
@@ -4312,6 +4409,7 @@ mod tests {
     /// SPEC-LIT S37.2. Checked against the literature form everywhere the
     /// literature form is still trustworthy.
     #[test]
+    // f32 (F32-17): the f32-evaluated form disagrees by 2.1e-4, past the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_rearranged_form_reproduces_the_literature_form() {
         let (c, p_inf) = (0.3_f64, 0.85_f64);
@@ -4437,6 +4535,7 @@ mod tests {
     /// unmodified for the low-Mach solver's velocity/pressure system (the
     /// module doc's first *DESIGN* note).
     #[test]
+    // f32 (F32-17): relative disagreement 1.14e-5 at T=294 exceeds the 1e-5 cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn buoyancy_matches_the_density_ratio_at_any_deltat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -4835,7 +4934,6 @@ mod tests {
     /// asymmetry once (S26.1); this test is the guard against the second
     /// time.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_target_divergence_takes_the_mass_source_and_takes_the_heat_through_q() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -4918,7 +5016,8 @@ mod tests {
         for c in 0..N {
             let want = plain[c] + q[c] / (rho[c] * props.cp * t[c]);
             assert!(
-                (hot[c] - want).abs() <= 1e-12 * want.abs(),
+                (hot[c] - want).abs() as f64
+                    <= crate::precision::roundoff_tol(1e-12) * want.abs() as f64,
                 "cell {c}: the registry's heat did not reach the divergence: {} vs {want}",
                 hot[c]
             );
@@ -4935,7 +5034,7 @@ mod tests {
         let cool = (plain[0] - hot[0]).abs();
         let want = H_V / (props.cp * t[0]);
         assert!(
-            (cool / d[0] - want).abs() <= 1e-9 * want,
+            ((cool / d[0] - want).abs() as f64) <= crate::precision::roundoff_tol(1e-9) * want as f64,
             "the contraction/expansion ratio is {} and h_v/(cp T) is {want}",
             cool / d[0]
         );
@@ -4958,7 +5057,6 @@ mod tests {
     /// `k_eff` cannot pass by accident. The second case also checks the field
     /// CELL BY CELL against the laplacian matrix's own operator.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_conduction_source_telescopes_to_the_boundary_heat() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -5007,7 +5105,7 @@ mod tests {
             let flux = g.download(&e.cond_flux.f)?;
             let scale = flux.iter().map(|v| f64::from(*v).abs()).fold(1.0f64, f64::max);
             assert!(
-                q_cond.abs() < 1e-10 * scale,
+                q_cond.abs() < crate::precision::roundoff_tol(1e-10) * scale,
                 "adiabatic box: integral(div(k_eff grad T)) dV = {q_cond}, \
                  face-flux scale {scale}"
             );
@@ -5062,7 +5160,7 @@ mod tests {
             let want = f64::from(q_w) * area;
             let got = f64::from(e.total_conduction_q(&g)?);
             assert!(
-                (got - want).abs() < 1e-9 * want.abs(),
+                (got - want).abs() < crate::precision::roundoff_tol(1e-9) * want.abs(),
                 "fixed-flux wall: integral(div(k_eff grad T)) dV = {got}, want q_w*A = {want}"
             );
 
@@ -5095,7 +5193,8 @@ mod tests {
                 let from_matrix = -(f64::from(at_h[c]) - f64::from(b_h[c])) / f64::from(hm.v[c]);
                 let from_flux = f64::from(cond[c]);
                 assert!(
-                    (from_matrix - from_flux).abs() <= 1e-9 * (1.0 + from_matrix.abs()),
+                    (from_matrix - from_flux).abs()
+                        <= crate::precision::roundoff_tol(1e-9) * (1.0 + from_matrix.abs()),
                     "cell {c}: explicit div(k_eff grad T) {from_flux} against the \
                      laplacian matrix's own {from_matrix}"
                 );
@@ -5339,7 +5438,6 @@ mod tests {
     /// `-q_w/k_eff_wall`, with the turbulent `k_eff_wall` this test's
     /// nonzero `nut` implies, not the molecular `props.k` alone.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn fixed_flux_temperature_reproduces_q_through_the_assembled_equation() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -5404,6 +5502,7 @@ mod tests {
     /// better than the tolerance checked here - it stands in for the
     /// semi-infinite solid the closed form assumes.
     #[test]
+    // f32 (F32-17): the observed refinement ratio 2.72 vs 3 is an order statement
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn one_d_transient_conduction_matches_erf_at_second_order() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
@@ -5832,7 +5931,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
         fn a_flat_conductivity_curve_gives_the_constant_k_eff_and_the_constant_field() -> Result<()> {
             let Some(g) = gpu() else { return Ok(()) };
 

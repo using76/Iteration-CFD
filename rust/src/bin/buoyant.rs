@@ -3052,6 +3052,7 @@ mod buoyant_tests {
     /// The measurement the whole driver exists to make: hot on top reads
     /// positive, hot on the bottom reads negative, and uniform reads zero.
     #[test]
+    // f32 (F32-17): the uniform upper-third mean misses exactly 400.0
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_probe_reports_which_third_is_hotter() {
         let up = Vec3::new(0.0, 0.0, 1.0);

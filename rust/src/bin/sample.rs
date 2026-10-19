@@ -913,7 +913,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn column_cells_finds_the_sorted_column_through_a_point() {
         let m = channel_block();
         // 0.375 is the second centre of the 4-cell x row (0.5 would be a tie);
@@ -931,7 +930,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn interpolate_at_brackets_and_interpolates() {
         let m = channel_block();
         let col = column_cells(&m, 1, 0.375, 0.5);

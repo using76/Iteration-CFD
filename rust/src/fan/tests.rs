@@ -113,7 +113,6 @@ fn the_fan_kernels_contain_no_atomic() {
 /// pressure are the SAME number there, which is what "operating point"
 /// means. A transcription error in (S52.15) breaks that equality.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52a_the_quadratic_operating_point_is_where_the_two_curves_cross() {
     let (dp_max, q_max, k_sys) = (3048.0 as Scalar, 2.4094 as Scalar, 400.0 as Scalar);
     let q = quadratic_operating_point(dp_max, q_max, k_sys);
@@ -121,21 +120,27 @@ fn gate_52a_the_quadratic_operating_point_is_where_the_two_curves_cross() {
     let dp_fan = dp_max * (1.0 - (q / q_max) * (q / q_max));
     let dp_sys = k_sys * q * q;
     assert!(
-        rel(dp_fan, dp_sys) < 1e-14,
+        (rel(dp_fan, dp_sys) as f64) < crate::precision::roundoff_tol(1e-14),
         "the closed form is not the crossing point: dp_fan = {dp_fan}, dp_sys = {dp_sys}"
     );
 
     // And the number the design note quotes, to all its digits - a second,
     // independent check that (S52.15) was transcribed correctly.
     assert!(rel(q, 1.8152058157833744) < 1e-14, "Q* = {q}");
-    assert!(rel(dp_fan, 1317.9888614615143) < 1e-13, "dp = {dp_fan}");
+    assert!(
+        (rel(dp_fan, 1317.9888614615143) as f64) < crate::precision::roundoff_tol(1e-13),
+        "dp = {dp_fan}"
+    );
 
     // The curve object must agree with the free function.
     let c = FanCurve::quadratic(dp_max, q_max);
     let (dp, s) = c.at(q);
-    assert!(rel(dp, dp_fan) < 1e-14);
+    assert!((rel(dp, dp_fan) as f64) < crate::precision::roundoff_tol(1e-14));
     // S = -dp' = 2 dp_max Q/Q_max^2 > 0 on the falling branch.
-    assert!(rel(s, 2.0 * dp_max * q / (q_max * q_max)) < 1e-14, "S = {s}");
+    assert!(
+        (rel(s, 2.0 * dp_max * q / (q_max * q_max)) as f64) < crate::precision::roundoff_tol(1e-14),
+        "S = {s}"
+    );
 }
 
 // ==========================================================================
@@ -176,7 +181,6 @@ fn gate_52b_the_fds_fan_test_operating_point_is_reproduced() {
 /// computed here from `p M/(R T)` rather than quoted, so a wrong molar mass
 /// fails rather than agrees.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52b_the_fds_qfan_loss_duct_is_reproduced() {
     let rho = 101325.0 * 28.85034e-3 / (8.3145 * 293.15) as Scalar;
     assert!(rel(rho, 1.199338) < 1e-5, "FDS's air density comes out {rho}");
@@ -196,7 +200,7 @@ fn gate_52b_the_fds_qfan_loss_duct_is_reproduced() {
     let c = PorousJumpCoeffs::from_loss_coefficient(k).expect("K");
     let r = c.resistance(q, a);
     assert!(
-        rel(rho * r * q, dp) < 1e-12,
+        (rel(rho * r * q, dp) as f64) < crate::precision::roundoff_tol(1e-12),
         "the jump coefficients do not reproduce (1/2) rho K u^2"
     );
 }
@@ -207,6 +211,7 @@ fn gate_52b_the_fds_qfan_loss_duct_is_reproduced() {
 
 /// (S52.8): the exact operator is symmetric, and it is a *bounded* downdate.
 #[test]
+// f32 (F32-17): the two association orders land bitwise equal in f32; assert_ne fails
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_exact_rank1_operator_is_symmetric() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
@@ -248,6 +253,7 @@ fn gate_52d_the_exact_rank1_operator_is_symmetric() {
 /// wrong** - at `S = 0` a `fixedValue` face contributes `D_f` to its own row,
 /// not the patch total. This test is what the note's prose would fail.
 #[test]
+// f32 (F32-17): the S to infinity row sum misses 1e-11 by f32 round-off
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_row_sum_is_d_f_over_one_plus_s_sigma_d() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
@@ -292,6 +298,7 @@ fn gate_52d_the_row_sum_is_d_f_over_one_plus_s_sigma_d() {
 /// (S52.10): the lumped `fr` reproduces (S52.9)'s row sum for **any** `D`,
 /// and the design note's per-face form does not.
 #[test]
+// f32 (F32-17): the note-form assert_ne finds the two equal in f32
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_lumped_fr_preserves_the_row_sum_and_the_notes_does_not() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
@@ -366,6 +373,7 @@ fn gate_52d_the_lumped_fr_preserves_the_row_sum_and_the_notes_does_not() {
 /// expression trees, so what is measured is the round-off - and that is what
 /// this test reports, not "identically zero".
 #[test]
+// f32 (F32-17): the S=100 form disagreement is past the 1e-5 cap
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_52d_the_lumped_and_exact_operators_impose_the_same_flow_rate() {
     let d = [0.3 as Scalar, 1.7, 0.55, 2.2, 0.9];
@@ -463,6 +471,7 @@ fn a_vertical_curve_delivers_the_prescribed_flow() {
 /// The Fritsch-Carlson limiter: a monotone table stays monotone, where a
 /// plain Catmull-Rom spline through the same points does not.
 #[test]
+// f32 (F32-17): a f32 rise of 3e-5 on values near 999 breaks the 1e-9 monotonicity slack
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_hermite_curve_is_monotone_where_a_plain_spline_is_not() {
     // Four points with a near-flat stretch followed by a steep drop - the
@@ -511,7 +520,6 @@ fn the_hermite_curve_is_monotone_where_a_plain_spline_is_not() {
 
 /// (S52.13): the affinity laws, checked against their own statement.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_density_and_speed_corrections_are_the_affinity_laws() {
     let base = FanCurve::quadratic(500.0, 2.0);
     let q = 1.0 as Scalar;
@@ -522,8 +530,11 @@ fn the_density_and_speed_corrections_are_the_affinity_laws() {
     d.rho = 0.9;
     d.rho_curve = 1.2;
     let (dp1, s1) = d.at(q);
-    assert!(rel(dp1, dp0 * 0.75) < 1e-13, "dp did not scale by rho/rho_curve");
-    assert!(rel(s1, s0 * 0.75) < 1e-13, "S did not scale by rho/rho_curve");
+    assert!((rel(dp1, dp0 * 0.75) as f64) < crate::precision::roundoff_tol(1e-13), "dp did not scale by rho/rho_curve");
+    assert!(
+        (rel(s1, s0 * 0.75) as f64) < crate::precision::roundoff_tol(1e-13),
+        "S did not scale by rho/rho_curve"
+    );
 
     // Speed: dp(Q; N) = dp_curve(Q N_c/N) (N/N_c)^2. At Q scaled with N the
     // pressure scales as N^2 exactly - the affinity law's own statement.
@@ -910,7 +921,6 @@ impl Rig {
 /// A 1-D chain with Dirichlet ends carries `Q = dp/SUM_i (1/D_i)`; a jump on
 /// face `j` replaces `1/D_j` by `1/D_j + R`. ONE assembly, ONE solve.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_53a_a_porous_jump_puts_resistances_in_series() {
     let Some(gpu) = gpu() else { return };
     let n = 12;
@@ -946,7 +956,11 @@ fn gate_53a_a_porous_jump_puts_resistances_in_series() {
         // closed form is exact rather than a fixed point.
         let area = rig.hm.mag_sf[mid];
         let coeffs = PorousJumpCoeffs { r_visc: r_jump * area, r_inert: 0.0 };
-        assert!(rel(coeffs.resistance(0.0, area), r_jump) < 1e-14 || r_jump == 0.0);
+        assert!(
+            (rel(coeffs.resistance(0.0, area), r_jump) as f64)
+                < crate::precision::roundoff_tol(1e-14)
+                || r_jump == 0.0
+        );
 
         let jumps =
             [PorousJump::Internal { faces: vec![mid as Label], coeffs }];
@@ -975,7 +989,7 @@ fn gate_53a_a_porous_jump_puts_resistances_in_series() {
             );
         } else {
             assert!(
-                rel(q, want) < 1e-10,
+                (rel(q, want) as f64) < crate::precision::roundoff_tol(1e-10),
                 "(S53.7) at R = {r_jump}: the face carries {q}, series says {want}"
             );
         }
@@ -991,7 +1005,7 @@ fn gate_53a_a_porous_jump_puts_resistances_in_series() {
             .iter()
             .fold(0.0 as Scalar, |m, v| m.max((v - q).abs()));
         assert!(
-            spread < 1e-10 * scale,
+            (spread as f64) < crate::precision::roundoff_tol(1e-10) * scale as f64,
             "the chain leaks: spread {spread} against the unjumped flux {scale}"
         );
     }
@@ -1201,7 +1215,6 @@ fn fan_rig(gpu: &Gpu, n: usize, fan: FanPatch, rau: Scalar) -> (Rig, FlowDevices
 /// The device triple is exactly [`lumped_triple`], for every curve kind and
 /// both directions.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_device_triple_mirrors_the_host() {
     let Some(gpu) = gpu() else { return };
     let curves = [
@@ -1251,7 +1264,7 @@ fn the_device_triple_mirrors_the_host() {
             let drg = gpu.download(&rig.p.ref_grad).expect("rg");
             for bf in pi.0..pi.0 + pi.1 {
                 assert!(
-                    rel(dfr[bf], fr) < 1e-12,
+                    (rel(dfr[bf], fr) as f64) < crate::precision::roundoff_tol(1e-12),
                     "fr: device {} host {fr} ({c:?}, {dir:?})",
                     dfr[bf]
                 );
@@ -1266,7 +1279,7 @@ fn the_device_triple_mirrors_the_host() {
             // And the reported state matches.
             let st = fd.states(&gpu).expect("states");
             assert!(rel(st[0].q, q) < 1e-13, "reported Q {} vs {q}", st[0].q);
-            assert!(rel(st[0].fr, fr) < 1e-12);
+            assert!((rel(st[0].fr, fr) as f64) < crate::precision::roundoff_tol(1e-12));
         }
     }
 }
@@ -1356,7 +1369,6 @@ fn gate_52c_a_flat_curve_reproduces_the_fixed_value_field_bitwise() {
 /// This is §52.12 Gate 52-A's real content on a real system: no model of the
 /// duct is needed, because the identity is closed.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_fan_lands_where_its_curve_crosses_the_systems_own_characteristic() {
     let Some(gpu) = gpu() else { return };
     let (p_a, rho, rau) = (0.0 as Scalar, 1.2 as Scalar, 0.02 as Scalar);
@@ -1395,7 +1407,7 @@ fn the_fan_lands_where_its_curve_crosses_the_systems_own_characteristic() {
     let q = st[0].q;
     assert!(q > 0.0, "the fan should be blowing out; Q = {q}");
     assert!(
-        rel(q, st[0].q_star) < 1e-6,
+        (rel(q, st[0].q_star) as f64) < crate::precision::roundoff_tol(1e-6),
         "the operating point has not converged: Q = {q}, Q* = {}",
         st[0].q_star
     );
@@ -1407,7 +1419,7 @@ fn the_fan_lands_where_its_curve_crosses_the_systems_own_characteristic() {
     let want = p_a - dp / rho;
     for bf in pi.0..pi.0 + pi.1 {
         assert!(
-            rel(pb[bf], want) < 1e-8,
+            (rel(pb[bf], want) as f64) < crate::precision::roundoff_tol(1e-8),
             "(S52.3): the face sits at {} where the curve says {want}",
             pb[bf]
         );
@@ -1961,6 +1973,7 @@ fn a_zero_resistance_boundary_jump_is_a_fixed_value_bitwise() {
 /// SPEC-LIT §52.1: the quadratic must be **odd** in `Q`, or a reversed fan
 /// pushes harder the more it is pushed back.
 #[test]
+// f32 (F32-17): at Q=3 the branch is round-off off exact 0; rel explodes on the 1e-300 floor
 #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_quadratic_curve_is_odd_in_q_so_s_never_goes_negative() {
     let c = FanCurve::quadratic(20.0, 3.0);
@@ -2219,7 +2232,6 @@ fn the_boundary_jump_does_not_scale_the_coefficient_it_measured_d_from() {
 /// §53.8 Gate 53-A, the BOUNDARY form: the same series law with the plenum on
 /// the far side. This is the gate that caught the double application.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_53a_the_boundary_jump_puts_resistances_in_series() {
     let Some(gpu) = gpu() else { return };
     let n = 12;
@@ -2287,7 +2299,7 @@ fn gate_53a_the_boundary_jump_puts_resistances_in_series() {
 
         let want = (p_in - p_plenum) / (base + r_jump);
         assert!(
-            rel(q, want) < 1e-9,
+            (rel(q, want) as f64) < crate::precision::roundoff_tol(1e-9),
             "(S53.7) boundary form at R = {r_jump}: the patch carries {q}, series \
              says {want}. A factor of about (1 + R D) here is the double \
              application SPEC-LIT S53.3 records"

@@ -17,7 +17,36 @@
 //! ```text
 //! ofgpu-par <case> [-np 2,3,4] [-comm threads] [-method all]
 //!                  [-sweeps N] [-alpha A] [-quiet]
+//! ofgpu-par -solve simple [-np 1,2,4] [-n N] [-method NAME] [-quiet]
+//! ofgpu-par -solve restart [-np 1,2,4] [-n N] [-iters K] [-dir DIR] [-quiet]
+//! ofgpu-par -bench strong|weak [-np 1,2,3,4] [-n N] [-warm W] [-iters K]
+//!                [-exchanges M] [-method NAME] [-comm threads] [-json FILE]
+//!                [-quiet]
 //! ```
+//!
+//! `-bench strong|weak` is SPEC-LIT §140's measured-scaling harness
+//! (PAR-16): per rank count and per repeat it builds one fresh `ThreadComm`
+//! world, times `cavity_part_timed`'s per-iteration time, then `SpmdHalo`'s
+//! halo exchange (`L_ex`) and the transport's allgather (`L_ag`), and
+//! reports the median and its 95 % t interval over 5 repeats. Speedup and
+//! efficiency are COMPUTED only while `P <= D`, D the number of distinct
+//! device ordinals in the placement; at `P > D` the row prints
+//! "time-shared, not scaling" (SPEC-LIT 73.6's rule), because time-shared
+//! ranks measure the card's context switching, not scaling. The MS-MPI
+//! column is printed and written as NOT RUN: the MPI transport is PAR-06,
+//! deferred by the user.
+//!
+//! `-solve simple` is SPEC-LIT 139.4's gate (PAR-10c): the lid-driven cavity
+//! of Ghia, Ghia & Shin (1982) at Re = 100, run serial on the whole mesh and
+//! then decomposed per rank count with `Simple`'s exchange seam, every rank
+//! printing its L_inf differences against the serial answer.
+//!
+//! `-solve restart` is SPEC-LIT 139.7's gate (PAR-15): the same cavity,
+//! run `RESTART_ITERS + 1` steps with the fields after step `RESTART_ITERS`
+//! written to a `processorN` set, then restarted from that set for one step
+//! and compared BIT FOR BIT with the uninterrupted run on every array of
+//! every rank; the set is reconstructed to the whole mesh and compared with
+//! the gathered fields, and a set from a different P is refused by name.
 //!
 //! For every rank count, every partitioner and every rotation of the part
 //! labels, in one `ThreadComm` world per (rank count, partitioner):
@@ -42,15 +71,22 @@
 //! sweep pipeline are `ofgpu-decompose`'s, so the two drivers gate the same
 //! systems. No external source. No GPL-licensed source was consulted.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ofgpu::comm::{Comm, Placement, ThreadComm};
 use ofgpu::decompose::{partition, Decomposition, PartMesh, PartitionMethod};
 use ofgpu::device::cfg_for;
+use ofgpu::distflow::{
+    cavity_ghia_errors, cavity_mesh, cavity_part, cavity_part_steps, cavity_serial, CavityRun,
+    CavitySteps, CAVITY_ITER_BAND, CAVITY_N, CAVITY_TOL_CENTRE, CAVITY_TOL_FIELD, CAVITY_U_TOL,
+    RESTART_ITERS, RESTART_N,
+};
+use ofgpu::io::decomposed::{gather_written, reconstruct, RankFields};
 use ofgpu::distsolve::{
     dist_solve, spmd_solve, DistReduce, DistSystem, DistWorkspace, SpmdWorkspace,
 };
+use ofgpu::error::IoContext;
 use ofgpu::exactsum::{ldexp, ExactReduction, SpmdReduction};
 use ofgpu::halo::{HaloExchange, SpmdHalo};
 use ofgpu::ldu::{GpuLduMatrix, HostLduMatrix};
@@ -64,18 +100,38 @@ use ofgpu::{DevBuf, Error, Gpu, HostMesh, Label, Result, Scalar, Tensor, Vec3};
 use cudarc::driver::PushKernelArg;
 
 mod common;
+mod par_bench;
 
 const USAGE: &str = "\
 usage: ofgpu-par <case> [options]
 
-  -np      2,3,4        rank counts to run (default 2,3,4)
+  -np      2,3,4        rank counts to run (default 2,3,4; solve mode 1,2,4)
   -comm    threads      the transport (default threads): one process, one
                         thread per rank. mpi is refused: the MPI transport
                         is PAR-06, deferred
-  -method  NAME         hilbert | linear | roundrobin | all (default all)
+  -method  NAME         hilbert | linear | roundrobin | all (default all;
+                        solve mode: one of the three, default hilbert)
   -sweeps  N            Jacobi sweeps in the halo gate (default 8)
   -alpha   A            under-relaxation factor (default 0.5)
   -quiet                print only the gate lines and the verdict
+  -solve   simple       run the decomposed-cavity gate of SPEC-LIT 139.4
+                        (PAR-10c) instead of the case gates: no <case> is
+                        read, the mesh is the generator's cavity
+  -solve   restart      run the decomposed-I/O gate of SPEC-LIT 139.7
+                        (PAR-15): write a processorN set, restart from it,
+                        reconstruct it, refuse a set from another P; no
+                        <case> is read, the mesh is the generator's cavity
+  -n      N             cells per side of the -solve cavity (default 64)
+  -iters  K             steps before the restart write (default 5)
+  -dir    DIR           the case directory the restart set is written to
+                        (default <temp>/ofgpu-par-restart-<pid>, removed
+                        at the end)
+  -bench   strong|weak  measure the per-iteration time, the halo exchange
+                        latency L_ex and the allgather latency L_ag for the
+                        threads transport (SPEC-LIT 140, PAR-16); the
+                        efficiency is REFUSED when ranks > devices. Options:
+                        -np 1,2,3,4 -n N -warm W -iters K -exchanges M
+                        -method NAME -comm threads -json FILE -quiet
 
 Rank r opens its own Gpu on device L[r mod |L|], L = OFGPU_DEVICES or every
 device (SPEC-LIT 138.7). Under mpiexec (PMI_RANK or PMI_SIZE set) the driver
@@ -166,6 +222,156 @@ fn parse(argv: &[String]) -> Result<Args> {
                 a.alpha = need(i)?
                     .parse()
                     .map_err(|e| Error::Config(format!("-alpha: {e}")))?;
+                i += 2;
+            }
+            "-quiet" => {
+                a.quiet = true;
+                i += 1;
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "unknown option '{other}'\n\n{USAGE}"
+                )))
+            }
+        }
+    }
+    Ok(a)
+}
+
+/// The options of `-solve simple`, SPEC-LIT 139.4's decomposed-cavity gate.
+/// No `<case>` is read; the mesh is `distflow::cavity_mesh(n)`.
+struct SolveArgs {
+    n: usize,
+    nps: Vec<usize>,
+    methods: Vec<String>,
+    quiet: bool,
+}
+
+fn parse_solve(argv: &[String]) -> Result<SolveArgs> {
+    let mut a = SolveArgs {
+        n: CAVITY_N,
+        nps: vec![1, 2, 4],
+        methods: vec!["hilbert".to_string()],
+        quiet: false,
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let need = |i: usize| -> Result<String> {
+            argv.get(i + 1)
+                .cloned()
+                .ok_or_else(|| Error::Config(format!("{} needs a value", argv[i])))
+        };
+        match argv[i].as_str() {
+            "-n" => {
+                a.n = need(i)?
+                    .parse()
+                    .map_err(|e| Error::Config(format!("-n: {e}")))?;
+                if a.n == 0 {
+                    return Err(Error::Config("-n: cells per side must be >= 1".to_string()));
+                }
+                i += 2;
+            }
+            "-np" => {
+                let v = need(i)?;
+                a.nps = v
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| Error::Config(format!("-np '{v}': {e}")))?;
+                if a.nps.iter().any(|&n| n == 0) {
+                    return Err(Error::Config(format!(
+                        "-np '{v}': a rank count must be at least 1"
+                    )));
+                }
+                i += 2;
+            }
+            "-method" => {
+                let v = need(i)?;
+                a.methods = if v == "all" {
+                    vec!["hilbert".to_string()]
+                } else {
+                    vec![v]
+                };
+                i += 2;
+            }
+            "-quiet" => {
+                a.quiet = true;
+                i += 1;
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "unknown option '{other}'\n\n{USAGE}"
+                )))
+            }
+        }
+    }
+    Ok(a)
+}
+
+/// The options of `-solve restart`, SPEC-LIT 139.7's decomposed-I/O gate.
+/// No `<case>` is read; the mesh is `distflow::cavity_mesh(n)`, cut Hilbert
+/// (Linear at P = 1), and the set goes to `-dir` (a per-P case directory
+/// under it), removed at the end unless `-dir` named one.
+struct RestartArgs {
+    n: usize,
+    nps: Vec<usize>,
+    iters: usize,
+    dir: Option<PathBuf>,
+    quiet: bool,
+}
+
+fn parse_restart(argv: &[String]) -> Result<RestartArgs> {
+    let mut a = RestartArgs {
+        n: RESTART_N,
+        nps: vec![1, 2, 4],
+        iters: RESTART_ITERS,
+        dir: None,
+        quiet: false,
+    };
+    let mut i = 0;
+    while i < argv.len() {
+        let need = |i: usize| -> Result<String> {
+            argv.get(i + 1)
+                .cloned()
+                .ok_or_else(|| Error::Config(format!("{} needs a value", argv[i])))
+        };
+        match argv[i].as_str() {
+            "-n" => {
+                a.n = need(i)?
+                    .parse()
+                    .map_err(|e| Error::Config(format!("-n: {e}")))?;
+                if a.n == 0 {
+                    return Err(Error::Config("-n: cells per side must be >= 1".to_string()));
+                }
+                i += 2;
+            }
+            "-iters" => {
+                a.iters = need(i)?
+                    .parse()
+                    .map_err(|e| Error::Config(format!("-iters: {e}")))?;
+                if a.iters == 0 {
+                    return Err(Error::Config(
+                        "-iters: the write step must be at least 1".to_string(),
+                    ));
+                }
+                i += 2;
+            }
+            "-dir" => {
+                a.dir = Some(PathBuf::from(need(i)?));
+                i += 2;
+            }
+            "-np" => {
+                let v = need(i)?;
+                a.nps = v
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>())
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| Error::Config(format!("-np '{v}': {e}")))?;
+                if a.nps.iter().any(|&n| n == 0) {
+                    return Err(Error::Config(format!(
+                        "-np '{v}': a rank count must be at least 1"
+                    )));
+                }
                 i += 2;
             }
             "-quiet" => {
@@ -745,11 +951,384 @@ fn verdict(ok: bool) -> &'static str {
     }
 }
 
+/// SPEC-LIT 139.4 (PAR-10c): `-solve simple` - the lid-driven cavity at
+/// Re = 100 (Ghia, Ghia & Shin 1982, DOI 10.1016/0021-9991(82)90058-4), run
+/// serial on the whole mesh and then decomposed, one `ThreadComm` thread per
+/// rank, every rank on its own `Gpu`. Each rank count prints its L_inf
+/// differences against the serial answer and PASS/FAIL against the gate
+/// constants of `distflow`; the exit status is 0 only when every run passes.
+fn run_solve(args: &SolveArgs) -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let hm = cavity_mesh(args.n)?;
+    if !args.quiet {
+        println!("solve  : simple - the lid-driven cavity at Re = 100 (Ghia, Ghia & Shin 1982)");
+        println!("mesh   : {} x {} x 1, {} cells", args.n, args.n, hm.n_cells);
+        println!("device : {}", gpu.name()?);
+        println!("np     : {:?}", args.nps);
+        println!();
+    }
+
+    let serial = cavity_serial(&gpu, &hm)?;
+    if !serial.converged {
+        return Err(Error::Config(format!(
+            "the serial cavity did not converge in {} iterations (U \
+             residualControl {CAVITY_U_TOL:e}); the gate has no \
+             reference",
+            serial.iterations,
+        )));
+    }
+    let errs_s = cavity_ghia_errors(&hm, &serial.u);
+    let worst_s = errs_s.iter().fold(0.0 as Scalar, |a, &x| a.max(x));
+    let u_scale = serial.u.iter().fold(0.0 as Scalar, |a, v| {
+        a.max(v.x.abs()).max(v.y.abs()).max(v.z.abs())
+    });
+    let p_scale = serial.p.iter().fold(0.0 as Scalar, |a, &v| a.max(v.abs()));
+    if !args.quiet {
+        println!(
+            "serial : {} iterations, worst U residual {:.3e}, continuity \
+             {:.3e}, worst centreline |e| {worst_s:.4}",
+            serial.iterations, serial.u_residual, serial.continuity
+        );
+        println!();
+    }
+
+    let mut all_ok = true;
+    let t_all = Instant::now();
+    for &np in &args.nps {
+        for name in &args.methods {
+            // The name is validated on every run; P = 1 is the Linear cut,
+            // which IS the one-part cut - so that is the name printed too.
+            let named = method_named(name, &hm, np)?;
+            let method = if np == 1 { PartitionMethod::Linear } else { named };
+            let name = if np == 1 { "linear" } else { name.as_str() };
+            let t0 = Instant::now();
+            let dec = Decomposition::build(&hm, np, &method)?;
+            let got = ThreadComm::run(np, |comm| -> Result<CavityRun> {
+                let gpu = Gpu::new(0)?;
+                cavity_part(&gpu, comm, &dec)
+            })?;
+            let mut up = vec![Vec3::ZERO; hm.n_cells];
+            let mut pp = vec![0.0 as Scalar; hm.n_cells];
+            let mut iters = Vec::new();
+            let mut conv_ok = true;
+            // A rank that failed fails the run by its own message: its owned
+            // cells would otherwise stay zero in the scatter below.
+            let got = got.into_iter().collect::<Result<Vec<CavityRun>>>()?;
+            for r in got.iter() {
+                for (i, &g) in r.global_cell.iter().enumerate() {
+                    up[g] = r.u[i];
+                    pp[g] = r.p[i];
+                }
+                iters.push(r.iterations);
+                conv_ok &= r.converged;
+            }
+            let u_rel = up
+                .iter()
+                .zip(&serial.u)
+                .fold(0.0 as Scalar, |a, (x, w)| {
+                    a.max((x.x - w.x).abs())
+                        .max((x.y - w.y).abs())
+                        .max((x.z - w.z).abs())
+                })
+                / u_scale;
+            let p_rel = pp
+                .iter()
+                .zip(&serial.p)
+                .fold(0.0 as Scalar, |a, (&x, &w)| a.max((x - w).abs()))
+                / p_scale;
+            let errs = cavity_ghia_errors(&hm, &up);
+            let worst_e = errs.iter().fold(0.0 as Scalar, |a, &x| a.max(x));
+            // The centreline rule, at every Ghia station: the decomposed
+            // error within the serial run's own error plus the tolerance.
+            let centre_ok = errs
+                .iter()
+                .zip(&errs_s)
+                .all(|(&ep, &es)| ep <= es + CAVITY_TOL_CENTRE);
+            let it_s = serial.iterations as f64;
+            let it_ok = iters
+                .iter()
+                .all(|&it| (it as f64 - it_s).abs() <= CAVITY_ITER_BAND * it_s);
+            let ok = u_rel <= CAVITY_TOL_FIELD
+                && p_rel <= CAVITY_TOL_FIELD
+                && centre_ok
+                && it_ok
+                && conv_ok;
+            all_ok &= ok;
+            println!(
+                "P = {np:<2} {name:<10} {} - iters {:?} (serial {}), U rel \
+                 {u_rel:.3e} <= {CAVITY_TOL_FIELD:e}, p rel {p_rel:.3e}, \
+                 worst centreline |e| {worst_e:.4} vs serial {worst_s:.4}, \
+                 {:.1} s",
+                verdict(ok),
+                iters,
+                serial.iterations,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+    }
+
+    let secs = t_all.elapsed().as_secs_f64();
+    if all_ok {
+        println!(
+            "ofgpu-par -solve simple: PASS - every rank count reproduced the \
+             serial cavity within the gate constants, {secs:.1} s"
+        );
+        Ok(())
+    } else {
+        println!("ofgpu-par -solve simple: FAIL - {secs:.1} s");
+        std::process::exit(1);
+    }
+}
+
+/// Scalar arrays compared bit for bit; a length mismatch counts every slot.
+fn count_scalars(a: &[Scalar], b: &[Scalar]) -> usize {
+    if a.len() != b.len() {
+        return a.len().max(b.len());
+    }
+    a.iter()
+        .zip(b)
+        .filter(|(p, q)| p.to_bits() != q.to_bits())
+        .count()
+}
+
+/// Vector arrays compared bit for bit, componentwise.
+fn count_vectors(a: &[Vec3], b: &[Vec3]) -> usize {
+    if a.len() != b.len() {
+        return a.len().max(b.len());
+    }
+    a.iter()
+        .zip(b)
+        .filter(|(p, q)| {
+            p.x.to_bits() != q.x.to_bits()
+                || p.y.to_bits() != q.y.to_bits()
+                || p.z.to_bits() != q.z.to_bits()
+        })
+        .count()
+}
+
+/// Every array of one rank's restart set, against the same rank's.
+fn count_rank_diffs(x: &RankFields, y: &RankFields) -> usize {
+    count_vectors(&x.u, &y.u)
+        + count_vectors(&x.u_bf, &y.u_bf)
+        + count_scalars(&x.p, &y.p)
+        + count_scalars(&x.p_bf, &y.p_bf)
+        + count_scalars(&x.phi_f, &y.phi_f)
+        + count_scalars(&x.phi_bf, &y.phi_bf)
+}
+
+/// The owned cells of `written`, gathered to whole-mesh order by
+/// `Decomposition::gather_field` - PAR-01's gather, which does NOT run
+/// through `gather_written`, the gather `reconstruct` itself calls, so a
+/// wrong cell gather rule cannot grade its own homework. U one component at
+/// a time: x, then y, then z.
+fn gather_cells(dec: &Decomposition, written: &[RankFields]) -> Result<(Vec<Vec3>, Vec<Scalar>)> {
+    let axis = |pick: fn(&Vec3) -> Scalar| -> Result<Vec<Scalar>> {
+        let cols: Vec<Vec<Scalar>> = written
+            .iter()
+            .map(|w| w.u.iter().map(pick).collect())
+            .collect();
+        dec.gather_field(&cols)
+    };
+    let xs = axis(|v| v.x)?;
+    let ys = axis(|v| v.y)?;
+    let zs = axis(|v| v.z)?;
+    let u: Vec<Vec3> = xs
+        .iter()
+        .zip(&ys)
+        .zip(&zs)
+        .map(|((x, y), z)| Vec3::new(*x, *y, *z))
+        .collect();
+    let cols: Vec<Vec<Scalar>> = written.iter().map(|w| w.p.clone()).collect();
+    let p = dec.gather_field(&cols)?;
+    Ok((u, p))
+}
+
+/// SPEC-LIT 139.7 (PAR-15): `-solve restart` - the decomposed-I/O gate. Per
+/// rank count: world A runs `K + 1` steps with the fields after step `K`
+/// written to a `processorN` set; the set is reconstructed to the whole mesh
+/// and compared bit for bit with the gathered fields; world B restarts from
+/// the set for one step and is compared bit for bit with world A's state
+/// after `K + 1` steps, on every array of every rank; and a set refused
+/// under a decomposition at another P must be refused BY NAME. The exit
+/// status is 0 only when every leg of every rank count passes.
+fn run_restart(args: &RestartArgs) -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let hm = cavity_mesh(args.n)?;
+    let owned_dir = args.dir.is_none();
+    let dir = args.dir.clone().unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("ofgpu-par-restart-{}", std::process::id()))
+    });
+    std::fs::create_dir_all(&dir)
+        .path(&dir)?;
+    if !args.quiet {
+        println!("solve  : restart - the decomposed I/O gate (PAR-15)");
+        println!("mesh   : {} x {} x 1, {} cells", args.n, args.n, hm.n_cells);
+        println!("device : {}", gpu.name()?);
+        println!("np     : {:?}", args.nps);
+        println!("dir    : {}", dir.display());
+        println!();
+    }
+    let out = restart_gate(&hm, args, &dir);
+    if owned_dir {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    out
+}
+
+fn restart_gate(hm: &HostMesh, args: &RestartArgs, dir: &Path) -> Result<()> {
+    let mut all_ok = true;
+    let t_all = Instant::now();
+    for &np in &args.nps {
+        let t0 = Instant::now();
+        // P = 1 is the Linear cut, which IS the one-part cut.
+        let method = if np == 1 {
+            PartitionMethod::Linear
+        } else {
+            PartitionMethod::Hilbert
+        };
+        let dec = Decomposition::build(hm, np, &method)?;
+        let dir_p = dir.join(format!("P{np}"));
+        std::fs::create_dir_all(&dir_p).path(&dir_p)?;
+        let tname = args.iters.to_string();
+
+        // World A: K + 1 steps, the fields after step K written.
+        let a = ThreadComm::run(np, |comm| -> Result<CavitySteps> {
+            let g = Gpu::new(0)?;
+            cavity_part_steps(
+                &g,
+                comm,
+                &dec,
+                args.iters + 1,
+                None,
+                Some((&dir_p, args.iters, tname.as_str())),
+            )
+        })?;
+        let a = a.into_iter().collect::<Result<Vec<_>>>()?;
+        let written: Vec<RankFields> = a
+            .iter()
+            .map(|s| {
+                s.written.clone().ok_or_else(|| {
+                    Error::Config(format!(
+                        "P = {np}: the write step produced no rank fields"
+                    ))
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        // Reconstruct. The cells against a reference gathered INDEPENDENTLY
+        // of the code under test - PAR-01's `gather_field` - the boundary
+        // faces against `gather_written`.
+        let rec = reconstruct(&dir_p, hm, &dec, &tname)?;
+        let (want_u, want_p) = gather_cells(&dec, &written)?;
+        let want = gather_written(hm, &dec, &written)?;
+        let rec_bad = count_vectors(&rec.u, &want_u)
+            + count_scalars(&rec.p, &want_p)
+            + count_vectors(&rec.u_bf, &want.u_bf)
+            + count_scalars(&rec.p_bf, &want.p_bf);
+
+        // World B: restart from the set, one step.
+        let b = ThreadComm::run(np, |comm| -> Result<CavitySteps> {
+            let g = Gpu::new(0)?;
+            cavity_part_steps(&g, comm, &dec, 1, Some((&dir_p, tname.as_str())), None)
+        })?;
+        let b = b.into_iter().collect::<Result<Vec<_>>>()?;
+        let mut end_bad = 0usize;
+        for (x, y) in b.iter().zip(a.iter()) {
+            end_bad += count_rank_diffs(&x.end, &y.end);
+        }
+
+        // A set from a different P is refused, by name, on every rank.
+        let other_np = if np == 1 { 2 } else { 1 };
+        let other = Decomposition::build(hm, other_np, &PartitionMethod::Linear)?;
+        let refused = match reconstruct(&dir_p, hm, &other, &tname) {
+            Err(Error::Config(m)) => m.contains("from a different P"),
+            _ => false,
+        };
+
+        let restart_ok = end_bad == 0;
+        let rec_ok = rec_bad == 0;
+        all_ok &= restart_ok && rec_ok && refused;
+        println!(
+            "P = {np:<2} restart     {} - {end_bad} differing values on \
+             every rank's six arrays",
+            verdict(restart_ok)
+        );
+        println!(
+            "P = {np:<2} reconstruct {} - {rec_bad} differing values in U, \
+             p and their boundary faces",
+            verdict(rec_ok)
+        );
+        println!(
+            "P = {np:<2} refusal     {} - this set of {np} part(s) \
+             refused by name to a {other_np}-rank run",
+            verdict(refused)
+        );
+        if !args.quiet {
+            println!("P = {np:<2} ({:.1} s)", t0.elapsed().as_secs_f64());
+            println!();
+        }
+    }
+
+    let secs = t_all.elapsed().as_secs_f64();
+    if all_ok {
+        println!(
+            "ofgpu-par -solve restart: PASS - every rank count restarts, \
+             reconstructs and refuses bit for bit, {secs:.1} s"
+        );
+        Ok(())
+    } else {
+        println!("ofgpu-par -solve restart: FAIL - {secs:.1} s");
+        std::process::exit(1);
+    }
+}
+
 fn run() -> Result<()> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         println!("{USAGE}");
         std::process::exit(if argv.is_empty() { 2 } else { 0 });
+    }
+    // SPEC-LIT 139.4's solve mode: `ofgpu-par -solve simple [options]`. The
+    // value is refused by name here, where the mode is chosen, so a typo
+    // never reads a case.
+    if argv[0] == "-solve" {
+        match argv.get(1).map(String::as_str) {
+            Some("simple") => {
+                let args = parse_solve(&argv[2..])?;
+                return run_solve(&args);
+            }
+            Some("restart") => {
+                let args = parse_restart(&argv[2..])?;
+                return run_restart(&args);
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "-solve '{}': known: simple, restart",
+                    other.unwrap_or("")
+                )));
+            }
+        }
+    }
+    // SPEC-LIT 140's bench mode: `ofgpu-par -bench strong|weak [options]`.
+    // The mode is refused by name here, before any option is read and before
+    // any device is opened.
+    if argv[0] == "-bench" {
+        match argv.get(1).map(String::as_str) {
+            Some("strong") => {
+                let args = par_bench::parse_bench("strong", &argv[2..])?;
+                return par_bench::run_bench(&args);
+            }
+            Some("weak") => {
+                let args = par_bench::parse_bench("weak", &argv[2..])?;
+                return par_bench::run_bench(&args);
+            }
+            other => {
+                return Err(Error::Config(format!(
+                    "-bench '{}': known: strong, weak",
+                    other.unwrap_or("")
+                )));
+            }
+        }
     }
     let args = parse(&argv)?;
     refuse_unbuilt_transport(&args.comm)?;

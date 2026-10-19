@@ -108,6 +108,9 @@
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuSurfaceScalarField};
+// SPEC-LIT 139.6 (PAR-12): `correct_bc`/`correct_nut_bc` made the five
+// non-test calls; the tests below still call the kernel directly.
+#[allow(unused_imports)]
 use crate::field_ops::{advance_time_levels, correct_boundary_conditions, set_field, FieldKernels};
 use crate::fv::{fvc_div_surface, fvc_grad_scalar_scheme, fvm_sp, fvm_su, fvm_susp};
 use crate::mesh::{GpuMesh, HostMesh};
@@ -400,6 +403,13 @@ impl<'m> KOmegaSst<'m> {
         }
 
         let nc = mesh.n_cells.max(1);
+        // The PAR-09 room (SPEC-LIT 139.6, PAR-12): the `fvc_` gradient
+        // outputs are `n_local` long, because the gradient launchers expect
+        // the room on a part; the kernels thread owned cells only, so the
+        // room is admitted and never read. `y_own` stays at `n_cells` - the
+        // wall distance is solved on the WHOLE mesh and split, and
+        // `copy_field` threads exactly the owned cells.
+        let nroom = mesh.n_local().max(1);
         let fld = FieldKernels::new(gpu)?;
 
         let mut y_own: DevBuf<Scalar> = gpu.zeros(nc)?;
@@ -420,25 +430,25 @@ impl<'m> KOmegaSst<'m> {
 
             y: y_own,
 
-            f1: gpu.zeros(nc)?,
-            f2: gpu.zeros(nc)?,
-            sigma_k: gpu.zeros(nc)?,
-            sigma_w: gpu.zeros(nc)?,
-            gamma_b: gpu.zeros(nc)?,
-            beta_b: gpu.zeros(nc)?,
+            f1: gpu.zeros(nroom)?,
+            f2: gpu.zeros(nroom)?,
+            sigma_k: gpu.zeros(nroom)?,
+            sigma_w: gpu.zeros(nroom)?,
+            gamma_b: gpu.zeros(nroom)?,
+            beta_b: gpu.zeros(nroom)?,
 
-            grad_k: gpu.zeros(nc)?,
-            grad_omega: gpu.zeros(nc)?,
+            grad_k: gpu.zeros(nroom)?,
+            grad_omega: gpu.zeros(nroom)?,
 
-            s: gpu.zeros(nc)?,
-            p: gpu.zeros(nc)?,
-            g_lim: gpu.zeros(nc)?,
+            s: gpu.zeros(nroom)?,
+            p: gpu.zeros(nroom)?,
+            g_lim: gpu.zeros(nroom)?,
 
             f1_override: None,
             des: None,
             lm: None,
             gm: None,
-            grad_frob: gpu.zeros(nc)?,
+            grad_frob: gpu.zeros(nroom)?,
             rho_opts: RhoSstOptions::default(),
             cont_ddt: gpu.zeros(nc)?,
         })
@@ -701,8 +711,8 @@ impl<'m> KOmegaSst<'m> {
             n,
         )?;
 
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.k, self.core.mesh)?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.omega, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.k)?;
+        self.core.correct_bc(gpu, &mut self.omega)?;
 
         self.core.update_flow_derived(gpu, flow)?;
         self.update_blending(gpu, flow, None)?;
@@ -953,6 +963,18 @@ impl<'m> KOmegaSst<'m> {
         if self.gm.is_some() {
             return refuse("the gamma transition model (SPEC-LIT 90)");
         }
+        // SPEC-LIT 139.6 (PAR-12): `rho` and the mass flux have no halo - the
+        // exchange moves scalars and labels, not the density triple or the
+        // rho-weighted equation's face density.
+        if self.core.has_exchange() {
+            return Err(Error::Config(
+                "distflow: the rho-weighted SST form (SPEC-LIT 156) has no \
+                 exchange - its rho triple and mass flux have no halo on the \
+                 turbulence path yet (PAR-12); run the kinematic form, or the \
+                 model serial"
+                    .to_string(),
+            ));
+        }
 
         let m = self.core.mesh;
         let (n, nif, nbf) = (m.n_cells, m.n_internal_faces, m.n_boundary_faces);
@@ -1193,7 +1215,7 @@ impl<'m> KOmegaSst<'m> {
             ctrl.omega_min,
             n,
         )?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.omega, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.omega)?;
 
         // ---- k -----------------------------------------------------------
         match dens {
@@ -1351,7 +1373,7 @@ impl<'m> KOmegaSst<'m> {
             .solve_equation(gpu, &mut self.k, ctrl.k_relax, &sc, false)?;
 
         bound_k(gpu, &self.core.turb, &mut self.k.f, ctrl.k_min, n)?;
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.k, self.core.mesh)?;
+        self.core.correct_bc(gpu, &mut self.k)?;
 
         self.correct_nut(gpu, flow)?;
 
@@ -1404,7 +1426,7 @@ impl<'m> KOmegaSst<'m> {
             n,
         )?;
 
-        correct_boundary_conditions(gpu, &self.core.fld, &mut self.core.nut, self.core.mesh)?;
+        self.core.correct_nut_bc(gpu)?;
         nut_boundary(gpu, &self.core.turb, &mut self.core.nut, self.core.mesh)?;
         self.core.wd.update_nut(
             gpu,
@@ -1424,6 +1446,65 @@ impl<'m> KOmegaSst<'m> {
     pub fn convergence_measure(&mut self, gpu: &Gpu) -> Result<Scalar> {
         let k = &self.k.f;
         self.core.convergence_measure(gpu, k)
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.6 (PAR-12)
+// ==========================================================================
+
+impl<'m> KOmegaSst<'m> {
+    /// The wall distance the model was built with - what a decomposed driver
+    /// needs to check its part's `y` against the whole mesh's (SPEC-LIT
+    /// 139.6's gate): computed ON THE WHOLE MESH and split by `global_cell`,
+    /// never solved on a part.
+    pub fn wall_distance(&self) -> &DevBuf<Scalar> {
+        &self.y
+    }
+
+    /// Set the exchange a decomposed SST runs through - the scalar halos of
+    /// `k`, `omega` and `nut`, the wall-cell constraint across the cut, the
+    /// processor faces' blended diffusivity and the world's convergence
+    /// maxima. `None` leaves every serial call launch for launch.
+    ///
+    /// Refused ([`Error::Config`], starting `distflow: `, `Some` only, before
+    /// delegating to [`RasCore::set_exchange`]) when an `f1` override, a
+    /// hybrid length scale or either transition model is attached: each
+    /// stamps fields or sources this core's seams do not carry across the
+    /// cut. The rest of the refusal table is [`RasCore::set_exchange`]'s.
+    pub fn set_exchange(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
+    ) -> Result<()> {
+        if x.is_some()
+            && (self.f1_override.is_some()
+                || self.des.is_some()
+                || self.lm.is_some()
+                || self.gm.is_some())
+        {
+            return Err(Error::Config(
+                "distflow: a decomposed KOmegaSst with an f1 override, a \
+                 hybrid length scale or a transition model attached is not \
+                 routed by PAR-12 - detach it and set the exchange, or run \
+                 the model serial"
+                    .to_string(),
+            ));
+        }
+        self.core.set_exchange(gpu, hm, x)
+    }
+
+    /// Set where `k` and `omega` are solved - the part's SPMD Krylov behind
+    /// [`crate::momentum::ComponentRoute`]; `None` keeps the rank-local
+    /// [`crate::solver::solve`], launch for launch.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.core.set_route(route)
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.core.has_exchange()
     }
 }
 

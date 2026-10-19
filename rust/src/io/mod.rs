@@ -77,6 +77,7 @@ pub mod case_parcels;
 pub mod case_chem;
 pub mod case_rad;
 pub mod case_dust;
+pub mod decomposed;
 
 pub use writer::{
     cartesian_info, CartesianInfo, FoamField, FoamPayload, FoamWriter, NvdbWriter, ResultWriter,

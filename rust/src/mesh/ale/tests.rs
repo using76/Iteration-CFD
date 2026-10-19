@@ -205,7 +205,6 @@ fn the_recomputed_geometry_is_the_host_sweep_on_the_moved_points() {
 /// T4 - Gate 105-A itself: space conservation to round-off over 100 steps,
 /// euler and backward, and the uniform state uniform to round-off.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn gate_105a_space_conservation_holds_to_round_off() {
     let Some(gpu) = gpu() else { return };
     for (name, scheme) in [("euler", DdtScheme::Euler), ("backward", DdtScheme::Backward)] {
@@ -220,8 +219,8 @@ fn gate_105a_space_conservation_holds_to_round_off() {
         );
         assert!(r.worst_scl <= 1e-12, "{name}: worst_scl {}", r.worst_scl);
         assert!(r.worst_scheme <= 1e-12, "{name}: worst_scheme {}", r.worst_scheme);
-        assert!(r.worst_uniform <= 1e-12, "{name}: worst_uniform {}", r.worst_uniform);
-        assert!(r.volume_drift <= 1e-12, "{name}: volume_drift {}", r.volume_drift);
+        assert!((r.worst_uniform as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: worst_uniform {}", r.worst_uniform);
+        assert!((r.volume_drift as f64) <= crate::precision::roundoff_tol(1e-12), "{name}: volume_drift {}", r.volume_drift);
         assert_eq!(
             r.boundary_flux_max, 0.0,
             "{name}: a boundary face moved, and its phi_mesh is not exactly zero"
@@ -270,7 +269,6 @@ fn fan(verts: &[Label], points: &[Vec3]) -> (Vec3, Vec3) {
 /// T5 - the identity of SPEC-LIT 105.3: a warped QUAD has
 /// `Sf.(Cf - x_avg) = 0` to round-off, a warped PENTAGON does not.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_not() {
     // A fixed 32-bit LCG, as the gpugeom fixture jitter uses, coordinates in
     // [-0.5, 0.5) - the same warping every run and every machine.
@@ -310,7 +308,7 @@ fn a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_no
     }
     for (k, r) in rs.iter().take(3).enumerate() {
         assert!(
-            *r <= 1e-14,
+            (*r as f64) <= crate::precision::roundoff_tol(1e-14),
             "quad {}: Sf.(Cf - x_avg) is {r:.3e} of |Sf| diam, and the identity \
              of SPEC-LIT 105.3 says it is zero to round-off",
             k + 1
@@ -327,7 +325,6 @@ fn a_quadrilateral_keeps_its_centroid_offset_normal_to_sf_and_a_pentagon_does_no
 /// T6 - on a mesh that does not move, the ALE ddt equals `timescheme`'s ddt
 /// to 1e-14 relative: the same equation, one association apart.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move() {
     let Some(gpu) = gpu() else { return };
     let rb = gate_box();
@@ -375,7 +372,7 @@ fn the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move() {
     let (rd, rs_) = (rel(&d1, &d2), rel(&s1, &s2));
     println!("  psi: diag rel {rd:.3e}, source rel {rs_:.3e}");
     assert!(rd <= 1e-14, "diag: {rd:.3e}");
-    assert!(rs_ <= 1e-14, "source: {rs_:.3e}");
+    assert!((rs_ as f64) <= crate::precision::roundoff_tol(1e-14), "source: {rs_:.3e}");
 
     a1.zero(&gpu).expect("zero");
     a2.zero(&gpu).expect("zero");
@@ -391,7 +388,7 @@ fn the_ale_ddt_reduces_to_the_static_ddt_on_a_mesh_that_does_not_move() {
     let (rd, rs_) = (rel(&d1, &d2), rel(&s1, &s2));
     println!("  rho psi: diag rel {rd:.3e}, source rel {rs_:.3e}");
     assert!(rd <= 1e-14, "rho diag: {rd:.3e}");
-    assert!(rs_ <= 1e-14, "rho source: {rs_:.3e}");
+    assert!((rs_ as f64) <= crate::precision::roundoff_tol(1e-14), "rho source: {rs_:.3e}");
 }
 
 /// T7 - (C1) works: a `Momentum` holding `&gm` is alive across an `advance`,
@@ -566,7 +563,6 @@ fn the_ale_step_replays_bitwise() {
 /// the swept-volume identity is measured with BOUNDARY faces sweeping, so its
 /// SCL is held to the gate's 1e-12 too.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_volume_drift_is_the_worst_step_and_not_the_last() {
     let Some(gpu) = gpu() else { return };
     let rb = refined::build([4, 3, 3], Vec3::new(0.25, 0.3, 0.2), &[0u32; 36]).expect("box");

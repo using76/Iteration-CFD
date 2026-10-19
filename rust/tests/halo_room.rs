@@ -282,8 +282,9 @@ const ALLOWED: &[(&str, &str, usize, &str)] = &[
 
 /// The number of halo sites the scan must find, so that deleting an
 /// `n_local` buffer fails this audit even when every remaining site is
-/// still classified.
-const HALO_SITES: usize = 62;
+/// still classified. 63 since lane G's merge 3b1170c sized
+/// `EnergySources::q_div` (SPEC-LIT 137.4) `n_local` like `q` and `sp`.
+const HALO_SITES: usize = 63;
 
 /// Every `.zeros(` argument on this line - the site is the leading dot, so
 /// `fn zeros(` and `GpuScalarField::zeros(` are not sites - balanced to the

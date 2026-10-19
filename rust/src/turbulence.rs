@@ -83,6 +83,7 @@ use crate::solver::{
     SolverWorkspace,
 };
 use crate::wallfunctions::{constrain_wall_cells, WallData, WallFunctionCoeffs};
+use crate::wallfunctions::mark_wall_cells;
 use crate::{Label, Scalar, Tensor, Vec3};
 
 /// Read from `system/`; defined in [`crate::io::case`] because that is where
@@ -170,6 +171,10 @@ pub struct TurbKernels {
     add_buoyancy_epsilon: CudaFunction,
     add_buoyancy_omega: CudaFunction,
     add_buoyancy_omega_cell: CudaFunction,
+
+    /// SPEC-LIT 139.6 (PAR-12) - the blended diffusivity of a decomposed
+    /// run's processor faces, interpolated as an internal face is.
+    gamma_coupled_cell: CudaFunction,
 }
 
 impl TurbKernels {
@@ -216,6 +221,8 @@ impl TurbKernels {
             add_buoyancy_epsilon: k.func("turbAddBuoyancyToEpsilon")?,
             add_buoyancy_omega: k.func("turbAddBuoyancyToOmega")?,
             add_buoyancy_omega_cell: k.func("turbAddBuoyancyToOmegaCell")?,
+
+            gamma_coupled_cell: k.func("turbGammaCoupledCell")?,
         })
     }
 }
@@ -229,6 +236,19 @@ fn expect_len<T>(buf: &DevBuf<T>, want: usize, what: &str) -> Result<()> {
             buf.len()
         )))
     }
+}
+
+/// SPEC-LIT 139.5 (PAR-11): `nut.f` may be the bare `n_cells` buffer a
+/// serial run always had, or the 139.1 halo-carrying cell buffer
+/// (`n_local`) a decomposed `ScalarTransport` carries - RasCore's own `nut`
+/// has carried the halo since 139.1. Both index exactly the cells the
+/// kernels read: owned cells on the internal faces, `bf` on the boundary
+/// ones, so the halo room is admitted and never read.
+fn expect_nut_cells(nut_f: &DevBuf<Scalar>, m: &GpuMesh) -> Result<()> {
+    if nut_f.len() == m.n_local() {
+        return Ok(());
+    }
+    expect_len(nut_f, m.n_cells, "nut.f")
 }
 
 // ==========================================================================
@@ -253,7 +273,7 @@ pub fn face_diffusivity(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -324,7 +344,7 @@ pub fn face_diffusivity_affine(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
 
     if m.n_internal_faces > 0 {
@@ -392,9 +412,17 @@ pub fn face_diffusivity_cell(
 ) -> Result<()> {
     expect_len(gamma, m.n_internal_faces, "gamma")?;
     expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
     expect_len(&nut.bf, m.n_boundary_faces, "nut.bf")?;
-    expect_len(r_sigma, m.n_cells, "r_sigma")?;
+    // SPEC-LIT 139.6 (PAR-12): on a part the multiplier may be the
+    // exchanged `n_local` room (RasCore::assemble_transport_blended passes
+    // it); this pass reads owned cells only - a part's internal faces join
+    // two owned cells - and the processor faces read the room's halo in
+    // face_diffusivity_coupled_cell. A whole mesh has `n_local == n_cells`
+    // and passes what it always passed.
+    if r_sigma.len() != m.n_local() {
+        expect_len(r_sigma, m.n_cells, "r_sigma")?;
+    }
 
     if m.n_internal_faces > 0 {
         let n = m.n_internal_faces;
@@ -434,6 +462,62 @@ pub fn face_diffusivity_cell(
         }
     }
 
+    Ok(())
+}
+
+/// SPEC-LIT 139.6 (PAR-12): the blended `Gamma_eff·|Sf|` on the LISTED
+/// boundary faces - a decomposed run's processor faces - interpolated as an
+/// INTERNAL face is, from the two cells the face couples.
+///
+/// [`face_diffusivity_cell`]'s boundary pass (`turbGammaBoundaryCell`) takes
+/// the OWNER's `rSigma`; on a processor face the other cell belongs to another
+/// rank and carries its own blending factor, so where the factor varies (SST's
+/// `F1`) the owner-only value is wrong at O(1e-3), not round-off. This is
+/// `turbGammaInternalCell`'s expression evaluated over the listed faces, the
+/// neighbour's `nut` and `r_sigma` read at the halo cell the exchange has
+/// filled. `r_sigma` is therefore the `n_local` HALO-CARRYING buffer, not the
+/// `n_cells` one the internal pass reads - and the caller runs this AFTER
+/// [`face_diffusivity_cell`], overwriting the processor faces' entries only.
+///
+/// k-epsilon's constant sigma makes the owner-only value algebraically equal
+/// to the interpolated one, so nothing calls this there.
+#[allow(clippy::too_many_arguments)]
+pub fn face_diffusivity_coupled_cell(
+    gpu: &Gpu,
+    k: &TurbKernels,
+    b_gamma: &mut DevBuf<Scalar>,
+    nut: &GpuScalarField,
+    r_sigma: &DevBuf<Scalar>,
+    faces: &DevBuf<Label>,
+    n_faces: usize,
+    m: &GpuMesh,
+    nu: Scalar,
+) -> Result<()> {
+    expect_len(b_gamma, m.n_boundary_faces, "b_gamma")?;
+    expect_nut_cells(&nut.f, m)?;
+    expect_len(r_sigma, m.n_local(), "r_sigma")?;
+    if n_faces == 0 {
+        return Ok(());
+    }
+    expect_len(faces, n_faces, "faces")?;
+
+    let nl = n_faces as Label;
+    let f = k.gamma_coupled_cell.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(b_gamma)
+            .arg(&nut.f)
+            .arg(r_sigma)
+            .arg(&m.b_face_cells)
+            .arg(&m.b_nbr_cell)
+            .arg(&m.b_weights)
+            .arg(&m.b_mag_sf)
+            .arg(faces)
+            .arg(&nu)
+            .arg(&nl)
+            .launch(cfg_for(n_faces))?;
+    }
     Ok(())
 }
 
@@ -547,7 +631,7 @@ pub fn nut_boundary(
         return Ok(());
     }
     expect_len(&nut.bf, n, "nut.bf")?;
-    expect_len(&nut.f, m.n_cells, "nut.f")?;
+    expect_nut_cells(&nut.f, m)?;
 
     let nl = n as Label;
     let f = kern.nut_boundary.clone();
@@ -1277,8 +1361,16 @@ pub fn ls_grad_grad_u_mag_sqr(
     m: &GpuMesh,
 ) -> Result<()> {
     let n = m.n_cells;
-    expect_len(out, n, "out")?;
-    expect_len(grad_u, n, "grad_u")?;
+    // The PAR-09 room (SPEC-LIT 139.6): the per-cell buffers of the SST
+    // blend allocate at `n_local` on a part, and the kernels thread the `n`
+    // owned cells only, so the room is admitted and never read. A whole
+    // mesh has `n_local == n_cells` and passes what it always passed.
+    if out.len() < n {
+        expect_len(out, n, "out")?;
+    }
+    if grad_u.len() < n {
+        expect_len(grad_u, n, "grad_u")?;
+    }
     if n == 0 {
         return Ok(());
     }
@@ -1421,8 +1513,16 @@ pub fn strain_rate_mag(
     if n == 0 {
         return Ok(());
     }
-    expect_len(out, n, "out")?;
-    expect_len(grad_u, n, "grad_u")?;
+    // The PAR-09 room (SPEC-LIT 139.6): the per-cell buffers of the SST
+    // blend allocate at `n_local` on a part, and the kernels thread the `n`
+    // owned cells only, so the room is admitted and never read. A whole
+    // mesh has `n_local == n_cells` and passes what it always passed.
+    if out.len() < n {
+        expect_len(out, n, "out")?;
+    }
+    if grad_u.len() < n {
+        expect_len(grad_u, n, "grad_u")?;
+    }
 
     let nl = n as Label;
     let f = kern.strain_rate.clone();
@@ -1453,8 +1553,16 @@ pub fn vorticity_mag(
     if n == 0 {
         return Ok(());
     }
-    expect_len(out, n, "out")?;
-    expect_len(grad_u, n, "grad_u")?;
+    // The PAR-09 room (SPEC-LIT 139.6): the per-cell buffers of the SST
+    // blend allocate at `n_local` on a part, and the kernels thread the `n`
+    // owned cells only, so the room is admitted and never read. A whole
+    // mesh has `n_local == n_cells` and passes what it always passed.
+    if out.len() < n {
+        expect_len(out, n, "out")?;
+    }
+    if grad_u.len() < n {
+        expect_len(grad_u, n, "grad_u")?;
+    }
 
     let nl = n as Label;
     let f = kern.vorticity.clone();
@@ -1487,8 +1595,16 @@ pub fn grad_frobenius(
     if n == 0 {
         return Ok(());
     }
-    expect_len(out, n, "out")?;
-    expect_len(grad_u, n, "grad_u")?;
+    // The PAR-09 room (SPEC-LIT 139.6): the per-cell buffers of the SST
+    // blend allocate at `n_local` on a part, and the kernels thread the `n`
+    // owned cells only, so the room is admitted and never read. A whole
+    // mesh has `n_local == n_cells` and passes what it always passed.
+    if out.len() < n {
+        expect_len(out, n, "out")?;
+    }
+    if grad_u.len() < n {
+        expect_len(grad_u, n, "grad_u")?;
+    }
 
     let nl = n as Label;
     let f = kern.grad_frobenius.clone();
@@ -1614,6 +1730,27 @@ pub struct RasCore<'m> {
     /// Two one-element landing pads for the convergence reduction.
     red_a: DevBuf<Scalar>,
     red_b: DevBuf<Scalar>,
+
+    // The decomposed seams - SPEC-LIT 139.6 (PAR-12). Both `Option`s are
+    // `None` for every serial run, where each new arm is the call this core
+    // has always made; a decomposed model is handed its
+    // [`FlowExchange`](crate::distflow::FlowExchange) and
+    // [`ComponentRoute`](crate::momentum::ComponentRoute) through
+    // [`Self::set_exchange`] / [`Self::set_route`].
+    /// The rank's field exchange, when the model runs on a part.
+    exchange: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
+    /// The part's SPMD Krylov route for every equation this core solves.
+    route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>,
+    /// `[n_proc_faces]` the part's processor boundary faces, ascending - the
+    /// faces whose diffusivity is interpolated as an internal face's is.
+    proc_faces: Option<DevBuf<Label>>,
+    /// `proc_faces`' length, kept because the time loop must not allocate and
+    /// the launcher needs a count.
+    n_proc_faces: usize,
+    /// `[n_local]` the diffusivity multiplier with its halo filled by the
+    /// exchange, rebuilt from the model's owned `r_sigma` each blended
+    /// assembly.
+    r_sigma_halo: Option<DevBuf<Scalar>>,
 }
 
 impl<'m> RasCore<'m> {
@@ -1637,7 +1774,14 @@ impl<'m> RasCore<'m> {
         // A degenerate mesh still gets one-element buffers: a zero-length
         // device allocation is an error, and every launcher returns early on
         // `n == 0` so nothing reads them.
-        let nc = mesh.n_cells.max(1);
+        //
+        // The PAR-09 room (SPEC-LIT 139.6, PAR-12): the per-cell buffers of
+        // the equation assembly are `n_local` long, because the `fvc_`/`fvm_`
+        // calls they feed expect the room on a part; the kernels thread
+        // owned cells only, so the room is admitted and never read. A whole
+        // mesh has `n_local == n_cells`, so a serial run allocates and
+        // launches exactly what it always did.
+        let nc = mesh.n_local().max(1);
         let nif = mesh.n_internal_faces.max(1);
         let nbf = mesh.n_boundary_faces.max(1);
 
@@ -1705,6 +1849,12 @@ impl<'m> RasCore<'m> {
             diff: gpu.zeros(nc)?,
             red_a: gpu.zeros(1)?,
             red_b: gpu.zeros(1)?,
+
+            exchange: None,
+            route: None,
+            proc_faces: None,
+            n_proc_faces: 0,
+            r_sigma_halo: None,
         })
     }
 
@@ -1796,6 +1946,23 @@ impl<'m> RasCore<'m> {
         t: &GpuScalarField,
         u: &GpuVectorField,
     ) -> Result<bool> {
+        // SPEC-LIT 139.6 (PAR-12): `G_b` reads `grad(T)`, and a decomposed
+        // run has no T gradient across the cut - the gradient pass reads
+        // `t.bf` and the neighbour cells' values at the far cell of every
+        // face, none of which the exchange of PAR-12 moves. A driver that
+        // attached buoyancy AFTER `set_exchange` is refused here, the same
+        // rule `set_exchange` states for one attached before. Without a
+        // buoyancy attached the call is the serial no-op it always was.
+        if self.exchange.is_some() && self.buoyancy.is_some() {
+            return Err(Error::Config(
+                "distflow: a decomposed RasCore cannot build the buoyancy \
+                 production G_b - it reads grad(T) at the far cell of a face, \
+                 and the temperature's gradient has no halo on the turbulence \
+                 path yet (PAR-12); run the model serial, or decompose an \
+                 isothermal case"
+                    .to_string(),
+            ));
+        }
         let Some(b) = self.buoyancy else {
             return Ok(false);
         };
@@ -1951,16 +2118,60 @@ impl<'m> RasCore<'m> {
     ) -> Result<()> {
         self.a.zero(gpu)?;
 
+        // SPEC-LIT 139.6 (PAR-12): the blend multiplier crosses the halo
+        // first. The owned values are copied into the `n_local` room and the
+        // exchange fills its halo - on EVERY rank with an exchange, because
+        // the exchange is collective - and both passes read the room: the
+        // internal-face pass its owned cells, the coupled pass below the
+        // processor faces' halo cells. Serially `exchange` and
+        // `r_sigma_halo` are `None` and `r_sigma` itself is the pass buffer -
+        // nothing here moves.
+        let Self { fld, exchange, r_sigma_halo, .. } = self;
+        let pass: &DevBuf<Scalar> = match (exchange.as_mut(), r_sigma_halo.as_mut()) {
+            (Some(x), Some(halo)) => {
+                crate::field_ops::copy_field(gpu, fld, halo, r_sigma, self.mesh.n_cells)?;
+                x.cells(gpu, halo)?;
+                &*halo
+            }
+            _ => r_sigma,
+        };
+
         face_diffusivity_cell(
             gpu,
             &self.turb,
             &mut self.gamma,
             &mut self.b_gamma,
             &self.nut,
-            r_sigma,
+            pass,
             self.mesh,
             flow.nu,
         )?;
+
+        // On a part the processor faces' diffusivity is an internal face's,
+        // not the owner-only value the boundary pass just wrote; the coupled
+        // kernel overwrites exactly those faces from the same exchanged
+        // room. Nothing here moves for a serial run: `proc_faces` is `None`
+        // and this block is a failed `if`.
+        if self.n_proc_faces > 0 {
+            let Self { r_sigma_halo, proc_faces, turb, b_gamma, nut, mesh, .. } = self;
+            let halo = r_sigma_halo
+                .as_mut()
+                .expect("proc_faces is set only with a halo buffer");
+            let faces = proc_faces
+                .as_ref()
+                .expect("n_proc_faces > 0 implies proc_faces");
+            face_diffusivity_coupled_cell(
+                gpu,
+                turb,
+                b_gamma,
+                nut,
+                halo,
+                faces,
+                self.n_proc_faces,
+                *mesh,
+                flow.nu,
+            )?;
+        }
 
         self.assemble_after_diffusivity(gpu, flow, psi, conv, None)
     }
@@ -2248,7 +2459,21 @@ impl<'m> RasCore<'m> {
         relax(gpu, &self.ldu, &mut self.a, self.mesh, &psi.f, alpha)?;
 
         if constrain_walls {
-            constrain_wall_cells(gpu, &self.ldu, &mut self.a, self.mesh, &self.wd)?;
+            if let Some(x) = &mut self.exchange {
+                // SPEC-LIT 139.6 (PAR-12): `constrain_wall_cells` split across
+                // the cut. The mark half first, then the two constraint
+                // arrays across the halo - `lduSetValues` reads `isFixed` at a
+                // coupled face's NEIGHBOUR cell, which on a part is a halo
+                // cell that only the exchange can fill - then the same fold,
+                // in the same position (after the relaxation that would
+                // re-open the row, before the boundary fold).
+                mark_wall_cells(gpu, &mut self.a, self.mesh, &self.wd)?;
+                x.cells_label(gpu, &mut self.a.is_fixed)?;
+                x.cells(gpu, &mut self.a.fixed_value)?;
+                crate::ldu_ops::set_values(gpu, &self.ldu, &mut self.a, self.mesh)?;
+            } else {
+                constrain_wall_cells(gpu, &self.ldu, &mut self.a, self.mesh, &self.wd)?;
+            }
         }
 
         add_boundary_contributions(gpu, &self.ldu, &mut self.a, self.mesh)?;
@@ -2263,7 +2488,69 @@ impl<'m> RasCore<'m> {
         // (SPEC-LIT 8.2, 13.4). A transport equation carrying convection is
         // asymmetric, so `solver PCG;` on one is now refused instead of
         // running BiCGStab and saying nothing.
-        crate::solver::solve(gpu, &self.sol, &mut psi.f, &self.a, self.mesh, &mut self.ws, sc)
+        // SPEC-LIT 139.6 (PAR-12): on a part the final solve goes through the
+        // SPMD Krylov (every residual norm the world's), exactly as
+        // `solve_equation_route` does; `None` - every serial run - is the
+        // rank-local call above, launch for launch.
+        match self.route.as_mut() {
+            Some(r) => r.solve_component(gpu, &mut psi.f, &self.a, self.mesh, sc),
+            None => {
+                crate::solver::solve(gpu, &self.sol, &mut psi.f, &self.a, self.mesh, &mut self.ws, sc)
+            }
+        }
+    }
+
+    /// SPEC-LIT 139.5 (PAR-11): [`Self::solve_equation_with`], with the final
+    /// solve through `route` when `Some`.
+    ///
+    /// `None` -> exactly `self.solve_equation_with(gpu, psi, alpha, sc,
+    /// constrain_walls, constrain_fixed)`, launch for launch. `Some` runs the
+    /// same relax / constrain_wall_cells / add_boundary_contributions /
+    /// set_values steps and hands the assembled system to the part's SPMD
+    /// Krylov instead of the rank-local one - the seam
+    /// `ScalarTransport::set_route` (PAR-11) drives.
+    pub fn solve_equation_route(
+        &mut self,
+        gpu: &Gpu,
+        psi: &mut GpuScalarField,
+        alpha: Scalar,
+        sc: &SolverControls,
+        constrain_walls: bool,
+        constrain_fixed: bool,
+        route: Option<&mut (dyn crate::momentum::ComponentRoute + '_)>,
+    ) -> Result<SolverPerformance> {
+        relax(gpu, &self.ldu, &mut self.a, self.mesh, &psi.f, alpha)?;
+
+        if constrain_walls {
+            if let Some(x) = &mut self.exchange {
+                // SPEC-LIT 139.6 (PAR-12): `constrain_wall_cells` split across
+                // the cut. The mark half first, then the two constraint
+                // arrays across the halo - `lduSetValues` reads `isFixed` at a
+                // coupled face's NEIGHBOUR cell, which on a part is a halo
+                // cell that only the exchange can fill - then the same fold,
+                // in the same position (after the relaxation that would
+                // re-open the row, before the boundary fold).
+                mark_wall_cells(gpu, &mut self.a, self.mesh, &self.wd)?;
+                x.cells_label(gpu, &mut self.a.is_fixed)?;
+                x.cells(gpu, &mut self.a.fixed_value)?;
+                crate::ldu_ops::set_values(gpu, &self.ldu, &mut self.a, self.mesh)?;
+            } else {
+                constrain_wall_cells(gpu, &self.ldu, &mut self.a, self.mesh, &self.wd)?;
+            }
+        }
+
+        add_boundary_contributions(gpu, &self.ldu, &mut self.a, self.mesh)?;
+
+        if constrain_fixed {
+            crate::ldu_ops::set_values(gpu, &self.ldu, &mut self.a, self.mesh)?;
+        }
+
+        match route {
+            Some(r) => r.solve_component(gpu, &mut psi.f, &self.a, self.mesh, sc),
+            None => {
+                crate::solver::solve(gpu, &self.sol, &mut psi.f, &self.a, self.mesh, &mut self.ws, sc)
+            }
+        }
     }
 
     /// `k_prev <- k`. Called at the top of every `correct`, so that
@@ -2299,7 +2586,175 @@ impl<'m> RasCore<'m> {
         let d = change.first().copied().unwrap_or(0.0);
         let s = scale.first().copied().unwrap_or(0.0);
 
+        // SPEC-LIT 139.6 (PAR-12): the two maxima are RANK-local reductions;
+        // on a part they are the WORLD's, or two ranks of one outer iteration
+        // would disagree about whether the model converged. The same
+        // NaN-propagating max the flow path reduces with.
+        let (d, s) = if let Some(x) = &mut self.exchange {
+            (x.max(d)?, x.max(s)?)
+        } else {
+            (d, s)
+        };
+
         Ok(if s > 0.0 { d / s } else { d })
+    }
+}
+
+// ==========================================================================
+//  The decomposed seams - SPEC-LIT 139.6 (PAR-12)
+// ==========================================================================
+
+impl<'m> RasCore<'m> {
+    /// Set the exchange a decomposed model runs through: the field halo +
+    /// boundary evaluation of [`Self::correct_bc`], the raw-cell halos of the
+    /// wall-cell constraint, the processor faces of the coupled diffusivity
+    /// and the world's maxima of [`Self::convergence_measure`]. `None` (the
+    /// default) leaves every serial call launch for launch.
+    ///
+    /// Refusals ([`Error::Config`], starting `distflow: `), checked only when
+    /// `x` is `Some`, in this order:
+    ///
+    /// 1. `snGrad` not `uncorrected`, or a non-orthogonal corrector - both
+    ///    read a cell gradient at the far cell of a face, and gradients have
+    ///    no halo on the turbulence path yet;
+    /// 2. `k`'s or `epsilon`'s (or `omega`'s) `divScheme` neither `upwind` nor
+    ///    `central` (named with `{:?}`) - the other schemes read the far cell's
+    ///    gradient too;
+    /// 3. `gradSchemes` not plain `Gauss linear` - a limiter reads its
+    ///    neighbours' extrema;
+    /// 4. buoyancy production attached - `G_b` needs the temperature's
+    ///    gradient, which PAR-12 does not exchange.
+    ///
+    /// Then the processor faces: every boundary face of every patch whose
+    /// `type_name` is `"processor"` (a TRUE cyclic patch is not one of them),
+    /// ascending, uploaded once - and the `n_local` halo buffer the blended
+    /// assembly fills, allocated on every rank with an exchange (its halo
+    /// exchange is collective, processor faces or not).
+    pub fn set_exchange(
+        &mut self,
+        gpu: &Gpu,
+        hm: &HostMesh,
+        x: Option<Box<dyn crate::distflow::FlowExchange + 'm>>,
+    ) -> Result<()> {
+        if let Some(_) = &x {
+            if self.ctrl.sn_grad != crate::fv::SnGradScheme::Uncorrected
+                || self.ctrl.n_non_orth_correctors > 0
+            {
+                return Err(Error::Config(format!(
+                    "distflow: snGrad {:?} with {} non-orthogonal corrector(s) \
+                     reads a cell gradient at the far cell of a face, and \
+                     gradients have no halo on the turbulence path yet \
+                     (PAR-12); a decomposed RAS model runs snGrad uncorrected \
+                     and zero correctors only",
+                    self.ctrl.sn_grad, self.ctrl.n_non_orth_correctors
+                )));
+            }
+            for (what, conv) in [("k", self.ctrl.k_conv()), ("epsilon", self.ctrl.eps_conv())] {
+                match conv.scheme {
+                    crate::fv::DivScheme::Upwind | crate::fv::DivScheme::Central => {}
+                    other => {
+                        return Err(Error::Config(format!(
+                            "distflow: {what} divScheme {other:?} needs a cell \
+                             gradient at the far cell of a face, and gradients \
+                             have no halo on the turbulence path yet (PAR-12); \
+                             a decomposed RAS model runs upwind or central \
+                             convection only"
+                        )));
+                    }
+                }
+            }
+            if self.ctrl.grad_scheme != crate::fv::GradScheme::GAUSS {
+                return Err(Error::Config(format!(
+                    "distflow: gradSchemes {} limits or reconstructs from the \
+                     neighbours' values, which cross the cut; a decomposed RAS \
+                     model runs plain Gauss linear only (PAR-12)",
+                    self.ctrl.grad_scheme.describe()
+                )));
+            }
+            if self.buoyancy.is_some() {
+                return Err(Error::Config(
+                    "distflow: a decomposed RAS model cannot run the buoyancy \
+                     production G_b - it reads grad(T) at the far cell of a \
+                     face, and the temperature's gradient has no halo on the \
+                     turbulence path yet (PAR-12)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        match x {
+            Some(x) => {
+                // The processor faces: kind Cyclic, `type_name` "processor" -
+                // a TRUE cyclic patch carries its own name and is NOT one of
+                // these (SPEC-LIT 139.1). Ascending by construction: the
+                // patches are stored in order and each patch's faces ascend.
+                let mut faces: Vec<Label> = Vec::new();
+                for pi in &hm.patches {
+                    if pi.type_name == "processor" {
+                        faces.extend((pi.start..pi.start + pi.size).map(|b| b as Label));
+                    }
+                }
+                if faces.is_empty() {
+                    self.proc_faces = None;
+                    self.n_proc_faces = 0;
+                } else {
+                    let mut buf = gpu.zeros(faces.len())?;
+                    gpu.write(&mut buf, &faces)?;
+                    self.proc_faces = Some(buf);
+                    self.n_proc_faces = faces.len();
+                }
+                // The room is allocated on EVERY rank with an exchange, not
+                // only on ranks with processor faces: the blend multiplier's
+                // halo exchange is collective, and a part whose neighbours
+                // reach it through a cut cyclic couple alone has a halo and
+                // no processor face - skipping the exchange there would
+                // leave its neighbours waiting.
+                self.r_sigma_halo = Some(gpu.zeros(self.mesh.n_local().max(1))?);
+                self.exchange = Some(x);
+            }
+            None => {
+                self.exchange = None;
+                self.proc_faces = None;
+                self.n_proc_faces = 0;
+                self.r_sigma_halo = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// SPEC-LIT 139.6 (PAR-12): set where every equation this core solves is
+    /// solved - the part's SPMD Krylov behind
+    /// [`ComponentRoute`](crate::momentum::ComponentRoute); `None` (the
+    /// default) keeps the rank-local [`crate::solver::solve`], launch for
+    /// launch.
+    pub fn set_route(&mut self, route: Option<Box<dyn crate::momentum::ComponentRoute + 'm>>) {
+        self.route = route;
+    }
+
+    /// True when a decomposed run's exchange is set.
+    pub fn has_exchange(&self) -> bool {
+        self.exchange.is_some()
+    }
+
+    /// A transported scalar's halo then boundary evaluation on a part; the
+    /// plain `correct_boundary_conditions` a serial run has always made,
+    /// launch for launch, when the exchange is `None`.
+    pub fn correct_bc(&mut self, gpu: &Gpu, psi: &mut GpuScalarField) -> Result<()> {
+        if let Some(x) = &mut self.exchange {
+            x.field(gpu, &self.fld, psi, self.mesh)
+        } else {
+            crate::field_ops::correct_boundary_conditions(gpu, &self.fld, psi, self.mesh)
+        }
+    }
+
+    /// [`Self::correct_bc`] for `nu_t`, whose boundary faces the model owns
+    /// and whose halo the kernels read at a coupled face's far cell.
+    pub fn correct_nut_bc(&mut self, gpu: &Gpu) -> Result<()> {
+        if let Some(x) = &mut self.exchange {
+            x.field(gpu, &self.fld, &mut self.nut, self.mesh)
+        } else {
+            crate::field_ops::correct_boundary_conditions(gpu, &self.fld, &mut self.nut, self.mesh)
+        }
     }
 }
 
@@ -2434,6 +2889,7 @@ mod tests {
     /// test that only checked the reduction would pass on a kernel that
     /// ignored `a` entirely.
     #[test]
+    // f32 (F32-17): face 25's identity gap is 1.1e-5 relative, past the cap
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_affine_diffusivity_reduces_to_the_plain_one_bitwise() -> Result<()> {
         let Some(gpu) = gpu() else {

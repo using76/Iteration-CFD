@@ -750,6 +750,7 @@ mod tests {
     /// `vofFaceUnitNormalBoundary` and the special case in [`cos_deg`] are
     /// justified by a number rather than by a comment.
     #[test]
+    // f32 (F32-17): an exact-zero identity: f32 cos(pi/2) is -4.4e-8
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_cosine_of_ninety_degrees_is_not_zero() {
         let raw = ((90.0 as Scalar) * (std::f64::consts::PI as Scalar) / 180.0).cos();
@@ -878,6 +879,7 @@ mod tests {
     /// Jiang, Oh & Slattery's stated limits: `Ca -> inf` gives complete
     /// dewetting of the displaced phase, `theta_d -> 180 deg`.
     #[test]
+    // f32 (F32-17): absolute 1e-12 on tanh values of size 0.0077, not R-eligible
     #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn jiang_reaches_complete_dewetting_at_large_capillary_number() {
         let c = cos_deg(45.0);
@@ -900,7 +902,6 @@ mod tests {
     /// Cox-Voinov, as PUBLISHED: `theta_d^3 - theta_e^3 = 9 Ca ln(L/L_m)`,
     /// wherever the clip is not biting.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn cox_voinov_is_the_published_cubic() {
         let deg: Scalar = 45.0;
         let th_e = deg * (std::f64::consts::PI as Scalar) / 180.0;
@@ -912,7 +913,7 @@ mod tests {
             let lhs = th_d * th_d * th_d - th_e * th_e * th_e;
             let rhs = 9.0 * ca * ln_ratio;
             assert!(
-                (lhs - rhs).abs() < 1e-10,
+                ((lhs - rhs).abs() as f64) < crate::precision::roundoff_tol(1e-10),
                 "at Ca = {ca}: {lhs} against 9 Ca ln(L/Lm) = {rhs}"
             );
         }
@@ -1475,7 +1476,6 @@ mod tests {
     /// RISE. Getting that backwards makes a spreading drop bead up, which
     /// still looks like a drop.
     #[test]
-    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_device_agrees_with_the_host_contact_angle() {
         let Some(g) = gpu() else { return };
         let (hm, _) = block();
@@ -1526,7 +1526,7 @@ mod tests {
                     }
                     let rel = (got[i] - want).abs() / want.abs().max(1e-30);
                     assert!(
-                        rel < 1e-12,
+                        (rel as f64) < crate::precision::roundoff_tol(1e-12),
                         "{} at U = {ux} (Ca = {ca}): device {} host {want}",
                         corr.name(),
                         got[i]

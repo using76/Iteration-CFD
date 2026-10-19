@@ -1019,7 +1019,6 @@ fn apply_refuses_a_target_too_short() {
 /// `0.5 * Q0 = 0.1` to 1e-12 relative, with the rate exactly 0 at t = 0 and
 /// 0.2 to 1e-12 relative after the ramp.
 #[test]
-#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn ramped_inlet_volume_is_the_closed_form() {
     let Ok(gpu) = Gpu::new(0) else { return };
     let k = F1Kernels::new(&gpu).unwrap();
@@ -1102,11 +1101,11 @@ fn ramped_inlet_volume_is_the_closed_form() {
     }
     println!("ramped_inlet_volume: trapezoid integral = {integral}");
     assert!(
-        (integral - 0.1).abs() <= 1.0e-12 * 0.1,
+        (integral - 0.1).abs() <= crate::precision::roundoff_tol(1.0e-12) * 0.1,
         "the integral {integral} is not 0.1 to 1e-12 relative"
     );
     assert!(
-        (q_prev - 0.2).abs() <= 1.0e-12 * 0.2,
+        (q_prev - 0.2).abs() <= crate::precision::roundoff_tol(1.0e-12) * 0.2,
         "the final rate {} is not 0.2 to 1e-12 relative",
         q_prev
     );

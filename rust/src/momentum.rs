@@ -87,6 +87,7 @@ use std::path::Path;
 use cudarc::driver::{CudaFunction, PushKernelArg};
 
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::distflow::FlowExchange;
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuSurfaceScalarField, GpuVectorField};
 use crate::field_ops::{self, FieldKernels};
@@ -1999,12 +2000,29 @@ impl<'m> Momentum<'m> {
     /// Must be called with the velocity the momentum solve produced, because
     /// `H` is evaluated at that velocity.
     pub fn rhie_chow(&mut self, gpu: &Gpu, u: &GpuVectorField) -> Result<()> {
+        self.rhie_chow_with(gpu, u, None)
+    }
+
+    /// SPEC-LIT 139.4: [`Momentum::rhie_chow`] on a part. With `x = Some`:
+    /// (1) the per-component copy `launch_component(.. uc.f, u.f ..)` in the
+    /// HbyA loop launches over `m.n_local()` instead of `n`, so `amul`'s
+    /// coupled faces read the ghost component (the caller has exchanged U's
+    /// halo); (2) after the HbyA loop and BEFORE "rAU on faces",
+    /// `x.cells(gpu, &mut self.rau)` then `x.cells_vector(gpu, &mut
+    /// self.hbya)`. With `None`: exactly today's body.
+    pub fn rhie_chow_with(
+        &mut self,
+        gpu: &Gpu,
+        u: &GpuVectorField,
+        mut x: Option<&mut dyn FlowExchange>,
+    ) -> Result<()> {
         let m = self.m;
         let n = m.n_cells;
         if n == 0 {
             return Ok(());
         }
         let nl = n as Label;
+        let comp_n = if x.is_some() { m.n_local() } else { n };
 
         // ---- rAU, or SIMPLEC's rAtU ---------------------------------------
         if self.ctrl.simplec {
@@ -2043,7 +2061,7 @@ impl<'m> Momentum<'m> {
             let cmpt = c as Label;
             {
                 let Self { mk, uc, .. } = self;
-                launch_component(gpu, &mk.vec_component, &mut uc.f, &u.f, cmpt, n)?;
+                launch_component(gpu, &mk.vec_component, &mut uc.f, &u.f, cmpt, comp_n)?;
             }
             {
                 let Self { lduk, au, uc, a, .. } = self;
@@ -2062,6 +2080,14 @@ impl<'m> Momentum<'m> {
                     .arg(&nl)
                     .launch(cfg_for(n))?;
             }
+        }
+
+        // SPEC-LIT 139.4: a part's coupled faces read `rau` and `hbya` at
+        // the halo index, so both cross before the face kernels - `amul`'s
+        // `au` above was already assembled from the ghost component.
+        if let Some(x) = x.as_deref_mut() {
+            x.cells(gpu, &mut self.rau)?;
+            x.cells_vector(gpu, &mut self.hbya)?;
         }
 
         // ---- rAU on faces -------------------------------------------------
