@@ -58,7 +58,7 @@ const StartSchema = z.object({
   args: z.array(ArgSchema).describe('Flags from the registry for this binary'),
   positionals: z.array(z.string()).nullable().describe('Extra positional arguments (bench nx ny nz); the case is added automatically'),
   label: z.string().nullable().describe('Short label shown in the run list'),
-  precision: RunPrecisionSchema.nullish().describe('Build to run: double (default, f64) or single (the f32 build in rust/target/single/release, a preview until F32-18; not for pipelines)'),
+  precision: RunPrecisionSchema.nullish().describe('Build to run: double (default, f64) or single (the f32 build in rust/target/single/release; not for pipelines)'),
 })
 
 export const runStart: ToolDef<typeof StartSchema> = {

@@ -105,7 +105,8 @@ describe('ofgpu-par dispatch', () => {
 // F32-19: the studio runs a case at f32. precision 'single' looks only in
 // rust/target/single/release (OFGPU_BIN_DIR and target/release hold the f64
 // build), the run records its precision, and the log's first line is the run
-// header naming the build. Single is a preview until F32-18.
+// header naming the build. Single was a preview until F32-18; F32-19b
+// cleared the flag.
 describe('single precision (F32-19)', () => {
   it('binarySearchDirs and findBinary: single looks only in rust/target/single/release', async () => {
     const ws = await makeTempWorkspace({ plume: false })
@@ -148,8 +149,8 @@ describe('single precision (F32-19)', () => {
       expect(code).toBe(0)
       // The f64 build is still looked for where it always was, and is not there.
       expect(() => dispatch(base)).toThrow(/is not built on this machine/)
-      expect(runHeaderLine('ofgpu-k-epsilon', 'single', exe)).toBe(`run header: ofgpu-k-epsilon precision single (f32 build, ${exe}; preview until F32-18)`)
-      expect(runHeaderLine('ofgpu-k-epsilon', 'single')).toBe('run header: ofgpu-k-epsilon precision single (f32 build, demo; preview until F32-18)')
+      expect(runHeaderLine('ofgpu-k-epsilon', 'single', exe)).toBe(`run header: ofgpu-k-epsilon precision single (f32 build, ${exe})`)
+      expect(runHeaderLine('ofgpu-k-epsilon', 'single')).toBe('run header: ofgpu-k-epsilon precision single (f32 build, demo)')
       expect(runHeaderLine('ofgpu-k-epsilon', 'double', '/x/ofgpu-k-epsilon')).toBe('run header: ofgpu-k-epsilon precision double (f64 build, /x/ofgpu-k-epsilon)')
       expect(runHeaderLine('ofgpu-k-epsilon', 'double')).toBe('run header: ofgpu-k-epsilon precision double (f64 build, demo)')
     } finally {
@@ -180,7 +181,7 @@ describe('single precision (F32-19)', () => {
         await runs.wait(single.id, { maxMs: 5_000 })
         const first = runs.log(single.id, 1, 1).lines[0]
         expect(first.stream).toBe('system')
-        expect(first.text).toBe('run header: ofgpu-k-epsilon precision single (f32 build, demo; preview until F32-18)')
+        expect(first.text).toBe('run header: ofgpu-k-epsilon precision single (f32 build, demo)')
         const dbl = await runs.start(base)
         expect(dbl.precision).toBe('double')
         for (let i = 0; i < 100 && seen.length < 2; i++) await new Promise((r) => setTimeout(r, 20))

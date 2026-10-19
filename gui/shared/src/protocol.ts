@@ -17,15 +17,15 @@ export const RunEndWordSchema = z.enum(RUN_END_WORDS)
 /**
  * The build a run uses (F32-19): `double` is the default f64 build in rust/target/release, `single`
  * the `--features single` build in rust/target/single/release (SPEC-LIT §118, mixed precision). The
- * default stays `double` (docs/17 §10.1 A18). Single is a PREVIEW until F32-18 measures the full
- * single-build validate run; only then is it a supported configuration.
+ * default stays `double` (docs/17 §10.1 A18). Single is a supported configuration since F32-18
+ * measured the full single-build validate run (SPEC-LIT §112.5).
  */
 export const RUN_PRECISIONS = ['double', 'single'] as const
 export const RunPrecisionSchema = z.enum(RUN_PRECISIONS)
 export type RunPrecision = z.infer<typeof RunPrecisionSchema>
 export const DEFAULT_RUN_PRECISION: RunPrecision = 'double'
-/** True until F32-18 lands: the run header says the single build is a preview. */
-export const SINGLE_PRECISION_PREVIEW = true
+/** True until F32-18 landed; false since F32-19b (F32-18 measured the single build). */
+export const SINGLE_PRECISION_PREVIEW = false
 
 /** Grouped machine scalars; `hostname` is the Machine primary key and the struct's main field. */
 export const MachineRefSchema = z.object({
@@ -523,7 +523,7 @@ export const UiCommandSchema = z.discriminatedUnion('type', [
     // and the GUI's run-settings form coerces "4000" and "true" by that type. Turning
     // every numeric-looking string into a number here would decide it in the wrong place.
     value: z.union([z.string(), z.coerce.number(), Boolish]).nullish().describe('New value; a string is passed through as typed and the GUI coerces it by the flag\'s type'),
-    precision: RunPrecisionSchema.nullish().describe('The build to run: double (default, f64) or single (the f32 build, a preview until F32-18); null = leave it'),
+    precision: RunPrecisionSchema.nullish().describe('The build to run: double (default, f64) or single (the f32 build); null = leave it'),
   }),
   z.object({ type: z.literal('start_run') }),
   z.object({

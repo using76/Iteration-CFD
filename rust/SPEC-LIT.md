@@ -35158,8 +35158,9 @@ After F32-18 the f32 build is a **supported configuration**. That word claims fo
   §112.3 (F32-16, F32-17).
 * **Every validate section reports.** Each of the 84 sections (81 at F32-18, and lane G's 82-84 measured at the merge) runs under `single` and prints every row at its class
   tolerance (§112.4, §118.14), or is NOT RUN because it alone takes more than ten minutes.
-* **The studio can run it.** F32-19's precision setting starts the `target/single` drivers. Its preview flag is lane
-  G's to clear now that this section is written. The studio keeps `double` as its default (docs/17 §10.1 A18).
+* **The studio can run it.** F32-19's precision setting starts the `target/single` drivers. F32-19b cleared its preview
+  flag, so the run header no longer calls a single run a preview. The studio keeps `double` as its default
+  (docs/17 §10.1 A18).
 
 It does **not** claim that f32 passes every gate. The f64 build remains the build of record: every gate verdict
 that SPEC-LIT and the READMEs quote is the f64 one, and an f32 verdict is reported beside it. §112.4 lists every
