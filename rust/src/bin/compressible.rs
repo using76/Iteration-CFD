@@ -1995,9 +1995,31 @@ fn run(o: &Options) -> Result<RunEnd> {
     Ok(end)
 }
 
+/// The stack of the thread the case runs on, bytes (virtual: pages are
+/// committed as they are used). A Windows main thread has 1 MiB, which the
+/// frames of a vent opening beside a dust coupling (`check_membrane`,
+/// `vent::open_onto_dust`, `CompressibleDust::hand_over`) overflow
+/// ("thread 'main' has overflowed its stack", exit 0xc00000fd, found by
+/// Gate DST-REMBE's smoke on its placeholder vessel, SPEC-LIT 158.10);
+/// they need a little over 1 MiB. No result depends on it.
+const DRIVER_STACK: usize = 64 << 20;
+
+/// Parse the arguments and run the case - what `main` does - on a thread of
+/// [`DRIVER_STACK`] bytes of stack. A panic of the case is re-raised here, so
+/// it ends the process as it did on the main thread.
+fn parse_and_run(args: &[String]) -> Result<RunEnd> {
+    let args = args.to_vec();
+    let worker = std::thread::Builder::new()
+        .name(DRIVER.to_string())
+        .stack_size(DRIVER_STACK)
+        .spawn(move || parse(&args).and_then(|o| run(&o)))
+        .map_err(|e| Error::Config(format!("{DRIVER}: cannot start its worker thread: {e}")))?;
+    worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let outcome = parse(&args).and_then(|o| run(&o));
+    let outcome = parse_and_run(&args);
     match outcome {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
@@ -2853,6 +2875,34 @@ pOperating [1 -1 -2 0 0 0 0] 1e5;
             let v = read_scalar_field(&out.join(name), 8)
                 .unwrap_or_else(|e| panic!("{name} was not written: {e}"));
             assert!(v.internal.iter().all(|x| x.is_finite()), "{name} holds a non-finite value");
+        }
+    }
+
+    /// **SPEC-LIT §158.10 (DST-11 part 3, a defect found by Gate DST-REMBE's
+    /// smoke):** the vented dust box opens at a step above 0 and carries on
+    /// when the entry `main` calls runs from a thread whose stack is the
+    /// 1 MiB of a Windows main thread. The other tests here run the driver on
+    /// a test thread (2 MiB), where the opening fits; on the main thread the
+    /// opening's frames overflowed it ("thread 'main' has overflowed its
+    /// stack", exit 0xc00000fd) right after `vent: opened after step`.
+    #[test]
+    fn a_vented_dust_run_fits_a_one_mebibyte_main_thread() {
+        if Gpu::new(0).is_err() {
+            return;
+        }
+        let (_dir, case) = dust_vent_box("dst11_stack_box", false, DST11_BOX_P_STAT);
+        let args = argv(&[case.to_string_lossy().as_ref(), "-iters", "20"]);
+        let end = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || parse_and_run(&args))
+            .expect("the 1 MiB thread spawns")
+            .join()
+            .expect("the entry returns")
+            .expect("the vented dust box runs");
+        assert_eq!(end.steps, 20);
+        match end.vent {
+            Some(vent::VentState::Open { step, .. }) => assert!((1..20).contains(&step), "{step}"),
+            other => panic!("the membrane did not open: {other:?}"),
         }
     }
 

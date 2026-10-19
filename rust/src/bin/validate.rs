@@ -4034,6 +4034,17 @@ fn run(c: &mut Checks) -> Result<()> {
     c.ran("check_plume_rad", r)?;
     c.leave_gate();
     }
+    // SPEC-LIT 158.7, 158.10 - Gate DST-REMBE: the vented REMBE explosion
+    // against H22 Fig. 11, its four comparisons NAMED and NOT RUN (no vessel
+    // geometry), and a REDUCED smoke on the labelled PLACEHOLDER vessel of
+    // cases/dust/rembeVented.jsonc, in src/bin/validate_gates/dst_rembe.rs
+    // (docs/17 DST-11).
+    if c.section("Gate DST-REMBE: the vented REMBE explosion, key J.3 NOT RUN, and a REDUCED smoke on the PLACEHOLDER vessel (SPEC-LIT 158.7, 158.10)") {
+    c.enter_gate(validate_gates::dst_rembe::GATE);
+    let r = validate_gates::dst_rembe::check_dst_rembe(c);
+    c.ran("check_dst_rembe", r)?;
+    c.leave_gate();
+    }
 
     Ok(())
 }

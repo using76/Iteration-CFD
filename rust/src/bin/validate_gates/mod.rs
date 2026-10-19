@@ -118,3 +118,10 @@ pub(crate) mod flame_d;
 /// cases/plumeMcCaffreyRad.jsonc at three levels, replayed through the same
 /// P1-P4 bands as leg 1 (docs/17 VAL-54).
 pub(crate) mod plume_rad;
+
+/// SPEC-LIT §158.7, §158.10, Gate DST-REMBE: the vented REMBE explosion
+/// against Huang, Bloching & Lipatnikov (2022) Fig. 11 - its four
+/// comparisons NAMED and NOT RUN (H22 publishes no vessel geometry), and a
+/// REDUCED smoke on the labelled PLACEHOLDER vessel of
+/// cases/dust/rembeVented.jsonc (docs/17 DST-11).
+pub(crate) mod dst_rembe;

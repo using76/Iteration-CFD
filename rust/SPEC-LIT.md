@@ -63605,13 +63605,15 @@ vent with r_v >= R.
 | `automesher_config_reads_back`, `generator_refusals`, `seal_reach_on_a_block` | the config through `read_config_str`; five refusals by key; the 4x1x1 walk | bitwise seed; key named; exact | D | hold | hold |
 | `vent_probes_lower_and_refuse`, `vent_probes_read_their_cells` | the probe block's refusals; nearest cell, ties, origin, the box; the gather | key named; bitwise f64::from(p[cell]) | D | hold | hold |
 
-**NOT RUN, with their reasons.** The R-run of §158.7 (no REMBE geometry). Its two prerequisites,
+**NOT RUN, with their reasons.** The R-run of §158.7 (no REMBE geometry). Its three prerequisites,
 recorded for when the geometry is obtained: H22's 0.06 bar initial overpressure needs a
-non-uniform initial p, which DST-10's driver refuses for a dust case (§158.9); and H22's
+non-uniform initial p, which DST-10's driver refuses for a dust case (§158.9); H22's
 half-by-symmetry box cannot come from the automesher's stage-0 margin rule, so the placeholder
-box is full width. Part 2 of DST-11 (the driver beside a vent, the probe series, the mass
+box is full width; and an open outside boundary cannot be had for a dust case, because `p fixedValue`
+lowers to §126.9's outlet and §158.6 refuses a §126 rule there, so the placeholder's box is sealed
+(part 3, below). Part 2 of DST-11 (the driver beside a vent, the probe series, the mass
 budget) is below; part 3 (`cases/dust/rembeVented.jsonc` and the validate gate with its REDUCED
-smoke) follows.
+smoke) follows it.
 
 **Decisions (TAKEN, by recommendation).** D1: the W4 supervisor's mesh (castellation only,
 29,662 cells), the closed 0.2 m wall shell with the vent cut through, the membrane plane x = 5.425
@@ -63695,7 +63697,148 @@ is not the target field's boundary length (stricter than "longer than either"). 
 two pStat values are inputs chosen by measurement on the micro-pascal dp of a box lit almost at
 once, not tolerances.
 
-Labels: (158.10a)-(158.10h).
+Labels: (158.10a)-(158.10j).
+
+**Part 3: the placeholder case, Gate DST-REMBE and its REDUCED smoke (DST-11 part 3).**
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Nothing here is physics: the two
+new labels define bookkeeping. **Gate DST-REMBE is built and stays NAMED and NOT RUN** against
+Huang, Bloching & Lipatnikov (2022) Fig. 11 (key J.3, `huang2022-rembe-p-vented`): H22 publishes no
+vessel geometry (§151.7 item 9), so its four comparisons are four `skip` rows and nothing is ever
+compared with that figure. What runs is a REDUCED smoke on the labelled PLACEHOLDER vessel, in
+`src/bin/validate_gates/dst_rembe.rs` (section 85 of `ofgpu-validate`, `-sections 85`) on
+`cases/dust/rembeVented.jsonc`.
+
+*The case.* `mesh { kind "polymesh", path "rembeVented.mesh" }` (the mesh is not shipped:
+`.gitignore` ignores it; the gate copies the case into its scratch directory and generates the mesh
+there with `ofgpu-automesher <cfg> -stopAfter castellate` on `gatemesh::automesher_config`, run
+from the scratch directory because the automesher resolves its config's paths against its current
+directory). The numbers are `rembeClosed.jsonc`'s (the formula thermo at phi 0.62, kOmegaSST without
+`sst.sust` at k 0.8438 and omega 102.06, FSC with A 0.4 and PrT 0.28, W0 1e4, t0 1e-3, T 273) and the
+DST-10/11 dust boxes' (the gas block; PIMPLE with 2 correctors, Euler, upwind, PBiCGStab with DILU
+for p and diagonal for U, T, c and k|omega, all at tolerance 1e-13, relTol 0, maxIter 2000 - the
+settings under which the budget closed to 1e-14); `combustion.tFlacc` 0.15 s states the extended FSC
+of §158.7; `run { endTime 0.35, deltaT 1e-4 }` (0.35 s is the span of key J.3). `vent { normal
+[1,0,0], centre [5.425, 0, 3], radius 0.45, pStat 1e4 }` with the probes P1 and P2 of
+`rembeVented.geometry.json` digit for digit: the centre is the membrane plane of (158.10d) of
+SPEC-LIT 158.10 with axisY and axisZ; any radius in (r_v + h_f/2, R) = (0.4473797804014327,
+0.970873525930309) selects the same faces, because the castellated shell is solid between the hole
+and the outer wall (the seal rows below prove it); pStat is H22's 0.1 bar. The ignition point is the
+cavity centre ((x0 + x1)/2, axisY, axisZ) = (3.3832529481393823, 0, 3) of (158.10c) of SPEC-LIT
+158.10 and sigmaR 0.2 m is about one level-2 cell (h0/4 = 0.19375 m), so the Gaussian of (155.4)
+reaches the nearest cell centres. The two box-patch rules and the vessel rule are `wall` rules (never
+`".*"`: it would also govern the split mesh's `ventIn` and `ventOut`, which `closed_lowered` refuses).
+The case does NOT model, each for its reason: H22's 0.06 bar initial overpressure (it needs a
+non-uniform initial p, which DST-10's driver refuses for a dust case, §158.9), the half-by-symmetry box
+(the automesher's stage-0 margin rule, (158.10d) of SPEC-LIT 158.10), and an open outside boundary
+(below).
+
+*Where the tree overrides the plan row and the earlier brief.* (1) The outside box is sealed: every box
+patch is a no-slip wall. The plan wants an open box, but `compressible::bc::lower` turns ANY
+`p fixedValue` patch into §126.9's `SupersonicSwitch` outlet and `ofgpu-compressible` refuses that
+outlet for a dust case (§158.6), so a dust case has no open boundary today; the vessel vents into
+a sealed box of about 985 m3. Lifting the refusal is a numerics decision for the user (the R-run's third
+prerequisite, D10). (2) The validate section is number 85, placed after the last section in the tree
+(Gate 110-C leg 2), not after DST-VES; `-sections 85` prints its title. (3) `combustion.tFlacc` exists
+(`io/case_chem.rs`), so the case states the extended FSC. (4) The answer-key marker of
+`huang2022-rembe-p-vented` moved from `validate_key/mod.rs` into `dst_rembe.rs` beside its `KEY_ID`
+(the scan list grew to 8 files; 48 markers still), and `rust/PROVENANCE.md`'s DRAFT row for the gate was
+replaced, not duplicated. (5) The smoke's mesh row cannot hold under single: see "The single build" below.
+
+*Two bookkeeping definitions* (they define what the gate counts, not physics). With P1_k the column P1
+of `probes.csv` (k = 0 at t_0, then after each of the K steps), n_o the step of the driver's line `vent:
+opened after step n_o`, x_i the f64 world centre `hm.origin + hm.geom64().c[i]`, C the cells whose
+centre is in the cavity of (158.10c) of SPEC-LIT 158.10, M the membrane faces `select_faces` returns, N
+the vessel's `segments`, and R, t, x0, axisY, axisZ the dimensions of (158.10a)-(158.10c) of SPEC-LIT
+158.10:
+
+```
+  k* = min { k : P1_k = max_j P1_j }
+  a pressure peak exists  <=>  n_o <= k* < K  and  P1_K < P1_k*                                   (158.10i)
+
+  C = { cells i : in_cavity(x_i) } of (158.10c);   seed = min C;   M = select_faces(raw, vent)
+  E = { cells i : x0 - t < x_i.x < plane  and  |(x_i.y - axisY, x_i.z - axisZ)| < (R + t) cos(pi/N) }
+  S = seal_reach(hm, M, seed);   sealed except through M  <=>  C ⊆ S  and  S ⊆ E                  (158.10j)
+```
+
+E is the shell's outer N-gon envelope on the vessel side of the membrane plane; it holds the cavity
+cells and the inner half of the vent hole, and no other kept cell can lie in it because the castellated
+shell is solid. `pressure_peak` returns `Some(k*)` when (158.10i) holds and `None` otherwise, which
+includes an empty series, n_o > K and a non-finite P1.
+
+*The inputs, by measurement (not tolerances; the precedent of D9).* The gate runs `-iters K` with
+`vent.pStat` replaced by one token. (a) Timing: a 10-step run of the section in each build with pStat 1e30
+gave the driver's closing line 1.29 s (f64) and 1.32 s (single), s = 0.129 and 0.132 s per step; K = 10
+floor(420 / (10 x 0.132)) = 3180 steps (0.318 s of the 0.35 s; the 3500 cap not reached). The long run is
+quicker per step than those ten: 3180 closed f64 steps took 31.95 s (0.0100 s per step). (b) The closed
+history (f64, K = 3180, pStat 1e30, so the membrane never opens and dp is about P1): P1 = 8.911834e-4 Pa
+after step 1, 1.796159e4 Pa after step 530 (K/6), 3.216173e4 Pa after step 1060 (K/3), 4.840663e4 Pa after
+step 1590 (K/2) and 1.426455e5 Pa after step 3180. The rule: when max over k <= K/3 of P1_k is at least
+1e4 Pa, pStat is H22's `1e4` and nothing is substituted; otherwise P1 at K/3 rounded down to two
+significant digits. The maximum, 3.216173e4 Pa, is above 1e4 Pa, so `SMOKE_P_STAT` is `"1e4"` and
+`SMOKE_ITERS` is 3180. No input was changed after this measurement, whatever the peak row or the budget
+row showed; deltaT stays 1e-4 s (the flame-Courant bound (155.9) never refused it: the measured Co_f
+at the reported steps stayed below 0.12 of the 0.5 limit).
+
+**Gates, measured 2026-10-20** (GPU; the REDUCED smoke on the placeholder, 29,662 cells, K = 3180 steps of
+1e-4 s, pStat 1e4 Pa; wall time of `-sections 85`: 35.4 s in f64, 42.2 s in single, the mesh and the
+spawns included). The class of every row is D except the mass budget, A.
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| the automesher builds the placeholder and its polyMesh reads | `ofgpu-automesher -stopAfter castellate` exits 0 and `read_poly_mesh` reads | exit 0 | D | holds (0.5 s) | **MISSED** (refused at §92.3 G2, below) |
+| cell count | `abs(cells - 29662)`; 99,165 faces, 7 patches (`xMin` ... `zMax`, `vessel`) | 0 | D | 0 | 0 (on the f64 mesh) |
+| seal, cavity (158.10j) | cavity cells not reached from the seed: C ⊆ S; \|C\| = 7286, \|S\| = 7332 | 0 | D | 0 | 0 |
+| seal, envelope (158.10j) | cells reached outside E: S ⊆ E | 0 | D | 0 | 0 |
+| the run completes | `ofgpu-compressible rembeVented.jsonc -iters 3180 -reportEvery 50` exits 0 | exit 0 | D | holds (34.06 s, 0.011 s/step) | holds (40.56 s, 0.013 s/step) |
+| finite | `U p T rho Mach c Ut Cof HRR` and `k omega nut` of the 0.318 directory at n_cells: missing + non-finite | 0 | D | 0 | 0 |
+| opened once | `abs(opening lines - 1)`; opened after step 49 (t = 0.0049 s, dp = 10 883 Pa) in both builds | 0 | D | 0 | 0 |
+| pressure peak (158.10i) | n_o = 49, k* = 84, P1_k* 1.528584e4 Pa (f64) and 1.528578e4 Pa (single), P1_K 4.580671e3 Pa and 4.575957e3 Pa | `Some(k*)` | D | holds | holds |
+| mass budget (158.10h) of SPEC-LIT 158.10 | `abs(r)` | 1e-10 relative | A | 5.348e-13 | **MISSED** 2.596e-7 (f32 rho and mdot rounded at every step; part 2: 1.04e-7 on the tube) |
+| the four comparisons of key J.3 (peak 0.60 bar +-10 %; its time 0.31 s +-0.015 s; the 0.20 to 0.28 s rise rate 4.55 bar/s +-15 %; rupture 0.10 s +-0.01 s) | - | - | - | NOT RUN | NOT RUN |
+
+The membrane M is 46 faces of total area 0.496484 m2 against A_v = 0.5 m2 (the staircase hole). The
+four key-J.3 rows are `skip` rows with the text "NOT RUN: H22 publishes no vessel geometry (SPEC-LIT 151.7
+item 9); a placeholder is never compared", and three notes name the R-run's three prerequisites. The
+budget miss is asserted and printed (the gate's registry report prints `MISSED` with its value and
+cause, as the §69.2 audit requires: a verdict word comes only from the registry), never loosened and
+never switched by build. In f64 the section reports no miss and all 13 checks (9 rows and the 4 registry
+audits) hold; under single 11 hold.
+
+*The single build.* The sibling single-build `ofgpu-automesher` refuses the placeholder at §92.3 G2 ("closure
+failed on 1301 cell(s)", E about 1e-7 against 1e-10): §92.3 sums f32 area vectors under single, the known A28
+of docs/17-review-later. The first row records that refusal (its row misses, the MISSED line quotes the
+automesher's own error), and the rest of the smoke runs on the mesh the f64 automesher writes from the same
+config (a polyMesh is host f64 text; Gate 116-P's single solve runs on its f64-built mesh in the same way): 29,662
+cells again, the same 46 membrane faces, the same seal sets. The mesh and the rows below it are
+therefore the f64 build's mesh run by the single driver. Nothing in the automesher's quality threshold was
+touched.
+
+*A defect found and fixed.* The first final run opened the membrane after step 49 and the driver died:
+"thread 'main' has overflowed its stack" (exit 0xc00000fd). A copy of the f64 driver with the stack
+raised by `editbin /STACK` ran the same case to its end from 1.25 MiB up, and overflowed at the 1 MiB default of
+a Windows main thread: the vent opening beside a dust coupling (`check_membrane`,
+`vent::open_onto_dust`, `CompressibleDust::hand_over`) needs a little over 1 MiB of stack in any mesh (the
+tests of part 2 ran the driver on test threads, 2 MiB, so they never saw it). The failing test
+`a_vented_dust_run_fits_a_one_mebibyte_main_thread` (the part-2 dust box with a vent, run through the entry `main`
+calls on a 1 MiB thread) aborted with STATUS_STACK_OVERFLOW before the fix and passes after it. The fix is
+`main` running the case through `parse_and_run`, which spawns a worker thread of `DRIVER_STACK` = 64 MiB of
+virtual stack and re-raises its panic (D14); no result, kernel or call sequence changed, and the driver's
+dust/vent tests (9) and the lib vent tests pass as before.
+
+**NOT RUN, with their reasons (completed).** The R-run of §158.7 has THREE prerequisites: H22's 0.06 bar
+initial overpressure (a non-uniform initial p, which DST-10's driver refuses for a dust case, §158.9); H22's
+half-by-symmetry box (the automesher's stage-0 margin rule); and an open outside boundary (§158.6's refusal of
+a §126 rule for a dust case, because `p fixedValue` lowers to §126.9's outlet), so the placeholder's box is sealed.
+
+**Decisions (TAKEN, by recommendation).** D10: the placeholder's box patches are no-slip walls (the sealed
+box of 985 m3). D11: the vent radius is 0.45 m, any value in (r_v + h_f/2, R) selecting the same faces. D12:
+`SMOKE_P_STAT` and `SMOKE_ITERS` are inputs chosen by the measurement above (the rule written before it ran:
+pStat is H22's 1e4 when the closed P1 reaches it by K/3, else P1 at K/3 to two significant digits), never
+re-tuned after the final runs. D13: the ignition's sigmaR is 0.2 m, about one level-2 cell of this mesh.
+D14: `ofgpu-compressible` runs its case on a 64 MiB worker thread (the stack defect above). D15: under single
+the gate records the single automesher's A28 refusal in its first row and runs the rest on the f64 automesher's
+mesh.
 
 ---
 
