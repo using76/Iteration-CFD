@@ -982,8 +982,13 @@ impl<'m> GasState<'m> {
         let nbf = self.m.n_boundary_faces;
         let rs = self.props.r_s();
 
-        field_ops::set_field(gpu, &self.fldk, &mut self.rho.f, self.p0 / rs, n)?;
-        field_ops::divide_field(gpu, &self.fldk, &mut self.rho.f, &t.f, n)?;
+        // SPEC-LIT 139.10 (PAR-14): the cell values over the ghost cells too,
+        // from `T`'s exchanged halo - a part's processor faces interpolate
+        // rho from both sides (`interpolate_linear`'s processor-face pass).
+        // A whole mesh has no ghosts: `n_local` is `n`, the same launch.
+        let nl = self.m.n_local();
+        field_ops::set_field(gpu, &self.fldk, &mut self.rho.f, self.p0 / rs, nl)?;
+        field_ops::divide_field(gpu, &self.fldk, &mut self.rho.f, &t.f, nl)?;
 
         field_ops::set_field(gpu, &self.fldk, &mut self.rho.bf, self.p0 / rs, nbf)?;
         field_ops::divide_field(gpu, &self.fldk, &mut self.rho.bf, &t.bf, nbf)?;

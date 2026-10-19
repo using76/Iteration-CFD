@@ -149,6 +149,13 @@ pub struct RankCtx<'c> {
     reduce: SpmdReduction,
     part: usize,
     global: Vec<Label>,
+    // SPEC-LIT 139.10 (PAR-14): the exact mean's two needs - the solver
+    // kernels the reduction's stage-one launches take, and the world's cell
+    // count, `new`'s allgather of the owned counts summed exactly in
+    // integers (`reduce.counts()` IS that allgather, so nothing new
+    // collects).
+    sol: SolverKernels,
+    n_global: usize,
 }
 
 impl<'c> RankCtx<'c> {
@@ -200,14 +207,21 @@ impl<'c> RankCtx<'c> {
                 part.n_halo
             )));
         }
+        // SPEC-LIT 139.10 (PAR-14): the reduction's own count allgather is
+        // the world's owned counts in rank order - their exact integer sum is
+        // the world's cell count, which `world_mean_exact` divides by.
+        let reduce = SpmdReduction::new(gpu, comm, part.mesh.n_cells)?;
+        let n_global: usize = reduce.counts().iter().sum();
         Ok(Self {
             comm,
             part: part.part,
             halo: SpmdHalo::new(gpu, part, comm.size())?,
-            reduce: SpmdReduction::new(gpu, comm, part.mesh.n_cells)?,
+            reduce,
             // The whole-mesh id of every OWNED cell, local order - what
             // `local_of_global` answers out of (SPEC-LIT 139.4).
             global: part.global_cell[..part.mesh.n_cells].to_vec(),
+            sol: SolverKernels::new(gpu)?,
+            n_global,
         })
     }
 
@@ -361,6 +375,26 @@ pub trait FlowExchange {
     /// WHOLE source - `assemble_pressure`'s own invariant - and on a part
     /// that mean is a cross-part quantity, which is what this moves.
     fn world_mean(&mut self, local_sum: Scalar, n_owned: usize) -> Result<Scalar>;
+    /// The world's mean of a per-cell quantity, PARTITION-INVARIANTLY
+    /// (SPEC-LIT 139.10, PAR-14): the sum crosses the exact reduction of
+    /// SPEC-LIT 72 (`SpmdReduction::sum` over `v`'s first `n_owned` entries
+    /// - this rank's owned cells, the halo tail never read), so the bits are
+    /// the same whatever the partition; the divide by `n_global`, the
+    /// world's cell count, happens once, in f64, rounded once to `Scalar`.
+    /// Every rank returns the same bits.
+    ///
+    /// `n_global` is the world's cell count, or 0 to let the implementation
+    /// use the count it gathered at construction (a rank-order allgather of
+    /// the owned counts, exact in integers); a nonzero value that disagrees
+    /// with the implementation's own count is refused by name, not silently
+    /// divided by.
+    fn world_mean_exact(
+        &mut self,
+        gpu: &Gpu,
+        v: &DevBuf<Scalar>,
+        n_owned: usize,
+        n_global: usize,
+    ) -> Result<Scalar>;
 }
 
 impl FlowExchange for RankCtx<'_> {
@@ -487,6 +521,43 @@ impl FlowExchange for RankCtx<'_> {
             nn += f64::from_le_bytes(c[8..].try_into().expect("8 bytes"));
         }
         Ok((ss / nn) as Scalar)
+    }
+
+    fn world_mean_exact(
+        &mut self,
+        gpu: &Gpu,
+        v: &DevBuf<Scalar>,
+        n_owned: usize,
+        n_global: usize,
+    ) -> Result<Scalar> {
+        // The count this context gathered at construction - `new`'s allgather
+        // of the owned counts, summed exactly in integers. A caller that
+        // passes 0 defers to it; a caller that passes its own count is
+        // checked against it.
+        if n_global != 0 && n_global != self.n_global {
+            return Err(Error::Config(format!(
+                "distflow: world_mean_exact was given a world cell count of \
+                 {n_global}, but this rank's allgather of the owned counts \
+                 summed to {}; the divide is the one rounding the mean has, \
+                 so the two must agree",
+                self.n_global
+            )));
+        }
+        if n_owned != self.reduce.n() {
+            return Err(Error::Config(format!(
+                "distflow: world_mean_exact was asked to sum {n_owned} \
+                 values, but this rank's reduction was built over {} - its \
+                 own cells; the buffer may be longer (the halo tail is never \
+                 read), never shorter",
+                self.reduce.n()
+            )));
+        }
+        // SPEC-LIT 72's exact accumulator: the sum comes out bit for bit the
+        // same whatever the partition, which `world_mean`'s rank-order fold
+        // of per-rank device sums cannot promise.
+        self.reduce.sum(gpu, &self.sol, self.comm, v)?;
+        let s = self.reduce.value(gpu)?;
+        Ok(((s as f64) / (self.n_global as f64)) as Scalar)
     }
 }
 
@@ -1731,7 +1802,7 @@ fn dvd_loop(
     s: &mut Simple<'_>,
     backend: &mut dyn PressureBackend,
     energy: &mut Energy<'_>,
-    gas: &GasState<'_>,
+    gas: &mut GasState<'_>,
     scalar: &mut ScalarTransport<'_>,
     nut: &GpuScalarField,
     tke: &DevBuf<Scalar>,
@@ -1806,7 +1877,7 @@ pub fn dvd_serial(gpu: &Gpu, hm: &HostMesh) -> Result<DvdRun> {
         &mut s,
         &mut backend,
         &mut energy,
-        &gas,
+        &mut gas,
         &mut scalar,
         &nut,
         &tke,
@@ -1893,7 +1964,7 @@ pub fn dvd_part(gpu: &Gpu, comm: &dyn Comm, dec: &Decomposition) -> Result<DvdRu
         &mut s,
         &mut backend,
         &mut energy,
-        &gas,
+        &mut gas,
         &mut scalar,
         &nut,
         &tke,
@@ -2470,4 +2541,419 @@ pub fn channel_part(
         diverged,
         residuals,
     )
+}
+
+// ==========================================================================
+//  The bitwise decomposed SIMPLE - SPEC-LIT 139.10 (PAR-14)
+// ==========================================================================
+
+/// The gate constants, FIXED BEFORE MEASURING (docs/17 §12, row PAR-14):
+/// neither the test nor the driver may loosen them, and a run that misses
+/// keeps the assert and reports its numbers.
+///
+/// There is no tolerance anywhere in this subsection: the gate is BITS
+/// (`to_bits` on every value). The sizes below are reduced so the shared
+/// card runs the four rank counts of both fixtures inside the verify
+/// budget - the size is reduced, never a tolerance.
+pub const BITWISE_ITERS: usize = 50;
+/// The bitwise gate's cavity: the lid-driven cavity of Ghia, Ghia & Shin
+/// (1982) at Re = 100, `n x n x 1` cells.
+pub const BITWISE_CAVITY_N: usize = 16;
+/// The bitwise gate's plume: the block generator's `plume` box
+/// (`blockgen::CaseKind::Plume`) at 12 x 6 x 4 cells.
+pub const BITWISE_PLUME: (usize, usize, usize) = (12, 6, 4);
+
+/// The plume fixture's physical numbers, FIXED BEFORE MEASURING: `PLUME_U_IN`
+/// m/s of `PLUME_T_IN` K air blows up through the floor window `inlet`, the
+/// rest of the box sits at `PLUME_T_REF` K, the flow is laminar at
+/// `PLUME_NU`, and the buoyancy is Boussinesq at `PLUME_BETA` under gravity
+/// `PLUME_G_Z` m/s² along `-z`. A laminar Boussinesq plume on the block
+/// generator's `plume` box - a fixture for a bitwise self-comparison, not a
+/// validation case.
+pub const PLUME_U_IN: Scalar = 0.2;
+pub const PLUME_T_IN: Scalar = 303.15;
+pub const PLUME_T_REF: Scalar = 293.15;
+pub const PLUME_NU: Scalar = 1e-2;
+pub const PLUME_BETA: Scalar = 3.4e-3;
+pub const PLUME_G_Z: Scalar = -9.81;
+
+/// One outer iteration's report, as the run returned it: the linear-solver
+/// iteration counts and the initial residuals the traces of the bitwise
+/// gate compare the BITS of, rank against the P = 1 run (SPEC-LIT 139.10).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepTrace {
+    /// The three momentum components' iteration counts, `x, y, z` order.
+    pub u_iters: [usize; 3],
+    /// The pressure solve's iteration count.
+    pub p_iters: usize,
+    /// The energy solve's iteration count; `0` for the cavity, which runs no
+    /// energy equation.
+    pub t_iters: usize,
+    /// The three momentum components' initial residuals.
+    pub u_res: [Scalar; 3],
+    /// The pressure equation's initial residual.
+    pub p_res: Scalar,
+    /// The energy equation's initial residual; `0` for the cavity.
+    pub t_res: Scalar,
+}
+
+/// What one rank's bitwise run reports (SPEC-LIT 139.10): the whole-mesh ids
+/// its cells and faces carry, the sides of its processor faces, and the
+/// fields and per-step traces the gate compares bit for bit against the
+/// P = 1 run.
+pub struct BitwiseRun {
+    /// `[n_cells]` the whole-mesh id of every owned cell, local order.
+    pub global_cell: Vec<usize>,
+    /// `[n_internal_faces + n_boundary_faces]` the whole-mesh id of every
+    /// local face, internal faces first.
+    pub global_face: Vec<usize>,
+    /// The part's `b_proc` - which side of the cut every boundary face is
+    /// on - EMPTY when the part has no processor faces.
+    pub b_proc: Vec<Label>,
+    /// The part's internal-face count: `global_face`'s first
+    /// `n_internal_faces` entries are internal.
+    pub n_internal_faces: usize,
+    /// The owned cells' velocity, local order.
+    pub u: Vec<Vec3>,
+    /// The owned cells' pressure, local order.
+    pub p: Vec<Scalar>,
+    /// The owned cells' temperature, local order; EMPTY for the cavity,
+    /// which runs no energy equation.
+    pub t: Vec<Scalar>,
+    /// The flux at the part's internal faces, local order.
+    pub phi_f: Vec<Scalar>,
+    /// The flux at the part's boundary faces, local order.
+    pub phi_bf: Vec<Scalar>,
+    /// One trace per outer iteration, in order.
+    pub steps: Vec<StepTrace>,
+}
+
+/// [`cavity_part_steps`]'s construction with `from = None, write = None`
+/// (SPEC-LIT 139.10, PAR-14), written out rather than refactored so the
+/// bitwise run cannot drift from the gated one: the same route, [`RankCtx`],
+/// [`SpmdPressureBackend`], [`cavity_bcs`], [`Simple::initialise`], `nut`,
+/// `t` and residual control - then EXACTLY `iters` calls of
+/// [`Simple::solve_step`], no convergence break, each one's
+/// `.first` [`crate::simple::SimplePerformance`] recorded as a
+/// [`StepTrace`] (the initial residuals `residualControl` is tested
+/// against), and the owned fields and the whole flux arrays downloaded.
+pub fn cavity_part_trace(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    dec: &Decomposition,
+    iters: usize,
+) -> Result<BitwiseRun> {
+    let rank = comm.rank();
+    let part = &dec.parts[rank];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(
+        gpu,
+        hm,
+        &gm,
+        cavity_controls(),
+        BuoyancyCoeffs {
+            g: Vec3::ZERO,
+            ..BuoyancyCoeffs::default()
+        },
+    )?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, cavity_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    cavity_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let fk = FieldKernels::new(gpu)?;
+    let nut = cavity_nut(gpu, &gm)?;
+    let t = cavity_t(gpu, &gm, &fk)?;
+
+    // The same residual control `cavity_loop` sets, then EXACTLY `iters`
+    // steps - no convergence break.
+    let src = format!("SIMPLE {{ residualControl {{ U {CAVITY_U_TOL:e}; }} }}");
+    let d = FoamDict::parse(&src, "fvSolution")?;
+    s.set_residual_control(ResidualControl::read(&d));
+
+    let mut steps = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let perf = s.solve_step(gpu, &mut backend, &nut, &t)?;
+        steps.push(StepTrace {
+            u_iters: [
+                perf.first.u[0].n_iterations,
+                perf.first.u[1].n_iterations,
+                perf.first.u[2].n_iterations,
+            ],
+            p_iters: perf.first.p.n_iterations,
+            t_iters: 0,
+            u_res: [
+                perf.first.u[0].initial_residual,
+                perf.first.u[1].initial_residual,
+                perf.first.u[2].initial_residual,
+            ],
+            p_res: perf.first.p.initial_residual,
+            t_res: 0.0 as Scalar,
+        });
+    }
+    let u = gpu.download(&s.u().f)?;
+    let p = gpu.download(&s.p().f)?;
+    Ok(BitwiseRun {
+        global_cell: part.global_cell[..hm.n_cells]
+            .iter()
+            .map(|&g| g as usize)
+            .collect(),
+        global_face: part.mesh.global_face.iter().map(|&g| g as usize).collect(),
+        b_proc: part.mesh.b_proc.clone(),
+        n_internal_faces: hm.n_internal_faces,
+        u: u[..hm.n_cells].to_vec(),
+        p: p[..hm.n_cells].to_vec(),
+        t: Vec::new(),
+        phi_f: gpu.download(&s.phi().f)?,
+        phi_bf: gpu.download(&s.phi().bf)?,
+        steps,
+    })
+}
+
+/// The plume mesh: the block generator's own `plume` case
+/// (`blockgen::CaseKind::Plume`), `nx x ny x nz` - the room-sized box with
+/// the hot window `inlet` cut into its `floor`.
+pub fn plume_mesh(nx: usize, ny: usize, nz: usize) -> Result<HostMesh> {
+    Ok(build_case(CaseKind::Plume, nx, ny, nz)?.0)
+}
+
+/// The plume's controls: [`cavity_controls`]' solver asks with the plume's
+/// laminar [`PLUME_NU`] and first-order upwind convection (the cell
+/// Reynolds number is 24 on this mesh) - `bounded_convection` stays true,
+/// and the pressure solve is [`cavity_controls`]' own ask.
+pub fn plume_controls() -> SimpleControls {
+    let mut c = cavity_controls();
+    c.momentum.nu = PLUME_NU;
+    c.momentum.div_scheme = DivScheme::Upwind;
+    c
+}
+
+/// The plume's Boussinesq body force (SPEC-LIT 121.3): gravity
+/// [`PLUME_G_Z`] m/s² along `-z`, reference [`PLUME_T_REF`], beta
+/// [`PLUME_BETA`] - the same shape [`dvd_buoyancy`] builds.
+pub fn plume_buoyancy() -> BuoyancyCoeffs {
+    BuoyancyCoeffs {
+        g: Vec3::new(0.0, 0.0, PLUME_G_Z),
+        t_ref: PLUME_T_REF,
+        form: BuoyancyForm::Boussinesq { beta: PLUME_BETA },
+        ..BuoyancyCoeffs::default()
+    }
+}
+
+/// The T equation's controls: [`dvd_energy_controls`]' asks with upwind
+/// convection - `bounded` stays true.
+fn plume_energy_controls() -> EnergyControls {
+    EnergyControls {
+        t_solver: dvd_transport_solver(),
+        div_scheme: DivEntry { scheme: DivScheme::Upwind, bounded: true },
+        sn_grad: SnGradScheme::Uncorrected,
+        ..EnergyControls::default()
+    }
+}
+
+/// The plume's boundary conditions, on the whole mesh and on a part alike,
+/// BY PATCH NAME, the stance [`cavity_bcs`] and [`dvd_bcs`] take: start
+/// from what `GpuVectorField`/`GpuScalarField::zeros` seeded - `Empty` on
+/// the empty patches, `Cyclic` (`fr` 0) on every processor patch,
+/// zeroGradient elsewhere - and overwrite only the patches named here.
+///
+/// `U`: fixedValue (0, 0, [`PLUME_U_IN`]) (`fr` 1) on `inlet`, fixedValue 0
+/// on `wallXMin`, `wallYMin`, `wallYMax`, `floor` and `ceiling`; `outlet`
+/// untouched (zeroGradient). `p`: fixedValue 0 (`fr` 1) on `outlet`,
+/// everything else untouched. Refused by name when a named patch is
+/// missing from the mesh.
+pub fn plume_bcs(gpu: &Gpu, hm: &HostMesh, s: &mut Simple<'_>) -> Result<()> {
+    for name in ["inlet", "outlet", "wallXMin", "wallYMin", "wallYMax", "floor", "ceiling"] {
+        if !hm.patches.iter().any(|p| p.name == name) {
+            return Err(Error::Config(format!(
+                "distflow: plume_bcs: the mesh has no `{name}` patch"
+            )));
+        }
+    }
+    let owner = patch_of(hm);
+
+    // `U`: the inlet blows up `+z`, the five walls are no-slip, `outlet`
+    // keeps the zeroGradient seed.
+    let mut ukind: Vec<crate::Label> = gpu.download(&s.u().bc_kind)?;
+    let mut ufr: Vec<Scalar> = gpu.download(&s.u().fr)?;
+    let mut urv: Vec<Vec3> = gpu.download(&s.u().ref_value)?;
+    let urg: Vec<Vec3> = gpu.download(&s.u().ref_grad)?;
+    if ukind.len() != hm.n_boundary_faces {
+        return Err(Error::Config(format!(
+            "distflow: plume_bcs was given a host mesh of {} boundary faces and a Simple of {}",
+            hm.n_boundary_faces,
+            ukind.len()
+        )));
+    }
+    for (i, &p) in owner.iter().enumerate() {
+        let name = hm.patches[p].name.as_str();
+        let named = matches!(
+            name,
+            "inlet" | "wallXMin" | "wallYMin" | "wallYMax" | "floor" | "ceiling"
+        );
+        if named {
+            ukind[i] = BcKind::FixedValue as crate::Label;
+            ufr[i] = 1.0;
+            urv[i] = if name == "inlet" {
+                Vec3::new(0.0, 0.0, PLUME_U_IN)
+            } else {
+                Vec3::ZERO
+            };
+        }
+    }
+    {
+        let u = s.u_mut();
+        gpu.write(&mut u.bc_kind, &ukind)?;
+        gpu.write(&mut u.fr, &ufr)?;
+        gpu.write(&mut u.ref_value, &urv)?;
+        gpu.write(&mut u.ref_grad, &urg)?;
+    }
+
+    // `p`: the one opening is the pressure reference, `outlet`.
+    let mut pk: Vec<crate::Label> = gpu.download(&s.p().bc_kind)?;
+    let mut pfr: Vec<Scalar> = gpu.download(&s.p().fr)?;
+    let mut prv: Vec<Scalar> = gpu.download(&s.p().ref_value)?;
+    let prg: Vec<Scalar> = gpu.download(&s.p().ref_grad)?;
+    for (i, &p) in owner.iter().enumerate() {
+        if hm.patches[p].name == "outlet" {
+            pk[i] = BcKind::FixedValue as crate::Label;
+            pfr[i] = 1.0;
+            prv[i] = 0.0;
+        }
+    }
+    {
+        let pf = s.p_mut();
+        gpu.write(&mut pf.bc_kind, &pk)?;
+        gpu.write(&mut pf.fr, &pfr)?;
+        gpu.write(&mut pf.ref_value, &prv)?;
+        gpu.write(&mut pf.ref_grad, &prg)?;
+    }
+    Ok(())
+}
+
+/// The plume's inlet temperature, BY PATCH NAME, [`dvd_wall_values`]'s
+/// stance: `fixedValue` at `value` on `inlet`, every other face left at
+/// what `GpuScalarField::zeros` seeded (zeroGradient).
+fn plume_t_inlet(gpu: &Gpu, hm: &HostMesh, f: &mut GpuScalarField, value: Scalar) -> Result<()> {
+    let owner = patch_of(hm);
+    let mut kind: Vec<Label> = gpu.download(&f.bc_kind)?;
+    let mut fr: Vec<Scalar> = gpu.download(&f.fr)?;
+    let mut rv: Vec<Scalar> = gpu.download(&f.ref_value)?;
+    for (i, &p) in owner.iter().enumerate() {
+        if hm.patches[p].name == "inlet" {
+            kind[i] = BcKind::FixedValue as Label;
+            fr[i] = 1.0;
+            rv[i] = value;
+        }
+    }
+    gpu.write(&mut f.bc_kind, &kind)?;
+    gpu.write(&mut f.fr, &fr)?;
+    gpu.write(&mut f.ref_value, &rv)
+}
+
+/// The buoyant plume on rank `comm.rank()`'s part of `dec` - the bitwise
+/// gate's second fixture (SPEC-LIT 139.10). [`dvd_part`]'s construction
+/// minus the passive scalar: [`plume_controls`]' Simple with the momentum
+/// route and the [`RankCtx`] exchange, the [`SpmdPressureBackend`] on
+/// [`plume_controls`]' pressure ask, [`plume_bcs`], [`Simple::initialise`],
+/// then `Energy` with its own route and exchange, a [`GasState`], `T` at
+/// [`PLUME_T_REF`] on every owned cell with [`PLUME_T_IN`] on `inlet`,
+/// `energy.initialise` and the gas density read once - then EXACTLY `iters`
+/// outer iterations of [`Simple::correct_outer`] plus `Energy::correct`, no
+/// convergence break, each one's iteration counts and initial residuals
+/// recorded as a [`StepTrace`], and the owned fields and whole flux arrays
+/// downloaded.
+pub fn plume_part_trace(
+    gpu: &Gpu,
+    comm: &dyn Comm,
+    dec: &Decomposition,
+    iters: usize,
+) -> Result<BitwiseRun> {
+    let part = &dec.parts[comm.rank()];
+    let hm = &part.mesh;
+    let gm = GpuMesh::upload_with_halo(gpu, hm, part.n_halo)?;
+    let mut s = Simple::new(gpu, hm, &gm, plume_controls(), plume_buoyancy())?;
+    s.set_momentum_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    s.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let mut backend =
+        SpmdPressureBackend::new(gpu, comm, dec, plume_controls().p_solver, DistReduce::Exact)?;
+    backend.setup(gpu, hm, &gm, &SystemProbe::default())?;
+
+    plume_bcs(gpu, hm, &mut s)?;
+    s.initialise(gpu)?;
+
+    let props = dvd_props();
+    let mut energy = Energy::new(gpu, &gm, plume_energy_controls(), props)?;
+    let mut gas = GasState::new(gpu, &gm, props, DomainKind::Open, 1e5)?;
+    energy.set_route(Some(Box::new(SpmdMomentumRoute::new(
+        gpu,
+        comm,
+        dec,
+        DistReduce::Exact,
+    )?)));
+    energy.set_exchange(Some(Box::new(RankCtx::new(gpu, comm, part, &gm)?)))?;
+
+    let nut = cavity_nut(gpu, &gm)?;
+    let tke = gpu.zeros(gm.n_local())?;
+
+    gpu.write(&mut energy.field_mut().f, &vec![PLUME_T_REF; gm.n_local()])?;
+    plume_t_inlet(gpu, hm, energy.field_mut(), PLUME_T_IN)?;
+    energy.initialise(gpu)?;
+    gas.update_density(gpu, energy.field())?;
+
+    let mut steps = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let perf = s.correct_outer(gpu, &mut backend, &nut, energy.field(), false)?;
+        let e = energy.correct(gpu, s.convective_flux(), &nut, &tke, PLUME_NU, &mut gas)?;
+        steps.push(StepTrace {
+            u_iters: [
+                perf.u[0].n_iterations,
+                perf.u[1].n_iterations,
+                perf.u[2].n_iterations,
+            ],
+            p_iters: perf.p.n_iterations,
+            t_iters: e.n_iterations,
+            u_res: [
+                perf.u[0].initial_residual,
+                perf.u[1].initial_residual,
+                perf.u[2].initial_residual,
+            ],
+            p_res: perf.p.initial_residual,
+            t_res: e.initial_residual,
+        });
+    }
+    let u = gpu.download(&s.u().f)?;
+    let p = gpu.download(&s.p().f)?;
+    Ok(BitwiseRun {
+        global_cell: part.global_cell[..hm.n_cells]
+            .iter()
+            .map(|&g| g as usize)
+            .collect(),
+        global_face: part.mesh.global_face.iter().map(|&g| g as usize).collect(),
+        b_proc: part.mesh.b_proc.clone(),
+        n_internal_faces: hm.n_internal_faces,
+        u: u[..hm.n_cells].to_vec(),
+        p: p[..hm.n_cells].to_vec(),
+        t: gpu.download(&energy.field().f)?[..hm.n_cells].to_vec(),
+        phi_f: gpu.download(&s.phi().f)?,
+        phi_bf: gpu.download(&s.phi().bf)?,
+        steps,
+    })
 }

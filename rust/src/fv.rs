@@ -642,6 +642,7 @@ pub struct FvKernels {
     div_surface: CudaFunction,
     interpolate_linear: CudaFunction,
     interpolate_boundary: CudaFunction,
+    interpolate_linear_proc: CudaFunction,
     flux_internal: CudaFunction,
     flux_boundary: CudaFunction,
     sn_grad_internal: CudaFunction,
@@ -669,6 +670,14 @@ pub struct FvKernels {
     div_correction_part: CudaFunction,
     div_surface_part: CudaFunction,
     reconstruct_part: CudaFunction,
+
+    // SPEC-LIT 139.10 (PAR-14): the convection weights' fix-ups and the
+    // convection assembly's twins - launched only on a mesh with processor
+    // faces, so no whole mesh and no P = 1 part moves.
+    weights_boundary_proc: CudaFunction,
+    weights_boundary_limited_proc: CudaFunction,
+    div_diag_part: CudaFunction,
+    div_boundary_part: CudaFunction,
 }
 
 impl FvKernels {
@@ -713,6 +722,7 @@ impl FvKernels {
             div_surface: k.func("fvDivSurface")?,
             interpolate_linear: k.func("fvInterpolateLinear")?,
             interpolate_boundary: k.func("fvInterpolateBoundary")?,
+            interpolate_linear_proc: k.func("fvInterpolateLinearProc")?,
             flux_internal: k.func("fvFluxInternal")?,
             flux_boundary: k.func("fvFluxBoundary")?,
             sn_grad_internal: k.func("fvSnGradFluxInternal")?,
@@ -733,6 +743,14 @@ impl FvKernels {
             div_correction_part: k.func("fvDivCorrectionPart")?,
             div_surface_part: k.func("fvDivSurfacePart")?,
             reconstruct_part: k.func("fvReconstructPart")?,
+
+            // SPEC-LIT 139.10 (PAR-14): the convection weights' fix-ups and
+            // the convection assembly's twins, launched only when the mesh
+            // has processor faces.
+            weights_boundary_proc: k.func("fvWeightsBoundaryProc")?,
+            weights_boundary_limited_proc: k.func("fvWeightsBoundaryLimitedProc")?,
+            div_diag_part: k.func("fvDivDiagPart")?,
+            div_boundary_part: k.func("fvDivBoundaryPart")?,
         })
     }
 }
@@ -970,6 +988,14 @@ pub fn fvm_ddt_bdf2(
 /// are being interpolated between. Everywhere else the face value comes from
 /// the field's `(fr, refValue, refGrad)` triple and `bw` is never read, so `1`
 /// is written there.
+///
+/// SPEC-LIT 139.10 (PAR-14): on a decomposed part, `bw` of a **processor
+/// face** is the whole face's owner-side weight - the weight the whole mesh's
+/// internal face had, which is what `b_proc_w` stores and what
+/// `fvm_div_gauss`'s part twins read. After the boundary launch a fix-up
+/// overwrites exactly the faces `b_proc` marks (`fvWeightsBoundaryProc` /
+/// `fvWeightsBoundaryLimitedProc`), so every other mesh launches nothing and
+/// moves no bit.
 #[allow(clippy::too_many_arguments)]
 pub fn div_scheme_weights(
     gpu: &Gpu,
@@ -1069,7 +1095,7 @@ pub fn div_scheme_weights(
                     unsafe {
                         gpu.stream()
                             .launch_builder(&f)
-                            .arg(bw)
+                            .arg(&mut *bw)
                             .arg(&phi.bf)
                             .arg(&m.b_weights)
                             .arg(&m.b_kind)
@@ -1078,13 +1104,31 @@ pub fn div_scheme_weights(
                             .arg(&nl)
                             .launch(cfg_for(n))?;
                     }
+
+                    // SPEC-LIT 139.10 (PAR-14): the processor faces' whole
+                    // weight, after the old launch has run.
+                    if m.n_proc_faces > 0 {
+                        let f = k.weights_boundary_proc.clone();
+                        unsafe {
+                            gpu.stream()
+                                .launch_builder(&f)
+                                .arg(&mut *bw)
+                                .arg(&phi.bf)
+                                .arg(&m.b_proc)
+                                .arg(&m.b_proc_w)
+                                .arg(&cd)
+                                .arg(&beta)
+                                .arg(&nl)
+                                .launch(cfg_for(n))?;
+                        }
+                    }
                 }
                 Some(g) => {
                     let f = k.weights_boundary_limited.clone();
                     unsafe {
                         gpu.stream()
                             .launch_builder(&f)
-                            .arg(bw)
+                            .arg(&mut *bw)
                             .arg(&phi.bf)
                             .arg(&m.b_weights)
                             .arg(&psi.f)
@@ -1099,6 +1143,30 @@ pub fn div_scheme_weights(
                             .arg(&beta)
                             .arg(&nl)
                             .launch(cfg_for(n))?;
+                    }
+                    // SPEC-LIT 139.10 (PAR-14): the same, for a scheme whose
+                    // weight is a function of r - the limited body on the
+                    // whole mesh's cells, centres and upwind gradient.
+                    if m.n_proc_faces > 0 {
+                        let f = k.weights_boundary_limited_proc.clone();
+                        unsafe {
+                            gpu.stream()
+                                .launch_builder(&f)
+                                .arg(&mut *bw)
+                                .arg(&phi.bf)
+                                .arg(&m.b_proc_w)
+                                .arg(&psi.f)
+                                .arg(g)
+                                .arg(&m.c)
+                                .arg(&m.b_proc_c)
+                                .arg(&m.b_proc)
+                                .arg(&m.b_face_cells)
+                                .arg(&m.b_nbr_cell)
+                                .arg(&cd)
+                                .arg(&beta)
+                                .arg(&nl)
+                                .launch(cfg_for(n))?;
+                        }
                     }
                 }
             }
@@ -1163,6 +1231,23 @@ pub fn fvm_div_gauss(
         }
     }
 
+    // SPEC-LIT 139.10 (PAR-14): on a part the diagonal share is summed over
+    // the MERGED row, so a processor face's share lands where the whole mesh
+    // put it - inside the internal-face run, at its global place - and a
+    // processor face's off-diagonal half goes to boundary_coeffs ONLY
+    // (`internal_coeffs = 0`, `boundary_coeffs = -upper[g]` on the owning
+    // side, `-lower[g]` on the other; 71.6's split). A whole mesh has no
+    // processor face and takes the path below, unchanged.
+    if m.n_proc_faces > 0 {
+        if m.n_cells > 0 {
+            part_div_diag(gpu, k, a, m, phi, w, bw, sign)?;
+        }
+        if m.n_boundary_faces > 0 {
+            part_div_boundary(gpu, k, a, m, phi, bw, psi, sign)?;
+        }
+        return Ok(());
+    }
+
     if m.n_cells > 0 {
         let n = m.n_cells;
         let nl = n as Label;
@@ -1204,6 +1289,80 @@ pub fn fvm_div_gauss(
         }
     }
 
+    Ok(())
+}
+
+/// [`fvm_div_gauss`]'s diagonal, on a decomposed part (SPEC-LIT 139.10):
+/// [`part_lap_diag`]'s rule - the merged row, the whole mesh's operands on a
+/// processor entry.
+#[allow(clippy::too_many_arguments)]
+fn part_div_diag(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    phi: &GpuSurfaceScalarField,
+    w: &DevBuf<Scalar>,
+    bw: &DevBuf<Scalar>,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.div_diag_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.diag)
+            .arg(&phi.f)
+            .arg(w)
+            .arg(&phi.bf)
+            .arg(bw)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// [`fvm_div_gauss`]'s boundary pass, on a decomposed part (SPEC-LIT 139.10):
+/// [`part_lap_boundary`]'s rule - a processor face's `internal_coeffs` stays
+/// at the zero the matrix was zeroed with, and its whole mesh's off-diagonal
+/// share, negated, goes to `boundary_coeffs`.
+#[allow(clippy::too_many_arguments)]
+fn part_div_boundary(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    phi: &GpuSurfaceScalarField,
+    bw: &DevBuf<Scalar>,
+    psi: &GpuScalarField,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_boundary_faces;
+    let nl = n as Label;
+    let f = k.div_boundary_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.internal_coeffs)
+            .arg(&mut a.boundary_coeffs)
+            .arg(&phi.bf)
+            .arg(bw)
+            .arg(&psi.fr)
+            .arg(&psi.ref_value)
+            .arg(&psi.ref_grad)
+            .arg(&m.b_delta_coeffs)
+            .arg(&m.b_proc)
+            .arg(&m.b_kind)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
     Ok(())
 }
 
@@ -2354,6 +2513,44 @@ pub fn interpolate_linear(
         }
     }
 
+    // SPEC-LIT 139.10 (PAR-14 run 2): on a part the processor faces' values
+    // are the WHOLE mesh's internal interpolations, which the copy above
+    // cannot form - it hands a composed cell value where fvInterpolateLinear
+    // handed the weighted sum of the two cells. `psi.f` covers the exchanged
+    // ghosts, so the twin reads the same cells the whole mesh read. A whole
+    // mesh launches nothing and moves no bit.
+    if m.n_proc_faces > 0 {
+        interpolate_linear_proc(gpu, k, out, psi, m)?;
+    }
+
+    Ok(())
+}
+
+/// The processor faces of [`interpolate_linear`], over the whole mesh's
+/// operands (SPEC-LIT 139.10). Private: every launch site goes through
+/// [`interpolate_linear`].
+fn interpolate_linear_proc(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut GpuSurfaceScalarField,
+    psi: &GpuScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_boundary_faces;
+    let nl = n as Label;
+    let f = k.interpolate_linear_proc.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut out.bf)
+            .arg(&psi.f)
+            .arg(&m.b_proc)
+            .arg(&m.b_proc_w)
+            .arg(&m.b_face_cells)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
     Ok(())
 }
 

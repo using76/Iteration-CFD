@@ -72,6 +72,14 @@ pub struct FieldKernels {
     dfsem_inlet: CudaFunction,
     synthetic_step: CudaFunction,
 
+    // SPEC-LIT 139.10 (PAR-14): the decomposed part's processor-face
+    // fix-ups, launched right after the evaluation on a mesh that has
+    // processor faces and never on any other (`n_proc_faces == 0`). The
+    // scalar one is also the fix-up every later interpolated-to-face field
+    // launches on a part (`Energy::update_k_eff`'s `rho_face`/`nut_face`).
+    pub(crate) proc_face_scalar: CudaFunction,
+    proc_face_vector: CudaFunction,
+
     copy: CudaFunction,
     copy_vector: CudaFunction,
     set: CudaFunction,
@@ -115,6 +123,9 @@ impl FieldKernels {
             digital_filter_inlet: k.func("fldDigitalFilterInlet")?,
             dfsem_inlet: k.func("fldDfsemInlet")?,
             synthetic_step: k.func("fldSyntheticStep")?,
+
+            proc_face_scalar: k.func("fldProcFaceScalar")?,
+            proc_face_vector: k.func("fldProcFaceVector")?,
 
             copy: k.func("fldCopy")?,
             copy_vector: k.func("fldCopyVector")?,
@@ -200,6 +211,27 @@ pub fn correct_boundary_conditions(
             .arg(&f.jump)
             .arg(&nl)
             .launch(cfg_for(n))?;
+    }
+
+    // SPEC-LIT 139.10 (PAR-14): on a decomposed part the processor faces'
+    // values are the WHOLE mesh's internal interpolations, which the cyclic
+    // branch above cannot form (it reads this side's `b_weights`). The
+    // fix-up overwrites exactly the faces `b_proc` marks; every other mesh
+    // launches nothing and moves no bit.
+    if m.n_proc_faces > 0 {
+        let func = k.proc_face_scalar.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&func)
+                .arg(&mut f.bf)
+                .arg(&f.f)
+                .arg(&m.b_proc)
+                .arg(&m.b_proc_w)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_nbr_cell)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
     }
     Ok(())
 }
@@ -292,6 +324,26 @@ pub fn correct_boundary_conditions_vector(
             .arg(&m.b_weights)
             .arg(&nl)
             .launch(cfg_for(n))?;
+    }
+
+    // SPEC-LIT 139.10 (PAR-14): the vector half of the processor-face
+    // fix-up - per component fvFluxInternal's expression on the whole
+    // mesh's two cells and weight. Nothing on a mesh without processor
+    // faces.
+    if m.n_proc_faces > 0 {
+        let func = k.proc_face_vector.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&func)
+                .arg(&mut f.bf)
+                .arg(&f.f)
+                .arg(&m.b_proc)
+                .arg(&m.b_proc_w)
+                .arg(&m.b_face_cells)
+                .arg(&m.b_nbr_cell)
+                .arg(&nl)
+                .launch(cfg_for(n))?;
+        }
     }
     Ok(())
 }

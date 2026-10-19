@@ -145,3 +145,134 @@ fn par_threads_gates_pass_on_a_small_plume() {
         assert!(!l.contains(" + 0 ghost"), "no ghost cells: {l}");
     }
 }
+
+/// SPEC-LIT 139.10 (PAR-14)'s fixtures: a fresh generated cavity case under
+/// the temp dir, removed first - the BASE side of every one-setting pair.
+fn base_case(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ofgpu-par14-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    ofgpu::blockgen::write_case(&dir, ofgpu::blockgen::CaseKind::Cavity, 8, 8, 1)
+        .expect("write the base case");
+    dir
+}
+
+/// `-check` accepts `dir`: exit 0 and the line saying the case takes the
+/// decomposed laminar SIMPLE path.
+fn accepted(cmd: &mut Command) {
+    let o = cmd.output().expect("run ofgpu-par -check");
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "refused:\n{out}\n{err}");
+    assert!(
+        out.contains("ofgpu-par -check:"),
+        "no -check line:\n{out}\n{err}"
+    );
+    assert!(!out.contains("PASS"), "a -check run printed a gate: {out}");
+}
+
+/// SPEC-LIT 13.4.1's shape, on SPEC-LIT 139.10's refusal list: for every
+/// unconverted path the BASE case is accepted by `ofgpu-par <dir> -check`,
+/// ONE setting is turned, and the same command is refused naming the row's
+/// name and `139.10`. No GPU is needed - the refusals and the loader run
+/// before any device is opened.
+#[test]
+fn par_check_refuses_every_unconverted_path_by_name() {
+    // VOF: `0/alpha.water` exists.
+    let d = base_case("vof");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("0/alpha.water"), "internalField uniform 0;\n").expect("write");
+    refused(exe().arg(&d).arg("-check"), &["VOF", "139.10"]);
+
+    // The dust model: cloudProperties stating `dustCloud`.
+    let d = base_case("dust");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/cloudProperties"), "dustCloud { }\n").expect("write");
+    refused(exe().arg(&d).arg("-check"), &["dust model", "139.10"]);
+
+    // Parcels: cloudProperties without `dustCloud`.
+    let d = base_case("parcels");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/cloudProperties"), "capacity 4;\n").expect("write");
+    refused(exe().arg(&d).arg("-check"), &["parcels", "139.10"]);
+
+    // LTS: `ddtSchemes/default localEuler` in the generated fvSchemes.
+    let d = base_case("lts");
+    accepted(exe().arg(&d).arg("-check"));
+    let p = d.join("system/fvSchemes");
+    let src = std::fs::read_to_string(&p).expect("read fvSchemes");
+    let steady = "default         steadyState;";
+    assert_eq!(src.matches(steady).count(), 1, "the generated fvSchemes moved");
+    std::fs::write(&p, src.replacen(steady, "default         localEuler;", 1)).expect("write");
+    refused(exe().arg(&d).arg("-check"), &["LTS", "139.10"]);
+
+    // AMR: `dynamicFvMesh dynamicRefineFvMesh`.
+    let d = base_case("amr");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/dynamicMeshDict"), "dynamicFvMesh dynamicRefineFvMesh;\n")
+        .expect("write");
+    refused(exe().arg(&d).arg("-check"), &["AMR", "139.10"]);
+
+    // ALE: `dynamicFvMesh` anything else; the static base side is accepted.
+    let d = base_case("ale");
+    std::fs::write(d.join("constant/dynamicMeshDict"), "dynamicFvMesh staticFvMesh;\n")
+        .expect("write");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(
+        d.join("constant/dynamicMeshDict"),
+        "dynamicFvMesh dynamicMotionSolverFvMesh;\n",
+    )
+    .expect("write");
+    refused(exe().arg(&d).arg("-check"), &["ALE", "139.10"]);
+
+    // CHT multi-region.
+    let d = base_case("cht");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(
+        d.join("constant/regionProperties"),
+        "regions ( fluid (air) solid (wall) );\n",
+    )
+    .expect("write");
+    refused(exe().arg(&d).arg("-check"), &["CHT multi-region", "139.10"]);
+
+    // Reacting chemistry.
+    let d = base_case("chem");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/chemistryProperties"), "chemistry on;\n").expect("write");
+    refused(exe().arg(&d).arg("-check"), &["reacting chemistry", "139.10"]);
+
+    // ofgpu-compressible.
+    let d = base_case("compressible");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(
+        d.join("constant/thermophysicalProperties"),
+        "thermoType { type hePsiThermo; }\n",
+    )
+    .expect("write");
+    refused(exe().arg(&d).arg("-check"), &["ofgpu-compressible", "139.10"]);
+
+    // Radiation: the model's own name; the `none` base side is accepted.
+    let d = base_case("rad-p1");
+    std::fs::write(d.join("constant/radiationProperties"), "radiationModel none;\n")
+        .expect("write");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/radiationProperties"), "radiationModel P1;\n").expect("write");
+    refused(exe().arg(&d).arg("-check"), &["P1", "139.10"]);
+
+    let d = base_case("rad-fvdom");
+    accepted(exe().arg(&d).arg("-check"));
+    std::fs::write(d.join("constant/radiationProperties"), "radiationModel fvDOM;\n")
+        .expect("write");
+    refused(exe().arg(&d).arg("-check"), &["fvDOM", "139.10"]);
+
+    // The flags: the pbicgstab base side is accepted, fft refused; the
+    // no-flag base side is accepted, -graph refused.
+    let d = base_case("backend");
+    accepted(exe().arg(&d).arg("-check").args(["-backend", "pbicgstab"]));
+    refused(
+        exe().arg(&d).arg("-check").args(["-backend", "fft"]),
+        &["FFT backend", "139.10"],
+    );
+
+    let d = base_case("graph");
+    accepted(exe().arg(&d).arg("-check"));
+    refused(exe().arg(&d).arg("-check").arg("-graph"), &["CUDA-graph capture", "139.10"]);
+}

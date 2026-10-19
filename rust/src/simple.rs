@@ -1386,7 +1386,14 @@ impl<'m> Simple<'m> {
             solver::device_sum(gpu, solk, &mut ws.num, &a_p.source, &mut ws.partials, n)?;
             match self.exchange.as_deref_mut() {
                 Some(x) => {
-                    let mean = x.world_mean(gpu.download(&ws.num)?[0], n)?;
+                    // SPEC-LIT 139.10 (PAR-14): the mean is PARTITION-
+                    // INVARIANT - the sum crosses the exact reduction of
+                    // SPEC-LIT 72 and the divide by the world's cell count
+                    // rounds once - so a part subtracts the bits the whole
+                    // mesh subtracts. (`world_mean`'s rank-order fold of
+                    // per-rank sums is not partition-invariant.) `n_global`
+                    // 0 = the exchange's own allgathered count.
+                    let mean = x.world_mean_exact(gpu, &a_p.source, n, 0)?;
                     gpu.write(&mut self.red, &[mean])?;
                     launch_sub_scalar(gpu, &sk.sub_scalar, &mut a_p.source, &self.red, 1.0, n)?;
                 }

@@ -955,3 +955,80 @@ extern "C" __global__ void momCorrectFluxBoundary
            ? phiHbyA[i]
            : phiHbyA[i] - rauf[i]*snGradP[i];
 }
+
+
+// ==========================================================================
+//  SPEC-LIT 139.10 (PAR-14) - the Rhie-Chow fix-ups
+// ==========================================================================
+
+//- momFaceInterpBoundary's fix-up: on a processor face rAU_f is the WHOLE
+//  face's interpolation, `wf*x[o_g] + (1 - wf)*x[n_g]` on the whole mesh's
+//  two cells and its STORED weight `bProcW` (139.8 fact 2) - not the part's
+//  own bWeights. Every face bProc does not mark is left as the boundary
+//  kernel wrote it.
+extern "C" __global__ void momFaceInterpProc
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ x,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (bProc[i] < 0) return;
+
+    const oflabel owns = (bProc[i] == 1);
+    const oflabel o_g = owns ? bFaceCells[i] : bNbrCell[i];
+    const oflabel n_g = owns ? bNbrCell[i] : bFaceCells[i];
+    const ofscalar wf = bProcW[i];
+
+    out[i] = wf*x[o_g] + (1 - wf)*x[n_g];
+}
+
+
+//- momPhiHbyABoundary's fix-up: on a processor face phi_HbyA is the whole
+//  face's flux, `hf + rauf_g*phib_g` with momPhiHbyA's body on the whole
+//  mesh's cells, weight, face area and buoyancy flux - negated on the side
+//  that does not own the face, which is the part-oriented flux the whole
+//  mesh's internal face becomes (IEEE negation is exact). The ghost cells the
+//  exchange filled play the far cells.
+extern "C" __global__ void momPhiHbyAProc
+(
+    ofscalar* __restrict__ bphi,
+    const ofvec3* __restrict__ hbya,
+    const ofscalar* __restrict__ rau,
+    const ofscalar* __restrict__ phib,
+    const ofvec3* __restrict__ bSf,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (bProc[i] < 0) return;
+
+    const oflabel owns = (bProc[i] == 1);
+    const oflabel o_g = owns ? bFaceCells[i] : bNbrCell[i];
+    const oflabel n_g = owns ? bNbrCell[i] : bFaceCells[i];
+    const ofscalar wf = bProcW[i];
+    const ofvec3 ho = hbya[o_g];
+    const ofvec3 hn = hbya[n_g];
+    const ofvec3 s = owns ? bSf[i] : mkvec(-bSf[i].x, -bSf[i].y, -bSf[i].z);
+
+    const ofscalar hf = (wf*ho.x + (1 - wf)*hn.x)*s.x
+                      + (wf*ho.y + (1 - wf)*hn.y)*s.y
+                      + (wf*ho.z + (1 - wf)*hn.z)*s.z;
+    const ofscalar rauf_g = wf*rau[o_g] + (1 - wf)*rau[n_g];
+    const ofscalar phib_g = owns ? phib[i] : -phib[i];
+
+    const ofscalar v = hf + rauf_g*phib_g;
+
+    bphi[i] = owns ? v : -v;
+}

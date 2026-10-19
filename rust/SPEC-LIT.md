@@ -41202,6 +41202,15 @@ reductions, each outer step costs 3 exchanges and 1 reduction, and the inner
 solves add theirs. §73.8's per-iteration counts hold for each inner solve and,
 unchanged, for the f64 build.
 
+**Changed by PAR-14 (§139.10).** The world sums of (118.12.3)-(118.12.4) are
+no longer the part-order fold of per-part doubles: each is §72's exact
+accumulator over the parts' per-cell double terms (owned cells only), so
+`S_x`, `N` and `R_k` - and with them the refinement - ARE partition-invariant
+to the bit, and the in-process and SPMD forms still agree bit for bit. The
+paragraph above describes the refinement before that unit. The exchange
+counts are unchanged; each world sum now gathers twice on a rank (the anchor,
+then the limbs) where the fold gathered once.
+
 **What it does not do.** CHT's per-region residuals (`solver::residual_ranged`
 in `cht.rs`) are still measured on the stored float field, so under `single`
 a region's report sits at the float floor. Ranged double kernels would be
@@ -54898,8 +54907,9 @@ first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11),
 k-epsilon and SST on a part (§139.6, PAR-12), decomposed I/O (§139.7,
 PAR-15), the partition-invariant laplacian and Gauss gradients (§139.8,
-PAR-13a), and the partition-invariant convection and flux kernels (§139.9,
-PAR-13b).
+PAR-13a), the partition-invariant convection and flux kernels (§139.9,
+PAR-13b), and the bitwise decomposed SIMPLE with its refusal list (§139.10,
+PAR-14).
 
 This section defines no equation, so it carries no equation label.
 
@@ -56199,6 +56209,153 @@ launches (`src/compressible/*.rs`, `src/vof.rs`) are not switched either -
 those drivers are not decomposed, so nothing on their path changed. And
 `fvDivSchemeFaceValue`, `fvDivFaces`'s face-value twin, is a measuring stick
 for the order of accuracy rather than an assembly, and has no part twin.
+
+### 139.10 The bitwise decomposed SIMPLE and the refusal list (PAR-14)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §139.4's gate compared the decomposed SIMPLE against the one-rank
+run at `1e-6`, and a tolerance is a bet that whatever remains is roundoff
+rather than a real partition dependence. Bits need every kernel on the path
+to be partition-invariant, so that no number in the run depends on where
+the cut fell: §139.8 and §139.9 made the laplacian, the Gauss gradients,
+the convection corrections and the flux sums bitwise; this subsection gates
+the whole loop - every cell of U, p (and T on the second fixture) and every
+face of the flux after a fixed iteration count, in both builds - and
+refuses by name every path a case or a flag can still state that the
+decomposed run has not converted.
+
+**The gate.** Two fixtures, every constant FIXED BEFORE MEASURING, in
+`src/distflow.rs`: the lid-driven cavity at `BITWISE_CAVITY_N = 16` cells
+per side, Re = 100, and a laminar Boussinesq plume on the block generator's
+`plume` box at `BITWISE_PLUME = (12, 6, 4)` - `PLUME_U_IN = 0.2` m/s of
+`PLUME_T_IN = 303.15` K air up through the floor window `inlet`, the box
+otherwise at `PLUME_T_REF = 293.15` K, `PLUME_NU = 1e-2`, Boussinesq
+`PLUME_BETA = 3.4e-3`, gravity `PLUME_G_Z = -9.81` m/s² down `-z` - a
+fixture for a bitwise self-comparison, not a validation case. `P = 1` under
+the Linear cut (which IS the one-part cut) is the reference; `P = 2, 3, 4`
+under Hilbert must reproduce it after `BITWISE_ITERS = 50` outer
+iterations, no convergence break, same iteration count. Compared BITWISE
+(`to_bits`), on every rank: each owned cell's U (three components), p and T
+against the reference at `global_cell[i]`; each internal face's flux
+against the reference's internal flux at `global_face[i]`; each boundary
+face's against the reference's boundary flux, EXCEPT a processor face,
+which must be the whole mesh's internal flux at that face with the rank's
+own side's sign (`b_proc[j] == 1` keeps it, else negated). The per-step
+traces - the linear-solver iteration counts and the initial residuals of U,
+p and T, as `.first` reported them - are compared the same way, per step.
+The sizes are REDUCED so the shared card runs the four rank counts of both
+fixtures inside the verify budget: the size is reduced, never a tolerance -
+there is no tolerance, the gate is bits. A miss prints one `[139.10] MISSED`
+line with the first differing value and never panics; asserted is only that
+every rank returned `Ok`, the step count is exact, and something was
+compared.
+
+**The refusal list.** `ofgpu-par <case>` refuses, before anything is loaded
+or any device opened, every path the case or the command line states that
+the decomposed run has not converted; the pair test in
+`tests/par_driver.rs` runs each row's base case accepted and the same
+command with ONE setting turned refused, the SPEC-LIT 13.4.1 shape:
+
+| refused | stated by |
+|---|---|
+| `FFT backend` | `-backend fft` or `-backend cufft`; any other `-backend` value than `pbicgstab` or `pcg` is refused naming the value |
+| `CUDA-graph capture` | `-graph` |
+| `VOF` | `0/alpha.water` exists |
+| `dust model` | `constant/cloudProperties` exists and states `dustCloud` |
+| `parcels` | `constant/cloudProperties` exists (and is not the dust model) |
+| `LTS` | `system/fvSchemes`' `ddtSchemes/default` is `localEuler` |
+| `AMR` | `constant/dynamicMeshDict`'s `dynamicFvMesh` is `dynamicRefineFvMesh` |
+| `ALE` | `dynamicFvMesh` anything else except `staticFvMesh` (static is accepted) |
+| `CHT multi-region` | `constant/regionProperties` exists |
+| `reacting chemistry` | the chemistry route of §133 names a file of the case |
+| `ofgpu-compressible` | `constant/thermophysicalProperties` parses and `thermoType/type` is `hePsiThermo` or `heRhoThermo` |
+| the model's own name (`P1`, `fvDOM`, ...) | `constant/radiationProperties`: `radiationModel` present and not `none` |
+
+`-check` runs the refusal list and then loads the case exactly as the run
+would - `common::load_case`, then the motion block's refusal - prints that
+the case takes the decomposed laminar SIMPLE path, and exits: no GPU is
+opened. The JSONC route's blocks (parcels, chemistry, radiation, dust,
+vent, motion) are refused by `common::load_case` itself, exactly as they
+are for the run.
+
+**The twins (run 2).** The gate's first misses lived in the face
+INTERPOLATION, not the matrix: on a part a processor face's field value is
+the whole mesh's `w·psi_owner + (1-w)·psi_neighbour`, which
+`fvInterpolateBoundary`'s copy of the boundary slot cannot form - even a
+uniform field loses a bit through the weights. Every twin selects itself
+with an `if m.n_proc_faces > 0 { ... }` guard and leaves the whole mesh's
+path - and the serial path, `n_halo == 0` - byte for byte what it was:
+
+| whole mesh kernel | part twin | what it forms |
+|---|---|---|
+| `fldCorrectBcScalar` | `fldProcFaceScalar` | `bf[i] = w·psi[o_g] + (1-w)·psi[n_g]` |
+| `fldCorrectBcVector` | `fldProcFaceVector` | the vector half, per component |
+| `fvInterpolateBoundary` | `fvInterpolateLinearProc` | the linear face interpolation from `psi.f`'s ghost slots |
+| `fvWeightsBoundary` | `fvWeightsBoundaryProc` | the convection weight of a proc face |
+| `fvWeightsBoundaryLimited` | `fvWeightsBoundaryLimitedProc` | its limited-scheme variant |
+| `fvDivDiag` | `fvDivDiagPart` | the convective diagonal over the merged row |
+| `fvDivBoundary` | `fvDivBoundaryPart` | its boundary share |
+| `momFaceInterpBoundary` | `momFaceInterpProc` | Rhie-Chow's face interpolation |
+| `momPhiHbyABoundary` | `momPhiHbyAProc` | `phiHbyA`'s boundary share |
+| `world_mean` | `world_mean_exact` | the pinned mean, partition-invariantly |
+| `solSum64Stage1`+`solSumStage2To64`+the rank fold | `exMaxAbs64Stage1`+`exSum64Stage1`+`exCombine`+`exact_sum64` | the refinement's world sums `sum x`, N, R_k, partition-invariantly |
+
+Two supports carry the interpolation twin its operands: `update_viscosity`
+composes `nu_eff = nu_lam + nu_t` over `m.n_local()`, not just the owned
+cells (the ghost slots of `nut.f` were exchanged by the model's BC pass,
+`nu_lam` is written over all of `n_local`), and `GasState::update_density`
+forms `rho.f = p0/(R T)` over `m.n_local()` too, from `T`'s halo that the
+energy equation's exchange filled - a whole mesh has no ghosts, `n_local`
+is `n`, so neither launch moves a bit.
+
+The refinement's own reductions (§118.4) needed the same treatment, and a
+twin was not enough: the part sum was rounded to one f64 per part
+(`solSumStage2To64`) before the ranks folded, so
+`round(Σ round(T_p)) ≠ round(T)` whenever the cut moved a partial across a
+binade - the gate's remaining single-build misses began as the world
+`sum x` of the pressure solve at step 4 differing on P4 while the pressure
+field it summed was bit for bit the whole mesh's. Run 2 rebuilds the three
+world sums (`sum x`, N, R_k) on §72's accumulator with double terms:
+`solResidual64Terms`/`solNormFactor64Terms` materialise each part's OWNED
+cells' terms in double (a halo cell's row is its owner's, and summing it
+twice would make the sum depend on the cut), `exMaxAbs64Stage1` +
+`exMax64Stage2` take the world anchor (a maximum, order-free),
+`exSum64Stage1` + `exCombine` reduce each part to exact 30-bit limbs, the
+gather moves bytes, and `exact_sum64` normalises the carries and rounds
+on the host. Every rank reads the same limbs against the same anchor and
+rounds them the same way, so the answer is the same bits whatever the part
+count. The serial refinement (`solver.rs`) keeps its own sums unchanged.
+
+**Measured (2026-10-20, RTX 5070 Ti, shared with another lane).** In BOTH
+builds, `tests/distflow_bitwise.rs`: the cavity at P = 2, 3, 4, 0 of 2096,
+2118 and 2112 values differ (U, p, phi); the plume, 0 of 2184, 2266 and
+2232, with T 0 of 288 each; iteration counts differ on 0 of 50 steps and the
+residual bits on 0. At HEAD before this unit the same gate printed MISSED
+on every row (f64: the cavity 1263-1285 values differing, the first U 1.6e6
+ulp off; the plume 1920-2002, every T; the iteration counts on 48 of 50
+cavity steps). The exact double sum test sums four dyadic terms dealt as
+[4], [2, 2] and [1, 3] parts to the exact `302.3828125`. The review found
+the host anchor `anchor64` adding `+ 1` twice - every refinement world sum came back
+exactly doubled, the SAME on every cut, so the bitwise gate passed while
+§139.5's single-build decomposed thermal cavity drifted to Nu rel 2.8e-3 at
+351 iterations against the serial 386; with the anchor fixed that test runs
+386 iterations on every rank and every row holds (Nu rel 2.953e-6, T
+6.782e-6, U 3.603e-6, p 2.531e-6 against 1e-5, identical at P = 1, 2, 4).
+The serial path did not move: the golden hash of `ofgpu-validate -sections
+1-10,13,16` is `ec7face0...c587` (344 rows) in f64 and `1b12f14f...f084`
+(350 rows) under `single`, as before this unit, and the SASS of every
+pre-existing kernel in `fv.cu` (51), `field.cu` (27), `momentum.cu` (25) and
+`simple.cu` (5) is identical function by function in both builds.
+
+**What this does not do.** MPI and multi-GPU are deferred by the user: a
+rank is a `ThreadComm` thread with its own `Gpu::new(0)` on the one card,
+and no cross-process or cross-device claim is made. Turbulence, the
+energy-only drivers, limited convection schemes beyond the fixtures' own
+upwind and central, and the non-orthogonal correctors are not gated here: a
+case that states them takes this refusal list or the loader's, and the
+bitwise claim covers exactly what the two fixtures run.
 
 ---
 
