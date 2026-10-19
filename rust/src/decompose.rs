@@ -933,6 +933,10 @@ impl PartBuild<'_> {
         // they stay the same length by construction.
         let mut b_proc = Vec::with_capacity(n_bf);
         let mut b_proc_w = Vec::with_capacity(n_bf);
+        // SPEC-LIT 139.9 (PAR-13b): the WHOLE mesh's centre of the ghost cell
+        // of a processor face, copied - the one metric the part cannot
+        // rebuild, because its `c` array stops at its own last cell.
+        let mut b_proc_c = Vec::with_capacity(n_bf);
         let mut global_face: Vec<Label> = Vec::with_capacity(n_if + n_bf);
         global_face.extend(interior.iter().copied());
         let mut patches: Vec<PatchInfo> = Vec::new();
@@ -1002,6 +1006,7 @@ impl PartBuild<'_> {
                 // no stored weight. SPEC-LIT 139.8.
                 b_proc.push(-1);
                 b_proc_w.push(0.0);
+                b_proc_c.push(Vec3::ZERO);
 
                 // The coupled neighbour: still owned here, or now in the halo.
                 let nc = m.b_nbr_cell[bf];
@@ -1083,6 +1088,11 @@ impl PartBuild<'_> {
                 // in floating point).
                 b_proc.push(if owns { 1 } else { 0 });
                 b_proc_w.push(m.weights[f]);
+                // SPEC-LIT 139.9: the ghost cell's WHOLE-mesh centre,
+                // copied (`there` is the cell on the other side of the
+                // cut). `fvDivCorrection`'s twin reads it where the whole
+                // mesh read `C[neighbour]`/`C[owner]`.
+                b_proc_c.push(m.c[there]);
                 b_nbr_cell.push(self.halo_of[there]);
                 b_nbr_face.push(-1);
                 // Cyclic, NOT Processor. `PatchKind::Processor` is a host-side
@@ -1121,6 +1131,7 @@ impl PartBuild<'_> {
         pm.b_patch = b_patch;
         pm.b_proc = b_proc;
         pm.b_proc_w = b_proc_w;
+        pm.b_proc_c = b_proc_c;
         pm.patches = patches;
         pm.global_face = global_face;
 

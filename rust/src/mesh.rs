@@ -344,6 +344,17 @@ pub struct HostMesh {
     /// point: the whole weight is not recoverable from the part's own. See
     /// SPEC-LIT 139.8's table of exact rebuilds.
     pub b_proc_w: Vec<Scalar>,
+    /// `[n_boundary_faces]` or EMPTY. On a processor face the WHOLE mesh's
+    /// centre `c` of the cell on the OTHER side of the cut (the ghost cell),
+    /// copied; `Vec3::ZERO` on every other face.
+    ///
+    /// It has to be STORED because `fvDivCorrection` reads `C[owner]` and
+    /// `C[neighbour]`, and on a part the ghost cell's centre is not on the
+    /// device (`GpuMesh::c` is `n_cells` long) and cannot be rebuilt bitwise
+    /// from face data. Filled together with [`Self::b_proc`] by `decompose`,
+    /// face by face, so the two stay the same length by construction.
+    /// SPEC-LIT 139.9.
+    pub b_proc_c: Vec<Vec3>,
 }
 
 /// What `HostMesh::check` found. Printing it is the first thing every binary
@@ -754,6 +765,11 @@ pub struct GpuMesh {
     /// whole mesh and on every P = 1 part, so the part twins of the
     /// laplacian and the Gauss gradients launch ONLY here.
     pub n_proc_faces: usize,
+    /// SPEC-LIT 139.9 (PAR-13b): `[n_bf]` the WHOLE mesh's centre of the cell
+    /// on the other side of a processor cut (the ghost cell), ZERO elsewhere.
+    /// Stored, not rebuilt: `GpuMesh::c` is `n_cells` long, so the ghost's
+    /// centre is not on the device and no face metric gives it back.
+    pub b_proc_c: DevBuf<Vec3>,
 }
 
 /// Everything a [`GpuMesh`] carries that is **not** geometry: the addressing,
@@ -787,6 +803,9 @@ struct GpuTopology {
     b_proc: DevBuf<Label>,
     b_proc_w: DevBuf<Scalar>,
     n_proc_faces: usize,
+    // SPEC-LIT 139.9 (PAR-13b): the stored ghost-cell centre of a processor
+    // face, face-sized like the marks.
+    b_proc_c: DevBuf<Vec3>,
 }
 
 impl GpuTopology {
@@ -836,7 +855,7 @@ impl GpuTopology {
         // boundary-face count nor EMPTY is a part whose marks were cut or
         // pasted wrong; refuse by name rather than let a kernel read a mark
         // that is not there.
-        let (b_proc, b_proc_w, n_proc) = if m.b_proc.len() == m.n_boundary_faces {
+        let (b_proc, b_proc_w, b_proc_c, n_proc) = if m.b_proc.len() == m.n_boundary_faces {
             if m.b_proc_w.len() != m.n_boundary_faces {
                 return Err(Error::Config(format!(
                     "mesh: b_proc_w has {} entries for {} boundary faces, \
@@ -846,12 +865,30 @@ impl GpuTopology {
                     m.n_boundary_faces
                 )));
             }
+            // SPEC-LIT 139.9 (PAR-13b): the ghost-cell centres travel with
+            // the marks; a full `b_proc` beside a short `b_proc_c` is a
+            // kernel reading a centre that is not there.
+            if m.b_proc_c.len() != m.n_boundary_faces {
+                return Err(Error::Config(format!(
+                    "mesh: b_proc_c has {} entries for {} boundary faces, \
+                     and b_proc marks all of them; the two arrays are filled \
+                     together by decompose and every consumer reads both",
+                    m.b_proc_c.len(),
+                    m.n_boundary_faces
+                )));
+            }
             let n = m.b_proc.iter().filter(|&&b| b >= 0).count();
-            (gpu.upload(&m.b_proc)?, gpu.upload(&m.b_proc_w)?, n)
+            (
+                gpu.upload(&m.b_proc)?,
+                gpu.upload(&m.b_proc_w)?,
+                gpu.upload(&m.b_proc_c)?,
+                n,
+            )
         } else if m.b_proc.is_empty() {
             (
                 gpu.upload(&vec![-1 as Label; m.n_boundary_faces])?,
                 gpu.upload(&vec![0.0 as Scalar; m.n_boundary_faces])?,
+                gpu.upload(&vec![Vec3::ZERO; m.n_boundary_faces])?,
                 0,
             )
         } else {
@@ -893,6 +930,7 @@ impl GpuTopology {
             b_proc,
             b_proc_w,
             n_proc_faces: n_proc,
+            b_proc_c,
         })
     }
 }
@@ -1024,6 +1062,7 @@ impl GpuMesh {
             b_proc: t.b_proc,
             b_proc_w: t.b_proc_w,
             n_proc_faces: t.n_proc_faces,
+            b_proc_c: t.b_proc_c,
         })
     }
 
@@ -1139,6 +1178,7 @@ impl GpuMesh {
             b_proc: t.b_proc,
             b_proc_w: t.b_proc_w,
             n_proc_faces: t.n_proc_faces,
+            b_proc_c: t.b_proc_c,
         })
     }
 }

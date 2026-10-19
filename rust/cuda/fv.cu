@@ -3340,3 +3340,384 @@ extern "C" __global__ void fvGradVectorPart
 
     g[c] = t;
 }
+
+
+// ==========================================================================
+//  SPEC-LIT 139.9 (PAR-13b): the convection and flux twins
+// ==========================================================================
+//
+//  Four more kernels obeying THE RULE of 139.8, so the CONVECTION and FLUX
+//  sums are partition-invariant: one thread per owned cell c, walking the
+//  MERGED row j in [rfOffset[c], rfOffset[c+1]), f = rfFace[j],
+//  fl = rfFlags[j], skipping f < 0. An internal entry uses
+//  owns = (fl & OFGPU_RF_OWNS) != 0 in place of cfOwn[j] and the old
+//  kernel's internal-loop expression COPIED operand for operand, in the
+//  same written order. A processor entry (fl & OFGPU_RF_BOUNDARY and
+//  bProc[f] >= 0) evaluates that SAME internal-face expression on the whole
+//  mesh's operands rebuilt exactly - owns = (bProc[f] == 1),
+//  nb = bNbrCell[f], o_g = owns ? c : nb, n_g = owns ? nb : c,
+//  Sf_g = owns ? bSf[f] : -bSf[f], phi_g = owns ? bphi[f] : -bphi[f] (IEEE
+//  negation is exact) - plus, NEW here, the stored ghost-cell centre
+//  bProcC[f]: C_o = owns ? C[c] : bProcC[f], C_n = owns ? bProcC[f] : C[c],
+//  Cf_g = bCf[f], magSf_g = bMagSf[f]. A processor face's convection sum
+//  needs C[owner] and C[neighbour], and on a part the ghost's centre is
+//  not on the device and cannot be rebuilt from face data, so it is
+//  STORED. Every other boundary entry is the old kernel's boundary-loop
+//  body, unchanged; after the loop, the old kernel's final statement,
+//  unchanged.
+//
+//  Launched ONLY when GpuMesh::n_proc_faces > 0, so no whole mesh and no
+//  P = 1 part ever reaches them and the serial path cannot move by one bit.
+
+//- fvDivBoundedDiag's twin: the bounded-convection diagonal, with a
+//  processor face's phi taken from the whole mesh's INTERNAL face g.
+extern "C" __global__ void fvDivBoundedDiagPart
+(
+    ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ bphi,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvDivBoundedDiag's internal-loop body, verbatim.
+            acc += (fl & OFGPU_RF_OWNS) ? phi[f] : -phi[f];
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same sum, on the whole mesh's flux (139.9).
+            const oflabel owns = (bProc[f] == 1);
+            const ofscalar phi_g = owns ? bphi[f] : -bphi[f];
+            acc += owns ? phi_g : -phi_g;
+        }
+        else
+        {
+            // fvDivBoundedDiag's boundary-loop body, unchanged.
+            if (bKind[f] == OFPATCH_EMPTY) continue;
+            acc += bphi[f];
+        }
+    }
+
+    diag[c] -= sign*acc;
+}
+
+
+//- fvDivCorrection's twin: the deferred-correction source, over the merged
+//  row. A processor face's term is the internal-face expression with the
+//  whole mesh's cells (the ghost's centre from bProcC), face centre and
+//  flux - NOT the coupled branch, which is the arithmetic a folded-in-half
+//  cyclic couple gets and not the arithmetic the whole mesh applied to this
+//  face when it was internal.
+extern "C" __global__ void fvDivCorrectionPart
+(
+    ofscalar* __restrict__ source,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ bphi,
+    const ofvec3* __restrict__ gradPsi,
+    const ofvec3* __restrict__ C,
+    const ofvec3* __restrict__ Cf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const ofscalar* __restrict__ bDeltaCoeffs,
+    const ofscalar* __restrict__ bWeights,
+    const ofvec3* __restrict__ bCf,
+    const ofvec3* __restrict__ bProcC,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel code,
+    ofscalar coef,
+    ofscalar sign,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvDivCorrection's internal-loop body, verbatim.
+            const oflabel o = owner[f];
+            const oflabel n = neighbour[f];
+
+            const ofvec3 cO = C[o];
+            const ofvec3 cN = C[n];
+            const ofvec3 cf = Cf[f];
+
+            const ofvec3 dP = mkvec(cf.x - cO.x, cf.y - cO.y, cf.z - cO.z);
+            const ofvec3 dN = mkvec(cf.x - cN.x, cf.y - cN.y, cf.z - cN.z);
+            const ofvec3 d  = mkvec(cN.x - cO.x, cN.y - cO.y, cN.z - cO.z);
+
+            const ofscalar corr = divCorrection
+            (
+                code, coef, phi[f], dP, dN, d, gradPsi[o], gradPsi[n]
+            );
+
+            const ofscalar t = phi[f]*corr;
+
+            // -phi*corr for the owner, +phi*corr for the neighbour; `acc`
+            // is subtracted from the source at the end, so the owner
+            // accumulates +t.
+            acc += (fl & OFGPU_RF_OWNS) ? t : -t;
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same expression, on the whole mesh's operands (139.9):
+            // the whole mesh's owner/neighbour cells (the ghost's centre
+            // STORED), its face centre and its flux.
+            const oflabel owns = (bProc[f] == 1);
+            const oflabel nb = bNbrCell[f];
+            const oflabel o_g = owns ? c : nb;
+            const oflabel n_g = owns ? nb : c;
+
+            const ofvec3 cO = owns ? C[c] : bProcC[f];
+            const ofvec3 cN = owns ? bProcC[f] : C[c];
+            const ofvec3 cf = bCf[f];
+
+            const ofvec3 dP = mkvec(cf.x - cO.x, cf.y - cO.y, cf.z - cO.z);
+            const ofvec3 dN = mkvec(cf.x - cN.x, cf.y - cN.y, cf.z - cN.z);
+            const ofvec3 d  = mkvec(cN.x - cO.x, cN.y - cO.y, cN.z - cO.z);
+
+            const ofscalar phi_g = owns ? bphi[f] : -bphi[f];
+
+            const ofscalar corr = divCorrection
+            (
+                code, coef, phi_g, dP, dN, d, gradPsi[o_g], gradPsi[n_g]
+            );
+
+            const ofscalar t = phi_g*corr;
+
+            acc += owns ? t : -t;
+        }
+        else
+        {
+            // fvDivCorrection's boundary-loop body, unchanged (cyclic, with
+            // `bNbrCell >= 0`, only).
+            const oflabel b = f;
+            const oflabel nbr = bNbrCell[b];
+            if (bKind[b] != OFPATCH_CYCLIC || nbr < 0) continue;
+
+            const ofscalar mag = bMagSf[b];
+            const ofscalar delta = bDeltaCoeffs[b];
+            if (!(mag > 0) || !(delta > 0)) continue;
+
+            const ofvec3 sb = bSf[b];
+            const ofscalar sc = 1/(mag*delta);
+            const ofvec3 d = mkvec(sb.x*sc, sb.y*sc, sb.z*sc);
+
+            const ofscalar wb = bWeights[b];
+            const ofvec3 dP = mkvec((1 - wb)*d.x, (1 - wb)*d.y, (1 - wb)*d.z);
+            const ofvec3 dN = mkvec(-wb*d.x, -wb*d.y, -wb*d.z);
+
+            const oflabel o = bFaceCells[b];
+
+            const ofscalar corr = divCorrection
+            (
+                code, coef, bphi[b], dP, dN, d, gradPsi[o], gradPsi[nbr]
+            );
+
+            // The cell is always the owner of its own boundary face.
+            acc += bphi[b]*corr;
+        }
+    }
+
+    source[c] -= sign*acc;
+}
+
+
+//- fvDivSurface's twin: the volumetric divergence, over the merged row.
+extern "C" __global__ void fvDivSurfacePart
+(
+    ofscalar* __restrict__ d,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ bphi,
+    const ofscalar* __restrict__ V,
+    const oflabel* __restrict__ bKind,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar acc = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvDivSurface's internal-loop body, verbatim.
+            acc += (fl & OFGPU_RF_OWNS) ? phi[f] : -phi[f];
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same sum, on the whole mesh's flux (139.9).
+            const oflabel owns = (bProc[f] == 1);
+            const ofscalar phi_g = owns ? bphi[f] : -bphi[f];
+            acc += owns ? phi_g : -phi_g;
+        }
+        else
+        {
+            // fvDivSurface's boundary-loop body, unchanged.
+            if (bKind[f] == OFPATCH_EMPTY) continue;
+            acc += bphi[f];
+        }
+    }
+
+    d[c] = acc/V[c];
+}
+
+
+//- fvReconstruct's twin: the least-squares velocity reconstruction, over
+//  the merged row. The owner/neighbour sign cancels on both sides of the
+//  original minimisation, so the internal body has NO sign - and a
+//  processor face takes the whole mesh's face normal and flux with their
+//  side's sign folded back in, which restores exactly the whole mesh's
+//  operands (139.9).
+extern "C" __global__ void fvReconstructPart
+(
+    ofvec3* __restrict__ u,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ bphi,
+    const ofvec3* __restrict__ Sf,
+    const ofscalar* __restrict__ magSf,
+    const ofvec3* __restrict__ bSf,
+    const ofscalar* __restrict__ bMagSf,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar txx = 0, txy = 0, txz = 0, tyy = 0, tyz = 0, tzz = 0;
+    ofscalar rx = 0, ry = 0, rz = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel f = rfFace[j];
+        if (f < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // fvReconstruct's internal-loop body, verbatim (no owner sign).
+            const ofscalar m = magSf[f];
+            if (!(m > 0)) continue;
+
+            const ofvec3 s = Sf[f];
+            const ofscalar rm = 1/m;
+
+            txx += s.x*s.x*rm; txy += s.x*s.y*rm; txz += s.x*s.z*rm;
+            tyy += s.y*s.y*rm; tyz += s.y*s.z*rm; tzz += s.z*s.z*rm;
+
+            const ofscalar p = phi[f]*rm;
+            rx += s.x*p; ry += s.y*p; rz += s.z*p;
+        }
+        else if (bProc[f] >= 0)
+        {
+            // The same body on the whole mesh's operands (139.9).
+            const oflabel owns = (bProc[f] == 1);
+            const ofscalar m = bMagSf[f];
+            if (!(m > 0)) continue;
+
+            const ofvec3 s0 = bSf[f];
+            const ofvec3 s = owns ? s0 : mkvec(-s0.x, -s0.y, -s0.z);
+            const ofscalar phi_g = owns ? bphi[f] : -bphi[f];
+            const ofscalar rm = 1/m;
+
+            txx += s.x*s.x*rm; txy += s.x*s.y*rm; txz += s.x*s.z*rm;
+            tyy += s.y*s.y*rm; tyz += s.y*s.z*rm; tzz += s.z*s.z*rm;
+
+            const ofscalar p = phi_g*rm;
+            rx += s.x*p; ry += s.y*p; rz += s.z*p;
+        }
+        else
+        {
+            // fvReconstruct's boundary-loop body, unchanged.
+            const ofscalar m = bMagSf[f];
+            if (!(m > 0)) continue;
+
+            const ofvec3 s = bSf[f];
+            const ofscalar rm = 1/m;
+
+            txx += s.x*s.x*rm; txy += s.x*s.y*rm; txz += s.x*s.z*rm;
+            tyy += s.y*s.y*rm; tyz += s.y*s.z*rm; tzz += s.z*s.z*rm;
+
+            const ofscalar p = bphi[f]*rm;
+            rx += s.x*p; ry += s.y*p; rz += s.z*p;
+        }
+    }
+
+    // fvReconstruct's cofactor block, floor and final statement, verbatim.
+    const ofscalar cxx = tyy*tzz - tyz*tyz;
+    const ofscalar cxy = txz*tyz - txy*tzz;
+    const ofscalar cxz = txy*tyz - txz*tyy;
+    const ofscalar cyy = txx*tzz - txz*txz;
+    const ofscalar cyz = txy*txz - txx*tyz;
+    const ofscalar czz = txx*tyy - txy*txy;
+
+    const ofscalar det = txx*cxx + txy*cxy + txz*cxz;
+
+    const ofscalar scale = txx + tyy + tzz;
+    if (!(ofabs_(det) > (ofscalar)1e-30*scale*scale*scale))
+    {
+        u[c] = mkvec(0, 0, 0);
+        return;
+    }
+
+    const ofscalar rd = 1/det;
+
+    u[c] = mkvec
+    (
+        (cxx*rx + cxy*ry + cxz*rz)*rd,
+        (cxy*rx + cyy*ry + cyz*rz)*rd,
+        (cxz*rx + cyz*ry + czz*rz)*rd
+    );
+}

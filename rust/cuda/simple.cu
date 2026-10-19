@@ -152,3 +152,65 @@ extern "C" __global__ void smpSubScalar
     if (i >= n) return;
     x[i] -= scale*v[0];
 }
+
+
+// SPEC-LIT 139.9 (PAR-13b): smpFaceFluxSum's part twin. THE RULE of
+// 139.8/139.9: one thread per owned cell c, walking the MERGED row
+// [rfOffset[c], rfOffset[c+1]) instead of the part's own cf/bcf CSR, so the
+// whole mesh's INTERNAL face that the cut turned into a processor boundary
+// face is summed at its global place in the row - where the whole mesh
+// summed it - and not after every internal face. A processor entry rebuilds
+// the whole mesh's flux exactly (phi_g = owns ? bphi[f] : -bphi[f]; IEEE
+// negation is exact); every other boundary entry is the old kernel's
+// boundary body, unchanged, and its empty-skip-free boundary sum is
+// preserved too. Launched ONLY when GpuMesh::n_proc_faces > 0, so the
+// serial path cannot move by one bit.
+extern "C" __global__ void smpFaceFluxSumPart
+(
+    ofscalar* __restrict__ out,
+    const ofscalar* __restrict__ phi,
+    const ofscalar* __restrict__ bphi,
+    const oflabel* __restrict__ bProc,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    oflabel accumulate,
+    oflabel nCells
+)
+{
+    const oflabel c = OFGPU_TID;
+    if (c >= nCells) return;
+
+    ofscalar s = 0;
+
+    for (oflabel j = rfOffset[c]; j < rfOffset[c + 1]; ++j)
+    {
+        const oflabel fi = rfFace[j];
+        if (fi < 0) continue;
+
+        const oflabel fl = rfFlags[j];
+
+        if (!(fl & OFGPU_RF_BOUNDARY))
+        {
+            // smpFaceFluxSum's internal-loop body, verbatim - its `f` is
+            // the VALUE, which is why the face index here is `fi`.
+            const ofscalar v = phi[fi];
+            s += (fl & OFGPU_RF_OWNS) ? v : -v;
+        }
+        else if (bProc[fi] >= 0)
+        {
+            // The same sum, on the whole mesh's flux (139.9).
+            const oflabel owns = (bProc[fi] == 1);
+            const ofscalar phi_g = owns ? bphi[fi] : -bphi[fi];
+            s += owns ? phi_g : -phi_g;
+        }
+        else
+        {
+            // smpFaceFluxSum's boundary-loop body, unchanged: no empty
+            // skip, as in the old kernel.
+            s += bphi[fi];
+        }
+    }
+
+    out[c] = accumulate ? out[c] + s : s;
+}

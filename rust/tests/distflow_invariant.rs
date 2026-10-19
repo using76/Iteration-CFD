@@ -20,6 +20,17 @@
 //! mesh's operands exactly (`b_proc`, `b_proc_w`), and leave
 //! `internal_coeffs` at the zero `split_matrix` gives a cut face.
 //!
+//! SPEC-LIT 139.9 (PAR-13b) adds the convection and flux kernels' gate: the
+//! five sums `fvDivBoundedDiag`, `fvDivCorrection`, `fvDivSurface`,
+//! `fvReconstruct` and `smpFaceFluxSum` form must be the whole mesh's bit
+//! for bit - the part convection `diag` and `source` bitwise `split_matrix`
+//! of the whole ones at P = 2, 3, 4 over the three partitioners, the four cell fields
+//! bitwise the whole mesh's at `global_cell[i]` on every owned cell, and
+//! every part storing the ghost cell's whole-mesh centre (`b_proc_c`)
+//! `fvDivCorrection`'s twin reads. The same MISSED-not-panic rule: the
+//! differences are MEASURED and printed, and what is asserted is that
+//! something was compared and every rank was `Ok`.
+//!
 //! Where the bitwise line fails the tests print one `MISSED` line with the
 //! counts, the max ulp and the FIRST difference, and continue (the misses
 //! rule of docs/17-review-later.md; the line is never loosened). What IS
@@ -38,15 +49,17 @@ use ofgpu::field_ops::{
     correct_boundary_conditions, correct_boundary_conditions_vector, FieldKernels,
 };
 use ofgpu::fv::{
-    fvc_grad_scalar, fvc_grad_vector, fvm_laplacian, fvm_laplacian_non_orth_correction,
-    FvKernels, SnGradScheme,
+    fvc_div_surface, fvc_grad_scalar, fvc_grad_vector, fvc_reconstruct,
+    fvm_div_bounded_correction, fvm_div_correction, fvm_laplacian,
+    fvm_laplacian_non_orth_correction, DivScheme, FvKernels, SnGradScheme,
 };
+use ofgpu::simple::fvc_face_flux_sum;
 use ofgpu::ldu::HostLduMatrix;
 use ofgpu::ldu_ops::{add_boundary_contributions, LduKernels};
 use ofgpu::solid::prototype;
 use ofgpu::{
-    BcKind, Gpu, GpuLduMatrix, GpuMesh, GpuScalarField, GpuVectorField, HostMesh, Label, Result,
-    Scalar, Tensor, Vec3,
+    BcKind, Gpu, GpuLduMatrix, GpuMesh, GpuScalarField, GpuSurfaceScalarField, GpuVectorField,
+    HostMesh, Label, PatchKind, Result, Scalar, Tensor, Vec3,
 };
 
 /// A machine without a card makes every device test pass vacuously, which is
@@ -740,6 +753,469 @@ fn the_part_laplacian_is_split_matrix_of_the_whole() {
         );
     }
     assert!(coeffs_total > 0, "no laplacian coefficient was compared");
+}
+
+/// The part carries the ghost cell's WHOLE-mesh centre of every processor
+/// face (SPEC-LIT 139.9). `fvDivCorrection` reads `C[owner]` and
+/// `C[neighbour]`, and on a part the ghost's centre is nowhere on the device
+/// (`GpuMesh::c` is `n_cells` long) and no face metric rebuilds it - so it
+/// is STORED as `b_proc_c`, a copy and therefore exact. Host first, on every
+/// cut; the device half only checks what the upload does with it.
+#[test]
+fn processor_faces_carry_the_ghost_cell_centre() {
+    for (name, hm) in meshes() {
+        assert!(
+            hm.b_proc_c.is_empty(),
+            "{name}: the whole mesh must not carry b_proc_c centres"
+        );
+        let n = hm.n_cells;
+        for pcount in 2..=4usize {
+            for method in partitioners(n, pcount) {
+                let d = Decomposition::build(&hm, pcount, &method).expect("cut");
+                for (p, part) in d.parts.iter().enumerate() {
+                    let pm = &part.mesh;
+                    assert_eq!(
+                        pm.b_proc_c.len(),
+                        pm.n_boundary_faces,
+                        "{name} P={pcount} {} part {p}: b_proc_c is not face-sized",
+                        method.as_str()
+                    );
+                    for j in 0..pm.n_boundary_faces {
+                        let g = pm.global_face[pm.n_internal_faces + j] as usize;
+                        let at = format!(
+                            "{name} P={pcount} {} part {p} boundary face {j} \
+                             (global {g})",
+                            method.as_str()
+                        );
+                        if pm.b_proc[j] >= 0 {
+                            // The cell on the OTHER side of the cut.
+                            let there = if pm.b_proc[j] == 1 {
+                                hm.neighbour[g]
+                            } else {
+                                hm.owner[g]
+                            };
+                            let w = hm.c[there as usize];
+                            let got = pm.b_proc_c[j];
+                            assert_eq!(
+                                got.x.to_bits(),
+                                w.x.to_bits(),
+                                "ghost centre x, {at}"
+                            );
+                            assert_eq!(
+                                got.y.to_bits(),
+                                w.y.to_bits(),
+                                "ghost centre y, {at}"
+                            );
+                            assert_eq!(
+                                got.z.to_bits(),
+                                w.z.to_bits(),
+                                "ghost centre z, {at}"
+                            );
+                        } else {
+                            assert_eq!(
+                                pm.b_proc_c[j],
+                                Vec3::ZERO,
+                                "an inherited face carries a centre, {at}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("  [139.9] host half: every part's stored ghost centres check out");
+
+    // ---- the device half: what the upload does with them ---------------
+    let Some(gpu) = gpu() else {
+        eprintln!(
+            "  [139.9] no GPU: the device half of \
+             processor_faces_carry_the_ghost_cell_centre skipped"
+        );
+        return;
+    };
+    let hm = mesh_a().expect("mesh A");
+    let d = Decomposition::build(&hm, 2, &PartitionMethod::Hilbert).expect("cut");
+    let mut mm = d.parts[0].mesh.clone();
+    mm.b_proc_c.truncate(mm.b_proc_c.len() - 1);
+    let msg = GpuMesh::upload_with_halo(&gpu, &mm, d.parts[0].n_halo)
+        .err()
+        .expect("a truncated b_proc_c must refuse")
+        .to_string();
+    assert!(msg.starts_with("mesh: b_proc_c"), "{msg}");
+    println!("  [139.9] A 12x10x8 box: the truncated b_proc_c refused by name");
+}
+
+/// The part convection matrix IS `split_matrix` of the whole mesh's, BITWISE
+/// (SPEC-LIT 139.9). The whole mesh assembles the bounded correction and the
+/// deferred correction of each scheme (linearUpwind - whose two branches the
+/// mixed-sign flux visits both - and cubic) against its own Gauss gradient;
+/// each rank assembles the SAME problem on its part, with its flux and the
+/// whole gradient HANDED to it (`full_of`), not recomputed, so the test
+/// isolates the assembly. The comparison is against
+/// `Decomposition::split_matrix`: BITWISE on `diag` and `source`, the two
+/// arrays the kernels write, and ZERO BY VALUE on the four they leave alone
+/// (a cut face's `-upper[g]` is `-0` there, a sign no kernel under test
+/// writes). A difference prints one `MISSED` line with the first offending
+/// coefficient and continues.
+#[test]
+fn the_part_convection_matrix_is_split_matrix_of_the_whole() {
+    let Some(gpu0) = gpu() else {
+        eprintln!(
+            "  [139.9] no GPU: \
+             the_part_convection_matrix_is_split_matrix_of_the_whole skipped"
+        );
+        return;
+    };
+    let fk0 = FieldKernels::new(&gpu0).expect("field kernels");
+    let fvk0 = FvKernels::new(&gpu0).expect("fv kernels");
+
+    let mut coeffs_total = 0usize;
+    let mut k_differ = 0usize;
+    let mut zeros_checked = 0usize;
+    let mut signed_zeros = 0usize;
+    let mut first: Option<String> = None;
+
+    for (name, hm) in meshes() {
+        let n = hm.n_cells;
+        let (psis, _) = smooth_fields(&hm);
+        let sm = Smooth::of(&hm);
+
+        // THE FLUX, whole mesh, host: mixed signs, so linearUpwind's both
+        // branches run.
+        let sh = Vec3::new(3.0, 3.0, 3.0);
+        let phi_if: Vec<Scalar> = (0..hm.n_internal_faces)
+            .map(|f| (sm.u(hm.cf[f]) - sh).dot(hm.sf[f]))
+            .collect();
+        let phi_bf: Vec<Scalar> = (0..hm.n_boundary_faces)
+            .map(|b| {
+                if hm.b_kind[b] == PatchKind::Empty as Label {
+                    0.0
+                } else {
+                    (sm.u(hm.b_cf[b]) - sh).dot(hm.b_sf[b])
+                }
+            })
+            .collect();
+
+        // ---- the reference: the WHOLE mesh, on the main thread -----------
+        let gm0 = GpuMesh::upload(&gpu0, &hm).expect("upload");
+        let mut psi = GpuScalarField::zeros(&gpu0, &gm0, "psi").expect("psi");
+        gpu0.write(&mut psi.f, &psis).expect("write psi");
+        correct_boundary_conditions(&gpu0, &fk0, &mut psi, &gm0).expect("correct");
+        let mut phi = GpuSurfaceScalarField::zeros(&gpu0, &gm0, "phi").expect("phi");
+        gpu0.write(&mut phi.f, &phi_if).expect("write phi");
+        gpu0.write(&mut phi.bf, &phi_bf).expect("write phi bf");
+        let mut grad = gpu0.zeros::<Vec3>(gm0.n_local()).expect("alloc");
+        fvc_grad_scalar(&gpu0, &fvk0, &mut grad, &psi, &gm0).expect("grad");
+        gpu0.sync().expect("sync");
+        let whole_grad: Vec<Vec3> = gpu0.download(&grad).expect("download grad");
+
+        for (sname, scheme) in [
+            ("linearUpwind", DivScheme::LinearUpwind),
+            ("cubic", DivScheme::Cubic),
+        ] {
+            let mut a = GpuLduMatrix::new(&gpu0, &gm0).expect("matrix");
+            fvm_div_bounded_correction(&gpu0, &fvk0, &mut a, &gm0, &phi, 1.0)
+                .expect("bounded");
+            fvm_div_correction(&gpu0, &fvk0, &mut a, &gm0, &phi, &grad, scheme, 1.0)
+                .expect("correction");
+            gpu0.sync().expect("sync");
+            let w = HostLduMatrix::download(&gpu0, &a).expect("download");
+
+            for pcount in 2..=4usize {
+                for method in partitioners(n, pcount) {
+                    let d = Decomposition::build(&hm, pcount, &method).expect("cut");
+                    let got = ThreadComm::run(pcount, |comm| -> Result<HostLduMatrix> {
+                        let gpu = Gpu::new(0)?;
+                        let part = &d.parts[comm.rank()];
+                        let pm = &part.mesh;
+                        let m = GpuMesh::upload_with_halo(&gpu, pm, part.n_halo)?;
+                        let _ctx = RankCtx::new(&gpu, comm, part, &m)?;
+                        let fvk = FvKernels::new(&gpu)?;
+
+                        // The part's flux: internal faces through
+                        // `global_face`; a PROCESSOR boundary face the whole
+                        // mesh's internal flux with the SIDE's sign; an
+                        // inherited face the whole mesh's boundary flux.
+                        let nif_global = d.n_global_internal_faces;
+                        let fp: Vec<Scalar> = (0..pm.n_internal_faces)
+                            .map(|i| phi_if[pm.global_face[i] as usize])
+                            .collect();
+                        let fbp: Vec<Scalar> = (0..pm.n_boundary_faces)
+                            .map(|j| {
+                                let g = pm.global_face
+                                    [pm.n_internal_faces + j] as usize;
+                                if g >= nif_global {
+                                    phi_bf[g - nif_global]
+                                } else if pm.b_proc[j] == 1 {
+                                    phi_if[g]
+                                } else {
+                                    -phi_if[g]
+                                }
+                            })
+                            .collect();
+                        let mut phi_p =
+                            GpuSurfaceScalarField::zeros(&gpu, &m, "phi")?;
+                        gpu.write(&mut phi_p.f, &fp)?;
+                        gpu.write(&mut phi_p.bf, &fbp)?;
+
+                        let mut a = GpuLduMatrix::new(&gpu, &m)?;
+                        fvm_div_bounded_correction(
+                            &gpu, &fvk, &mut a, &m, &phi_p, 1.0,
+                        )?;
+                        // The gradient is HANDED to the part, not recomputed,
+                        // so this test isolates the assembly.
+                        let mut grad_p = gpu.zeros::<Vec3>(m.n_local())?;
+                        gpu.write(&mut grad_p, &full_of(part, &whole_grad))?;
+                        fvm_div_correction(
+                            &gpu, &fvk, &mut a, &m, &phi_p, &grad_p, scheme, 1.0,
+                        )?;
+                        gpu.sync()?;
+                        HostLduMatrix::download(&gpu, &a)
+                    })
+                    .expect("spmd run");
+
+                    for (p, _part) in d.parts.iter().enumerate() {
+                        let w_p = got[p]
+                            .as_ref()
+                            .unwrap_or_else(|e| panic!("rank {p} failed: {e}"));
+                        let at = format!(
+                            "{name} P={pcount} {} rank {p} {sname}",
+                            method.as_str()
+                        );
+                        let want = d.split_matrix(&hm, p, &w).expect("split");
+                        // The two kernels write `diag` and `source` only:
+                        // those are compared BITWISE. The other four arrays
+                        // are untouched on both sides and must be ZERO by
+                        // value - `split_matrix` writes a cut face's
+                        // `boundary_coeffs` as `-upper[g]`, and `-(+0)` is
+                        // `-0`, a sign the part's untouched `+0` cannot carry
+                        // and no kernel under test produces (SPEC-LIT 139.9).
+                        for i in 0..want.n_cells {
+                            for (nm, g, wv) in [
+                                ("diag", w_p.diag[i], want.diag[i]),
+                                ("source", w_p.source[i], want.source[i]),
+                            ] {
+                                coeffs_total += 1;
+                                if g.to_bits() != wv.to_bits() {
+                                    k_differ += 1;
+                                    if first.is_none() {
+                                        first = Some(format!(
+                                            "{nm}[{i}] {at}: got {g:e}, want {wv:e}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        let untouched = [
+                            ("upper", &w_p.upper, &want.upper),
+                            ("lower", &w_p.lower, &want.lower),
+                            ("internal_coeffs", &w_p.internal_coeffs, &want.internal_coeffs),
+                            ("boundary_coeffs", &w_p.boundary_coeffs, &want.boundary_coeffs),
+                        ];
+                        for (nm, gs, ws) in untouched {
+                            assert_eq!(gs.len(), ws.len(), "{nm} length, {at}");
+                            for (i, (&g, &wv)) in gs.iter().zip(ws.iter()).enumerate() {
+                                zeros_checked += 1;
+                                if g != 0.0 || wv != 0.0 {
+                                    k_differ += 1;
+                                    if first.is_none() {
+                                        first = Some(format!(
+                                            "{nm}[{i}] {at}: not zero, got {g:e}, want {wv:e}"
+                                        ));
+                                    }
+                                } else if g.to_bits() != wv.to_bits() {
+                                    signed_zeros += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "  [139.9] convection: {coeffs_total} diag/source coefficients compared bitwise, \
+         {k_differ} differ; {zeros_checked} untouched coefficients zero by value \
+         ({signed_zeros} of them -0 in split_matrix's -upper[g])"
+    );
+    if k_differ > 0 {
+        eprintln!(
+            "  [139.9] MISSED part convection bitwise: {k_differ} of \
+             {coeffs_total} differ; first: {}",
+            first.as_ref().expect("a difference was counted")
+        );
+    }
+    assert!(coeffs_total > 0, "no convection coefficient was compared");
+    assert!(zeros_checked > 0, "no untouched coefficient was checked");
+}
+
+/// The part flux fields ARE the whole mesh's, BITWISE (SPEC-LIT 139.9): the
+/// divergence `fvc_div_surface` (volumetric), the reconstruction
+/// `fvc_reconstruct`, and the raw sum `fvc_face_flux_sum` both ways -
+/// overwriting and accumulating into the smooth psi. Every OWNED cell
+/// compared against the whole mesh's value at `global_cell[i]`, 1 + 3 + 1 + 1
+/// values per cell. A difference prints one `MISSED` line with the first
+/// difference and continues; what IS asserted is that values were compared
+/// and every rank was `Ok`.
+#[test]
+fn the_part_flux_fields_are_the_whole_mesh_ones() {
+    let Some(gpu0) = gpu() else {
+        eprintln!(
+            "  [139.9] no GPU: the_part_flux_fields_are_the_whole_mesh_ones skipped"
+        );
+        return;
+    };
+    let fvk0 = FvKernels::new(&gpu0).expect("fv kernels");
+
+    let mut vals_total = 0usize;
+    let mut cells_total = 0usize;
+    let mut k_differ = 0usize;
+    let mut first: Option<String> = None;
+
+    for (name, hm) in meshes() {
+        let n = hm.n_cells;
+        let (psis, _) = smooth_fields(&hm);
+        let sm = Smooth::of(&hm);
+
+        // THE FLUX, whole mesh, host: mixed signs (test 5's).
+        let sh = Vec3::new(3.0, 3.0, 3.0);
+        let phi_if: Vec<Scalar> = (0..hm.n_internal_faces)
+            .map(|f| (sm.u(hm.cf[f]) - sh).dot(hm.sf[f]))
+            .collect();
+        let phi_bf: Vec<Scalar> = (0..hm.n_boundary_faces)
+            .map(|b| {
+                if hm.b_kind[b] == PatchKind::Empty as Label {
+                    0.0
+                } else {
+                    (sm.u(hm.b_cf[b]) - sh).dot(hm.b_sf[b])
+                }
+            })
+            .collect();
+
+        // ---- the reference: the WHOLE mesh, on the main thread -----------
+        let gm0 = GpuMesh::upload(&gpu0, &hm).expect("upload");
+        let mut phi = GpuSurfaceScalarField::zeros(&gpu0, &gm0, "phi").expect("phi");
+        gpu0.write(&mut phi.f, &phi_if).expect("write phi");
+        gpu0.write(&mut phi.bf, &phi_bf).expect("write phi bf");
+
+        let mut div = gpu0.zeros::<Scalar>(gm0.n_local()).expect("alloc");
+        let mut rec = gpu0.zeros::<Vec3>(gm0.n_local()).expect("alloc");
+        let mut fs0 = gpu0.zeros::<Scalar>(gm0.n_local()).expect("alloc");
+        let mut fs1 = gpu0.zeros::<Scalar>(gm0.n_local()).expect("alloc");
+        gpu0.write(&mut fs1, &psis).expect("prefill fs1");
+        fvc_div_surface(&gpu0, &fvk0, &mut div, &phi, &gm0).expect("div surface");
+        fvc_reconstruct(&gpu0, &fvk0, &mut rec, &phi, &gm0).expect("reconstruct");
+        fvc_face_flux_sum(&gpu0, &mut fs0, &phi, &gm0, false).expect("flux sum");
+        fvc_face_flux_sum(&gpu0, &mut fs1, &phi, &gm0, true).expect("flux sum acc");
+        gpu0.sync().expect("sync");
+        let whole_div: Vec<Scalar> = gpu0.download(&div).expect("download");
+        let whole_rec: Vec<Vec3> = gpu0.download(&rec).expect("download");
+        let whole_fs0: Vec<Scalar> = gpu0.download(&fs0).expect("download");
+        let whole_fs1: Vec<Scalar> = gpu0.download(&fs1).expect("download");
+
+        for pcount in 2..=4usize {
+            for method in partitioners(n, pcount) {
+                let d = Decomposition::build(&hm, pcount, &method).expect("cut");
+                let got = ThreadComm::run(
+                    pcount,
+                    |comm| -> Result<(Vec<Scalar>, Vec<Vec3>, Vec<Scalar>, Vec<Scalar>)> {
+                        let gpu = Gpu::new(0)?;
+                        let part = &d.parts[comm.rank()];
+                        let pm = &part.mesh;
+                        let m = GpuMesh::upload_with_halo(&gpu, pm, part.n_halo)?;
+                        let fvk = FvKernels::new(&gpu)?;
+
+                        // The part's flux, exactly as test 5 builds it.
+                        let nif_global = d.n_global_internal_faces;
+                        let fp: Vec<Scalar> = (0..pm.n_internal_faces)
+                            .map(|i| phi_if[pm.global_face[i] as usize])
+                            .collect();
+                        let fbp: Vec<Scalar> = (0..pm.n_boundary_faces)
+                            .map(|j| {
+                                let g = pm.global_face
+                                    [pm.n_internal_faces + j] as usize;
+                                if g >= nif_global {
+                                    phi_bf[g - nif_global]
+                                } else if pm.b_proc[j] == 1 {
+                                    phi_if[g]
+                                } else {
+                                    -phi_if[g]
+                                }
+                            })
+                            .collect();
+                        let mut phi_p =
+                            GpuSurfaceScalarField::zeros(&gpu, &m, "phi")?;
+                        gpu.write(&mut phi_p.f, &fp)?;
+                        gpu.write(&mut phi_p.bf, &fbp)?;
+
+                        let mut div = gpu.zeros::<Scalar>(m.n_local())?;
+                        let mut rec = gpu.zeros::<Vec3>(m.n_local())?;
+                        let mut fs0 = gpu.zeros::<Scalar>(m.n_local())?;
+                        let mut fs1 = gpu.zeros::<Scalar>(m.n_local())?;
+                        gpu.write(&mut fs1, &full_of(part, &psis))?;
+                        fvc_div_surface(&gpu, &fvk, &mut div, &phi_p, &m)?;
+                        fvc_reconstruct(&gpu, &fvk, &mut rec, &phi_p, &m)?;
+                        fvc_face_flux_sum(&gpu, &mut fs0, &phi_p, &m, false)?;
+                        fvc_face_flux_sum(&gpu, &mut fs1, &phi_p, &m, true)?;
+                        gpu.sync()?;
+                        Ok((
+                            gpu.download(&div)?,
+                            gpu.download(&rec)?,
+                            gpu.download(&fs0)?,
+                            gpu.download(&fs1)?,
+                        ))
+                    },
+                )
+                .expect("spmd run");
+
+                for (r, part) in d.parts.iter().enumerate() {
+                    let (dv, rc, f0, f1) = got[r]
+                        .as_ref()
+                        .unwrap_or_else(|e| panic!("rank {r} failed: {e}"));
+                    for i in 0..part.mesh.n_cells {
+                        let g = part.global_cell[i] as usize;
+                        let at = format!(
+                            "{name} P={pcount} {} rank {r} cell {i} (global {g})",
+                            method.as_str()
+                        );
+                        cells_total += 1;
+                        for (fld, a, b) in [
+                            ("div", dv[i], whole_div[g]),
+                            ("rec.x", rc[i].x, whole_rec[g].x),
+                            ("rec.y", rc[i].y, whole_rec[g].y),
+                            ("rec.z", rc[i].z, whole_rec[g].z),
+                            ("fs0", f0[i], whole_fs0[g]),
+                            ("fs1", f1[i], whole_fs1[g]),
+                        ] {
+                            vals_total += 1;
+                            let du = ulp(a, b);
+                            if a.to_bits() != b.to_bits() {
+                                k_differ += 1;
+                                if first.is_none() {
+                                    first = Some(format!(
+                                        "{fld}, {at}: got {a:e}, want {b:e}, \
+                                         {du} ulp"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "  [139.9] flux fields: {vals_total} values compared on \
+         {cells_total} cells, {k_differ} differ"
+    );
+    if k_differ > 0 {
+        eprintln!(
+            "  [139.9] MISSED part flux fields bitwise: {k_differ} of \
+             {vals_total} differ; first: {}",
+            first.as_ref().expect("a difference was counted")
+        );
+    }
+    assert!(vals_total > 0, "no flux-field value was compared");
 }
 
 

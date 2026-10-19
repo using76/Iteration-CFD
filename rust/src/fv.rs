@@ -660,6 +660,15 @@ pub struct FvKernels {
     lap_non_orth_part: CudaFunction,
     grad_scalar_part: CudaFunction,
     grad_vector_part: CudaFunction,
+
+    // SPEC-LIT 139.9 (PAR-13b): the convection and flux twins, launched ONLY
+    // on a mesh with processor faces (`GpuMesh::n_proc_faces > 0`), where
+    // they sum the convection source, the flux divergences and the
+    // reconstruction in the whole mesh's order.
+    div_bounded_diag_part: CudaFunction,
+    div_correction_part: CudaFunction,
+    div_surface_part: CudaFunction,
+    reconstruct_part: CudaFunction,
 }
 
 impl FvKernels {
@@ -719,6 +728,11 @@ impl FvKernels {
             lap_non_orth_part: k.func("fvLapNonOrthPart")?,
             grad_scalar_part: k.func("fvGradScalarPart")?,
             grad_vector_part: k.func("fvGradVectorPart")?,
+
+            div_bounded_diag_part: k.func("fvDivBoundedDiagPart")?,
+            div_correction_part: k.func("fvDivCorrectionPart")?,
+            div_surface_part: k.func("fvDivSurfacePart")?,
+            reconstruct_part: k.func("fvReconstructPart")?,
         })
     }
 }
@@ -1247,6 +1261,15 @@ pub fn fvm_div_correction(
     let cd = corr.code();
     let coef = corr.coef();
 
+    // SPEC-LIT 139.9 (PAR-13b): on a part the source is summed over the
+    // MERGED row, so a processor face's correction lands where the whole
+    // mesh put it - inside the internal-face run, at its global place. A
+    // whole mesh has no processor face and takes the path below, unchanged.
+    if m.n_proc_faces > 0 {
+        part_div_correction(gpu, k, a, m, phi, grad_psi, cd, coef, sign)?;
+        return Ok(());
+    }
+
     let f = k.div_correction.clone();
     unsafe {
         gpu.stream()
@@ -1381,6 +1404,15 @@ pub fn fvm_div_bounded_correction(
         return Ok(());
     }
     let nl = n as Label;
+
+    // SPEC-LIT 139.9 (PAR-13b): the part twin - a processor face's phi is
+    // taken from the whole mesh's INTERNAL face, at its place in the merged
+    // row. A whole mesh has no processor face and takes the path below,
+    // unchanged.
+    if m.n_proc_faces > 0 {
+        part_div_bounded_diag(gpu, k, a, m, phi, sign)?;
+        return Ok(());
+    }
 
     let f = k.div_bounded_diag.clone();
     unsafe {
@@ -2247,6 +2279,15 @@ pub fn fvc_div_surface(
     }
     let nl = n as Label;
 
+    // SPEC-LIT 139.9 (PAR-13b): on a part the divergence is summed over the
+    // MERGED row, so a processor face's flux is added where the whole mesh
+    // added it. A whole mesh has no processor face and takes the path
+    // below, unchanged.
+    if m.n_proc_faces > 0 {
+        part_div_surface(gpu, k, out, phi, m)?;
+        return Ok(());
+    }
+
     let f = k.div_surface.clone();
     unsafe {
         gpu.stream()
@@ -2609,6 +2650,15 @@ pub fn fvc_reconstruct(
         None => &m.b_sf,
     };
 
+    // SPEC-LIT 139.9 (PAR-13b): on a part the row sums run over the MERGED
+    // row with the whole mesh's face normal and flux (side-signed) rebuilt
+    // per processor face. A whole mesh has no processor face and takes the
+    // path below, unchanged.
+    if m.n_proc_faces > 0 {
+        part_reconstruct(gpu, k, out, phi, m)?;
+        return Ok(());
+    }
+
     let f = k.reconstruct.clone();
     unsafe {
         gpu.stream()
@@ -2879,6 +2929,158 @@ fn part_grad_vector(
             .arg(&m.b_kind)
             .arg(&m.b_proc)
             .arg(&m.b_proc_w)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  SPEC-LIT 139.9 (PAR-13b): the convection and flux part launches
+//
+//  Private, and called only under the `n_proc_faces > 0` selection above,
+//  in PAR-13a's style: a whole mesh and every P = 1 part has no processor
+//  face, so no existing caller ever reaches these.
+// ==========================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn part_div_bounded_diag(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    phi: &GpuSurfaceScalarField,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.div_bounded_diag_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.diag)
+            .arg(&phi.f)
+            .arg(&phi.bf)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_div_correction(
+    gpu: &Gpu,
+    k: &FvKernels,
+    a: &mut GpuLduMatrix,
+    m: &GpuMesh,
+    phi: &GpuSurfaceScalarField,
+    grad_psi: &DevBuf<Vec3>,
+    cd: Label,
+    coef: Scalar,
+    sign: Scalar,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.div_correction_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut a.source)
+            .arg(&phi.f)
+            .arg(&phi.bf)
+            .arg(grad_psi)
+            .arg(&m.c)
+            .arg(&m.cf)
+            .arg(&m.b_sf)
+            .arg(&m.b_mag_sf)
+            .arg(&m.b_delta_coeffs)
+            .arg(&m.b_weights)
+            .arg(&m.b_cf)
+            .arg(&m.b_proc_c)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.b_face_cells)
+            .arg(&m.b_nbr_cell)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&cd)
+            .arg(&coef)
+            .arg(&sign)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_div_surface(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Scalar>,
+    phi: &GpuSurfaceScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    let f = k.div_surface_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(&phi.f)
+            .arg(&phi.bf)
+            .arg(&m.v)
+            .arg(&m.b_kind)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn part_reconstruct(
+    gpu: &Gpu,
+    k: &FvKernels,
+    out: &mut DevBuf<Vec3>,
+    phi: &GpuSurfaceScalarField,
+    m: &GpuMesh,
+) -> Result<()> {
+    let n = m.n_cells;
+    let nl = n as Label;
+    // The SAME boundary areas the old launch passes (SPEC-LIT 119.2, 139.9):
+    // the wedge's rotated `S'_f` when the mesh has one, `b_sf` otherwise.
+    let b_sf: &DevBuf<Vec3> = match &m.b_sf_recon {
+        Some(r) => r,
+        None => &m.b_sf,
+    };
+    let f = k.reconstruct_part.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(&mut *out)
+            .arg(&phi.f)
+            .arg(&phi.bf)
+            .arg(&m.sf)
+            .arg(&m.mag_sf)
+            .arg(b_sf)
+            .arg(&m.b_mag_sf)
+            .arg(&m.b_proc)
             .arg(&m.rf_offset)
             .arg(&m.rf_face)
             .arg(&m.rf_flags)

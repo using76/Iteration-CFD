@@ -335,6 +335,10 @@ struct SimpleKernels {
     relax_field: CudaFunction,
     pick_value: CudaFunction,
     sub_scalar: CudaFunction,
+    // SPEC-LIT 139.9 (PAR-13b): the part twin, launched ONLY on a mesh with
+    // processor faces (`GpuMesh::n_proc_faces > 0`), where it sums the face
+    // flux at each term's global place in the merged row.
+    face_flux_sum_part: CudaFunction,
 }
 
 impl SimpleKernels {
@@ -345,6 +349,7 @@ impl SimpleKernels {
             relax_field: k.func("smpRelaxField")?,
             pick_value: k.func("smpPickValue")?,
             sub_scalar: k.func("smpSubScalar")?,
+            face_flux_sum_part: k.func("smpFaceFluxSumPart")?,
         })
     }
 }
@@ -1341,9 +1346,11 @@ impl<'m> Simple<'m> {
         {
             let Self { sk, a_p, momentum, .. } = self;
             let phi_hbya = momentum.phi_hbya();
-            launch_face_flux_sum(
+            // SPEC-LIT 139.9: the part twin on a decomposed part, the old
+            // kernel exactly as today otherwise.
+            face_flux_sum_select(
                 gpu,
-                &sk.face_flux_sum,
+                sk,
                 &mut a_p.source,
                 &phi_hbya.f,
                 &phi_hbya.bf,
@@ -1477,9 +1484,11 @@ impl<'m> Simple<'m> {
 
         {
             let Self { sk, div_phi, phi, .. } = self;
-            launch_face_flux_sum(
+            // SPEC-LIT 139.9: the part twin on a decomposed part, the old
+            // kernel exactly as today otherwise.
+            face_flux_sum_select(
                 gpu,
-                &sk.face_flux_sum,
+                sk,
                 div_phi,
                 &phi.f,
                 &phi.bf,
@@ -1567,6 +1576,100 @@ fn launch_sub_scalar(
             .launch(cfg_for(n))?;
     }
     Ok(())
+}
+
+// SPEC-LIT 139.9 (PAR-13b): the part twin's launch, in the same shape as
+// [`launch_face_flux_sum`] and private like it. Called only under the
+// `n_proc_faces > 0` selection below.
+fn launch_face_flux_sum_part(
+    gpu: &Gpu,
+    k: &CudaFunction,
+    out: &mut DevBuf<Scalar>,
+    phi: &DevBuf<Scalar>,
+    bphi: &DevBuf<Scalar>,
+    m: &GpuMesh,
+    accumulate: bool,
+) -> Result<()> {
+    let n = m.n_cells;
+    if n == 0 {
+        return Ok(());
+    }
+    let nl = n as Label;
+    let acc: Label = if accumulate { 1 } else { 0 };
+    let f = k.clone();
+    unsafe {
+        gpu.stream()
+            .launch_builder(&f)
+            .arg(out)
+            .arg(phi)
+            .arg(bphi)
+            .arg(&m.b_proc)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&acc)
+            .arg(&nl)
+            .launch(cfg_for(n))?;
+    }
+    Ok(())
+}
+
+/// The selection rule of SPEC-LIT 139.9: the part twin when the mesh has
+/// processor faces, the old kernel exactly as today otherwise.
+fn face_flux_sum_select(
+    gpu: &Gpu,
+    sk: &SimpleKernels,
+    out: &mut DevBuf<Scalar>,
+    phi: &DevBuf<Scalar>,
+    bphi: &DevBuf<Scalar>,
+    m: &GpuMesh,
+    accumulate: bool,
+) -> Result<()> {
+    if m.n_proc_faces > 0 {
+        launch_face_flux_sum_part(
+            gpu,
+            &sk.face_flux_sum_part,
+            out,
+            phi,
+            bphi,
+            m,
+            accumulate,
+        )
+    } else {
+        launch_face_flux_sum(gpu, &sk.face_flux_sum, out, phi, bphi, m, accumulate)
+    }
+}
+
+/// sum_f (+-phi_f) per cell, smpFaceFluxSum (or its part twin, SPEC-LIT
+/// 139.9) - the public door tests use; loads the SIMPLE kernel set on every
+/// call.
+pub fn fvc_face_flux_sum(
+    gpu: &Gpu,
+    out: &mut DevBuf<Scalar>,
+    phi: &GpuSurfaceScalarField,
+    m: &GpuMesh,
+    accumulate: bool,
+) -> Result<()> {
+    if out.len() < m.n_cells {
+        return Err(Error::Config(format!(
+            "fvc_face_flux_sum: out has {} elements, expected at least {}",
+            out.len(),
+            m.n_cells
+        )));
+    }
+    // The kernel reads phi.f[face] and phi.bf[face] unchecked; a field of
+    // another mesh is refused here rather than read out of bounds.
+    if phi.f.len() != m.n_internal_faces || phi.bf.len() != m.n_boundary_faces {
+        return Err(Error::Config(format!(
+            "fvc_face_flux_sum: phi has {}/{} internal/boundary faces, the mesh {}/{}",
+            phi.f.len(),
+            phi.bf.len(),
+            m.n_internal_faces,
+            m.n_boundary_faces
+        )));
+    }
+    let sk = SimpleKernels::new(gpu)?;
+    face_flux_sum_select(gpu, &sk, out, &phi.f, &phi.bf, m, accumulate)
 }
 
 // ==========================================================================

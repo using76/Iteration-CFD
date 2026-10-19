@@ -54897,8 +54897,9 @@ first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
 (§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11),
 k-epsilon and SST on a part (§139.6, PAR-12), decomposed I/O (§139.7,
-PAR-15), and the partition-invariant laplacian and Gauss gradients (§139.8,
-PAR-13a).
+PAR-15), the partition-invariant laplacian and Gauss gradients (§139.8,
+PAR-13a), and the partition-invariant convection and flux kernels (§139.9,
+PAR-13b).
 
 This section defines no equation, so it carries no equation label.
 
@@ -56068,6 +56069,136 @@ alone. And `lduNegSumDiag` / `lduAddBoundaryContributions`, which the plan
 row names, are not edited: the first is called only by tests, and the fold
 needs no change once a processor face's `internal_coeffs` is 0 - it adds
 `+0` there, which changes no bit.
+
+### 139.9 The partition-invariant convection and flux kernels (PAR-13b)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §139.8 made the laplacian and the two Gauss gradients
+partition-invariant by moving their part assemblies onto the merged row of
+§70, and five more sums stayed on the old two loops: the
+five kernels named in the plan row - `fvDivBoundedDiag`, `fvDivCorrection`,
+`fvDivSurface`, `fvReconstruct` and `smpFaceFluxSum` - each walk a part's own
+cell -> face CSR, whose boundary loop runs AFTER every internal face, so a
+processor face's term lands at the end of the row while the whole mesh summed
+the same face in its INTERNAL position, at its global place among the
+internal faces. Float addition is not associative (§70.1; the summation-order
+cost is Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed.,
+SIAM 2002, ch. 4), so a part's row sum was a different number from the whole
+mesh's - the same shape of miss §139.2 measured for the gradients, and this
+subsection's gate measures for these kernels below. `fvDivCorrection` also
+carries a gap §139.8's twins did not: its internal-face expression reads
+`C[owner]` and `C[neighbour]`, and on a part the ghost cell's centre is
+nowhere on the device (`GpuMesh::c` is `n_cells` long) and is not rebuildable
+from face data - no combination of `b_cf`, `b_sf` and the deltas reconstructs
+a cell centre bitwise. What CAN be rebuilt is everything else (§71.3): the
+side (`b_proc`), the face normal (`b_sf`, negated on the non-owning side -
+exact negation is *IEEE Standard for Floating-Point Arithmetic*, IEEE Std
+754-2019), the face centre (`b_cf`, copied), the magnitude (`b_mag_sf`,
+copied), and the flux (`bphi[f]` of a processor face IS the whole mesh's
+internal flux with the side's sign). The centre alone has to be STORED.
+
+**What a part carries.** One new per-boundary-face array beside §139.8's
+`b_proc`/`b_proc_w`, filled by `PartBuild::build` face by face with them:
+
+| array | length | meaning |
+|---|---|---|
+| `b_proc_c` | `[n_bf]` or EMPTY | on a processor face, the WHOLE mesh's centre `c` of the cell on the OTHER side of the cut (the ghost cell), copied - a copy is exact; `Vec3::ZERO` on every other face |
+
+EMPTY means "no processor face", every mesh except a decomposed part, and
+uploads as a zero vector per face - nothing about a whole mesh's upload
+moves. `GpuMesh::upload` refuses a full `b_proc` beside a short `b_proc_c`
+by name (`mesh: b_proc_c`, naming both lengths), because the kernel reads
+the centre of every marked face and a short array is a read out of bounds
+rather than an error - the same reason §139.8 refuses a short `b_proc_w`.
+
+**The twins.** Appended at the end of `cuda/fv.cu`, and one to
+`cuda/simple.cu`; the old kernels are untouched, byte for byte. Each obeys
+THE RULE of §139.8 verbatim - one thread per owned cell `c`, walking the
+MERGED row `j in [rf_offset[c], rf_offset[c+1])`, `f = rf_face[j]`,
+`fl = rf_flags[j]`, skipping `f < 0`; an internal entry computes the old
+internal-loop expression operand for operand in the same written order with
+`owns = (fl & RF_OWNS) != 0` in place of `cf_own[j]`; a processor entry
+computes that SAME expression on the whole mesh's operands - `owns =
+(b_proc[f] == 1)`, `o_g = owns ? c : b_nbr_cell[f]`, `n_g = owns ?
+b_nbr_cell[f] : c`, `Sf_g = owns ? b_sf[f] : -b_sf[f]`, `phi_g = owns ?
+bphi[f] : -bphi[f]`, `C_o = owns ? C[c] : b_proc_c[f]`, `C_n = owns ?
+b_proc_c[f] : C[c]`, `Cf_g = b_cf[f]`, `magSf_g = b_mag_sf[f]` - and every
+other boundary entry runs the old boundary-loop body unchanged, with the
+old kernel's final statement after the loop.
+
+| old kernel | twin | what differs on a processor entry |
+|---|---|---|
+| `fvDivBoundedDiag` | `fvDivBoundedDiagPart` | `acc += owns ? phi_g : -phi_g` joins the merged-row sum at the face's global place, instead of `acc += bphi[b]` after every internal face; an EMPTY patch is still skipped, as the old boundary loop skips it |
+| `fvDivCorrection` | `fvDivCorrectionPart` | the internal expression on `o_g, n_g, C_o, C_n, Cf_g, phi_g` and the whole mesh's gradients at `o_g`/`n_g` - NOT the coupled branch with `b_weights`, which is the arithmetic a folded-in-half cyclic couple gets; `cyclic` faces with `b_nbr_cell >= 0` only keep the old boundary body |
+| `fvDivSurface` | `fvDivSurfacePart` | `acc += owns ? phi_g : -phi_g` in the merged row, EMPTY still skipped - the volumetric division `d[c] = acc/V[c]` unchanged |
+| `fvReconstruct` | `fvReconstructPart` | the same no-sign internal body on `Sf_g = owns ? b_sf[f] : -b_sf[f]` and `phi_g`, `magSf_g = b_mag_sf[f]`, with the `!(m > 0)` floor, the cofactor block, the `1e-30` degeneracy floor and the final statement unchanged |
+| `smpFaceFluxSum` | `smpFaceFluxSumPart` | `s += owns ? phi_g : -phi_g` in the merged row; the boundary body keeps NO empty skip, as the old kernel has none |
+
+**The selection rule, and why the serial path cannot move.** `src/fv.rs`
+switches each of the four call sites on `m.n_proc_faces > 0`, immediately
+before its old launch, and `src/simple.rs` routes both of its `smpFaceFluxSum`
+call sites through a `face_flux_sum_select` that makes the same test:
+
+| call site | switch |
+|---|---|
+| `fvm_div_bounded_correction` | `part_div_bounded_diag` (`fvDivBoundedDiagPart`) |
+| `fvm_div_correction` | `part_div_correction` (`fvDivCorrectionPart`), the scheme's code and coef handed through |
+| `fvc_div_surface` | `part_div_surface` (`fvDivSurfacePart`) |
+| `fvc_reconstruct` | `part_reconstruct` (`fvReconstructPart`), the SAME `b_sf` the old launch passes - the wedge's `S'_f` when the mesh has one (§119.2) |
+| `launch_face_flux_sum` call sites (the pressure source and `continuity_error`) | `face_flux_sum_select` |
+
+No whole mesh and no P = 1 part has a processor face - `b_proc` is EMPTY or
+all `-1`, so `n_proc_faces` is 0 - so every existing launch runs exactly as
+today, and the twins launch ONLY on a part of a real cut. The single
+`fvc_face_flux_sum` is a NEW public door in `src/simple.rs` for the tests:
+it length-checks `out` (`fvc_face_flux_sum:`, refused by name), builds the
+SIMPLE kernel set on every call, and calls the same selection.
+
+**The tests.** `tests/distflow_invariant.rs`, in BOTH builds, over both gate
+meshes of §139.2, P = 2, 3, 4, Hilbert, Linear and round robin, every rank a
+`ThreadComm` thread with its own `Gpu`:
+
+| test | what it holds |
+|---|---|
+| `processor_faces_carry_the_ghost_cell_centre` | host: the whole mesh's `b_proc_c` is empty; every part's is face-sized; a processor face's entry is bitwise the whole mesh's `hm.c[there]` of the cell on the OTHER side of the cut (`b_proc` decides which); every other face `Vec3::ZERO`. Device: a part whose `b_proc_c` was truncated by one is refused with text starting `mesh: b_proc_c` |
+| `the_part_convection_matrix_is_split_matrix_of_the_whole` | the whole mesh assembles the bounded correction plus the deferred correction of `linearUpwind` and of `cubic` against a mixed-sign flux (`U - (3,3,3)` dotted with each face normal, so `linearUpwind`'s both branches run) and its own Gauss gradient; each rank assembles the same on its part, with the gradient HANDED over (`full_of`), not recomputed, so the test isolates the assembly; against `split_matrix` of the whole's, `diag` and `source` - the two arrays the kernels write - are compared BITWISE, and `upper`, `lower`, `internal_coeffs`, `boundary_coeffs` - written by neither kernel - must be ZERO BY VALUE on both sides (a cut face's `split_matrix` entry is `-upper[g]`, and the negation of an untouched `+0` is `-0`, a sign no kernel under test writes; their count is printed). A difference prints one `MISSED` line with the first coefficient and continues; asserted: coefficients compared > 0, untouched coefficients checked > 0, every rank `Ok` |
+| `the_part_flux_fields_are_the_whole_mesh_ones` | the same flux; whole: `fvc_div_surface`, `fvc_reconstruct`, and `fvc_face_flux_sum` both overwriting and accumulating into the smooth psi; each rank the same four on its part, `fs1`'s buffer pre-filled with the psi; every OWNED cell compared BITWISE against the whole at `global_cell[i]`, 1 + 3 + 1 + 1 values per cell. One `MISSED` line with the first difference (mesh, P, method, rank, i, g, field, component, got, want, ulp), no panic; asserted: values compared > 0, every rank `Ok` |
+
+At HEAD - before the twins - the gate MEASURED the miss. Counted then over
+all six arrays of the matrix, `71 683` of `345 480` convection coefficients
+differed, the first a real one (`diag[5]`, box, P = 2 Hilbert,
+linearUpwind: `-5.845113545753379e-3` against `-5.845113545753372e-3`), and
+`20 670` of `105 840` flux values differed (first: `div`, 8 ulp). That is the
+bug this subsection closes.
+
+**Measured (2026-10-19, RTX 5070 Ti, f64 and single alike).**
+`tests/distflow_invariant.rs`: `70 560` `diag`/`source` coefficients of the
+bounded and deferred corrections (linearUpwind and cubic), **0 differ**;
+`274 920` untouched coefficients zero by value on both sides, `41 784` of
+them the `-0` of `split_matrix`'s `-upper[g]` on a processor face; `105 840`
+flux values (`fvc_div_surface`, `fvc_reconstruct`, `fvc_face_flux_sum`
+overwriting and accumulating) on `17 640` owned cells, **0 differ**.
+§139.8's gates still hold at 0 differ. The serial path did not move: the
+golden hash of `ofgpu-validate -sections 1-10,13,16` (§139.8's recipe) is
+`ec7face0...c587` (344 rows) in f64 and `1b12f14f...f084` (350 rows) in
+single, identical before and after this unit; in the f64 build the SASS of
+all 47 pre-existing `cuda/fv.cu` kernels and all 4 pre-existing
+`cuda/simple.cu` kernels is identical function by function, and no other
+cubin changed in either build.
+
+**What this does not do.** The convection MATRIX itself - `fvDivDiag`,
+`fvDivBoundary`, `fvDivFaces` - and the boundary weights
+(`fvWeightsBoundary*`) are not in PAR-13b's plan row and are not switched: on
+a part a processor face's convection diagonal share still goes to
+`internal_coeffs` with the part's own weight, so a decomposed convection
+matrix is not yet bitwise - PAR-14's business, with the bitwise decomposed
+SIMPLE. The compressible, VOF and energy drivers' own `smpFaceFluxSum`
+launches (`src/compressible/*.rs`, `src/vof.rs`) are not switched either -
+those drivers are not decomposed, so nothing on their path changed. And
+`fvDivSchemeFaceValue`, `fvDivFaces`'s face-value twin, is a measuring stick
+for the order of accuracy rather than an assembly, and has no part twin.
 
 ---
 
