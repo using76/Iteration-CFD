@@ -3,23 +3,28 @@
 # Source-available, not Open Source. See LICENSE at the repository root.
 # No GPL-licensed source was consulted.
 
-"""Sample the drone's forward-flight solution onto a dense lattice and pack
-it as an Isaac Sim scene: OpenVDB grids in a .usda beside the drone.
+"""Stage the drone's finished solution as a case carrying a `wake` cell
+field, run the solver's own offline writer `ofgpu-sample volume -isaac`
+(SPEC-LIT 117.11, 117.9), read the .vdb back with Isaac's openvdb, export
+the drone with Blender, write a wrapper scene, and judge the gate.
 
-The solver's own -output vdb,usda writes .vdb only on a uniform Cartesian
-box mesh, so it refuses the snapped octree polyMesh before its time loop
-(refuse_visualisation_on_a_non_cartesian_mesh in rust/src/io/output_plan.rs).
-This tool therefore samples the finished solution (cell centres and values,
-the promo helpers' inverse-distance-squared interpolation) onto a dense
-lattice in Python, writes the .vdb through tools/drone/isaac_vdb.py run
-under Isaac Sim's own Python (its omni.volume openvdb writes file format
-224, which Isaac Sim 6.0 reads; Blender's bundled module writes 225, which
-Isaac refuses - the gate's G-VDBVER), then a .usda in the solver's own
-scene conventions (rust/src/io/usda.rs: one Volume prim per field with a
-field relationship to an
-OpenVDBAsset child; the vector U as four scalar grids). Isaac Sim renders
-the scene headless through tools/drone/isaac_probe.py (run by the
-supervisor on the GPU box, never here).
+The writer reads <case>/constant/polyMesh and every volScalarField and
+volVectorField of <case>/<time>, lays the voxel lattice of SPEC-LIT 117.3,
+scales a density grid derived from the `wake` field so its densest column
+has optical depth exactly tau ((117.12) of SPEC-LIT 117.9), and writes the
+lattice .vdb plus the native Isaac scene. This tool stages that case (polyMesh, U, p, and wake =
+|U - U_inf| / |U_inf| derived from U per cell), runs the writer, reads the
+.vdb back through tools/drone/isaac_vdb.py under Isaac Sim's own Python
+(its omni.volume openvdb writes file format 224, which Isaac Sim 6.0
+reads; Blender's bundled module writes 225, which Isaac refuses - the
+gate's G-VDBVER), exports the drone .usdc with Blender, writes a wrapper
+scene that sublayers the native scene, hides its boundary surface (the
+far-field box would enclose the cameras) and references the drone, and
+judges the nine gates on the native outputs. Isaac Sim renders the wrapper
+headless through tools/isaac/probe.py (run by the supervisor on the GPU box,
+never here) with --profile given explicitly - its auto detection reads only
+the root layer's text, and the volume lives in the sublayer - and --box set
+to the lattice box.
 
 The mesh and everything made from it derive from the BSD-3-Clause PX4 x500
 model ("(c) 2022 Rudis Laboratories / PX4 Autopilot for Drones"), so
@@ -30,45 +35,56 @@ demonstration numbers from an unsteady run, not validated; wake is
 |U - U_inf| / |U_inf|, derived from U, not a transported scalar (the solve
 transported no passive scalar).
 
-Subcommands: export (solve dir + geom dir -> lattice, vdb, usdc, scene,
-export.json), validate (one .usda -> the check dict as JSON). --selftest
-runs T1-T10 on the CPU (T8 drives tools/drone/isaac_vdb.py under Isaac
-Sim's own Python).
+Subcommands: export (solve dir + geom dir -> staged case, native vdb +
+scene, drone usdc, wrapper scene, export.json), validate (one .usda -> the
+check dict as JSON). --selftest runs T1-T12 (T11 drives
+rust/target/release/ofgpu-sample.exe, ofgpu-generate-mesh.exe and
+tools/drone/isaac_vdb.py under Isaac Sim's own Python).
 """
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-import types
-import warnings
 
 import numpy as np
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdUtils, UsdVol, Vt
+from pxr import Usd, UsdGeom, UsdUtils, UsdVol
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TOOL = "tools/drone/isaac_export.py"
-VERSION = "drone-isaac/1"
+VERSION = "drone-isaac/2"
 CREDIT = "(c) 2022 Rudis Laboratories / PX4 Autopilot for Drones, BSD-3-Clause"
 GRIDS = ["U.x", "U.y", "U.z", "U.mag", "p", "wake"]
 VOXEL_DEFAULT = 0.01                                   # m
 BOX_DEFAULT = (-1.2, -0.6, -0.8, 0.6, 0.6, 0.4)        # xlo, ylo, zlo, xhi, yhi, zhi (m): the drone plus its wake and downwash
 MAX_VOXELS = 8_000_000
-SOLID_VALUE = 0.0                                      # every grid's value where the lattice point is not fluid
 FLUID_MIN_FRAC = 0.9
 FREESTREAM_TOL = 0.05                                  # relative
 BLENDER = "C:/Program Files/Blender Foundation/Blender 5.1/blender.exe"
 ISAAC_PYTHON = "C:/iss/env/Scripts/python.exe"
 VDB_MAX_FILE_VERSION = 224  # Isaac Sim 6.0's reader (measured 2026-10-06: 225 refused)
-SCENE_NAME = "drone_flow.usda"
+SCENE_NAME = "drone_flow.usda"                         # the WRAPPER scene
 DRONE_REL = "./drone/x500.usdc"
+SAMPLE_EXE = os.path.join(REPO, "rust", "target", "release", "ofgpu-sample.exe")
+GENMESH_EXE = os.path.join(REPO, "rust", "target", "release", "ofgpu-generate-mesh.exe")
+USDA_CHECK = os.path.join(REPO, "tools", "isaac", "usda_check.py")
+DENSITY = "density"
+PROFILES = ("index", "pathtrace")
+TAU_DEFAULT = 2.0
+DEPTH_TOL = 0.01                                       # VIO-09's bar: within 1 %
+STEM = "drone_flow"
+NATIVE_DIR = "native"
+WAKE = "wake"
 
 
 def _load(name, path):
@@ -98,127 +114,212 @@ def refuse(code, text):
     raise SystemExit(2)
 
 
-# ------------------------------------------------------------------ lattice
+# ----------------------------------------------------------------- lattice
 
-def lattice_axes(lo, hi, voxel):
-    """R2: the axis coordinate arrays of the dense lattice - n_a nodes from
-    lo_a (inclusive) stepping voxel, the last node within one voxel of hi_a."""
+def lattice_shape(lo, hi, voxel):
+    """(nx, ny, nz) by (117.1) of SPEC-LIT 117.3: n_a = max(1, ceil(L_a / h - 1e-9)) -
+    the voxel-centred lattice the native writer lays."""
     lo = tuple(float(v) for v in lo)
     hi = tuple(float(v) for v in hi)
     v = float(voxel)
-    if not (v > 0.0):
-        refuse("DI-BOX", "voxel " + repr(v) + " m: must be > 0")
+    if not (math.isfinite(v) and v > 0.0):
+        refuse("DI-BOX", "voxel " + repr(v) + " m: must be finite and > 0")
     for a in range(3):
         if lo[a] >= hi[a]:
             refuse("DI-BOX", "axis " + "xyz"[a] + ": lo " + repr(lo[a]) +
                    " >= hi " + repr(hi[a]))
-    dims = [int(math.floor((hi[a] - lo[a]) / v + 1e-9)) + 1 for a in range(3)]
+    dims = tuple(max(1, int(math.ceil((hi[a] - lo[a]) / v - 1e-9))) for a in range(3))
     n = dims[0] * dims[1] * dims[2]
     if n > MAX_VOXELS:
         refuse("DI-BOX", "lattice " + repr(dims) + " is " + str(n) +
                " voxels, over the cap " + str(MAX_VOXELS))
-    axes = [lo[a] + v * np.arange(dims[a], dtype=np.float64) for a in range(3)]
-    return axes[0], axes[1], axes[2]
+    return dims
 
 
-def lattice_points(xs, ys, zs):
-    """R2: (nx*ny*nz, 3) float64, meshgrid indexing="ij" in C order, so the
-    flat index of (i, j, k) is (i*ny + j)*nz + k."""
-    gx, gy, gz = np.meshgrid(xs, ys, zs, indexing="ij")
-    return np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1).astype(np.float64)
+def lattice_centres(lo, voxel, dims):
+    """(first, last) 3-tuples of float: the world positions of voxel
+    centres (0,0,0) and (n-1,n-1,n-1) by (117.2) of SPEC-LIT 117.3,
+    x_ijk = lo + h (i + 1/2, j + 1/2, k + 1/2)."""
+    lo = tuple(float(v) for v in lo)
+    h = float(voxel)
+    first = tuple(lo[a] + h / 2.0 for a in range(3))
+    last = tuple(lo[a] + h * (int(dims[a]) - 0.5) for a in range(3))
+    return first, last
 
 
-def sample_cells(centres, h, values, points, chunk=200000):
-    """R3: promo_post.make_vel once, then chunk-by-chunk queries - (vals
-    (n, m) float64, fluid (n,) bool); every non-fluid row is SOLID_VALUE."""
-    centres = np.asarray(centres, dtype=np.float64)
-    h = np.asarray(h, dtype=np.float64).reshape(-1)
-    values = np.asarray(values, dtype=np.float64)
-    nc = int(centres.shape[0])
-    vel = PROMO_POST.make_vel(centres, h, values, nc)
-    n = int(points.shape[0])
-    vals = np.zeros((n, int(values.shape[1])), dtype=np.float64)
-    fluid = np.zeros(n, dtype=bool)
-    for a in range(0, n, int(chunk)):
-        b = min(n, a + int(chunk))
-        v, fl = vel(points[a:b])
-        vals[a:b] = v
-        fluid[a:b] = fl
-    vals[~fluid] = SOLID_VALUE
-    return vals, fluid
-
-
-def derived_grids(U, p, fluid, U_inf):
-    """R4: the six GRIDS as (n,) float32, SOLID_VALUE off the fluid - wake is
-    |U - U_inf| / |U_inf|, derived from U, not a transported scalar."""
-    U = np.asarray(U, dtype=np.float64)
-    p = np.asarray(p, dtype=np.float64).reshape(-1)
-    fluid = np.asarray(fluid, dtype=bool)
+def wake_cells(U, U_inf):
+    """(n,) float64 |U - U_inf| / |U_inf| - the writer's density source
+    field; all zeros when |U_inf| == 0."""
+    U = np.asarray(U, dtype=np.float64).reshape(-1, 3)
     uinf = np.asarray(U_inf, dtype=np.float64).reshape(3)
     speed = float(np.linalg.norm(uinf))
-    raw = {"U.x": U[:, 0], "U.y": U[:, 1], "U.z": U[:, 2],
-           "U.mag": np.linalg.norm(U, axis=1), "p": p,
-           "wake": (np.linalg.norm(U - uinf[None, :], axis=1) / speed
-                    if speed > 0.0 else np.zeros(U.shape[0]))}
-    out = {}
-    for name in GRIDS:
-        arr = np.array(raw[name], dtype=np.float32)
-        arr[~fluid] = SOLID_VALUE
-        out[name] = arr
-    return out
+    if speed == 0.0:
+        return np.zeros(U.shape[0], dtype=np.float64)
+    return np.linalg.norm(U - uinf[None, :], axis=1) / speed
 
 
-# ------------------------------------------------------------------ scene
+def write_foam_field(path, values):
+    """One ascii OpenFOAM field: shape (n,) -> volScalarField /
+    List<scalar>, (n, 3) -> volVectorField / List<vector>, one value per
+    line (repr of each float; a vector as (x y z)); anything else raises
+    ValueError. The solver reads only internalField."""
+    v = np.asarray(values)
+    if v.ndim == 1:
+        cls, lst = "volScalarField", "List<scalar>"
+        body = [repr(float(x)) for x in v]
+    elif v.ndim == 2 and v.shape[1] == 3:
+        cls, lst = "volVectorField", "List<vector>"
+        body = ["(" + " ".join(repr(float(c)) for c in row) + ")" for row in v]
+    else:
+        raise ValueError("values shape " + repr(v.shape) + ": want (n,) or (n, 3)")
+    lines = ["FoamFile", "{", "    version 2.0;", "    format ascii;",
+             "    class " + cls + ";",
+             "    object " + os.path.basename(str(path)) + ";", "}", "",
+             "dimensions [0 0 0 0 0 0 0];",
+             "internalField nonuniform " + lst, str(len(body)), "("]
+    lines += body
+    lines += [")", ";", "", "boundaryField", "{", "}", ""]
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write("".join(line + chr(10) for line in lines))
 
-def safe_prim_name(grid):
-    """R5: every char not in [A-Za-z0-9_] becomes "_"; a leading digit gets a
-    "_" prefix - "U.x" -> "U_x"."""
-    s = "".join(c if (c.isascii() and c.isalnum()) or c == "_" else "_" for c in str(grid))
-    if s and s[0].isdigit():
-        s = "_" + s
-    return s
+
+def stage_case(pm_dir, tdir, time_sel, out_case, uinf):
+    """Copy the five polyMesh files, U and p, then write the writer's third
+    field: wake = |U - U_inf| / |U_inf| per cell. Returns n_cells. Never
+    writes into pm_dir/tdir."""
+    pm_out = os.path.join(out_case, "constant", "polyMesh")
+    os.makedirs(pm_out, exist_ok=True)
+    for f in ("boundary", "faces", "owner", "neighbour", "points"):
+        shutil.copy2(os.path.join(pm_dir, f), os.path.join(pm_out, f))
+    t_out = os.path.join(out_case, str(time_sel))
+    os.makedirs(t_out, exist_ok=True)
+    for f in ("U", "p"):
+        shutil.copy2(os.path.join(tdir, f), os.path.join(t_out, f))
+    owner = PROMO.read_ints(os.path.join(pm_dir, "owner"))
+    neighbour = PROMO.read_ints(os.path.join(pm_dir, "neighbour"))
+    n_cells = int(owner.max()) + 1
+    if neighbour.size:
+        n_cells = max(n_cells, int(neighbour.max()) + 1)
+    U = PROMO_POST.read_foam_vector(os.path.join(tdir, "U"), n_cells)
+    write_foam_field(os.path.join(t_out, WAKE), wake_cells(U, uinf))
+    return n_cells
 
 
-def write_scene(path, drone_rel, vdb_rel, grids, lo, voxel, dims, doc):
-    """R5: the solver's own .usda conventions (rust/src/io/usda.rs) - one
-    UsdVol.Volume per grid with a float3[] extent and a field:<safe-name>
-    relationship to an OpenVDBAsset child carrying filePath + fieldName."""
-    lo = np.asarray(lo, dtype=np.float64).reshape(3)
-    dims = np.asarray(dims, dtype=np.int64).reshape(3)
-    voxel = float(voxel)
-    half = voxel / 2.0
-    ext_lo = Gf.Vec3f(float(lo[0] - half), float(lo[1] - half), float(lo[2] - half))
-    ext_hi = Gf.Vec3f(float(lo[0] + (dims[0] - 1) * voxel + half),
-                      float(lo[1] + (dims[1] - 1) * voxel + half),
-                      float(lo[2] + (dims[2] - 1) * voxel + half))
+# ------------------------------------------------------------- the writer
+
+def lattice_json(lo, hi, voxel):
+    """-lattice payload (SPEC-LIT 117.3): the box and the voxel."""
+    return json.dumps({"voxel": float(voxel),
+                       "box": [float(v) for v in tuple(lo) + tuple(hi)]})
+
+
+def isaac_json(profile, field, tau):
+    """-isaac payload (SPEC-LIT 117.9): the profile, the density source
+    field and the optical-depth scaling target."""
+    if profile not in PROFILES:
+        refuse("DI-PROFILE", repr(profile) + ": profile is one of " +
+               ", ".join(PROFILES))
+    return json.dumps({"profile": profile, "field": field,
+                       "scaling": "opticalDepth", "tau": float(tau)})
+
+
+def sample_cmd(exe, case, time_sel, lo, hi, voxel, profile, tau, ux, out_dir):
+    """The one writer command: volume <case> <time> -vdb -usda -lattice
+    ... -isaac ... -freestream ... -out DIR -stem NAME."""
+    return [str(exe), "volume", str(case), str(time_sel), "-vdb", "-usda",
+            "-lattice", lattice_json(lo, hi, voxel),
+            "-isaac", isaac_json(profile, WAKE, tau),
+            "-freestream", repr(float(ux)), "-out", str(out_dir), "-stem", STEM]
+
+
+_LATTICE_RE = re.compile(
+    r"^\s*lattice (\d+) x (\d+) x (\d+) of h = (\S+) \(requested (\S+), "
+    r"coarsen (\S+)\): (\d+) voxels, (\d+) fluid, (\d+) gap-filled; "
+    r"fluid fraction (\S+)\s*$", re.M)
+_FREESTREAM_RE = re.compile(
+    r"^\s*freestream: median U\.x over the (\d+ .+) = (\S+); "
+    r"\|median - Ux\|/\|Ux\| = (\S+) against Ux = \S+\s*$", re.M)
+_HELD_RE = re.compile(
+    r"optical depth held from this write on: range \[(\S+), (\S+)\], "
+    r"D = (\S+) m \(tau = (\S+)\)")
+_WROTE_RE = re.compile(r"^\s*wrote (.+?)\s*$", re.M)
+
+
+def parse_sample_report(text):
+    """The writer's stdout -> dict. Refuses DI-SAMPLE on a uniform
+    Cartesian box (it lays no lattice: not this tool's mesh), or a report
+    without a lattice line or a freestream line."""
+    if "uniform Cartesian box" in text:
+        refuse("DI-SAMPLE", "the writer laid a uniform Cartesian box: "
+               "not this tool's mesh")
+    m = _LATTICE_RE.search(text)
+    if not m:
+        refuse("DI-SAMPLE", "the report has no lattice line")
+    f = _FREESTREAM_RE.search(text)
+    if not f:
+        refuse("DI-SAMPLE", "the report has no freestream line")
+    held = _HELD_RE.search(text)
+    return {
+        "n": [int(m.group(1)), int(m.group(2)), int(m.group(3))],
+        "voxel": float(m.group(4)),
+        "n_voxels": int(m.group(7)),
+        "n_fluid": int(m.group(8)),
+        "fluid_frac": float(m.group(10)),
+        "freestream": {"plane": f.group(1), "median_Ux": float(f.group(2)),
+                       "rel_err": float(f.group(3))},
+        "held": ({"range": [float(held.group(1)), float(held.group(2))],
+                  "D": float(held.group(3)), "tau": float(held.group(4))}
+                 if held else None),
+        "density_zero": "writing an all-zero density grid" in text,
+        "wrote": [w for w in _WROTE_RE.findall(text)],
+    }
+
+
+def read_vdb(vdb_python, vdb_path, dims, manifest, log_path):
+    """tools/drone/isaac_vdb.py --read under Isaac Sim's own Python: the
+    file as Isaac's reader sees it, measured into the manifest. Returns
+    the loaded manifest; non-zero exit or no manifest refuses DI-VDB."""
+    dims_s = ",".join(str(int(v)) for v in dims)
+    rc = _run_writer([vdb_python, os.path.join(REPO, "tools", "drone",
+                                              "isaac_vdb.py"),
+                      "--read", str(vdb_path), "--dims", dims_s,
+                      "--manifest", str(manifest)], log_path)
+    if rc != 0:
+        refuse("DI-VDB", "isaac_vdb.py --read exited " + str(rc) +
+               " (see writers.log)")
+    if not os.path.isfile(str(manifest)):
+        refuse("DI-VDB", _posix(manifest) + ": vdb manifest missing (see writers.log)")
+    with open(str(manifest), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def write_wrapper(path, native_rel, drone_rel, doc):
+    """The wrapper scene: the native writer's scene as the first
+    sublayer, the stage's metadata, the native /World/boundary made
+    invisible in this layer, and the drone referenced at /World/Drone."""
     stage = Usd.Stage.CreateNew(str(path))
     layer = stage.GetRootLayer()
+    layer.subLayerPaths.append(str(native_rel))
     layer.defaultPrim = "World"
     layer.documentation = doc
     UsdGeom.SetStageUpAxis(stage, "Z")
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-    UsdGeom.Xform.Define(stage, "/World")
-    drone = UsdGeom.Xform.Define(stage, "/World/Drone")
-    drone.GetPrim().GetReferences().AddReference(str(drone_rel))
-    UsdGeom.Scope.Define(stage, "/World/Flow")
-    for g in grids:
-        s = safe_prim_name(g)
-        vol = UsdVol.Volume.Define(stage, "/World/Flow/" + s)
-        UsdGeom.Boundable(vol.GetPrim()).CreateExtentAttr(Vt.Vec3fArray([ext_lo, ext_hi]))
-        field_path = Sdf.Path("/World/Flow/" + s + "/" + s)
-        vol.GetPrim().CreateRelationship("field:" + s).SetTargets([field_path])
-        asset = UsdVol.OpenVDBAsset.Define(stage, field_path)
-        asset.CreateFilePathAttr(Sdf.AssetPath(str(vdb_rel)))
-        asset.CreateFieldNameAttr(str(g))
+    bnd = stage.GetPrimAtPath("/World/boundary")
+    if bool(bnd) and bnd.IsActive():
+        UsdGeom.Imageable(bnd).CreateVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+    if drone_rel is not None:
+        drone = UsdGeom.Xform.Define(stage, "/World/Drone")
+        drone.GetPrim().GetReferences().AddReference(str(drone_rel))
     stage.Save()
 
 
-def validate_scene(path, expect_grids):
-    """R5: open the stage back and check everything - never raises."""
+def validate_scene(path, profile, want_drone=True):
+    """Open the wrapper scene back and check everything - never raises.
+    The profile rule: index -> one Volume carrying the density field and
+    no volume mesh; pathtrace -> one volume Mesh and no Volume."""
     res = {"opens": False, "up_axis": "", "meters_per_unit": 0.0, "default_prim": "",
-           "volumes": 0, "fields": [], "drone_meshes": 0, "unresolved": [],
-           "compliance_errors": [], "compliance_failed": [], "ok": False}
-    expect = [str(g) for g in expect_grids]
+           "volumes": 0, "volume_meshes": 0, "fields": [], "boundary_hidden": False,
+           "drone_meshes": 0, "unresolved": [], "ok": False}
     try:
         stage = Usd.Stage.Open(str(path))
     except Exception:
@@ -231,8 +332,12 @@ def validate_scene(path, expect_grids):
         res["meters_per_unit"] = float(UsdGeom.GetStageMetersPerUnit(stage))
         dp = stage.GetDefaultPrim()
         res["default_prim"] = str(dp.GetPath()) if dp.IsValid() else ""
-        vols = [p for p in stage.Traverse() if p.IsA(UsdVol.Volume)]
+        prims = list(stage.Traverse())
+        vols = [p for p in prims if p.IsA(UsdVol.Volume)]
         res["volumes"] = len(vols)
+        meshes = [p for p in prims if p.IsA(UsdGeom.Mesh)]
+        res["volume_meshes"] = sum(
+            1 for p in meshes if p.GetAttribute("primvars:isVolume").Get() is True)
         fields = []
         for v in vols:
             for rel in v.GetPrim().GetRelationships():
@@ -245,39 +350,49 @@ def validate_scene(path, expect_grids):
                         val = fa.Get() if fa.IsValid() else None
                         fields.append(str(val) if val is not None else "")
         res["fields"] = fields
-        res["drone_meshes"] = sum(1 for p in stage.Traverse() if p.IsA(UsdGeom.Mesh)
-                                  and str(p.GetPath()).startswith("/World/Drone"))
+        bnd = stage.GetPrimAtPath("/World/boundary")
+        res["boundary_hidden"] = bool(
+            bnd and bnd.IsActive()
+            and str(UsdGeom.Imageable(bnd).ComputeVisibility())
+            == str(UsdGeom.Tokens.invisible))
+        res["drone_meshes"] = sum(1 for p in meshes
+                                  if str(p.GetPath()).startswith("/World/Drone"))
         missing = []
         _layers, _assets, unresolved = UsdUtils.ComputeAllDependencies(str(path))
-        missing.extend(str(u) for u in unresolved)
-        scene_dir = os.path.dirname(os.path.abspath(str(path)))
-        for p in stage.Traverse():
-            if not p.IsA(UsdVol.OpenVDBAsset):
-                continue
-            fa = p.GetAttribute("filePath")
-            if not fa.IsValid() or fa.Get() is None:
-                continue
-            ap = str(getattr(fa.Get(), "path", fa.Get()))
-            rp = ap if os.path.isabs(ap) else os.path.normpath(os.path.join(scene_dir, ap))
-            if not os.path.isfile(rp):
-                missing.append(ap)
+        missing.extend(str(u) for u in unresolved if not str(u).endswith(".mdl"))
+        for p in prims:
+            for attr in p.GetAttributes():
+                if str(attr.GetTypeName()) not in ("asset", "asset[]"):
+                    continue
+                for val in [attr.Get()] + [attr.Get(t) for t in attr.GetTimeSamples()]:
+                    if val is None or not str(getattr(val, "path", "")).endswith(".vdb"):
+                        continue
+                    rp = str(getattr(val, "resolvedPath", "") or "")
+                    if not rp or not os.path.isfile(rp):
+                        missing.append(str(val.path))
         res["unresolved"] = missing
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            cc = UsdUtils.ComplianceChecker(arkit=False, skipARKitRootLayerCheck=True,
-                                            rootPackageOnly=False, skipVariants=False,
-                                            verbose=False)
-            cc.CheckCompliance(str(path))
-            res["compliance_errors"] = [str(e) for e in cc.GetErrors()]
-            res["compliance_failed"] = [str(e) for e in cc.GetFailedChecks()]
     except Exception:
         pass
-    res["ok"] = bool(res["opens"] and res["up_axis"] == "Z" and res["meters_per_unit"] == 1.0
-                     and res["default_prim"] == "/World" and res["volumes"] == len(expect)
-                     and res["fields"] == expect and res["drone_meshes"] >= 1
-                     and res["unresolved"] == [] and res["compliance_errors"] == []
-                     and res["compliance_failed"] == [])
+    if profile == "pathtrace":
+        prof_ok = res["volumes"] == 0 and res["volume_meshes"] == 1
+    else:
+        prof_ok = (res["volumes"] == 1 and res["volume_meshes"] == 0
+                   and res["fields"] == ["density"])
+    drone_ok = res["drone_meshes"] >= 1 if want_drone else True
+    res["ok"] = bool(res["opens"] and res["up_axis"] == "Z"
+                     and res["meters_per_unit"] == 1.0
+                     and res["default_prim"] == "/World" and res["boundary_hidden"]
+                     and res["unresolved"] == [] and prof_ok and drone_ok)
     return res
+
+
+def run_usda_check(path, profile):
+    """tools/isaac/usda_check.py on the native scene (a subprocess of this
+    interpreter, so it works under plain python and Isaac's alike)."""
+    p = subprocess.run([sys.executable, USDA_CHECK, str(path), "--profile", profile],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    return {"ok": p.returncode == 0, "returncode": p.returncode}
 
 
 # ------------------------------------------------------------------ gate
@@ -287,27 +402,30 @@ GATE_IDS = ["G-GRIDS", "G-DENSE", "G-ROUNDTRIP", "G-PLACE", "G-FLUID",
 
 
 def judge(ex):
-    """R7: the export gate, ids in table order."""
+    """The export gate on the native outputs, ids in table order."""
     failed = []
     lat = ex["lattice"]
     grids = ex["grids"]
-    if [g["name"] for g in grids] != GRIDS:
+    if sorted(g["name"] for g in grids) != sorted(GRIDS + [DENSITY]):
         failed.append("G-GRIDS")
-    if any(int(g["active_voxels"]) != int(lat["n_voxels"]) for g in grids):
+    exp = int(lat["expected_active"])
+    if any(int(g["active_voxels"]) != exp for g in grids):
         failed.append("G-DENSE")
-    if any(float(g["roundtrip_max_abs"]) != 0.0 for g in grids):
+    rel = float((ex.get("density") or {}).get("rel_err", float("inf")))
+    if any(not bool(g.get("finite")) for g in grids) or rel > DEPTH_TOL:
         failed.append("G-ROUNDTRIP")
-    lo = [float(v) for v in lat["lo"]]
+    first = [float(v) for v in lat["first"]]
     last = [float(v) for v in lat["last"]]
-    if any(any(abs(float(g["world_first"][i]) - lo[i]) > 1e-9
-               or abs(float(g["world_last"][i]) - last[i]) > 1e-9 for i in range(3))
-           for g in grids):
+    if ([int(v) for v in lat["report_dims"]] != [int(v) for v in lat["dims"]]
+            or any(any(abs(float(g["world_first"][i]) - first[i]) > 1e-9
+                       or abs(float(g["world_last"][i]) - last[i]) > 1e-9
+                       for i in range(3)) for g in grids)):
         failed.append("G-PLACE")
     if float(ex["fluid_frac"]) < FLUID_MIN_FRAC:
         failed.append("G-FLUID")
     if float(ex["freestream"]["rel_err"]) > FREESTREAM_TOL:
         failed.append("G-FREESTREAM")
-    if not ex["scene"].get("ok"):
+    if not ex["scene"].get("ok") or not (ex.get("native_check") or {}).get("ok"):
         failed.append("G-USD")
     usd = ex["usd"]
     if int(usd.get("mesh_objects", 0)) < 1 or int(ex["scene"].get("drone_meshes", -1)) != int(usd.get("mesh_objects", -2)):
@@ -421,9 +539,9 @@ def _parse_box(text):
 
 
 def _run_writer(cmd, log_path, first=False):
-    """One writer subprocess - isaac_vdb.py under Isaac's Python, or blender
-    -b - with stdout+stderr streamed into writers.log; both writers append.
-    Returns the exit code; the caller refuses."""
+    """One writer subprocess - ofgpu-sample, isaac_vdb.py under Isaac's
+    Python, or blender -b - with stdout+stderr streamed into the log; all
+    append. Returns the exit code; the caller refuses."""
     d = os.path.dirname(log_path)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -444,7 +562,8 @@ def _digest(path):
 # ------------------------------------------------------------------ export
 
 def cmd_export(args):
-    """R11: the real solve -> the full Isaac output set, gate-judged."""
+    """Stage the case, run ofgpu-sample volume -isaac, read the .vdb back,
+    export the drone, write the wrapper scene, judge the nine gates."""
     t_all = time.monotonic()
     times = {}
 
@@ -458,86 +577,57 @@ def cmd_export(args):
     out = os.path.abspath(args.out)
     blender = os.path.abspath(args.blender)
     vdb_python = os.path.abspath(args.vdb_python)
+    sample_exe = os.path.abspath(args.sample_exe)
+    voxel = float(args.voxel)
+    tau = float(args.tau)
+    profile = str(args.profile)
     t0 = time.monotonic()
     _check_out(out)
     pm_dir, tdir, time_sel = _check_inputs(solve, str(args.time))
     lo, hi = _parse_box(args.box)
-    voxel = float(args.voxel)
-    xs, ys, zs = lattice_axes(lo, hi, voxel)
+    dims = lattice_shape(lo, hi, voxel)
     if not os.path.isfile(blender):
         refuse("DI-BLENDER", _posix(blender) + ": blender.exe not found")
+    if not os.path.isfile(sample_exe):
+        refuse("DI-SAMPLE", _posix(sample_exe) + ": ofgpu-sample not found")
     if not os.path.isfile(vdb_python):
         refuse("DI-VDB", _posix(vdb_python) + ": the vdb python not found")
     stage("checks", t0)
 
     t0 = time.monotonic()
-    points = PROMO.read_points(os.path.join(pm_dir, "points"))
-    arity, ptr, flat = PROMO.read_faces(os.path.join(pm_dir, "faces"))
-    pm = PROMO.PolyMesh(points, arity, ptr, flat)
-    owner = PROMO.read_ints(os.path.join(pm_dir, "owner"))
-    neighbour = PROMO.read_ints(os.path.join(pm_dir, "neighbour"))
-    n_cells = int(owner.max()) + 1 if owner.size else 0
-    V, centres = DRONE.cell_geometry(pm, owner, neighbour, n_cells)
-    h = np.cbrt(V)
-    U_cells = PROMO_POST.read_foam_vector(os.path.join(tdir, "U"), n_cells)
-    p_cells = read_foam_scalar(os.path.join(tdir, "p"), n_cells)
     with open(os.path.join(solve, "write.json"), encoding="utf-8") as fh:
         uinf = np.asarray(json.load(fh)["params"]["U_vec"], dtype=np.float64)
-    stage("mesh+fields", t0)
+    stage_case(pm_dir, tdir, time_sel, os.path.join(out, "case"), uinf)
+    stage("stage", t0)
 
     t0 = time.monotonic()
-    pts = lattice_points(xs, ys, zs)
-    nx, ny, nz = int(xs.size), int(ys.size), int(zs.size)
-    n_vox = int(pts.shape[0])
-    values = np.column_stack([U_cells, p_cells.reshape(-1, 1)])
-    vals, fluid = sample_cells(centres, h, values, pts)
-    U = vals[:, 0:3]
-    p = vals[:, 3]
-    grids = derived_grids(U, p, fluid, uinf)
-    fluid_frac = float(fluid.mean()) if n_vox else 0.0
-    jj, kk = np.meshgrid(np.arange(ny), np.arange(nz), indexing="ij")
-    plane = ((nx - 1) * ny + jj.ravel()) * nz + kk.ravel()
-    sel = plane[fluid[plane]]
-    if sel.size == 0:
-        refuse("DI-FREESTREAM", "the xMax lattice plane has no fluid points")
-    median_ux = float(np.median(U[sel, 0]))
-    rel_err = abs(median_ux - float(uinf[0])) / abs(float(uinf[0]))
+    cmd = sample_cmd(sample_exe, os.path.join(out, "case"), time_sel, lo, hi,
+                     voxel, profile, tau, float(uinf[0]), os.path.join(out, NATIVE_DIR))
+    rc = _run_writer(cmd, os.path.join(out, "sample.log"), first=True)
+    if rc != 0:
+        refuse("DI-SAMPLE", "ofgpu-sample exited " + str(rc) +
+               " (see sample.log)")
+    with open(os.path.join(out, "sample.log"), encoding="utf-8", errors="replace") as fh:
+        rep = parse_sample_report(fh.read())
     stage("sample", t0)
 
     t0 = time.monotonic()
-    os.makedirs(out, exist_ok=True)
-    npz_path = os.path.join(out, "lattice.npz")
-    payload = {"lo": np.asarray(lo, dtype=np.float64), "voxel": np.float64(voxel),
-               "dims": np.array([nx, ny, nz], dtype=np.int64), "grids": np.array(GRIDS)}
-    for g in GRIDS:
-        payload[g] = np.ascontiguousarray(grids[g].reshape(nx, ny, nz), dtype=np.float32)
-    np.savez(npz_path, **payload)
-    stage("npz", t0)
-
-    t0 = time.monotonic()
-    log_path = os.path.join(out, "writers.log")
-    vdb_script = os.path.join(REPO, "tools", "drone", "isaac_vdb.py")
-    vdb_name = "drone_flow_t" + time_sel + ".vdb"
-    vdb_path = os.path.join(out, "VDB", vdb_name)
+    vdb_path = os.path.join(out, NATIVE_DIR, "VDB", STEM + "_000000.vdb")
+    native = os.path.join(out, NATIVE_DIR, STEM + ".usda")
     man_v = os.path.join(out, "vdb_manifest.json")
-    rc = _run_writer([vdb_python, vdb_script, "--npz", npz_path, "--out", vdb_path,
-                      "--manifest", man_v], log_path, first=True)
-    if rc != 0:
-        refuse("DI-VDB", "isaac_vdb.py exited " + str(rc) + " (see writers.log)")
-    if not os.path.isfile(man_v):
-        refuse("DI-VDB", _posix(man_v) + ": vdb manifest missing (see writers.log)")
+    wlog = os.path.join(out, "writers.log")
+    open(wlog, "wb").close()   # a fresh log: read_vdb and Blender append
+    vdb_manifest = read_vdb(vdb_python, vdb_path, dims, man_v, wlog)
     bpy_script = os.path.join(REPO, "tools", "drone", "isaac_bpy.py")
     usdc_path = os.path.join(out, "drone", "x500.usdc")
     man_u = os.path.join(out, "usd_manifest.json")
     rc = _run_writer([blender, "-b", "--factory-startup",
                       os.path.join(geom, "x500_assembled.blend"), "--python", bpy_script,
-                      "--", "usd", "--out", usdc_path, "--manifest", man_u], log_path)
+                      "--", "usd", "--out", usdc_path, "--manifest", man_u], wlog)
     if rc != 0:
         refuse("DI-BLENDER", "blender exited " + str(rc) + " (see writers.log)")
     if not os.path.isfile(man_u):
         refuse("DI-BLENDER", _posix(man_u) + ": usd manifest missing (see writers.log)")
-    with open(man_v, encoding="utf-8") as fh:
-        vdb_manifest = json.load(fh)
     with open(man_u, encoding="utf-8") as fh:
         usd_manifest = json.load(fh)
     stage("writers", t0)
@@ -547,9 +637,9 @@ def cmd_export(args):
     doc = (CREDIT + "; drone solve time " + time_sel + " s; flow values are demonstration "
            "numbers from an unsteady run, not validated; wake = |U - U_inf| / |U_inf|, "
            "derived from U, not a transported scalar")
-    write_scene(scene_path, DRONE_REL, "./VDB/" + vdb_name, GRIDS,
-                np.asarray(lo, dtype=np.float64), voxel, (nx, ny, nz), doc)
-    scene = validate_scene(scene_path, GRIDS)
+    write_wrapper(scene_path, "./" + NATIVE_DIR + "/" + STEM + ".usda", DRONE_REL, doc)
+    scene = validate_scene(scene_path, profile)
+    native_check = run_usda_check(native, profile)
     stage("scene", t0)
 
     t0 = time.monotonic()
@@ -561,35 +651,53 @@ def cmd_export(args):
 
     t0 = time.monotonic()
     files = {}
-    for p in (scene_path, vdb_path, usdc_path, npz_path):
+    for p in (scene_path, native, vdb_path, usdc_path):
         rel = _posix(os.path.relpath(p, out))
         files[rel] = {"bytes": int(os.path.getsize(p)), "sha256": _digest(p)}
-    lo_l = [float(v) for v in lo]
-    last = [lo_l[i] + (d - 1) * voxel for i, d in enumerate((nx, ny, nz))]
+    stage("files", t0)
+
+    t0 = time.monotonic()
+    rep_voxel = float(rep["voxel"])
+    first, last = lattice_centres(lo, rep_voxel, dims)
+    grids = vdb_manifest.get("grids", [])
+    dens = [g for g in grids if g.get("name") == DENSITY]
+    max_col = float(dens[0]["max_column"]) if dens else None
     ex = {
         "tool": TOOL, "version": VERSION, "credit": CREDIT,
+        "profile": profile, "tau": tau,
         "solve_dir": _posix(solve), "time": time_sel,
-        "lattice": {"lo": lo_l, "last": last, "voxel": voxel,
-                    "dims": [nx, ny, nz], "n_voxels": n_vox},
+        "sample_cmd": " ".join(_posix(a) for a in cmd),
+        "lattice": {"lo": [float(v) for v in lo], "hi": [float(v) for v in hi],
+                    "voxel": rep_voxel, "dims": list(dims),
+                    "report_dims": [int(v) for v in rep["n"]],
+                    "first": [float(v) for v in first],
+                    "last": [float(v) for v in last],
+                    "n_voxels": rep["n_voxels"], "n_fluid": rep["n_fluid"],
+                    "activation": "fluid" if profile == "index" else "dense",
+                    "expected_active": (rep["n_fluid"] if profile == "index"
+                                        else rep["n_voxels"])},
         "U_inf": [float(v) for v in uinf],
-        "fluid_frac": fluid_frac,
-        "freestream": {"plane": "xMax lattice plane, i = nx-1",
-                       "median_Ux": median_ux, "rel_err": rel_err},
-        "grids": vdb_manifest.get("grids", []),
+        "fluid_frac": rep["fluid_frac"],
+        "freestream": rep["freestream"],
+        "held": rep["held"],
+        "density_zero": rep["density_zero"],
+        "grids": grids,
+        "density": {"tau": tau, "max_column": max_col,
+                    "rel_err": (abs(max_col - tau) / tau if dens else float("inf"))},
         "vdb": {"file_version": vdb_manifest.get("file_version"),
                 "openvdb": vdb_manifest.get("openvdb"),
                 "library_version": vdb_manifest.get("library_version")},
         "usd": usd_manifest,
         "scene": scene,
+        "native_check": native_check,
         "files": files,
         "timing_s": times,
         "notes": [
-            "the solver's -output vdb,usda writes .vdb only on a uniform cartesian box mesh "
-            "and refuse_visualisation_on_a_non_cartesian_mesh rejects this snapped octree, "
-            "so the finished solution is sampled onto a dense lattice instead",
-            "wake = |U - U_inf| / |U_inf|, derived from U, not a transported scalar",
+            "the solver's ofgpu-sample volume -isaac wrote the lattice .vdb and the "
+            "native scene; this tool stages the case and judges",
+            "wake = |U - U_inf| / |U_inf|, derived from U per cell, not a "
+            "transported scalar",
             "flow values are demonstration numbers from an unsteady run, not validated",
-            "no passive scalar: the solve transported none",
         ],
     }
     gate = judge(ex)
@@ -606,7 +714,7 @@ def cmd_export(args):
 
 
 def cmd_validate(args):
-    d = validate_scene(args.scene, GRIDS)
+    d = validate_scene(args.scene, args.profile)
     print(json.dumps(d, indent=2))
     return 0 if d["ok"] else 1
 
@@ -614,97 +722,109 @@ def cmd_validate(args):
 # ---------------------------------------------------------------- selftest
 
 def _t1():
-    xs, ys, zs = lattice_axes((-1.2, -0.6, -0.8), (0.6, 0.6, 0.4), 0.01)
-    assert (len(xs), len(ys), len(zs)) == (181, 121, 121), (len(xs), len(ys), len(zs))
-    assert abs(xs[0] - (-1.2)) < 1e-12, xs[0]
-    assert abs(xs[-1] - 0.6) < 1e-12, xs[-1]
+    assert lattice_shape((-1.2, -0.6, -0.8), (0.6, 0.6, 0.4), 0.01) == (180, 120, 120)
+    assert lattice_shape((0, 0, 0), (4, 2, 0.1), 0.05) == (80, 40, 2)
     bad = ((0.0, (-1.2, -0.6, -0.8), (0.6, 0.6, 0.4)),
+           (float("nan"), (-1.2, -0.6, -0.8), (0.6, 0.6, 0.4)),
            (0.01, (0.0, 0.0, 0.0), (0.0, 1.0, 1.0)),
            (0.001, (-1.2, -0.6, -0.8), (0.6, 0.6, 0.4)))
     for v, blo, bhi in bad:
         code = 0
         try:
-            lattice_axes(blo, bhi, v)
+            lattice_shape(blo, bhi, v)
         except SystemExit as exc:
             code = int(exc.code or 0)
-        assert code == 2, (v, code)
+        assert code == 2, (v, blo, bhi, code)
 
 
 def _t2():
-    pts = lattice_points([0, 1, 2, 3], [10, 11, 12], [20, 21, 22, 23, 24])
-    assert pts.shape == (60, 3), pts.shape
-    assert tuple(pts[38]) == (2, 11, 23), pts[38]
+    first, last = lattice_centres((-1.2, -0.6, -0.8), 0.01, (180, 120, 120))
+    wf, wl = (-1.195, -0.595, -0.795), (0.595, 0.595, 0.395)
+    for i in range(3):
+        assert abs(first[i] - wf[i]) < 1e-12, (first, wf)
+        assert abs(last[i] - wl[i]) < 1e-12, (last, wl)
 
 
 def _t3():
-    cen = np.array([[float(x), float(y), float(z)] for x in range(4)
-                    for y in range(4) for z in range(4)])
-    h = np.ones(64)
-    f = (2.0 * cen[:, 0] + 3.0 * cen[:, 1] - cen[:, 2] + 1.0).reshape(64, 1)
-    probe = np.array([[1.5, 1.5, 1.5], [2.0, 1.0, 3.0], [10.0, 10.0, 10.0]])
-    vals, fluid = sample_cells(cen, h, f, probe)
-    assert abs(vals[0, 0] - 7.0) < 1e-12 and bool(fluid[0]), (vals[0], fluid[0])
-    assert abs(vals[1, 0] - 5.0) < 1e-12, vals[1]
-    assert not fluid[2] and vals[2, 0] == 0.0, (vals[2], fluid[2])
-    vals3, _ = sample_cells(cen, h, np.column_stack([f[:, 0], 2.0 * f[:, 0], -f[:, 0]]),
-                            np.array([[1.5, 1.5, 1.5]]))
-    assert np.allclose(vals3[0], [7.0, 14.0, -7.0], rtol=0.0, atol=1e-12), vals3[0]
+    tmp = tempfile.mkdtemp(prefix="drone-isaac-t3-")
+    try:
+        vals = [0.1, -2.5e-7, 3.0]
+        p = os.path.join(tmp, "w")
+        write_foam_field(p, np.asarray(vals, dtype=np.float64))
+        assert read_foam_scalar(p, 3).tolist() == vals, read_foam_scalar(p, 3)
+        text = open(p, encoding="utf-8").read()
+        assert "class volScalarField;" in text, text
+        vmat = [[0.1, -2.5e-7, 3.0], [4.0, 5.5, 6.25]]
+        q = os.path.join(tmp, "wv")
+        write_foam_field(q, np.asarray(vmat, dtype=np.float64))
+        back = PROMO_POST.read_foam_vector(q, 2)
+        assert back.tolist() == vmat, back
+        tv = open(q, encoding="utf-8").read()
+        assert "class volVectorField;" in tv, tv
+        bad = False
+        try:
+            write_foam_field(os.path.join(tmp, "wb"), np.zeros((2, 2)))
+        except ValueError:
+            bad = True
+        assert bad, "shape (2, 2) must raise ValueError"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _t4():
     U = np.array([[-15.0, 0.0, 0.0], [0.0, 0.0, 0.0], [-12.0, 0.0, -4.0]])
-    p = np.array([1.0, 2.0, 3.0])
-    g = derived_grids(U, p, np.array([True, True, True]), (-15.0, 0.0, 0.0))
-    assert list(g.keys()) == GRIDS, list(g.keys())
-    assert np.allclose(g["wake"], [0.0, 1.0, 1.0 / 3.0], rtol=0.0, atol=1e-6), g["wake"]
-    assert abs(float(g["U.mag"][2]) - 12.649110640673518) < 1e-5, g["U.mag"][2]
-    for name in GRIDS:
-        assert g[name].dtype == np.float32, (name, g[name].dtype)
-    g2 = derived_grids(U, p, np.array([True, False, True]), (-15.0, 0.0, 0.0))
-    for name in GRIDS:
-        assert g2[name][1] == 0.0, (name, g2[name][1])
-        assert g2[name][0] == g[name][0] and g2[name][2] == g[name][2], name
+    w = wake_cells(U, (-15.0, 0.0, 0.0))
+    assert w.dtype == np.float64, w.dtype
+    assert np.allclose(w, [0.0, 1.0, 1.0 / 3.0], rtol=0.0, atol=1e-15), w
+    z = wake_cells(np.ones((4, 3)), (0.0, 0.0, 0.0))
+    assert z.dtype == np.float64 and np.array_equal(z, np.zeros(4)), z
 
 
 def _t5():
-    assert safe_prim_name("U.x") == "U_x", safe_prim_name("U.x")
-    assert safe_prim_name("U.mag") == "U_mag", safe_prim_name("U.mag")
-    assert safe_prim_name("p") == "p"
-    assert safe_prim_name("1a") == "_1a", safe_prim_name("1a")
-    assert safe_prim_name("a-b c") == "a_b_c", safe_prim_name("a-b c")
-
-
-def _t6_fixture(tmp):
-    from pxr import Usd, UsdGeom
-    os.makedirs(os.path.join(tmp, "drone"), exist_ok=True)
-    os.makedirs(os.path.join(tmp, "VDB"), exist_ok=True)
-    st = Usd.Stage.CreateNew(os.path.join(tmp, "drone", "x500.usda"))
-    UsdGeom.Xform.Define(st, "/root")
-    UsdGeom.Mesh.Define(st, "/root/cube")
-    st.GetRootLayer().defaultPrim = "root"
-    st.Save()
-    with open(os.path.join(tmp, "VDB", "f.vdb"), "wb") as fh:
-        fh.write(b"vdb")
+    assert lattice_json((-1.2, -0.6, -0.8), (0.6, 0.6, 0.4), 0.01) == \
+        '{"voxel": 0.01, "box": [-1.2, -0.6, -0.8, 0.6, 0.6, 0.4]}'
+    assert isaac_json("index", "wake", 2.0) == \
+        '{"profile": "index", "field": "wake", "scaling": "opticalDepth", "tau": 2.0}'
+    code = 0
+    try:
+        isaac_json("nvdb", "wake", 2.0)
+    except SystemExit as exc:
+        code = int(exc.code or 0)
+    assert code == 2, code
+    cmd = sample_cmd("s.exe", "c", "0.5", (0, 0, 0), (1, 1, 1), 0.5, "pathtrace", 2.0,
+                     -15.0, "o")
+    assert cmd == ["s.exe", "volume", "c", "0.5", "-vdb", "-usda", "-lattice",
+                   '{"voxel": 0.5, "box": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]}', "-isaac",
+                   '{"profile": "pathtrace", "field": "wake", "scaling": "opticalDepth", '
+                   '"tau": 2.0}', "-freestream", "-15.0", "-out", "o",
+                   "-stem", "drone_flow"], cmd
 
 
 def _t6():
     from pxr import Usd, UsdGeom
     tmp = tempfile.mkdtemp(prefix="drone-isaac-t6-")
     try:
-        _t6_fixture(tmp)
-        scene = os.path.join(tmp, "scene.usda")
-        write_scene(scene, "./drone/x500.usda", "./VDB/f.vdb", GRIDS,
-                    (-1.0, -1.0, -1.0), 0.5, (3, 3, 3), "doc")
-        v = validate_scene(scene, GRIDS)
+        os.makedirs(os.path.join(tmp, "native", "VDB"))
+        os.makedirs(os.path.join(tmp, "drone"))
+        shutil.copy2(os.path.join(REPO, "tools", "isaac", "fixtures", "index",
+                                  "isaac.usda"),
+                     os.path.join(tmp, "native", "drone_flow.usda"))
+        with open(os.path.join(tmp, "native", "VDB", "isaac_000000.vdb"), "wb") as fh:
+            fh.write(b"")
+        st = Usd.Stage.CreateNew(os.path.join(tmp, "drone", "x500.usda"))
+        UsdGeom.Xform.Define(st, "/root")
+        UsdGeom.Mesh.Define(st, "/root/cube")
+        st.GetRootLayer().defaultPrim = "root"
+        st.Save()
+        scene = os.path.join(tmp, "drone_flow.usda")
+        write_wrapper(scene, "./native/drone_flow.usda", "./drone/x500.usda", "doc")
+        v = validate_scene(scene, "index")
         assert v["ok"] is True, v
-        assert v["volumes"] == 6 and v["fields"] == GRIDS, v
+        assert v["volumes"] == 1 and v["volume_meshes"] == 0, v
+        assert v["fields"] == ["density"] and v["boundary_hidden"] is True, v
         assert v["drone_meshes"] == 1 and v["unresolved"] == [], v
-        s = Usd.Stage.Open(scene)
-        ext = UsdGeom.Boundable(s.GetPrimAtPath("/World/Flow/U_x")).GetExtentAttr().Get()
-        assert np.allclose(np.array(ext[0]), [-1.25, -1.25, -1.25], rtol=0.0, atol=0.0), ext
-        assert np.allclose(np.array(ext[1]), [0.25, 0.25, 0.25], rtol=0.0, atol=0.0), ext
-        fa = s.GetPrimAtPath("/World/Flow/U_x/U_x").GetAttribute("fieldName")
-        assert str(fa.Get()) == "U.x", fa.Get()
+        v2 = validate_scene(scene, "pathtrace")
+        assert v2["ok"] is False, v2
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -712,80 +832,109 @@ def _t6():
 def _t7():
     tmp = tempfile.mkdtemp(prefix="drone-isaac-t7-")
     try:
-        _t6_fixture(tmp)
-        scene = os.path.join(tmp, "scene.usda")
-        write_scene(scene, "./drone/x500.usda", "./VDB/f.vdb", GRIDS,
-                    (-1.0, -1.0, -1.0), 0.5, (3, 3, 3), "doc")
-        os.remove(os.path.join(tmp, "VDB", "f.vdb"))
-        v = validate_scene(scene, GRIDS)
+        os.makedirs(os.path.join(tmp, "native", "VDB"))
+        shutil.copy2(os.path.join(REPO, "tools", "isaac", "fixtures", "index",
+                                  "isaac.usda"),
+                     os.path.join(tmp, "native", "drone_flow.usda"))
+        vdbp = os.path.join(tmp, "native", "VDB", "isaac_000000.vdb")
+        open(vdbp, "wb").close()
+        scene = os.path.join(tmp, "drone_flow.usda")
+        write_wrapper(scene, "./native/drone_flow.usda", None, "doc")
+        os.remove(vdbp)
+        v = validate_scene(scene, "index", want_drone=False)
         assert v["ok"] is False and v["unresolved"], v
-        with open(os.path.join(tmp, "VDB", "f.vdb"), "wb") as fh:
-            fh.write(b"vdb")
-        v = validate_scene(scene, GRIDS[:-1])
-        assert v["ok"] is False, v
         junk = os.path.join(tmp, "junk.usda")
         with open(junk, "w", encoding="utf-8") as fh:
             fh.write("this is not a usd file" + chr(10))
-        v = validate_scene(junk, GRIDS)
-        assert v["ok"] is False and v["opens"] is False, v
+        vj = validate_scene(junk, "index", want_drone=False)
+        assert vj["opens"] is False and vj["ok"] is False, vj
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp = tempfile.mkdtemp(prefix="drone-isaac-t7b-")
+    try:
+        os.makedirs(os.path.join(tmp, "native", "VDB"))
+        shutil.copy2(os.path.join(REPO, "tools", "isaac", "fixtures", "pathtrace",
+                                  "isaac.usda"),
+                     os.path.join(tmp, "native", "drone_flow.usda"))
+        with open(os.path.join(tmp, "native", "VDB", "isaac_000000.vdb"), "wb") as fh:
+            fh.write(b"")
+        scene = os.path.join(tmp, "drone_flow.usda")
+        write_wrapper(scene, "./native/drone_flow.usda", None, "doc")
+        vp = validate_scene(scene, "pathtrace", want_drone=False)
+        assert vp["ok"] is True, vp
+        assert vp["volumes"] == 0 and vp["volume_meshes"] == 1, vp
+        assert vp["drone_meshes"] == 0, vp
+        assert validate_scene(scene, "pathtrace", want_drone=True)["ok"] is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _run_vdb(npz, out, man, log_path):
-    """T8: the vdb writer under Isaac Sim's own Python (never Blender - the
-    Blender-bundled openvdb writes file format 225, which Isaac refuses)."""
-    cmd = [ISAAC_PYTHON, os.path.join(REPO, "tools", "drone", "isaac_vdb.py"),
-           "--npz", npz, "--out", out, "--manifest", man]
-    with open(log_path, "wb") as log:
-        return subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT)
+_T8_TEXT = chr(10).join([
+    "volume of t at time 1: 192 cells; fields U, wake (of U, wake)",
+    "  lattice 80 x 40 x 2 of h = 0.05 (requested 0.05, coarsen 1): 6400 voxels, "
+    "6400 fluid, 0 gap-filled; fluid fraction 1",
+    "  lattice built in 0.000 s",
+    "  freestream: median U.x over the 80 fluid voxels of the xMax lattice plane "
+    "(i = 79) = 1.75; |median - Ux|/|Ux| = 0.75 against Ux = 1",
+    "output.visualisation.isaac: optical depth held from this write on: range "
+    "[0.0, 0.19], D = 3.200263157894737 m (tau = 2.0), at t = 1 s (SPEC-LIT 117.9)",
+    "  wrote t/out/VDB/isaac_000000.vdb",
+    "  wrote t/out/isaac.usda",
+    "  total 0.0 s",
+    ""])
 
 
 def _t8():
-    tmp = tempfile.mkdtemp(prefix="drone-isaac-t8-")
-    try:
-        npz = os.path.join(tmp, "l.npz")
-        lo = np.array([-0.5, 0.25, 1.0])
-        a = np.arange(60, dtype=np.float32).reshape(3, 4, 5)
-        np.savez(npz, lo=lo, voxel=np.float64(0.1),
-                 dims=np.array([3, 4, 5], dtype=np.int64),
-                 grids=np.array(["a", "b", "z"]), a=a, b=-a,
-                 z=np.zeros((3, 4, 5), dtype=np.float32))
-        man = os.path.join(tmp, "m.json")
-        log = os.path.join(tmp, "w.log")
-        rc = _run_vdb(npz, os.path.join(tmp, "o.vdb"), man, log)
-        if rc != 0:
-            tail = open(log, encoding="utf-8", errors="replace").read()[-2000:]
-        assert rc == 0, "isaac_vdb.py exited " + str(rc) + chr(10) + tail
-        with open(man, encoding="utf-8") as fh:
-            d = json.load(fh)
-        assert [g["name"] for g in d["grids"]] == ["a", "b", "z"], d["grids"]
-        want_last = (-0.3, 0.55, 1.4)
-        for g in d["grids"]:
-            assert int(g["active_voxels"]) == 60, g
-            assert float(g["roundtrip_max_abs"]) == 0.0, g
-            wf = [float(v) for v in g["world_first"]]
-            wl = [float(v) for v in g["world_last"]]
-            for i in range(3):
-                assert abs(wf[i] - float(lo[i])) < 1e-9, (g["name"], wf)
-                assert abs(wl[i] - want_last[i]) < 1e-9, (g["name"], wl)
-        assert int(d["bytes"]) > 0 and d["openvdb"] == "isaac-omni.volume", d
-        assert int(d["file_version"]) == VDB_MAX_FILE_VERSION, d
-        assert isinstance(d["library_version"], list) and d["library_version"], d
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    rep = parse_sample_report(_T8_TEXT)
+    assert rep["n"] == [80, 40, 2] and rep["voxel"] == 0.05, rep
+    assert rep["n_voxels"] == 6400 and rep["n_fluid"] == 6400, rep
+    assert rep["fluid_frac"] == 1.0, rep
+    fs = rep["freestream"]
+    assert fs["plane"] == "80 fluid voxels of the xMax lattice plane (i = 79)", fs
+    assert fs["median_Ux"] == 1.75 and fs["rel_err"] == 0.75, fs
+    assert rep["held"]["range"] == [0.0, 0.19], rep
+    assert rep["held"]["D"] == 3.200263157894737 and rep["held"]["tau"] == 2.0, rep
+    assert rep["density_zero"] is False, rep
+    assert rep["wrote"] == ["t/out/VDB/isaac_000000.vdb", "t/out/isaac.usda"], rep
+    nofree = chr(10).join(l for l in _T8_TEXT.splitlines() if "freestream" not in l)
+    boxed = _T8_TEXT.replace(
+        "  lattice 80 x 40 x 2 of h = 0.05 (requested 0.05, coarsen 1): 6400 voxels, "
+        "6400 fluid, 0 gap-filled; fluid fraction 1",
+        "  uniform Cartesian box 8 x 6 x 4: the cells are the voxels")
+    for bad in (nofree, boxed):
+        code = 0
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                parse_sample_report(bad)
+        except SystemExit as exc:
+            code = int(exc.code or 0)
+        assert code == 2, code
+        assert "refused: DI-SAMPLE" in buf.getvalue(), buf.getvalue()
+    d0 = parse_sample_report(_T8_TEXT.replace(
+        "output.visualisation.isaac: optical depth held from this write on: range "
+        "[0.0, 0.19], D = 3.200263157894737 m (tau = 2.0), at t = 1 s (SPEC-LIT 117.9)",
+        "output.visualisation.isaac: D = 0 at t = 1 s - writing an all-zero density "
+        "grid (SPEC-LIT 117.9)"))
+    assert d0["held"] is None and d0["density_zero"] is True, d0
 
 
 def _t9():
-    lat = {"lo": [0.0, 0.0, 0.0], "last": [2.0, 2.0, 2.0], "voxel": 0.4,
-           "dims": [6, 6, 6], "n_voxels": 216}
-    grids = [{"name": n, "active_voxels": 216, "roundtrip_max_abs": 0.0,
-              "world_first": [0.0, 0.0, 0.0], "world_last": [2.0, 2.0, 2.0]}
-             for n in GRIDS]
-    ex = {"lattice": lat, "grids": grids, "fluid_frac": 0.95,
-          "freestream": {"plane": "xMax lattice plane, i = nx-1",
-                         "median_Ux": -14.9, "rel_err": 0.01},
+    lat = {"lo": [0.0, 0.0, 0.0], "hi": [2.4, 2.4, 2.4], "voxel": 0.4,
+           "dims": [6, 6, 6], "report_dims": [6, 6, 6],
+           "first": [0.2, 0.2, 0.2], "last": [2.2, 2.2, 2.2],
+           "n_voxels": 216, "n_fluid": 216,
+           "activation": "dense", "expected_active": 216}
+    grids = [{"name": n, "active_voxels": 216, "finite": True,
+              "world_first": [0.2, 0.2, 0.2], "world_last": [2.2, 2.2, 2.2]}
+             for n in sorted(GRIDS + [DENSITY])]
+    ex = {"lattice": lat, "grids": grids,
+          "density": {"tau": 2.0, "max_column": 2.00000001, "rel_err": 5e-9},
+          "fluid_frac": 0.95,
+          "freestream": {"plane": "80 fluid voxels of the xMax lattice plane",
+                         "median_Ux": 1.0, "rel_err": 0.01},
           "scene": {"ok": True, "drone_meshes": 25},
+          "native_check": {"ok": True, "returncode": 0},
           "usd": {"mesh_objects": 25},
           "vdb": {"file_version": 224, "openvdb": "isaac-omni.volume",
                   "library_version": [12, 0, 0]}}
@@ -799,9 +948,6 @@ def _t9():
         assert r["pass"] is False and len(r["failed"]) == 1, r
         return r["failed"][0]
 
-    order = ["G-GRIDS", "G-DENSE", "G-ROUNDTRIP", "G-PLACE", "G-FLUID",
-             "G-FREESTREAM", "G-USD", "G-DRONE", "G-VDBVER"]
-
     def b_grids(e):
         e["grids"][2]["name"] = "zzz"
 
@@ -809,10 +955,10 @@ def _t9():
         e["grids"][1]["active_voxels"] = 5
 
     def b_round(e):
-        e["grids"][0]["roundtrip_max_abs"] = 1e-3
+        e["density"]["rel_err"] = 0.02
 
     def b_place(e):
-        e["grids"][4]["world_last"] = [9.0, 2.0, 2.0]
+        e["grids"][4]["world_last"] = [9.0, 2.2, 2.2]
 
     def b_fluid(e):
         e["fluid_frac"] = 0.5
@@ -821,7 +967,7 @@ def _t9():
         e["freestream"]["rel_err"] = 0.5
 
     def b_usd(e):
-        e["scene"]["ok"] = False
+        e["native_check"]["ok"] = False
 
     def b_drone(e):
         e["usd"]["mesh_objects"] = 24
@@ -829,8 +975,14 @@ def _t9():
     def b_vdb(e):
         e["vdb"]["file_version"] = 225
 
-    for want, fn in zip(order, (b_grids, b_dense, b_round, b_place, b_fluid,
-                                b_free, b_usd, b_drone, b_vdb)):
+    for want, fn in zip(GATE_IDS, (b_grids, b_dense, b_round, b_place, b_fluid,
+                                   b_free, b_usd, b_drone, b_vdb)):
+        got = broken(fn)
+        assert got == want, (want, got)
+    extras = [("G-ROUNDTRIP", lambda e: e["grids"][3].__setitem__("finite", False)),
+              ("G-PLACE", lambda e: e["lattice"].__setitem__("report_dims", [6, 6, 5])),
+              ("G-USD", lambda e: e["scene"].__setitem__("ok", False))]
+    for want, fn in extras:
         got = broken(fn)
         assert got == want, (want, got)
 
@@ -871,8 +1023,11 @@ def _t10():
             ("DI-BLENDER", ["export", "--solve", os.path.join(tmp, "full"), "--geom",
                             os.path.join(tmp, "geom"), "--out", os.path.join(tmp, "o4"),
                             "--blender", os.path.join(tmp, "no-blender.exe")]),
+            ("DI-SAMPLE", ["export", "--solve", os.path.join(tmp, "full"), "--geom",
+                           os.path.join(tmp, "geom"), "--out", os.path.join(tmp, "o5"),
+                           "--sample-exe", os.path.join(tmp, "no-sample.exe")]),
             ("DI-VDB", ["export", "--solve", os.path.join(tmp, "full"), "--geom",
-                        os.path.join(tmp, "geom"), "--out", os.path.join(tmp, "o5"),
+                        os.path.join(tmp, "geom"), "--out", os.path.join(tmp, "o6"),
                         "--vdb-python", os.path.join(tmp, "no-python.exe")]),
         ]
         for code, argv in cases:
@@ -894,19 +1049,136 @@ def _t10():
             shutil.rmtree(real_out, ignore_errors=True)
 
 
+def _t11():
+    tmp = tempfile.mkdtemp(prefix="drone-isaac-t11-")
+    try:
+        gen = os.path.join(tmp, "gen")
+        p = subprocess.run([GENMESH_EXE, "channel", gen, "8", "6", "4",
+                            "-grading", "x=2"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", cwd=REPO)
+        assert p.returncode == 0, (p.returncode, p.stdout[-800:], p.stderr[-800:])
+        gen_pm = os.path.join(gen, "constant", "polyMesh")
+        if not os.path.isfile(os.path.join(gen_pm, "owner")):
+            gen_pm = gen
+        solve = os.path.join(tmp, "solve")
+        pm = os.path.join(solve, "case", "constant", "polyMesh")
+        os.makedirs(pm)
+        for f in ("boundary", "faces", "owner", "neighbour", "points"):
+            shutil.copy2(os.path.join(gen_pm, f), os.path.join(pm, f))
+        with open(os.path.join(solve, "write.json"), "w", encoding="utf-8") as fh:
+            json.dump({"params": {"U_vec": [1.0, 0.0, 0.0]}}, fh)
+        t1 = os.path.join(solve, "case", "1")
+        os.makedirs(t1)
+        n0 = int(PROMO.read_ints(os.path.join(pm, "owner")).max()) + 1
+        assert n0 == 192, n0
+        write_foam_field(os.path.join(t1, "U"),
+                         np.column_stack([1.0 + 0.01 * np.arange(n0, dtype=np.float64),
+                                          np.zeros(n0), np.zeros(n0)]))
+        write_foam_field(os.path.join(t1, "p"), np.zeros(n0))
+        blo, bhi = (0.0, -1.0, 0.0), (4.0, 1.0, 0.1)
+        want_dims = lattice_shape(blo, bhi, 0.05)
+        want_first, want_last = lattice_centres(blo, 0.05, want_dims)
+        assert want_dims == (80, 40, 2), want_dims
+        for profile in PROFILES:
+            _t11_profile(tmp, solve, t1, profile, blo, bhi, want_dims,
+                         want_first, want_last)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _t11_profile(tmp, solve, t1, profile, blo, bhi, want_dims, want_first, want_last):
+    o = os.path.join(tmp, "o_" + profile)
+    n = stage_case(os.path.join(solve, "case", "constant", "polyMesh"), t1, "1",
+                   os.path.join(o, "case"), np.array([1.0, 0.0, 0.0]))
+    assert n == 192, n
+    cmd = sample_cmd(SAMPLE_EXE, os.path.join(o, "case"), "1", blo, bhi, 0.05,
+                     profile, 2.0, 1.0, os.path.join(o, NATIVE_DIR))
+    rc = _run_writer(cmd, os.path.join(o, "sample.log"), first=True)
+    with open(os.path.join(o, "sample.log"), encoding="utf-8", errors="replace") as fh:
+        log = fh.read()
+    assert rc == 0, (profile, rc, log[-1500:])
+    rep = parse_sample_report(log)
+    assert rep["n"] == [80, 40, 2] == list(want_dims), (profile, rep["n"])
+    assert rep["n_voxels"] == 6400 and rep["n_fluid"] == 6400, (profile, rep)
+    vdbp = os.path.join(o, NATIVE_DIR, "VDB", STEM + "_000000.vdb")
+    native = os.path.join(o, NATIVE_DIR, STEM + ".usda")
+    man = read_vdb(ISAAC_PYTHON, vdbp, want_dims,
+                   os.path.join(o, "vdb_manifest.json"), os.path.join(o, "writers.log"))
+    assert [g["name"] for g in man["grids"]] == sorted(GRIDS + [DENSITY]), \
+        (profile, [g["name"] for g in man["grids"]])
+    for g in man["grids"]:
+        assert int(g["active_voxels"]) == 6400, (profile, g["name"])
+        assert g["finite"] is True, (profile, g["name"])
+        for i in range(3):
+            assert abs(float(g["world_first"][i]) - want_first[i]) < 1e-9, \
+                (profile, g["name"], g["world_first"])
+            assert abs(float(g["world_last"][i]) - want_last[i]) < 1e-9, \
+                (profile, g["name"], g["world_last"])
+    mc = float([g for g in man["grids"] if g["name"] == DENSITY][0]["max_column"])
+    assert abs(mc - 2.0) <= DEPTH_TOL * 2.0, (profile, mc)
+    assert int(man["file_version"]) <= VDB_MAX_FILE_VERSION, man["file_version"]
+    chk = run_usda_check(native, profile)
+    assert chk["ok"] is True, (profile, chk)
+    sc = os.path.join(o, SCENE_NAME)
+    write_wrapper(sc, "./" + NATIVE_DIR + "/" + STEM + ".usda", None, "doc")
+    v = validate_scene(sc, profile, want_drone=False)
+    assert v["ok"] is True, (profile, v)
+
+
+def _t12():
+    tmp = tempfile.mkdtemp(prefix="drone-isaac-t12-")
+    try:
+        pm = os.path.join(tmp, "pm")
+        os.makedirs(pm)
+
+        def labels(name, values):
+            path = os.path.join(pm, name)
+            lines = ["FoamFile", "{", "    version 2.0;", "    format ascii;",
+                     "    class labelList;", "    object " + name + ";", "}",
+                     "", str(len(values)), "("]
+            lines += [str(int(v)) for v in values]
+            lines += [")", ""]
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write("".join(line + chr(10) for line in lines))
+
+        labels("owner", [0, 0, 1])
+        labels("neighbour", [1, 2])
+        assert PROMO.read_ints(os.path.join(pm, "owner")).tolist() == [0, 0, 1], \
+            "owner layout not parsed by PROMO.read_ints"
+        assert PROMO.read_ints(os.path.join(pm, "neighbour")).tolist() == [1, 2], \
+            "neighbour layout not parsed by PROMO.read_ints"
+        for f in ("boundary", "faces", "points"):
+            with open(os.path.join(pm, f), "w", encoding="utf-8", newline="") as fh:
+                fh.write("dummy" + chr(10))
+        t1 = os.path.join(tmp, "1")
+        os.makedirs(t1)
+        write_foam_field(os.path.join(t1, "U"),
+                         [[1, 0, 0], [2, 0, 0], [4, 0, 0]])
+        write_foam_field(os.path.join(t1, "p"), np.zeros(3))
+        out_case = os.path.join(tmp, "out_case")
+        n = stage_case(pm, t1, "1", out_case, (1, 0, 0))
+        assert n == 3, n
+        wake = read_foam_scalar(os.path.join(out_case, "1", WAKE), 3)
+        assert wake.tolist() == [0.0, 1.0, 3.0], wake.tolist()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def selftest():
-    """R9: T1-T10, CPU only (T8 drives tools/drone/isaac_vdb.py under Isaac
-    Sim's own Python); temp files only under tempfile.mkdtemp()."""
+    """T1-T12; T11 drives rust/target/release/ofgpu-sample.exe,
+    ofgpu-generate-mesh.exe and tools/drone/isaac_vdb.py under Isaac Sim's
+    own Python. Temp files only under tempfile.mkdtemp()."""
     tests = [("T1", _t1), ("T2", _t2), ("T3", _t3), ("T4", _t4), ("T5", _t5),
-             ("T6", _t6), ("T7", _t7), ("T8", _t8), ("T9", _t9), ("T10", _t10)]
+             ("T6", _t6), ("T7", _t7), ("T8", _t8), ("T9", _t9), ("T10", _t10),
+             ("T11", _t11), ("T12", _t12)]
     npass = 0
     for name, fn in tests:
         try:
             fn()
             print("[ok] " + name, flush=True)
             npass += 1
-        except Exception as exc:
-            print("[FAIL] " + name + ": " + str(exc), flush=True)
+        except (Exception, SystemExit) as exc:   # a refuse() inside a test fails that test only
+            print("[FAIL] " + name + ": " + type(exc).__name__ + " " + str(exc), flush=True)
     if npass == len(tests):
         print("SELFTEST PASS " + str(npass) + "/" + str(len(tests)), flush=True)
         return 0
@@ -928,8 +1200,12 @@ def main(argv=None):
     ep.add_argument("--box", default=",".join(str(v) for v in BOX_DEFAULT))
     ep.add_argument("--blender", default=BLENDER)
     ep.add_argument("--vdb-python", default=ISAAC_PYTHON)
+    ep.add_argument("--profile", choices=PROFILES, default="index")
+    ep.add_argument("--tau", type=float, default=TAU_DEFAULT)
+    ep.add_argument("--sample-exe", default=SAMPLE_EXE)
     vp = sub.add_parser("validate")
     vp.add_argument("--scene", required=True)
+    vp.add_argument("--profile", choices=PROFILES, default="index")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
@@ -943,3 +1219,21 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -30,7 +30,18 @@ loads after its DLL directories are set up; without either the tool refuses
 DI-VDB and exits 2. At interpreter exit the omni.volume nanobind prints
 "leaked function" lines on stderr - harmless, the exit code stays 0.
 
---selftest runs V1-V2. V1 needs an openvdb module: on a plain Python
+--read FILE --dims nx,ny,nz --manifest JSON reads a written .vdb back the
+way Isaac's own reader sees it: readAll returns the grids SORTED BY NAME
+(not in file order), and each one is copied dense into a dims array and
+measured into the manifest - active_voxels, the world positions of the
+first and last voxel centres, the voxel size, finiteness, min/max, and
+max_column, the largest h * sum over any lattice column along any axis
+((117.11) of SPEC-LIT 117.9: for the density grid, the optical depth of
+the densest column). This
+is the read half of tools/drone/isaac_export.py's G-ROUNDTRIP: the file is
+judged as the consumer will open it, under the same openvdb Isaac uses.
+
+--selftest runs V1-V3. V1 needs an openvdb module: on a plain Python
 without one the tool refuses, which is the point.
 """
 
@@ -173,6 +184,52 @@ def write_vdb(npz_path, out_path, manifest_path):
           + source + ", file format " + str(man["file_version"]) + ")", flush=True)
 
 
+def read_vdb(path, dims, manifest_path):
+    """Read one .vdb the way Isaac's reader sees it: grids sorted by name,
+    each copied dense into a (dims) float32 array and measured - active
+    voxels, world first/last voxel centres, voxel size, finite, min, max,
+    and max_column = max over axes k of vs[k] * sum(axis=k).max(), the
+    optical depth of the densest column along that axis."""
+    vdb, source = load_openvdb()
+    dims = [int(v) for v in dims]
+    loaded = vdb.readAll(str(path))[0]
+    byname = {str(g.name): g for g in loaded}
+    per = []
+    for name in sorted(byname):
+        g = byname[name]
+        a = np.zeros(tuple(dims), dtype=np.float32)
+        g.copyToArray(a, ijk=(0, 0, 0))
+        vs = g.transform.voxelSize()
+        af = a.astype(np.float64)
+        per.append({
+            "name": name,
+            "active_voxels": int(g.activeVoxelCount()),
+            "world_first": [float(v) for v in g.transform.indexToWorld((0, 0, 0))],
+            "world_last": [float(v) for v in g.transform.indexToWorld(
+                (dims[0] - 1, dims[1] - 1, dims[2] - 1))],
+            "voxel_size": [float(vs[0]), float(vs[1]), float(vs[2])],
+            "finite": bool(np.isfinite(af).all()),
+            "min": float(a.min()),
+            "max": float(a.max()),
+            "max_column": max(float(vs[k]) * float(af.sum(axis=k).max())
+                              for k in range(3)),
+        })
+    try:
+        lib = [int(v) for v in vdb.LIBRARY_VERSION]
+    except (AttributeError, TypeError):
+        lib = None
+    man = {"file": str(path).replace(os.sep, "/"),
+           "bytes": int(os.path.getsize(path)),
+           "dims": dims, "openvdb": source, "library_version": lib,
+           "file_version": vdb_file_version(path),
+           "grids": per}
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, indent=2)
+    print("[isaac_vdb] read " + str(path) + " (" + str(len(per)) + " grids, openvdb "
+          + source + ")", flush=True)
+    return man
+
+
 # ---------------------------------------------------------------- selftest
 
 def _v1():
@@ -217,9 +274,36 @@ def _v2():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _v3():
+    """read_vdb on the V1 lattice: one grid `a`, active 8, finite, values
+    0..7, the transform's first/last voxel centres, and the densest
+    column's optical depth, a[1,1,0] + a[1,1,1] = 6 + 7 = 13.0, exactly."""
+    tmp = tempfile.mkdtemp(prefix="isaac-vdb-v3-")
+    try:
+        npz = os.path.join(tmp, "tiny.npz")
+        np.savez(npz, lo=np.zeros(3, dtype=np.float64), voxel=np.float64(1.0),
+                 dims=np.array([2, 2, 2], dtype=np.int64), grids=np.array(["a"]),
+                 a=np.arange(8, dtype=np.float32).reshape(2, 2, 2))
+        vdb_path = os.path.join(tmp, "tiny.vdb")
+        write_vdb(npz, vdb_path, os.path.join(tmp, "w.json"))
+        d = read_vdb(vdb_path, (2, 2, 2), os.path.join(tmp, "r.json"))
+        assert [g["name"] for g in d["grids"]] == ["a"], d
+        g = d["grids"][0]
+        assert int(g["active_voxels"]) == 8, g
+        assert g["finite"] is True, g
+        assert float(g["min"]) == 0.0 and float(g["max"]) == 7.0, g
+        wf, wl = g["world_first"], g["world_last"]
+        for i in range(3):
+            assert abs(float(wf[i]) - 0.0) < 1e-12, (g, wf)
+            assert abs(float(wl[i]) - 1.0) < 1e-12, (g, wl)
+        assert float(g["max_column"]) == 13.0, g["max_column"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def selftest():
-    """V1-V2; V1 loads an openvdb module or the tool refuses (exit 2)."""
-    tests = [("V1", _v1), ("V2", _v2)]
+    """V1-V3; V1 loads an openvdb module or the tool refuses (exit 2)."""
+    tests = [("V1", _v1), ("V2", _v2), ("V3", _v3)]
     npass = 0
     for name, fn in tests:
         try:
@@ -241,10 +325,19 @@ def main(argv=None):
     ap.add_argument("--npz")
     ap.add_argument("--out")
     ap.add_argument("--manifest")
+    ap.add_argument("--read")
+    ap.add_argument("--dims")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
+    if args.read or args.dims:
+        missing = [f for f in ("read", "dims", "manifest") if not getattr(args, f)]
+        if missing:
+            _die("needs --read --dims --manifest, missing: " + ", ".join(missing))
+        dims = tuple(int(v) for v in str(args.dims).split(","))
+        read_vdb(args.read, dims, args.manifest)
+        return 0
     missing = [f for f in ("npz", "out", "manifest") if not getattr(args, f)]
     if missing:
         _die("needs --npz --out --manifest, missing: " + ", ".join(missing))

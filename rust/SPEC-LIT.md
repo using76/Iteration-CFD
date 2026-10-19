@@ -39159,6 +39159,38 @@ fluid fraction against the 0.999906 of §117.1 (within 1e-3) and the free-stream
   `-freestream` that is zero or not finite, with no `volVectorField U`, or with no fluid voxel
   on the plane; and an unknown argument.
 
+**As built (VIO-11).** `tools/drone/isaac_export.py` (`drone-isaac/2`) now drives this path and
+no longer resamples in Python. The code makes these choices where the plan's row leaves room.
+
+- **The staged case.** The tool copies the solve's polyMesh, `U` and `p` under `--out/case` and
+  writes one more `volScalarField`, `wake = |U - U_inf| / |U_inf|`, per cell. That is a derived
+  cell field, not a resampling. The Isaac block is `{profile, field: wake, scaling: opticalDepth,
+  tau}` (`tau` 2 by default, §117.9), and the lattice block is `{voxel, box}` (0.01 m on the
+  drone box, so 180 x 120 x 120 voxels by (117.1) of SPEC-LIT 117.3). The profile sets the
+  activation (D1 of §117.9). One export writes one profile.
+- **The cell count.** The tool counts `max(owner, neighbour) + 1` cells. A cell whose faces are all
+  owned by lower-numbered cells appears only in `neighbour`. On the box-sphere example the old
+  rule, `max(owner) + 1`, gave 15 375 of 15 376 cells, and the field read was refused.
+- **The read-back.** `tools/drone/isaac_vdb.py --read` opens the written `.vdb` with Isaac Sim's own
+  OpenVDB module (file format 224). Its `readAll` lists the grids sorted by name, not in file
+  order. Each grid is copied dense and its column sums are taken as in (117.11) of SPEC-LIT 117.9.
+- **The nine gates.** The ids are unchanged, and five are re-read on the native outputs.
+  `G-GRIDS`: the names are `U.x U.y U.z U.mag p wake density`, compared as a set.
+  `G-DENSE`: every grid's active count is the activation's, `n_fluid` for `index` and
+  `n_voxels` for `pathtrace` (§117.6). `G-ROUNDTRIP`: every grid is finite, and the density's
+  densest column is within 1 % of `tau` as Isaac's reader reads it (VIO-09's bar). `G-PLACE`: the
+  printed lattice shape is (117.1)'s, and the first and last voxel centres are (117.2)'s within
+  1e-9 m. `G-USD`: the wrapper scene checks out, and `tools/isaac/usda_check.py` passes on the
+  native scene. `G-FLUID`, `G-FREESTREAM` (0.05, this tool's bar, not VIO-06's 0.005), `G-DRONE`
+  and `G-VDBVER` are as before.
+- **The wrapper scene.** `drone_flow.usda` sublayers the native scene, references the Blender
+  drone at `/World/Drone`, and makes the native `Mesh "boundary"` invisible. The boundary of
+  §117.12 includes the far-field patches, which enclose the cameras. Enclosed, the cameras see
+  the inside of the box, unlit by the dome and distant lights.
+- **Probing it.** `tools/isaac/probe.py` must be given `--profile`. Its `auto` reads only the root
+  layer's text, and the volume prim lives in the sublayer, so `auto` refuses the wrapper.
+  `--box` is the lattice box.
+
 ### 117.12 The boundary surface, and what is refused
 
 **The true face polygons (VIO-07).** When the raw mesh is available,
@@ -39345,6 +39377,11 @@ Tolerances follow docs/17 §5.1.4 and D-F32-1: an R-class row has
 | VIO-09 | the round trip (`writer::tests::isaac_density_round_trip`): one write of the 2:1 lattice at `h` = 1/24, field `smoke`, read back and re-measured at the stored precision | `F32`: densest column 2.0000000149, relative error 7.451e-9; `F16`: densest column 1.9993286133, relative error 3.357e-4; both bars 1 %. The other grids keep `VdbWriter::new`'s values bit for bit | this unit |
 | VIO-09 | the fixtures (`tests/isaac_profile.rs`, both builds): `build_writers_isaac` on the 2:1 mesh, `h` = 1/8 on the default box (8 x 8 x 8), compared byte for byte with `tools/isaac/fixtures/<profile>/`; and `usda_check.py --selftest` (pxr `Usd.Stage.Open`, `UsdVol`, `UsdGeom`, `UsdShade`, `UsdValidation`) | `index` scene 12 860 B, `pathtrace` scene 14 055 B (the `.vdb` each references, 318 359 B, is not kept: the selftest stages each scene with an empty placeholder at that path); the same bytes in both builds; both fixtures pass every check, and the four mutants (a `.nvdb` reference, `fieldName` `rho`, the `upAxis` line gone, `primvars:isVolume` gone) each fail on their own check | this unit |
 | VIO-10 | `python tools/isaac/probe.py --selftest` and `python tools/drone/isaac_probe.py --selftest`, plain Python (no Isaac) | `SELFTEST PASS 10/10` and `SELFTEST PASS 8/8`. P5: on the box `[0, 2]^3` at `theta_v` = 60 deg, `r` = 1.7320508075688772 and `R` = 3.8105117766515306 (117.17), clipping `[0.0381051, 55.4256]`. P6: on the drone lattice box `[-1.2, 0.6] x [-0.6, 0.6] x [-0.8, 0.4]`, the largest angle between a view axis and a box corner is 27.0179 deg, against the bound `asin( sin 30 deg / 1.1 )` = 27.0357 deg and the half-angle 30 deg. P8: `f` = 10.208003814170388 at 1280 x 720 (117.17a), and `theta_v` is recovered as 60 deg to 1e-12 | this unit |
+| VIO-11 | `python tools/drone/isaac_export.py --selftest` and `isaac_vdb.py --selftest` under Isaac Sim's Python. T11 runs end to end on `ofgpu-generate-mesh channel 8 6 4 -grading x=2` (192 cells), with `U_i = (1 + 0.01 i, 0, 0)`, the box `[0, 4] x [-1, 1] x [0, 0.1]` and a voxel of 0.05, for both profiles | `SELFTEST PASS 12/12` and `SELFTEST PASS 3/3`. T11: 80 x 40 x 2 = 6 400 voxels, every one fluid; all seven grids have 6 400 active voxels and are finite, placed within 1e-9 m; the densest column of `density` read back by Isaac's OpenVDB is 2.0000000029802325 (relative 1.5e-9, bar 1 %); file format 224; `usda_check.py` and the wrapper check pass. T12: the cell count on a 3-cell mesh whose last cell is only a neighbour is 3 | this unit |
+| VIO-11 | the drone at `t = 0.5 s`, exported and probed under `index` and `pathtrace` (6 min or less each); VIO-06's drone gate with it | **NOT RUN**. Neither the solve (`write.json`, the polyMesh and the 0.5 directory) nor the PX4 x500 model (`x500_assembled.blend`, `rotors.json`) is on disk. Searched on 2026-10-19 under `C:/Users/sdd32`, `C:/bulc_runs` and `C:/Temp`, after VIO-06 and TET-18 found the same. Re-solving needs the x500 model. The gate stays open | this unit |
+| VIO-11 | the box-sphere stand-in. The automesher example (15 376 cells, snapped, 2 layers), `ofgpu-lowmach` (kEpsilon) 200 iterations from `U = (2, 0, 0)` at the inlet, `wake` from `U_inf = (2, 0, 0)`. The lattice `[3, 9] x [3, 7] x [3, 7]` at 0.04 m, exported through `isaac_export`'s own functions, without the drone | 150 x 100 x 100 = 1 500 000 voxels, 1 435 752 fluid, 3 336 gap-filled, fluid fraction 0.957168. Held range `[0.03075, 1.39495]`, `D` = 2.6045 m. In both profiles: densest column 2.000000005699696 read back (relative 2.8e-9); active 1 435 752 (`index`) and 1 500 000 (`pathtrace`); format 224; the wrapper check and `usda_check.py` pass. Export 1.0 s. Seven of the nine gates pass. `G-DRONE` is not judged, because there is no drone. `G-FREESTREAM` reads 0.0665 against 0.05: here the flow runs in +x, so the xMax plane lies 4 m behind the sphere in its wake (median `U.x` 1.867 against 2). The gate's plane is the drone's upstream plane (`U_inf.x = -15`) and does not apply to this case | this unit |
+| VIO-11 | the box-sphere probe, `index` (`--profile index --box 3 3 3 9 7 7`, 1280 x 720, Isaac Sim 6.0.0-rc.59, RTX 5070 Ti) | **visible**: (117.16) of SPEC-LIT 117.10 holds with 114 498 px changed (12.4 %) against 0 px of re-render noise, `maxdiff` 197. Wall time 2 min 39 s, under 6 min. An earlier run on a hand-made wrapper gave 114 492 px in 4 min 33 s. The frames show the density as opaque, voxel-stepped blocks, with the lattice box's far faces lit. It does not render as a translucent fog | this unit |
+| VIO-11 | the box-sphere probe, `pathtrace` (the same flags with `--profile pathtrace`) | **MISSED: the volume does not render.** The rule (117.16) of SPEC-LIT 117.10 evaluates true: 921 600 px changed (100 %), 0 px of noise. But frame `a` of `front34` and `back34` is black everywhere (mean 0), and `side` is the uniform background (227-228). Isaac warns three times that `Material parameter 'volume_density_texture' (Type: '3D') was assigned an incompatible texture`. A density-only copy of the `.vdb` (one grid, rewritten by Isaac's OpenVDB) gives the same warning and the same frames. Wall time 33 s (29 s for the copy). The verdict is a false positive: a black frame `a` satisfies (117.15)-(117.16), which never ask whether `a` rendered | this unit |
 
 **As built (VIO-01).** The code makes these choices where the text above leaves room, and none changes (117.6). The index range of pass 1's step 2 is widened by one voxel on each side, so the rounding of `(B - lo)/h` can never drop a voxel; (117.5) decides, and `K_v` of pass 2 compares `x_v` with the closed box directly. Pass 2 decides every gap voxel before it assigns any. The `h'` of (117.3) is found per axis by bisection on `m` (the fitting `m` are a prefix) and the minimum over the three axes is taken, which is the candidate the increasing-order search returns. `VoxelMap::build` takes `raw.points` as world coordinates; the shift of §117.2 item 4 is added by the unit that merges F32-10's local origin with this map. The L-prism rows show the limit of pass 2's boundary-face condition: with the notch solid, the two arms of the L are not filled either, because the re-entrant faces are then boundary faces.
 
