@@ -79,6 +79,20 @@ pub struct JsonVent {
     /// `noSlip` (default) | `slip`: U on the membrane while closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall: Option<String>,
+    /// SPEC-LIT §158.10: named pressure probes. Absent is every case this
+    /// reader has built; present, each probe is the cell nearest its point
+    /// ([`probe_cells`]) and the driver records that cell's gauge pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<Vec<JsonProbe>>,
+}
+
+/// One `vent.probes[]` entry (SPEC-LIT §158.10): a name made of
+/// `[A-Za-z0-9_]` and a world point in m.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonProbe {
+    pub name: String,
+    pub point: [f64; 3],
 }
 
 /// U on the membrane while it is closed (SPEC-LIT §158.1).
@@ -104,11 +118,72 @@ pub struct VentSpec {
     pub select: VentSelect,
     pub p_stat: f64,
     pub wall: MembraneWall,
+    /// SPEC-LIT §158.10: the lowered `vent.probes`, in the case's order;
+    /// empty when the block states none.
+    pub probes: Vec<VentProbe>,
+}
+
+/// A lowered `vent.probes[]` entry (SPEC-LIT §158.10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VentProbe {
+    pub name: String,
+    pub point: DVec3,
 }
 
 /// A `vent.<key>` refusal naming the key and the value it saw (§158.8).
 fn vent_refused(key: &str, value: impl std::fmt::Display, why: &str) -> Error {
     Error::Refused(format!("vent.{key}: {value} - {why} (SPEC-LIT §158.8)"))
+}
+
+/// A `vent.probes` refusal naming the key, the probe (its name or index) and
+/// the value it saw (SPEC-LIT §158.10). [`vent_refused`] hard-codes §158.8.
+fn probe_refused(which: impl std::fmt::Display, value: impl std::fmt::Display, why: &str) -> Error {
+    Error::Refused(format!("vent.probes: {which}: {value} - {why} (SPEC-LIT §158.10)"))
+}
+
+/// Lower `vent.probes` (SPEC-LIT §158.10): `Ok(empty)` when the block states
+/// none; refused, naming the key and the probe, for an empty list, a name
+/// that is empty, repeated or not made only of `[A-Za-z0-9_]`, and a point
+/// with a non-finite coordinate.
+fn lower_probes(probes: Option<&Vec<JsonProbe>>) -> Result<Vec<VentProbe>> {
+    let Some(list) = probes else { return Ok(Vec::new()) };
+    if list.is_empty() {
+        return Err(Error::Refused(
+            "vent.probes: [] - is an empty probe list: state a probe or drop the key \
+             (SPEC-LIT §158.10)"
+                .into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for (i, p) in list.iter().enumerate() {
+        if p.name.is_empty() {
+            return Err(probe_refused(format!("probe {i}"), "\"\"", "has an empty name"));
+        }
+        if !p.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("\"{}\"", p.name),
+                "a name is made only of [A-Za-z0-9_]",
+            ));
+        }
+        if !seen.insert(p.name.as_str()) {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("\"{}\"", p.name),
+                "the name is repeated - each probe has its own",
+            ));
+        }
+        if !p.point.iter().all(|v| v.is_finite()) {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("{:?}", p.point),
+                "is not a finite point",
+            ));
+        }
+        out.push(VentProbe { name: p.name.clone(), point: DVec3::new(p.point[0], p.point[1], p.point[2]) });
+    }
+    Ok(out)
 }
 
 impl JsonVent {
@@ -147,7 +222,8 @@ impl JsonVent {
                 return Err(vent_refused("wall", format!("\"{w}\""), "is neither `noSlip` nor `slip`"));
             }
         };
-        Ok(VentSpec { normal, select, p_stat: self.p_stat, wall })
+        let probes = lower_probes(self.probes.as_ref())?;
+        Ok(VentSpec { normal, select, p_stat: self.p_stat, wall, probes })
     }
 
     /// The disc route, once both keys are present.
@@ -639,6 +715,101 @@ impl VentTrigger {
             )));
         }
         Ok(VentReading { p_in, p_out, dp })
+    }
+}
+
+// ==========================================================================
+//  The probes (SPEC-LIT §158.10)
+// ==========================================================================
+
+/// The cell each probe reads (SPEC-LIT §158.10): the cell whose WORLD centre,
+/// `hm.origin + hm.geom64().c[i]` in f64, is nearest the probe's point; a tie
+/// goes to the lowest id. A point outside the axis-aligned box of the world
+/// boundary-face centres (`hm.origin + hm.geom64().b_cf[j]`) is refused,
+/// naming `vent.probes` and the probe - [`HostMesh`] keeps no points, and on a
+/// box mesh this box is the mesh's own.
+pub fn probe_cells(hm: &HostMesh, probes: &[VentProbe]) -> Result<Vec<usize>> {
+    let g = hm.geom64();
+    let Some(&first) = g.b_cf.first() else {
+        return Err(Error::Refused(
+            "vent.probes: the mesh has no boundary face, so it has no box to place a probe in \
+             (SPEC-LIT §158.10)"
+                .into(),
+        ));
+    };
+    let (mut lo, mut hi) = (hm.origin + first, hm.origin + first);
+    for &b in g.b_cf.iter() {
+        let w = hm.origin + b;
+        lo = lo.cmpt_min(w);
+        hi = hi.cmpt_max(w);
+    }
+    let mut out = Vec::with_capacity(probes.len());
+    for p in probes {
+        let q = p.point;
+        let inside = q.x >= lo.x
+            && q.x <= hi.x
+            && q.y >= lo.y
+            && q.y <= hi.y
+            && q.z >= lo.z
+            && q.z <= hi.z;
+        if !inside {
+            return Err(Error::Refused(format!(
+                "vent.probes: probe \"{}\" at ({} {} {}) - lies outside the box of the mesh's \
+                 boundary-face centres, ({} {} {}) to ({} {} {}) (SPEC-LIT §158.10)",
+                p.name, q.x, q.y, q.z, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+            )));
+        }
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for i in 0..hm.n_cells {
+            let d = ((hm.origin + g.c[i]) - q).mag_sqr();
+            // Strictly less: a tie keeps the lowest id.
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        out.push(best);
+    }
+    Ok(out)
+}
+
+/// The probes' pressure gather (SPEC-LIT §158.10): `presGather`, exactly as
+/// [`VentTrigger`] launches it, collects the gauge pressure at the probes'
+/// cells and `read` returns them widened to f64, in probe order.
+pub struct VentProbes {
+    gather: CudaFunction,
+    cells: DevBuf<Label>,
+    out: DevBuf<Scalar>,
+    n: usize,
+}
+
+impl VentProbes {
+    pub fn new(gpu: &Gpu, cells: &[usize]) -> Result<Self> {
+        let gather = KernelSet::new(gpu, crate::kernels::PRESSURE)?.func("presGather")?;
+        Ok(Self {
+            gather,
+            cells: gpu.upload(&(cells.iter().map(|&c| c as Label).collect::<Vec<_>>()))?,
+            out: gpu.zeros(cells.len())?,
+            n: cells.len(),
+        })
+    }
+
+    /// Gather `p` (the gauge p's cell array) at the probes' cells on the
+    /// device, download and widen with `f64::from`, in probe order.
+    pub fn read(&mut self, gpu: &Gpu, p: &DevBuf<Scalar>) -> Result<Vec<f64>> {
+        let m = self.n as Label;
+        let f = self.gather.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.out)
+                .arg(p)
+                .arg(&self.cells)
+                .arg(&m)
+                .launch(cfg_for(self.n))?;
+        }
+        Ok(gpu.download(&self.out)?.into_iter().map(f64::from).collect())
     }
 }
 

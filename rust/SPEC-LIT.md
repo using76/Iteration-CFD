@@ -63524,6 +63524,103 @@ rule, a vent, or a non-Euler ddt is refused (DST-11 joins the vent). D7: `Mach` 
 the mixture's.
 
 Labels: (158.5)-(158.7).
+
+### 158.10 Gate DST-REMBE's case side as built (DST-11 part 1)
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Nothing here is physics: the
+relations below are the PLACEHOLDER vessel's geometry definitions.
+
+**Gate DST-REMBE stays NAMED and NOT RUN** (§158.7): H22 publishes no vessel geometry (§151.7
+item 9), and this tree does not invent one. Part 1 builds the case side on a labelled
+PLACEHOLDER that is never compared with data: `src/io/case_json.rs` (`mesh.kind: "polymesh"`),
+`src/dust/vent.rs` (`vent.probes`), `src/dust/gatemesh.rs` (the vessel generator),
+`cases/dust/rembeVented.geometry.json` (the placeholder's parameters), and the tests
+`tests/case_polymesh.rs` and `tests/dust_rembe_mesh.rs` (host, both builds) and two rows
+appended to `tests/shared/dust_vent_cases.rs`. No kernel and no existing numeric path changed.
+
+**A case on a polyMesh.** `mesh.kind: "polymesh"` with `mesh.path`, the directory holding
+`constant/polyMesh` (a relative path resolves against the case file's directory, which
+`read_case_jsonc` records as `JsonCase::base_dir`; an absolute one is used as is). `lower()`
+reads it once, before the sector and block routes run; the file's patch names in file order are
+the case's patch names, each governed by a `patches` rule (the block route's matching and
+unmatched-name refusal), its type string `patch_class(rule.kind)` and its kind from that string.
+`LoweredCase::poly_mesh` carries it (`None` for every other case); `build_raw_mesh` and
+`build_host_mesh` return it about the global origin, `block` stays the default and `windows`
+empty. Refused by key with (SPEC-LIT §158.10): `mesh.bounds`, `mesh.cells`, `mesh.boundaries`,
+`mesh.regions`, `mesh.grading`, `mesh.cyclic`, `mesh.wedge` and `mesh.sector` beside
+`"polymesh"`; a `motion` block; a missing `mesh.path`; a directory without a readable polyMesh
+(the reader's error behind `mesh.path: <dir>:`); a patch cyclic in the file (`mesh.path`); a patch
+a `wedge` rule governs (`patches`). A cartesian case must state `bounds`, `cells` and
+`boundaries` (each refused by name when absent, `mesh.path` refused beside it) and lowers,
+serialises and builds exactly as before; the schema now requires only `mesh.kind`.
+
+**The probes.** `vent.probes`, a list of `{ name, point }` (name of `[A-Za-z0-9_]`, unique; point
+finite; an empty list refused), lowers onto `VentSpec::probes`. `probe_cells` takes the cell
+whose world centre `origin + c` is nearest in f64 (a tie to the lowest id) and refuses a point
+outside the box of the world boundary-face centres; `VentProbes` gathers the gauge p at those
+cells with `presGather`, as `VentTrigger` does, and widens with `f64::from`.
+
+**The placeholder vessel.** An 11.5 m3 right circular cylinder, L/D = 2, flat ends, a 0.2 m
+wall, the 0.5 m2 vent centred on the front end, in the full-width outside box
+`[0, 15.5] x [-5, 5] x [0, 6.355]` (no symmetry plane). With V = `vessel.volume`, lambda =
+`lengthOverDiameter`, t = `shell`, A_v = `vent.area`, X_m = `ventPlaneX`, h_b =
+`domain.baseSize`, N = `segments` and x_lo/x_hi = `domain.extent[0]`/`[1]`:
+
+```
+  D = (4 V / (pi lambda))^(1/3),   R = D/2,   L = lambda D                          (158.10a)
+  r_v = (A_v / pi)^(1/2)                                                            (158.10b)
+  x1 = X_m - t/2  (inner face of the vented front end),  x0 = x1 - L  (inner face of the back end);
+  the axis is y = axisY, z = axisZ along +x;  in_cavity(p):  x0 < p.x < x1  and  |(p.y-axisY, p.z-axisZ)| < R  (158.10c)
+  n = max(1, round((x_hi - x_lo)/h_b)),  h0 = (x_hi - x_lo)/n,  i = round((X_m - x_lo)/h0),
+  plane = x_lo + i h0,  h_f = h0 / 2^level                                          (158.10d)
+  A(rho) = (N/2) rho^2 sin(2 pi / N)          (area of the N-gon of circumradius rho)
+  V_solid = A(R+t) (L+2t) - A(R) L - A(r_v) t                                       (158.10e)
+```
+
+`vessel_stl` writes the wall shell with the vent hole as one closed, outward-oriented ASCII STL
+of N-gon rings (outer side, back outer disc, front outer annulus, inner side, inner back disc,
+inner front annulus, vent side; 12 N facets, every vertex from one function so a shared vertex
+prints the same `{:.17e}` text). `membrane_plane` returns the plane of (158.10d) and refuses, in
+order: `vessel.ventPlaneX` off the base grid by more than 1e-9 (x_hi - x_lo), `vessel.ventPlaneX`
+outside `(x1 + h_f/2, x1 + t - h_f/2)`, `vessel.shell` when t < 2 h_f, and `domain.extent`
+unless the shell's bounding box lies inside the extent with one h_b of margin on every side (the
+automesher's stage-0 rule). `automesher_config` is the W4 supervisor's verified castellation-only
+config (`-stopAfter castellate`, staircase walls, so the membrane plane's faces stay planar; 29,662
+cells), with the seed point at `(x_lo + 0.9137 dx, y_lo + 0.5137 dy, z_lo + 0.5137 dz)` in the
+open air. `seal_reach` walks the cells reachable from a seed through internal faces not in the
+membrane. `parse_vessel_geometry` refuses by key a non-positive or non-finite volume,
+lengthOverDiameter, shell, vent area, baseSize, band or outerBand, `segments < 8`, `level < 1`,
+`outerLevel > level`, an extent pair with hi <= lo, an empty, repeated or non-finite probe, and a
+vent with r_v >= R.
+
+**Gates, measured 2026-10-20** (host, both builds; the probe read on the GPU).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `a_polymesh_case_builds_the_mesh_it_names` | a 4x3x2 box written as a polyMesh and named by `mesh.path`, against the cartesian case | equal counts, names, kinds, types; bitwise V and C | D | holds | holds |
+| `polymesh_refusals_name_the_key` | every refusal above | key and §158.10 named | D | holds | holds |
+| `placeholder_dims` | R 0.970873525930309, L 3.883494103721236, r_v 0.3989422804014327, x1 5.325, x0 1.4415058962787644; plane 5.425; P1, P2 at the quarter points and in the cavity | 1e-14 relative (plane 1e-12) | A | holds | holds |
+| `vessel_stl_is_closed_and_oriented` | each directed edge once and its reverse once; signed volume against V_solid = 6.82925363456151 m3 | 1e-12 relative | A | holds | holds |
+| `automesher_config_reads_back`, `generator_refusals`, `seal_reach_on_a_block` | the config through `read_config_str`; five refusals by key; the 4x1x1 walk | bitwise seed; key named; exact | D | hold | hold |
+| `vent_probes_lower_and_refuse`, `vent_probes_read_their_cells` | the probe block's refusals; nearest cell, ties, origin, the box; the gather | key named; bitwise f64::from(p[cell]) | D | hold | hold |
+
+**NOT RUN, with their reasons.** The R-run of §158.7 (no REMBE geometry). Its two prerequisites,
+recorded for when the geometry is obtained: H22's 0.06 bar initial overpressure needs a
+non-uniform initial p, which DST-10's driver refuses for a dust case (§158.9); and H22's
+half-by-symmetry box cannot come from the automesher's stage-0 margin rule, so the placeholder
+box is full width. Parts 2 and 3 of DST-11 (the driver beside a vent, the probe series, the mass
+budget, `cases/dust/rembeVented.jsonc` and the validate gate with its REDUCED smoke) follow.
+
+**Decisions (TAKEN, by recommendation).** D1: the W4 supervisor's mesh (castellation only,
+29,662 cells), the closed 0.2 m wall shell with the vent cut through, the membrane plane x = 5.425
+on a base-grid plane and `mesh.kind: "polymesh"` with `mesh.path` stand. D2: a probe is the
+nearest cell centre, not an interpolation. D3: the vent radius must stay below R (a refusal the
+row did not list, kept). D4: the studio's pick-list of mesh kinds follows the regenerated schema
+in lane G (a hand-off; its pinned `['cartesian']` gains `polymesh`).
+
+Labels: (158.10a)-(158.10e).
+
 ---
 
 ## 159. Phase B — reacting parcels, char, the cloud, two-way coupling, particle radiation, and its gates

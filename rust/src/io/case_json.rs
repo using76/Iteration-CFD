@@ -150,6 +150,11 @@ pub struct JsonCase {
     /// refuses the case by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vent: Option<crate::dust::vent::JsonVent>,
+    /// SPEC-LIT §158.10: the directory of the case FILE, which a relative
+    /// `mesh.path` resolves against. Set by [`read_case_jsonc`]; `None` from
+    /// [`read_case_jsonc_str`] and never serialised.
+    #[serde(skip)]
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 /// One `sources[]` entry - SPEC-LIT §18's registry, reached from JSONC.
@@ -310,18 +315,30 @@ impl JsonMotion {
 #[serde(rename_all = "lowercase")]
 pub enum MeshKind {
     Cartesian,
+    /// SPEC-LIT §158.10: the mesh is a polyMesh read from disk
+    /// (`mesh.path`), not one the reader builds from `bounds`, `cells` and
+    /// `boundaries`.
+    Polymesh,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct JsonBounds {
     pub min: [f64; 3],
     pub max: [f64; 3],
 }
 
+impl JsonBounds {
+    /// True exactly for the all-zero default - what `mesh.bounds` is when the
+    /// case does not state it (SPEC-LIT §158.10).
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Which patch each of the six box faces belongs to, `-x +x -y +y -z +z` -
 /// [`crate::blockgen::BlockSpec`]'s own slot order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct JsonBoundaries {
     pub xmin: String,
@@ -330,6 +347,21 @@ pub struct JsonBoundaries {
     pub ymax: String,
     pub zmin: String,
     pub zmax: String,
+}
+
+impl JsonBoundaries {
+    /// True exactly for the default, six empty strings - what
+    /// `mesh.boundaries` is when the case does not state it (SPEC-LIT
+    /// §158.10).
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// True for the all-zero `mesh.cells` - what it is when the case does not
+/// state it (SPEC-LIT §158.10).
+fn cells_unset(c: &[u32; 3]) -> bool {
+    *c == [0, 0, 0]
 }
 
 /// A rectangular window carved out of one box face, replacing the
@@ -358,9 +390,17 @@ pub enum JsonShape {
 #[serde(deny_unknown_fields)]
 pub struct JsonMesh {
     pub kind: MeshKind,
+    /// Required with `kind: "cartesian"`, refused with `"polymesh"`
+    /// (SPEC-LIT §158.10); absent reads as the all-zero default.
+    #[serde(default, skip_serializing_if = "JsonBounds::is_unset")]
     pub bounds: JsonBounds,
-    /// Cell counts along `x, y, z`.
+    /// Cell counts along `x, y, z`. Required with `kind: "cartesian"`,
+    /// refused with `"polymesh"` (SPEC-LIT §158.10).
+    #[serde(default, skip_serializing_if = "cells_unset")]
     pub cells: [u32; 3],
+    /// Required with `kind: "cartesian"`, refused with `"polymesh"`
+    /// (SPEC-LIT §158.10).
+    #[serde(default, skip_serializing_if = "JsonBoundaries::is_unset")]
     pub boundaries: JsonBoundaries,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<JsonRegion>,
@@ -400,6 +440,13 @@ pub struct JsonMesh {
     /// exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sector: Option<JsonSector>,
+    /// SPEC-LIT §158.10: with `kind: "polymesh"`, the directory that holds
+    /// `constant/polyMesh` (the `constant` or `polyMesh` directory itself is
+    /// accepted too). A relative path resolves against the case file's
+    /// directory; an absolute path is used as is. Refused with
+    /// `kind: "cartesian"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// [`JsonMesh::wedge`]'s one entry - SPEC-LIT 119.3. `angle` is the FULL
@@ -1565,7 +1612,11 @@ fn jsonc_to_serde(v: jsonc_parser::JsonValue) -> Result<serde_json::Value> {
 /// just what.
 pub fn read_case_jsonc(path: &Path) -> Result<JsonCase> {
     let text = std::fs::read_to_string(path).path(path)?;
-    read_case_jsonc_str(&text, &path.display().to_string())
+    let mut case = read_case_jsonc_str(&text, &path.display().to_string())?;
+    // SPEC-LIT §158.10: a relative `mesh.path` resolves against the file's
+    // own directory.
+    case.base_dir = path.parent().map(Path::to_path_buf);
+    Ok(case)
 }
 
 /// [`read_case_jsonc`] on text already in memory - what a test that writes
@@ -1853,6 +1904,13 @@ pub struct LoweredCase {
     /// overrides an earlier one where their boxes overlap. Empty for every
     /// case without the block.
     pub initial_regions: Vec<LoweredInitialRegion>,
+    /// SPEC-LIT §158.10: the polyMesh `mesh.kind: "polymesh"` names, read
+    /// once in [`JsonCase::lower`] with its patches' type strings set from
+    /// the case's rules. `None` for every other case - then
+    /// [`Self::block`] is the mesh's spec, as it always was; for a polymesh
+    /// case [`Self::block`] stays [`BlockSpec::default`] and
+    /// [`Self::windows`] stays empty.
+    pub poly_mesh: Option<crate::io::polymesh::PolyMeshRaw>,
 }
 
 /// One lowered `initial.regions` entry (SPEC-LIT 125.8.1): the cell-centre
@@ -1947,6 +2005,10 @@ impl LoweredCase {
     /// are the builder's; the map reads the faces and points only, in the
     /// mesh's own face order.
     pub fn build_raw_mesh(&self) -> Result<crate::io::polymesh::PolyMeshRaw> {
+        // SPEC-LIT §158.10: a polymesh case's mesh is the file it named.
+        if let Some(raw) = &self.poly_mesh {
+            return Ok(raw.clone());
+        }
         match (&self.wedge, &self.sector) {
             (None, None) => crate::blockgen::raw_mesh(&self.block),
             (Some(w), _) => crate::blockgen::raw_wedge_mesh(w),
@@ -1964,6 +2026,11 @@ impl LoweredCase {
     /// writes no patch on the axis, so the `xmin` name stands for no patch
     /// and no lowered field carries a boundary entry under it.
     pub fn build_host_mesh(&self) -> Result<crate::mesh::HostMesh> {
+        // SPEC-LIT §158.10: the polyMesh the case named, about the GLOBAL
+        // origin as the block route builds it (not `build_host_mesh_local`).
+        if let Some(raw) = &self.poly_mesh {
+            return crate::io::polymesh::build_host_mesh(raw);
+        }
         let Some(w) = &self.wedge else {
             if let Some(s) = &self.sector {
                 // SPEC-LIT 157.3: the sector mesh; the case's own patch
@@ -2457,7 +2524,15 @@ fn validate_wedge_rules(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<()
 }
 
 fn build_block(mesh: &JsonMesh, patches: &[JsonPatchRule]) -> Result<(BlockSpec, Vec<WindowRegionSpec>)> {
-    let MeshKind::Cartesian = mesh.kind;
+    // SPEC-LIT §158.10: a polymesh case never reaches here (`JsonCase::lower`
+    // takes the polyMesh route first); this guard is the type's own answer.
+    if mesh.kind == MeshKind::Polymesh {
+        return Err(Error::Config(
+            "mesh.kind: \"polymesh\" has no block to build - the mesh is the polyMesh \
+             mesh.path names (SPEC-LIT §158.10)"
+                .to_string(),
+        ));
+    }
 
     validate_constraint_rules(patches)?;
     validate_wedge_rules(mesh, patches)?;
@@ -2795,6 +2870,142 @@ fn sector_spec_of(
         ],
         patch_type: [class(1)?, class(2)?, class(3)?, class(4)?, class(5)?],
     }))
+}
+
+/// A `mesh.*` refusal of SPEC-LIT §158.10, naming its key.
+fn mesh_kind_refused(key: &str, detail: String) -> Error {
+    Error::Config(format!("{key}: {detail} (SPEC-LIT §158.10)"))
+}
+
+/// SPEC-LIT §158.10: the case's `mesh.kind`, checked BEFORE `sector_spec_of`
+/// or `build_block` runs. `Ok(None)` for a cartesian case that states its
+/// `bounds`, `cells` and `boundaries` (and no `path`) - it then lowers exactly
+/// as before. For `"polymesh"` the polyMesh `mesh.path` names is read ONCE,
+/// every patch's type string is set from the case's rule for its name
+/// (`patch_class`), and the raw mesh comes back; everything a polyMesh cannot
+/// take from a case is refused here by key.
+fn polymesh_of(case: &JsonCase) -> Result<Option<crate::io::polymesh::PolyMeshRaw>> {
+    let mesh = &case.mesh;
+    match mesh.kind {
+        MeshKind::Cartesian => {
+            if mesh.bounds.is_unset() {
+                return Err(mesh_kind_refused(
+                    "mesh.bounds",
+                    "required with mesh.kind \"cartesian\"".to_string(),
+                ));
+            }
+            if cells_unset(&mesh.cells) {
+                return Err(mesh_kind_refused(
+                    "mesh.cells",
+                    "required with mesh.kind \"cartesian\"".to_string(),
+                ));
+            }
+            if mesh.boundaries.is_unset() {
+                return Err(mesh_kind_refused(
+                    "mesh.boundaries",
+                    "required with mesh.kind \"cartesian\"".to_string(),
+                ));
+            }
+            if let Some(p) = &mesh.path {
+                return Err(mesh_kind_refused(
+                    "mesh.path",
+                    format!(
+                        "\"{p}\" names a polyMesh, which is read only with mesh.kind \
+                         \"polymesh\" - a cartesian case builds its own mesh"
+                    ),
+                ));
+            }
+            Ok(None)
+        }
+        MeshKind::Polymesh => {
+            let stated = |key: &str| {
+                mesh_kind_refused(
+                    key,
+                    "stated beside mesh.kind \"polymesh\" - the mesh is the polyMesh \
+                     mesh.path names, with its own geometry, cells and patches"
+                        .to_string(),
+                )
+            };
+            if !mesh.bounds.is_unset() {
+                return Err(stated("mesh.bounds"));
+            }
+            if !cells_unset(&mesh.cells) {
+                return Err(stated("mesh.cells"));
+            }
+            if !mesh.boundaries.is_unset() {
+                return Err(stated("mesh.boundaries"));
+            }
+            if !mesh.regions.is_empty() {
+                return Err(stated("mesh.regions"));
+            }
+            if mesh.grading.is_some() {
+                return Err(stated("mesh.grading"));
+            }
+            if !mesh.cyclic.is_empty() {
+                return Err(stated("mesh.cyclic"));
+            }
+            if mesh.wedge.is_some() {
+                return Err(stated("mesh.wedge"));
+            }
+            if mesh.sector.is_some() {
+                return Err(stated("mesh.sector"));
+            }
+            if case.motion.is_some() {
+                return Err(mesh_kind_refused(
+                    "motion",
+                    "a moving mesh beside mesh.kind \"polymesh\" is refused - the motion \
+                     path moves a block mesh's points"
+                        .to_string(),
+                ));
+            }
+            let Some(stated_path) = &mesh.path else {
+                return Err(mesh_kind_refused(
+                    "mesh.path",
+                    "required with mesh.kind \"polymesh\"".to_string(),
+                ));
+            };
+            let given = Path::new(stated_path);
+            let dir = match (&case.base_dir, given.is_absolute()) {
+                (Some(base), false) => base.join(given),
+                _ => given.to_path_buf(),
+            };
+            let mut raw = crate::io::polymesh::read_poly_mesh(&dir).map_err(|e| {
+                mesh_kind_refused("mesh.path", format!("{}: {e}", dir.display()))
+            })?;
+            validate_constraint_rules(&case.patches)?;
+            for p in &mut raw.patches {
+                if p.nbr_patch.is_some()
+                    || p.kind == crate::mesh::PatchKind::Cyclic
+                    || p.type_name.starts_with("cyclic")
+                {
+                    return Err(mesh_kind_refused(
+                        "mesh.path",
+                        format!(
+                            "{}: patch \"{}\" is cyclic in the file - no `patches` rule \
+                             can say cyclic, so a cyclic polyMesh is not read",
+                            dir.display(),
+                            p.name
+                        ),
+                    ));
+                }
+                let rule = resolve_patch_rule(&case.patches, &p.name)?;
+                if rule.kind == PatchPresetKind::Wedge {
+                    return Err(mesh_kind_refused(
+                        "patches",
+                        format!(
+                            "rule \"{}\" has kind \"wedge\" and governs polyMesh patch \
+                             \"{}\" - a wedge rule is for mesh.wedge's mesh, and a \
+                             polyMesh has no wedge sides to state",
+                            rule.pattern, p.name
+                        ),
+                    ));
+                }
+                p.type_name = patch_class(rule.kind).to_string();
+                p.kind = crate::mesh::PatchKind::from_type(&p.type_name);
+            }
+            Ok(Some(raw))
+        }
+    }
 }
 
 // ------------------------------------------------------------ cyclic pairs
@@ -3508,6 +3719,11 @@ impl JsonCase {
         // `SectorSpec` and owns the mesh when it is present. Its refusal
         // list runs BEFORE any mesh is built, so a sector case answers for
         // itself and not as a box (or a wedge) first.
+        //
+        // SPEC-LIT §158.10: the mesh KIND is answered before either: a
+        // cartesian case must state its bounds, cells and boundaries, and a
+        // polymesh case reads the polyMesh it names, once, here.
+        let poly_mesh = polymesh_of(self)?;
         let sector = sector_spec_of(&self.mesh, &self.patches)?;
         if sector.is_some() && self.motion.is_some() {
             return Err(Error::Config(
@@ -3516,7 +3732,13 @@ impl JsonCase {
                     .to_string(),
             ));
         }
-        let (block, windows) = build_block(&self.mesh, &self.patches)?;
+        // SPEC-LIT §158.10: a polymesh case has no block - its patches are
+        // the file's, and `build_block` is the cartesian route's.
+        let (block, windows) = if poly_mesh.is_some() {
+            (BlockSpec::default(), Vec::new())
+        } else {
+            build_block(&self.mesh, &self.patches)?
+        };
 
         // SPEC-LIT 119.3: `mesh.wedge` lowers onto the 119.0 `WedgeSpec`
         // (`None` for every case without it), and a moving mesh on a wedge
@@ -3807,7 +4029,12 @@ impl JsonCase {
             ));
         }
 
-        let mut names = mesh_patch_names(&block);
+        // SPEC-LIT §158.10: a polymesh case's patch names are the file's, in
+        // file order; every other case's are the block's.
+        let mut names = match &poly_mesh {
+            Some(raw) => raw.patches.iter().map(|p| p.name.clone()).collect(),
+            None => mesh_patch_names(&block),
+        };
         // SPEC-LIT 119.3: on a wedge PIPE (`bounds.min[0] == 0`) the 119.0
         // mesh writes no patch on the axis - the `xmin` name stands for no
         // patch, so no lowered field may carry a boundary entry under it.
@@ -4152,6 +4379,7 @@ impl JsonCase {
             cloud,
             vent,
             initial_regions,
+            poly_mesh,
         })
     }
 }
@@ -7393,6 +7621,7 @@ mod tests {
             radius: Some(0.2),
             faces: None,
             wall: None,
+            probes: None,
         });
         let low = case.lower().expect("a vent case on a box lowers");
         let v = low.vent.as_ref().expect("the block lowers onto a spec");

@@ -55,6 +55,9 @@ cases/*
 !cases/dust/
 cases/dust/*
 !cases/dust/*.jsonc
+# docs/17 DST-11: the placeholder vessel's parameter file (SPEC-LIT 158.10),
+# read by tests/dust_rembe_mesh.rs, is a case definition too.
+!cases/dust/*.geometry.json
 # docs/17 CHR-02b: the mechanism folder's README (SPEC-LIT 129.6). Only the
 # README is tracked: GRI-Mech 3.0 and DRM19 have no redistribution grant, so a
 # copy a user downloads into this folder must stay untracked.

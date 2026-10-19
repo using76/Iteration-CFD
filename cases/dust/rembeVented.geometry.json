@@ -1,0 +1,7 @@
+{ "placeholder": true,
+  "label": "PLACEHOLDER - not the REMBE vessel: H22 publishes no dimensions (SPEC-LIT 151.7 item 9). An 11.5 m3 right circular cylinder, L/D = 2, flat ends, a 0.2 m wall, the 0.5 m2 vent centred on the front end, in a full-width outside box (no symmetry plane); never compared.",
+  "vessel": { "volume": 11.5, "lengthOverDiameter": 2.0, "shell": 0.2, "axisY": 0.0, "axisZ": 3.0, "ventPlaneX": 5.425, "segments": 48 },
+  "vent": { "area": 0.5 },
+  "domain": { "extent": [0.0, 15.5, -5.0, 5.0, 0.0, 6.355], "baseSize": 0.775, "level": 3, "band": 0.25, "outerLevel": 2, "outerBand": 1.0 },
+  "probes": [ { "name": "P1", "point": [2.4123794222090735, 0.0, 3.4854367629651546] },
+              { "name": "P2", "point": [4.354126474069691, 0.0, 2.5145632370348454] } ] }
