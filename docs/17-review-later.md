@@ -400,7 +400,7 @@
 
 - server `registry/schema.test` 'merges the enum pick-lists from $defs'
 - server `http/routes.test` 'health, hello, registry and the schema'
-- shared `dc.seed.test` CAP-BUOY 앵커 (`momentum.rs:203` 대신 `:117`, CMP-01이 옮김). **(2026-10-20, G W9 병합 `bf30278`)** 첫 불일치가 이제 CAP-FLOW다 (`gui/shared/src/ontology/seed/dc.capabilities.ts`의 앵커 `simple.rs:823` 대 `:943`). S 레인 PAR-10c가 simple.rs를 옮겼고, 두 부모 모두에서 실패한다. 앵커들을 다시 잡아야 한다 (G 레인 gui). **(2026-10-20, S W6 병합 `fa150be`)** 첫 불일치는 여전히 CAP-FLOW이고 이제 `simple.rs:823` 대 `:948`이다 (S W6가 simple.rs에 줄을 더 넣었다)
+- shared `dc.seed.test` CAP-BUOY 앵커 (`momentum.rs:203` 대신 `:117`, CMP-01이 옮김). **(2026-10-20, G W9 병합 `bf30278`)** 첫 불일치가 이제 CAP-FLOW다 (`gui/shared/src/ontology/seed/dc.capabilities.ts`의 앵커 `simple.rs:823` 대 `:943`). S 레인 PAR-10c가 simple.rs를 옮겼고, 두 부모 모두에서 실패한다. 앵커들을 다시 잡아야 한다 (G 레인 gui). **(2026-10-20, S W6 병합 `fa150be`)** 첫 불일치는 여전히 CAP-FLOW이고 이제 `simple.rs:823` 대 `:948`이다 (S W6가 simple.rs에 줄을 더 넣었다). **해결 (2026-10-20, G W11 GUI-DCSEED `9642c6c`)**: `dc.capabilities.ts`의 앵커 23개 중 낡은 14개를 각 probe 심볼이 지금 가리키는 줄로 다시 잡았다 (CAP-FLOW `simple.rs:948`, CAP-BUOY `momentum.rs:228`, CAP-PSYCHRO, CAP-TURB-DC, refuse_condensation, refuse_wet_bulb_field, CAP-SPECIES, CAP-RADIATION-DC, CAP-CHT, CAP-YPLUS, CAP-FIELDOUT-DC, CAP-TRANSIENT-DC, CAP-SWEEP-DC, CAP-COIL). 줄 번호만 바뀌었고 같은 코드를 가리킨다. server의 corpus gold `spec-lit-52-55.json`이 그중 여섯 앵커를 복사해 지니고 있어 (gold.test가 seed와 비교한다) 같이 고쳤다. shared 156/156, server 1008/1010 (실패는 import.test 221-runs 하나, 1 skipped).
 - `import.test`의 221-runs 케이스 (2026-10-20, W9 병합 `bf30278`과 S W6 병합 `fa150be`에서도 실패)
 
 ---
