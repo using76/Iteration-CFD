@@ -34475,6 +34475,124 @@ measured here, are the absorbing ambient's stratification against walls held at 
 SIMPLE picking an asymmetric state of a symmetric box. Each cure changes the case or the model
 (per-cell `κ`, an open side boundary, a transient run), so none was tried (docs/17 review-later).
 
+**The full `ofgpu-validate` run (docs/17 VAL-82).** The status and gate blocks of `README.md` and `README.en.md`, §11 of both guidebooks, and the two tables below are generated from one full run in each build. `tools/validate_record.py sections` splits a run's `-json` document into its sections by the order of the run's stdout: the `=== ... ===` banners, the `not selected` skip rows, the row lines, which it checks one for one against the document's rows, and the verdict lines, which it checks one for one against the document's gate registry. A section's time is the gap between its banner's time stamp and the next one, stamped as each stdout line arrived. `merge` joins one build's runs. The two build records are `docs/validate-run/f64.json` and `docs/validate-run/single.json`, and the run documents they came from are kept in `docs/validate-run/runs/`. `python tools/validate_record.py check README.en.md README.md docs/GUIDEBOOK.en.md docs/GUIDEBOOK.md rust/SPEC-LIT.md` holds every generated block equal to what the records render, and `--write` regenerates them. A status line counts what the build's runs printed, the four §69 audit rows of each run included.
+
+* **f64.** One unfiltered `ofgpu-validate -json` at HEAD `960bd2a`, on 2026-10-20 from 15:17 to 16:16 local time, 3,533 s, on the RTX 5070 Ti of record with no other lane on the card. It printed `1634/1708 checks passed` and `35 gates carry the verdict MISSES, and 37 the verdict OPEN`. Of its 95 sections 77 hold, 16 miss (43, 70, 71, 74, 76-78, 80-83, 89, 90 and 92-94) and 2 have no rows (56, 58). Its row-class line reads 298 P, 189 A, 388 R and 780 D, and 53 rows still carry no class. The slowest sections were 80 (DST-LEEDS, 960.7 s), 57 (the Ghia cavity, 388.7 s), 61 (CMP-B, 226.8 s), 75 (CMP-OBL, 216.2 s) and 92 (DST-B-LAM, 195.0 s).
+* **single.** An unfiltered run did not fit the unit's card budget of about three hours for both builds: §112.4 had five sections over 600 s each (29, 44, 52, 57 and 61), with no bound above that. So the single build ran as six commands, one after another. `-sections 1-28,30-43,45-51,53-56,58-60,62-95` took 2,612 s and printed `1377/1557 checks passed`, with 40 MISSES and 37 OPEN registrations. Then each of the five sections ran alone under a 900 s cap. Section 29 took 787 s (21 of its 48 rows pass), 52 took 851 s (5 of 16), 57 took 463 s (8 of 8: it holds) and 61 took 375 s (4 of 10). Section 44 (Gate 95-G) reached the cap and is **NOT RUN**: by then it had printed 20 of its rows, 4 of them passing, and none of the outer loops it reached had converged. The five commands that finished took 5,087 s. Together `single` holds 49 sections, misses 43, has no rows in 2 (56, 58) and leaves 1 NOT RUN (44). It passes 1,411 of 1,635 section rows, and its runs registered 42 MISSES and 37 OPEN. The card time of the two builds' records is 9,521 s in all (2.64 h), the 900 s of section 44 included.
+* **Against §112.4.** F32-18 and VAL-81 measured one section per command. Every section has the counts §112.4 records in both builds, with two exceptions, and with the four sections that §112.4 could not finish. Section 58 (Gate 110-A) has no rows here in either build, where §112.4 has 17 of 17. This checkout has no `reference/mkm99/`, so the gate prints OPEN, answer key missing ("Placing a key", above). Section 80 (DST-LEEDS) ran to its end in f64, 18 of 23 rows in 960.7 s, where F32-18's 600 s cap had cut it. Under `single`, sections 29, 52, 57 and 61 now have counts where §112.4 has NOT RUN, and 44 stays NOT RUN at 900 s. The registrations `single` makes and f64 does not are two more of Gate 95-A's cantilever legs, Gates 98-B, 98-C and 100-C, two of Gate 100-B's, and DST-REMBE's. CMP-RING's order row is judged in f64 only (A50), so `single` registers no verdict for it.
+* **The Results table above.** The run printed 110-B's two MISSES (the study is not formed, and class R) and the OPEN verdicts of 110-C and of its leg 2, as the table states them. The table's 110-A verdicts B1-B3 are VAL-51's, taken with the three DNS files in place. This run could not take them again, and it printed OPEN, answer key missing.
+
+<!-- validate-run:status:en begin -->
+```
+ofgpu-validate (f64)   1634 / 1708 checks passed in 95 sections (2026-10-20, one unfiltered run, 3,533 s; SPEC-LIT §110.5)
+                       77 sections hold, 16 miss, 2 have no rows, 0 NOT RUN
+                       then 35 gates registered MISSES and 37 OPEN, named below
+ofgpu-validate (f32)   1431 / 1655 checks passed in 95 sections (2026-10-20, 5 runs, 5,087 s; SPEC-LIT §110.5)
+                       49 sections hold, 43 miss, 2 have no rows, 1 NOT RUN
+                       then 42 gates registered MISSES and 37 OPEN, named below
+```
+<!-- validate-run:status:en end -->
+
+<!-- validate-run:sections:en begin -->
+| # | section | f64 rows | f64 s | f32 rows | f32 s |
+|---|---|---|---|---|---|
+| 1 | 3-D graded block | 71/71 | 0.0 | 71/71 | 0.0 |
+| 2 | 3-D sheared block (non-orthogonal) | 36/36 | 0.0 | 36/36 | 0.0 |
+| 3 | 3-D block with 2:1 refinement interfaces | 35/35 | 0.0 | 35/35 | 0.0 |
+| 4 | the adapt: refine, coarsen, and what a rebuild costs | 34/34 | 1.1 | 34/34 | 1.1 |
+| 5 | 2-D block with empty front and back | 37/37 | 0.0 | 37/37 | 0.0 |
+| 6 | linear solvers | 6/6 | 0.2 | **10/12** | 1.8 |
+| 7 | method of manufactured solutions, -lap(psi) = f | 6/6 | 0.1 | 6/6 | 0.1 |
+| 8 | observed order and reported uncertainty (SPEC-LIT 94) | 10/10 | 0.3 | 10/10 | 0.4 |
+| 9 | buoyancy | 12/12 | 0.0 | **8/12** | 0.0 |
+| 10 | buoyancy production, sources, species, phi I/O | 14/14 | 0.1 | **13/14** | 0.1 |
+| 11 | volume of fluid (SPEC-LIT 20, the 22 rows) | 16/16 | 2.5 | **13/16** | 13.6 |
+| 12 | msh hex closure, cut-cell closure (SPEC-LIT 23, 24) | 10/10 | 0.0 | 10/10 | 0.0 |
+| 13 | the low-Mach reference pressure (SPEC-LIT 25) | 3/3 | 0.0 | 3/3 | 0.0 |
+| 14 | wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29) | 5/5 | 0.0 | 5/5 | 0.0 |
+| 15 | Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30) | 9/9 | 0.1 | 9/9 | 0.2 |
+| 16 | periodic domains: cyclic-pair invariants (SPEC-LIT 31.1) | 4/4 | 0.0 | 4/4 | 0.0 |
+| 17 | the thermal wall-function gate, redesigned (SPEC-LIT 32) | 27/27 | 0.0 | **25/27** | 0.0 |
+| 18 | Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3) | 10/10 | 0.0 | 10/10 | 0.0 |
+| 19 | resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34) | 3/3 | 0.0 | 3/3 | 0.0 |
+| 20 | the bulk-temperature thermostat (SPEC-LIT 35) | 17/17 | 0.0 | 17/17 | 0.0 |
+| 21 | thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2) | 5/5 | 0.0 | 5/5 | 0.0 |
+| 22 | bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5) | 10/10 | 0.0 | 10/10 | 0.0 |
+| 23 | Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2) | 10/10 | 0.0 | **6/10** | 0.0 |
+| 24 | realizable and RNG k-epsilon (SPEC-LIT 40, 41) | 39/39 | 6.0 | **37/39** | 19.7 |
+| 25 | the output block, and fp16 voxels (SPEC-LIT 44, 45) | 22/22 | 0.0 | 22/22 | 0.0 |
+| 26 | conjugate heat transfer (SPEC-LIT 46, 47, 48) | 16/16 | 0.5 | **15/16** | 0.5 |
+| 27 | the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows) | 6/6 | 0.0 | **3/6** | 0.1 |
+| 28 | an equation that lives on a region - Gate 93-A (SPEC-LIT 93) | 8/8 | 0.0 | 8/8 | 0.0 |
+| 29 | the conjugate fluid/solid interface (SPEC-LIT 59, 60) | 48/48 | 182.9 | **21/48** | 786.7 |
+| 30 | surface-to-surface radiation (SPEC-LIT 49, 50, 51) | 47/47 | 2.3 | **45/47** | 0.7 |
+| 31 | fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55) | 83/83 | 0.2 | **81/83** | 0.3 |
+| 32 | Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58) | 43/43 | 0.2 | **39/43** | 0.3 |
+| 33 | gamma-Re_theta transition (SPEC-LIT 88, 89) | 20/20 | 0.0 | **19/20** | 0.0 |
+| 34 | the 2015 gamma transition model (SPEC-LIT 90) | 24/24 | 0.1 | **21/24** | 0.1 |
+| 35 | Lagrangian parcels (SPEC-LIT 66) | 11/11 | 0.2 | 11/11 | 0.1 |
+| 36 | the parcel sort and gather-shaped deposition (SPEC-LIT 67) | 12/12 | 0.0 | 12/12 | 0.0 |
+| 37 | two-way coupling of the dispersed phase (SPEC-LIT 68) | 13/13 | 2.7 | 13/13 | 2.6 |
+| 38 | droplet heating and evaporation (SPEC-LIT 76) | 12/12 | 1.5 | **9/12** | 1.1 |
+| 39 | the vapour into the gas (SPEC-LIT 77) | 14/14 | 1.4 | **13/14** | 1.4 |
+| 40 | droplet-wall impact (SPEC-LIT 78) | 45/45 | 1.7 | **42/45** | 11.3 |
+| 41 | Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10) | 6/6 | 3.9 | **3/6** | 81.1 |
+| 42 | Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments) | 3/3 | 163.7 | 3/3 | 442.3 |
+| 43 | Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (four meshes each, the tip study on the finest three, SPEC-LIT 109.6) | **36/42** | 86.5 | **4/42** | 335.2 |
+| 44 | Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (LE1 and LE11 three meshes, the ring and LE10 four with their study on the finest three, SPEC-LIT 95.11) | 24/24 | 50.4 | NOT RUN | - |
+| 45 | the imported region (SPEC-LIT 97) | 5/5 | 0.1 | 5/5 | 0.1 |
+| 46 | the region layout (SPEC-LIT 97) | 3/3 | 0.0 | 3/3 | 0.1 |
+| 47 | Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6) | 1/1 | 0.1 | 1/1 | 0.1 |
+| 48 | Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6) | 4/4 | 0.0 | **3/4** | 0.0 |
+| 49 | Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9) | 5/5 | 12.0 | **2/5** | 183.9 |
+| 50 | Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4) | 5/5 | 0.0 | **4/5** | 0.0 |
+| 51 | Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8) | 4/4 | 0.2 | **0/1** | 0.3 |
+| 52 | Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15) | 16/16 | 27.4 | **5/16** | 850.7 |
+| 53 | Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15) | 11/11 | 91.6 | **0/1** | 0.3 |
+| 54 | Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5) | 10/10 | 0.1 | 10/10 | 0.1 |
+| 55 | Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10) | 14/14 | 20.4 | **8/14** | 41.1 |
+| 56 | Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14) | - | 0.0 | - | 0.0 |
+| 57 | lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D) | 8/8 | 388.7 | 8/8 | 462.8 |
+| 58 | Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2) | - | 0.0 | - | 0.0 |
+| 59 | Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3) | 1/1 | 0.0 | 1/1 | 0.0 |
+| 60 | Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4) | 17/17 | 0.0 | 17/17 | 0.0 |
+| 61 | Gate CMP-B: de Vahl Davis with Boussinesq at beta*dT = 0.03, centro-symmetry, and the density-ratio control (SPEC-LIT 121.8) | 13/13 | 226.8 | **4/10** | 374.6 |
+| 62 | Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3) | 5/5 | 54.4 | 5/5 | 216.3 |
+| 63 | Gate 145-A: the dam break against Martin & Moyce 1952 Table 2, three meshes (SPEC-LIT 145.2) | 9/9 | 79.8 | 9/9 | 84.5 |
+| 64 | Gate 78-D measured leg: the two splash criteria against Riboux & Gordillo 2014's threshold speeds, eight liquids (SPEC-LIT 146.2) | 2/2 | 0.0 | 2/2 | 0.0 |
+| 65 | Gate 132-L: the laminar flat plate against Blasius, three meshes (SPEC-LIT 144.2) | 7/7 | 52.7 | 7/7 | 24.2 |
+| 66 | T3A leg 1 in 2-D: the leading-edge Tu of kOmegaSSTLM and kOmegaSSTGamma on the flat-plate harness, three meshes, replayed (SPEC-LIT 144.3) | 6/6 | 0.0 | 6/6 | 0.0 |
+| 67 | Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) of kOmegaSSTLM and kOmegaSSTGamma against Roach & Brierley's T3A measurement, replayed (SPEC-LIT 144.4) | 4/4 | 0.0 | 4/4 | 0.0 |
+| 68 | Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5) | 5/5 | 0.0 | 5/5 | 0.0 |
+| 69 | Gate 131-P: TG0's turbulent pipe, kOmegaSST on the true wedge against Prandtl, Blasius, the log law and the core defect, three radial levels, replayed (SPEC-LIT 143.5) | 13/13 | 0.0 | 13/13 | 0.0 |
+| 70 | Gate CMP-SOD: Sod's shock tube against the exact Riemann solution, three meshes (SPEC-LIT 127.6) | **3/9** | 34.5 | **3/9** | 40.5 |
+| 71 | Gate CMP-AC: a small acoustic pulse travels at c_0 = sqrt(gamma R_s T_0), 400 cells (SPEC-LIT 127.6) | **1/2** | 21.7 | **1/2** | 27.8 |
+| 72 | Gate CMP-LM: the lid-driven cavity at Re 100, lid M 0.05, against Ghia (1982) (SPEC-LIT 127.6) | 3/3 | 27.8 | 3/3 | 27.0 |
+| 73 | Gate CMP-COU: compressible Couette with viscous heating, adiabatic-wall rise and T profile (SPEC-LIT 127.6) | 3/3 | 63.4 | 3/3 | 56.5 |
+| 74 | Gate CMP-NOZ: the quasi-1-D nozzle, subsonic, supersonic started and shocked, 200 cells (SPEC-LIT 127.6) | **1/7** | 89.5 | **1/7** | 101.5 |
+| 75 | Gate CMP-OBL: the oblique shock on a 10-degree ramp at M 2, 90 x 60 cells (SPEC-LIT 127.6) | 3/3 | 216.2 | 3/3 | 217.4 |
+| 76 | Gate CMP-RING: Ringleb's transonic flow on three meshes, h, h/2, h/4 (SPEC-LIT 127.6) | **3/4** | 128.1 | 3/3 | 129.8 |
+| 77 | Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras against AR-138, a live coarse smoke and the three recorded C-meshes, replayed (SPEC-LIT 127.6) | **2/13** | 48.4 | **0/13** | 0.7 |
+| 78 | Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17) | **2/5** | 0.0 | **2/5** | 0.0 |
+| 79 | Gate 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to ERCOFTAC's measured Tu(x), onset ordering and spread, replayed (SPEC-LIT 144.7) | 14/14 | 0.0 | 14/14 | 0.0 |
+| 80 | Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb, S_t,b against Bradley, Chen & Swithenbank 1989 via Huang et al. 2020 Fig. 9 (SPEC-LIT 157.5) | **18/23** | 960.7 | **2/23** | 20.6 |
+| 81 | Gate DST-VES: closed vessels, thin-flame spheres against (157.4) and the REMBE closed stage against Huang et al. 2022 Fig. 10 (SPEC-LIT 157.6) | **7/21** | 107.1 | **0/9** | 61.7 |
+| 82 | Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12) | **0/3** | 0.0 | **0/3** | 0.0 |
+| 83 | Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8) | **1/7** | 0.0 | **1/7** | 0.0 |
+| 84 | Gate 110-C leg 2: the radiating plume, P1 kappa 1.0 1/m, McCaffrey 1979, replayed (SPEC-LIT 110.4) | 2/2 | 0.0 | 2/2 | 0.0 |
+| 85 | Gate CHR-THERMO: NASA-7 thermochemistry of the ten TM-4513 records against TP-2002 Table B1 (SPEC-LIT 128.7) | 111/111 | 0.0 | 111/111 | 0.0 |
+| 86 | Gate CHR-EQ: gas-phase equilibrium by Gibbs minimisation on the TM-4513 fixture against the 40-digit oracle (SPEC-LIT 131.4) | 94/94 | 0.0 | 94/94 | 0.0 |
+| 87 | Gate CHR-ODE: RODAS3 and ROS3 on Robertson and HIRES, and the constant-pressure reactor (SPEC-LIT 132.6, 132.8) | 48/48 | 3.7 | 48/48 | 3.6 |
+| 88 | Gate CHR-EDM: EDM and PaSR, the library and kernel gate of CHR-14, not a driver run (SPEC-LIT 134.5) | 33/33 | 0.0 | 33/33 | 0.0 |
+| 89 | Gate CHR-SLAB: the isothermal grey slab, P1 against its closed form and S8 fvDOM against 1 - 2 E_3 (SPEC-LIT 135.5, 136.7) | **61/63** | 72.8 | **38/41** | 130.6 |
+| 90 | Gate CHR-CUBE: fvDOM with scattering on the slab, and the isothermal cube at 24^3 (SPEC-LIT 136.8) | **53/54** | 49.2 | **53/54** | 44.3 |
+| 91 | Gate CHR-WSGG: the weighted sum of grey gases on the slab, per-gas fvDOM and P1, and the grey mean (SPEC-LIT 136.9) | 33/33 | 15.8 | 33/33 | 20.9 |
+| 92 | Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame against the gas flame of its volatile, the fine-particle limit and the size order (SPEC-LIT 159.11) | **15/16** | 195.0 | **13/16** | 221.1 |
+| 93 | Gate DST-B-VES: the Phase B cloud in a closed 20 L sphere, replayed from its records - the AICC end pressure and the thin-flame half time (SPEC-LIT 159.12) | **11/18** | 0.0 | **11/18** | 0.0 |
+| 94 | Gate 68-C coupled leg: Theobald test 3 through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its records (SPEC-LIT 147.2) | **9/10** | 0.0 | **9/10** | 0.0 |
+| 95 | Gate DST-REMBE: the vented REMBE explosion, key J.3 NOT RUN, and a REDUCED smoke on the PLACEHOLDER vessel (SPEC-LIT 158.7, 158.10) | 9/9 | 35.8 | **7/9** | 42.7 |
+<!-- validate-run:sections:en end -->
+
 ---
 
 ## 111. Device memory — what a cell costs, what the card holds, and the cliff that was a reading
@@ -35215,7 +35333,8 @@ The verdicts:
 **The deferred full run.** The plan's gate is "a deferred long run of `ofgpu-validate` under single exits 0 (R rows
 per D-F32-1)", and it is **MISSED**. The rows above already fail in 32 sections, so an unflagged run under `single`
 exits 1. That run is longer than ten minutes: about 100 minutes here, five sections of it over 600 s each. It was not
-taken, and it is listed for the user's long slot.
+taken, and it is listed for the user's long slot. VAL-82 (§110.5, 2026-10-20) ran four of those five sections to their end
+under `single`, one command each with a 900 s cap: 29 (21 of 48 rows, 787 s), 52 (5 of 16, 851 s), 57 (8 of 8, 463 s) and 61 (4 of 10, 375 s); 44 stayed NOT RUN at the cap.
 
 The misses are those of §118.14's two tables. Where a section was renumbered since then, its row names the gate. The
 new sections hold under `single`, or miss as f64 does: 66-69, 72, 73, 75, 76 and 79 hold, and 70, 71, 74 and 78 miss

@@ -1,0 +1,1770 @@
+{
+ "schema": "ofgpu-validate-record/1",
+ "build": "single",
+ "sources": [
+  {
+   "runId": "v_20261020T071655Z",
+   "startedAt": "2026-10-20T07:16:55.753Z",
+   "gitSha": "960bd2aa7b670dbda2bb900a795ed2c318cace79",
+   "sectionsSpec": "1-28,30-43,45-51,53-56,58-60,62-95",
+   "wallSeconds": 2612.1,
+   "exitCode": 1,
+   "aborted": null,
+   "totals": {
+    "total": 1557,
+    "failures": 180,
+    "skipped": 21,
+    "replayed": 100
+   }
+  },
+  {
+   "runId": "v_20261020T080106Z",
+   "startedAt": "2026-10-20T08:01:06.801Z",
+   "gitSha": "960bd2aa7b670dbda2bb900a795ed2c318cace79",
+   "sectionsSpec": "29",
+   "wallSeconds": 786.7,
+   "exitCode": 1,
+   "aborted": null,
+   "totals": {
+    "total": 52,
+    "failures": 27,
+    "skipped": 94,
+    "replayed": 0
+   }
+  },
+  {
+   "runId": "v_20261020T082913Z",
+   "startedAt": "2026-10-20T08:29:13.840Z",
+   "gitSha": "960bd2aa7b670dbda2bb900a795ed2c318cace79",
+   "sectionsSpec": "52",
+   "wallSeconds": 850.7,
+   "exitCode": 1,
+   "aborted": null,
+   "totals": {
+    "total": 20,
+    "failures": 11,
+    "skipped": 94,
+    "replayed": 0
+   }
+  },
+  {
+   "runId": "v_20261020T084324Z",
+   "startedAt": "2026-10-20T08:43:24.773Z",
+   "gitSha": "960bd2aa7b670dbda2bb900a795ed2c318cace79",
+   "sectionsSpec": "57",
+   "wallSeconds": 462.8,
+   "exitCode": 0,
+   "aborted": null,
+   "totals": {
+    "total": 12,
+    "failures": 0,
+    "skipped": 94,
+    "replayed": 0
+   }
+  },
+  {
+   "runId": "v_20261020T085107Z",
+   "startedAt": "2026-10-20T08:51:07.773Z",
+   "gitSha": "960bd2aa7b670dbda2bb900a795ed2c318cace79",
+   "sectionsSpec": "61",
+   "wallSeconds": 374.6,
+   "exitCode": 1,
+   "aborted": null,
+   "totals": {
+    "total": 14,
+    "failures": 6,
+    "skipped": 95,
+    "replayed": 0
+   }
+  }
+ ],
+ "sectionCount": 95,
+ "sections": [
+  {
+   "n": 1,
+   "title": "3-D graded block",
+   "status": "holds",
+   "checks": 71,
+   "passed": 71,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 2,
+   "title": "3-D sheared block (non-orthogonal)",
+   "status": "holds",
+   "checks": 36,
+   "passed": 36,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 3,
+   "title": "3-D block with 2:1 refinement interfaces",
+   "status": "holds",
+   "checks": 35,
+   "passed": 35,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 4,
+   "title": "the adapt: refine, coarsen, and what a rebuild costs",
+   "status": "holds",
+   "checks": 34,
+   "passed": 34,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 1.1
+  },
+  {
+   "n": 5,
+   "title": "2-D block with empty front and back",
+   "status": "holds",
+   "checks": 37,
+   "passed": 37,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 6,
+   "title": "linear solvers",
+   "status": "misses",
+   "checks": 12,
+   "passed": 10,
+   "failed": 2,
+   "skips": 0,
+   "seconds": 1.8
+  },
+  {
+   "n": 7,
+   "title": "method of manufactured solutions, -lap(psi) = f",
+   "status": "holds",
+   "checks": 6,
+   "passed": 6,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 8,
+   "title": "observed order and reported uncertainty (SPEC-LIT 94)",
+   "status": "holds",
+   "checks": 10,
+   "passed": 10,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.4
+  },
+  {
+   "n": 9,
+   "title": "buoyancy",
+   "status": "misses",
+   "checks": 12,
+   "passed": 8,
+   "failed": 4,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 10,
+   "title": "buoyancy production, sources, species, phi I/O",
+   "status": "misses",
+   "checks": 14,
+   "passed": 13,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 11,
+   "title": "volume of fluid (SPEC-LIT 20, the 22 rows)",
+   "status": "misses",
+   "checks": 16,
+   "passed": 13,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 13.6
+  },
+  {
+   "n": 12,
+   "title": "msh hex closure, cut-cell closure (SPEC-LIT 23, 24)",
+   "status": "holds",
+   "checks": 10,
+   "passed": 10,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 13,
+   "title": "the low-Mach reference pressure (SPEC-LIT 25)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 14,
+   "title": "wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29)",
+   "status": "holds",
+   "checks": 5,
+   "passed": 5,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 15,
+   "title": "Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30)",
+   "status": "holds",
+   "checks": 9,
+   "passed": 9,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.2
+  },
+  {
+   "n": 16,
+   "title": "periodic domains: cyclic-pair invariants (SPEC-LIT 31.1)",
+   "status": "holds",
+   "checks": 4,
+   "passed": 4,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 17,
+   "title": "the thermal wall-function gate, redesigned (SPEC-LIT 32)",
+   "status": "misses",
+   "checks": 27,
+   "passed": 25,
+   "failed": 2,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 18,
+   "title": "Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3)",
+   "status": "holds",
+   "checks": 10,
+   "passed": 10,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 19,
+   "title": "resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 20,
+   "title": "the bulk-temperature thermostat (SPEC-LIT 35)",
+   "status": "holds",
+   "checks": 17,
+   "passed": 17,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 21,
+   "title": "thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2)",
+   "status": "holds",
+   "checks": 5,
+   "passed": 5,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 22,
+   "title": "bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5)",
+   "status": "holds",
+   "checks": 10,
+   "passed": 10,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 23,
+   "title": "Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2)",
+   "status": "misses",
+   "checks": 10,
+   "passed": 6,
+   "failed": 4,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 24,
+   "title": "realizable and RNG k-epsilon (SPEC-LIT 40, 41)",
+   "status": "misses",
+   "checks": 39,
+   "passed": 37,
+   "failed": 2,
+   "skips": 0,
+   "seconds": 19.7
+  },
+  {
+   "n": 25,
+   "title": "the output block, and fp16 voxels (SPEC-LIT 44, 45)",
+   "status": "holds",
+   "checks": 22,
+   "passed": 22,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 26,
+   "title": "conjugate heat transfer (SPEC-LIT 46, 47, 48)",
+   "status": "misses",
+   "checks": 16,
+   "passed": 15,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.5
+  },
+  {
+   "n": 27,
+   "title": "the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows)",
+   "status": "misses",
+   "checks": 6,
+   "passed": 3,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 28,
+   "title": "an equation that lives on a region - Gate 93-A (SPEC-LIT 93)",
+   "status": "holds",
+   "checks": 8,
+   "passed": 8,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 29,
+   "title": "the conjugate fluid/solid interface (SPEC-LIT 59, 60)",
+   "status": "misses",
+   "checks": 48,
+   "passed": 21,
+   "failed": 27,
+   "skips": 0,
+   "seconds": 786.7
+  },
+  {
+   "n": 30,
+   "title": "surface-to-surface radiation (SPEC-LIT 49, 50, 51)",
+   "status": "misses",
+   "checks": 47,
+   "passed": 45,
+   "failed": 2,
+   "skips": 0,
+   "seconds": 0.7
+  },
+  {
+   "n": 31,
+   "title": "fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55)",
+   "status": "misses",
+   "checks": 83,
+   "passed": 81,
+   "failed": 2,
+   "skips": 0,
+   "seconds": 0.3
+  },
+  {
+   "n": 32,
+   "title": "Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58)",
+   "status": "misses",
+   "checks": 43,
+   "passed": 39,
+   "failed": 4,
+   "skips": 0,
+   "seconds": 0.3
+  },
+  {
+   "n": 33,
+   "title": "gamma-Re_theta transition (SPEC-LIT 88, 89)",
+   "status": "misses",
+   "checks": 20,
+   "passed": 19,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 34,
+   "title": "the 2015 gamma transition model (SPEC-LIT 90)",
+   "status": "misses",
+   "checks": 24,
+   "passed": 21,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 35,
+   "title": "Lagrangian parcels (SPEC-LIT 66)",
+   "status": "holds",
+   "checks": 11,
+   "passed": 11,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 36,
+   "title": "the parcel sort and gather-shaped deposition (SPEC-LIT 67)",
+   "status": "holds",
+   "checks": 12,
+   "passed": 12,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 37,
+   "title": "two-way coupling of the dispersed phase (SPEC-LIT 68)",
+   "status": "holds",
+   "checks": 13,
+   "passed": 13,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 2.6
+  },
+  {
+   "n": 38,
+   "title": "droplet heating and evaporation (SPEC-LIT 76)",
+   "status": "misses",
+   "checks": 12,
+   "passed": 9,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 1.1
+  },
+  {
+   "n": 39,
+   "title": "the vapour into the gas (SPEC-LIT 77)",
+   "status": "misses",
+   "checks": 14,
+   "passed": 13,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 1.4
+  },
+  {
+   "n": 40,
+   "title": "droplet-wall impact (SPEC-LIT 78)",
+   "status": "misses",
+   "checks": 45,
+   "passed": 42,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 11.3
+  },
+  {
+   "n": 41,
+   "title": "Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10)",
+   "status": "misses",
+   "checks": 6,
+   "passed": 3,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 81.1
+  },
+  {
+   "n": 42,
+   "title": "Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 442.3
+  },
+  {
+   "n": 43,
+   "title": "Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (four meshes each, the tip study on the finest three, SPEC-LIT 109.6)",
+   "status": "misses",
+   "checks": 42,
+   "passed": 4,
+   "failed": 38,
+   "skips": 0,
+   "seconds": 335.2
+  },
+  {
+   "n": 44,
+   "title": "Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (LE1 and LE11 three meshes, the ring and LE10 four with their study on the finest three, SPEC-LIT 95.11)",
+   "status": "NOT RUN",
+   "reason": "over 900 s: the cap stopped it after 20 of its rows, 4 passing",
+   "checks": 0,
+   "passed": 0,
+   "failed": 0,
+   "skips": 0,
+   "seconds": null
+  },
+  {
+   "n": 45,
+   "title": "the imported region (SPEC-LIT 97)",
+   "status": "holds",
+   "checks": 5,
+   "passed": 5,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 46,
+   "title": "the region layout (SPEC-LIT 97)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 47,
+   "title": "Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6)",
+   "status": "holds",
+   "checks": 1,
+   "passed": 1,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 48,
+   "title": "Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6)",
+   "status": "misses",
+   "checks": 4,
+   "passed": 3,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 49,
+   "title": "Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9)",
+   "status": "misses",
+   "checks": 5,
+   "passed": 2,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 183.9
+  },
+  {
+   "n": 50,
+   "title": "Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4)",
+   "status": "misses",
+   "checks": 5,
+   "passed": 4,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 51,
+   "title": "Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8)",
+   "status": "misses",
+   "checks": 1,
+   "passed": 0,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.3
+  },
+  {
+   "n": 52,
+   "title": "Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15)",
+   "status": "misses",
+   "checks": 16,
+   "passed": 5,
+   "failed": 11,
+   "skips": 0,
+   "seconds": 850.7
+  },
+  {
+   "n": 53,
+   "title": "Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15)",
+   "status": "misses",
+   "checks": 1,
+   "passed": 0,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.3
+  },
+  {
+   "n": 54,
+   "title": "Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5)",
+   "status": "holds",
+   "checks": 10,
+   "passed": 10,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.1
+  },
+  {
+   "n": 55,
+   "title": "Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10)",
+   "status": "misses",
+   "checks": 14,
+   "passed": 8,
+   "failed": 6,
+   "skips": 0,
+   "seconds": 41.1
+  },
+  {
+   "n": 56,
+   "title": "Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14)",
+   "status": "no rows",
+   "checks": 0,
+   "passed": 0,
+   "failed": 0,
+   "skips": 8,
+   "seconds": 0.0
+  },
+  {
+   "n": 57,
+   "title": "lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D)",
+   "status": "holds",
+   "checks": 8,
+   "passed": 8,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 462.8
+  },
+  {
+   "n": 58,
+   "title": "Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2)",
+   "status": "no rows",
+   "checks": 0,
+   "passed": 0,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 59,
+   "title": "Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3)",
+   "status": "holds",
+   "checks": 1,
+   "passed": 1,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 60,
+   "title": "Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4)",
+   "status": "holds",
+   "checks": 17,
+   "passed": 17,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 61,
+   "title": "Gate CMP-B: de Vahl Davis with Boussinesq at beta*dT = 0.03, centro-symmetry, and the density-ratio control (SPEC-LIT 121.8)",
+   "status": "misses",
+   "checks": 10,
+   "passed": 4,
+   "failed": 6,
+   "skips": 1,
+   "seconds": 374.6
+  },
+  {
+   "n": 62,
+   "title": "Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)",
+   "status": "holds",
+   "checks": 5,
+   "passed": 5,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 216.3
+  },
+  {
+   "n": 63,
+   "title": "Gate 145-A: the dam break against Martin & Moyce 1952 Table 2, three meshes (SPEC-LIT 145.2)",
+   "status": "holds",
+   "checks": 9,
+   "passed": 9,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 84.5
+  },
+  {
+   "n": 64,
+   "title": "Gate 78-D measured leg: the two splash criteria against Riboux & Gordillo 2014's threshold speeds, eight liquids (SPEC-LIT 146.2)",
+   "status": "holds",
+   "checks": 2,
+   "passed": 2,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 65,
+   "title": "Gate 132-L: the laminar flat plate against Blasius, three meshes (SPEC-LIT 144.2)",
+   "status": "holds",
+   "checks": 7,
+   "passed": 7,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 24.2
+  },
+  {
+   "n": 66,
+   "title": "T3A leg 1 in 2-D: the leading-edge Tu of kOmegaSSTLM and kOmegaSSTGamma on the flat-plate harness, three meshes, replayed (SPEC-LIT 144.3)",
+   "status": "holds",
+   "checks": 6,
+   "passed": 6,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 67,
+   "title": "Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) of kOmegaSSTLM and kOmegaSSTGamma against Roach & Brierley's T3A measurement, replayed (SPEC-LIT 144.4)",
+   "status": "holds",
+   "checks": 4,
+   "passed": 4,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 68,
+   "title": "Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)",
+   "status": "holds",
+   "checks": 5,
+   "passed": 5,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 69,
+   "title": "Gate 131-P: TG0's turbulent pipe, kOmegaSST on the true wedge against Prandtl, Blasius, the log law and the core defect, three radial levels, replayed (SPEC-LIT 143.5)",
+   "status": "holds",
+   "checks": 13,
+   "passed": 13,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 70,
+   "title": "Gate CMP-SOD: Sod's shock tube against the exact Riemann solution, three meshes (SPEC-LIT 127.6)",
+   "status": "misses",
+   "checks": 9,
+   "passed": 3,
+   "failed": 6,
+   "skips": 0,
+   "seconds": 40.5
+  },
+  {
+   "n": 71,
+   "title": "Gate CMP-AC: a small acoustic pulse travels at c_0 = sqrt(gamma R_s T_0), 400 cells (SPEC-LIT 127.6)",
+   "status": "misses",
+   "checks": 2,
+   "passed": 1,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 27.8
+  },
+  {
+   "n": 72,
+   "title": "Gate CMP-LM: the lid-driven cavity at Re 100, lid M 0.05, against Ghia (1982) (SPEC-LIT 127.6)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 27.0
+  },
+  {
+   "n": 73,
+   "title": "Gate CMP-COU: compressible Couette with viscous heating, adiabatic-wall rise and T profile (SPEC-LIT 127.6)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 56.5
+  },
+  {
+   "n": 74,
+   "title": "Gate CMP-NOZ: the quasi-1-D nozzle, subsonic, supersonic started and shocked, 200 cells (SPEC-LIT 127.6)",
+   "status": "misses",
+   "checks": 7,
+   "passed": 1,
+   "failed": 6,
+   "skips": 0,
+   "seconds": 101.5
+  },
+  {
+   "n": 75,
+   "title": "Gate CMP-OBL: the oblique shock on a 10-degree ramp at M 2, 90 x 60 cells (SPEC-LIT 127.6)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 217.4
+  },
+  {
+   "n": 76,
+   "title": "Gate CMP-RING: Ringleb's transonic flow on three meshes, h, h/2, h/4 (SPEC-LIT 127.6)",
+   "status": "holds",
+   "checks": 3,
+   "passed": 3,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 129.8
+  },
+  {
+   "n": 77,
+   "title": "Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras against AR-138, a live coarse smoke and the three recorded C-meshes, replayed (SPEC-LIT 127.6)",
+   "status": "misses",
+   "checks": 13,
+   "passed": 0,
+   "failed": 13,
+   "skips": 0,
+   "seconds": 0.7
+  },
+  {
+   "n": 78,
+   "title": "Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17)",
+   "status": "misses",
+   "checks": 5,
+   "passed": 2,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 79,
+   "title": "Gate 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to ERCOFTAC's measured Tu(x), onset ordering and spread, replayed (SPEC-LIT 144.7)",
+   "status": "holds",
+   "checks": 14,
+   "passed": 14,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 80,
+   "title": "Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb, S_t,b against Bradley, Chen & Swithenbank 1989 via Huang et al. 2020 Fig. 9 (SPEC-LIT 157.5)",
+   "status": "misses",
+   "checks": 23,
+   "passed": 2,
+   "failed": 21,
+   "skips": 0,
+   "seconds": 20.6
+  },
+  {
+   "n": 81,
+   "title": "Gate DST-VES: closed vessels, thin-flame spheres against (157.4) and the REMBE closed stage against Huang et al. 2022 Fig. 10 (SPEC-LIT 157.6)",
+   "status": "misses",
+   "checks": 9,
+   "passed": 0,
+   "failed": 9,
+   "skips": 0,
+   "seconds": 61.7
+  },
+  {
+   "n": 82,
+   "title": "Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12)",
+   "status": "misses",
+   "checks": 3,
+   "passed": 0,
+   "failed": 3,
+   "skips": 1,
+   "seconds": 0.0
+  },
+  {
+   "n": 83,
+   "title": "Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8)",
+   "status": "misses",
+   "checks": 7,
+   "passed": 1,
+   "failed": 6,
+   "skips": 1,
+   "seconds": 0.0
+  },
+  {
+   "n": 84,
+   "title": "Gate 110-C leg 2: the radiating plume, P1 kappa 1.0 1/m, McCaffrey 1979, replayed (SPEC-LIT 110.4)",
+   "status": "holds",
+   "checks": 2,
+   "passed": 2,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 85,
+   "title": "Gate CHR-THERMO: NASA-7 thermochemistry of the ten TM-4513 records against TP-2002 Table B1 (SPEC-LIT 128.7)",
+   "status": "holds",
+   "checks": 111,
+   "passed": 111,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 86,
+   "title": "Gate CHR-EQ: gas-phase equilibrium by Gibbs minimisation on the TM-4513 fixture against the 40-digit oracle (SPEC-LIT 131.4)",
+   "status": "holds",
+   "checks": 94,
+   "passed": 94,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 87,
+   "title": "Gate CHR-ODE: RODAS3 and ROS3 on Robertson and HIRES, and the constant-pressure reactor (SPEC-LIT 132.6, 132.8)",
+   "status": "holds",
+   "checks": 48,
+   "passed": 48,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 3.6
+  },
+  {
+   "n": 88,
+   "title": "Gate CHR-EDM: EDM and PaSR, the library and kernel gate of CHR-14, not a driver run (SPEC-LIT 134.5)",
+   "status": "holds",
+   "checks": 33,
+   "passed": 33,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 89,
+   "title": "Gate CHR-SLAB: the isothermal grey slab, P1 against its closed form and S8 fvDOM against 1 - 2 E_3 (SPEC-LIT 135.5, 136.7)",
+   "status": "misses",
+   "checks": 41,
+   "passed": 38,
+   "failed": 3,
+   "skips": 0,
+   "seconds": 130.6
+  },
+  {
+   "n": 90,
+   "title": "Gate CHR-CUBE: fvDOM with scattering on the slab, and the isothermal cube at 24^3 (SPEC-LIT 136.8)",
+   "status": "misses",
+   "checks": 54,
+   "passed": 53,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 44.3
+  },
+  {
+   "n": 91,
+   "title": "Gate CHR-WSGG: the weighted sum of grey gases on the slab, per-gas fvDOM and P1, and the grey mean (SPEC-LIT 136.9)",
+   "status": "holds",
+   "checks": 33,
+   "passed": 33,
+   "failed": 0,
+   "skips": 0,
+   "seconds": 20.9
+  },
+  {
+   "n": 92,
+   "title": "Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame against the gas flame of its volatile, the fine-particle limit and the size order (SPEC-LIT 159.11)",
+   "status": "misses",
+   "checks": 16,
+   "passed": 13,
+   "failed": 3,
+   "skips": 1,
+   "seconds": 221.1
+  },
+  {
+   "n": 93,
+   "title": "Gate DST-B-VES: the Phase B cloud in a closed 20 L sphere, replayed from its records - the AICC end pressure and the thin-flame half time (SPEC-LIT 159.12)",
+   "status": "misses",
+   "checks": 18,
+   "passed": 11,
+   "failed": 7,
+   "skips": 1,
+   "seconds": 0.0
+  },
+  {
+   "n": 94,
+   "title": "Gate 68-C coupled leg: Theobald test 3 through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its records (SPEC-LIT 147.2)",
+   "status": "misses",
+   "checks": 10,
+   "passed": 9,
+   "failed": 1,
+   "skips": 0,
+   "seconds": 0.0
+  },
+  {
+   "n": 95,
+   "title": "Gate DST-REMBE: the vented REMBE explosion, key J.3 NOT RUN, and a REDUCED smoke on the PLACEHOLDER vessel (SPEC-LIT 158.7, 158.10)",
+   "status": "misses",
+   "checks": 9,
+   "passed": 7,
+   "failed": 2,
+   "skips": 4,
+   "seconds": 42.7
+  }
+ ],
+ "titles": {
+  "1": "3-D graded block",
+  "2": "3-D sheared block (non-orthogonal)",
+  "3": "3-D block with 2:1 refinement interfaces",
+  "4": "the adapt: refine, coarsen, and what a rebuild costs",
+  "5": "2-D block with empty front and back",
+  "6": "linear solvers",
+  "7": "method of manufactured solutions, -lap(psi) = f",
+  "8": "observed order and reported uncertainty (SPEC-LIT 94)",
+  "9": "buoyancy",
+  "10": "buoyancy production, sources, species, phi I/O",
+  "11": "volume of fluid (SPEC-LIT 20, the 22 rows)",
+  "12": "msh hex closure, cut-cell closure (SPEC-LIT 23, 24)",
+  "13": "the low-Mach reference pressure (SPEC-LIT 25)",
+  "14": "wall treatment: Ks -> 0, the thermal wall function (SPEC-LIT 29)",
+  "15": "Werner-Wengle, coupled-solver turbulence selection (SPEC-LIT 30)",
+  "16": "periodic domains: cyclic-pair invariants (SPEC-LIT 31.1)",
+  "17": "the thermal wall-function gate, redesigned (SPEC-LIT 32)",
+  "18": "Launder-Sharma low-Re k-epsilon: damping functions (SPEC-LIT 33.3)",
+  "19": "resolved leg mesh resolution, replayed (SPEC-LIT 33.2/34)",
+  "20": "the bulk-temperature thermostat (SPEC-LIT 35)",
+  "21": "thermostat weighting: the decisive experiment, replayed (SPEC-LIT 35.3.2)",
+  "22": "bounded convection on momentum: the isolation, replayed (SPEC-LIT 3.1/32.5.5)",
+  "23": "Kays-Crawford turbulent Prandtl number (SPEC-LIT 37.1/37.2)",
+  "24": "realizable and RNG k-epsilon (SPEC-LIT 40, 41)",
+  "25": "the output block, and fp16 voxels (SPEC-LIT 44, 45)",
+  "26": "conjugate heat transfer (SPEC-LIT 46, 47, 48)",
+  "27": "the per-region residual - Gate 93-B (SPEC-LIT 8.4 on each region's rows)",
+  "28": "an equation that lives on a region - Gate 93-A (SPEC-LIT 93)",
+  "29": "the conjugate fluid/solid interface (SPEC-LIT 59, 60)",
+  "30": "surface-to-surface radiation (SPEC-LIT 49, 50, 51)",
+  "31": "fan curves, porous jumps, psychrometrics, metrics (SPEC-LIT 52, 53, 54, 55)",
+  "32": "Spalart-Allmaras, DES97/DDES/IDDES (SPEC-LIT 56, 57, 58)",
+  "33": "gamma-Re_theta transition (SPEC-LIT 88, 89)",
+  "34": "the 2015 gamma transition model (SPEC-LIT 90)",
+  "35": "Lagrangian parcels (SPEC-LIT 66)",
+  "36": "the parcel sort and gather-shaped deposition (SPEC-LIT 67)",
+  "37": "two-way coupling of the dispersed phase (SPEC-LIT 68)",
+  "38": "droplet heating and evaporation (SPEC-LIT 76)",
+  "39": "the vapour into the gas (SPEC-LIT 77)",
+  "40": "droplet-wall impact (SPEC-LIT 78)",
+  "41": "Gate 95-D: the thick cylinder heated through the conduction solver (three meshes, SPEC-LIT 95.10)",
+  "42": "Gate 95-E: the bimetal strip, two materials bonded in one region (three meshes, two bond treatments)",
+  "43": "Gate 95-A: the end-loaded cantilever, block-coupled, at 2.5:1, 5:1 and 10:1 (four meshes each, the tip study on the finest three, SPEC-LIT 109.6)",
+  "44": "Gate 95-G: the boundary-point fit on the Lame ring, and NAFEMS LE1, LE10 and LE11 from a restatement (LE1 and LE11 three meshes, the ring and LE10 four with their study on the finest three, SPEC-LIT 95.11)",
+  "45": "the imported region (SPEC-LIT 97)",
+  "46": "the region layout (SPEC-LIT 97)",
+  "47": "Gate 98-A: the straight fin, three meshes, against (S98.7) (SPEC-LIT 98.6)",
+  "48": "Gate 98-B: the slab radiating to a surround, its Newton passes (SPEC-LIT 98.6)",
+  "49": "Gate 98-C: an enclosure on a live conjugate flow, its balance, split and relaxation (SPEC-LIT 98.9)",
+  "50": "Gate 100-B: silicon, air and the seven-term cp/R against their tables (SPEC-LIT 100.4)",
+  "51": "Gate 100-A: the Kirchhoff slab, kappa linear in T, three meshes (SPEC-LIT 100.8)",
+  "52": "Gate 100-C: Brinkman's plane Poiseuille with viscous heating, two walls, three meshes each (SPEC-LIT 100.15)",
+  "53": "Gate 100-D: Qu & Mudawar's micro-channel with water's mu(T) live (SPEC-LIT 100.15)",
+  "54": "Gate 105-A: space conservation on a moving mesh, euler and backward, 100 steps (SPEC-LIT 105.5)",
+  "55": "Gate 105-B: the piston and the stroking outlet, euler and backward (SPEC-LIT 105.10)",
+  "56": "Gate 105-C: Turek-Hron CFD1/CFD2 drag and lift over four meshes (the study on the finest three), CFD3 on a wobbling mesh (SPEC-LIT 105.14)",
+  "57": "lid-driven cavity, Ghia, Ghia & Shin (1982), three meshes per Re (SPEC-LIT 94.4 Gate 94-D)",
+  "58": "Gate 110-A: channel DNS, Moser-Kim-Mansour 1999, Re_tau 180/395/590 (SPEC-LIT 110.2)",
+  "59": "Gate 110-B: backward-facing step, Driver & Seegmiller 1985 (SPEC-LIT 110.3)",
+  "60": "Gate 110-C: buoyant plume, McCaffrey 1979 (SPEC-LIT 110.4)",
+  "61": "Gate CMP-B: de Vahl Davis with Boussinesq at beta*dT = 0.03, centro-symmetry, and the density-ratio control (SPEC-LIT 121.8)",
+  "62": "Gate 119-A: the wedge - Hagen-Poiseuille through the axis prisms and radial conduction in an annulus (SPEC-LIT 119.3)",
+  "63": "Gate 145-A: the dam break against Martin & Moyce 1952 Table 2, three meshes (SPEC-LIT 145.2)",
+  "64": "Gate 78-D measured leg: the two splash criteria against Riboux & Gordillo 2014's threshold speeds, eight liquids (SPEC-LIT 146.2)",
+  "65": "Gate 132-L: the laminar flat plate against Blasius, three meshes (SPEC-LIT 144.2)",
+  "66": "T3A leg 1 in 2-D: the leading-edge Tu of kOmegaSSTLM and kOmegaSSTGamma on the flat-plate harness, three meshes, replayed (SPEC-LIT 144.3)",
+  "67": "Gates 88-T and 90-T leg 4: the 2-D C_f(Re_x) of kOmegaSSTLM and kOmegaSSTGamma against Roach & Brierley's T3A measurement, replayed (SPEC-LIT 144.4)",
+  "68": "Gate 132-Z: the TMR zero-pressure-gradient plate, SA and SST against Karman-Schoenherr and Coles, three meshes, replayed (SPEC-LIT 144.5)",
+  "69": "Gate 131-P: TG0's turbulent pipe, kOmegaSST on the true wedge against Prandtl, Blasius, the log law and the core defect, three radial levels, replayed (SPEC-LIT 143.5)",
+  "70": "Gate CMP-SOD: Sod's shock tube against the exact Riemann solution, three meshes (SPEC-LIT 127.6)",
+  "71": "Gate CMP-AC: a small acoustic pulse travels at c_0 = sqrt(gamma R_s T_0), 400 cells (SPEC-LIT 127.6)",
+  "72": "Gate CMP-LM: the lid-driven cavity at Re 100, lid M 0.05, against Ghia (1982) (SPEC-LIT 127.6)",
+  "73": "Gate CMP-COU: compressible Couette with viscous heating, adiabatic-wall rise and T profile (SPEC-LIT 127.6)",
+  "74": "Gate CMP-NOZ: the quasi-1-D nozzle, subsonic, supersonic started and shocked, 200 cells (SPEC-LIT 127.6)",
+  "75": "Gate CMP-OBL: the oblique shock on a 10-degree ramp at M 2, 90 x 60 cells (SPEC-LIT 127.6)",
+  "76": "Gate CMP-RING: Ringleb's transonic flow on three meshes, h, h/2, h/4 (SPEC-LIT 127.6)",
+  "77": "Gate CMP-RAE: RAE 2822 Case 6 with Spalart-Allmaras against AR-138, a live coarse smoke and the three recorded C-meshes, replayed (SPEC-LIT 127.6)",
+  "78": "Gate 116-P: Hagen-Poiseuille on tetrahedra and prisms, the L1 pipe at Re 100, replayed (SPEC-LIT 116.17)",
+  "79": "Gate 88-T and 90-T leg 3: T3B and T3A- with a per-case inflow fitted to ERCOFTAC's measured Tu(x), onset ordering and spread, replayed (SPEC-LIT 144.7)",
+  "80": "Gate DST-LEEDS: the Leeds fan-stirred cornflour bomb, S_t,b against Bradley, Chen & Swithenbank 1989 via Huang et al. 2020 Fig. 9 (SPEC-LIT 157.5)",
+  "81": "Gate DST-VES: closed vessels, thin-flame spheres against (157.4) and the REMBE closed stage against Huang et al. 2022 Fig. 10 (SPEC-LIT 157.6)",
+  "82": "Gate CHR-13: a 1-D freely propagating CH4-air flame, BFER phi 1.0, S_L by the 1500 K isotherm, three meshes, replayed (SPEC-LIT 133.12)",
+  "83": "Gate CHR-16: Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED on the true wedge, replayed (SPEC-LIT 134.8)",
+  "84": "Gate 110-C leg 2: the radiating plume, P1 kappa 1.0 1/m, McCaffrey 1979, replayed (SPEC-LIT 110.4)",
+  "85": "Gate CHR-THERMO: NASA-7 thermochemistry of the ten TM-4513 records against TP-2002 Table B1 (SPEC-LIT 128.7)",
+  "86": "Gate CHR-EQ: gas-phase equilibrium by Gibbs minimisation on the TM-4513 fixture against the 40-digit oracle (SPEC-LIT 131.4)",
+  "87": "Gate CHR-ODE: RODAS3 and ROS3 on Robertson and HIRES, and the constant-pressure reactor (SPEC-LIT 132.6, 132.8)",
+  "88": "Gate CHR-EDM: EDM and PaSR, the library and kernel gate of CHR-14, not a driver run (SPEC-LIT 134.5)",
+  "89": "Gate CHR-SLAB: the isothermal grey slab, P1 against its closed form and S8 fvDOM against 1 - 2 E_3 (SPEC-LIT 135.5, 136.7)",
+  "90": "Gate CHR-CUBE: fvDOM with scattering on the slab, and the isothermal cube at 24^3 (SPEC-LIT 136.8)",
+  "91": "Gate CHR-WSGG: the weighted sum of grey gases on the slab, per-gas fvDOM and P1, and the grey mean (SPEC-LIT 136.9)",
+  "92": "Gate DST-B-LAM: the Phase B cloud's 1-D laminar flame against the gas flame of its volatile, the fine-particle limit and the size order (SPEC-LIT 159.11)",
+  "93": "Gate DST-B-VES: the Phase B cloud in a closed 20 L sphere, replayed from its records - the AICC end pressure and the thin-flame half time (SPEC-LIT 159.12)",
+  "94": "Gate 68-C coupled leg: Theobald test 3 through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its records (SPEC-LIT 147.2)",
+  "95": "Gate DST-REMBE: the vented REMBE explosion, key J.3 NOT RUN, and a REDUCED smoke on the PLACEHOLDER vessel (SPEC-LIT 158.7, 158.10)"
+ },
+ "audit": {
+  "checks": 20,
+  "passed": 20
+ },
+ "gates": [
+  {
+   "gate": "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction factor, +-10 % band",
+   "headline": "WF Nu is +34.3% of Gnielinski at the MEASURED f and +15.2% at the viscous form of it - outside the band on both",
+   "section": 17
+  },
+  {
+   "gate": "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), wall-function leg, at PrtModel KaysCrawford (opt-in, S37)",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction factor, +-10 % band, on the PrtModel KaysCrawford record",
+   "headline": "WF Nu is +34.0% of Gnielinski at the MEASURED f, at PrtModel KaysCrawford (opt-in, S37) - outside the band",
+   "section": 17
+  },
+  {
+   "gate": "SPEC-LIT S32.4 verdict 1 (absolute prediction), resolved leg",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Gnielinski (1976) evaluated at the Petukhov smooth-PIPE f, +-10 % band",
+   "headline": "resolved leg Nu is +11.9% of it - outside the band by 1.9 points, against an energy-balance uncertainty of 0.00001% which is now round-off, so the gate does NOT close and the miss is DECISIVE with nothing left to hide any of it behind (S32.4's UNDECIDED clause does not apply)",
+   "section": 20
+  },
+  {
+   "gate": "SPEC-LIT S32.4 verdict 2 (Reynolds analogy), resolved leg",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Gnielinski (1976) evaluated at this leg's own MEASURED wall friction factor, +-10 % band",
+   "headline": "resolved leg Nu is +14.9% of it at the MEASURED f = 2.3832e-02 - outside the band",
+   "section": 20
+  },
+  {
+   "gate": "SPEC-LIT S60.5 Gate 5",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Kaminski & Prakash (1986), conjugate natural convection in a square enclosure - through the open-access SECONDARY table of Belazizia et al. (2012), the primary being paywalled and never read - bar 3 % at every conductivity ratio",
+   "headline": "worst disagreement 98.59 %, and it is at the SMALLEST conductivity ratio - the CONDUCTION-DOMINATED end - shrinking to 11.95 % at Kr = 10; reference-limited at Kr <= 1, SPEC-LIT 115 (O1, D-VAL-4)",
+   "section": 29
+  },
+  {
+   "gate": "SPEC-LIT S88 Gate 88-T",
+   "verdict": "OPEN",
+   "how": "Live",
+   "against": "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
+   "headline": "the model's own onset criterion fires at Re_x = 85251.4, where the local Tu has decayed to 2.24405 % and Re_theta~ = 234.21 - but no published digit-level onset Re_x for T3A was found to hold it against, so the comparison is not closed",
+   "section": 33
+  },
+  {
+   "gate": "SPEC-LIT S90 Gate 90-T",
+   "verdict": "OPEN",
+   "how": "Live",
+   "against": "the ERCOFTAC T3A flat plate's measured transition, on the NASA/TMBWG 2D T3A rig (U = 69.44 m/s, Re/m = 2.00e5, Tu = 3.300 % at the leading edge)",
+   "headline": "the 2015 correlation's onset switch fires at Re_x = 22826.1, where the local Tu_L has decayed to 54.6012 % and Re_thetac reads 100 - but no published digit-level onset Re_x for T3A was found to hold it against, so the comparison is not closed",
+   "section": 34
+  },
+  {
+   "gate": "SPEC-LIT S68.12 Gate 68-C",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Theobald (1981), 90 hose streams, maximum throw, at the shape of the FDS Validation Guide's own metric for this quantity - +-10 % bias, 30 % scatter",
+   "headline": "with the gas at rest this solver throws the stream 61.2858 % of the measured distance on average",
+   "section": 37
+  },
+  {
+   "gate": "78-D",
+   "verdict": "OPEN",
+   "how": "Live",
+   "against": "Bai & Gosman SAE 950283 (1995) against Mundo, Sommerfeld & Tropea, Int. J. Multiphase Flow 21 (1995) 151",
+   "headline": "the two published splash criteria disagree by a factor of 4.78 in Weber number for the same 100 um water droplet - Mundo splashes it at 8.99 m/s (We 111), Bai-Gosman at 19.65 m/s (We 531)",
+   "section": 40
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "2.5:1: converged 0/4, p_u -0.08, p_sigma 1.43 (n_y 16 -> 32), finest tip 8.89e-4",
+   "section": 43
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "5:1: converged 0/4, p_u -1.27, p_sigma 3.20 (n_y 16 -> 32), finest tip 9.71e-1",
+   "section": 43
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "10:1: converged 0/4, p_u -53.62, p_sigma -inf (n_y 16 -> 32), finest tip 1.37e16",
+   "section": 43
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "2.5:1 GMRES(50): converged 0/4, p_u -8.23, p_sigma -9.72 (n_y 16 -> 32), finest tip 5.70e-2",
+   "section": 43
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "5:1 GMRES(50): converged 0/4, p_u 0.59, p_sigma 4.61 (n_y 16 -> 32), finest tip 9.71e-1",
+   "section": 43
+  },
+  {
+   "gate": "Gate 95-A cantilever",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Timoshenko & Goodier ch. 3, plane strain, block-coupled (SPEC-LIT 109.6), four meshes r = 2, orders on the finest pair, the tip study on the finest three",
+   "headline": "10:1 GMRES(50): converged 0/4, p_u -53.62, p_sigma -inf (n_y 16 -> 32), finest tip 1.37e16",
+   "section": 43
+  },
+  {
+   "gate": "SPEC-LIT 98.6 Gate 98-B radiating slab",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the steady balance of a slab radiating to a large surround, (S98.8), SPEC-LIT 98.6",
+   "headline": "T_b rel 6.56e-7, residual 0.00e0, worst Newton ratio 1.092e4 against 2C = 1.725e-3, 5 ratios",
+   "section": 48
+  },
+  {
+   "gate": "SPEC-LIT 98.9 Gate 98-C enclosure with a running flow",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the enclosure's own power balance, (S98.9), (S98.10), parallel_plate_flux and concentric_flux, SPEC-LIT 98.9",
+   "headline": "(a) power balance 3.39e-6 against 1e-10; (b) (S98.10) worst 5.77e-2 against 1e-9; (b) cell source rel 9.08e-8 against 1e-12; (b) closed form rel 5.02e-4 against 1e-10 over 100 faces; (c) not every radiationRelaxation converged within 4000 iterations",
+   "section": 49
+  },
+  {
+   "gate": "SPEC-LIT 100.4 Gate 100-B published property tables",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Ho, Powell and Liley (1972), J. Phys. Chem. Ref. Data 1, 279, p. 394: silicon, recommended values",
+   "headline": "silicon: knots to the bit false, worst 1.55 % between them against 5 %",
+   "section": 50
+  },
+  {
+   "gate": "SPEC-LIT 100.4 Gate 100-B published property tables",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "McBride, Zehe and Gordon, NASA/TP-2002-211556 (2002), eq. (1), Appendix D and Table B1",
+   "headline": "cp/R: worst |Cp(298.15) - Table B1| 3.51e-4 J/(K mol) against 5e-4, worst jump at 1000 K 3.41e-7 against 1e-8",
+   "section": 50
+  },
+  {
+   "gate": "SPEC-LIT 100.15 Gate 100-C Brinkman plane Poiseuille",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Brinkman's fully developed plane Poiseuille with viscous heating, (S100.15) and (S100.16), SPEC-LIT 100.15",
+   "headline": "both walls held, ny = 8: converged false, balance 5.60e-6; both walls held, ny = 16: converged false, balance 1.68e-4; both walls held, ny = 32: converged false, balance 1.86e-4; top adiabatic, ny = 8: converged false, balance 3.15e-5; top adiabatic, ny = 16: converged false, balance 1.53e-4; top adiabatic, ny = 32: converged false, balance 1.50e-4",
+   "section": 52
+  },
+  {
+   "gate": "SPEC-LIT 105.14 Gate 105-C Turek-Hron",
+   "verdict": "OPEN",
+   "how": "Live",
+   "against": "Turek & Hron (2006), CFD1/CFD2 level 6+0 and CFD3 level 4+0",
+   "headline": "the Turek-Hron meshes are not generated, so no comparison was run",
+   "section": 56
+  },
+  {
+   "gate": "SPEC-LIT S110.2 Gate 110-A channel DNS (Moser, Kim & Mansour 1999)",
+   "verdict": "OPEN",
+   "how": "Live",
+   "against": "Moser, Kim & Mansour (1999) DNS mean-velocity profiles, reference/mkm99/chan{180,395,590}.means, u_D = 0 (none stated)",
+   "headline": "answer key missing: mkm99-chan180, mkm99-chan395, mkm99-chan590 - absent from reference/ or not its manifest digest (SPEC-LIT 110.1); no comparison was run",
+   "section": 58
+  },
+  {
+   "gate": "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Driver & Seegmiller (1985) x_r/H = 6.26 +- 0.10, reference/driver_seegmiller_1985/reattachment.txt",
+   "headline": "study not formed: the dx = 0.1H level stopped - run ended: refused | ofgpu-lowmach: max Mach number 3.615 at cell 56 (step 1232); the dx = 0.05H level stopped - run ended: refused | ofgpu-lowmach: max Mach number 1.920 at cell 917604 (step 30); on the finest level that converged, dx = 0.2H, x_r/H = 5.637 against 6.26, E = -0.623 (-9.9% of D), outside the datum's own +-0.10 at that level, with no u_num",
+   "section": 59
+  },
+  {
+   "gate": "SPEC-LIT S110.3 Gate 110-B backward-facing step reattachment (Driver & Seegmiller 1985)",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Driver & Seegmiller (1985) x_r/H = 6.26 +- 0.10, reference/driver_seegmiller_1985/reattachment.txt",
+   "headline": "class R: the single build's dx = 0.2H run left no record - run ended: refused | ofgpu-lowmach: max Mach number 10255882.000 at cell 57149 (step 0)",
+   "section": 59
+  },
+  {
+   "gate": "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "McCaffrey (1979) NBSIR 79-1910 Table 1 plume-region correlations at the declared Q, reference/mccaffrey_1979/centreline_table1.txt",
+   "headline": "P3: the finest centreline dT decays as z^(-2.130) over the six stations, outside -5/3 +- 0.25 - the correlation's exponent, so the gate is left open (S110.1)",
+   "section": 60
+  },
+  {
+   "gate": "SPEC-LIT S110.4 Gate 110-C buoyant plume centreline (McCaffrey 1979)",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "McCaffrey (1979) NBSIR 79-1910 Table 1 plume-region correlations at the declared Q, reference/mccaffrey_1979/centreline_table1.txt",
+   "headline": "P1 worst +212.6% outside, P2 worst +76.1% undecided against the +-15% band at u_val/D = 1.422 - on the predicted high side but BEYOND what 20-40 % radiative loss accounts for (dT +16% to +41%, w +8% to +19%): radiation alone does not explain this miss (S110.4)",
+   "section": 60
+  },
+  {
+   "gate": "SPEC-LIT 146.2 Gate 78-D measured leg, mundo",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Riboux & Gordillo, Phys. Rev. Lett. 113 (2014) 024507 (arXiv:1401.6943v3): the splash threshold speeds of Fig. 4(c), eight liquids on smooth dry glass in air, band +-20 % per row",
+   "headline": "0 of 8 liquids inside the band (146.6), 6 needed; 0 of 17 rows inside (146.5), e from -0.734 to -0.214",
+   "section": 64
+  },
+  {
+   "gate": "SPEC-LIT 146.2 Gate 78-D measured leg, baiGosman",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Riboux & Gordillo, Phys. Rev. Lett. 113 (2014) 024507 (arXiv:1401.6943v3): the splash threshold speeds of Fig. 4(c), eight liquids on smooth dry glass in air, band +-20 % per row",
+   "headline": "1 of 8 liquids inside the band (146.6), 6 needed; 3 of 17 rows inside (146.5), e from -0.396 to +0.690",
+   "section": 64
+  },
+  {
+   "gate": "SPEC-LIT 144.3 T3A leg 1 in 2-D, kOmegaSSTLM, against the TMR's 3.300 %",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "the NASA/TMBWG T3A page's stated leading-edge Tu, 3.300 % (SPEC-LIT 88.10)",
+   "headline": "Tu at the leading edge 3.35332 % on the finest mesh, 1.616 % from 3.300 % (bar 0.5 %); the 1-D closed form of the same model is 1.607 % from it",
+   "section": 66
+  },
+  {
+   "gate": "SPEC-LIT 144.3 T3A leg 1 in 2-D, kOmegaSSTGamma, against the TMR's 3.300 %",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "the NASA/TMBWG T3A page's stated leading-edge Tu, 3.300 % (SPEC-LIT 88.10)",
+   "headline": "Tu at the leading edge 3.35332 % on the finest mesh, 1.616 % from 3.300 % (bar 0.5 %); the 1-D closed form of the same model is 1.607 % from it",
+   "section": 66
+  },
+  {
+   "gate": "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, transition onset Re_x against Roach & Brierley",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (SPEC-LIT 144.6)",
+   "headline": "kOmegaSSTLM onset Re_x (least C_f) against (144.4a): E = -35.88 % at Re_x 8.8932e4 on the finest mesh, band 15 %, u_val 6.53 % (u_num 6.53 %, u_D 0 %)",
+   "section": 67
+  },
+  {
+   "gate": "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, turbulent C_f against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (SPEC-LIT 144.6)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSSTLM worst turbulent C_f against the station's (144.4b): E = -7.07 % at Re_x 3.0930e5 on the finest mesh, band 10 %, u_val 5.22 % (u_num 4.82 %, u_D 2 %)",
+   "section": 67
+  },
+  {
+   "gate": "SPEC-LIT 144.4 Gate 88-T leg 4, kOmegaSSTLM, laminar C_f against Blasius",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Blasius' 0.664/sqrt(Re_x) (SPEC-LIT 88.7) over the part of the plate the key measures laminar",
+   "headline": "kOmegaSSTLM worst laminar C_f against Blasius (144.4c): E = +16.29 % at Re_x 7.5000e4 on the finest mesh, band 10 %, u_val 0.62 % (u_num 0.62 %, u_D 0 %)",
+   "section": 67
+  },
+  {
+   "gate": "SPEC-LIT 144.4 Gate 90-T leg 4, kOmegaSSTGamma, transition onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (SPEC-LIT 144.6)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSSTGamma onset Re_x (least C_f) against (144.4a): E = +12.72 % at Re_x 1.5633e5 on the finest mesh, band 15 %, u_val 6.99 % (u_num 6.99 %, u_D 0 %)",
+   "section": 67
+  },
+  {
+   "gate": "SPEC-LIT 144.4 Gate 90-T leg 4, kOmegaSSTGamma, laminar C_f against Blasius",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Blasius' 0.664/sqrt(Re_x) (SPEC-LIT 88.7) over the part of the plate the key measures laminar",
+   "headline": "kOmegaSSTGamma worst laminar C_f against Blasius (144.4c): E = +15.78 % at Re_x 1.0000e5 on the finest mesh, band 10 %, u_val 1.46 % (u_num 1.46 %, u_D 0 %)",
+   "section": 67
+  },
+  {
+   "gate": "SPEC-LIT 144.5 Gate 132-Z ZPG plate, SpalartAllmaras, C_f against Karman-Schoenherr",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "the Karman-Schoenherr C_f(Re_theta) as the NASA TMR tabulates it (a correlation, SPEC-LIT 144.5)",
+   "headline": "undecided, within u_val of the bar (SPEC-LIT 32.4, 110.1): SpalartAllmaras worst C_f against K-S over Re_theta 4000..13000: E = -4.455% at Re_theta 4000 on the finest mesh, bar 3 %, u_val 6.344%",
+   "section": 68
+  },
+  {
+   "gate": "SPEC-LIT 144.5 Gate 132-Z ZPG plate, kOmegaSST, C_f against Karman-Schoenherr",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "the Karman-Schoenherr C_f(Re_theta) as the NASA TMR tabulates it (a correlation, SPEC-LIT 144.5)",
+   "headline": "outside the bar, against a correlation (SPEC-LIT 144.5): kOmegaSST worst C_f against K-S over Re_theta 4000..13000: E = -4.310% at Re_theta 4000 on the finest mesh, bar 3 %, u_val 0.626%",
+   "section": 68
+  },
+  {
+   "gate": "SPEC-LIT 143.5 Gate 131-P turbulent pipe, kOmegaSST, Re_tau 576.69, f against Prandtl",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Prandtl's smooth-pipe law at the input Re_tau (Nikuradse's measured pipes, Schlichting NACA TM 1218 eq 16.26)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSST at Re_tau 576.69, f against Prandtl: E = +5.18 % on the finest level (n = 160), bar 5 %, u_val 0.66 %",
+   "section": 69
+  },
+  {
+   "gate": "SPEC-LIT 143.5 Gate 131-P turbulent pipe, kOmegaSST, Re_tau 576.69, the log law",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "the log law u+ = 2.5 ln y+ + 5.5 over 30 <= y+ <= 0.2 Re_tau (Schlichting NACA TM 1218 eq 16.14)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSST at Re_tau 576.69, log-law deviation: E = 1.177 in u+ on the finest level (n = 160), bar 1.0 in u+, u_val 0.237",
+   "section": 69
+  },
+  {
+   "gate": "SPEC-LIT 143.5 Gate 131-P turbulent pipe, kOmegaSST, Re_tau 576.69, the core defect",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Nikuradse's core defect (U_axis - U_b)/u_tau = 4.07 (Schlichting NACA TM 1218 eq 16.22)",
+   "headline": "kOmegaSST at Re_tau 576.69, defect against 4.07: E = -11.21 % on the finest level (n = 160), bar 10 %, u_val 0.01 %",
+   "section": 69
+  },
+  {
+   "gate": "SPEC-LIT 143.5 Gate 131-P turbulent pipe, kOmegaSST, Re_tau 2358, the log law",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "the log law u+ = 2.5 ln y+ + 5.5 over 30 <= y+ <= 0.2 Re_tau (Schlichting NACA TM 1218 eq 16.14)",
+   "headline": "kOmegaSST at Re_tau 2358, log-law deviation: E = 1.230 in u+ on the finest level (n = 160), bar 1.0 in u+, u_val 0.173",
+   "section": 69
+  },
+  {
+   "gate": "SPEC-LIT 143.5 Gate 131-P turbulent pipe, kOmegaSST, Re_tau 2358, the core defect",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Nikuradse's core defect (U_axis - U_b)/u_tau = 4.07 (Schlichting NACA TM 1218 eq 16.22)",
+   "headline": "kOmegaSST at Re_tau 2358, defect against 4.07: E = -18.39 % on the finest level (n = 160), bar 10 %, u_val 0.04 %",
+   "section": 69
+  },
+  {
+   "gate": "SPEC-LIT 127.6 Gate CMP-SOD Sod shock tube",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the exact Riemann solution of Sod's (1978) shock tube, (127.5)-(127.7b), evaluated live (CMP-07)",
+   "headline": "PISO, 800 cells: worst plateau rho*_L 45.95 % (bar 1 %), shock not found inside the tube (bar 0.5 % of the length); L1(rho) order 0.015 (bar >= 0.6)",
+   "section": 70
+  },
+  {
+   "gate": "SPEC-LIT 127.6 Gate CMP-AC acoustic pulse speed",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "linear acoustics: c_0 = sqrt(gamma R_s T_0), (122.4)",
+   "headline": "the solver's default coupling (nOuterCorrectors 1, nCorrectors 2), 400 cells: the pulse travels at 1.1893 c_0 (bar: within 1 %)",
+   "section": 71
+  },
+  {
+   "gate": "SPEC-LIT 127.6 Gate CMP-NOZ quasi-1-D nozzle",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the quasi-1-D keys (127.23)-(127.25), SPEC-LIT §127.2's isentropic and shocked nozzle relations evaluated live by compressible::exact (CMP-06)",
+   "headline": "Gate CMP-NOZ subsonic: M(x) within 0.5 % of the key's M(xi), all 200 cells (SPEC-LIT 127.6): 6.0019e-3 against 0.005; Gate CMP-NOZ supersonic: M(x) within 0.5 % of the key's M(xi), all 200 cells (SPEC-LIT 127.6): no field, the march stopped on a bound; Gate CMP-NOZ supersonic: exit p within 0.5 % of the key at the last cell centre (SPEC-LIT 127.6): no field, the march stopped on a bound; Gate CMP-NOZ shocked: shock position within 1 % of the length, 200 cells (SPEC-LIT 127.6): no field, the march stopped on a bound; Gate CMP-NOZ shocked: p_t2/p_t1 within 1 % of (127.25)'s, the last cell (SPEC-LIT 127.6): no field, the march stopped on a bound; Gate CMP-NOZ shocked: exit p within 0.5 % of the key at the last cell centre (SPEC-LIT 127.6): no field, the march stopped on a bound",
+   "section": 74
+  },
+  {
+   "gate": "SPEC-LIT 127.6 Gate CMP-RAE RAE 2822",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "RAE 2822 Case 6 (the corrected conditions M 0.729, alpha 2.31 degrees, Re 6.5e6) of Cook, McDonald & Firmin, AGARD AR-138 (1979), as the NPARC archive reproduces it - the answer key rae2822-cp-case6",
+   "headline": "the smoke stopped on a bound: after 0 iterations: compressible::Compressible::step: 2 cell(s) out of bounds at the end of outer iteration 3 of step 13 (T <= 0: 0, p_abs <= 0: 1, rho <= 0: 1); the first is p_abs at cell 151, p_abs = -8763310.648889285. The gas law has no state there, so the run stops, and -permissive does not lift it; nothing was clipped (SPEC-LIT §122.3); f64 L0 stopped on a bound at step 5968 (the first out-of-bounds cell 6312); f64 L1 stopped on a bound at step 5454 (the first out-of-bounds cell 21072); f64 L2 stopped on a bound at step 5376 (the first out-of-bounds cell 75232); single L1 stopped on a bound at step 210 (the first out-of-bounds cell 151)",
+   "section": 77
+  },
+  {
+   "gate": "Gate 116-P",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Hagen-Poiseuille, 8 mu L Q / (pi R^4) (116.27)",
+   "headline": "Hagen-Poiseuille on the L1 pipe at Re 100: f64 +15.49 %, single stopped (diverged), the solve 78.6 s, the single-build mesh refused (the known A28)",
+   "section": 78
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3B onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3B key (ercoftac-t3b, SPEC-LIT 144.7)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSSTLM onset Re_x (the first grid minimum (144.7e), the least face being the trailing edge) against (144.4a): E = -11.50 % at Re_x 4.9938e4 on the finest mesh, band 15 %, u_val 28.55 % (u_num 28.55 %, u_D 0 %)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3B laminar C_f against Blasius",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Blasius' 0.664/sqrt(Re_x) (SPEC-LIT 88.7) over the part of the plate the key measures laminar",
+   "headline": "kOmegaSSTLM worst laminar C_f against Blasius (144.4c): E = +58.30 % at Re_x 3.9360e4 on the finest mesh, band 10 %, u_val 8.97 % (u_num 8.97 %, u_D 0 %)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3B onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3B key (ercoftac-t3b, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3B run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3B turbulent C_f against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3B key (ercoftac-t3b, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3B run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3B laminar C_f against Blasius",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3B key (ercoftac-t3b, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3B run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 the T3A- inflow fit against ERCOFTAC's measured free-stream Tu(x)",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the ERCOFTAC key's measured free-stream Tu(x), its TUFS column",
+   "headline": "fitted decay misses the measured Tu(x) by 3.63 % at Re_x 7.7200e5 (band 3 %); the run uses this inflow anyway (an input check, SPEC-LIT 144.7)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A- onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A- key (ercoftac-t3am, SPEC-LIT 144.7)",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): kOmegaSSTLM onset Re_x (least C_f) against (144.4a): E = -16.13 % at Re_x 1.2106e6 on the finest mesh, band 15 %, u_val 5.68 % (u_num 5.68 %, u_D 0 %)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A- turbulent C_f against Roach & Brierley",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A- key (ercoftac-t3am, SPEC-LIT 144.7)",
+   "headline": "kOmegaSSTLM worst turbulent C_f against the station's (144.4b): E = +132.12 % at Re_x 2.0220e6 on the finest mesh, band 10 %, u_val 12.81 % (u_num 12.65 %, u_D 2 %)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A- laminar C_f against Blasius",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Blasius' 0.664/sqrt(Re_x) (SPEC-LIT 88.7) over the part of the plate the key measures laminar",
+   "headline": "kOmegaSSTLM worst laminar C_f against Blasius (144.4c): E = +27.55 % at Re_x 1.2097e6 on the finest mesh, band 10 %, u_val 0.63 % (u_num 0.63 %, u_D 0 %)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A- onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A- key (ercoftac-t3am, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3A- run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A- turbulent C_f against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A- key (ercoftac-t3am, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3A- run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A- laminar C_f against Blasius",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A- key (ercoftac-t3am, SPEC-LIT 144.7)",
+   "headline": "no kOmegaSSTGamma T3A- run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTLM T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A turbulent C_f against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTLM T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, T3A laminar C_f against Blasius",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTLM T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A onset Re_x against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTGamma T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A turbulent C_f against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTGamma T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, T3A laminar C_f against Blasius",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's measured C_f(Re_x), the ERCOFTAC T3A key (ercoftac-t3a, SPEC-LIT 144.6)",
+   "headline": "no kOmegaSSTGamma T3A run recorded yet - run the record_t3fit_* tests of SPEC-LIT 144.7",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 88-T leg 3, kOmegaSSTLM, onset spread Re_x(T3A-)/Re_x(T3B) against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's T3 series, the keys' own (144.4a) onsets and their ratio",
+   "headline": "undecided, within u_val of the band edge (SPEC-LIT 32.4, 110.1): the onset spread (144.7d): S_sim = 2.4242e1 against S_key = 2.5578e1, E = -5.22 %, band 15 %, u_val 32.97 % (u_num from the two onsets' studies)",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, onset ordering T3B < T3A < T3A- against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's T3 series, the keys' own (144.4a) onsets and their ratio",
+   "headline": "missing a T3B fine f64 run, a T3A- fine f64 run",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 144.7 Gate 90-T leg 3, kOmegaSSTGamma, onset spread Re_x(T3A-)/Re_x(T3B) against Roach & Brierley",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "Roach & Brierley's T3 series, the keys' own (144.4a) onsets and their ratio",
+   "headline": "missing a T3B fine f64 run, a T3A- fine f64 run",
+   "section": 79
+  },
+  {
+   "gate": "SPEC-LIT 157.5 Gate DST-LEEDS Leeds fan-stirred cornflour bomb",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Bradley, Chen & Swithenbank (1989) via Huang et al. (2020) Fig. 9, key huang2020-leeds-st-b",
+   "headline": "21 of the gate's rows leave the bands of §157.5",
+   "section": 80
+  },
+  {
+   "gate": "SPEC-LIT 157.6 Gate DST-VES closed vessels: thin-flame spheres and the REMBE closed stage",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Huang, Bloching & Lipatnikov (2022) Fig. 10, key huang2022-rembe-p-closed",
+   "headline": "9 of the gate's rows leave the bands of §157.6",
+   "section": 81
+  },
+  {
+   "gate": "SPEC-LIT 133.12 Gate CHR-13 1-D freely propagating CH4-air flame, BFER phi 1.0",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "the plan's S_L = U_in - dx_f/dt within 10 % of Konnov et al. 2018 (closed, so that comparison is NOT RUN); a level that stops before its end time gives no S_L at all",
+   "headline": "3 of 3 levels stopped before 6 ms on the reactor's refusal (100 µm at 0.0006 s, 50 µm at 0.0006 s, 25 µm at 0.0006 s), so no S_L was measured",
+   "section": 82
+  },
+  {
+   "gate": "SPEC-LIT 134.8 Gate CHR-16 Sandia Flame D, EDC + DRM19, k-epsilon C1 1.6, REDUCED",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "the plan's REDUCED gate: 300 iterations, finite fields, element and mass budgets within 1e-6",
+   "headline": "40 of 300 steps: chemistry: EDC refused 1 cell(s); the first is cell 244 with status 8 (BELOW_NEGATIVE_ATOL) (SPEC-LIT §134.8); the worst inventory budget is C at 2.354e-1 against 1e-6",
+   "section": 83
+  },
+  {
+   "gate": "SPEC-LIT S110.4 Gate 110-C leg 2 radiating plume centreline (McCaffrey 1979)",
+   "verdict": "OPEN",
+   "how": "Replayed",
+   "against": "McCaffrey (1979) NBSIR 79-1910 Table 1 plume-region correlations at the declared Q, reference/mccaffrey_1979/centreline_table1.txt; the run's radiant fraction beside the report's 20-40 %",
+   "headline": "undecided: P1/P2 worst 1.539 is within u_val/D = 2.678 of the 15% edge (S32.4); the run's radiant fraction chi_r = 0.077 against McCaffrey's 0.20-0.40",
+   "section": 84
+  },
+  {
+   "gate": "SPEC-LIT 136.7 Gate CHR-SLAB the isothermal grey slab",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "the exact slab 1 - 2 E_3(tau), (135.6) of SPEC-LIT 135.2",
+   "headline": "under single the N = 256 slab does not converge: 80 of the direction solves unconverged in one sweep at tau 0.1, 80 at tau 1, 80 at tau 10 - the f32 PBiCGStab breaks down on the 256-cell upwind chain",
+   "section": 89
+  },
+  {
+   "gate": "SPEC-LIT 136.8 Gate CHR-CUBE scattering slab and cube",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "(136.6), the cube's wall-centre flux by the exact angular integral, SPEC-LIT 136.3",
+   "headline": "S8 kL 0.1 24^3: e -3.1005e-2 outside 3 %, by the step scheme's spatial error",
+   "section": 90
+  },
+  {
+   "gate": "SPEC-LIT 159.11 Gate DST-B-LAM Phase B laminar dust flame: the fine-particle limit and the size order",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "(i) |S_L,B(1 um)/S_L,gas - 1| within 2 % and (ii) S_L(d_{j+1}) <= S_L(d_j) along d = 5, 10, 20, 40 um - the gate's own bands; no published measurement",
+   "headline": "3 of the gate's rows leave the bands of 159.11",
+   "section": 92
+  },
+  {
+   "gate": "SPEC-LIT 159.12 Gate DST-B-VES Phase B cloud in a closed 20 L sphere: the AICC end pressure and the thin-flame half time",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "the cloud's host AICC (159.21) and the thin-flame half time (159.30) with S_u(p) of the 1-D Phase B tube",
+   "headline": "7 of the gate's rows leave the bands of 159.12",
+   "section": 93
+  },
+  {
+   "gate": "SPEC-LIT 147.2 Gate 68-C coupled leg: Theobald test 3 through ofgpu-lowmach, replayed",
+   "verdict": "MISSES",
+   "how": "Replayed",
+   "against": "Theobald (1981) test 3's measured maximum throw, 24.4 m, at the shape of the FDS Validation Guide's own metric for this quantity - +-10 % bias, 30 % scatter",
+   "headline": "3 of the gate's rows leave the bars of 68.12",
+   "section": 94
+  },
+  {
+   "gate": "SPEC-LIT 158.7 Gate DST-REMBE: the vented REMBE explosion, REDUCED PLACEHOLDER smoke on the castellated vessel, key J.3 NOT RUN",
+   "verdict": "MISSES",
+   "how": "Live",
+   "against": "Huang, Bloching & Lipatnikov (2022) Fig. 11, key huang2022-rembe-p-vented",
+   "headline": "2 row(s) of the REDUCED PLACEHOLDER smoke leave their bars (never compared with H22)",
+   "section": 95
+  }
+ ]
+}
