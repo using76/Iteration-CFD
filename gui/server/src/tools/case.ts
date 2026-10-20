@@ -52,11 +52,13 @@ export function structuralValidate(json: unknown): PointerError[] {
   for (const key of REQUIRED_TOP) if (!(key in obj)) errors.push({ pointer: `/${key}`, message: `must have required property '${key}'` })
   const mesh = obj.mesh as Record<string, unknown> | undefined
   if (mesh && typeof mesh === 'object') {
-    if (mesh.kind !== 'cartesian') errors.push({ pointer: '/mesh/kind', message: `must be one of ${PICK_LISTS.meshKinds.join(', ')}` })
+    if (typeof mesh.kind !== 'string' || !PICK_LISTS.meshKinds.includes(mesh.kind)) errors.push({ pointer: '/mesh/kind', message: `must be one of ${PICK_LISTS.meshKinds.join(', ')}` })
+    // A missing cells/bounds is meshKindChecks' `required` error (SPEC-LIT §158.10), so only the
+    // shape of a stated key is checked here, and only for the cartesian kind that states one.
     const cells = mesh.cells
-    if (!Array.isArray(cells) || cells.length !== 3 || !cells.every((n) => Number.isInteger(n) && n >= 1)) errors.push({ pointer: '/mesh/cells', message: 'must be three positive integers' })
+    if (mesh.kind === 'cartesian' && cells !== undefined && (!Array.isArray(cells) || cells.length !== 3 || !cells.every((n) => Number.isInteger(n) && n >= 1))) errors.push({ pointer: '/mesh/cells', message: 'must be three positive integers' })
     const bounds = mesh.bounds as Record<string, unknown> | undefined
-    if (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max)) errors.push({ pointer: '/mesh/bounds', message: 'must have min and max' })
+    if (mesh.kind === 'cartesian' && bounds !== undefined && (!bounds || !Array.isArray(bounds.min) || !Array.isArray(bounds.max))) errors.push({ pointer: '/mesh/bounds', message: 'must have min and max' })
   }
   return errors
 }
@@ -163,10 +165,70 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
+// --- mesh.kind (SPEC-LIT §158.10) -------------------------------------------
+// The solver's text-level refusals (rust/src/io/case_json.rs polymesh_of),
+// answered beside the schema: a polymesh case carries only mesh.path, a
+// cartesian case states its own geometry, and anything without a mesh.kind is
+// the schema's business. Every offence is reported, not just the first one the
+// solver would stop at.
+
+const UNSET_BOUNDS = { min: [0, 0, 0], max: [0, 0, 0] }
+const STATED_BESIDE_POLYMESH =
+  'stated beside mesh.kind "polymesh" - the mesh is the polyMesh mesh.path names, with its own geometry, cells and patches (SPEC-LIT §158.10)'
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false
+  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => deepEqual(x, (b as unknown[])[i]))
+  const ka = Object.keys(a)
+  const kb = Object.keys(b)
+  return ka.length === kb.length && ka.every((k) => deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+}
+
+/** "Unset" (SPEC-LIT §158.10): absent, null, or exactly the solver's default. */
+function isUnset(v: unknown, def: unknown): boolean {
+  return v === undefined || v === null || deepEqual(v, def)
+}
+
+function isUnsetList(v: unknown): boolean {
+  return v === undefined || v === null || (Array.isArray(v) && v.length === 0)
+}
+
+function isUnsetBoundaries(v: unknown): boolean {
+  if (v === undefined || v === null) return true
+  return isObject(v) && ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'].every((f) => v[f] === '')
+}
+
+/** The mesh.kind refusals the solver gives before any mesh is read; [] for a case the schema answers. */
+export function meshKindChecks(json: unknown): PointerError[] {
+  const errors: PointerError[] = []
+  if (!isObject(json) || !isObject(json.mesh)) return errors
+  const mesh = json.mesh
+  if (mesh.kind === 'polymesh') {
+    for (const key of ['bounds', 'cells', 'boundaries', 'regions', 'grading', 'cyclic', 'wedge', 'sector'] as const) {
+      const v = mesh[key]
+      const unset = key === 'bounds' ? isUnset(v, UNSET_BOUNDS) : key === 'cells' ? isUnset(v, [0, 0, 0]) : key === 'boundaries' ? isUnsetBoundaries(v) : key === 'regions' || key === 'cyclic' ? isUnsetList(v) : v === undefined || v === null
+      if (!unset) errors.push({ pointer: `/mesh/${key}`, message: STATED_BESIDE_POLYMESH })
+    }
+    if (json.motion !== undefined && json.motion !== null) errors.push({ pointer: '/motion', message: 'a moving mesh beside mesh.kind "polymesh" is refused - the motion path moves a block mesh\'s points (SPEC-LIT §158.10)' })
+    if (mesh.path === undefined || mesh.path === null) errors.push({ pointer: '/mesh/path', message: 'required with mesh.kind "polymesh" (SPEC-LIT §158.10)' })
+  } else if (mesh.kind === 'cartesian') {
+    if (isUnset(mesh.bounds, UNSET_BOUNDS)) errors.push({ pointer: '/mesh/bounds', message: 'required with mesh.kind "cartesian" (SPEC-LIT §158.10)' })
+    if (isUnset(mesh.cells, [0, 0, 0])) errors.push({ pointer: '/mesh/cells', message: 'required with mesh.kind "cartesian" (SPEC-LIT §158.10)' })
+    if (isUnsetBoundaries(mesh.boundaries)) errors.push({ pointer: '/mesh/boundaries', message: 'required with mesh.kind "cartesian" (SPEC-LIT §158.10)' })
+    if (mesh.path !== undefined && mesh.path !== null) {
+      const p = typeof mesh.path === 'string' ? mesh.path : JSON.stringify(mesh.path)
+      errors.push({ pointer: '/mesh/path', message: `"${p}" names a polyMesh, which is read only with mesh.kind "polymesh" - a cartesian case builds its own mesh (SPEC-LIT §158.10)` })
+    }
+  }
+  return errors
+}
+
 export function semanticChecks(json: unknown): { errors: PointerError[]; warnings: PointerError[] } {
   const errors: PointerError[] = []
   const warnings: PointerError[] = []
   if (!isObject(json)) return { errors, warnings }
+  errors.push(...meshKindChecks(json))
   const turbulence = isObject(json.turbulence) ? json.turbulence : null
   const initial = isObject(json.initial) ? json.initial : {}
   if (turbulence && typeof turbulence.model === 'string') {
@@ -344,11 +406,14 @@ function jsoncSummary(info: CaseJsoncInfo) {
   const json = isObject(info.json) ? info.json : {}
   const patches = Array.isArray(json.patches) ? json.patches.filter(isObject).map((p) => ({ match: String(p.match ?? ''), kind: p.kind === undefined ? null : String(p.kind) })) : []
   const cellsOf = (spec: { cells: [number, number, number] }): number => spec.cells[0] * spec.cells[1] * spec.cells[2]
+  const mesh = isObject(json.mesh) ? json.mesh : null
   return {
     name: info.name,
     cells: info.mesh ? info.mesh.cells[0] * info.mesh.cells[1] * info.mesh.cells[2] : null,
     cellsPerAxis: info.mesh?.cells ?? null,
     bounds: info.mesh?.bounds ?? null,
+    meshKind: mesh && typeof mesh.kind === 'string' ? mesh.kind : null,
+    meshPath: mesh && typeof mesh.path === 'string' ? mesh.path : null,
     model: info.model,
     kind: info.turbulenceKind,
     patches,

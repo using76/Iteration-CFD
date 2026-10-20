@@ -211,6 +211,13 @@ function refusal(code: string, message: string, extra: Json = {}): { refusal: To
   return { refusal: { ...r, data: { ...(r.data as Json), ...extra } } }
 }
 
+/** Why the Boundary editor cannot open this case (SPEC-LIT §158.10): its patches are
+ *  the polyMesh's at mesh.path, which a .jsonc alone does not carry. Null otherwise. Pure. */
+export function polymeshRefusal(json: unknown, relPath: string): string | null {
+  if (!(isObj(json) && isObj(json.mesh) && json.mesh.kind === 'polymesh')) return null
+  return `${relPath} is a polymesh case (mesh.kind "polymesh"): its patches are the polyMesh's at mesh.path, which the Boundary editor does not read; edit its patches[] rules with case_edit`
+}
+
 export interface SetPatchPlan {
   input: CaseEditInput
   /** The patches[] index the edit writes (the own rule, or where the new rule goes). */
@@ -224,6 +231,8 @@ export interface SetPatchPlan {
 export function planSetPatch(cmd: SetPatchCmd, text: string, relPath: string): SetPatchPlan | { refusal: ToolResult } {
   const { json, errors } = parseJsonc(text)
   if (errors.length || !isObj(json)) return refusal('INVALID', `${relPath} does not parse as JSONC (${errors[0]?.message ?? 'not an object'}); fix it before set_patch`)
+  const meshKind = polymeshRefusal(json, relPath)
+  if (meshKind !== null) return refusal('MESH_KIND', meshKind)
   const name = cmd.patch
   const names = casePatchNames(json)
   if (!names.includes(name)) {
@@ -600,6 +609,8 @@ export async function readBoundaryTable(casePath: string, ctx: ToolContext): Pro
   if (!isJsonCase(rel)) return fail('NOT_A_CASE', `${rel} is neither a .jsonc case nor a case directory`)
   const { json, errors } = parseJsonc(await fsp.readFile(abs, 'utf8'))
   if (errors.length || !isObj(json)) return fail('INVALID', `${rel} does not parse as JSONC (${errors[0]?.message ?? 'not an object'})`)
+  const meshKind = polymeshRefusal(json, rel)
+  if (meshKind !== null) return fail('MESH_KIND', meshKind)
   // Meshed: the polyMesh the case's mesh is written into (datasets.discover resolves a JSONC case to it).
   let meshed: { dir: string; patches: Array<{ name: string; nFaces: number }> } | null = null
   try {

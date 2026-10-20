@@ -189,6 +189,23 @@ describe('set_patch refusals', () => {
     expect((await runTool('gui_control', setPatch({ patch: 'floor', kind: 'symmetry' }), c)).error?.code).toBe('NO_CASE')
   })
 
+  it('a polymesh case is MESH_KIND for set_patch and for the Boundary table, and is untouched', async () => {
+    const { c } = await openCopy('pm')
+    const json = parse(plumeText, [], { allowTrailingComma: true }) as { mesh: unknown }
+    json.mesh = { kind: 'polymesh', path: 'plume.mesh' }
+    const rel = 'cases/pm.jsonc'
+    const abs = path.join(ws.root, rel)
+    const text = JSON.stringify(json)
+    await fsp.writeFile(abs, text, 'utf8')
+    const r = await runTool('gui_control', setPatch({ patch: 'inlet', kind: 'no-slip-wall' }), c)
+    expect(r.ok).toBe(false)
+    expect(r.error?.code).toBe('MESH_KIND')
+    expect(r.error?.message).toContain('polymesh')
+    expect(r.error?.message).toContain('mesh.path')
+    expect(await fsp.readFile(abs, 'utf8')).toBe(text)
+    expect((await readBoundaryTable(rel, c)).error?.code).toBe('MESH_KIND')
+  })
+
   it("the refusals answer from gui_control's veto, before any approval card", async () => {
     const { c } = await openCopy('r5')
     expect(guiControl.refuse!(setPatch({ patch: 'roof', kind: 'symmetry' }), c)?.error?.code).toBe('NO_PATCH')

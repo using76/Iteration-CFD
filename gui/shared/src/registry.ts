@@ -865,7 +865,7 @@ export const PICK_LISTS = {
   turbulenceKinds: ['RAS', 'LES'],
   wallTreatments: ['standard', 'spalding', 'rough', 'lowRe'],
   algorithms: ['SIMPLE', 'PISO', 'PIMPLE'],
-  meshKinds: ['cartesian'],
+  meshKinds: ['cartesian', 'polymesh'],
   // PatchPresetKind of docs/schema/case-1.json; farfield and supersonicInlet need physics.compressible
   patchKinds: ['wall', 'inlet', 'open', 'empty', 'symmetry', 'wedge', 'farfield', 'supersonicInlet'],
   buoyancy: ['densityRatio', 'boussinesq'],

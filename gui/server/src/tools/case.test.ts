@@ -2,9 +2,10 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { fakeDatasets, fakeHub, fakeRuns, makeWorkspace, type FakeHub, type TempWorkspace } from '../agent/test-fakes.js'
-import { applyCaseEdits, pointerToJsonPath, previewCaseEdit, semanticChecks, setSchemaValidator, structuralValidate, validateCaseText } from './case.js'
+import { applyCaseEdits, meshKindChecks, pointerToJsonPath, previewCaseEdit, semanticChecks, setSchemaValidator, structuralValidate, validateCaseText } from './case.js'
 import type { ToolContext } from './context.js'
 import { unifiedDiff } from './diff.js'
+import { getCaseSchema } from '../registry/schema.js'
 import { runTool } from './index.js'
 import { REPO_ROOT } from '../runs/test-helpers.js'
 import { parse as parseJsoncText, parseTree } from 'jsonc-parser'
@@ -240,5 +241,109 @@ describe('cht cases', () => {
     expect(rd.summary.interfaces).toBe(3)
     expect(rd.summary.mode === null || rd.summary.mode === 'stress').toBe(true)
     expect(rd.suggestedDrivers).toEqual(['ofgpu-cht'])
+  })
+})
+
+describe('a polymesh case (SPEC-LIT §158.10)', () => {
+  const STATED = 'stated beside mesh.kind "polymesh" - the mesh is the polyMesh mesh.path names, with its own geometry, cells and patches (SPEC-LIT §158.10)'
+
+  async function plumeJson(): Promise<Record<string, unknown>> {
+    return parseJsoncText(await fsp.readFile(path.join(ws.root, 'cases/plume.jsonc'), 'utf8'), [], { allowTrailingComma: true }) as Record<string, unknown>
+  }
+
+  it('accepts plume with mesh.kind "polymesh" and only a path', async () => {
+    const json = await plumeJson()
+    json.mesh = { kind: 'polymesh', path: 'plume.mesh' }
+    expect(structuralValidate(json)).toEqual([])
+    expect(semanticChecks(json).errors).toEqual([])
+  })
+
+  it('accepts the shipped rembeVented.jsonc under the real schema', async () => {
+    const text = await fsp.readFile(path.join(REPO_ROOT, 'cases', 'dust', 'rembeVented.jsonc'), 'utf8')
+    const json = parseJsoncText(text, [], { allowTrailingComma: true })
+    expect(getCaseSchema([path.join(REPO_ROOT, 'docs', 'schema', 'case-1.json')]).validate(json)).toEqual([])
+    expect(meshKindChecks(json)).toEqual([])
+  })
+
+  it('the defaults are not "stated"', () => {
+    const json = {
+      mesh: { kind: 'polymesh', path: 'm', bounds: { min: [0, 0, 0], max: [0, 0, 0] }, cells: [0, 0, 0], boundaries: { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' }, regions: [], cyclic: [], grading: null, wedge: null, sector: null },
+      motion: null,
+    }
+    expect(meshKindChecks(json)).toEqual([])
+  })
+
+  it('every stated key beside polymesh is refused at its pointer', () => {
+    // the stated values of rust/tests/case_polymesh.rs's own refusal list
+    const stated: Array<[string, unknown]> = [
+      ['bounds', { min: [0, 0, 0], max: [4, 3, 2] }],
+      ['cells', [4, 3, 2]],
+      ['boundaries', { xmin: 'a', xmax: 'b', ymin: 'c', ymax: 'd', zmin: 'e', zmax: 'f' }],
+      ['regions', [{ name: 'w', on: 'xmin', shape: { kind: 'box', min: [0, 0, 0], max: [0, 1, 1] } }]],
+      ['grading', { x: { expansion: 2.0 } }],
+      ['cyclic', [{ a: 'inlet', b: 'outlet', transform: 'translate' }]],
+      ['wedge', { angle: 5 }],
+      ['sector', { angle: 60, fineRadius: 0.05, growth: 1.05 }],
+    ]
+    for (const [key, value] of stated) {
+      expect(meshKindChecks({ mesh: { kind: 'polymesh', path: 'm', [key]: value } }), key).toEqual([{ pointer: `/mesh/${key}`, message: STATED }])
+    }
+    expect(meshKindChecks({ motion: { patches: [] }, mesh: { kind: 'polymesh', path: 'm' } }), 'motion').toEqual([
+      { pointer: '/motion', message: 'a moving mesh beside mesh.kind "polymesh" is refused - the motion path moves a block mesh\'s points (SPEC-LIT §158.10)' },
+    ])
+    expect(meshKindChecks({ mesh: { kind: 'polymesh' } }), 'no path').toEqual([{ pointer: '/mesh/path', message: 'required with mesh.kind "polymesh" (SPEC-LIT §158.10)' }])
+  })
+
+  it('reports all ten refusals once, in the solver\'s order', () => {
+    const json = {
+      motion: { patches: [] },
+      mesh: {
+        kind: 'polymesh',
+        bounds: { min: [0, 0, 0], max: [4, 3, 2] },
+        cells: [4, 3, 2],
+        boundaries: { xmin: 'a', xmax: 'b', ymin: 'c', ymax: 'd', zmin: 'e', zmax: 'f' },
+        regions: [{ name: 'w', on: 'xmin', shape: { kind: 'box', min: [0, 0, 0], max: [0, 1, 1] } }],
+        grading: { x: { expansion: 2.0 } },
+        cyclic: [{ a: 'inlet', b: 'outlet', transform: 'translate' }],
+        wedge: { angle: 5 },
+        sector: { angle: 60, fineRadius: 0.05, growth: 1.05 },
+      },
+    }
+    expect(meshKindChecks(json).map((e) => e.pointer)).toEqual(['/mesh/bounds', '/mesh/cells', '/mesh/boundaries', '/mesh/regions', '/mesh/grading', '/mesh/cyclic', '/mesh/wedge', '/mesh/sector', '/motion', '/mesh/path'])
+  })
+
+  it('a cartesian case states its own geometry and refuses a path', async () => {
+    const plume = await plumeJson()
+    expect(meshKindChecks(plume)).toEqual([])
+    const mesh = plume.mesh as Record<string, unknown>
+    expect(meshKindChecks({ ...plume, mesh: { ...mesh, path: 'somewhere' } })).toEqual([
+      { pointer: '/mesh/path', message: '"somewhere" names a polyMesh, which is read only with mesh.kind "polymesh" - a cartesian case builds its own mesh (SPEC-LIT §158.10)' },
+    ])
+    for (const key of ['bounds', 'cells', 'boundaries'] as const) {
+      const without = { ...mesh }
+      delete without[key]
+      expect(meshKindChecks({ ...plume, mesh: without }), key).toEqual([{ pointer: `/mesh/${key}`, message: 'required with mesh.kind "cartesian" (SPEC-LIT §158.10)' }])
+    }
+  })
+
+  it('a kind the gui does not take is refused at /mesh/kind', async () => {
+    const json = await plumeJson()
+    ;(json.mesh as Record<string, unknown>).kind = 'polar'
+    expect(structuralValidate(json)).toEqual([{ pointer: '/mesh/kind', message: 'must be one of cartesian, polymesh' }])
+  })
+
+  it("a .cht.jsonc's mesh manifest gets no mesh-kind errors", () => {
+    expect(meshKindChecks({ mesh: { regions: 'regions.json' } })).toEqual([])
+  })
+
+  it('case_read reports meshKind and meshPath in the summary', async () => {
+    const json = await plumeJson()
+    json.mesh = { kind: 'polymesh', path: 'plume.mesh' }
+    await fsp.writeFile(path.join(ws.root, 'cases', 'polymeshPlume.jsonc'), JSON.stringify(json), 'utf8')
+    const r = await runTool('case_read', { path: 'cases/polymeshPlume.jsonc' }, ctx())
+    expect(r.ok).toBe(true)
+    expect((r.data as { summary: Record<string, unknown> }).summary).toMatchObject({ meshKind: 'polymesh', meshPath: 'plume.mesh', cells: null })
+    const own = await runTool('case_read', { path: 'cases/plume.jsonc' }, ctx())
+    expect((own.data as { summary: Record<string, unknown> }).summary).toMatchObject({ meshKind: 'cartesian', meshPath: null })
   })
 })
