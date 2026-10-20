@@ -2,7 +2,7 @@
 // the twenty-three Capability rows and the implementedBy links of the
 // data-centre seed. A Model constant never appears on a case and a case value
 // never appears on a Model (docs/13 section 3, rule 1). Line numbers in the
-// anchors were re-derived from this tree on 2026-10-04; the tests grep the
+// anchors were re-derived from this tree on 2026-10-20; the tests grep the
 // symbols, not the numbers.
 import { dcLink, dcRow, type SeedLink, type SeedObject } from './dc.types.js'
 
@@ -42,12 +42,12 @@ const CAP = (tag: string, kind: string, module: string, anchor: string, specSect
 // provides — nine. A reason is permitted on a provides row; it is written only
 // where it would otherwise carry a fact the tree would lose.
 export const DC_CAPABILITIES: readonly SeedObject[] = Object.freeze([
-  CAP('CAP-FLOW', 'provides', 'rust/src/simple.rs', 'rust/src/simple.rs:823', 'S5', null, null),
-  CAP('CAP-BUOY', 'provides', 'rust/src/momentum.rs', 'rust/src/momentum.rs:117', 'S9',
+  CAP('CAP-FLOW', 'provides', 'rust/src/simple.rs', 'rust/src/simple.rs:948', 'S5', null, null),
+  CAP('CAP-BUOY', 'provides', 'rust/src/momentum.rs', 'rust/src/momentum.rs:228', 'S9',
     'The body force is the density-ratio form, exact for an ideal gas at constant pressure, not a Boussinesq linearisation; the reference temperature and gravity come from the case\'s air block.', null),
   CAP('CAP-ENERGY', 'provides', 'rust/src/scalar_transport.rs', 'rust/src/scalar_transport.rs:222', 'S26',
     'The data-centre driver transports temperature as a plain scalar with a turbulent Prandtl number; `rust/src/energy.rs`, and with it the Jayatilleke thermal wall function, is not wired into it, so a wall rule gets a fixed-value temperature and nothing else.', null),
-  CAP('CAP-PSYCHRO', 'provides', 'rust/src/psychro.rs', 'rust/src/psychro.rs:216', 'S54',
+  CAP('CAP-PSYCHRO', 'provides', 'rust/src/psychro.rs', 'rust/src/psychro.rs:303', 'S54',
     'Humidity is one transported vapour fraction; the psychrometric state is computed on the device and supersaturation is reported with a cell count and a worst excess, never clipped. The real-gas enhancement factor is named and not implemented, and the resulting bias is printed.', null),
   CAP('CAP-FAN', 'provides', 'rust/src/fan.rs', 'rust/src/fan.rs:105', 'S52',
     'One curve per whole patch, corrected for density and speed at every evaluation. A curve with fewer than two points, a non-increasing flow column, a rising pressure branch, a non-positive maximum pressure or flow, a non-positive curve density or speed, or an efficiency outside the half-open unit interval is refused by name in `FanCurve::validate`. A fan condition on any field but pressure is structurally impossible: only the fan module rewrites the triple.', null),
@@ -57,7 +57,7 @@ export const DC_CAPABILITIES: readonly SeedObject[] = Object.freeze([
     'The reductions are deterministic and fixed-partition. An ASHRAE class the solver does not know, a sample set it does not know, and a metric patch that is unknown or has no faces are each refused by name with the menu printed.', null),
   CAP('CAP-REFUSE', 'provides', 'rust/src/io/contract.rs', 'rust/src/io/contract.rs:105', 'S13.4',
     'Recognised and implemented is used; recognised and not implemented is an error naming the setting and the menu; not recognised is an error naming the setting. One switch downgrades the rejection to a warning and prints what it substituted, once per distinct setting.', null),
-  CAP('CAP-TURB-DC', 'provides', 'rust/src/bin/datacentre.rs', 'rust/src/bin/datacentre.rs:735', 'S6',
+  CAP('CAP-TURB-DC', 'provides', 'rust/src/bin/datacentre.rs', 'rust/src/bin/datacentre.rs:738', 'S6',
     'The driver builds standard k-epsilon with standard wall functions and no other model: the turbulence model, the wall treatment, the inlet turbulence intensity and length scale, and the convection scheme are all hard-coded and none is settable from a case. Realizable, RNG, SST, Spalart-Allmaras, DES and LES all exist in the crate and none is reachable from a `.dc.jsonc`.', null),
   // refuses — five. Every tag is a refuse_ function that exists in the module
   // it names, which is what the acceptance criterion counts.
@@ -67,31 +67,31 @@ export const DC_CAPABILITIES: readonly SeedObject[] = Object.freeze([
   CAP('refuse_capacitance_fft', 'refuses', 'rust/src/fan.rs', 'rust/src/fan.rs:677', 'S52.9',
     'A fan patch makes a face neither uniformly Dirichlet nor uniformly Neumann, and a jump makes the coefficient non-constant, so the direct Fourier pressure path is not available on a room that has either. The rank-one correction that would put it back is named and not implemented.',
     'pbicgstab'),
-  CAP('refuse_condensation', 'refuses', 'rust/src/psychro.rs', 'rust/src/psychro.rs:297', 'S54.5',
+  CAP('refuse_condensation', 'refuses', 'rust/src/psychro.rs', 'rust/src/psychro.rs:388', 'S54.5',
     'A saturation-constrained source with its own inner iteration is a different model. What is offered instead: supersaturation is reported with a cell count and the worst excess, and the case may set a barometric pressure, virtual temperature, a fan supply relative humidity and a tile plenum relative humidity. No case key reaches this refusal today, so it is documented rather than fired.', null),
-  CAP('refuse_wet_bulb_field', 'refuses', 'rust/src/psychro.rs', 'rust/src/psychro.rs:320', 'S54.5',
+  CAP('refuse_wet_bulb_field', 'refuses', 'rust/src/psychro.rs', 'rust/src/psychro.rs:411', 'S54.5',
     'A per-cell root find with a data-dependent trip count is not capturable as a fixed graph. What is offered instead: the report\'s host-side wet bulb, the dew point and the relative humidity. No case key reaches this refusal today.', null),
   CAP('refuse_scattered_rack', 'refuses', 'rust/src/dcmetrics.rs', 'rust/src/dcmetrics.rs:422', 'S55.5',
     'Reducing over a scattered index list is a segmented reduction, which is deterministic but is not this project\'s single reduction shape, and no second reduction kernel is added for one metric. What is offered instead: give each rack its own patch, which is also what makes the per-rack heat flows reportable one by one.', null),
   // absent — nine, each naming the first file that would have to change.
   // docs/13 section 4 requires a named absence to be a row, never a gap.
-  CAP('CAP-SPECIES', 'absent', 'rust/src/species.rs', 'rust/src/species.rs:169', 'S19',
+  CAP('CAP-SPECIES', 'absent', 'rust/src/species.rs', 'rust/src/species.rs:324', 'S19',
     'Multi-species transport exists in the crate and is constructed only in tests and the validation binary; no solver driver builds it. A capture index needs one transported tracer per supply source and one per extract, so the first file to change is `rust/src/bin/datacentre.rs`, which today builds exactly one transported scalar for the vapour fraction.', null),
-  CAP('CAP-RADIATION-DC', 'absent', 'rust/src/s2s.rs', 'rust/src/s2s.rs:1983', 'S49',
+  CAP('CAP-RADIATION-DC', 'absent', 'rust/src/s2s.rs', 'rust/src/s2s.rs:2276', 'S49',
     'Surface-to-surface radiation exists in the crate and is constructed only in tests and the validation binary. Rack-to-rack and rack-to-wall radiant exchange is therefore absent from every data-centre run; the first files to change are `rust/src/bin/datacentre.rs` and a radiation key in the case format.', null),
-  CAP('CAP-CHT', 'absent', 'rust/src/cht.rs', 'rust/src/cht.rs:2202', 'S47',
+  CAP('CAP-CHT', 'absent', 'rust/src/cht.rs', 'rust/src/cht.rs:2312', 'S47',
     'Conjugate heat transfer is a separate driver with a separate case format and is not composable with a data-centre case. A rack as a solid, with its own conduction and its own surface, cannot be expressed here.', null),
-  CAP('CAP-YPLUS', 'absent', 'rust/src/bin/lowmach.rs', 'rust/src/bin/lowmach.rs:2647', 'S6.4',
+  CAP('CAP-YPLUS', 'absent', 'rust/src/bin/lowmach.rs', 'rust/src/bin/lowmach.rs:3873', 'S6.4',
     'Per-patch minimum, mean and maximum wall distance in wall units is computed and printed by the low-Mach driver and is absent from the data-centre driver. D5 ports it and must not re-derive it; the first file to change is `rust/src/bin/datacentre.rs`.', null),
   CAP('CAP-GATE-WALLVALID', 'absent', 'rust/src/bin/datacentre.rs', 'rust/src/bin/datacentre.rs:256', 'S6.4',
     'Nothing computes the ratio of buoyancy to inertia at a wall, so no run says whether its wall function was valid. A hall lives in exactly the band where that question decides the answer: about 0.18 in a 2 m/s aisle and about 18 in a stalled one. The first file to change is `rust/src/bin/datacentre.rs`, beside the wall-function coefficients it passes unconditionally.', null),
-  CAP('CAP-FIELDOUT-DC', 'absent', 'rust/src/bin/datacentre.rs', 'rust/src/bin/datacentre.rs:1177', 'S44',
+  CAP('CAP-FIELDOUT-DC', 'absent', 'rust/src/bin/datacentre.rs', 'rust/src/bin/datacentre.rs:1209', 'S44',
     'The driver writes a single comma-separated snapshot of the final state and no field at all: no mesh, no volume data, no restart. A customer cannot be shown the cold aisle. The first file to change is `rust/src/bin/datacentre.rs`; the specification\'s own output block is not wired into the case format.', null),
-  CAP('CAP-TRANSIENT-DC', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:379', 'S55',
+  CAP('CAP-TRANSIENT-DC', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:390', 'S55',
     'The data-centre run is steady by construction: a fixed outer-iteration count, a steady turbulence control, and a run block with no time step and no end time. A cooling-unit failure, a load ramp and a ride-through cannot be asked for. The first file to change is `rust/src/io/case_dc.rs`.', null),
-  CAP('CAP-SWEEP-DC', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:351', 'S55.4',
+  CAP('CAP-SWEEP-DC', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:362', 'S55.4',
     'The supply-temperature sweep key is parsed and never read, so the free-cooling ceiling is absent from every report. This is the defect class the case format exists to prevent, live in the shipped format. D4 implements it; the first files to change are `rust/src/io/case_dc.rs`, where the key is read, and `rust/src/bin/datacentre.rs`, where the ceiling is written.', null),
-  CAP('CAP-COIL', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:165', 'S52',
+  CAP('CAP-COIL', 'absent', 'rust/src/io/case_dc.rs', 'rust/src/io/case_dc.rs:176', 'S52',
     'The only cooling device the format carries is a fan patch with a pressure-flow curve. There is no coil, no sensible and latent split, no return-air control and no supply-temperature set point, so a real air handler cannot be expressed and its dehumidification cannot be accounted. The first file to change is `rust/src/io/case_dc.rs`.', null),
 ])
 

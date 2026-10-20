@@ -375,7 +375,7 @@
         "tag": "CAP-PSYCHRO",
         "kind": "provides",
         "module": "rust/src/psychro.rs",
-        "anchor": "rust/src/psychro.rs:216",
+        "anchor": "rust/src/psychro.rs:303",
         "specSection": "S54",
         "reason": "Humidity is one transported vapour fraction; the psychrometric state is computed on the device and supersaturation is reported with a cell count and a worst excess, never clipped. The real-gas enhancement factor is named and not implemented, and the resulting bias is printed."
       }
@@ -461,7 +461,7 @@
         "tag": "refuse_condensation",
         "kind": "refuses",
         "module": "rust/src/psychro.rs",
-        "anchor": "rust/src/psychro.rs:297",
+        "anchor": "rust/src/psychro.rs:388",
         "specSection": "S54.5",
         "reason": "A saturation-constrained source with its own inner iteration is a different model. What is offered instead: supersaturation is reported with a cell count and the worst excess, and the case may set a barometric pressure, virtual temperature, a fan supply relative humidity and a tile plenum relative humidity. No case key reaches this refusal today, so it is documented rather than fired."
       }
@@ -475,7 +475,7 @@
         "tag": "refuse_wet_bulb_field",
         "kind": "refuses",
         "module": "rust/src/psychro.rs",
-        "anchor": "rust/src/psychro.rs:320",
+        "anchor": "rust/src/psychro.rs:411",
         "specSection": "S54.5",
         "reason": "A per-cell root find with a data-dependent trip count is not capturable as a fixed graph. What is offered instead: the report's host-side wet bulb, the dew point and the relative humidity. No case key reaches this refusal today."
       }
@@ -503,7 +503,7 @@
         "tag": "CAP-TRANSIENT-DC",
         "kind": "absent",
         "module": "rust/src/io/case_dc.rs",
-        "anchor": "rust/src/io/case_dc.rs:379",
+        "anchor": "rust/src/io/case_dc.rs:390",
         "specSection": "S55",
         "reason": "The data-centre run is steady by construction: a fixed outer-iteration count, a steady turbulence control, and a run block with no time step and no end time. A cooling-unit failure, a load ramp and a ride-through cannot be asked for. The first file to change is `rust/src/io/case_dc.rs`."
       }
@@ -517,7 +517,7 @@
         "tag": "CAP-SWEEP-DC",
         "kind": "absent",
         "module": "rust/src/io/case_dc.rs",
-        "anchor": "rust/src/io/case_dc.rs:351",
+        "anchor": "rust/src/io/case_dc.rs:362",
         "specSection": "S55.4",
         "reason": "The supply-temperature sweep key is parsed and never read, so the free-cooling ceiling is absent from every report. This is the defect class the case format exists to prevent, live in the shipped format. D4 implements it; the first files to change are `rust/src/io/case_dc.rs`, where the key is read, and `rust/src/bin/datacentre.rs`, where the ceiling is written."
       }
@@ -531,7 +531,7 @@
         "tag": "CAP-COIL",
         "kind": "absent",
         "module": "rust/src/io/case_dc.rs",
-        "anchor": "rust/src/io/case_dc.rs:165",
+        "anchor": "rust/src/io/case_dc.rs:176",
         "specSection": "S52",
         "reason": "The only cooling device the format carries is a fan patch with a pressure-flow curve. There is no coil, no sensible and latent split, no return-air control and no supply-temperature set point, so a real air handler cannot be expressed and its dehumidification cannot be accounted. The first file to change is `rust/src/io/case_dc.rs`."
       }
