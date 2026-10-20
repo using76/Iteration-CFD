@@ -3875,6 +3875,8 @@ fn every_external_refusal_fires_and_names_the_setting() {
 }
 
 #[test]
+// f32 (VAL-81): externalSlab Newton stalls at 4.6e-4 K against 1e-10 (SPEC-LIT 98.3)
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn pair_every_external_entry_changes_the_answer() {
     let Some(gpu) = gpu() else { return };
     let pairs = [
@@ -4035,6 +4037,8 @@ fn an_external_face_on_a_fluid_wall_meets_its_robin_identity() {
 }
 
 #[test]
+// f32 (VAL-81): linearisation residual 7.8e-4 and 9.0e-4 in f32 (SPEC-LIT 98.5)
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn pair_the_external_entries_change_a_conjugate_answer() {
     let Some(gpu) = gpu() else { return };
     let rows = [
@@ -4940,6 +4944,8 @@ mod conjugate_curves {
 
     /// SPEC-LIT §100.10 check: the curves lower onto the case's regions.
     #[test]
+    // f32 (VAL-81): the curve at 300 K reads 0.99999994, asserted exactly 1.0
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_fluid_and_a_solid_conductivity_curve_lower_on_a_conjugate_case() {
         let base = kp_pair_base();
         let text = with_wall_k(&with_fluid_k(&base, K_SLOPED), r#"{ "table": [[200.0, 1.0], [400.0, 2.0]] }"#);

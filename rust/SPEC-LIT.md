@@ -34788,8 +34788,8 @@ eight-decade solves). Its probe `gate_95a_probe_how_far_eight_decades_lands_from
 `#[cfg(not(feature = "single"))]` and a plain `#[ignore]` measurement, and moves neither count.
 
 Every other test in the failed and did-not-finish columns now carries
-`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **192** library
-tests and **7** binary tests. (F32-17 left 191; the 192nd is CHR-24's `io::case_rad::tests::field_file_lowers_and_refuses`, first compiled under single at lane M's W10 merge with main: it asserts the read emissivity 0.8 exactly, and the single build's reader gives 0.800000011920929, an exact-value test kept by F32-16's rule.) So the second invocation of the house command reports
+`#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]`: **254** library
+tests and **9** binary tests. (F32-17 left 191; the 192nd is CHR-24's `io::case_rad::tests::field_file_lowers_and_refuses`, first compiled under single at lane M's W10 merge with main: it asserts the read emissivity 0.8 exactly, and the single build's reader gives 0.800000011920929, an exact-value test kept by F32-16's rule. VAL-81 (below) added 62 library and 2 binary tests, failures that no unit had run under the feature before.) So the second invocation of the house command reports
 1577 passed, 0 failed, 442 ignored for the library (1085 s; the 1577th is the counting
 test below) and 259 passed, 13 ignored for the binaries (0 failed unless the schema
 race above fires), and `-- --ignored` under the feature runs exactly the tests that do
@@ -34799,10 +34799,10 @@ does nothing without the feature: the f64 lists and results are the ones above.
 and holds them to the two bold numbers in this paragraph (it is itself one more library
 test, so the f64 build now lists 2020 and passes 2010). The library count was 432 when this
 paragraph was measured; a later section that adds such a test moves the bold number and says so
-where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, F32-16 (below) took 186 away, and F32-17 (below) took 112 more; the merge of lane G's W8 into lane M (2026-10-19) was recounted by this test and moved neither number, because F32-15 (§118.15) runs its four tests as `tests/f32_unfinished.rs` and changes no attribute. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
+where the test is described - §109.3 added six, §109.5 four, §109.6 four, §109.8 one, §95.11 four, §98 seven, §100 fifteen, §98.8 two, §100.12 seven, §100.13 three, §120.1 one, F32-16 (below) took 186 away, F32-17 (below) took 112 more, and VAL-81 (below) added 62; the merge of lane G's W8 into lane M (2026-10-19) was recounted by this test and moved neither number, because F32-15 (§118.15) runs its four tests as `tests/f32_unfinished.rs` and changes no attribute. The binary count was 13 when this paragraph was measured; §105.16 added one (Gate
 105-D's `ofgpu-lowmach` test), §105.17 one (Gate 105-E's), §105.18 one (the `backward`
 stroke's regression test) and §144.3 one (`ofgpu-validate`'s 10:1 cantilever mesh test, which first compiled under
-the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`). F32-17 (below) took eleven away and added one (`ofgpu-compressible`'s `every_knob_changes_the_run`).
+the feature there: its cubic-cell volume misses its `1e-6` relative bar by the f32 rounding of the points, `1.6e-5`). F32-17 (below) took eleven away and added one (`ofgpu-compressible`'s `every_knob_changes_the_run`). VAL-81 (below) added two (`ofgpu-buoyant`'s `buoyant_s2s_parallel_plates` and `ofgpu-compressible`'s `a_dust_sst_vent_case_hands_over`).
 
 **Why they fail**, read from their own messages (the four that did not finish were
 stopped after 95 minutes; in f64 each takes seconds):
@@ -35008,6 +35008,62 @@ time as 0.04999999888, and `a_translating_turbulent_plate_is_the_static_plate_in
 `ofgpu-datacentre`'s `the_shipped_dc_schema_is_the_generated_one` reads an empty file while a parallel test
 rewrites it, and passes alone. Each binary's suite takes at most 208 s (`ofgpu-lowmach`).
 
+**VAL-81 (2026-10-20): every test target under the feature, and a posture for each failure.** F32-16 and F32-17 ran
+under the feature only the tests that already carried the attribute. This unit ran all of them, at HEAD c28ecdb, with
+`cargo test --release --features single --target-dir target/single`. That command compiles every test target of the
+tree: the library, the 22 binaries and the 130 integration targets of `tests/`, all of which tranche 17 added. Each
+command was capped at ten minutes. The library ran as one filtered run per top-level module (63 runs, 2,165 s in all,
+the longest `compressible` at 496 s), and each binary and integration target as its own run (152 runs, 3,380 s, the
+longest `ofgpu-lowmach` at 349 s and `tests/bc_wedge.rs` at 320 s). The `dust` run reached its 600-s cap with two
+`dust::progress` tests still running, and both pass when run alone. Every failure but the rigid body's was then
+re-run by its exact name, on one thread, and failed again, except `ofgpu-datacentre`'s schema race (above), which
+passes alone.
+
+| suite | listed | passed | failed | ignored |
+|---|---|---|---|---|
+| library | 2907 | 2631 | 70 | 206 (192 marked, 14 plain long runs) |
+| the 22 binaries | 582 | 518 | 5 | 59 |
+| the 130 integration targets | 833 | 820 | 0 | 13 |
+
+Each failure now has one of the house postures, and none was made to pass:
+
+* **K (64).** 62 library and 2 binary tests carry the attribute, with a `// f32 (VAL-81): <cause>` line above it.
+* **f64 subject (6).** The automesher's six golden pins are `#[cfg(not(feature = "single"))]` and carry no attribute.
+  Each compares a digest of the f64 build's mesh: `the_full_run_without_bodies_is_pinned`, `the_cube_config_run_is_golden`
+  and `hex_goldens_unchanged` in the driver, `castellated_goldens::the_castellated_layer_cases_are_golden` and
+  `castellated_goldens::a_flipped_point_bit_changes_the_golden` in the layers, and `the_snapped_mesh_without_bodies_is_pinned`
+  in the snap. The single library target therefore lists 2901 tests.
+* **R (0).** No tolerance moved, and this unit invents no f32 tolerance (§112.2). Some K tests fail only by the round-off
+  of a round-off subject: a 1e-12 to 1e-15 bound on a chain length, a cover parameter or a reseated point, the two-tet
+  volume sum, the parcel linearisation defect and the fan's `phi_HbyA`. They are kept for a later sorting by F32-16's rule.
+* **Left unmarked (5).** Two are library tests, `rigid_body::tests::a_rigidly_moving_box_preserves_a_free_stream` and
+  `rigid_body::tests_v2::ras_models_keep_a_free_stream_uniform_on_a_rigidly_moving_box`, both NaN in the first iterations.
+  Two are the `ofgpu-lowmach` rigid-body tests named above, whose code is being extended elsewhere. The fifth is the schema race.
+
+| module or binary | failed | K | f64 subject | unmarked | cause |
+|---|---|---|---|---|---|
+| automesher (driver 8, layers 25, snap 11) | 44 | 38 | 6 | 0 | most are §92.3's f32 closure refusal (docs/17 A28): no layer grows, the ladders retreat, G2 fails on 185 to 4,804 cells; the rest assert an exact length or value, or a 1e-12 to 1e-15 bound |
+| distsolve | 4 | 4 | 0 | 0 | the SPMD and in-process vote counts differ (22 against 16, 24 against 18, 38 against 32), and the block-local factorisation changes nothing in 6 cuts |
+| tetmesh (emit) | 3 | 3 | 0 | 0 | the emit gate's G2 refuses the sphere (8,468 cells) and the cube minus cylinder (60,284), E about 1.2e-7 against 1e-10; the two-tet volume sum misses 1e-15 |
+| io (case_cht) | 3 | 3 | 0 | 0 | the externalSlab Newton stalls at 4.6e-4 K against 1e-10 (§98.3), the linearisation residuals are 7.8e-4 and 9.0e-4 (§98.5), and a curve reads 0.99999994 against an exact 1.0 |
+| solver | 2 | 2 | 0 | 0 | the fused and unfused PCG and PBiCGStab loops differ at cell 0, so §113.1's bit-for-bit contract does not hold under the feature |
+| s2s | 2 | 2 | 0 | 0 | the box enclosure's coarse rows sum to 1.16 and the closure check refuses (F32-16's s2s group) |
+| vof | 2 | 2 | 0 | 0 | the alpha Courant number overflows (1.7e18 and 9e27) and the step is refused |
+| parcels | 2 | 2 | 0 | 0 | a 1e-14 linearisation bound, and a deposit fixture that is not order-sensitive in f32 |
+| adapt, fan, momentum, simple, solid, timescheme | 6 | 6 | 0 | 0 | an invented extremum, `phi_HbyA` at 8.6e-8 against 1e-13, an exact 0.099, a NaN Boussinesq column (`tests/f32_boussinesq.rs` runs the f32 one), Aitken short of six decades, Crank-Nicolson order 1.80 |
+| rigid_body | 2 | 0 | 0 | 2 | NaN in the first iterations, left to the rigid body's owner |
+| **library** | 70 | 62 | 6 | 2 | |
+| `ofgpu-buoyant`, `ofgpu-compressible` | 2 | 2 | 0 | 0 | a parallel-plate face flux at -127.7194 against -127.7177, and the dust vent's membrane does not open |
+| `ofgpu-lowmach`, `ofgpu-datacentre` | 3 | 0 | 0 | 3 | the two rigid-body tests above and the schema race |
+| **binaries** | 5 | 2 | 0 | 3 | |
+
+So the counts in the paragraph above read 254 and 9, and `types::tests::the_f32_failure_count_is_the_one_spec_lit_states`
+holds them. Under the feature the library now passes 2631 of 2901 tests, with 2 failing (the rigid body) and 268
+ignored. The binaries pass 518 of 582, with 3 failing (the two rigid-body tests and, when it fires, the schema race)
+and 61 ignored. VAL-81's gate asks for a stated f32 posture for every new test and gate. It holds: every test target
+has run under the feature, each failure has a posture or is named above, and §112.4 has a row for every
+`ofgpu-validate` section, 1 to 95.
+
 ### 112.4 `ofgpu-validate` at f32, section by section
 
 This table replaces the run of 2026-09-24. That run aborted at section 8's first conduction case, with the anisotropy
@@ -35017,7 +35073,7 @@ Two changes since then let every section run and report. §118.3 moved that guar
 `Checks::ran` turns a section that stops under `single` into one failed row. docs/17's F32-18 row asks for "the measured 51-section table". The tree had **81**
 sections: main's 1-79, then DST-LEEDS (80) and DST-VES (81). The table has a row for each. The merge with lane G
 (2026-10-19) brought lane G's three: Gate CHR-13 (82), Gate CHR-16 (83) and Gate 110-C leg 2 (84). Their rows were
-measured at that merge, the same way, and they are not in the totals below.
+measured at that merge, the same way, and they are not in the totals below. VAL-81 measured sections 85-95 (lane G's CHR-27 gates and its dust and Theobald gates, and lane S's DST-REMBE) on 2026-10-20 in the same way; their rows follow 84, and they are counted in their own bullet below.
 
 **How it was measured** (2026-10-18 and 19, F32-18, HEAD 5e10534; this unit changes nothing `ofgpu-validate`
 computes):
@@ -35125,6 +35181,17 @@ The verdicts:
 | 82 | Gate CHR-13, replayed | 0/3 | 0/3 | 2 | the same three rows as f64: each recorded level stops at 0.6 ms on the reactor's refusal (A98); the Konnov row is a skip in both |
 | 83 | Gate CHR-16 REDUCED, replayed | 1/7 | 1/7 | 0 | the same six rows as f64: the recorded run stops at step 41 (A100), and its inventory budgets are 1.30e-2 .. 2.35e-1 against 1e-6 |
 | 84 | Gate 110-C leg 2, replayed | 2/2 | 2/2 | 1 | holds; the single build's recorded run lands where the f64 run does (class R), and P1/P2 stay OPEN in both (A104) |
+| 85 | Gate CHR-THERMO | 111/111 | 111/111 | 0 | holds |
+| 86 | Gate CHR-EQ | 94/94 | 94/94 | 0 | holds |
+| 87 | Gate CHR-ODE | 48/48 | 48/48 | 4 | holds |
+| 88 | Gate CHR-EDM | 33/33 | 33/33 | 0 | holds |
+| 89 | Gate CHR-SLAB | 61/63 | 38/41 | 133 | the S8 N = 256 slab: 80 direction solves stay unconverged in each sweep at tau 0.1, 1 and 10 (D, A114, §136.7), so the three convergence rows fail and f64's 25 S8 rows are not reached; f64 misses its two tau 0.1 rows, 2.171e-2 against 2e-2 (the recorded S8 angular limit) |
+| 90 | Gate CHR-CUBE | 53/54 | 53/54 | 45 | the same row as f64: S8 kL 0.1 at 24^3, the wall-centre flux 3.100e-2 against 3e-2 (A2) |
+| 91 | Gate CHR-WSGG | 33/33 | 33/33 | 21 | holds |
+| 92 | Gate DST-B-LAM | 15/16 | 13/16 | 225 | the 1 um cloud run exits 1 (A125), so its completion and fronts rows fail and (i) has no 1 um speed (the gas run's S_L is 0.058416 m/s); f64 misses (i) alone, 4.507e-2 against 2e-2; (iii) is a skip in both |
+| 93 | Gate DST-B-VES, replayed | 11/18 | 11/18 | 1 | the same seven rows as f64, from the single build's own records: the p/p0 = 3 and 6 tubes are refused by the reactor (BAD_TEMPERATURE at cell 119) and the sphere by the Mach guard at step 2 (f64's sphere is refused by the reactor at cell 3); the K_st row is a skip in both |
+| 94 | Gate 68-C coupled leg, replayed | 9/10 | 9/10 | 0 | the same row as f64: test 3 alone against the 10 % bias bar, 0.1397 |
+| 95 | Gate DST-REMBE | 9/9 | 7/9 | 44 | the single automesher refuses the placeholder (G2 closure on 1,301 cells, A132), so the run uses the f64 mesh, and the mass budget (158.10h) of SPEC-LIT 158.10 reads -2.596e-7 against 1e-10 (A131); the four key J.3 rows are skips in both (no published vessel) |
 
 **What it adds up to.**
 * **f32:** 43 sections hold, 32 miss, 5 are NOT RUN and 1 has no rows. In the 76 sections that ran, 937 of 1,091 rows
@@ -35135,6 +35202,15 @@ The verdicts:
 * **Sections 82-84** (lane G's, measured at the merge on 2026-10-19, 3 s under `single`): all three replay recorded runs,
   and each gives the same rows in both builds. 82 and 83 miss as f64 does, 1 of 10 rows passing; 84 holds, 2 of 2.
   With them, `single` holds 44 of the 84 sections and misses 34, and f64 holds 72 and misses 10.
+* **Sections 85-95** (VAL-81, 2026-10-20, HEAD c28ecdb; lane G's CHR-27 gates 85-91, DST-B-LAM 92, DST-B-VES 93 and
+  the Theobald coupled leg 94, and lane S's DST-REMBE 95). Each section was its own `ofgpu-validate -sections N -json`
+  command, `single` first and then f64, with no other lane running. Under `single` 5 sections hold (85-88, 91) and
+  6 miss (89, 90, 92-95), 450 of 467 rows, in 473 s. In f64 6 hold (85-88, 91, 95) and 5 miss, 477 of 489 rows, in 390 s.
+  Sections 90, 93 and 94 miss under `single` by exactly the rows f64 misses. The f32 findings are 89 (A114), 92 (A125)
+  and 95 (A131, A132), each recorded where its gate is described (§136.7, §159.11, §158.10). The units' recorded `single`
+  runs agree, except DST-B-LAM's 18 of 20, which predates the k_g fix (A125); section 89 took 133 s here, against the 349 s CHR-27 measured on a shared card.
+  With them, `single` holds 49 of the 95 sections and misses 40, and f64 holds 78 and misses 15. Five sections are
+  NOT RUN under `single` and one in f64, and one has no rows in either build.
 
 **The deferred full run.** The plan's gate is "a deferred long run of `ofgpu-validate` under single exits 0 (R rows
 per D-F32-1)", and it is **MISSED**. The rows above already fail in 32 sections, so an unflagged run under `single`

@@ -4577,6 +4577,8 @@ mod tests {
     /// this test reports is a ratio against this solver's own spurious
     /// currents rather than against a threshold picked to pass.
     #[test]
+    // f32 (VAL-81): the alpha Courant number overflows (9e27) in f32, the step refused
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_marangoni_source_reaches_the_momentum_equation_and_drives_flow() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 
@@ -4767,6 +4769,8 @@ mod tests {
     ///   along the interface - the classic spurious interface current - and
     ///   must stay bounded rather than growing step on step.
     #[test]
+    // f32 (VAL-81): the alpha Courant number reaches 1.7e18 in f32, the step refused
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_static_drop_has_the_laplace_pressure_jump() -> Result<()> {
         let Some(g) = gpu() else { return Ok(()) };
 

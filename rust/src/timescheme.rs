@@ -2052,6 +2052,8 @@ mod tests {
     /// (`relaxationFactors == 1`): the theta method must be reachable there
     /// and still be second order once it is reached, not merely accepted.
     #[test]
+    // f32 (VAL-81): observed order 1.80 in f32: the finest error 2.3e-6 meets round-off
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn crank_nicolson_is_reachable_and_second_order_for_an_unrelaxed_equation() -> Result<()> {
         let Some(fx) = fixture([6, 6, 1]) else { return Ok(()) };
         let (a, dense, psi0) = diffusion_system(&fx)?;

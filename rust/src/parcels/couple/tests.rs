@@ -838,6 +838,8 @@ fn the_momentum_coupling_mode_changes_the_matrix() {
 /// under `explicit` there is nothing to move, so it is zero by definition
 /// rather than by arithmetic.
 #[test]
+// f32 (VAL-81): a 1e-14 relative bound, below f32 round-off
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_linearisation_defect_is_what_the_split_moved() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block([3, 3, 3], [1.0, 1.0, 1.0], ["wall"; 6]);

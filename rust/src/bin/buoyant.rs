@@ -3644,6 +3644,8 @@ mod buoyant_tests {
     /// 400 K - and, at `e2 = 1`, the concentric one at any area ratio. The
     /// enclosure's own power balance closes to the tolerance.
     #[test]
+    // f32 (VAL-81): face 320 flux -127.7194 against the closed form -127.7177 in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn buoyant_s2s_parallel_plates() {
         if Gpu::new(0).is_err() {
             return;

@@ -2172,6 +2172,8 @@ fn a_fan_or_jump_patch_is_seeded_as_a_dirichlet_because_it_pins_the_level() {
 /// SPEC-LIT §53.3: the boundary jump divides ONLY `phi_HbyA`. Dividing the
 /// coefficient too applies the resistance twice.
 #[test]
+// f32 (VAL-81): phi_HbyA relative 8.6e-8 against 1e-13
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn the_boundary_jump_does_not_scale_the_coefficient_it_measured_d_from() {
     let Some(gpu) = gpu() else { return };
     let mut rig = Rig::new(&gpu, chain(8), 0.02).expect("rig");

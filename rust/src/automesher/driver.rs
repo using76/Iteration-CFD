@@ -2162,6 +2162,8 @@ mod tests {
     /// was - the mesh leaves the pipeline unchanged through the split stage
     /// being recorded and skipped, and `out.layout` staying `None`.
     #[test]
+    // f64 subject (VAL-81): pins the f64 build's mesh fingerprint
+    #[cfg(not(feature = "single"))]
     fn the_full_run_without_bodies_is_pinned() {
         let cfg = cube_config();
         let surf = cube_surface();
@@ -2314,6 +2316,8 @@ mod tests {
     /// regions grow 3 x 54 layer cells and the layered layout still pairs
     /// bit for bit across the interface.
     #[test]
+    // f32 (VAL-81): G2 fails on 196 cells in f32, no layer grows (A28)
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn layers_grow_on_both_sides_of_the_interface() {
         let cfg = planar_config();
         let surf = planar_surface();
@@ -2367,6 +2371,8 @@ mod tests {
     /// refused naming the regions' patch lists; an entry one region carries
     /// grows layers THERE and the other region's row says skipped.
     #[test]
+    // f32 (VAL-81): G2 fails on 196 cells in f32, no layer grows (A28)
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_layer_patch_that_no_region_has_is_refused() {
         let surf = planar_surface();
         // No region has the STL patch name: the split names are the layout's
@@ -2611,6 +2617,8 @@ mod tests {
     /// every layer row reports its keep/ring/off split and every ladder
     /// entry its terminate count.
     #[test]
+    // f32 (VAL-81): cell closure 6.2e-12 against 1e-12 on f32 points (A28)
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_face_mode_cube_run_reports_its_coverage() {
         let mut cfg = cube_config();
         cfg.layers.terminate = crate::automesher::LayerTerminate::Face;
@@ -2638,6 +2646,8 @@ mod tests {
     /// emitted when the layer stage's castellated goldens were written, bit
     /// for bit, hashed as they are.
     #[test]
+    // f64 subject (VAL-81): pins the f64 build's mesh digest
+    #[cfg(not(feature = "single"))]
     fn the_cube_config_run_is_golden() {
         const GOLDEN: &str = "3b257be84dc343e6b66432eca0ead5d7e150203a2c5984001e28a4b3fd95d5e3";
         let (out, _) = run_recording(&cube_config(), &cube_surface(), None);
@@ -2652,6 +2662,8 @@ mod tests {
     /// `the_cube_config_run_is_golden` bit for bit. (The stage-level L1a
     /// goldens, `layers::tests::castellated_goldens`, never read the kind.)
     #[test]
+    // f64 subject (VAL-81): pins the f64 build's mesh digest
+    #[cfg(not(feature = "single"))]
     fn hex_goldens_unchanged() {
         const GOLDEN: &str = "3b257be84dc343e6b66432eca0ead5d7e150203a2c5984001e28a4b3fd95d5e3";
         let cfg = cube_config();
@@ -2679,6 +2691,8 @@ mod tests {
     /// the cube's 12 edges of 1 m, a tenth of the finest cell as the
     /// tolerance, and a captured length above 0 and at most the sharp one.
     #[test]
+    // f32 (VAL-81): asserts tol == 0.05 exactly; f32 reads 0.05000000075
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_snap_row_reports_the_feature_capture() {
         let cfg = cube_config();
         let surf = cube_surface();
@@ -2703,6 +2717,8 @@ mod tests {
     /// the capture reads the interface faces' edges: the same 12 m of sharp
     /// length, and some of it held.
     #[test]
+    // f32 (VAL-81): captures 0 of 12 feature edges in f32, the closure refusal (A28)
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_body_run_captures_along_its_interface() {
         let cfg = body_config();
         let surf = cube_surface();

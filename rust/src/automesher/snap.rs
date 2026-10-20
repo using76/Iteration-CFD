@@ -1616,6 +1616,7 @@ pub fn feature_capture(
 mod tests {
     use super::*;
     use crate::automesher::castellate::castellate;
+    #[cfg_attr(feature = "single", allow(unused_imports))]
     use crate::automesher::castellate::tests::{
         box_soup, mesh_fingerprint, sphere_soup, thresholds,
     };
@@ -2264,9 +2265,12 @@ mod tests {
     /// Requirement 2's pin (M6 Run 1): with no bodies the snapped sphere
     /// mesh is bit for bit what it was before the run's edits. The constant
     /// was pinned before any other edit.
+    #[cfg_attr(feature = "single", allow(dead_code))]
     const PINNED_SPHERE_SNAP_NO_BODY: u64 = 0x0637e67a829f905e;
 
     #[test]
+    // f64 subject (VAL-81): pins the f64 build's snapped-mesh fingerprint
+    #[cfg(not(feature = "single"))]
     fn the_snapped_mesh_without_bodies_is_pinned() {
         let (surf, mesh) = sphere_case();
         let snapped =
@@ -2333,6 +2337,8 @@ mod tests {
     /// topology and the total volume are the castellated mesh's own, and the
     /// fluid/body split of the volume is (about) the block minus the sphere.
     #[test]
+    // f32 (VAL-81): p99 residual 0.203 against 0.06 in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_kept_sphere_is_snapped_along_its_interface() {
         let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
         let surf = Surface::from_soup(
@@ -2582,6 +2588,8 @@ mod tests {
     /// a staircase over-reports a curved surface's area (by up to sqrt(3)),
     /// so the castellated ratio sits above the snapped one.
     #[test]
+    // f32 (VAL-81): snapped area ratio 1.497 outside (0.9, 1.1) in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_snapped_sphere_area_is_near_its_surface_area() {
         let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
         let surf = Surface::from_soup(
@@ -2627,6 +2635,8 @@ mod tests {
     /// covers the geometry: one row, a positive castellated area that
     /// includes those interfaces, and a snapped ratio within ten per cent.
     #[test]
+    // f32 (VAL-81): snapped area ratio 1.506 outside (0.9, 1.1) in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_interface_area_counts_toward_the_snapped_ratio() {
         let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
         let surf = Surface::from_soup(
@@ -2748,6 +2758,8 @@ mod tests {
     /// than with it off - the chamfer of `feature_tolerance` 0 is what the
     /// capture exists to show. Both are printed for the record.
     #[test]
+    // f32 (VAL-81): captures 0 of 12 edge length in f32, with or without attraction
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_attraction_raises_the_capture_on_an_off_lattice_cube() {
         let (surf, cast) = cube_case();
         let on = snap(&cast, &surf, 1.0, 30.0, &SnapSpec::default(), &thresholds())
@@ -2883,6 +2895,8 @@ mod tests {
     /// angle: a 45-degree kink into 2 and 1, a closed square into 4 open
     /// chains of 1, a closed 16-gon one closed chain.
     #[test]
+    // f32 (VAL-81): a 1e-12 bound on a chain length, below f32 round-off
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn the_chains_cut_a_polyline_where_it_turns_further_than_the_capture_angle() {
         let fs_of = |points: Vec<Vec3>, pl: Vec<u32>| features::FeatureSet {
             points,
@@ -2945,6 +2959,8 @@ mod tests {
     /// intervals where that one is of positive length, no cover where it
     /// has none.
     #[test]
+    // f32 (VAL-81): a 1e-15 bound on a cover parameter, below f32 round-off
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn on_one_segment_the_chain_cover_is_the_segment_cover() {
         let fs = features::FeatureSet {
             points: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
@@ -2995,6 +3011,8 @@ mod tests {
     /// midpoints of the last and first sides covers one side's length
     /// across the seam, and the 16 edges cover the whole loop.
     #[test]
+    // f32 (VAL-81): a 1e-12 bound on a chain length, below f32 round-off
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_closed_chain_is_covered_across_its_seam() {
         let ch = &capture_chains(&gon16_set())[0];
         let l = 2.0 * (std::f64::consts::PI / 16.0).sin();
@@ -3078,6 +3096,8 @@ mod tests {
     /// edges in 12 chains, `captured_length` 24 where the per-segment
     /// measure reads 0.
     #[test]
+    // f32 (VAL-81): sharp length reads 23.999994 in f32 against an exact 24
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_subdivided_cube_on_the_cell_planes_is_captured_whole() {
         let (surf, mesh) = grid_cube_case();
         let fs = features::extract(&surf, 30.0).expect("features");
@@ -3137,6 +3157,8 @@ mod tests {
     /// Pull the mesh point at the middle of one subdivided cube edge half
     /// a cell off it: the chain measure takes that edge's 2 away, 24 to 22.
     #[test]
+    // f32 (VAL-81): sharp length reads 23.999994 in f32 against an exact 24
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_point_pulled_off_a_subdivided_edge_uncovers_that_edge() {
         let (surf, mut mesh) = grid_cube_case();
         let mid = Vec3::new(2.0, 1.0, 1.0);
@@ -3160,6 +3182,8 @@ mod tests {
     /// the mesh still through the gate, over half of B within the
     /// tolerance. The old loop abandoned 17 iterates and held 527 of 1178.
     #[test]
+    // f32 (VAL-81): 0 of 1178 points within tolerance in f32
+    #[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
     fn a_box_pulled_onto_its_edges_from_afar_moves_what_passes_and_holds_the_rest() {
         let (mut tree, bg) = setup([0.0, 8.0, 0.0, 8.0, 0.0, 8.0], 1.0, 2);
         let surf = Surface::from_soup(

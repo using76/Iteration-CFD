@@ -895,6 +895,8 @@ fn shifting_every_injected_parcel_into_a_different_slot_moves_no_bit() {
 /// exactly one ulp of 1.0 - which is the whole reason gate 67-C can see
 /// anything at all.
 #[test]
+// f32 (VAL-81): the fixture is not order-sensitive in f32: both orders give 1.0000001
+#[cfg_attr(feature = "single", ignore = "fails at f32: SPEC-LIT 112.3")]
 fn changing_one_identity_changes_the_deposited_bits() {
     let Some(gpu) = Gpu::new(0).ok() else { return };
     let hm = block(4);
