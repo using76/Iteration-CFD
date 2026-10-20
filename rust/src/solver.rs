@@ -269,6 +269,12 @@ pub struct SolverKernels {
     pub beta_bicg: CudaFunction,
     pub convergence_test: CudaFunction,
     pub pack_report: CudaFunction,
+    // (139.10, PAR-14 run 2) the refinement's per-cell double terms, for
+    // exactsum's exact world sums.
+    #[cfg(feature = "single")]
+    pub residual64_terms: CudaFunction,
+    #[cfg(feature = "single")]
+    pub norm_factor64_terms: CudaFunction,
 }
 
 impl SolverKernels {
@@ -315,6 +321,10 @@ impl SolverKernels {
             split3: k.func("solSplit3")?,
             #[cfg(feature = "single")]
             join3: k.func("solJoin3")?,
+            #[cfg(feature = "single")]
+            residual64_terms: k.func("solResidual64Terms")?,
+            #[cfg(feature = "single")]
+            norm_factor64_terms: k.func("solNormFactor64Terms")?,
 
             amul: k.func("solAmul")?,
             copy: k.func("solCopy")?,
@@ -5672,4 +5682,90 @@ mod tests {
             .expect("a fixed-iteration capture after the refusals");
         assert!(g.is_some(), "the fixed-iteration capture after the refusals recorded nothing");
     }
+}
+
+/// (139.10, PAR-14 run 2) The refinement's per-cell residual terms
+/// `|b - A.x|` in double, on the part's OWNED cells - exactsum's exact world
+/// sum takes the same multiset of terms whatever the cut, so a halo cell's
+/// row (its owner's) must not enter twice.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+pub fn residual64_terms(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<f64>,
+    x: &DevBuf<f64>,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    n: usize,
+) -> Result<()> {
+    let nl = to_label(n)?;
+    // One thread per cell (the kernel has no grid stride), so the
+    // cell-count launch, not the capped reduction grid.
+    let cfg = cfg_for(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.residual64_terms)
+            .arg(&mut *out)
+            .arg(&a.source)
+            .arg(x)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    Ok(())
+}
+
+/// (139.10, PAR-14 run 2) The refinement's per-cell section 8.4 terms
+/// `|A.x - A.x_ref| + |b - A.x_ref|` in double, on the part's OWNED cells,
+/// with `x_ref = sum_x[0]·inv_n` - the same expression
+/// `norm_factor64_stage1` sums, handed to exactsum instead.
+#[cfg(feature = "single")]
+#[allow(clippy::too_many_arguments)]
+pub fn norm_factor64_terms(
+    gpu: &Gpu,
+    k: &SolverKernels,
+    out: &mut DevBuf<f64>,
+    x: &DevBuf<f64>,
+    sum_x: &DevBuf<f64>,
+    inv_n: f64,
+    a: &GpuLduMatrix,
+    m: &GpuMesh,
+    n: usize,
+) -> Result<()> {
+    let nl = to_label(n)?;
+    // One thread per cell (the kernel has no grid stride), so the
+    // cell-count launch, not the capped reduction grid.
+    let cfg = cfg_for(n);
+    unsafe {
+        gpu.stream()
+            .launch_builder(&k.norm_factor64_terms)
+            .arg(&mut *out)
+            .arg(x)
+            .arg(sum_x)
+            .arg(&inv_n)
+            .arg(&a.source)
+            .arg(&a.diag)
+            .arg(&a.upper)
+            .arg(&a.lower)
+            .arg(&m.owner)
+            .arg(&m.neighbour)
+            .arg(&m.rf_offset)
+            .arg(&m.rf_face)
+            .arg(&m.rf_flags)
+            .arg(&a.boundary_coeffs)
+            .arg(&m.b_nbr_cell)
+            .arg(&nl)
+            .launch(cfg)?;
+    }
+    Ok(())
 }

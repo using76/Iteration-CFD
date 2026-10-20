@@ -1463,4 +1463,74 @@ extern "C" __global__ void solJoin3
     x[i] = ((double)hi[i] + (double)mid[i]) + (double)lo[i];
 }
 
+//- (139.10, PAR-14 run 2) The per-cell residual terms `|b - A.x|` of
+//  (118.4.3), materialised in double so exactsum.cu's accumulator can take
+//  them: solResidual64Stage1's own expression, one thread per cell, over the
+//  part's OWNED cells only - a halo cell's row is its owner's, and summing
+//  it twice would make the world sum depend on the cut.
+extern "C" __global__ void solResidual64Terms
+(
+    double* __restrict__ out,
+    const ofscalar* __restrict__ b,
+    const double* __restrict__ x,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nCells
+)
+{
+    const oflabel c = (oflabel)OFGPU_TID;
+    if (c >= nCells) return;
+
+    const double ax = amul64Row_(c, x, diag, upper, lower, owner, neighbour,
+                                 rfOffset, rfFace, rfFlags, boundaryCoeffs,
+                                 bNbrCell);
+    out[c] = fabs64_((double)b[c] - ax);
+}
+
+
+//- (139.10, PAR-14 run 2) The per-cell section 8.4 terms
+//  `|A.x - A.x_ref| + |b - A.x_ref|` of (118.4.2), materialised in double:
+//  solNormFactor64Stage1's own expression, one thread per cell, over the
+//  part's OWNED cells only, for the same reason.
+extern "C" __global__ void solNormFactor64Terms
+(
+    double* __restrict__ out,
+    const double* __restrict__ x,
+    const double* __restrict__ sumX,
+    double invN,
+    const ofscalar* __restrict__ b,
+    const ofscalar* __restrict__ diag,
+    const ofscalar* __restrict__ upper,
+    const ofscalar* __restrict__ lower,
+    const oflabel* __restrict__ owner,
+    const oflabel* __restrict__ neighbour,
+    const oflabel* __restrict__ rfOffset,
+    const oflabel* __restrict__ rfFace,
+    const oflabel* __restrict__ rfFlags,
+    const ofscalar* __restrict__ boundaryCoeffs,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nCells
+)
+{
+    const double xr = sumX[0] * invN;
+    const oflabel c = (oflabel)OFGPU_TID;
+    if (c >= nCells) return;
+
+    const double ax = amul64Row_(c, x, diag, upper, lower, owner, neighbour,
+                                 rfOffset, rfFace, rfFlags, boundaryCoeffs,
+                                 bNbrCell);
+    const double axr = amul64ConstRow_(c, xr, diag, upper, lower, owner,
+                                       neighbour, rfOffset, rfFace, rfFlags,
+                                       boundaryCoeffs, bNbrCell);
+    out[c] = fabs64_(ax - axr) + fabs64_((double)b[c] - axr);
+}
+
 #endif  // OFGPU_SINGLE

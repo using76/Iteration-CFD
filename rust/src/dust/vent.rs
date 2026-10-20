@@ -37,10 +37,11 @@
 use crate::compressible::bc::Lowered;
 use crate::compressible::{Compressible, CompressibleControls, CompressibleState};
 use crate::device::{cfg_for, DevBuf, Gpu, KernelSet};
+use crate::dust::source::CompressibleDust;
 use crate::error::{Error, Result};
 use crate::field::{GpuScalarField, GpuVectorField};
 use crate::field_setup::{setup_scalar_field, setup_vector_field};
-use crate::io::fields::PatchFieldSpec;
+use crate::io::fields::{PatchFieldSpec, RawScalarField};
 use crate::io::polymesh::PolyMeshRaw;
 use crate::mesh::{GpuMesh, HostMesh, PatchInfo, PatchKind};
 use crate::{DVec3, Label, Scalar};
@@ -79,6 +80,20 @@ pub struct JsonVent {
     /// `noSlip` (default) | `slip`: U on the membrane while closed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall: Option<String>,
+    /// SPEC-LIT §158.10: named pressure probes. Absent is every case this
+    /// reader has built; present, each probe is the cell nearest its point
+    /// ([`probe_cells`]) and the driver records that cell's gauge pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<Vec<JsonProbe>>,
+}
+
+/// One `vent.probes[]` entry (SPEC-LIT §158.10): a name made of
+/// `[A-Za-z0-9_]` and a world point in m.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JsonProbe {
+    pub name: String,
+    pub point: [f64; 3],
 }
 
 /// U on the membrane while it is closed (SPEC-LIT §158.1).
@@ -104,11 +119,72 @@ pub struct VentSpec {
     pub select: VentSelect,
     pub p_stat: f64,
     pub wall: MembraneWall,
+    /// SPEC-LIT §158.10: the lowered `vent.probes`, in the case's order;
+    /// empty when the block states none.
+    pub probes: Vec<VentProbe>,
+}
+
+/// A lowered `vent.probes[]` entry (SPEC-LIT §158.10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VentProbe {
+    pub name: String,
+    pub point: DVec3,
 }
 
 /// A `vent.<key>` refusal naming the key and the value it saw (§158.8).
 fn vent_refused(key: &str, value: impl std::fmt::Display, why: &str) -> Error {
     Error::Refused(format!("vent.{key}: {value} - {why} (SPEC-LIT §158.8)"))
+}
+
+/// A `vent.probes` refusal naming the key, the probe (its name or index) and
+/// the value it saw (SPEC-LIT §158.10). [`vent_refused`] hard-codes §158.8.
+fn probe_refused(which: impl std::fmt::Display, value: impl std::fmt::Display, why: &str) -> Error {
+    Error::Refused(format!("vent.probes: {which}: {value} - {why} (SPEC-LIT §158.10)"))
+}
+
+/// Lower `vent.probes` (SPEC-LIT §158.10): `Ok(empty)` when the block states
+/// none; refused, naming the key and the probe, for an empty list, a name
+/// that is empty, repeated or not made only of `[A-Za-z0-9_]`, and a point
+/// with a non-finite coordinate.
+fn lower_probes(probes: Option<&Vec<JsonProbe>>) -> Result<Vec<VentProbe>> {
+    let Some(list) = probes else { return Ok(Vec::new()) };
+    if list.is_empty() {
+        return Err(Error::Refused(
+            "vent.probes: [] - is an empty probe list: state a probe or drop the key \
+             (SPEC-LIT §158.10)"
+                .into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(list.len());
+    for (i, p) in list.iter().enumerate() {
+        if p.name.is_empty() {
+            return Err(probe_refused(format!("probe {i}"), "\"\"", "has an empty name"));
+        }
+        if !p.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("\"{}\"", p.name),
+                "a name is made only of [A-Za-z0-9_]",
+            ));
+        }
+        if !seen.insert(p.name.as_str()) {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("\"{}\"", p.name),
+                "the name is repeated - each probe has its own",
+            ));
+        }
+        if !p.point.iter().all(|v| v.is_finite()) {
+            return Err(probe_refused(
+                format!("probe \"{}\" (index {i})", p.name),
+                format!("{:?}", p.point),
+                "is not a finite point",
+            ));
+        }
+        out.push(VentProbe { name: p.name.clone(), point: DVec3::new(p.point[0], p.point[1], p.point[2]) });
+    }
+    Ok(out)
 }
 
 impl JsonVent {
@@ -147,7 +223,8 @@ impl JsonVent {
                 return Err(vent_refused("wall", format!("\"{w}\""), "is neither `noSlip` nor `slip`"));
             }
         };
-        Ok(VentSpec { normal, select, p_stat: self.p_stat, wall })
+        let probes = lower_probes(self.probes.as_ref())?;
+        Ok(VentSpec { normal, select, p_stat: self.p_stat, wall, probes })
     }
 
     /// The disc route, once both keys are present.
@@ -519,6 +596,50 @@ pub fn closed_lowered(low: &Lowered, wall: MembraneWall) -> Result<Lowered> {
     Ok(out)
 }
 
+/// The closed-stage copy of a dust-side scalar field (c~, k, omega, nut):
+/// `raw` plus `zeroGradient` under [`VENT_IN`] and [`VENT_OUT`], the treatment
+/// [`closed_lowered`] gives p and T (SPEC-LIT §158.10). DECISION (TAKEN by the
+/// supervisor): during the closed stage the membrane carries zeroGradient c~,
+/// k, omega and nut and no wall function. It exists only until pStat, and a
+/// wall function on it would need the case to name one. Its two patches are
+/// still wall-kind, so the split mesh's SST wall distance counts them.
+/// Refused by name, with [`closed_lowered`]'s texts and the field's name: a
+/// `ventIn`/`ventOut` key already in `raw.boundary`, and a pattern of
+/// `raw.boundary_patterns` that would govern a vent patch.
+pub fn closed_scalar(raw: &RawScalarField) -> Result<RawScalarField> {
+    let mut out = raw.clone();
+    for key in [VENT_IN, VENT_OUT] {
+        if raw.boundary.contains_key(key) {
+            return Err(Error::Refused(format!(
+                "vent: the case already states a boundaryField entry for \
+                 {key} on {} (SPEC-LIT §158.8)",
+                raw.name
+            )));
+        }
+    }
+    for key in [VENT_IN, VENT_OUT] {
+        out.boundary.insert(
+            key.to_string(),
+            PatchFieldSpec { type_name: "zeroGradient".to_string(), ..Default::default() },
+        );
+    }
+    // As `closed_lowered`: the exact keys now exist, so the precedence the
+    // run rests on is checked, not assumed.
+    for key in [VENT_IN, VENT_OUT] {
+        match crate::io::fields::governing_key(&out.boundary, &out.boundary_patterns, key)? {
+            Some(k) if k == key => {}
+            Some(k) => {
+                return Err(Error::Refused(format!(
+                    "vent: the pattern {k} would govern {key}; state the \
+                     patch explicitly (SPEC-LIT §158.8)"
+                )));
+            }
+            None => {}
+        }
+    }
+    Ok(out)
+}
+
 /// The state a step reads, on either mesh: the lowered U/p/T built as
 /// `src/bin/compressible.rs` builds the case's own state, and the derived
 /// fields allocated as zeros for [`Compressible::initialise`] to fill.
@@ -642,6 +763,101 @@ impl VentTrigger {
     }
 }
 
+// ==========================================================================
+//  The probes (SPEC-LIT §158.10)
+// ==========================================================================
+
+/// The cell each probe reads (SPEC-LIT §158.10): the cell whose WORLD centre,
+/// `hm.origin + hm.geom64().c[i]` in f64, is nearest the probe's point; a tie
+/// goes to the lowest id. A point outside the axis-aligned box of the world
+/// boundary-face centres (`hm.origin + hm.geom64().b_cf[j]`) is refused,
+/// naming `vent.probes` and the probe - [`HostMesh`] keeps no points, and on a
+/// box mesh this box is the mesh's own.
+pub fn probe_cells(hm: &HostMesh, probes: &[VentProbe]) -> Result<Vec<usize>> {
+    let g = hm.geom64();
+    let Some(&first) = g.b_cf.first() else {
+        return Err(Error::Refused(
+            "vent.probes: the mesh has no boundary face, so it has no box to place a probe in \
+             (SPEC-LIT §158.10)"
+                .into(),
+        ));
+    };
+    let (mut lo, mut hi) = (hm.origin + first, hm.origin + first);
+    for &b in g.b_cf.iter() {
+        let w = hm.origin + b;
+        lo = lo.cmpt_min(w);
+        hi = hi.cmpt_max(w);
+    }
+    let mut out = Vec::with_capacity(probes.len());
+    for p in probes {
+        let q = p.point;
+        let inside = q.x >= lo.x
+            && q.x <= hi.x
+            && q.y >= lo.y
+            && q.y <= hi.y
+            && q.z >= lo.z
+            && q.z <= hi.z;
+        if !inside {
+            return Err(Error::Refused(format!(
+                "vent.probes: probe \"{}\" at ({} {} {}) - lies outside the box of the mesh's \
+                 boundary-face centres, ({} {} {}) to ({} {} {}) (SPEC-LIT §158.10)",
+                p.name, q.x, q.y, q.z, lo.x, lo.y, lo.z, hi.x, hi.y, hi.z
+            )));
+        }
+        let mut best = 0usize;
+        let mut best_d = f64::INFINITY;
+        for i in 0..hm.n_cells {
+            let d = ((hm.origin + g.c[i]) - q).mag_sqr();
+            // Strictly less: a tie keeps the lowest id.
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        out.push(best);
+    }
+    Ok(out)
+}
+
+/// The probes' pressure gather (SPEC-LIT §158.10): `presGather`, exactly as
+/// [`VentTrigger`] launches it, collects the gauge pressure at the probes'
+/// cells and `read` returns them widened to f64, in probe order.
+pub struct VentProbes {
+    gather: CudaFunction,
+    cells: DevBuf<Label>,
+    out: DevBuf<Scalar>,
+    n: usize,
+}
+
+impl VentProbes {
+    pub fn new(gpu: &Gpu, cells: &[usize]) -> Result<Self> {
+        let gather = KernelSet::new(gpu, crate::kernels::PRESSURE)?.func("presGather")?;
+        Ok(Self {
+            gather,
+            cells: gpu.upload(&(cells.iter().map(|&c| c as Label).collect::<Vec<_>>()))?,
+            out: gpu.zeros(cells.len())?,
+            n: cells.len(),
+        })
+    }
+
+    /// Gather `p` (the gauge p's cell array) at the probes' cells on the
+    /// device, download and widen with `f64::from`, in probe order.
+    pub fn read(&mut self, gpu: &Gpu, p: &DevBuf<Scalar>) -> Result<Vec<f64>> {
+        let m = self.n as Label;
+        let f = self.gather.clone();
+        unsafe {
+            gpu.stream()
+                .launch_builder(&f)
+                .arg(&mut self.out)
+                .arg(p)
+                .arg(&self.cells)
+                .arg(&m)
+                .launch(cfg_for(self.n))?;
+        }
+        Ok(gpu.download(&self.out)?.into_iter().map(f64::from).collect())
+    }
+}
+
 /// The membrane's state: closed, or open from the step, time and Δp it
 /// opened at (158.1, irreversible).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -687,7 +903,7 @@ impl Membrane {
 
 /// Copy one scalar field by host round trip: `f`, `f0` and `f00` whole, and
 /// the first `n_bf` entries of every `[n_bf]` value buffer the struct has.
-fn hand_over_scalar(
+pub(crate) fn hand_over_scalar(
     gpu: &Gpu,
     from: &GpuScalarField,
     to: &mut GpuScalarField,
@@ -847,6 +1063,121 @@ pub fn open_onto<'m>(
     hand_over_state(gpu, split, from_state, &mut state)?;
     hand_over_solver(from, &mut solver);
     Ok((solver, state))
+}
+
+/// [`open_onto`] for a run that carries a dust coupling (SPEC-LIT §158.10).
+/// The order is fixed: the merged state is set up and the merged solver built
+/// (as [`open_onto`]); the closed run's coupling is `carried` when it has taken
+/// a step, `None` when the membrane opens on the initial state; `make` builds
+/// the merged coupling from the merged state and `carried`, and it is attached
+/// BEFORE `initialise`, so the gas state is the mixture law as on the no-vent
+/// path; the rest is [`open_onto`]'s body exactly - at step 0 `initialise` only,
+/// otherwise `hand_over_state`, `initialise`, `hand_over_state`,
+/// `hand_over_solver`. Refused by name: a closed run that has taken a step and
+/// carries no dust coupling.
+#[allow(clippy::too_many_arguments)]
+pub fn open_onto_dust<'m, F>(
+    gpu: &Gpu,
+    split: &VentSplit,
+    from: &Compressible<'_>,
+    from_state: &CompressibleState,
+    merged: &'m GpuMesh,
+    merged_hm: &HostMesh,
+    ctrl: CompressibleControls,
+    low: &Lowered,
+    make: F,
+) -> Result<(Compressible<'m>, CompressibleState)>
+where
+    F: FnOnce(&CompressibleState, Option<&CompressibleDust<'_>>) -> Result<CompressibleDust<'m>>,
+{
+    let mut state = setup_state(gpu, merged, merged_hm, low)?;
+    let mut solver = build_solver(gpu, merged, ctrl, low)?;
+    let carried = if from.steps_taken() > 0 {
+        Some(from.dust().ok_or_else(|| {
+            Error::Refused(
+                "dust::vent::open_onto_dust: the closed run has taken steps and carries no \
+                 dust coupling to hand over; use open_onto (SPEC-LIT §158.10)"
+                    .into(),
+            )
+        })?)
+    } else {
+        None
+    };
+    let dust = make(&state, carried)?;
+    solver.attach_dust(gpu, dust)?;
+    if from.steps_taken() == 0 {
+        solver.initialise(gpu, &mut state)?;
+        return Ok((solver, state));
+    }
+    hand_over_state(gpu, split, from_state, &mut state)?;
+    solver.initialise(gpu, &mut state)?;
+    hand_over_state(gpu, split, from_state, &mut state)?;
+    hand_over_solver(from, &mut solver);
+    Ok((solver, state))
+}
+
+// ==========================================================================
+//  The mass budget (SPEC-LIT §158.10)
+// ==========================================================================
+
+/// The run's mass budget (SPEC-LIT §158.10), bookkeeping and not physics.
+/// `M` is the host sum `sum_i rho_i V_i` of (158.10f) of SPEC-LIT 158.10 over the
+/// case's cell volumes `V`, in f64 and cell order. `outflow` accumulates
+/// (158.10g) of SPEC-LIT 158.10: after every step `dt` times the sum, in face
+/// order, of the boundary face mass flux `mdot.bf` - outflow is positive. The
+/// residual (158.10h) of SPEC-LIT 158.10 is
+/// `(M(t_n) - M(t_0) + B(t_n)) / M(t_0)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MassBudget {
+    /// kg, `M(t_0)`.
+    pub m0: f64,
+    /// kg, `B(t_n)`: the boundary outflow accumulated so far.
+    pub outflow: f64,
+}
+
+impl MassBudget {
+    /// (158.10f) of SPEC-LIT 158.10: `sum_i rho_i V_i` over `v.len()` cells, f64,
+    /// in cell order, from the downloaded `rho.f`. Refused by name: a `v` longer
+    /// than the field's cells.
+    pub fn mass(gpu: &Gpu, s: &CompressibleState, v: &[Scalar]) -> Result<f64> {
+        if v.len() > s.rho.n_cells {
+            return Err(Error::Refused(format!(
+                "dust::vent::MassBudget::mass: {} cell volumes for a rho field of {} cells \
+                 (SPEC-LIT §158.10)",
+                v.len(),
+                s.rho.n_cells
+            )));
+        }
+        let rho = gpu.download(&s.rho.f)?;
+        let mut m = 0.0f64;
+        for i in 0..v.len() {
+            m += f64::from(rho[i]) * f64::from(v[i]);
+        }
+        Ok(m)
+    }
+
+    /// `M(t_0)` on the state the first step starts from, outflow 0.
+    pub fn start(gpu: &Gpu, s: &CompressibleState, v: &[Scalar]) -> Result<Self> {
+        Ok(Self { m0: Self::mass(gpu, s, v)?, outflow: 0.0 })
+    }
+
+    /// (158.10g) of SPEC-LIT 158.10: add `dt` times the sum of the boundary face
+    /// mass flux `mdot.bf` of the step just taken, summed in face order.
+    pub fn after_step(&mut self, gpu: &Gpu, s: &CompressibleState, dt: f64) -> Result<()> {
+        let bf = gpu.download(&s.mdot.bf)?;
+        let mut sum = 0.0f64;
+        for x in &bf {
+            sum += f64::from(*x);
+        }
+        self.outflow += dt * sum;
+        Ok(())
+    }
+
+    /// (158.10h) of SPEC-LIT 158.10: `(m - M(t_0) + B) / M(t_0)` for the mass `m`
+    /// of the current state.
+    pub fn residual(&self, m: f64) -> f64 {
+        (m - self.m0 + self.outflow) / self.m0
+    }
 }
 
 #[cfg(test)]

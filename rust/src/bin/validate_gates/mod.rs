@@ -179,3 +179,10 @@ pub(crate) mod dst_b_vessel;
 /// case through ofgpu-lowmach with Rosin-Rammler sizes, replayed from its
 /// records (docs/17 VAL-72b).
 pub(crate) mod theobald_coupled;
+
+/// SPEC-LIT §158.7, §158.10, Gate DST-REMBE: the vented REMBE explosion
+/// against Huang, Bloching & Lipatnikov (2022) Fig. 11 - its four
+/// comparisons NAMED and NOT RUN (H22 publishes no vessel geometry), and a
+/// REDUCED smoke on the labelled PLACEHOLDER vessel of
+/// cases/dust/rembeVented.jsonc (docs/17 DST-11).
+pub(crate) mod dst_rembe;

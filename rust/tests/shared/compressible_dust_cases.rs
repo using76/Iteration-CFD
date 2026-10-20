@@ -1120,3 +1120,472 @@ fn acoustic_precursor() -> Result<()> {
     }
     Ok(())
 }
+
+// ==========================================================================
+//  DST-11 part 2 (SPEC-LIT §158.10): the vent beside the dust model - the
+//  hand-over of the coupling at the opening. D1 `dust_vent_open_at_zero_is_the_unvented_run`
+//  (bitwise, the membrane opens before any step), D2 `dust_vent_hand_over_keeps_every_cell`
+//  (bitwise carry of every cell at a step-10 opening, then the mass budget
+//  (158.10h) of SPEC-LIT 158.10, class A). Everything below carries the
+//  `dst11_` prefix; the `dst10_` helpers above are used as they stand.
+// ==========================================================================
+
+use ofgpu::compressible::Compressible;
+use ofgpu::dust::vent::{
+    closed_lowered, closed_scalar, open_onto_dust, select_faces, split_raw, MassBudget,
+    Membrane, MembraneWall, VentSelect, VentSpec, VentSplit, VentTrigger,
+};
+use ofgpu::types::DVec3;
+
+/// s, the step of every DST-11 tube run.
+const DST11_DT: f64 = 1.0e-6;
+
+/// The `dst10_tube_dust` JSONC text with the combustion block `combustion`
+/// (a `dst11_` copy, SPEC-LIT §158.10): the formula REMBE gas at phi 0.62,
+/// no ignition, initial T 300 K, lowered.
+fn dst11_tube_dust(combustion: &str) -> LoweredDust {
+    let text = format!(
+        r#"{{
+  "name": "dst11Tube",
+  "mesh": {{ "kind": "cartesian", "bounds": {{ "min": [0, 0, 0], "max": [0.4, 0.001, 0.001] }},
+    "cells": [400, 1, 1], "boundaries": {{ "xmin": "tubeX0", "xmax": "tubeX1", "ymin": "tubeY0",
+      "ymax": "tubeY1", "zmin": "tubeZ0", "zmax": "tubeZ1" }} }},
+  "physics": {{ "gravity": [0, 0, 0], "fluid": {{ "nu": 1.5e-5, "Pr": 0.71, "Prt": 0.85, "TRef": 300 }},
+    "buoyancy": "densityRatio" }},
+  "patches": [ {{ "match": ".*", "kind": "wall",
+      "U": {{ "type": "fixedValue", "value": [0, 0, 0] }},
+      "p": {{ "type": "zeroGradient" }}, "T": {{ "type": "zeroGradient" }} }} ],
+  "initial": {{ "U": [0, 0, 0], "T": 300, "p": 0.0 }},
+  "numerics": {{
+    "algorithm": {{ "kind": "PIMPLE", "correctors": 2 }},
+    "ddt": "Euler",
+    "div": {{ "default": "Gauss upwind", "div(phi,U)": "Gauss upwind", "div(phi,T)": "bounded Gauss upwind" }},
+    "grad": "Gauss linear",
+    "laplacian": {{ "snGrad": "corrected", "nonOrthogonalCorrectors": 0 }},
+    "relaxation": {{ "U": 1.0, "p": 1.0, "T": 1.0 }},
+    "solvers": [
+      {{ "match": "p", "solver": "PBiCGStab", "preconditioner": "DIC", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }},
+      {{ "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }}
+    ]
+  }},
+  "run": {{ "endTime": 1.5e-3, "deltaT": 1e-6 }},
+  "combustion": {combustion},
+  "dust": {{ "thermo": "formula", "phi": 0.62 }}
+}}"#
+    );
+    read_case_jsonc_str(&text, "dst11Tube")
+        .and_then(|c| c.lower())
+        .expect("lower")
+        .dust
+        .expect("dust config")
+}
+
+/// The TFC combustion block of `dst10_tube_dust`.
+const DST11_TFC: &str = r#"{ "model": "TFC", "PrT": 0.28 }"#;
+/// The same tube with the extended FSC and the local flame age (SPEC-LIT §160.5).
+const DST11_FSC_LOCAL: &str = r#"{ "model": "FSC", "PrT": 0.28, "flameAge": "local" }"#;
+
+/// The merged tube (200 cells on 0.2 m, dx = 1e-3 m), the same mesh split at
+/// its x = 0.1 plane (the single face M), both uploaded, the `dst10_flame_tube`
+/// physics (the smoothstep c~ and the adiabatic-line T about x = 0.03 m, at
+/// rest, the prescribed constant `U_t = S_L`) and the lowered fields for the
+/// merged stage and the closed stage.
+struct Dst11Tube {
+    split: VentSplit,
+    hm_m: HostMesh,
+    hm_s: HostMesh,
+    gm_m: GpuMesh,
+    gm_s: GpuMesh,
+    low: Lowered,
+    closed: Lowered,
+    gas: PerfectGas,
+    dust: LoweredDust,
+    k_mol: f64,
+    nu_ref: f64,
+    raw_c: RawScalarField,
+}
+
+fn dst11_tube(g: &Gpu, combustion: &str) -> Result<Dst11Tube> {
+    let raw = dst10_tube_raw(200, 0.2, 0.001);
+    let spec = VentSpec {
+        normal: DVec3::new(1.0, 0.0, 0.0),
+        select: VentSelect::Disc { centre: DVec3::new(0.1, 0.0005, 0.0005), radius: 1.0 },
+        p_stat: 1.0e30,
+        wall: MembraneWall::NoSlip,
+        probes: Vec::new(),
+    };
+    let split = split_raw(&raw, select_faces(&raw, &spec)?)?;
+    let hm_m = build_host_mesh(&raw)?;
+    let hm_s = build_host_mesh(&split.raw)?;
+    let gm_m = GpuMesh::upload(g, &hm_m)?;
+    let gm_s = GpuMesh::upload(g, &hm_s)?;
+    let gas = PerfectGas::air(101325.0);
+    let kc = gas.constants();
+    let k_mol = dst10_w64(kc.kappa(300.0 as Scalar));
+    let mut dust = dst11_tube_dust(combustion);
+    dust.prescribed_ut = Some(BurningLaw::constant(dust.s_l));
+    let setup = DustSetup::new(&dust, 101325.0, k_mol)?;
+    let nu_ref = dst10_w64(kc.mu(300.0 as Scalar)) / setup.rho_u0;
+    let hc = DustHConst::from_gas(&setup.gas, setup.t_u)?;
+    let t_u = setup.t_u;
+    let smooth = |x: f64| -> f64 {
+        let xi = ((x - 0.02) / 0.02).clamp(0.0, 1.0);
+        3.0 * xi * xi - 2.0 * xi * xi * xi
+    };
+    let state = |x: f64| -> (f64, f64) {
+        let c = 1.0 - smooth(x);
+        let t = (hc.cp_u * t_u + c * (hc.a_u - hc.a_b)) / (hc.cp_u + c * (hc.cp_b - hc.cp_u));
+        (101325.0, t)
+    };
+    let low = dst10_lowered(&hm_m, &gas, &state)?;
+    let closed = closed_lowered(&low, MembraneWall::NoSlip)?;
+    let mut raw_c = RawScalarField {
+        name: "c".into(),
+        dimensions: "[0 0 0 0 0 0 0]".into(),
+        internal: (0..hm_m.n_cells)
+            .map(|i| (1.0 - smooth(dst10_w64(hm_m.c[i].x))) as Scalar)
+            .collect(),
+        ..RawScalarField::default()
+    };
+    for p in &hm_m.patches {
+        raw_c.boundary.insert(p.name.clone(), dst10_entry("zeroGradient"));
+    }
+    Ok(Dst11Tube { split, hm_m, hm_s, gm_m, gm_s, low, closed, gas, dust, k_mol, nu_ref, raw_c })
+}
+
+impl Dst11Tube {
+    fn setup(&self) -> Result<DustSetup> {
+        DustSetup::new(&self.dust, 101325.0, self.k_mol)
+    }
+
+    /// The unvented run's solver and state: the merged mesh, dust attached,
+    /// `initialise`.
+    fn merged_run(&self, g: &Gpu) -> Result<(Compressible<'_>, CompressibleState)> {
+        let dust = CompressibleDust::new(
+            g,
+            &self.hm_m,
+            &self.gm_m,
+            self.setup()?,
+            &self.raw_c,
+            dst10_progress_controls(DST11_DT),
+            None,
+            self.nu_ref,
+        )?;
+        let mut solver =
+            build_solver(g, &self.gm_m, dst10_controls(self.gas, DST11_DT, 10), &self.low)?;
+        solver.attach_dust(g, dust)?;
+        let mut st = setup_state(g, &self.gm_m, &self.hm_m, &self.low)?;
+        solver.initialise(g, &mut st)?;
+        Ok((solver, st))
+    }
+
+    /// The closed stage: the split mesh, c~ closed under the membrane, dust
+    /// attached, `initialise`.
+    fn closed_run(&self, g: &Gpu) -> Result<(Compressible<'_>, CompressibleState)> {
+        let closed_c = closed_scalar(&self.raw_c)?;
+        let dust = CompressibleDust::new(
+            g,
+            &self.hm_s,
+            &self.gm_s,
+            self.setup()?,
+            &closed_c,
+            dst10_progress_controls(DST11_DT),
+            None,
+            self.nu_ref,
+        )?;
+        let mut solver =
+            build_solver(g, &self.gm_s, dst10_controls(self.gas, DST11_DT, 10), &self.closed)?;
+        solver.attach_dust(g, dust)?;
+        let mut st = setup_state(g, &self.gm_s, &self.hm_s, &self.closed)?;
+        solver.initialise(g, &mut st)?;
+        Ok((solver, st))
+    }
+}
+
+/// Every value of a scalar buffer, as bits.
+fn dst11_bits(g: &Gpu, f: &DevBuf<Scalar>) -> Result<Vec<u64>> {
+    Ok(g.download(f)?.into_iter().map(|v| v.to_bits() as u64).collect())
+}
+
+/// Every value of a vector buffer, as bits, x, y and z each.
+fn dst11_bits3(g: &Gpu, f: &DevBuf<Vec3>) -> Result<Vec<[u64; 3]>> {
+    Ok(g
+        .download(f)?
+        .into_iter()
+        .map(|v| [v.x.to_bits() as u64, v.y.to_bits() as u64, v.z.to_bits() as u64])
+        .collect())
+}
+
+/// `a` and `b` are the same bits, value by value; with `n` the first `n`
+/// only, otherwise all of them and the lengths match.
+fn dst11_same(what: &str, a: &[u64], b: &[u64], n: Option<usize>) {
+    let n = match n {
+        Some(n) => {
+            assert!(a.len() >= n && b.len() >= n, "{what}: lengths {} and {} are short of {n}", a.len(), b.len());
+            n
+        }
+        None => {
+            assert_eq!(a.len(), b.len(), "{what}: lengths differ");
+            a.len()
+        }
+    };
+    for i in 0..n {
+        assert_eq!(a[i], b[i], "{what}[{i}]: {:x} against {:x}", a[i], b[i]);
+    }
+}
+
+/// `a` and `b` are the same bits, component by component.
+fn dst11_same3(what: &str, a: &[[u64; 3]], b: &[[u64; 3]], n: Option<usize>) {
+    let n = match n {
+        Some(n) => {
+            assert!(a.len() >= n && b.len() >= n, "{what}: lengths {} and {} are short of {n}", a.len(), b.len());
+            n
+        }
+        None => {
+            assert_eq!(a.len(), b.len(), "{what}: lengths differ");
+            a.len()
+        }
+    };
+    for i in 0..n {
+        assert_eq!(a[i], b[i], "{what}[{i}]: {:x?} against {:x?}", a[i], b[i]);
+    }
+}
+
+/// A scalar field's `f`, `f0` and `f00` bitwise, and with `bf = Some(n)` the
+/// first `n` entries of its `bf`, `fr`, `ref_value` and `ref_grad`.
+fn dst11_field_same(
+    g: &Gpu,
+    what: &str,
+    a: &GpuScalarField,
+    b: &GpuScalarField,
+    bf: Option<usize>,
+) -> Result<()> {
+    for (nm, x, y) in [("f", &a.f, &b.f), ("f0", &a.f0, &b.f0), ("f00", &a.f00, &b.f00)] {
+        dst11_same(&format!("{what}.{nm}"), &dst11_bits(g, x)?, &dst11_bits(g, y)?, None);
+    }
+    if let Some(n) = bf {
+        for (nm, x, y) in [
+            ("bf", &a.bf, &b.bf),
+            ("fr", &a.fr, &b.fr),
+            ("ref_value", &a.ref_value, &b.ref_value),
+            ("ref_grad", &a.ref_grad, &b.ref_grad),
+        ] {
+            dst11_same(&format!("{what}.{nm}"), &dst11_bits(g, x)?, &dst11_bits(g, y)?, Some(n));
+        }
+    }
+    Ok(())
+}
+
+/// A vector field's `f`, `f0` and `f00` bitwise, and with `bf = Some(n)` the
+/// first `n` entries of its `bf`.
+fn dst11_vector_same(
+    g: &Gpu,
+    what: &str,
+    a: &GpuVectorField,
+    b: &GpuVectorField,
+    bf: Option<usize>,
+) -> Result<()> {
+    for (nm, x, y) in [("f", &a.f, &b.f), ("f0", &a.f0, &b.f0), ("f00", &a.f00, &b.f00)] {
+        dst11_same3(&format!("{what}.{nm}"), &dst11_bits3(g, x)?, &dst11_bits3(g, y)?, None);
+    }
+    if let Some(n) = bf {
+        dst11_same3(&format!("{what}.bf"), &dst11_bits3(g, &a.bf)?, &dst11_bits3(g, &b.bf)?, Some(n));
+    }
+    Ok(())
+}
+
+/// **D1, the membrane opens before any step (D, bitwise, SPEC-LIT §158.10):**
+/// the vented tube with pStat 0 opens at n = 0 (uniform p gives dp = 0 >= 0),
+/// `open_onto_dust` builds the coupling fresh on the merged mesh (`carried` is
+/// `None`), and 20 steps later the state is bit for bit the run on the merged
+/// mesh with no vent: U, p, T and rho (`f`, `f0`, `f00`, `bf`), c~ (the same
+/// four), `mdot.f` and `mdot.bf`.
+#[test]
+fn dust_vent_open_at_zero_is_the_unvented_run() -> Result<()> {
+    let Some(g) = dst10_gpu() else { return Ok(()) };
+    let t = dst11_tube(&g, DST11_TFC)?;
+    // Run A: no vent.
+    let (mut a_solver, mut a_st) = t.merged_run(&g)?;
+    for _ in 0..20 {
+        a_solver.step(&g, &mut a_st)?;
+    }
+    // Run B: the split mesh, opened at n = 0.
+    let (v_solver, v_st) = t.closed_run(&g)?;
+    let mut trigger = VentTrigger::new(&g, &t.split)?;
+    let mut membrane = Membrane::new(0.0);
+    let r = trigger.read(&g, &v_st.p.f)?;
+    assert!(membrane.check(0, 0.0, &r), "the membrane must open at n = 0: {r:?}");
+    let (mut b_solver, mut b_st) = open_onto_dust(
+        &g,
+        &t.split,
+        &v_solver,
+        &v_st,
+        &t.gm_m,
+        &t.hm_m,
+        dst10_controls(t.gas, DST11_DT, 10),
+        &t.low,
+        |_st, carried| {
+            assert!(carried.is_none(), "nothing is carried at n = 0");
+            CompressibleDust::new(
+                &g,
+                &t.hm_m,
+                &t.gm_m,
+                t.setup()?,
+                &t.raw_c,
+                dst10_progress_controls(DST11_DT),
+                None,
+                t.nu_ref,
+            )
+        },
+    )?;
+    assert_eq!(b_solver.steps_taken(), 0, "the n = 0 opening has taken no step");
+    for _ in 0..20 {
+        b_solver.step(&g, &mut b_st)?;
+    }
+    assert_eq!(a_solver.steps_taken(), 20);
+    assert_eq!(b_solver.steps_taken(), 20);
+    dst11_vector_same(&g, "U", &a_st.u, &b_st.u, Some(a_st.u.n_boundary_faces))?;
+    for (name, a, b) in
+        [("p", &a_st.p, &b_st.p), ("T", &a_st.t, &b_st.t), ("rho", &a_st.rho, &b_st.rho)]
+    {
+        dst11_field_same(&g, name, a, b, Some(a.n_boundary_faces))?;
+    }
+    let (ca, cb) = (a_solver.dust().expect("dust A").c(), b_solver.dust().expect("dust B").c());
+    dst11_field_same(&g, "c~", ca, cb, Some(ca.n_boundary_faces))?;
+    dst11_same("mdot.f", &dst11_bits(&g, &a_st.mdot.f)?, &dst11_bits(&g, &b_st.mdot.f)?, None);
+    dst11_same("mdot.bf", &dst11_bits(&g, &a_st.mdot.bf)?, &dst11_bits(&g, &b_st.mdot.bf)?, None);
+    println!("dst11 open at zero: 20 steps bitwise equal to the unvented run, {} cells", t.hm_m.n_cells);
+    Ok(())
+}
+
+/// One run of D2's body on `combustion`'s tube (`tag` names it in the
+/// prints): 10 closed steps on the split mesh with the budget (158.10g) of
+/// SPEC-LIT 158.10 accumulated, the opening by hand, every cell carried
+/// bitwise, 10 more steps, and the budget residual (158.10h).
+fn dst11_hand_over_body(g: &Gpu, combustion: &str, tag: &str) -> Result<()> {
+    let t = dst11_tube(g, combustion)?;
+    let (mut v_solver, mut v_st) = t.closed_run(g)?;
+    let mut trigger = VentTrigger::new(g, &t.split)?;
+    let mut membrane = Membrane::new(1.0e30);
+    let mut budget = MassBudget::start(g, &v_st, &t.hm_m.v)?;
+    for step in 1..=10u64 {
+        v_solver.step(g, &mut v_st)?;
+        budget.after_step(g, &v_st, DST11_DT)?;
+        let r = trigger.read(g, &v_st.p.f)?;
+        assert!(
+            !membrane.check(step, step as f64 * DST11_DT, &r),
+            "{tag}: the membrane opened against pStat 1e30 at step {step}"
+        );
+    }
+    let n_bf = t.split.n_boundary_merged;
+    let (mut m_solver, mut m_st) = open_onto_dust(
+        g,
+        &t.split,
+        &v_solver,
+        &v_st,
+        &t.gm_m,
+        &t.hm_m,
+        dst10_controls(t.gas, DST11_DT, 10),
+        &t.low,
+        |_st, carried| {
+            let d = carried.expect("a closed run that has taken steps carries its coupling");
+            d.hand_over(g, &t.hm_m, &t.gm_m, &t.raw_c, None)
+        },
+    )?;
+    assert_eq!(v_solver.steps_taken(), 10, "{tag}: closed steps");
+    assert_eq!(m_solver.steps_taken(), 10, "{tag}: the run continues its step count");
+    assert_eq!(v_solver.mom.ddt.state, m_solver.mom.ddt.state, "{tag}: the momentum ddt clock");
+    assert_eq!(v_solver.energy.ddt.state, m_solver.energy.ddt.state, "{tag}: the energy ddt clock");
+    let (vd, md) = (v_solver.dust().expect("closed dust"), m_solver.dust().expect("merged dust"));
+    // c~: f, f0, f00 whole, the shared boundary prefix.
+    dst11_field_same(g, &format!("{tag} c~"), vd.c(), md.c(), Some(n_bf))?;
+    assert_eq!(
+        format!("{:?}", vd.last_solve()),
+        format!("{:?}", md.last_solve()),
+        "{tag}: the last c~ solve's report"
+    );
+    // The flame age's alpha, when on in both.
+    match (vd.progress_age(), md.progress_age()) {
+        (Some(a), Some(b)) => {
+            dst11_field_same(g, &format!("{tag} alpha"), a, b, Some(n_bf))?;
+            println!("dst11 hand-over ({tag}): the flame-age field alpha carried bitwise");
+        }
+        (None, None) => {}
+        _ => panic!("{tag}: the flame age is on in one coupling only"),
+    }
+    dst11_vector_same(g, &format!("{tag} U"), &v_st.u, &m_st.u, None)?;
+    for (name, a, b) in
+        [("p", &v_st.p, &m_st.p), ("T", &v_st.t, &m_st.t), ("rho", &v_st.rho, &m_st.rho)]
+    {
+        dst11_field_same(g, &format!("{tag} {name}"), a, b, None)?;
+    }
+    // mdot.f: kept faces at their merged ids, M's face exactly 0.0.
+    let (old_mdot, new_mdot) = (dst11_bits(g, &v_st.mdot.f)?, dst11_bits(g, &m_st.mdot.f)?);
+    for (i, &k) in t.split.kept.iter().enumerate() {
+        assert_eq!(new_mdot[k], old_mdot[i], "{tag}: mdot.f of kept face {k}");
+    }
+    for f in &t.split.faces {
+        assert_eq!(new_mdot[f.face], 0, "{tag}: mdot.f on M's face {} is not 0.0", f.face);
+    }
+    // Ten more steps on the merged solver, the budget kept going.
+    for _ in 0..10 {
+        m_solver.step(g, &mut m_st)?;
+        budget.after_step(g, &m_st, DST11_DT)?;
+    }
+    assert_eq!(m_solver.steps_taken(), 20, "{tag}: steps after the opening");
+    for (name, f) in [("p", &m_st.p.f), ("T", &m_st.t.f), ("rho", &m_st.rho.f)] {
+        for (i, v) in g.download(f)?.into_iter().enumerate() {
+            assert!(dst10_w64(v).is_finite(), "{tag}: {name}[{i}] went non-finite: {v}");
+        }
+    }
+    for (i, v) in g.download(&m_st.u.f)?.into_iter().enumerate() {
+        assert!(
+            dst10_w64(v.x).is_finite() && dst10_w64(v.y).is_finite() && dst10_w64(v.z).is_finite(),
+            "{tag}: U[{i}] went non-finite"
+        );
+    }
+    for (i, v) in g.download(&m_solver.dust().expect("merged dust").c().f)?.into_iter().enumerate() {
+        assert!(dst10_w64(v).is_finite(), "{tag}: c~[{i}] went non-finite: {v}");
+    }
+    // (158.10h): the budget of the 20 steps.
+    let m = MassBudget::mass(g, &m_st, &t.hm_m.v)?;
+    let r = budget.residual(m);
+    println!(
+        "dst11 hand-over mass budget: M0 {:.9e} kg, M {:.9e} kg, B {:.9e} kg, residual {:.3e}, {tag}",
+        budget.m0, m, budget.outflow, r
+    );
+    if r.abs() <= 1.0e-10 {
+        return Ok(());
+    }
+    // Only the single build may reach here: f32 rho and mdot round at every
+    // step, and DST-09's closed tube measured 8.7e-7 relative under single.
+    println!(
+        "MISSED dst11 hand-over mass budget (A), {tag}: residual {r:.3e} against 1e-10 relative; \
+         f32 rho and mdot are rounded at every step (DST-09's closed tube measured 8.7e-7 \
+         under single); the bar is the f64 build's and is never widened"
+    );
+    assert!(
+        cfg!(feature = "single"),
+        "{tag}: the mass budget residual {r:e} misses 1e-10 in the f64 build"
+    );
+    Ok(())
+}
+
+/// **D2, the hand-over keeps every cell (D, then A, SPEC-LIT §158.10):**
+/// pStat 1e30 so the trigger never fires; 10 closed steps on the split mesh,
+/// the opening by hand with `open_onto_dust` and `CompressibleDust::hand_over`;
+/// the step count, both ddt clocks, c~ (`f`, `f0`, `f00` and the shared
+/// boundary prefix), the last c~ solve, U, p, T and rho (`f`, `f0`, `f00`)
+/// and `mdot` carried bit for bit, M's face exactly 0.0; 10 more steps finite;
+/// and the budget (158.10h) of SPEC-LIT 158.10 closes to 1e-10 relative (the
+/// A row; under single a miss prints MISSED). The second pass runs the same
+/// body with the extended FSC and `flameAge: "local"`, and alpha is carried
+/// bitwise too.
+#[test]
+fn dust_vent_hand_over_keeps_every_cell() -> Result<()> {
+    let Some(g) = dst10_gpu() else { return Ok(()) };
+    dst11_hand_over_body(&g, DST11_TFC, "TFC")?;
+    dst11_hand_over_body(&g, DST11_FSC_LOCAL, "FSC local flame age")
+}

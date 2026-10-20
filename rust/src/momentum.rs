@@ -654,6 +654,11 @@ struct MomentumKernels {
     force_flux_boundary: CudaFunction,
     correct_flux: CudaFunction,
     correct_flux_boundary: CudaFunction,
+    // SPEC-LIT 139.10 (PAR-14): the Rhie-Chow processor-face fix-ups,
+    // launched right after the boundary kernels on a mesh that has
+    // processor faces and never on any other (`n_proc_faces == 0`).
+    face_interp_proc: CudaFunction,
+    phi_hbya_proc: CudaFunction,
 }
 
 impl MomentumKernels {
@@ -684,6 +689,8 @@ impl MomentumKernels {
             force_flux_boundary: k.func("momForceFluxBoundary")?,
             correct_flux: k.func("momCorrectFlux")?,
             correct_flux_boundary: k.func("momCorrectFluxBoundary")?,
+            face_interp_proc: k.func("momFaceInterpProc")?,
+            phi_hbya_proc: k.func("momPhiHbyAProc")?,
         })
     }
 }
@@ -1368,7 +1375,11 @@ impl<'m> Momentum<'m> {
 
         {
             let Self { mk, nu_eff, nu_lam, b_nu_lam, .. } = self;
-            launch_add(gpu, &mk.add, &mut nu_eff.f, nu_lam, &nut.f, n)?;
+            // Over the ghost cells too (SPEC-LIT 139.10): `nut.f` has been
+            // exchanged by then, `nu_lam` is written over all of `n_local`,
+            // and `interpolate_linear`'s processor faces read `nu_eff.f`'s
+            // ghost slots. A whole mesh has no ghosts and `n_local` is `n`.
+            launch_add(gpu, &mk.add, &mut nu_eff.f, nu_lam, &nut.f, m.n_local())?;
             launch_add(gpu, &mk.add, &mut nu_eff.bf, b_nu_lam, &nut.bf, nbf)?;
         }
 
@@ -2124,6 +2135,27 @@ impl<'m> Momentum<'m> {
                     .arg(&nbl)
                     .launch(cfg_for(nbf))?;
             }
+
+            // SPEC-LIT 139.10 (PAR-14): on a decomposed part the processor
+            // faces' rAU_f is the WHOLE mesh's interpolation - the part's own
+            // `b_weights` is not the whole weight on the non-owning side.
+            // BEFORE the `|Sf|` product below, which is the pressure
+            // laplacian's coefficient and inherits the fix.
+            if m.n_proc_faces > 0 {
+                let f = self.mk.face_interp_proc.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut self.rauf.bf)
+                        .arg(&self.rau)
+                        .arg(&m.b_proc)
+                        .arg(&m.b_proc_w)
+                        .arg(&m.b_face_cells)
+                        .arg(&m.b_nbr_cell)
+                        .arg(&nbl)
+                        .launch(cfg_for(nbf))?;
+                }
+            }
         }
 
         {
@@ -2172,6 +2204,28 @@ impl<'m> Momentum<'m> {
                     .arg(&u.bc_kind)
                     .arg(&nbl)
                     .launch(cfg_for(nbf))?;
+            }
+
+            // SPEC-LIT 139.10 (PAR-14): the processor faces' whole flux,
+            // part-oriented - `owns ? v : -v` on momPhiHbyA's body over the
+            // whole mesh's cells, weight, area and buoyancy flux.
+            if m.n_proc_faces > 0 {
+                let f = self.mk.phi_hbya_proc.clone();
+                unsafe {
+                    gpu.stream()
+                        .launch_builder(&f)
+                        .arg(&mut self.phi_hbya.bf)
+                        .arg(&self.hbya)
+                        .arg(&self.rau)
+                        .arg(&self.phib.bf)
+                        .arg(&m.b_sf)
+                        .arg(&m.b_proc)
+                        .arg(&m.b_proc_w)
+                        .arg(&m.b_face_cells)
+                        .arg(&m.b_nbr_cell)
+                        .arg(&nbl)
+                        .launch(cfg_for(nbf))?;
+                }
             }
         }
 

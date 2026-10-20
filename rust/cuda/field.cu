@@ -1622,3 +1622,73 @@ extern "C" __global__ void fldSyntheticStep
     state[0] = state[0] + 1.0;
     state[1] = fma(prm[9], dt, state[1]);
 }
+
+
+//- SPEC-LIT 139.10 (PAR-14): a decomposed part's processor faces, on a field.
+//
+//  fldCorrectBcScalar's cyclic branch interpolates with the part's OWN
+//  bWeights - not the whole mesh's weight, which is what `bProcW` stores
+//  (SPEC-LIT 139.8, fact 2: `1 - (1 - w)` is not `w`). The whole mesh had no
+//  boundary face here at all: it had an INTERNAL face, whose value is
+//  fvInterpolateLinear's `w*psi_o + (1 - w)*psi_n` on the whole mesh's two
+//  cells and weight. This rewrites exactly that, operand for operand and in
+//  the same written order, on every face `bProc` marks - the ghost cell the
+//  exchange filled (SPEC-LIT 139.1) plays the far cell. Every other face is
+//  left as the evaluation left it.
+extern "C" __global__ void fldProcFaceScalar
+(
+    ofscalar* __restrict__ bf,
+    const ofscalar* __restrict__ psi,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (bProc[i] < 0) return;
+
+    const oflabel owns = (bProc[i] == 1);
+    const oflabel c = bFaceCells[i];
+    const oflabel o_g = owns ? c : bNbrCell[i];
+    const oflabel n_g = owns ? bNbrCell[i] : c;
+    const ofscalar w = bProcW[i];
+
+    bf[i] = w*psi[o_g] + (1 - w)*psi[n_g];
+}
+
+
+//- The vector half, per component exactly as fvFluxInternal writes it.
+extern "C" __global__ void fldProcFaceVector
+(
+    ofvec3* __restrict__ bf,
+    const ofvec3* __restrict__ psi,
+    const oflabel* __restrict__ bProc,
+    const ofscalar* __restrict__ bProcW,
+    const oflabel* __restrict__ bFaceCells,
+    const oflabel* __restrict__ bNbrCell,
+    oflabel nbf
+)
+{
+    const oflabel i = OFGPU_TID;
+    if (i >= nbf) return;
+    if (bProc[i] < 0) return;
+
+    const oflabel owns = (bProc[i] == 1);
+    const oflabel c = bFaceCells[i];
+    const oflabel o_g = owns ? c : bNbrCell[i];
+    const oflabel n_g = owns ? bNbrCell[i] : c;
+    const ofscalar w = bProcW[i];
+
+    const ofvec3 uo = psi[o_g];
+    const ofvec3 un = psi[n_g];
+
+    bf[i] = mkvec
+    (
+        w*uo.x + (1 - w)*un.x,
+        w*uo.y + (1 - w)*un.y,
+        w*uo.z + (1 - w)*un.z
+    );
+}

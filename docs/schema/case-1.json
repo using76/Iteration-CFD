@@ -1863,13 +1863,15 @@
       "type": "object",
       "properties": {
         "boundaries": {
+          "description": "Required with `kind: \"cartesian\"`, refused with `\"polymesh\"`\n(SPEC-LIT §158.10).",
           "$ref": "#/$defs/JsonBoundaries"
         },
         "bounds": {
+          "description": "Required with `kind: \"cartesian\"`, refused with `\"polymesh\"`\n(SPEC-LIT §158.10); absent reads as the all-zero default.",
           "$ref": "#/$defs/JsonBounds"
         },
         "cells": {
-          "description": "Cell counts along `x, y, z`.",
+          "description": "Cell counts along `x, y, z`. Required with `kind: \"cartesian\"`,\nrefused with `\"polymesh\"` (SPEC-LIT §158.10).",
           "type": "array",
           "items": {
             "type": "integer",
@@ -1899,6 +1901,13 @@
         },
         "kind": {
           "$ref": "#/$defs/MeshKind"
+        },
+        "path": {
+          "description": "SPEC-LIT §158.10: with `kind: \"polymesh\"`, the directory that holds\n`constant/polyMesh` (the `constant` or `polyMesh` directory itself is\naccepted too). A relative path resolves against the case file's\ndirectory; an absolute path is used as is. Refused with\n`kind: \"cartesian\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "regions": {
           "type": "array",
@@ -1931,10 +1940,7 @@
       },
       "additionalProperties": false,
       "required": [
-        "kind",
-        "bounds",
-        "cells",
-        "boundaries"
+        "kind"
       ]
     },
     "JsonMotion": {
@@ -2520,6 +2526,29 @@
       "additionalProperties": false,
       "required": [
         "S0"
+      ]
+    },
+    "JsonProbe": {
+      "description": "One `vent.probes[]` entry (SPEC-LIT §158.10): a name made of\n`[A-Za-z0-9_]` and a world point in m.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "point": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "point"
       ]
     },
     "JsonRadAbsorption": {
@@ -3399,6 +3428,16 @@
           "type": "number",
           "format": "double"
         },
+        "probes": {
+          "description": "SPEC-LIT §158.10: named pressure probes. Absent is every case this\nreader has built; present, each probe is the cell nearest its point\n([`probe_cells`]) and the driver records that cell's gauge pressure.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/JsonProbe"
+          }
+        },
         "radius": {
           "description": "The disc route: the radius [m] about `centre`, in the plane.",
           "type": [
@@ -3566,9 +3605,18 @@
       ]
     },
     "MeshKind": {
-      "type": "string",
-      "enum": [
-        "cartesian"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "cartesian"
+          ]
+        },
+        {
+          "description": "SPEC-LIT §158.10: the mesh is a polyMesh read from disk\n(`mesh.path`), not one the reader builds from `bounds`, `cells` and\n`boundaries`.",
+          "type": "string",
+          "const": "polymesh"
+        }
       ]
     },
     "PatchPresetKind": {

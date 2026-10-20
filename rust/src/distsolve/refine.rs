@@ -21,12 +21,15 @@
 //!   `mid = fl32(x - hi)`, `lo = fl32(x - hi - mid)` (118.12.1), joined back
 //!   as `(hi + mid) + lo` (118.12.2): three exchanges, bit for bit the
 //!   owner's double for `2^-97 <= |x| < 2^128` and for zero;
-//! * **the sums** - each part's `ofacc` sum is stored in double and the
-//!   world value is the sum over parts in part order, which an SPMD rank
-//!   forms after one `Comm::allgather` of the f64 bytes in rank order. So
-//!   the SPMD refinement is bit for bit the in-process one; it is NOT
-//!   partition-invariant to the bit (the part sums move with the cut), and
-//!   §118.12 gates it at the f64 tolerance across part counts instead.
+//! * **the sums** - since PAR-14 run 2 (§139.10) each world sum is §72's
+//!   exact accumulator over the part's DOUBLE terms
+//!   ([`crate::exactsum::ExactSum64`]): the anchor is the world maximum
+//!   (order-free), the limbs are exact integer arithmetic, the gather moves
+//!   bytes (one `Comm::allgather` under SPMD), and the ONE rounding is the
+//!   host finish [`crate::exactsum::exact_sum64`]. The sums are
+//!   partition-invariant to the bit - the same multiset of per-cell terms
+//!   lands on the same limbs whatever the cut - which is what lets a
+//!   decomposed run answer the whole mesh's solve bit for bit.
 //!
 //! Provenance: ORIGINAL - the distributed placement of §118.4's refinement
 //! (Moler 1967; Carson & Higham 2018) is this project's own; the three-float
@@ -37,10 +40,11 @@
 use crate::comm::Comm;
 use crate::device::{DevBuf, Gpu};
 use crate::error::{Error, Result};
+use crate::exactsum::{exact_sum64, ExactSum64, EXACT_WORDS};
 use crate::halo::{HaloExchange, SpmdHalo};
 use crate::precision::{ir_inner_tolerance, ir_target, ir_verdict, IrVerdict};
 use crate::solver::{self, SolverControls, SolverKernels};
-use crate::{Acc, Label, Scalar};
+use crate::{Label, Scalar};
 
 use super::spmd::SpmdWorkspace;
 use super::{DistPerformance, DistSystem, DistWorkspace};
@@ -74,8 +78,13 @@ pub(super) struct DistIr {
     /// for the §8.4 kernel's `x_ref`), `[1]` the part's `N_p`, `[2]` its
     /// `R_p`.
     scal: Vec<DevBuf<f64>>,
-    /// Stage-one partials of the part's double sums.
-    partials: Vec<DevBuf<Acc>>,
+    /// The exact world sums (§139.10): the anchor and limb passes over the
+    /// part's double terms.
+    exact: ExactSum64,
+    /// The part's per-cell residual terms `|b - A.x|`, owned cells only.
+    r_terms: Vec<DevBuf<f64>>,
+    /// The part's per-cell §8.4 terms `|A.x - A.x_ref| + |b - A.x_ref|`.
+    n_terms: Vec<DevBuf<f64>>,
     /// Outer steps of the LAST solve; 0 when it was not refined.
     pub(super) outer_steps: usize,
 }
@@ -97,9 +106,14 @@ impl DistIr {
             mid: f32s()?,
             lo: f32s()?,
             scal: n.iter().map(|_| gpu.zeros(3)).collect::<Result<_>>()?,
-            partials: n
+            exact: ExactSum64::new(gpu, n)?,
+            r_terms: n
                 .iter()
-                .map(|&k| gpu.zeros(solver::reduce_geometry(k.max(1)).1))
+                .map(|&k| gpu.zeros(k.max(1)))
+                .collect::<Result<_>>()?,
+            n_terms: n
+                .iter()
+                .map(|&k| gpu.zeros(k.max(1)))
                 .collect::<Result<_>>()?,
             outer_steps: 0,
         })
@@ -124,8 +138,14 @@ pub(super) fn refines(ctrl: &SolverControls, n_global_cells: usize) -> bool {
 trait Parts {
     /// Fill the halo of one float field on every part held here.
     fn exchange(&mut self, gpu: &Gpu, f: &mut [DevBuf<Scalar>]) -> Result<()>;
-    /// The world sum of every part's pair, in part (= rank) order.
-    fn world_sums(&mut self, mine: &[[f64; 2]]) -> Result<[f64; 2]>;
+    /// The world maximum of the parts' magnitudes. Exact whatever the
+    /// order - a maximum has none (§72.3).
+    fn world_max(&mut self, mine: &[f64]) -> Result<f64>;
+    /// The world sum of the parts' exact limb sets (`n_parts`
+    /// concatenated `EXACT_WORDS` sets, gathered in part = rank order),
+    /// against the anchor `amax` they were formed with. Exact whatever the
+    /// order; the ONE rounding is [`exact_sum64`]'s host finish (§139.10).
+    fn world_sum(&mut self, mine: &[i64], amax: f64, offset: f64) -> Result<f64>;
     /// Every rank's outer verdict agrees: the SPMD flag vote, taken on
     /// `stop` when the workspace's vote is on; nothing in process.
     fn vote(&mut self, stop: bool) -> Result<()>;
@@ -153,8 +173,13 @@ impl Parts for InProcess<'_> {
         self.ex.scalar(gpu, f)
     }
 
-    fn world_sums(&mut self, mine: &[[f64; 2]]) -> Result<[f64; 2]> {
-        Ok(sum_in_order(mine.iter().copied()))
+    fn world_max(&mut self, mine: &[f64]) -> Result<f64> {
+        Ok(mine.iter().copied().fold(0.0f64, f64::max))
+    }
+
+    fn world_sum(&mut self, mine: &[i64], amax: f64, offset: f64) -> Result<f64> {
+        // The parts are all here; the exact i64 combine is local.
+        Ok(exact_sum64(mine, amax, offset))
     }
 
     fn vote(&mut self, _stop: bool) -> Result<()> {
@@ -207,19 +232,37 @@ impl Parts for Spmd<'_> {
         self.halo.scalar(gpu, self.comm, &mut f[0])
     }
 
-    fn world_sums(&mut self, mine: &[[f64; 2]]) -> Result<[f64; 2]> {
-        let mut bytes = Vec::with_capacity(16);
-        bytes.extend_from_slice(&mine[0][0].to_le_bytes());
-        bytes.extend_from_slice(&mine[0][1].to_le_bytes());
+    fn world_max(&mut self, mine: &[f64]) -> Result<f64> {
+        // One double per rank: allgather moves bytes, the host maximum is
+        // exact whatever the order it arrives in (§72.3).
+        let bytes: Vec<u8> = mine
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let size = self.comm.size();
-        let mut all = vec![0u8; 16 * size];
+        let mut all = vec![0u8; 8 * size];
         self.comm.allgather(&bytes, &mut all)?;
-        let f = |o: usize| {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(&all[o..o + 8]);
-            f64::from_le_bytes(b)
-        };
-        Ok(sum_in_order((0..size).map(|q| [f(16 * q), f(16 * q + 8)])))
+        Ok(all
+            .chunks_exact(8)
+            .map(|b| f64::from_le_bytes(b.try_into().expect("8 bytes")))
+            .fold(0.0f64, f64::max))
+    }
+
+    fn world_sum(&mut self, mine: &[i64], amax: f64, offset: f64) -> Result<f64> {
+        // One limb set per rank: the allgather moves the bytes, and
+        // exact_sum64's i64 combine over them is exact whatever the order.
+        let bytes: Vec<u8> = mine
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let size = self.comm.size();
+        let mut all = vec![0u8; 8 * EXACT_WORDS * size];
+        self.comm.allgather(&bytes, &mut all)?;
+        let sets: Vec<i64> = all
+            .chunks_exact(8)
+            .map(|b| i64::from_le_bytes(b.try_into().expect("8 bytes")))
+            .collect();
+        Ok(exact_sum64(&sets, amax, offset))
     }
 
     fn vote(&mut self, stop: bool) -> Result<()> {
@@ -275,17 +318,6 @@ impl Parts for Spmd<'_> {
             ),
         }
     }
-}
-
-/// `0 + v_0 + v_1 + ...` per component, in the order given - the one
-/// summation order both forms share.
-fn sum_in_order(values: impl Iterator<Item = [f64; 2]>) -> [f64; 2] {
-    let mut acc = [0.0f64; 2];
-    for v in values {
-        acc[0] += v[0];
-        acc[1] += v[1];
-    }
-    acc
 }
 
 /// The in-process refined solve: [`super::dist_pcg`] / [`super::dist_pbicgstab`]
@@ -404,35 +436,117 @@ fn fill_halo<P: Parts>(
     Ok(())
 }
 
-/// (118.4.3) every part's `R_p` into `scal[p][2]`, then each part's three
-/// slots read back in one copy - `[N_p, R_p]` (a part without cells holds
-/// zeros).
-fn part_residuals(
+/// (118.4.3) every part's per-cell residual terms `|b - A.x|` into
+/// `r_terms[p]`, OWNED cells only (§139.10): a halo cell's row is its
+/// owner's, and summing it twice would make the world sum depend on the
+/// cut. The world sum itself is [`world_exact`]'s.
+fn residual_terms(
     gpu: &Gpu,
     sol: &SolverKernels,
     sys: &DistSystem,
     ir: &mut DistIr,
-) -> Result<Vec<[f64; 2]>> {
-    let mut out = Vec::with_capacity(sys.n_parts());
+) -> Result<()> {
     for p in 0..sys.n_parts() {
-        if sys.owned()[p] == 0 {
-            out.push([0.0, 0.0]);
+        let own = sys.owned()[p];
+        if own == 0 {
             continue;
         }
-        let np = solver::residual64_sum_stage1(
+        solver::residual64_terms(
             gpu,
             sol,
-            &mut ir.partials[p],
+            &mut ir.r_terms[p],
             &ir.x_hi[p],
             &sys.a[p],
             &sys.mesh[p],
+            own,
         )?;
-        let mut slot = ir.scal[p].slice_mut(2..3);
-        solver::sum2_to64(gpu, sol, &mut slot, &ir.partials[p], np, 0.0)?;
-        let host = gpu.download(&ir.scal[p])?;
-        out.push([host[1], host[2]]);
     }
-    Ok(out)
+    Ok(())
+}
+
+/// (118.4.2) the same for the §8.4 factor's per-cell terms, into
+/// `n_terms[p]`, with `x_ref = sum x / n_global` from `scal[p][0]`.
+#[allow(clippy::too_many_arguments)]
+fn norm_factor_terms(
+    gpu: &Gpu,
+    sol: &SolverKernels,
+    sys: &DistSystem,
+    ir: &mut DistIr,
+    inv_n: f64,
+) -> Result<()> {
+    for p in 0..sys.n_parts() {
+        let own = sys.owned()[p];
+        if own == 0 {
+            continue;
+        }
+        solver::norm_factor64_terms(
+            gpu,
+            sol,
+            &mut ir.n_terms[p],
+            &ir.x_hi[p],
+            &ir.scal[p],
+            inv_n,
+            &sys.a[p],
+            &sys.mesh[p],
+            own,
+        )?;
+    }
+    Ok(())
+}
+
+/// Which buffer one exact world sum runs over.
+#[derive(Clone, Copy)]
+enum Terms {
+    /// The solution itself, `x_hi` (the `sum x` reduction).
+    X,
+    /// The materialised §8.4 terms, `n_terms`.
+    N,
+    /// The materialised residual terms, `r_terms`.
+    R,
+}
+
+/// One exact world sum (§139.10): the anchor pass over the `Terms` buffer,
+/// then the limb pass, then the Parts seam's gather and the host finish. A
+/// part without cells contributes zeros to both gathers, so the
+/// collectives keep their shape.
+fn world_exact<P: Parts>(
+    gpu: &Gpu,
+    parts: &mut P,
+    sys: &DistSystem,
+    ir: &mut DistIr,
+    which: Terms,
+    offset: f64,
+) -> Result<f64> {
+    let own = sys.owned();
+    let mut maxima = Vec::with_capacity(own.len());
+    for p in 0..own.len() {
+        maxima.push(if own[p] == 0 {
+            0.0
+        } else {
+            let t = match which {
+                Terms::X => &ir.x_hi[p],
+                Terms::N => &ir.n_terms[p],
+                Terms::R => &ir.r_terms[p],
+            };
+            ir.exact.max_part(gpu, p, t, own[p])?
+        });
+    }
+    let amax = parts.world_max(&maxima)?;
+    ir.exact.set_anchor(gpu, amax)?;
+    let mut mine: Vec<i64> = Vec::with_capacity(own.len() * EXACT_WORDS);
+    for p in 0..own.len() {
+        if own[p] == 0 {
+            mine.extend(std::iter::repeat(0).take(EXACT_WORDS));
+            continue;
+        }
+        let t = match which {
+            Terms::X => &ir.x_hi[p],
+            Terms::N => &ir.n_terms[p],
+            Terms::R => &ir.r_terms[p],
+        };
+        mine.extend(ir.exact.part_limbs(gpu, p, t, own[p])?);
+    }
+    Ok(parts.world_sum(&mine, amax, offset)?)
 }
 
 /// SPEC-LIT (118.4.1)-(118.4.9) over every part, the halo and the sums as
@@ -461,43 +575,20 @@ fn refine<P: Parts>(
     }
     fill_halo(gpu, sol, parts, sys, ir, perf)?;
 
-    // (118.4.2) the world `sum x`, written back to every part's slot 0 for
-    // the §8.4 kernel's `x_ref = sum x / n_global`.
-    let mut mine = vec![[0.0f64; 2]; np];
-    for p in 0..np {
-        if own[p] == 0 {
-            continue;
-        }
-        let k = solver::sum64_stage1(gpu, sol, &mut ir.partials[p], &ir.x_hi[p], own[p])?;
-        let mut slot = ir.scal[p].slice_mut(0..1);
-        solver::sum2_to64(gpu, sol, &mut slot, &ir.partials[p], k, 0.0)?;
-        mine[p][0] = gpu.download(&ir.scal[p])?[0];
-    }
-    let sum_x = parts.world_sums(&mine)?[0];
+    // (118.4.2) the world `sum x`, exact (§139.10), written back to every
+    // part's slot 0 for the §8.4 kernel's `x_ref = sum x / n_global`.
+    let sum_x = world_exact(gpu, parts, sys, ir, Terms::X, 0.0)?;
     perf.n_reductions += 1;
     let inv_n = 1.0 / (sys.n_global_cells() as f64);
     for p in 0..np {
         gpu.write(&mut ir.scal[p], &[sum_x, 0.0, 0.0])?;
-        if own[p] == 0 {
-            continue;
-        }
-        let k = solver::norm_factor64_stage1(
-            gpu,
-            sol,
-            &mut ir.partials[p],
-            &ir.x_hi[p],
-            &ir.scal[p],
-            inv_n,
-            &sys.a[p],
-            &sys.mesh[p],
-        )?;
-        let mut slot = ir.scal[p].slice_mut(1..2);
-        solver::sum2_to64(gpu, sol, &mut slot, &ir.partials[p], k, 0.0)?;
     }
-    // (118.4.3) R_0, and N = sum_p N_p + eps64 in one world sum.
-    let mine = part_residuals(gpu, sol, sys, ir)?;
-    let [n_sum, r_0] = parts.world_sums(&mine)?;
-    perf.n_reductions += 1;
+    norm_factor_terms(gpu, sol, sys, ir, inv_n)?;
+    // (118.4.2) N, and (118.4.3) R_0, each an exact world sum.
+    let n_sum = world_exact(gpu, parts, sys, ir, Terms::N, 0.0)?;
+    residual_terms(gpu, sol, sys, ir)?;
+    let r_0 = world_exact(gpu, parts, sys, ir, Terms::R, 0.0)?;
+    perf.n_reductions += 3;
     let norm = n_sum + f64::MIN_POSITIVE;
     let mut r_k = r_0;
 
@@ -558,13 +649,10 @@ fn refine<P: Parts>(
         outer += 1;
         fill_halo(gpu, sol, parts, sys, ir, perf)?;
 
-        // (118.4.3) again, and its world sum.
-        let mine: Vec<[f64; 2]> = part_residuals(gpu, sol, sys, ir)?
-            .iter()
-            .map(|v| [v[1], 0.0])
-            .collect();
+        // (118.4.3) again, and its exact world sum.
+        residual_terms(gpu, sol, sys, ir)?;
         r_prev = Some(r_k);
-        r_k = parts.world_sums(&mine)?[0];
+        r_k = world_exact(gpu, parts, sys, ir, Terms::R, 0.0)?;
         perf.n_reductions += 1;
     };
 

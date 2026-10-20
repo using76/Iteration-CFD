@@ -83,6 +83,7 @@ use ofgpu::distflow::{
     RESTART_ITERS, RESTART_N,
 };
 use ofgpu::io::decomposed::{gather_written, reconstruct, RankFields};
+use ofgpu::io::dict::FoamDict;
 use ofgpu::distsolve::{
     dist_solve, spmd_solve, DistReduce, DistSystem, DistWorkspace, SpmdWorkspace,
 };
@@ -132,6 +133,15 @@ usage: ofgpu-par <case> [options]
                         efficiency is REFUSED when ranks > devices. Options:
                         -np 1,2,3,4 -n N -warm W -iters K -exchanges M
                         -method NAME -comm threads -json FILE -quiet
+  -check                load the case exactly as a run would and exit,
+                        saying it takes the decomposed laminar SIMPLE path;
+                        every unconverted path is refused by name
+                        (SPEC-LIT 139.10). No device is opened
+  -backend NAME         the pressure solver of the decomposed path
+                        (default pbicgstab; pcg also runs; anything else is
+                        refused by name, SPEC-LIT 139.10)
+  -graph                capture the run in a CUDA graph - refused on the
+                        decomposed path (SPEC-LIT 139.10)
 
 Rank r opens its own Gpu on device L[r mod |L|], L = OFGPU_DEVICES or every
 device (SPEC-LIT 138.7). Under mpiexec (PMI_RANK or PMI_SIZE set) the driver
@@ -157,6 +167,9 @@ struct Args {
     sweeps: usize,
     alpha: Scalar,
     quiet: bool,
+    check: bool,
+    backend: String,
+    graph: bool,
 }
 
 fn parse(argv: &[String]) -> Result<Args> {
@@ -172,6 +185,9 @@ fn parse(argv: &[String]) -> Result<Args> {
         sweeps: 8,
         alpha: 0.5,
         quiet: false,
+        check: false,
+        backend: "pbicgstab".to_string(),
+        graph: false,
     };
     let mut i = 1;
     while i < argv.len() {
@@ -228,6 +244,18 @@ fn parse(argv: &[String]) -> Result<Args> {
                 a.quiet = true;
                 i += 1;
             }
+            "-check" => {
+                a.check = true;
+                i += 1;
+            }
+            "-backend" => {
+                a.backend = need(i)?;
+                i += 2;
+            }
+            "-graph" => {
+                a.graph = true;
+                i += 1;
+            }
             other => {
                 return Err(Error::Config(format!(
                     "unknown option '{other}'\n\n{USAGE}"
@@ -236,6 +264,114 @@ fn parse(argv: &[String]) -> Result<Args> {
         }
     }
     Ok(a)
+}
+
+/// SPEC-LIT 139.10's refusal list (PAR-14): every path a case or the command
+/// line states that the decomposed run has not converted is refused BY NAME,
+/// before anything is loaded and before any device is opened. When `case`
+/// is a FILE - a JSONC case - only the flag checks run here: the JSONC
+/// route's blocks (parcels, chemistry, radiation, dust, vent, motion) are
+/// refused by [`common::load_case`] itself, exactly as they are for the run.
+fn refuse_unconverted(case: &Path, backend: &str, graph: bool) -> Result<()> {
+    let refused = |what: &str, name: &str| -> Error {
+        Error::Config(format!(
+            "{what}: refused - {name} is not converted to the decomposed path; \
+             a decomposed run takes the laminar incompressible SIMPLE path only \
+             (SPEC-LIT 139.10)"
+        ))
+    };
+    match backend {
+        "pbicgstab" | "pcg" => {}
+        "fft" | "cufft" => return Err(refused(&format!("-backend {backend}"), "FFT backend")),
+        other => {
+            return Err(Error::Config(format!(
+                "-backend '{other}': refused - only pbicgstab and pcg run the decomposed \
+                 path (SPEC-LIT 139.10)"
+            )))
+        }
+    }
+    if graph {
+        return Err(refused("-graph", "CUDA-graph capture"));
+    }
+    if !case.is_dir() {
+        return Ok(());
+    }
+    if case.join("0/alpha.water").exists() {
+        return Err(refused("0/alpha.water", "VOF"));
+    }
+    let cloud = case.join("constant/cloudProperties");
+    if cloud.exists() {
+        // The dust model is the cloudProperties file that states dustCloud;
+        // every other cloudProperties file is the parcels driver's.
+        let d = FoamDict::read(&cloud)?;
+        if states_key(&d, "dustCloud") {
+            return Err(refused("constant/cloudProperties", "dust model"));
+        }
+        return Err(refused("constant/cloudProperties", "parcels"));
+    }
+    let schemes = case.join("system/fvSchemes");
+    if schemes.exists() && FoamDict::read(&schemes).is_ok_and(|d| {
+        first_word(d.get_or("ddtSchemes/default", "")) == "localEuler"
+    }) {
+        return Err(refused("system/fvSchemes", "LTS"));
+    }
+    let dyn_mesh = case.join("constant/dynamicMeshDict");
+    if dyn_mesh.exists() {
+        if let Ok(d) = FoamDict::read(&dyn_mesh) {
+            match first_word(d.get_or("dynamicFvMesh", "")) {
+                "dynamicRefineFvMesh" => {
+                    return Err(refused("constant/dynamicMeshDict", "AMR"));
+                }
+                "" | "staticFvMesh" => {}
+                other => {
+                    return Err(refused(
+                        &format!("constant/dynamicMeshDict dynamicFvMesh {other}"),
+                        "ALE",
+                    ));
+                }
+            }
+        }
+    }
+    if case.join("constant/regionProperties").exists() {
+        return Err(refused("constant/regionProperties", "CHT multi-region"));
+    }
+    if let Some(f) = ofgpu::io::case_chem::dict_route_states_chemistry(case)? {
+        return Err(refused(f, "reacting chemistry"));
+    }
+    let thermo = case.join("constant/thermophysicalProperties");
+    if thermo.exists()
+        && FoamDict::read(&thermo).is_ok_and(|d| {
+            matches!(
+                first_word(d.get_or("thermoType/type", "")),
+                "hePsiThermo" | "heRhoThermo"
+            )
+        })
+    {
+        return Err(refused("constant/thermophysicalProperties", "ofgpu-compressible"));
+    }
+    let rad = case.join("constant/radiationProperties");
+    if rad.exists() {
+        if let Ok(d) = FoamDict::read(&rad) {
+            let model = first_word(d.get_or("radiationModel", ""));
+            if !model.is_empty() && model != "none" {
+                return Err(refused("constant/radiationProperties", model));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The first whitespace-delimited word of `s`.
+fn first_word(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
+}
+
+/// Does the parsed dictionary state `key` at all - as a leaf entry, or as a
+/// sub-dictionary? An EMPTY sub-dictionary parses to the marker key `key/`
+/// alone, which `has(key)` and `sub_keys` both skip; a non-empty one has
+/// `key/...` children.
+fn states_key(d: &FoamDict, key: &str) -> bool {
+    d.has(key) || d.has(&format!("{key}/")) || !d.sub_keys(key).is_empty()
 }
 
 /// The options of `-solve simple`, SPEC-LIT 139.4's decomposed-cavity gate.
@@ -1332,6 +1468,19 @@ fn run() -> Result<()> {
     }
     let args = parse(&argv)?;
     refuse_unbuilt_transport(&args.comm)?;
+    refuse_unconverted(&args.case, &args.backend, args.graph)?;
+    if args.check {
+        // The refusal list passed: load the case exactly as the run would,
+        // so the loader's own refusals fire here too, and say the case
+        // takes the decomposed path. No GPU is opened.
+        let (_m, _cc, lowered) = common::load_case(&args.case)?;
+        common::refuse_motion_block(lowered.as_ref(), "ofgpu-par")?;
+        println!(
+            "ofgpu-par -check: {} takes the decomposed laminar SIMPLE path (SPEC-LIT 139.10)",
+            args.case.display()
+        );
+        return Ok(());
+    }
     let (m, _cc, lowered) = common::load_case(&args.case)?;
     common::refuse_motion_block(lowered.as_ref(), "ofgpu-par")?;
     for &np in &args.nps {

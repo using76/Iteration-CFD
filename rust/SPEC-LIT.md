@@ -41288,6 +41288,15 @@ reductions, each outer step costs 3 exchanges and 1 reduction, and the inner
 solves add theirs. §73.8's per-iteration counts hold for each inner solve and,
 unchanged, for the f64 build.
 
+**Changed by PAR-14 (§139.10).** The world sums of (118.12.3)-(118.12.4) are
+no longer the part-order fold of per-part doubles: each is §72's exact
+accumulator over the parts' per-cell double terms (owned cells only), so
+`S_x`, `N` and `R_k` - and with them the refinement - ARE partition-invariant
+to the bit, and the in-process and SPMD forms still agree bit for bit. The
+paragraph above describes the refinement before that unit. The exchange
+counts are unchanged; each world sum now gathers twice on a rank (the anchor,
+then the limbs) where the fold gathered once.
+
 **What it does not do.** CHT's per-region residuals (`solver::residual_ranged`
 in `cht.rs`) are still measured on the stored float field, so under `single`
 a region's report sits at the float floor. Ranged double kernels would be
@@ -55076,9 +55085,12 @@ contract (ORIGINAL). It has no external input.
 the bytes between ranks. This section runs the flow solver itself on one part:
 first the room the halo needs (§139.1, PAR-09), then the exchanges that fill it
 (§139.2, PAR-10a), the Krylov routing (§139.3, PAR-10b), the decomposed SIMPLE
-(§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11), and
-k-epsilon and SST on a part (§139.6, PAR-12), and decomposed I/O (§139.7,
-PAR-15).
+(§139.4, PAR-10c), energy and scalars on a part (§139.5, PAR-11),
+k-epsilon and SST on a part (§139.6, PAR-12), decomposed I/O (§139.7,
+PAR-15), the partition-invariant laplacian and Gauss gradients (§139.8,
+PAR-13a), the partition-invariant convection and flux kernels (§139.9,
+PAR-13b), and the bitwise decomposed SIMPLE with its refusal list (§139.10,
+PAR-14).
 
 This section defines no equation, so it carries no equation label.
 
@@ -55286,7 +55298,8 @@ interpolated face value itself differs in the last bits. Where a cell's
 Green-Gauss sum nearly cancels - a smooth field's gradient is small next to
 its face fluxes - a few reordered additions show up as many ulps of the
 result. The conditioning check is what shows the miss is the order of
-rounding and not a wrong value. PAR-13a makes the gradients bitwise. A
+rounding and not a wrong value. PAR-13a makes the gradients bitwise
+(§139.8: since then this gate measures 0 ulp in both builds). A
 part's p and momentum solves go through the SPMD Krylov solvers in §139.3
 (PAR-10b). No decomposed SIMPLE is gated here: that is PAR-10c.
 
@@ -56065,6 +56078,465 @@ view - it does not feed a solve. There is no parallel FILE system: every
 rank writes its own directory of one shared case, on one disk. MPI and
 multi-GPU are deferred: the ranks are `ThreadComm` threads, each with its
 own `Gpu::new(0)` on one card.
+
+### 139.8 The partition-invariant laplacian and Gauss gradients (PAR-13a)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §70 gave every row one global-face-ordered list so that APPLYING a
+matrix sums it in an order no partition can move, and §71.6 defined what a
+cut face's coefficients must BE: `internal_coeffs = 0`,
+`boundary_coeffs = -upper[g]` (this part owns `g`) or `-lower[g]`. ASSEMBLING
+on a part still went through the two old loops, and on a processor face that
+is different arithmetic four times over. §70.5's table names the assembly
+kernels and declines to convert them, on the ground that the boundary path's
+operands are not the internal path's; §71.3's part build removed that ground
+for the processor patches - every metric they carry is a copy or an exact
+negation of the whole mesh's - so only the loop and the weight were left.
+§139.2 measured the damage: the part gradients missed the whole mesh's by up
+to 82 ulp (f64) and 305 ulp (single) under the round robin, every miss on a
+cell touching a processor face, with the conditioning check showing each miss
+was the order of rounding and not a wrong value.
+
+Four facts, all measured on this tree (§70.5's table; §139.2's miss; the
+summation-order cost is Higham, *Accuracy and Stability of Numerical
+Algorithms*, 2nd ed., SIAM 2002, ch. 4, and exact negation is *IEEE Standard
+for Floating-Point Arithmetic*, IEEE Std 754-2019 - the two citations §70
+rests on):
+
+1. A processor face is a boundary face of kind `Cyclic` whose `b_nbr_cell`
+   is a halo cell. The Gauss gradient and `fvLapNonOrth` add its term in the
+   BOUNDARY loop - after all internal faces - while the whole mesh added the
+   same term in the INTERNAL loop at the face's global position, and float
+   addition is not associative (§70.1).
+2. On the side that does NOT own the global face, `b_weights` is
+   `weight_from_offsets(b, a)` (§71.3), not the whole mesh's `w_g`; and
+   `1 - (1 - w)` is not `w` in floating point, so `w_g` cannot be recovered
+   from the part's own array and has to be STORED.
+3. `fvLapBoundary` puts a coupled face's diagonal share in
+   `internal_coeffs`, which `lduAddBoundaryContributions` folds into `diag`
+   LATER, after the whole diagonal sum - while the whole mesh put the cut
+   face's share in `diag` inside `fvLapDiag`'s sum, at the face's place
+   among the internal faces. `split_matrix` (§71.6) defines the target: on a
+   cut face `internal_coeffs = 0` and `boundary_coeffs = -upper[g]` (this
+   part owns `g`) or `-lower[g]`.
+4. Everything else on a processor face is already exact:
+   `b_sf = owns ? sf[g] : -sf[g]`, `b_delta_coeffs = delta_coeffs[g]`,
+   `b_non_orth_corr = owns ? k[g] : -k[g]`, `b_mag_sf = mag_sf[g]` (§71.3);
+   IEEE negation is exact, so the operands only had to be PUT BACK.
+
+**What a part carries.** Two new per-boundary-face arrays on `HostMesh`,
+filled by `PartBuild::build` face by face with the rest, and one count on
+`GpuMesh`:
+
+| array | length | meaning |
+|---|---|---|
+| `b_proc` | `[n_bf]` or EMPTY | `-1` not a processor face (a real boundary face, or an inherited cyclic couple); `1` a processor face whose GLOBAL owner cell is on this part; `0` a processor face whose global owner is on the other part (this part's cell is the whole mesh's neighbour) |
+| `b_proc_w` | `[n_bf]` or EMPTY | the WHOLE mesh's `weights[g]` of a processor face - the owner-side weight, whichever side of the cut this part is on; `0` on every other face |
+| `n_proc_faces` | count | the entries of `b_proc` that are `>= 0`, counted once at upload |
+
+EMPTY means "no processor face", which is every mesh except a decomposed
+part - so every mesh that predates this subsection means what it always
+meant, and `GpuMesh::upload` fills an EMPTY `b_proc` with `-1` and a `0.0`
+`b_proc_w` of the right length. A `b_proc` of any other length is refused by
+name (`mesh: b_proc`), and a full `b_proc` beside a short `b_proc_w` is
+refused by name (`mesh: b_proc_w`), because the kernels read both arrays face
+by face and a short one is a read out of bounds rather than an error.
+
+**The rule.** The five twins appended to `cuda/fv.cu` each obey one rule:
+one thread per owned cell `c`, walking the MERGED row `j in [rf_offset[c],
+rf_offset[c+1])`, `f = rf_face[j]`, `fl = rf_flags[j]`, skipping `f < 0`.
+The row is ascending in GLOBAL face id, so the entries that are internal
+faces (`!(fl & RF_BOUNDARY)`) and processor faces (`fl & RF_BOUNDARY` and
+`b_proc[f] >= 0`) come first, in exactly the order the whole mesh's internal
+(cf) loop visits them, and the other boundary faces come after, in the whole
+mesh's boundary (bcf) order. For an internal entry, `owns = (fl & RF_OWNS)
+!= 0` and the term is computed by the SAME source expression, operand for
+operand and in the same written order, as the old kernel's internal loop -
+the expression is copied verbatim, which keeps nvcc's FMA contraction the
+same. For a processor entry `b`, the term is that SAME internal-face
+expression evaluated with the whole mesh's operands, rebuilt exactly from
+the part's arrays:
+
+| quantity | rebuild | why it is exact |
+|---|---|---|
+| `owns` | `b_proc[b] == 1` | the stored side |
+| `o_g` | `owns ? c : b_nbr_cell[b]` | this part's cell, or the ghost its exchange filled (§139.2: bitwise the owner's) |
+| `n_g` | `owns ? b_nbr_cell[b] : c` | the same two cells, seen from the other side |
+| `w_g` | `b_proc_w[b]` | STORED - fact 2, `1 - (1 - w)` is not `w` |
+| `Sf_g` | `owns ? b_sf[b] : -b_sf[b]` | IEEE negation is exact |
+| `k_g` | `owns ? b_non_orth_corr[b] : -b_non_orth_corr[b]` | the same |
+| `delta`, `gamma` | `b_delta_coeffs[b]`, `b_gamma_mag_sf[b]` ¹ | copies (§71.3) |
+
+and then `owns` plays the role `cf_own[j]` played. Every other boundary
+entry is the old kernel's boundary-loop body, unchanged, and after the loop
+comes the old kernel's final statement, unchanged.
+
+¹ the caller's boundary gamma on a processor face must be the whole mesh's
+INTERNAL-face `gamma_mag_sf[g]` - the value `gammaMagSf[g]` had when the
+whole mesh assembled. That is a CONVENTION on the caller (§139.4's decomposed
+SIMPLE does not carry it yet; that is PAR-14's); the tests below feed it
+directly.
+
+**The five twins.** Appended at the end of `cuda/fv.cu`; the old kernels are
+untouched, byte for byte:
+
+| old kernel | twin | what differs on a processor entry |
+|---|---|---|
+| `fvLapDiag` | `fvLapDiagPart` | the share `acc += bGammaMagSf*bDeltaCoeffs` joins the merged-row sum, at the face's global place among the internal faces, instead of coming through the fold |
+| `fvLapBoundary` | `fvLapBoundaryPart` | `coef = sign*g*delta` goes to `boundary_coeffs` ONLY; `internal_coeffs` stays at the zero the matrix was zeroed with. Every other face: fvLapBoundary's body unchanged (the processor check is FIRST - a processor face's kind is `Cyclic` and would otherwise take the coupled branch) |
+| `fvLapNonOrth` | `fvLapNonOrthPart` | the internal-face expression on `o_g, n_g, w_g, k_g, delta, gamma` - NO jump, NO `b_weights`, which an internal face never read - in place of the coupled branch |
+| `fvGradScalar` | `fvGradScalarPart` | `pf = w_g psi_o_g + (1 - w_g) psi_n_g` on the whole mesh's cells and weight, `Sf_g`, and NOT `bpsi[b]`: the evaluated boundary value of a processor face is the INTERPOLATED one, a different number from what the whole mesh's internal loop formed |
+| `fvGradVector` | `fvGradVectorPart` | the same, through all nine components, with `sg = owns ? 1 : -1` exactly as the internal loop's |
+
+`fvLapNonOrthPart`, `fvGradScalarPart` and `fvGradVectorPart` also take
+`b_nbr_cell` (the ghost index the rebuild table needs); each is launched with
+the mesh's `rf_offset`/`rf_face`/`rf_flags`, `b_proc` and `b_proc_w` in place
+of the cf/bcf CSR the old kernel took.
+
+**Why `internal_coeffs` is 0 on a processor face.** Because the whole mesh
+already put that face's diagonal share in `diag`, at the face's place in
+`fvLapDiag`'s sum - `fvLapDiagPart` puts the part's share in exactly that
+place of the merged row - and adding it again through the fold would double
+it. This is `split_matrix`'s own rule (§71.6), and it makes the fold
+(`lduAddBoundaryContributions`) a no-op on the face: with
+`internal_coeffs = 0` the fold adds `+0` after the inherited faces, and
+`x + 0.0` changes no bit (the fold's accumulator starts at `+0` and a sum
+that cancels to zero rounds to `+0`, so `x` is never `-0` there). So a part may be folded before or after it is
+split, and the folded comparison below holds bitwise as the unfolded one
+does.
+
+**The selection rule, and why the serial path cannot move.** `src/fv.rs`
+switches on `m.n_proc_faces > 0`:
+
+| call site | switch |
+|---|---|
+| `fvm_laplacian`, the diagonal block | `part_lap_diag` when `m.n_proc_faces > 0 && m.n_cells > 0`, else the old `fvLapDiag` launch |
+| `fvm_laplacian`, the boundary block | `part_lap_boundary` when `m.n_proc_faces > 0 && m.n_boundary_faces > 0`, else the old `fvLapBoundary` launch |
+| `fvm_laplacian_non_orth_correction` | `part_lap_non_orth`, then the skew step as before, then return; else the old launch |
+| `fvc_grad_scalar_scheme` / `fvc_grad_vector_scheme` | a new arm `GradBase::Gauss if m.n_proc_faces > 0` before the old `Gauss` arm; the limiter block after the match runs as before |
+
+No whole mesh and no P = 1 part has a processor face - `b_proc` is EMPTY or
+all `-1`, so `n_proc_faces` is 0 - so every existing launch runs exactly as
+today, and the twins launch ONLY on a part of a real cut. The `upper`/`lower`
+pass (`fvLapFaces`) is not switched: an internal face's coefficient is the
+same number on both sides of the cut already (§71.3).
+
+**The tests.** `tests/distflow_invariant.rs`, in BOTH builds, over both gate
+meshes of §139.2, P = 2, 3, 4, Hilbert, Linear and round robin, every rank a
+`ThreadComm` thread with its own `Gpu`:
+
+| test | what it holds |
+|---|---|
+| `processor_faces_carry_the_whole_mesh_side_and_weight` | host: the whole mesh's `b_proc` is empty; every part's `b_proc`/`b_proc_w` are face-sized; a cut face's mark is the side and its stored weight is bitwise the whole mesh's `weights[g]`; an inherited face is `-1`/`0`; the parts' processor faces total `2 n_cut_faces`. Device: a whole mesh uploads `n_proc_faces == 0`, each part's `n_proc_faces` is its mark count, and a part whose `b_proc_w` was truncated by one is refused with text starting `mesh: b_proc_w` |
+| `the_part_gradients_are_the_whole_mesh_gradients` | the §139.2 gradient run, compared BITWISE on every owned AND ghost cell, all 3 + 9 components, against the whole gradient at `global_cell[i]`; the count and the FIRST difference printed, and on any difference one `MISSED` line, not a panic. Asserted: components compared > 0, ghosts compared > 0, every rank `Ok` |
+| `the_part_laplacian_is_split_matrix_of_the_whole` | the whole mesh assembles a laplacian with even non-coupled faces `FixedValue` of the smooth psi and face gamma `mag_sf (2 + sin(3 x))`, runs the non-orthogonal correction against its own gradient, and downloads the matrix folded and unfolded; each rank assembles the same problem on its part (the boundary state copied onto inherited faces, gamma mapped through `global_face`, a processor face taking the whole mesh's INTERNAL gamma, the gradient HANDED over as `full_of` - not recomputed, so the test isolates the assembly) and both its matrices are BITWISE `split_matrix` of the whole's - `diag`/`source` on the owned cells, the rest whole. Differences print one `MISSED` line with the first coefficient; asserted: coefficients compared > 0, every rank `Ok` |
+
+**Measured (2026-10-19, RTX 5070 Ti, f64 and single alike).**
+`tests/distflow_invariant.rs`: 389 844 gradient components on 32 487 owned and
+ghost cells, **0 differ**; 345 480 laplacian coefficients, unfolded and
+folded, **0 differ**. §139.2's own gate (`tests/distflow.rs`) now holds its
+4-ulp line at **0 ulp** on all 211 680 owned components, normalised error 0,
+so the miss §139.2 records is closed. The serial path did not move: the
+golden hash of `ofgpu-validate -sections 1-10,13,16` - SHA-256 over every
+row's `kind, what, err, tol, ok, replayed, why, nonFinite, gate`, the fields
+`tools/f64_identity.py rows` compares - is `ec7face0...c587` (344 rows) in
+f64 and `1b12f14f...f084` (350 rows) in single, identical before and after
+this unit and stable over two runs each, and `f64_identity.py rows` reports
+the rows identical in both builds. In the f64 build the SASS of all 42
+pre-existing `cuda/fv.cu` kernels is identical function by function, and
+every other cubin is unchanged.
+
+**What this does not do.** The least-squares gradients and the
+skew-corrected gradient corrections are not switched by this unit: on a part
+their processor faces still take the coupled branch with the part's own
+`b_weights`, so they are not bitwise; the min/max limiters are already
+invariant (§70.5). The convection and flux
+kernels are PAR-13b. A bitwise decomposed SIMPLE is PAR-14: the laminar
+SIMPLE's own `b_gamma_mag_sf` on a processor face is still the interpolated
+one today, so a decomposed SIMPLE run is NOT bitwise through these kernels
+alone. And `lduNegSumDiag` / `lduAddBoundaryContributions`, which the plan
+row names, are not edited: the first is called only by tests, and the fold
+needs no change once a processor face's `internal_coeffs` is 0 - it adds
+`+0` there, which changes no bit.
+
+### 139.9 The partition-invariant convection and flux kernels (PAR-13b)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §139.8 made the laplacian and the two Gauss gradients
+partition-invariant by moving their part assemblies onto the merged row of
+§70, and five more sums stayed on the old two loops: the
+five kernels named in the plan row - `fvDivBoundedDiag`, `fvDivCorrection`,
+`fvDivSurface`, `fvReconstruct` and `smpFaceFluxSum` - each walk a part's own
+cell -> face CSR, whose boundary loop runs AFTER every internal face, so a
+processor face's term lands at the end of the row while the whole mesh summed
+the same face in its INTERNAL position, at its global place among the
+internal faces. Float addition is not associative (§70.1; the summation-order
+cost is Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed.,
+SIAM 2002, ch. 4), so a part's row sum was a different number from the whole
+mesh's - the same shape of miss §139.2 measured for the gradients, and this
+subsection's gate measures for these kernels below. `fvDivCorrection` also
+carries a gap §139.8's twins did not: its internal-face expression reads
+`C[owner]` and `C[neighbour]`, and on a part the ghost cell's centre is
+nowhere on the device (`GpuMesh::c` is `n_cells` long) and is not rebuildable
+from face data - no combination of `b_cf`, `b_sf` and the deltas reconstructs
+a cell centre bitwise. What CAN be rebuilt is everything else (§71.3): the
+side (`b_proc`), the face normal (`b_sf`, negated on the non-owning side -
+exact negation is *IEEE Standard for Floating-Point Arithmetic*, IEEE Std
+754-2019), the face centre (`b_cf`, copied), the magnitude (`b_mag_sf`,
+copied), and the flux (`bphi[f]` of a processor face IS the whole mesh's
+internal flux with the side's sign). The centre alone has to be STORED.
+
+**What a part carries.** One new per-boundary-face array beside §139.8's
+`b_proc`/`b_proc_w`, filled by `PartBuild::build` face by face with them:
+
+| array | length | meaning |
+|---|---|---|
+| `b_proc_c` | `[n_bf]` or EMPTY | on a processor face, the WHOLE mesh's centre `c` of the cell on the OTHER side of the cut (the ghost cell), copied - a copy is exact; `Vec3::ZERO` on every other face |
+
+EMPTY means "no processor face", every mesh except a decomposed part, and
+uploads as a zero vector per face - nothing about a whole mesh's upload
+moves. `GpuMesh::upload` refuses a full `b_proc` beside a short `b_proc_c`
+by name (`mesh: b_proc_c`, naming both lengths), because the kernel reads
+the centre of every marked face and a short array is a read out of bounds
+rather than an error - the same reason §139.8 refuses a short `b_proc_w`.
+
+**The twins.** Appended at the end of `cuda/fv.cu`, and one to
+`cuda/simple.cu`; the old kernels are untouched, byte for byte. Each obeys
+THE RULE of §139.8 verbatim - one thread per owned cell `c`, walking the
+MERGED row `j in [rf_offset[c], rf_offset[c+1])`, `f = rf_face[j]`,
+`fl = rf_flags[j]`, skipping `f < 0`; an internal entry computes the old
+internal-loop expression operand for operand in the same written order with
+`owns = (fl & RF_OWNS) != 0` in place of `cf_own[j]`; a processor entry
+computes that SAME expression on the whole mesh's operands - `owns =
+(b_proc[f] == 1)`, `o_g = owns ? c : b_nbr_cell[f]`, `n_g = owns ?
+b_nbr_cell[f] : c`, `Sf_g = owns ? b_sf[f] : -b_sf[f]`, `phi_g = owns ?
+bphi[f] : -bphi[f]`, `C_o = owns ? C[c] : b_proc_c[f]`, `C_n = owns ?
+b_proc_c[f] : C[c]`, `Cf_g = b_cf[f]`, `magSf_g = b_mag_sf[f]` - and every
+other boundary entry runs the old boundary-loop body unchanged, with the
+old kernel's final statement after the loop.
+
+| old kernel | twin | what differs on a processor entry |
+|---|---|---|
+| `fvDivBoundedDiag` | `fvDivBoundedDiagPart` | `acc += owns ? phi_g : -phi_g` joins the merged-row sum at the face's global place, instead of `acc += bphi[b]` after every internal face; an EMPTY patch is still skipped, as the old boundary loop skips it |
+| `fvDivCorrection` | `fvDivCorrectionPart` | the internal expression on `o_g, n_g, C_o, C_n, Cf_g, phi_g` and the whole mesh's gradients at `o_g`/`n_g` - NOT the coupled branch with `b_weights`, which is the arithmetic a folded-in-half cyclic couple gets; `cyclic` faces with `b_nbr_cell >= 0` only keep the old boundary body |
+| `fvDivSurface` | `fvDivSurfacePart` | `acc += owns ? phi_g : -phi_g` in the merged row, EMPTY still skipped - the volumetric division `d[c] = acc/V[c]` unchanged |
+| `fvReconstruct` | `fvReconstructPart` | the same no-sign internal body on `Sf_g = owns ? b_sf[f] : -b_sf[f]` and `phi_g`, `magSf_g = b_mag_sf[f]`, with the `!(m > 0)` floor, the cofactor block, the `1e-30` degeneracy floor and the final statement unchanged |
+| `smpFaceFluxSum` | `smpFaceFluxSumPart` | `s += owns ? phi_g : -phi_g` in the merged row; the boundary body keeps NO empty skip, as the old kernel has none |
+
+**The selection rule, and why the serial path cannot move.** `src/fv.rs`
+switches each of the four call sites on `m.n_proc_faces > 0`, immediately
+before its old launch, and `src/simple.rs` routes both of its `smpFaceFluxSum`
+call sites through a `face_flux_sum_select` that makes the same test:
+
+| call site | switch |
+|---|---|
+| `fvm_div_bounded_correction` | `part_div_bounded_diag` (`fvDivBoundedDiagPart`) |
+| `fvm_div_correction` | `part_div_correction` (`fvDivCorrectionPart`), the scheme's code and coef handed through |
+| `fvc_div_surface` | `part_div_surface` (`fvDivSurfacePart`) |
+| `fvc_reconstruct` | `part_reconstruct` (`fvReconstructPart`), the SAME `b_sf` the old launch passes - the wedge's `S'_f` when the mesh has one (§119.2) |
+| `launch_face_flux_sum` call sites (the pressure source and `continuity_error`) | `face_flux_sum_select` |
+
+No whole mesh and no P = 1 part has a processor face - `b_proc` is EMPTY or
+all `-1`, so `n_proc_faces` is 0 - so every existing launch runs exactly as
+today, and the twins launch ONLY on a part of a real cut. The single
+`fvc_face_flux_sum` is a NEW public door in `src/simple.rs` for the tests:
+it length-checks `out` (`fvc_face_flux_sum:`, refused by name), builds the
+SIMPLE kernel set on every call, and calls the same selection.
+
+**The tests.** `tests/distflow_invariant.rs`, in BOTH builds, over both gate
+meshes of §139.2, P = 2, 3, 4, Hilbert, Linear and round robin, every rank a
+`ThreadComm` thread with its own `Gpu`:
+
+| test | what it holds |
+|---|---|
+| `processor_faces_carry_the_ghost_cell_centre` | host: the whole mesh's `b_proc_c` is empty; every part's is face-sized; a processor face's entry is bitwise the whole mesh's `hm.c[there]` of the cell on the OTHER side of the cut (`b_proc` decides which); every other face `Vec3::ZERO`. Device: a part whose `b_proc_c` was truncated by one is refused with text starting `mesh: b_proc_c` |
+| `the_part_convection_matrix_is_split_matrix_of_the_whole` | the whole mesh assembles the bounded correction plus the deferred correction of `linearUpwind` and of `cubic` against a mixed-sign flux (`U - (3,3,3)` dotted with each face normal, so `linearUpwind`'s both branches run) and its own Gauss gradient; each rank assembles the same on its part, with the gradient HANDED over (`full_of`), not recomputed, so the test isolates the assembly; against `split_matrix` of the whole's, `diag` and `source` - the two arrays the kernels write - are compared BITWISE, and `upper`, `lower`, `internal_coeffs`, `boundary_coeffs` - written by neither kernel - must be ZERO BY VALUE on both sides (a cut face's `split_matrix` entry is `-upper[g]`, and the negation of an untouched `+0` is `-0`, a sign no kernel under test writes; their count is printed). A difference prints one `MISSED` line with the first coefficient and continues; asserted: coefficients compared > 0, untouched coefficients checked > 0, every rank `Ok` |
+| `the_part_flux_fields_are_the_whole_mesh_ones` | the same flux; whole: `fvc_div_surface`, `fvc_reconstruct`, and `fvc_face_flux_sum` both overwriting and accumulating into the smooth psi; each rank the same four on its part, `fs1`'s buffer pre-filled with the psi; every OWNED cell compared BITWISE against the whole at `global_cell[i]`, 1 + 3 + 1 + 1 values per cell. One `MISSED` line with the first difference (mesh, P, method, rank, i, g, field, component, got, want, ulp), no panic; asserted: values compared > 0, every rank `Ok` |
+
+At HEAD - before the twins - the gate MEASURED the miss. Counted then over
+all six arrays of the matrix, `71 683` of `345 480` convection coefficients
+differed, the first a real one (`diag[5]`, box, P = 2 Hilbert,
+linearUpwind: `-5.845113545753379e-3` against `-5.845113545753372e-3`), and
+`20 670` of `105 840` flux values differed (first: `div`, 8 ulp). That is the
+bug this subsection closes.
+
+**Measured (2026-10-19, RTX 5070 Ti, f64 and single alike).**
+`tests/distflow_invariant.rs`: `70 560` `diag`/`source` coefficients of the
+bounded and deferred corrections (linearUpwind and cubic), **0 differ**;
+`274 920` untouched coefficients zero by value on both sides, `41 784` of
+them the `-0` of `split_matrix`'s `-upper[g]` on a processor face; `105 840`
+flux values (`fvc_div_surface`, `fvc_reconstruct`, `fvc_face_flux_sum`
+overwriting and accumulating) on `17 640` owned cells, **0 differ**.
+§139.8's gates still hold at 0 differ. The serial path did not move: the
+golden hash of `ofgpu-validate -sections 1-10,13,16` (§139.8's recipe) is
+`ec7face0...c587` (344 rows) in f64 and `1b12f14f...f084` (350 rows) in
+single, identical before and after this unit; in the f64 build the SASS of
+all 47 pre-existing `cuda/fv.cu` kernels and all 4 pre-existing
+`cuda/simple.cu` kernels is identical function by function, and no other
+cubin changed in either build.
+
+**What this does not do.** The convection MATRIX itself - `fvDivDiag`,
+`fvDivBoundary`, `fvDivFaces` - and the boundary weights
+(`fvWeightsBoundary*`) are not in PAR-13b's plan row and are not switched: on
+a part a processor face's convection diagonal share still goes to
+`internal_coeffs` with the part's own weight, so a decomposed convection
+matrix is not yet bitwise - PAR-14's business, with the bitwise decomposed
+SIMPLE. The compressible, VOF and energy drivers' own `smpFaceFluxSum`
+launches (`src/compressible/*.rs`, `src/vof.rs`) are not switched either -
+those drivers are not decomposed, so nothing on their path changed. And
+`fvDivSchemeFaceValue`, `fvDivFaces`'s face-value twin, is a measuring stick
+for the order of accuracy rather than an assembly, and has no part twin.
+
+### 139.10 The bitwise decomposed SIMPLE and the refusal list (PAR-14)
+
+`No GPL-licensed source was consulted.` This subsection is this project's own
+contract (ORIGINAL). It has no external input.
+
+**Why.** §139.4's gate compared the decomposed SIMPLE against the one-rank
+run at `1e-6`, and a tolerance is a bet that whatever remains is roundoff
+rather than a real partition dependence. Bits need every kernel on the path
+to be partition-invariant, so that no number in the run depends on where
+the cut fell: §139.8 and §139.9 made the laplacian, the Gauss gradients,
+the convection corrections and the flux sums bitwise; this subsection gates
+the whole loop - every cell of U, p (and T on the second fixture) and every
+face of the flux after a fixed iteration count, in both builds - and
+refuses by name every path a case or a flag can still state that the
+decomposed run has not converted.
+
+**The gate.** Two fixtures, every constant FIXED BEFORE MEASURING, in
+`src/distflow.rs`: the lid-driven cavity at `BITWISE_CAVITY_N = 16` cells
+per side, Re = 100, and a laminar Boussinesq plume on the block generator's
+`plume` box at `BITWISE_PLUME = (12, 6, 4)` - `PLUME_U_IN = 0.2` m/s of
+`PLUME_T_IN = 303.15` K air up through the floor window `inlet`, the box
+otherwise at `PLUME_T_REF = 293.15` K, `PLUME_NU = 1e-2`, Boussinesq
+`PLUME_BETA = 3.4e-3`, gravity `PLUME_G_Z = -9.81` m/s² down `-z` - a
+fixture for a bitwise self-comparison, not a validation case. `P = 1` under
+the Linear cut (which IS the one-part cut) is the reference; `P = 2, 3, 4`
+under Hilbert must reproduce it after `BITWISE_ITERS = 50` outer
+iterations, no convergence break, same iteration count. Compared BITWISE
+(`to_bits`), on every rank: each owned cell's U (three components), p and T
+against the reference at `global_cell[i]`; each internal face's flux
+against the reference's internal flux at `global_face[i]`; each boundary
+face's against the reference's boundary flux, EXCEPT a processor face,
+which must be the whole mesh's internal flux at that face with the rank's
+own side's sign (`b_proc[j] == 1` keeps it, else negated). The per-step
+traces - the linear-solver iteration counts and the initial residuals of U,
+p and T, as `.first` reported them - are compared the same way, per step.
+The sizes are REDUCED so the shared card runs the four rank counts of both
+fixtures inside the verify budget: the size is reduced, never a tolerance -
+there is no tolerance, the gate is bits. A miss prints one `[139.10] MISSED`
+line with the first differing value and never panics; asserted is only that
+every rank returned `Ok`, the step count is exact, and something was
+compared.
+
+**The refusal list.** `ofgpu-par <case>` refuses, before anything is loaded
+or any device opened, every path the case or the command line states that
+the decomposed run has not converted; the pair test in
+`tests/par_driver.rs` runs each row's base case accepted and the same
+command with ONE setting turned refused, the SPEC-LIT 13.4.1 shape:
+
+| refused | stated by |
+|---|---|
+| `FFT backend` | `-backend fft` or `-backend cufft`; any other `-backend` value than `pbicgstab` or `pcg` is refused naming the value |
+| `CUDA-graph capture` | `-graph` |
+| `VOF` | `0/alpha.water` exists |
+| `dust model` | `constant/cloudProperties` exists and states `dustCloud` |
+| `parcels` | `constant/cloudProperties` exists (and is not the dust model) |
+| `LTS` | `system/fvSchemes`' `ddtSchemes/default` is `localEuler` |
+| `AMR` | `constant/dynamicMeshDict`'s `dynamicFvMesh` is `dynamicRefineFvMesh` |
+| `ALE` | `dynamicFvMesh` anything else except `staticFvMesh` (static is accepted) |
+| `CHT multi-region` | `constant/regionProperties` exists |
+| `reacting chemistry` | the chemistry route of §133 names a file of the case |
+| `ofgpu-compressible` | `constant/thermophysicalProperties` parses and `thermoType/type` is `hePsiThermo` or `heRhoThermo` |
+| the model's own name (`P1`, `fvDOM`, ...) | `constant/radiationProperties`: `radiationModel` present and not `none` |
+
+`-check` runs the refusal list and then loads the case exactly as the run
+would - `common::load_case`, then the motion block's refusal - prints that
+the case takes the decomposed laminar SIMPLE path, and exits: no GPU is
+opened. The JSONC route's blocks (parcels, chemistry, radiation, dust,
+vent, motion) are refused by `common::load_case` itself, exactly as they
+are for the run.
+
+**The twins (run 2).** The gate's first misses lived in the face
+INTERPOLATION, not the matrix: on a part a processor face's field value is
+the whole mesh's `w·psi_owner + (1-w)·psi_neighbour`, which
+`fvInterpolateBoundary`'s copy of the boundary slot cannot form - even a
+uniform field loses a bit through the weights. Every twin selects itself
+with an `if m.n_proc_faces > 0 { ... }` guard and leaves the whole mesh's
+path - and the serial path, `n_halo == 0` - byte for byte what it was:
+
+| whole mesh kernel | part twin | what it forms |
+|---|---|---|
+| `fldCorrectBcScalar` | `fldProcFaceScalar` | `bf[i] = w·psi[o_g] + (1-w)·psi[n_g]` |
+| `fldCorrectBcVector` | `fldProcFaceVector` | the vector half, per component |
+| `fvInterpolateBoundary` | `fvInterpolateLinearProc` | the linear face interpolation from `psi.f`'s ghost slots |
+| `fvWeightsBoundary` | `fvWeightsBoundaryProc` | the convection weight of a proc face |
+| `fvWeightsBoundaryLimited` | `fvWeightsBoundaryLimitedProc` | its limited-scheme variant |
+| `fvDivDiag` | `fvDivDiagPart` | the convective diagonal over the merged row |
+| `fvDivBoundary` | `fvDivBoundaryPart` | its boundary share |
+| `momFaceInterpBoundary` | `momFaceInterpProc` | Rhie-Chow's face interpolation |
+| `momPhiHbyABoundary` | `momPhiHbyAProc` | `phiHbyA`'s boundary share |
+| `world_mean` | `world_mean_exact` | the pinned mean, partition-invariantly |
+| `solSum64Stage1`+`solSumStage2To64`+the rank fold | `exMaxAbs64Stage1`+`exSum64Stage1`+`exCombine`+`exact_sum64` | the refinement's world sums `sum x`, N, R_k, partition-invariantly |
+
+Two supports carry the interpolation twin its operands: `update_viscosity`
+composes `nu_eff = nu_lam + nu_t` over `m.n_local()`, not just the owned
+cells (the ghost slots of `nut.f` were exchanged by the model's BC pass,
+`nu_lam` is written over all of `n_local`), and `GasState::update_density`
+forms `rho.f = p0/(R T)` over `m.n_local()` too, from `T`'s halo that the
+energy equation's exchange filled - a whole mesh has no ghosts, `n_local`
+is `n`, so neither launch moves a bit.
+
+The refinement's own reductions (§118.4) needed the same treatment, and a
+twin was not enough: the part sum was rounded to one f64 per part
+(`solSumStage2To64`) before the ranks folded, so
+`round(Σ round(T_p)) ≠ round(T)` whenever the cut moved a partial across a
+binade - the gate's remaining single-build misses began as the world
+`sum x` of the pressure solve at step 4 differing on P4 while the pressure
+field it summed was bit for bit the whole mesh's. Run 2 rebuilds the three
+world sums (`sum x`, N, R_k) on §72's accumulator with double terms:
+`solResidual64Terms`/`solNormFactor64Terms` materialise each part's OWNED
+cells' terms in double (a halo cell's row is its owner's, and summing it
+twice would make the sum depend on the cut), `exMaxAbs64Stage1` +
+`exMax64Stage2` take the world anchor (a maximum, order-free),
+`exSum64Stage1` + `exCombine` reduce each part to exact 30-bit limbs, the
+gather moves bytes, and `exact_sum64` normalises the carries and rounds
+on the host. Every rank reads the same limbs against the same anchor and
+rounds them the same way, so the answer is the same bits whatever the part
+count. The serial refinement (`solver.rs`) keeps its own sums unchanged.
+
+**Measured (2026-10-20, RTX 5070 Ti, shared with another lane).** In BOTH
+builds, `tests/distflow_bitwise.rs`: the cavity at P = 2, 3, 4, 0 of 2096,
+2118 and 2112 values differ (U, p, phi); the plume, 0 of 2184, 2266 and
+2232, with T 0 of 288 each; iteration counts differ on 0 of 50 steps and the
+residual bits on 0. At HEAD before this unit the same gate printed MISSED
+on every row (f64: the cavity 1263-1285 values differing, the first U 1.6e6
+ulp off; the plume 1920-2002, every T; the iteration counts on 48 of 50
+cavity steps). The exact double sum test sums four dyadic terms dealt as
+[4], [2, 2] and [1, 3] parts to the exact `302.3828125`. The review found
+the host anchor `anchor64` adding `+ 1` twice - every refinement world sum came back
+exactly doubled, the SAME on every cut, so the bitwise gate passed while
+§139.5's single-build decomposed thermal cavity drifted to Nu rel 2.8e-3 at
+351 iterations against the serial 386; with the anchor fixed that test runs
+386 iterations on every rank and every row holds (Nu rel 2.953e-6, T
+6.782e-6, U 3.603e-6, p 2.531e-6 against 1e-5, identical at P = 1, 2, 4).
+The serial path did not move: the golden hash of `ofgpu-validate -sections
+1-10,13,16` is `ec7face0...c587` (344 rows) in f64 and `1b12f14f...f084`
+(350 rows) under `single`, as before this unit, and the SASS of every
+pre-existing kernel in `fv.cu` (51), `field.cu` (27), `momentum.cu` (25) and
+`simple.cu` (5) is identical function by function in both builds.
+
+**What this does not do.** MPI and multi-GPU are deferred by the user: a
+rank is a `ThreadComm` thread with its own `Gpu::new(0)` on the one card,
+and no cross-process or cross-device claim is made. Turbulence, the
+energy-only drivers, limited convection schemes beyond the fixtures' own
+upwind and central, and the non-orthogonal correctors are not gated here: a
+case that states them takes this refusal list or the loader's, and the
+bitwise claim covers exactly what the two fixtures run.
 
 ---
 
@@ -63367,6 +63839,323 @@ rule, a vent, or a non-Euler ddt is refused (DST-11 joins the vent). D7: `Mach` 
 the mixture's.
 
 Labels: (158.5)-(158.7).
+
+### 158.10 Gate DST-REMBE's case side as built (DST-11 part 1)
+
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Nothing here is physics: the
+relations below are the PLACEHOLDER vessel's geometry definitions.
+
+**Gate DST-REMBE stays NAMED and NOT RUN** (§158.7): H22 publishes no vessel geometry (§151.7
+item 9), and this tree does not invent one. Part 1 builds the case side on a labelled
+PLACEHOLDER that is never compared with data: `src/io/case_json.rs` (`mesh.kind: "polymesh"`),
+`src/dust/vent.rs` (`vent.probes`), `src/dust/gatemesh.rs` (the vessel generator),
+`cases/dust/rembeVented.geometry.json` (the placeholder's parameters), and the tests
+`tests/case_polymesh.rs` and `tests/dust_rembe_mesh.rs` (host, both builds) and two rows
+appended to `tests/shared/dust_vent_cases.rs`. No kernel and no existing numeric path changed.
+
+**A case on a polyMesh.** `mesh.kind: "polymesh"` with `mesh.path`, the directory holding
+`constant/polyMesh` (a relative path resolves against the case file's directory, which
+`read_case_jsonc` records as `JsonCase::base_dir`; an absolute one is used as is). `lower()`
+reads it once, before the sector and block routes run; the file's patch names in file order are
+the case's patch names, each governed by a `patches` rule (the block route's matching and
+unmatched-name refusal), its type string `patch_class(rule.kind)` and its kind from that string.
+`LoweredCase::poly_mesh` carries it (`None` for every other case); `build_raw_mesh` and
+`build_host_mesh` return it about the global origin, `block` stays the default and `windows`
+empty. Refused by key with (SPEC-LIT §158.10): `mesh.bounds`, `mesh.cells`, `mesh.boundaries`,
+`mesh.regions`, `mesh.grading`, `mesh.cyclic`, `mesh.wedge` and `mesh.sector` beside
+`"polymesh"`; a `motion` block; a missing `mesh.path`; a directory without a readable polyMesh
+(the reader's error behind `mesh.path: <dir>:`); a patch cyclic in the file (`mesh.path`); a patch
+a `wedge` rule governs (`patches`). A cartesian case must state `bounds`, `cells` and
+`boundaries` (each refused by name when absent, `mesh.path` refused beside it) and lowers,
+serialises and builds exactly as before; the schema now requires only `mesh.kind`.
+
+**The probes.** `vent.probes`, a list of `{ name, point }` (name of `[A-Za-z0-9_]`, unique; point
+finite; an empty list refused), lowers onto `VentSpec::probes`. `probe_cells` takes the cell
+whose world centre `origin + c` is nearest in f64 (a tie to the lowest id) and refuses a point
+outside the box of the world boundary-face centres; `VentProbes` gathers the gauge p at those
+cells with `presGather`, as `VentTrigger` does, and widens with `f64::from`.
+
+**The placeholder vessel.** An 11.5 m3 right circular cylinder, L/D = 2, flat ends, a 0.2 m
+wall, the 0.5 m2 vent centred on the front end, in the full-width outside box
+`[0, 15.5] x [-5, 5] x [0, 6.355]` (no symmetry plane). With V = `vessel.volume`, lambda =
+`lengthOverDiameter`, t = `shell`, A_v = `vent.area`, X_m = `ventPlaneX`, h_b =
+`domain.baseSize`, N = `segments` and x_lo/x_hi = `domain.extent[0]`/`[1]`:
+
+```
+  D = (4 V / (pi lambda))^(1/3),   R = D/2,   L = lambda D                          (158.10a)
+  r_v = (A_v / pi)^(1/2)                                                            (158.10b)
+  x1 = X_m - t/2  (inner face of the vented front end),  x0 = x1 - L  (inner face of the back end);
+  the axis is y = axisY, z = axisZ along +x;  in_cavity(p):  x0 < p.x < x1  and  |(p.y-axisY, p.z-axisZ)| < R  (158.10c)
+  n = max(1, round((x_hi - x_lo)/h_b)),  h0 = (x_hi - x_lo)/n,  i = round((X_m - x_lo)/h0),
+  plane = x_lo + i h0,  h_f = h0 / 2^level                                          (158.10d)
+  A(rho) = (N/2) rho^2 sin(2 pi / N)          (area of the N-gon of circumradius rho)
+  V_solid = A(R+t) (L+2t) - A(R) L - A(r_v) t                                       (158.10e)
+```
+
+`vessel_stl` writes the wall shell with the vent hole as one closed, outward-oriented ASCII STL
+of N-gon rings (outer side, back outer disc, front outer annulus, inner side, inner back disc,
+inner front annulus, vent side; 12 N facets, every vertex from one function so a shared vertex
+prints the same `{:.17e}` text). `membrane_plane` returns the plane of (158.10d) and refuses, in
+order: `vessel.ventPlaneX` off the base grid by more than 1e-9 (x_hi - x_lo), `vessel.ventPlaneX`
+outside `(x1 + h_f/2, x1 + t - h_f/2)`, `vessel.shell` when t < 2 h_f, and `domain.extent`
+unless the shell's bounding box lies inside the extent with one h_b of margin on every side (the
+automesher's stage-0 rule). `automesher_config` is the W4 supervisor's verified castellation-only
+config (`-stopAfter castellate`, staircase walls, so the membrane plane's faces stay planar; 29,662
+cells), with the seed point at `(x_lo + 0.9137 dx, y_lo + 0.5137 dy, z_lo + 0.5137 dz)` in the
+open air. `seal_reach` walks the cells reachable from a seed through internal faces not in the
+membrane. `parse_vessel_geometry` refuses by key a non-positive or non-finite volume,
+lengthOverDiameter, shell, vent area, baseSize, band or outerBand, `segments < 8`, `level < 1`,
+`outerLevel > level`, an extent pair with hi <= lo, an empty, repeated or non-finite probe, and a
+vent with r_v >= R.
+
+**Gates, measured 2026-10-20** (host, both builds; the probe read on the GPU).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `a_polymesh_case_builds_the_mesh_it_names` | a 4x3x2 box written as a polyMesh and named by `mesh.path`, against the cartesian case | equal counts, names, kinds, types; bitwise V and C | D | holds | holds |
+| `polymesh_refusals_name_the_key` | every refusal above | key and §158.10 named | D | holds | holds |
+| `placeholder_dims` | R 0.970873525930309, L 3.883494103721236, r_v 0.3989422804014327, x1 5.325, x0 1.4415058962787644; plane 5.425; P1, P2 at the quarter points and in the cavity | 1e-14 relative (plane 1e-12) | A | holds | holds |
+| `vessel_stl_is_closed_and_oriented` | each directed edge once and its reverse once; signed volume against V_solid = 6.82925363456151 m3 | 1e-12 relative | A | holds | holds |
+| `automesher_config_reads_back`, `generator_refusals`, `seal_reach_on_a_block` | the config through `read_config_str`; five refusals by key; the 4x1x1 walk | bitwise seed; key named; exact | D | hold | hold |
+| `vent_probes_lower_and_refuse`, `vent_probes_read_their_cells` | the probe block's refusals; nearest cell, ties, origin, the box; the gather | key named; bitwise f64::from(p[cell]) | D | hold | hold |
+
+**NOT RUN, with their reasons.** The R-run of §158.7 (no REMBE geometry). Its three prerequisites,
+recorded for when the geometry is obtained: H22's 0.06 bar initial overpressure needs a
+non-uniform initial p, which DST-10's driver refuses for a dust case (§158.9); H22's
+half-by-symmetry box cannot come from the automesher's stage-0 margin rule, so the placeholder
+box is full width; and an open outside boundary cannot be had for a dust case, because `p fixedValue`
+lowers to §126.9's outlet and §158.6 refuses a §126 rule there, so the placeholder's box is sealed
+(part 3, below). Part 2 of DST-11 (the driver beside a vent, the probe series, the mass
+budget) is below; part 3 (`cases/dust/rembeVented.jsonc` and the validate gate with its REDUCED
+smoke) follows it.
+
+**Decisions (TAKEN, by recommendation).** D1: the W4 supervisor's mesh (castellation only,
+29,662 cells), the closed 0.2 m wall shell with the vent cut through, the membrane plane x = 5.425
+on a base-grid plane and `mesh.kind: "polymesh"` with `mesh.path` stand. D2: a probe is the
+nearest cell centre, not an interpolation. D3: the vent radius must stay below R (a refusal the
+row did not list, kept). D4: the studio's pick-list of mesh kinds follows the regenerated schema
+in lane G (a hand-off; its pinned `['cartesian']` gains `polymesh`).
+
+Labels: (158.10a)-(158.10e).
+
+**Part 2: the dust coupling beside a vent, the probe history and the mass budget (DST-11
+part 2).** `ofgpu-compressible` now runs a dust case with a `vent` block; the refusal of §158.9
+("the hand-over of c~ and the closures on opening is DST-11's") is lifted, and the §126-rule,
+non-Euler ddt and steady refusals stay. No kernel, no `.cu` file and no solver algorithm changed;
+a run without a vent, and a vent run without dust, make the same library calls as before
+(`no_dust_no_change` and DST-09's and DST-10's tests unchanged).
+
+- *The closed stage.* With a vent, the run's first coupling is built on the SPLIT mesh, with
+  c~, k, omega and nut passed through `vent::closed_scalar`: the case's field plus
+  `zeroGradient` under `ventIn` and `ventOut`, the treatment `closed_lowered` gives p and T, and
+  `closed_lowered`'s refusals (a stated vent key; a pattern that would govern a vent patch).
+  DECISION (TAKEN by the supervisor): the membrane carries zeroGradient c~, k, omega and nut and
+  no wall function while closed; its two patches stay wall-kind, so the split mesh's SST wall
+  distance counts them.
+- *The opening.* `vent::open_onto_dust` is `open_onto` with the coupling attached BEFORE
+  `initialise`, in a fixed order: the merged state and solver; `carried` = the closed run's
+  coupling when it has taken a step (`None` at n = 0; a stepped run with no coupling refused by
+  name); the merged coupling from a closure; `attach_dust`; then `open_onto`'s body. Opened at
+  n = 0, the coupling is built fresh on the merged mesh, so the run is the unvented one bit for
+  bit. Otherwise `CompressibleDust::hand_over` builds a coupling on the merged mesh (the case's
+  own c~ field, a turbulence model freshly built there, whose wall distance is its own) and
+  carries, bit for bit: c~'s `f`, `f0`, `f00` and the shared boundary prefix of `bf`, `fr`,
+  `ref_value`, `ref_grad`, and its ddt clock (`ProgressEquation::carry_from`); with the local
+  flame age, alpha the same way and the age clock's `t_prev`, `delta`, `delta_prev`, `pending`,
+  `last`; the model's k, omega and nut; `last`; and U_t', q, wdot, the flame-Courant buffer and
+  lambda, which the driver's writer reads between steps. The SST's own ddt clock is not carried
+  (a dust run is Euler only, §158.6, and Euler's coefficients read only dt); `closure_age`,
+  `sua`, `spa` and every other per-step buffer are written before they are read in a step.
+- *The probe history.* With `vent.probes`, the gauge p at each probe's nearest cell on the CASE's
+  host mesh (the same cells on either mesh) is read on the t_0 state and after every step, after
+  the membrane check: a stdout line `probes: t ... P1=... P2=...` at the report cadence, and,
+  when the run writes, `probes.csv` (`t,<names>`, then one row at t_0 and one per step, every
+  value `{:.12e}`, flushed).
+- *The mass budget.* A transient run with a vent or a dust block keeps `vent::MassBudget`
+  (bookkeeping, not physics). V_i is the cell volume of the CASE's host mesh throughout; rho^n
+  is the solver's `rho.f` after step n; mdot_f^n is the boundary face mass flux `mdot.bf` after
+  step n on whichever mesh the run is on (the split mesh's vent faces included; outflow is
+  positive, S_f pointing out):
+
+```
+  M(t_n) = sum_i  rho_i^n V_i                    (f64, i in cell order)                       (158.10f)
+  B(t_n) = sum_{k=1..n}  dt * ( sum_{f in boundary} mdot_f^k )   (inner sum in face order, then x dt) (158.10g)
+  r      = ( M(t_n) - M(t_0) + B(t_n) ) / M(t_0)                                               (158.10h)
+```
+
+  t_0 is the state the first step starts from (after `initialise` and the n = 0 membrane check;
+  the merged state when the membrane opens at n = 0). B is accumulated straight after each step,
+  before the membrane check, so a step on the split mesh counts the split mdot. The driver prints
+  `mass budget: M0 ..., M ..., boundary outflow ..., residual ...` and returns (M0, M, B, r) in
+  `RunEnd::mass`.
+
+**Gates, measured 2026-10-20** (GPU; the 200-cell tube of §158.9's flame rows, dx = 1e-3 m,
+dt = 1e-6 s; the DST-10 dust box).
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| `dust_vent_open_at_zero_is_the_unvented_run` | pStat 0 opens at n = 0; 20 steps against the merged run with no vent: U, p, T, rho (`f`, `f0`, `f00`, `bf`), c~ (the same four), `mdot` | bitwise | D | holds | holds |
+| `dust_vent_hand_over_keeps_every_cell`, the carry | pStat 1e30, 10 closed steps, the opening by hand: step count, both ddt clocks, c~ (and alpha with FSC `flameAge: "local"`), the last c~ solve, U, p, T, rho, `mdot` at the kept faces, M's face 0.0; 10 more steps finite | bitwise | D | holds (TFC and FSC local) | holds (both) |
+| `dust_vent_hand_over_keeps_every_cell`, the residual r | the 20-step r, TFC / FSC local | 1e-10 relative | A | 3.727e-41 (M == M0 bitwise) / 2.872e-15 | **MISSED** 1.042e-7 / 1.060e-7 (f32 rho and mdot rounded every step; DST-09's closed tube measured 8.7e-7) |
+| `a_dust_vent_case_opens_and_reports_probes` (driver) | the laminar dust box, vent on x = 0.005, pStat 4.7e-6 Pa (chosen by measurement: dp first reaches it after step 4), 20 steps; `probes.csv` `t,P1,P2` + 21 finite rows from t = 0; r | opens in [1, 19]; r 1e-10 | D, A | opens after step 4; r 5.549e-14 | not run (bin tests run f64) |
+| `a_dust_sst_vent_case_hands_over` (driver) | the kOmegaSST dust box, pStat 3.7e-6 Pa (dp first reaches it after step 3), 5 steps; every written field finite; r | opens in [1, 4]; r 1e-10 | D, A | opens after step 3; r 1.160e-14 | not run |
+
+DST-09's vented tube now prints its budget too (r 3.07e-16 closed, 4.39e-16 opened, f64).
+
+**Decisions (TAKEN, by recommendation).** D5: the closed-stage membrane treatment above (the
+supervisor's). D6: `hand_over` also carries U_t', q, wdot, the flame-Courant buffer and lambda,
+because the driver's writer reads them between steps (a state written at the opening step is the
+closed run's last one); it changes no step's arithmetic. D7: `carry_from` refuses an `n_bf` that
+is not the target field's boundary length (stricter than "longer than either"). D8:
+`closed_scalar` reuses `closed_lowered`'s refusal texts (§158.8) with the field's name. D9: the
+two pStat values are inputs chosen by measurement on the micro-pascal dp of a box lit almost at
+once, not tolerances.
+
+Labels: (158.10a)-(158.10j).
+
+**Part 3: the placeholder case, Gate DST-REMBE and its REDUCED smoke (DST-11 part 3).**
+`No GPL-licensed source was consulted.` The specification was informed by a review of
+FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied. Nothing here is physics: the two
+new labels define bookkeeping. **Gate DST-REMBE is built and stays NAMED and NOT RUN** against
+Huang, Bloching & Lipatnikov (2022) Fig. 11 (key J.3, `huang2022-rembe-p-vented`): H22 publishes no
+vessel geometry (§151.7 item 9), so its four comparisons are four `skip` rows and nothing is ever
+compared with that figure. What runs is a REDUCED smoke on the labelled PLACEHOLDER vessel, in
+`src/bin/validate_gates/dst_rembe.rs` (section 95 of `ofgpu-validate`, `-sections 95`) on
+`cases/dust/rembeVented.jsonc`.
+
+*The case.* `mesh { kind "polymesh", path "rembeVented.mesh" }` (the mesh is not shipped:
+`.gitignore` ignores it; the gate copies the case into its scratch directory and generates the mesh
+there with `ofgpu-automesher <cfg> -stopAfter castellate` on `gatemesh::automesher_config`, run
+from the scratch directory because the automesher resolves its config's paths against its current
+directory). The numbers are `rembeClosed.jsonc`'s (the formula thermo at phi 0.62, kOmegaSST without
+`sst.sust` at k 0.8438 and omega 102.06, FSC with A 0.4 and PrT 0.28, W0 1e4, t0 1e-3, T 273) and the
+DST-10/11 dust boxes' (the gas block; PIMPLE with 2 correctors, Euler, upwind, PBiCGStab with DILU
+for p and diagonal for U, T, c and k|omega, all at tolerance 1e-13, relTol 0, maxIter 2000 - the
+settings under which the budget closed to 1e-14); `combustion.tFlacc` 0.15 s states the extended FSC
+of §158.7; `run { endTime 0.35, deltaT 1e-4 }` (0.35 s is the span of key J.3). `vent { normal
+[1,0,0], centre [5.425, 0, 3], radius 0.45, pStat 1e4 }` with the probes P1 and P2 of
+`rembeVented.geometry.json` digit for digit: the centre is the membrane plane of (158.10d) of
+SPEC-LIT 158.10 with axisY and axisZ; any radius in (r_v + h_f/2, R) = (0.4473797804014327,
+0.970873525930309) selects the same faces, because the castellated shell is solid between the hole
+and the outer wall (the seal rows below prove it); pStat is H22's 0.1 bar. The ignition point is the
+cavity centre ((x0 + x1)/2, axisY, axisZ) = (3.3832529481393823, 0, 3) of (158.10c) of SPEC-LIT
+158.10 and sigmaR 0.2 m is about one level-2 cell (h0/4 = 0.19375 m), so the Gaussian of (155.4)
+reaches the nearest cell centres. The two box-patch rules and the vessel rule are `wall` rules (never
+`".*"`: it would also govern the split mesh's `ventIn` and `ventOut`, which `closed_lowered` refuses).
+The case does NOT model, each for its reason: H22's 0.06 bar initial overpressure (it needs a
+non-uniform initial p, which DST-10's driver refuses for a dust case, §158.9), the half-by-symmetry box
+(the automesher's stage-0 margin rule, (158.10d) of SPEC-LIT 158.10), and an open outside boundary
+(below).
+
+*Where the tree overrides the plan row and the earlier brief.* (1) The outside box is sealed: every box
+patch is a no-slip wall. The plan wants an open box, but `compressible::bc::lower` turns ANY
+`p fixedValue` patch into §126.9's `SupersonicSwitch` outlet and `ofgpu-compressible` refuses that
+outlet for a dust case (§158.6), so a dust case has no open boundary today; the vessel vents into
+a sealed box of about 985 m3. Lifting the refusal is a numerics decision for the user (the R-run's third
+prerequisite, D10). (2) The validate section is number 95, placed after the last section in the tree
+(lane S built it as 85 after Gate 110-C leg 2; the merge with lane G's sections 85-94 renumbered it
+after Gate 68-C's coupled leg), not after DST-VES; `-sections 95` prints its title. (3) `combustion.tFlacc` exists
+(`io/case_chem.rs`), so the case states the extended FSC. (4) The answer-key marker of
+`huang2022-rembe-p-vented` moved from `validate_key/mod.rs` into `dst_rembe.rs` beside its `KEY_ID`
+(the scan list grew to 8 files; 48 markers still), and `rust/PROVENANCE.md`'s DRAFT row for the gate was
+replaced, not duplicated. (5) The smoke's mesh row cannot hold under single: see "The single build" below.
+
+*Two bookkeeping definitions* (they define what the gate counts, not physics). With P1_k the column P1
+of `probes.csv` (k = 0 at t_0, then after each of the K steps), n_o the step of the driver's line `vent:
+opened after step n_o`, x_i the f64 world centre `hm.origin + hm.geom64().c[i]`, C the cells whose
+centre is in the cavity of (158.10c) of SPEC-LIT 158.10, M the membrane faces `select_faces` returns, N
+the vessel's `segments`, and R, t, x0, axisY, axisZ the dimensions of (158.10a)-(158.10c) of SPEC-LIT
+158.10:
+
+```
+  k* = min { k : P1_k = max_j P1_j }
+  a pressure peak exists  <=>  n_o <= k* < K  and  P1_K < P1_k*                                   (158.10i)
+
+  C = { cells i : in_cavity(x_i) } of (158.10c);   seed = min C;   M = select_faces(raw, vent)
+  E = { cells i : x0 - t < x_i.x < plane  and  |(x_i.y - axisY, x_i.z - axisZ)| < (R + t) cos(pi/N) }
+  S = seal_reach(hm, M, seed);   sealed except through M  <=>  C ⊆ S  and  S ⊆ E                  (158.10j)
+```
+
+E is the shell's outer N-gon envelope on the vessel side of the membrane plane; it holds the cavity
+cells and the inner half of the vent hole, and no other kept cell can lie in it because the castellated
+shell is solid. `pressure_peak` returns `Some(k*)` when (158.10i) holds and `None` otherwise, which
+includes an empty series, n_o > K and a non-finite P1.
+
+*The inputs, by measurement (not tolerances; the precedent of D9).* The gate runs `-iters K` with
+`vent.pStat` replaced by one token. (a) Timing: a 10-step run of the section in each build with pStat 1e30
+gave the driver's closing line 1.29 s (f64) and 1.32 s (single), s = 0.129 and 0.132 s per step; K = 10
+floor(420 / (10 x 0.132)) = 3180 steps (0.318 s of the 0.35 s; the 3500 cap not reached). The long run is
+quicker per step than those ten: 3180 closed f64 steps took 31.95 s (0.0100 s per step). (b) The closed
+history (f64, K = 3180, pStat 1e30, so the membrane never opens and dp is about P1): P1 = 8.911834e-4 Pa
+after step 1, 1.796159e4 Pa after step 530 (K/6), 3.216173e4 Pa after step 1060 (K/3), 4.840663e4 Pa after
+step 1590 (K/2) and 1.426455e5 Pa after step 3180. The rule: when max over k <= K/3 of P1_k is at least
+1e4 Pa, pStat is H22's `1e4` and nothing is substituted; otherwise P1 at K/3 rounded down to two
+significant digits. The maximum, 3.216173e4 Pa, is above 1e4 Pa, so `SMOKE_P_STAT` is `"1e4"` and
+`SMOKE_ITERS` is 3180. No input was changed after this measurement, whatever the peak row or the budget
+row showed; deltaT stays 1e-4 s (the flame-Courant bound (155.9) never refused it: the measured Co_f
+at the reported steps stayed below 0.12 of the 0.5 limit).
+
+**Gates, measured 2026-10-20** (GPU; the REDUCED smoke on the placeholder, 29,662 cells, K = 3180 steps of
+1e-4 s, pStat 1e4 Pa; wall time of `-sections 95` (85 before the merge): 35.4 s in f64, 42.2 s in single, the mesh and the
+spawns included). The class of every row is D except the mass budget, A.
+
+| row | measure | tolerance | class | f64 | single |
+|---|---|---|---|---|---|
+| the automesher builds the placeholder and its polyMesh reads | `ofgpu-automesher -stopAfter castellate` exits 0 and `read_poly_mesh` reads | exit 0 | D | holds (0.5 s) | **MISSED** (refused at §92.3 G2, below) |
+| cell count | `abs(cells - 29662)`; 99,165 faces, 7 patches (`xMin` ... `zMax`, `vessel`) | 0 | D | 0 | 0 (on the f64 mesh) |
+| seal, cavity (158.10j) | cavity cells not reached from the seed: C ⊆ S; \|C\| = 7286, \|S\| = 7332 | 0 | D | 0 | 0 |
+| seal, envelope (158.10j) | cells reached outside E: S ⊆ E | 0 | D | 0 | 0 |
+| the run completes | `ofgpu-compressible rembeVented.jsonc -iters 3180 -reportEvery 50` exits 0 | exit 0 | D | holds (34.06 s, 0.011 s/step) | holds (40.56 s, 0.013 s/step) |
+| finite | `U p T rho Mach c Ut Cof HRR` and `k omega nut` of the 0.318 directory at n_cells: missing + non-finite | 0 | D | 0 | 0 |
+| opened once | `abs(opening lines - 1)`; opened after step 49 (t = 0.0049 s, dp = 10 883 Pa) in both builds | 0 | D | 0 | 0 |
+| pressure peak (158.10i) | n_o = 49, k* = 84, P1_k* 1.528584e4 Pa (f64) and 1.528578e4 Pa (single), P1_K 4.580671e3 Pa and 4.575957e3 Pa | `Some(k*)` | D | holds | holds |
+| mass budget (158.10h) of SPEC-LIT 158.10 | `abs(r)` | 1e-10 relative | A | 5.348e-13 | **MISSED** 2.596e-7 (f32 rho and mdot rounded at every step; part 2: 1.04e-7 on the tube) |
+| the four comparisons of key J.3 (peak 0.60 bar +-10 %; its time 0.31 s +-0.015 s; the 0.20 to 0.28 s rise rate 4.55 bar/s +-15 %; rupture 0.10 s +-0.01 s) | - | - | - | NOT RUN | NOT RUN |
+
+The membrane M is 46 faces of total area 0.496484 m2 against A_v = 0.5 m2 (the staircase hole). The
+four key-J.3 rows are `skip` rows with the text "NOT RUN: H22 publishes no vessel geometry (SPEC-LIT 151.7
+item 9); a placeholder is never compared", and three notes name the R-run's three prerequisites. The
+budget miss is asserted and printed (the gate's registry report prints `MISSED` with its value and
+cause, as the §69.2 audit requires: a verdict word comes only from the registry), never loosened and
+never switched by build. In f64 the section reports no miss and all 13 checks (9 rows and the 4 registry
+audits) hold; under single 11 hold.
+
+*The single build.* The sibling single-build `ofgpu-automesher` refuses the placeholder at §92.3 G2 ("closure
+failed on 1301 cell(s)", E about 1e-7 against 1e-10): §92.3 sums f32 area vectors under single, the known A28
+of docs/17-review-later. The first row records that refusal (its row misses, the MISSED line quotes the
+automesher's own error), and the rest of the smoke runs on the mesh the f64 automesher writes from the same
+config (a polyMesh is host f64 text; Gate 116-P's single solve runs on its f64-built mesh in the same way): 29,662
+cells again, the same 46 membrane faces, the same seal sets. The mesh and the rows below it are
+therefore the f64 build's mesh run by the single driver. Nothing in the automesher's quality threshold was
+touched.
+
+*A defect found and fixed.* The first final run opened the membrane after step 49 and the driver died:
+"thread 'main' has overflowed its stack" (exit 0xc00000fd). A copy of the f64 driver with the stack
+raised by `editbin /STACK` ran the same case to its end from 1.25 MiB up, and overflowed at the 1 MiB default of
+a Windows main thread: the vent opening beside a dust coupling (`check_membrane`,
+`vent::open_onto_dust`, `CompressibleDust::hand_over`) needs a little over 1 MiB of stack in any mesh (the
+tests of part 2 ran the driver on test threads, 2 MiB, so they never saw it). The failing test
+`a_vented_dust_run_fits_a_one_mebibyte_main_thread` (the part-2 dust box with a vent, run through the entry `main`
+calls on a 1 MiB thread) aborted with STATUS_STACK_OVERFLOW before the fix and passes after it. The fix is
+`main` running the case through `parse_and_run`, which spawns a worker thread of `DRIVER_STACK` = 64 MiB of
+virtual stack and re-raises its panic (D14); no result, kernel or call sequence changed, and the driver's
+dust/vent tests (9) and the lib vent tests pass as before.
+
+**NOT RUN, with their reasons (completed).** The R-run of §158.7 has THREE prerequisites: H22's 0.06 bar
+initial overpressure (a non-uniform initial p, which DST-10's driver refuses for a dust case, §158.9); H22's
+half-by-symmetry box (the automesher's stage-0 margin rule); and an open outside boundary (§158.6's refusal of
+a §126 rule for a dust case, because `p fixedValue` lowers to §126.9's outlet), so the placeholder's box is sealed.
+
+**Decisions (TAKEN, by recommendation).** D10: the placeholder's box patches are no-slip walls (the sealed
+box of 985 m3). D11: the vent radius is 0.45 m, any value in (r_v + h_f/2, R) selecting the same faces. D12:
+`SMOKE_P_STAT` and `SMOKE_ITERS` are inputs chosen by the measurement above (the rule written before it ran:
+pStat is H22's 1e4 when the closed P1 reaches it by K/3, else P1 at K/3 to two significant digits), never
+re-tuned after the final runs. D13: the ignition's sigmaR is 0.2 m, about one level-2 cell of this mesh.
+D14: `ofgpu-compressible` runs its case on a 64 MiB worker thread (the stack defect above). D15: under single
+the gate records the single automesher's A28 refusal in its first row and runs the rest on the f64 automesher's
+mesh.
+
 ---
 
 ## 159. Phase B — reacting parcels, char, the cloud, two-way coupling, particle radiation, and its gates

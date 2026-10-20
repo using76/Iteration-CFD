@@ -626,6 +626,61 @@ impl<'m> ProgressEquation<'m> {
         self.age.as_ref().and_then(|a| a.last)
     }
 
+    /// Carry another equation's state onto this one, bit for bit (SPEC-LIT
+    /// §158.10, the vent's opening): c~'s `f`, `f0` and `f00` in full and the
+    /// first `n_bf` entries of its `bf`, `fr`, `ref_value` and `ref_grad`
+    /// ([`crate::dust::vent::hand_over_scalar`]); the time state of the ddt
+    /// clock; and, with the flame age on in both, the alpha field the same
+    /// way and the clock's `t_prev`, `delta`, `delta_prev`, `pending` and
+    /// `last`. `closure_age`, `sua` and `spa` are per-step scratch: the
+    /// closures' age is written by [`Self::begin_age_step`] before the first
+    /// outer solve reads it, and `sua`/`spa` by [`Self::solve`] before the
+    /// assembly does, so neither is carried. Refused by name: different cell
+    /// counts, an `n_bf` that is not this field's boundary length or is longer
+    /// than `from`'s, and the age on in one equation and off in the other.
+    pub fn carry_from(&mut self, gpu: &Gpu, from: &ProgressEquation<'_>, n_bf: usize) -> Result<()> {
+        const W: &str = "dust::progress::carry_from";
+        if self.c.n_cells != from.c.n_cells {
+            return Err(Error::Refused(format!(
+                "{W}: the two equations hold {} and {} cells (SPEC-LIT §158.10)",
+                self.c.n_cells, from.c.n_cells
+            )));
+        }
+        if n_bf > from.c.n_boundary_faces {
+            return Err(Error::Refused(format!(
+                "{W}: n_bf = {n_bf} is longer than the carried field's boundary of {} faces \
+                 (SPEC-LIT §158.10)",
+                from.c.n_boundary_faces
+            )));
+        }
+        if n_bf != self.c.n_boundary_faces {
+            return Err(Error::Refused(format!(
+                "{W}: n_bf = {n_bf} is not this field's boundary of {} faces: the merged \
+                 arrays are the shared prefix (SPEC-LIT §158.10)",
+                self.c.n_boundary_faces
+            )));
+        }
+        if self.age.is_some() != from.age.is_some() {
+            return Err(Error::Refused(format!(
+                "{W}: the flame age is {} here and {} in the carried equation \
+                 (SPEC-LIT §158.10)",
+                if self.age.is_some() { "on" } else { "off" },
+                if from.age.is_some() { "on" } else { "off" }
+            )));
+        }
+        crate::dust::vent::hand_over_scalar(gpu, &from.c, &mut self.c, n_bf)?;
+        self.core.ddt.state = from.core.ddt.state;
+        if let (Some(to_a), Some(from_a)) = (&mut self.age, &from.age) {
+            crate::dust::vent::hand_over_scalar(gpu, &from_a.alpha, &mut to_a.alpha, n_bf)?;
+            to_a.t_prev = from_a.t_prev;
+            to_a.delta = from_a.delta;
+            to_a.delta_prev = from_a.delta_prev;
+            to_a.pending = from_a.pending;
+            to_a.last = from_a.last;
+        }
+        Ok(())
+    }
+
     /// Writes c~'s cells and corrects its boundary values - the tube's late
     /// kernel (SPEC-LIT §160.5's `run_aged`) seeds a fresh ignition with it.
     pub fn overwrite_field(&mut self, gpu: &Gpu, c: &[Scalar]) -> Result<()> {

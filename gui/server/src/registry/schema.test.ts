@@ -54,7 +54,7 @@ describe('case schema', () => {
     expect(PICK_LISTS.patchKinds).toEqual(lists.patchKinds)
     expect(lists.wallTreatments).toEqual(['standard', 'spalding', 'rough', 'lowRe'])
     expect(lists.turbulenceKinds).toEqual(['RAS', 'LES'])
-    expect(lists.meshKinds).toEqual(['cartesian'])
+    expect(lists.meshKinds).toEqual(['cartesian', 'polymesh'])
     expect(lists.buoyancy).toEqual(['densityRatio', 'boussinesq'])
     expect(lists.divSchemes).toEqual(PICK_LISTS.divSchemes)
     expect(schema.pickLists).toEqual(lists)

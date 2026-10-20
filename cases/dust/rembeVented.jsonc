@@ -1,0 +1,114 @@
+// PLACEHOLDER - not the REMBE vessel: H22 publishes no dimensions (SPEC-LIT 151.7
+// item 9); never compared with data.
+//
+// The case side of Gate DST-REMBE (SPEC-LIT 158.7, 158.10): the vented explosion of
+// Huang, Bloching & Lipatnikov, J. Loss Prev. Process Ind. 75 (2022) 104707, DOI
+// 10.1016/j.jlp.2021.104707 (CC BY 4.0), Fig. 11 (key huang2022-rembe-p-vented), on
+// the labelled PLACEHOLDER vessel of cases/dust/rembeVented.geometry.json: an 11.5 m3
+// right circular cylinder, L/D = 2, flat ends, a 0.2 m wall, the 0.5 m2 vent centred
+// on the front end, in a full-width outside box. Gate DST-REMBE's full R-run is
+// NAMED and NOT RUN until the vessel geometry is obtained; the gate runs a REDUCED
+// smoke of this file (src/bin/validate_gates/dst_rembe.rs) and its rows say so.
+//
+// The mesh: `mesh.path` names rembeVented.mesh beside this file. It is not shipped
+// (.gitignore); it comes from `ofgpu-automesher <cfg> -stopAfter castellate`, run on
+// `gatemesh::automesher_config` of rembeVented.geometry.json with `case_dir`
+// "rembeVented.mesh" (SPEC-LIT 158.10: 29,662 cells). The gate copies this file into
+// its scratch directory and generates the mesh there.
+//
+// Where every number comes from:
+//   - physics, turbulence, initial, the SST wall values, the formula thermo at
+//     phi = 0.62, FSC with A = 0.4 and PrT = 0.28, the ignition's W0 and t0: the
+//     REMBE closed stage, cases/dust/rembeClosed.jsonc (H22's inputs; u' = 0.75 m/s
+//     and L = 0.1 m give k = 0.8438 m2/s2 and omega = 102.06 1/s); the compressible
+//     gas block is DST-10's dust box (SPEC-LIT 158.6, 158.9).
+//   - combustion.tFlacc 0.15 s: the extended FSC of SPEC-LIT 158.7.
+//   - the solvers: PBiCGStab (DILU for p, diagonal for the rest) at 1e-13 absolute,
+//     relTol 0, maxIter 2000 - the DST-10/11 dust boxes' settings, under which the
+//     mass budget of (158.10h) of SPEC-LIT 158.10 closed to 1e-14.
+//   - run.endTime 0.35 s: the span of key J.3. deltaT 1e-4 s: the dust boxes'.
+//   - the vent: the membrane plane x = 5.425 of (158.10d) of SPEC-LIT 158.10 with
+//     axisY 0 and axisZ 3 (centre below); the radius is any value in
+//     (r_v + h_f/2, R) = (0.4473797804014327, 0.970873525930309), because the castellated
+//     shell is solid between the hole and the outer wall, so every radius there selects
+//     the same faces (the seal rows of the gate prove it); pStat is H22's 0.1 bar. The
+//     gate runs its REDUCED smoke at a pStat it measures (SPEC-LIT 158.10 D12), by
+//     replacing the pStat token below; nothing else of this file changes.
+//   - the ignition point: the cavity centre (x0 + x1)/2 of (158.10c) of SPEC-LIT
+//     158.10, with axisY and axisZ. sigmaR 0.2 m is about one level-2 cell
+//     (h0/4 = 0.19375 m), so the Gaussian of (155.4) of SPEC-LIT 155
+//     reaches the nearest cell centres.
+//   - the probes: the points of rembeVented.geometry.json, digit for digit.
+//
+// What this case does NOT model, each with its reason:
+//   - H22's 0.06 bar initial overpressure: it needs a non-uniform initial p, which
+//     DST-10's driver refuses for a dust case (SPEC-LIT 158.9). initial.p is 0.
+//   - H22's half-by-symmetry box: the automesher's stage-0 margin rule cannot make it
+//     (SPEC-LIT 158.10), so the outside box is full width.
+//   - an open outside boundary: `compressible::bc::lower` turns any `p fixedValue`
+//     patch into SPEC-LIT 126.9's outlet, which ofgpu-compressible refuses for a dust
+//     case (SPEC-LIT 158.6). The box patches are therefore no-slip walls and the
+//     vessel vents into a sealed box of about 985 m3.
+//
+// No GPL-licensed source was consulted.
+// The specification was informed by a review of FSCDustFoam (Huang & Lipatnikov, GPL) and no code was copied.
+{
+  "name": "rembeVented",
+  "mesh": { "kind": "polymesh", "path": "rembeVented.mesh" },
+  "physics": {
+    "gravity": [0, 0, 0],
+    "fluid": { "nu": 1.5e-5, "Pr": 0.7, "Prt": 0.28, "TRef": 273 },
+    "buoyancy": "densityRatio",
+    "compressible": { "gamma": 1.4, "W": 0.0289647, "Pr": 0.71,
+      "viscosity": { "model": "sutherland", "As": 1.458e-6, "Ts": 110.4 },
+      "pOperating": 101325 }
+  },
+  "turbulence": { "kind": "RAS", "model": "kOmegaSST",
+    "wallFunctions": { "kappa": 0.41, "E": 9.8 } },
+  "patches": [
+    { "match": "vessel", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 0.8438 },
+      "omega": { "type": "omegaWallFunction", "value": 102.06 } },
+    // The PLACEHOLDER's sealed outside box: six no-slip walls (see above). Never
+    // ".*": it would also govern the split mesh's ventIn and ventOut.
+    { "match": "(x|y|z)(Min|Max)", "kind": "wall",
+      "U": { "type": "fixedValue", "value": [0, 0, 0] },
+      "p": { "type": "zeroGradient" },
+      "T": { "type": "zeroGradient" },
+      "k": { "type": "kqRWallFunction", "value": 0.8438 },
+      "omega": { "type": "omegaWallFunction", "value": 102.06 } }
+  ],
+  "initial": { "U": [0, 0, 0], "T": 273, "p": 0.0, "k": 0.8438, "omega": 102.06 },
+  "vent": {
+    "normal": [1, 0, 0],
+    "centre": [5.425, 0, 3],
+    "radius": 0.45,
+    "pStat": 1e4,
+    "probes": [
+      { "name": "P1", "point": [2.4123794222090735, 0.0, 3.4854367629651546] },
+      { "name": "P2", "point": [4.354126474069691, 0.0, 2.5145632370348454] }
+    ]
+  },
+  "numerics": {
+    "algorithm": { "kind": "PIMPLE", "correctors": 2 },
+    "ddt": "Euler",
+    "div": { "default": "Gauss upwind" },
+    "grad": "Gauss linear",
+    "laplacian": { "snGrad": "corrected", "nonOrthogonalCorrectors": 0 },
+    "relaxation": { "U": 1.0, "p": 1.0, "T": 1.0 },
+    "solvers": [
+      { "match": "p", "solver": "PBiCGStab", "preconditioner": "DILU", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "U", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "T", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "c", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 },
+      { "match": "k|omega", "solver": "PBiCGStab", "preconditioner": "diagonal", "tolerance": 1e-13, "relTol": 0.0, "maxIter": 2000 }
+    ]
+  },
+  "run": { "endTime": 0.35, "deltaT": 1e-4 },
+  "combustion": { "model": "FSC", "A": 0.4, "PrT": 0.28, "tFlacc": 0.15,
+    "ignition": { "point": [3.3832529481393823, 0, 3], "sigmaR": 0.2, "W0": 1e4, "t0": 1e-3 } },
+  "dust": { "thermo": "formula", "phi": 0.62 }
+}

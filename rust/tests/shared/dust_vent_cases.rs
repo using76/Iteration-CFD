@@ -37,9 +37,10 @@ use ofgpu::compressible::thermo::{PerfectGas, Viscosity};
 use ofgpu::compressible::{Compressible, CompressibleControls, CompressibleState};
 use ofgpu::device::DevBuf;
 use ofgpu::dust::vent::{
-    area_weighted, build_solver, closed_lowered, face_area_vector, open_onto, select_faces,
-    setup_state, split_raw, JsonVent, Membrane, MembraneWall, VentReading, VentSelect, VentSpec,
-    VentSplit, VentState, VentTrigger, VENT_IN, VENT_OUT,
+    area_weighted, build_solver, closed_lowered, face_area_vector, open_onto, probe_cells,
+    select_faces, setup_state, split_raw, JsonProbe, JsonVent, Membrane, MembraneWall, VentProbe,
+    VentProbes, VentReading, VentSelect, VentSpec, VentSplit, VentState, VentTrigger, VENT_IN,
+    VENT_OUT,
 };
 use ofgpu::fv::{DivScheme, Limiter};
 use ofgpu::io::fields::{PatchFieldSpec, RawScalarField, RawVectorField};
@@ -242,6 +243,7 @@ fn tube_vent(p_stat: f64) -> VentSpec {
         select: VentSelect::Disc { centre: DVec3::new(0.5, 0.005, 0.005), radius: 1.0 },
         p_stat,
         wall: MembraneWall::NoSlip,
+        probes: Vec::new(),
     }
 }
 
@@ -711,6 +713,7 @@ fn opens_at_first_step_over_p_stat() -> Result<()> {
         select: VentSelect::Disc { centre: DVec3::new(0.5, 0.5, 0.05), radius: 10.0 },
         p_stat: 1.0e4,
         wall: MembraneWall::NoSlip,
+        probes: Vec::new(),
     };
     let faces = select_faces(&raw, &spec)?;
     assert_eq!(faces.len(), 3, "the x = 0.5 plane holds three faces");
@@ -798,6 +801,7 @@ fn split_keeps_the_mesh() -> Result<()> {
         select: VentSelect::Disc { centre: DVec3::new(0.5, 0.5, 0.05), radius: 10.0 },
         p_stat: 1.0e4,
         wall: MembraneWall::NoSlip,
+        probes: Vec::new(),
     };
     let split = split_raw(&raw, select_faces(&raw, &spec)?)?;
     let hm = build_host_mesh(&raw)?;
@@ -994,6 +998,7 @@ fn vent_refusals() -> Result<()> {
         radius: None,
         faces: None,
         wall: None,
+        probes: None,
     };
     let with = |v: &JsonVent, f: fn(&mut JsonVent)| {
         let mut out = v.clone();
@@ -1063,6 +1068,7 @@ fn vent_refusals() -> Result<()> {
         select,
         p_stat: 1.0e4,
         wall: MembraneWall::NoSlip,
+        probes: Vec::new(),
     };
     let n_internal = raw.neighbour.len();
     refused(
@@ -1117,5 +1123,183 @@ fn vent_refusals() -> Result<()> {
         freestreams: Vec::new(),
     };
     refused("already ventOut", closed_lowered(&low, MembraneWall::NoSlip), "ventOut");
+    Ok(())
+}
+
+// ==========================================================================
+//  8. vent_probes_lower_and_refuse (host, §158.10)
+// ==========================================================================
+
+/// A `vent.probes` refusal must name its key, the probe and the section.
+fn probe_refusal(tag: &str, r: Result<impl std::fmt::Debug>, probe: &str) {
+    let msg = match r {
+        Ok(_) => panic!("{tag}: must be refused"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("vent.probes"), "{tag}: refusal '{msg}' does not name vent.probes");
+    assert!(msg.contains(probe), "{tag}: refusal '{msg}' does not name {probe}");
+    assert!(msg.contains("(SPEC-LIT §158.10)"), "{tag}: refusal '{msg}' lacks the section");
+}
+
+#[test]
+fn vent_probes_lower_and_refuse() -> Result<()> {
+    let probe = |name: &str, point: [f64; 3]| JsonProbe { name: name.into(), point };
+    let vent = |probes: Option<Vec<JsonProbe>>| JsonVent {
+        normal: [1.0, 0.0, 0.0],
+        p_stat: 1.0e4,
+        centre: Some([0.5, 0.5, 0.05]),
+        radius: Some(10.0),
+        faces: None,
+        wall: None,
+        probes,
+    };
+
+    // Absent: an empty list on the spec, and nothing serialised.
+    let absent = vent(None);
+    assert!(absent.lower()?.probes.is_empty(), "no probes block, no probes");
+    let text = serde_json::to_string(&absent).expect("serialises");
+    assert!(!text.contains("probes"), "an absent block serialises no key: {text}");
+
+    // Present: names and points, in the case's order, and a serde round trip.
+    let two = vent(Some(vec![probe("P1", [0.1, 0.2, 0.05]), probe("P_2", [0.9, 0.8, 0.05])]));
+    let spec = two.lower()?;
+    assert_eq!(
+        spec.probes,
+        vec![
+            VentProbe { name: "P1".into(), point: DVec3::new(0.1, 0.2, 0.05) },
+            VentProbe { name: "P_2".into(), point: DVec3::new(0.9, 0.8, 0.05) },
+        ],
+        "the probes lower in order"
+    );
+    let back: JsonVent = serde_json::from_str(&serde_json::to_string(&two).expect("serialises"))
+        .expect("re-parses");
+    assert_eq!(back, two, "the probes survive a serde round trip");
+    let e = serde_json::from_str::<JsonProbe>(
+        "{\"name\":\"P1\",\"point\":[0,0,0],\"colour\":1}",
+    )
+    .err()
+    .unwrap_or_else(|| panic!("serde_json must refuse colour"));
+    assert!(e.to_string().contains("colour"), "serde_json: '{e}'");
+
+    // The refusals, each by key, probe and section.
+    probe_refusal("empty list", vent(Some(Vec::new())).lower(), "[]");
+    probe_refusal("empty name", vent(Some(vec![probe("", [0.0; 3])])).lower(), "probe 0");
+    probe_refusal(
+        "repeated name",
+        vent(Some(vec![probe("P1", [0.0; 3]), probe("P1", [1.0, 0.0, 0.0])])).lower(),
+        "\"P1\"",
+    );
+    for bad in ["P-1", "P 1", "p.1", "pr\u{e9}", "P1;"] {
+        probe_refusal(
+            &format!("name {bad:?}"),
+            vent(Some(vec![probe("ok", [0.0; 3]), probe(bad, [0.0; 3])])).lower(),
+            &format!("\"{bad}\""),
+        );
+    }
+    for (tag, point) in [
+        ("NaN", [f64::NAN, 0.0, 0.0]),
+        ("inf", [0.0, f64::INFINITY, 0.0]),
+        ("-inf", [0.0, 0.0, f64::NEG_INFINITY]),
+    ] {
+        probe_refusal(
+            &format!("{tag} coordinate"),
+            vent(Some(vec![probe("Q", point)])).lower(),
+            "\"Q\"",
+        );
+    }
+    Ok(())
+}
+
+// ==========================================================================
+//  9. vent_probes_read_their_cells (the read needs the GPU, §158.10)
+// ==========================================================================
+
+#[test]
+fn vent_probes_read_their_cells() -> Result<()> {
+    // The mesh: the chamber box, 4 x 3 x 1 cells with the y axis graded.
+    let raw = box_raw();
+    let hm = build_host_mesh(&raw)?;
+    assert_eq!(hm.n_cells, 12);
+    let centre = |i: usize| hm.origin + hm.geom64().c[i];
+    let at = |name: &str, p: DVec3| VentProbe { name: name.into(), point: p };
+
+    // A probe placed exactly at a cell's centre returns that cell.
+    let wanted = [0usize, 5, 11, 7];
+    let probes: Vec<VentProbe> = wanted.iter().map(|&i| at(&format!("C{i}"), centre(i))).collect();
+    let cells = probe_cells(&hm, &probes)?;
+    assert_eq!(cells, wanted.to_vec(), "a probe at a cell's centre returns that cell");
+
+    // A point inside a cell, off its centre, returns that cell too.
+    let nudged = at("N", centre(6) + DVec3::new(0.01, 0.0, 0.001));
+    assert_eq!(probe_cells(&hm, &[nudged])?, vec![6], "the nearest centre wins");
+
+    // A tie goes to the lowest id: two cells whose centres are 2 m apart on
+    // a hand-built mesh, and a point exactly between them (every number is
+    // exact in binary, so the two distances are equal bit for bit).
+    let two_cells = HostMesh {
+        n_cells: 2,
+        c: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)],
+        b_cf: vec![Vec3::new(-1.0, -1.0, -1.0), Vec3::new(3.0, 1.0, 1.0)],
+        ..HostMesh::default()
+    };
+    assert_eq!(
+        probe_cells(&two_cells, &[at("T", DVec3::new(1.0, 0.0, 0.0))])?,
+        vec![0],
+        "a tie between cells 0 and 1 goes to the lowest id"
+    );
+    let swapped = HostMesh {
+        c: vec![Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)],
+        ..two_cells.clone()
+    };
+    assert_eq!(
+        probe_cells(&swapped, &[at("T", DVec3::new(1.0, 0.0, 0.0))])?,
+        vec![0],
+        "the tie goes to id 0 whichever centre it has"
+    );
+    // A mesh with an origin: the world centre is origin + c.
+    let shifted = HostMesh { origin: DVec3::new(10.0, 0.0, 0.0), ..two_cells.clone() };
+    assert_eq!(
+        probe_cells(&shifted, &[at("W", DVec3::new(12.0, 0.0, 0.0))])?,
+        vec![1],
+        "a probe is a WORLD point: origin + c"
+    );
+
+    // A probe outside the box of the boundary-face centres is refused.
+    for (tag, p) in [
+        ("past x", DVec3::new(1.5, 0.5, 0.05)),
+        ("below y", DVec3::new(0.5, -0.01, 0.05)),
+        ("above z", DVec3::new(0.5, 0.5, 0.2)),
+    ] {
+        let msg = match probe_cells(&hm, &[at("OUT", p)]) {
+            Ok(c) => panic!("{tag}: the probe was placed in cell {c:?} but must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("vent.probes"), "{tag}: '{msg}'");
+        assert!(msg.contains("OUT"), "{tag}: '{msg}'");
+        assert!(msg.contains("(SPEC-LIT §158.10)"), "{tag}: '{msg}'");
+    }
+
+    // The gather: p[i] = 1000 + i as Scalar; each probe reads its own cell.
+    let Some(g) = gpu() else { return Ok(()) };
+    let p_host: Vec<Scalar> = (0..hm.n_cells).map(|i| (1000 + i) as Scalar).collect();
+    let p_dev = g.upload(&p_host)?;
+    let mut reader = VentProbes::new(&g, &cells)?;
+    let got = reader.read(&g, &p_dev)?;
+    assert_eq!(got.len(), cells.len(), "one reading per probe");
+    for (k, &c) in cells.iter().enumerate() {
+        assert_eq!(
+            got[k].to_bits(),
+            f64::from(p_host[c]).to_bits(),
+            "probe {k} reads cell {c}: got {}",
+            got[k]
+        );
+    }
+    // Another order reads in that order, and a cell may repeat.
+    let order = [11usize, 0, 11];
+    let mut reader = VentProbes::new(&g, &order)?;
+    let got = reader.read(&g, &p_dev)?;
+    for (k, &c) in order.iter().enumerate() {
+        assert_eq!(got[k].to_bits(), f64::from(p_host[c]).to_bits(), "ordered probe {k}");
+    }
     Ok(())
 }

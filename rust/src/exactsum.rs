@@ -125,6 +125,11 @@ struct ExactKernels {
     norm_factor1: CudaFunction,
     combine: CudaFunction,
     to_scalar: CudaFunction,
+    // (139.10, PAR-14 run 2) the DOUBLE twins the refinement's exact world
+    // sums run on - the outer loop is double even in the single build.
+    max_abs64: CudaFunction,
+    max64_2: CudaFunction,
+    sum64: CudaFunction,
 }
 
 impl ExactKernels {
@@ -139,6 +144,9 @@ impl ExactKernels {
             norm_factor1: k.func("exNormFactorStage1")?,
             combine: k.func("exCombine")?,
             to_scalar: k.func("exToScalar")?,
+            max_abs64: k.func("exMaxAbs64Stage1")?,
+            max64_2: k.func("exMax64Stage2")?,
+            sum64: k.func("exSum64Stage1")?,
         })
     }
 }
@@ -943,6 +951,245 @@ pub fn host_exact_sum(terms: &[Scalar]) -> Scalar {
         v = (m[k] as Scalar + v) * inv;
     }
     ldexp(m[0] as Scalar + v, mexp - EXACT_W as i32)
+}
+
+// ==========================================================================
+//  §139.10 (PAR-14 run 2): the refinement's exact world sums
+// ==========================================================================
+
+/// The refinement's exact world sums (§139.10, PAR-14 run 2) - §72's
+/// accumulator over **double** terms, one handle for a set of parts: the
+/// anchor pass ([`ExactKernels::max_abs64`] + `max64_2`), the limb pass
+/// (`sum64`) and the per-part stage two (`exCombine`). The refinement's
+/// outer loop is double in BOTH builds (SPEC-LIT §118.4), so the single
+/// build's f64 sums cannot run through `ExactReduction`, whose terms are
+/// `Scalar`.
+///
+/// The world step itself is the caller's - the gather is
+/// `distsolve::refine`'s `Parts` seam, an allgather under SPMD - and
+/// [`exact_sum64`] is the host finish, so the one rounding happens on bytes
+/// every rank holds identically after its gather.
+///
+/// A part's term buffer may be longer than its count (a decomposed field is
+/// `n_cells + n_halo` long, §71.1); the launches take the count.
+pub struct ExactSum64 {
+    k: ExactKernels,
+    /// `[n_parts]` the anchor stage-one partials (`ofacc` = double, §118.1).
+    max_partials: Vec<DevBuf<Acc>>,
+    /// `[n_parts]` the world anchor, written back for the limb pass.
+    amax: Vec<DevBuf<Acc>>,
+    /// `[n_parts]` limb stage-one partials, `EXACT_WORDS` per block.
+    limb_partials: Vec<DevBuf<i64>>,
+    /// `[n_parts]` each part's combined limb set.
+    limb_slot: Vec<DevBuf<i64>>,
+}
+
+impl ExactSum64 {
+    /// Allocate for parts owning `n[r]` terms each.
+    pub fn new(gpu: &Gpu, n: &[usize]) -> Result<Self> {
+        if n.is_empty() {
+            return Err(Error::Config(
+                "exactsum: a refinement reduction over zero parts has no \
+                 answer; pass at least one part"
+                    .to_string(),
+            ));
+        }
+        for &ni in n {
+            to_label(ni)?;
+        }
+        let np = n.len();
+        let mut max_partials = Vec::with_capacity(np);
+        let mut limb_partials = Vec::with_capacity(np);
+        for &ni in n {
+            let parts = reduce_geometry(ni.max(1)).1;
+            max_partials.push(gpu.zeros(parts)?);
+            limb_partials.push(gpu.zeros(parts * EXACT_WORDS)?);
+        }
+        Ok(Self {
+            k: ExactKernels::new(gpu)?,
+            max_partials,
+            amax: (0..np).map(|_| gpu.zeros(1)).collect::<Result<_>>()?,
+            limb_partials,
+            limb_slot: (0..np).map(|_| gpu.zeros(EXACT_WORDS)).collect::<Result<_>>()?,
+        })
+    }
+
+    /// This part's `max|t|`: the anchor stage one, then `exMax64Stage2` -
+    /// `solMaxStage2` with the float rounding of the answer removed - and
+    /// the read-back. Exact whatever the order, a maximum having none; the
+    /// caller forms the WORLD anchor from every part's answer before
+    /// [`ExactSum64::set_anchor`].
+    pub fn max_part(
+        &mut self,
+        gpu: &Gpu,
+        p: usize,
+        terms: &DevBuf<f64>,
+        n: usize,
+    ) -> Result<f64> {
+        let Self { k, max_partials, amax, .. } = self;
+        let nl = to_label(n)?;
+        let (cfg, nparts) = reduce_geometry(n);
+        let npl = to_label(nparts)?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.max_abs64)
+                .arg(&mut max_partials[p])
+                .arg(terms)
+                .arg(&nl)
+                .launch(cfg)?;
+            gpu.stream()
+                .launch_builder(&k.max64_2)
+                .arg(&mut amax[p])
+                .arg(&max_partials[p])
+                .arg(&npl)
+                .launch(one_block())?;
+        }
+        Ok(gpu.download(&amax[p])?[0])
+    }
+
+    /// Write the world anchor into every part's slot, for the limb pass.
+    pub fn set_anchor(&mut self, gpu: &Gpu, amax: f64) -> Result<()> {
+        for a in &mut self.amax {
+            gpu.write(a, &[amax])?;
+        }
+        Ok(())
+    }
+
+    /// This part's exact limb set of `sum(terms[0..n])`: the limb pass
+    /// against the anchor [`ExactSum64::set_anchor`] wrote, then
+    /// `exCombine` over the blocks - exact integer addition, which has no
+    /// order to defend.
+    pub fn part_limbs(
+        &mut self,
+        gpu: &Gpu,
+        p: usize,
+        terms: &DevBuf<f64>,
+        n: usize,
+    ) -> Result<Vec<i64>> {
+        let Self { k, limb_partials, amax, limb_slot, .. } = self;
+        let nl = to_label(n)?;
+        let (cfg, nparts) = reduce_geometry(n);
+        let npl = to_label(nparts)?;
+        unsafe {
+            gpu.stream()
+                .launch_builder(&k.sum64)
+                .arg(&mut limb_partials[p])
+                .arg(terms)
+                .arg(&nl)
+                .arg(&amax[p])
+                .launch(cfg)?;
+            gpu.stream()
+                .launch_builder(&k.combine)
+                .arg(&mut limb_slot[p])
+                .arg(&limb_partials[p])
+                .arg(&npl)
+                .launch(one_block())?;
+        }
+        gpu.download(&limb_slot[p])
+    }
+}
+
+/// The exact world sum of the parts' limb sets - `exToScalar`'s body on the
+/// host, in f64. The i64 combine is exact whatever the order the sets were
+/// gathered in, and every f64 step below is IEEE-deterministic, so every
+/// rank converts the same bytes to the same bits: this is the ONE rounding
+/// in the whole path. `limbs` is concatenated `EXACT_WORDS` sets,
+/// `amax` the world anchor they were formed against, `offset` the eps64 of
+/// the §8.4 factor (zero everywhere else), exactly as in `exToScalar`.
+pub fn exact_sum64(limbs: &[i64], amax: f64, offset: f64) -> f64 {
+    let mut m = [0i64; EXACT_WORDS];
+    for set in limbs.chunks_exact(EXACT_WORDS) {
+        for (mk, &v) in m.iter_mut().zip(set) {
+            *mk += v;
+        }
+    }
+    limbs_to_f64(&m, amax, offset)
+}
+
+/// One limb set -> f64: the carry pass and the conversion of `exToScalar`,
+/// in double. `!(amax > 0.0)` rather than `amax <= 0.0` for the same reason
+/// the kernel is written that way - a NaN anchor must take this branch too.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub fn limbs_to_f64(limbs: &[i64; EXACT_WORDS], amax: f64, offset: f64) -> f64 {
+    if limbs[EXACT_K] != 0 || !amax.is_finite() {
+        return f64::NAN;
+    }
+    if !(amax > 0.0) {
+        return offset;
+    }
+    let mut c = [0i64; EXACT_K];
+    c.copy_from_slice(&limbs[..EXACT_K]);
+    for k in (1..EXACT_K).rev() {
+        // Arithmetic shift: floor division by 2^W for negative values too,
+        // which is what makes the remainder non-negative and the conversion
+        // exact - exToScalar's own note.
+        let carry = c[k] >> EXACT_W;
+        c[k] -= carry << EXACT_W;
+        c[k - 1] += carry;
+    }
+    let mut v = 0.0f64;
+    for k in (1..EXACT_K).rev() {
+        v = (c[k] as f64 + v) * (1.0 / 1073741824.0);
+    }
+    ldexp64(c[0] as f64 + v, anchor64(amax) - EXACT_W as i32) + offset
+}
+
+/// The host half of `exAnchor64_`: `ilogb(amax) + 1`, clamped the same way
+/// - the clamp BEFORE the `+ 1` - so the device limbs and this conversion
+/// always agree on where the window sits. `ilogb` is not in Rust's `std`,
+/// and going through the bit pattern would need a subnormal case; scaling
+/// into `[0.5, 1)` has none, as in [`anchor_exponent`]. Callers have
+/// answered already for a NaN and for `amax <= 0`, so the loops terminate.
+fn anchor64(amax: f64) -> i32 {
+    let mut e = 0i32;
+    let mut f = amax;
+    while f >= 1.0 {
+        f *= 0.5;
+        e += 1;
+    }
+    while f < 0.5 {
+        f *= 2.0;
+        e -= 1;
+    }
+    // `f` in [0.5, 1) makes `e` the frexp exponent, which IS `ilogb + 1`
+    // (PAR-14 review: a second `+ 1` here doubled every exact sum). The
+    // clamp is `exAnchor64_`'s, on `ilogb`, returning the bound itself.
+    let il = e - 1;
+    if il > 1100 {
+        1100
+    } else if il < -1100 {
+        -1100
+    } else {
+        il + 1
+    }
+}
+
+/// `2^e` for `|e| <= 1000`, built by repeated exact multiplication - the
+/// f64 twin of [`pow2`].
+fn pow2_64(e: i32) -> f64 {
+    let (n, step) = if e >= 0 { (e, 2.0f64) } else { (-e, 0.5f64) };
+    let mut r = 1.0f64;
+    for _ in 0..n {
+        r *= step;
+    }
+    r
+}
+
+/// The f64 twin of [`ldexp`]: scaling by a power of two only moves the
+/// exponent, and the chunked multiplication cannot overflow on the way
+/// whenever the result is in range.
+fn ldexp64(x: f64, e: i32) -> f64 {
+    let mut r = x;
+    let mut e = e;
+    while e > 500 {
+        r *= pow2_64(500);
+        e -= 500;
+    }
+    while e < -500 {
+        r *= pow2_64(-500);
+        e += 500;
+    }
+    r * pow2_64(e)
 }
 
 #[cfg(test)]
