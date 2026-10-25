@@ -60,6 +60,12 @@ fi
 # 자식 프로세스만 z.ai 로 향한다. 부모 셸의 환경은 건드리지 않는다.
 # 지시문은 stdin 으로 넘긴다: Windows 의 명령줄 한도(약 32 KB)를 넘는 브리프를
 # 인자로 주면 claude.exe 가 "Argument list too long" 으로 뜨지도 못한다 (2026-09-12 실측, 51 KB 브리프).
+#
+# 도구 목록은 --tools 로 명시한다. 2026-10-20 약 17:02 부터 자식이 기본 도구
+# 세트에서 Bash, Read, Edit, Write, Glob, Grep 을 전혀 받지 못했다 (ToolSearch 로도
+# 없음; 429/1310/1311 도 권한 거부도 아님). 2026-10-25 실측(CLI 2.1.310):
+# --tools 로 이름을 주면 여섯 개가 모두 돌아온다. GLM_TOOLS 로 바꿀 수 있다.
+GLM_TOOLS="${GLM_TOOLS:-Bash,Read,Edit,Write,Glob,Grep}"
 printf '%s' "$prompt" | \
 ANTHROPIC_BASE_URL="$BASE_URL" \
 ANTHROPIC_AUTH_TOKEN="$key" \
@@ -74,4 +80,5 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   claude -p \
     --model sonnet \
     ${GLM_PERMISSION_MODE:+--permission-mode "$GLM_PERMISSION_MODE"} \
+    --tools "$GLM_TOOLS" \
     < <(printf '%s\n' "$prompt")
