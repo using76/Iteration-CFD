@@ -326,7 +326,7 @@
 - AMG-07a: `build_spmd` 안에서 한 rank만 `SpmdHalo::from_level`에 실패하면 나머지 rank가 ThreadComm 타임아웃까지 기다린다. `coarsen`이 만든 계획에서는 일어나지 않지만, 투표를 한 번 더 넣으면 막을 수 있다.
 - PAR-17: `ofgpu-par`가 rank별 잔차를 출력하지 않으므로, 실행 패널은 rank별 Krylov 반복 수와 전체 잔차만 보여준다.
 - STU-06b: 메시 초안에서 텍스트 필드를 비울 수 없다. 한 번 켠 automesher `-check`가 계속 남는다.
-- STU-07a: gui의 patchRules 매칭은 `^...$`로 고정되지만, 솔버(`resolve_patch_rule`)는 고정하지 않는다. 예를 들어 `wall` 규칙과 `wallXMin` 패치에서 둘의 결과가 다를 수 있다.
+- STU-07a: gui의 patchRules 매칭은 `^...$`로 고정되지만, 솔버(`resolve_patch_rule`)는 고정하지 않는다. 예를 들어 `wall` 규칙과 `wallXMin` 패치에서 둘의 결과가 다를 수 있다. **해결 (2026-10-25, T18 계획 검사, docs/18 §3)**: 전제가 틀렸다. `resolve_patch_rule`이 부르는 `crate::io::regex::Regex::is_match`는 이름 전체가 맞을 때만 참이다 (rust/src/io/regex.rs 119-123행, 테스트 `the_match_is_anchored_at_both_ends`). 그래서 gui의 `^(?:...)$` (casejsonc.ts 114행)는 이미 솔버와 같고, `wall` 규칙은 두 쪽 모두에서 `wallXMin`에 맞지 않는다. 고칠 것이 없다.
 - STU-07b: `set_patch`는 명령 한 번에 필드 하나만 쓴다. T를 푸는 케이스에서 wall을 velocity-inlet으로 바꾸려면 U와 T를 동시에 바꿔야 해서 항상 `PATCH_FIELD`로 거부된다.
 - STU-13: 볼록하지 않거나 뒤틀린 셀은 `nearest-centre`로 답한다. snappy 계열 실제 메시에서는 대부분의 셀이 이렇게 답할 수 있다.
 - STU-17: boolean 결과 파일을 덮어써도, 이미 열린 탭은 다시 열 때까지 이전 파일을 보여준다.

@@ -54,14 +54,14 @@ Rows already 해결 at `120eaff` are not listed: D 335, 338, 345, 348, 355, 362,
 | D:326 | AMG-07a: build_spmd 안에서 한 rank만 SpmdHalo::from_level에 실패하면 나머지 rank가 | **CODE** | T18-PAR-01 |
 | D:327 | PAR-17: ofgpu-par가 rank별 잔차를 출력하지 않으므로, 실행 패널은 rank별 | **CODE** | T18-PAR-01 (the per-rank lines) and T18-GUI-11 (the run panel) |
 | D:328 | STU-06b: 메시 초안에서 텍스트 필드를 비울 수 없다. 한 | **CODE** | T18-GUI-01 |
-| D:329 | STU-07a: gui의 patchRules 매칭은 ^...$로 고정되지만, 솔버(resolve_patch_rule)는 고정하… | **CODE** | T18-GUI-02 (the gui follows the solver, TAKEN) |
+| D:329 | STU-07a: gui의 patchRules 매칭은 ^...$로 고정되지만, 솔버(resolve_patch_rule)는 고정하… | **DONE** | the row's premise is false (checker, 2026-10-25): `resolve_patch_rule` calls `crate::io::regex::Regex::is_match`, which matches the WHOLE name (rust/src/io/regex.rs:119-123, test `the_match_is_anchored_at_both_ends`), so the gui's `^(?:...)$` (casejsonc.ts:114) already equals the solver; `wall` matches neither `wallXMin` in the solver nor in the gui |
 | D:330 | STU-07b: set_patch는 명령 한 번에 필드 하나만 쓴다. T를 | **CODE** | T18-GUI-02 |
 | D:331 | STU-13: 볼록하지 않거나 뒤틀린 셀은 nearest-centre로 답한다. snappy 계열 | **CODE** | T18-GUI-09 |
 | D:332 | STU-17: boolean 결과 파일을 덮어써도, 이미 열린 탭은 다시 | **CODE** | T18-GUI-10 |
 | D:333 | VAL-70: README와 GUIDEBOOK이 splash 기준을 "실험과 비교하지 않았다"고 적고 | **CODE** | T18-DOC-01 (opus-only); README.md:425, README.en.md:435, GUIDEBOOK.en.md:1100/1113 still say 'not transcribed' |
 | D:334 | VAL-30: JSONC cartesian 메시는 축마다 GradedAxis가 하나라서 내부의 앞전 | **CODE** | T18-MESH-01 |
 | D:336 | TET-07a: 매 pass가 Delaunay를 처음부터 다시 만든다 (Delaunay::insert가 비공개였다). | **USER** | recover.rs:513/1278 still rebuild per pass; incremental insertion may change the mesh at degenerate (cospherical) ties - a mesher numerics decision |
-| D:337 | AUT-05: gui 카드 템플릿(templates.json)에 R-SNAP 항목이 없어 AUT-05 이후 | **CODE** | T18-GUI-07 (R-ECON and R-TE are missing too) |
+| D:337 | AUT-05: gui 카드 템플릿(templates.json)에 R-SNAP 항목이 없어 AUT-05 이후 | **CODE** | T18-GUI-07 (R-ECON, RM-SNAP-TAU and RM-TE are missing too; templates.json is re-dumped from explain.py) |
 | D:339 | DST-04: dust_progress가 공유 GPU에서 빌드마다 5~6분 걸린다 (계획 예산 | **CODE** | T18-DUST-01 |
 | D:340 | F32-07: validate의 max_abs_diff가 NaN을 버리므로, single에서 다른 행들도 NaN으로 | **CODE** | T18-F32-01 (the NaN half is already true: validate.rs:916-955 `nan_max`; marked in place) |
 | D:341 | AMG-04b: PbicgstabBackend 밖의 방정식(ofgpu-vof p_rgh, 압축성 p, 에너지, 난류, | **CODE** | T18-SOLV-06 |
@@ -139,9 +139,12 @@ Notes on the classification:
   the opt-ins: no driver passes `BcInputs::turbulent_inlet`, `jumps` or `advective`, and none calls the `_timed`
   setup (SPEC-LIT 120.1 says "Wiring the drivers is a follow-up unit"). Cases that do not use these names keep
   every number. The work is wiring, not numerics.
-- **D:329 is decided by recommendation (TAKEN): the gui follows the solver.** The solver's `resolve_patch_rule`
-  (case_json.rs:3074) is what runs, and it searches without anchors. The gui (`casejsonc.ts:114`) anchors with
-  `^(?:...)$`. Anchoring the solver instead would change how existing cases lower.
+- **D:329 is DONE: its premise is false (checker, 2026-10-25).** The solver's `resolve_patch_rule`
+  (case_json.rs:3074) calls `crate::io::regex::Regex::is_match`, which is "True when the pattern matches the WHOLE
+  of `text`" (rust/src/io/regex.rs:119-123) and has been since the first commit of that file; the doc comment above
+  `resolve_patch_rule` says "anchored at both ends", and `regex::tests::the_match_is_anchored_at_both_ends` holds
+  it. The gui's `new RegExp(`^(?:${r.match})$`)` (`casejsonc.ts:114`) is therefore already the solver's rule.
+  Unanchoring the gui, as the first draft of T18-GUI-02 planned, would have CREATED the mismatch the row feared.
 - **E:426 has a new cause.** Run on 2026-10-25, the failing assertion is `Mesh inserted toBe(0)`, which received 4
   (import.test.ts:315). Three of the four are ignored runtime files written by studio runs on 2026-10-15:
   `cases/channel/constant/polyMesh/.meshSummary.json` and `.meshSummary.json` under
@@ -277,11 +280,11 @@ What tranche 18 adds:
 | id | what is TRUE after it | closes | size | coder | deps |
 |---|---|---|---|---|---|
 | T18-GUI-01 | Mesh dialog text fields can be cleared (`-check` goes away); studio offers the `plate` preset | D:328, D:350 (D:359) | S | glm | — |
-| T18-GUI-02 | studio patch-rule matching is the solver's; `set_patch` writes several fields in one edit | D:329, D:330 | M | glm | — |
+| T18-GUI-02 | `set_patch` writes several fields in one edit | D:330 | S | glm | — |
 | T18-GUI-03 | the web Boundary editor edits fixedProfile (direction, origin, profile) | D:408 | S | glm | — |
 | T18-GUI-04 | studio launches `ofgpu-par -solve` / `-bench` modes; the dead preview flag is gone | D:409, D:410 | S | glm | — |
 | T18-GUI-06 | the studio prompt and case-block list match case-1.json (dust, vent, initial.regions, parcels, EDC/EDM/PaSR) | D:376, D:399 | S | glm | — |
-| T18-GUI-07 | every autonomy rule id has an explanation template (R-SNAP, R-ECON, R-TE added) | D:337 | S | glm | — |
+| T18-GUI-07 | every autonomy rule and remedy id has an explanation template (templates.json re-dumped from explain.py: R-SNAP, R-ECON, RM-SNAP-TAU, RM-TE added) | D:337 | S | glm | — |
 | T18-TOOL-02 | `validate_record.py selftest` renders two blocks into one text and checks it | D:417 | S | glm | — |
 | T18-TOOL-01 | one command re-anchors the dc.seed capabilities and their gold copies from their probe symbols | D:414 | S | glm | — |
 | T18-TEST-01 | schema-writing tests write atomically (no race); two single-build test warnings gone | D:386, D:402 | S | glm | TOOL-01 |
@@ -332,9 +335,11 @@ supervisor says so.
   - `open_mesh_dialog` accepts `null` for each of the four text fields, meaning "clear". An omitted key keeps
     today's "unchanged". `MeshDialog`'s commit of `''` on a field whose draft holds a value sends `null` for it
     (today `''` returns no command, MeshDialog.tsx:58).
-  - `MESH_KINDS` = `['channel', 'cavity', 'step', 'big', 'plume', 'room', 'damBreak', 'plate']`. These are the names
-    of `CaseKind::from_name` (rust/src/blockgen.rs:3651-3658; `plate` is the usage name). A test reads that match
-    block and requires every primary name to be in `MESH_KINDS`.
+  - `MESH_KINDS` = `['channel', 'cavity', 'step', 'big', 'plume', 'room', 'damBreak', 'plate']`. That is the kind
+    list of the `ofgpu-generate-mesh` usage line, `<channel|cavity|step|big|plume|room|damBreak|plate>`
+    (rust/src/bin/generate_mesh.rs:112). A test reads that usage line and requires `MESH_KINDS` to equal its list,
+    in order. (It does NOT read `CaseKind::from_name`, blockgen.rs:3648-3658: there the flat plate's first spelling
+    is `flatPlate`, and `plate` is an alias, so a "primary names" test would demand the wrong name.)
 - **Tests:**
   - a draft `{check: '25'}` cleared in the dialog produces `{type: 'open_mesh_dialog', check: null}`;
   - the server merge of `check: null` leaves a draft without `check`, and the argv built from it has no `-check`;
@@ -342,30 +347,25 @@ supervisor says so.
 - **Verify:** V-GUI. Counts are the baseline plus the new tests.
 - **Deps:** none. **Size:** S. **Coder:** glm.
 
-#### T18-GUI-02 — Patch rules match as the solver matches; multi-field set_patch
+#### T18-GUI-02 — Multi-field set_patch
 
 - **TRUE after:**
-  - `casejsonc.ts`'s `patchRules` builds `new RegExp(r.match)` without anchors, first rule wins, exactly as
-    `resolve_patch_rule` does (rust/src/io/case_json.rs:3074, `Regex::is_match`). Decision TAKEN: the gui follows
-    the solver (§3 note).
+  - `casejsonc.ts`'s `patchRules` is NOT changed: its `^(?:...)$` already equals the solver's whole-name
+    `Regex::is_match` (rust/src/io/regex.rs:119-123; D:329 is DONE, §3 note).
   - `set_patch` takes `fields: { <field>: { value } | { bc } }` with one or more fields, applied as ONE case_edit.
     So turning a wall into a velocity-inlet on a case that solves T writes U and T together. The single-field form
     `{field, value|bc}` keeps working unchanged.
-- **Closes:** D:329, D:330.
+- **Closes:** D:330.
 - **Files:**
-  - `gui/server/src/formats/casejsonc.ts` (+ test)
   - `gui/server/src/tools/guiBoundary.ts` (+ `guiBoundary.test.ts`)
   - `gui/shared/src/protocol.ts` (`set_patch` schema, around line 651)
   - `gui/server/src/agent/prompt.ts` (the one set_patch line)
 - **Tests:**
-  - rules `[{match: 'wall', kind: 'wall'}, {match: '.*', kind: 'patch'}]` give patch `wallXMin` the type `wall`
-    (today `patch`);
-  - a rule `set_patch` wrote as `^inlet$` still matches only `inlet`;
   - `set_patch {patch: 'inlet', kind: 'velocity-inlet', fields: {U: {value: [1,0,0]}, T: {value: 300}}}` on a case
     with T is accepted with one approval card that writes both;
   - `fields` naming a field the case does not solve is refused `PATCH_FIELD`, naming it;
   - both `fields` and `field` in one command are refused `PATCH_FIELD`.
-- **Verify:** V-GUI. **Deps:** none. **Size:** M. **Coder:** glm.
+- **Verify:** V-GUI. **Deps:** none. **Size:** S. **Coder:** glm.
 
 #### T18-GUI-03 — fixedProfile in the web Boundary editor
 
@@ -431,16 +431,23 @@ supervisor says so.
 #### T18-GUI-07 — Explanation templates for every autonomy rule
 
 - **TRUE after:**
-  - `gui/web/src/assistant/autonomy/templates.json` has a template for each rule id that
-    `tools/autonomy/rules.py` defines: R-BUDGET, R-CURV, R-DOM, R-ECON, R-FEAT, R-GAP, R-PLANE, R-SNAP, R-TE,
-    R-WIN, R-YP. Today R-ECON, R-SNAP and R-TE are missing.
-  - Template wording comes from rules.py's and remedies.py's own descriptions, with no new claims.
+  - `gui/web/src/assistant/autonomy/templates.json` is a GENERATED file (§5 rule 5): its own `$comment` says it is
+    `json.dump(sort_keys=True)` of `tools/autonomy/explain.py`'s `TEMPLATES`, `FLAG_ORDER` and `TERMINAL_OF` at an
+    older mesh-tree commit. It is re-dumped from explain.py at HEAD by the same rule (no hand-written wording), and
+    the `$comment` names the new commit.
+  - explain.py's `TEMPLATES` already holds every rule and remedy id the autonomy code emits. The dump today lacks
+    four of them: R-ECON, R-SNAP (rules.py) and RM-SNAP-TAU, RM-TE (remedies.py). All four appear as `rule_id`s in
+    `tools/autonomy/fixtures/explain/records_by_id.json`. (R-TE is NOT a rule id: it occurs in rules.py only in
+    comments and inside a pointer string, `rules/R-TE.md`; its remedy id is RM-TE.)
+  - If explain.py itself lacks a template for an id the fixtures carry, the unit returns a REVIEW-LATER line and
+    does not invent one.
 - **Closes:** D:337.
 - **Files:** `templates.json` and the explain test that loads it.
 - **Tests:**
-  - a test extracts the `R-[A-Z0-9-]+` ids from rules.py and requires a template for each;
-  - explaining the records in `tools/autonomy/fixtures/explain/records_by_id.json` returns no "no template for rule
-    id" string.
+  - every `rule_id` in `tools/autonomy/fixtures/explain/records_by_id.json` has a template (fails today on the
+    four ids above), and `explainGeometry` over those records returns no "no template for rule id" string;
+  - the `templates` key set equals the key set of explain.py's `TEMPLATES` (the test reads explain.py's source; the
+    supervisor states the parse it uses).
 - **Verify:** V-GUI (web). **Deps:** none. **Size:** S. **Coder:** glm.
 
 #### T18-TOOL-02 — validate_record selftest covers two blocks in one file
@@ -538,11 +545,20 @@ supervisor says so.
 
 - **TRUE after:**
   - (a) `LoweredCase::refuse_compressible` refuses `physics.compressible` and `initial.regions` by name ("runs on
-    ofgpu-compressible", SPEC-LIT 127/158). `common::load_case_inner` calls it for every driver except
-    `ofgpu-compressible`, beside `refuse_parcels`, `refuse_dust` and `refuse_vent` (common/mod.rs:129-163). The
-    dust+compressible message at common/mod.rs:149 is unchanged.
+    ofgpu-compressible", SPEC-LIT 127/158). `common::load_case_inner` gains an `allow_compressible` flag and calls
+    it, beside `refuse_parcels`, `refuse_dust` and `refuse_vent` (common/mod.rs:129-163), for every SOLVING driver
+    except `ofgpu-compressible`. The dust+compressible message at common/mod.rs:149 is unchanged.
+  - Loaders that read a case without running its physics let the block through, exactly as VAL-54 lets the
+    lowmach-only blocks through the sampler: `load_case_vented` (ofgpu-compressible), `ofgpu-sample`'s
+    `load_sampled_case` (sample.rs:279-286, which reads compressible runs' results too) and `ofgpu-decompose`
+    (decompose.rs:551, mesh only). Checker note: `compressible.rs`'s own tests load `compressibleTube.jsonc` and
+    `sodShockTube.jsonc` through plain `common::load_case` (compressible.rs:2201, 3135, 3286). They move to
+    `load_case_vented`, the loader the binary itself uses (the same lowering, so their asserts are unchanged); a
+    refusal placed in every `load_case` call would otherwise break them.
   - (b) A case that selects GAMG (solver or preconditioner) for an equation the driver does not solve through
-    `PbicgstabBackend` is refused when the case is read. Today it is refused at the first solve, by the internal
+    `PbicgstabBackend` is refused when the case is read. Which equations go through the backend is a property of
+    the DRIVER, not of the case, so each driver passes its own list of GAMG-capable equation names to one shared
+    check right after its case load (the reader alone cannot know it). Today it is refused at the first solve, by the internal
     name `set_gamg`. Those equations are the `ofgpu-vof` p_rgh, the compressible p, energy, turbulence, U and
     `dist_solve`. The refusal names the equation, GAMG and SPEC-LIT 141.7.
 - **Closes:** D:341, D:371.
@@ -554,7 +570,7 @@ supervisor says so.
 - **Tests:**
   - `ofgpu-lowmach` on `cases/sodShockTube.jsonc` is refused, naming `physics.compressible` and
     `ofgpu-compressible`;
-  - `ofgpu-compressible` on it is unchanged (its existing tests);
+  - `ofgpu-compressible` on it is unchanged (its existing tests), and `ofgpu-sample` still reads it;
   - a lowmach JSONC case with GAMG on U is refused at load, naming U, before any GPU work;
   - GAMG on lowmach p is still accepted;
   - every shipped `cases/*.jsonc` still loads in the drivers whose tests load it (no test count drops).
@@ -598,8 +614,15 @@ supervisor says so.
   - The GAMG keys `cycle` (`V` default | `K`) and `kThreshold` (default `amg::cycle::DEFAULT_K_THRESHOLD` = 0.25,
     finite in [0, 1)) are read by `read_gamg_controls` (case.rs:293) and `JsonGamg::lower` (case_json.rs:1270) and
     reach `Gamg::set_cycle` (amg/cycle.rs:326).
-  - `K` is accepted only when the GAMG is the preconditioner of FCG. Anywhere else it is refused by name, citing
-    SPEC-LIT 141.6 ("PCG and PBiCGStab refuse it").
+  - `K` is accepted where SPEC-LIT 141.6 runs it: as the preconditioner of FCG, and as the GAMG SOLVER
+    (`solve_gamg` "runs the selected cycle, the K-cycle included"). Under PCG or PBiCGStab it is refused by name at
+    read time, citing 141.6 (today those solvers refuse it at the first solve, "variable", naming `solve_fcg` and
+    `set_cycle`).
+  - `K` with `precision single` is refused by name: the f32 GAMG copy runs the V-cycle only (`set_cycle(K)` is
+    refused by name; extending it is the USER item D:354).
+  - A K-cycle cannot be recorded into a CUDA graph (`Gamg::cycle` refuses it inside a capture, 141.6). The supervisor
+    checks whether the driver used by the cavity test below captures its pressure solve; if it does, that driver
+    refuses `cycle K` at load by name instead of failing at the first captured solve.
   - `JsonGamg` gains `precision` (`native` | `single`, through `gamg_precision_from_name`, case.rs:206), so the
     JSONC route equals the dictionary route.
   - `docs/schema/case-1.json` is regenerated by its write test, and SPEC-LIT 141 gets a subsection with the keys.
@@ -613,10 +636,11 @@ supervisor says so.
 - **Tests:**
   - the dictionary `p { solver FCG; preconditioner { preconditioner GAMG; cycle K; kThreshold 0.3; } }` and the
     equivalent JSONC lower to equal `SolverControls` (Fcg, GAMG precon, cycle K 0.3);
-  - `solver PCG` with a K-cycle GAMG is refused, naming FCG;
-  - `kThreshold 1.0` is refused;
+  - `solver PCG` with a K-cycle GAMG preconditioner is refused at read time, naming FCG;
+  - `solver GAMG; cycle K;` lowers (141.6's `solve_gamg` path);
+  - `kThreshold 1.0` is refused, and so is `cycle K; precision single`;
   - JSONC `gamg: {precision: 'single'}` lowers to `GamgPrecision::Single` (today: unknown field);
-  - the smallest shipped lowmach cavity with p FCG+GAMG(K) meets the same residualControl as PCG+GAMG(V) within
+  - a blockgen cavity (`CaseKind::Cavity`, 32 x 32 x 1) on `ofgpu-lowmach` with p FCG+GAMG(K) meets the same residualControl as PCG+GAMG(V) within
     its iteration budget (class P; no bitwise claim).
 - **Verify:** V-RUST (filters `case:: case_json gamg fcg`), plus server `schema.test`, `registry/sync.test`.
 - **Deps:** T18-TOOL-01. **Size:** M. **Coder:** glm.
@@ -683,8 +707,10 @@ supervisor says so.
 - **TRUE after:**
   - In a transient run, both drivers pass `BcInputs::advective = true` and refresh each advective face once per
     step through `field::advective` (its `store_old_time` and triple, field.rs:389-396, field_ops.rs:1085-1090).
-    The wave speed is what SPEC-LIT 120.4 prescribes for an incompressible outlet. If 120.4 leaves it to the
-    driver, the unit writes the face-normal velocity `phi_f/|S_f|` into 120.4 as TAKEN.
+    The wave speed is not the unit's choice: (120.4b) of SPEC-LIT 120.4 prescribes `w = max(phi_b/|S_f|, 0)` and
+    `K = w/L_inf` (`K = 0` without `lInf`), with `phi_b` the VOLUMETRIC face flux. The supervisor states which flux
+    each driver holds; a driver that holds a mass flux divides by the face density first. No new wave-speed rule is
+    written.
   - `mapped`/`mappedFixedValue` on T (the energy field) and on k, epsilon, omega and nut refresh every outer
     iteration, as U and p do (`field_ops::update_mapped_scalar`), so those setups pass `mapped: true`.
   - Cases without these names are bitwise unchanged.
@@ -740,15 +766,25 @@ supervisor says so.
 #### T18-F32-01 — CHT region residuals in f64 under single
 
 - **TRUE after:**
-  - Under `--features single`, `solver::residual_ranged` (solver.rs:1823) forms the ranged residual and its norm
-    factor through the f64 accumulation path. That path is the one §118's `residual64_terms` /
-    `norm_factor64_terms` use for the whole system.
-  - So cht.rs:2225/2245 `region_met` no longer sits at the f32 floor.
+  - Under `--features single`, the region residual after the solve (src/cht.rs:2245) is the §8.4 measure of the
+    DOUBLE solution `x` of the §118.4 refinement, `SolverWorkspace::refined_solution()` (solver.rs:588), formed in
+    double over the region's rows: the rows of (118.4.3) and the factor of (118.4.2) restricted to
+    `offset..offset+n`. The region residual before the solve (cht.rs:2225) uses `fl64(psi)`, which is (118.4.1)'s
+    `x^0`. A double-input ranged variant of `residual_ranged` (solver.rs:1823) carries both; the existing
+    `residual64_terms` / `norm_factor64_terms` kernels (solver.rs:5697/5738, written for PAR-14's refinement,
+    SPEC-LIT 139.10) already take an `f64` `x` and may be reused on a range.
+  - Checker note: widening only the ACCUMULATION while still reading the stored float field cannot pass the proof
+    below. 118.4 says the stored field is `fl32(x)` and "its own residual is at the float floor again", so the
+    double `x` is the input that lifts the floor. When the last solve was not refined (`ir_outer_steps() == 0`, e.g.
+    a GAMG solver), the stored field is used as today.
+  - So `region_met` (cht.rs:2248/2276) no longer sits at the f32 floor.
   - The change is `cfg(feature = "single")` only. f64 is bitwise: `tools/f64_identity.py sass` + `sass-diff`
     shows identical hashes if a `.cu` is touched.
-  - This extends the adopted §118 mixed-precision rule; it is not a new numerics choice.
+  - This extends the adopted §118.4 rule ("what is reported ... the residual of the double solution `x`") from the
+    whole system to its regions; it is not a new numerics choice. Only the single build's region stop can move.
 - **Closes:** the rest of D:340 (its NaN half is already true and is noted in place).
-- **Files:** `rust/src/solver.rs`, `rust/tests/f32_cht.rs`, SPEC-LIT 118 (one sentence).
+- **Files:** `rust/src/solver.rs`, `rust/src/cht.rs` (the two call sites), `rust/tests/f32_cht.rs`, SPEC-LIT 118.4
+  (one sentence).
 - **Proof first:** a two-region conduction case in `tests/f32_cht.rs` whose region residual reaches 1e-9 relative
   in f64. Under single it stalls near 1e-7 today (fails), and after the change it meets 1e-9 within the same
   iteration budget (class A).
@@ -900,13 +936,18 @@ supervisor says so.
 
 - **TRUE after:**
   - When the case's p solver or preconditioner is GAMG, `ofgpu-par` builds one `DistGamg` per rank on its part
-    (amg/distcycle.rs:716, setup :753) and preconditions the distributed Krylov with it (`precondition`, :1058):
-    a V-cycle, or a K-cycle only under FCG, per T18-SOLV-07.
-  - `-check` reports it, and the SPEC-LIT 139.4 refusal list no longer names GAMG.
+    (amg/distcycle.rs:716, setup :753) and runs the distributed solve with it the way SPEC-LIT 141.11's SPMD path
+    does (`SpmdWorkspace::set_gamg`, `precondition` :1058). Today `distflow::refuse_gamg` (distflow.rs:572, called
+    from `SpmdKrylov::run` and `SpmdPressureBackend::new`) refuses it; that refusal is lifted for the cases
+    141.11 runs and kept, by name, for the rest.
+  - `DistGamg` has a V-cycle only (141.11; distcycle.rs has no K-cycle). A case asking `cycle K` (T18-SOLV-07) or
+    `precision single` (the f32 copy has no `DistGamg`, D:354) is refused on `ofgpu-par` by name. Giving
+    `DistGamg` a K-cycle is new numerics scope and stays the user's (D:354).
+  - `-check` reports it, and the GAMG row of SPEC-LIT 139's refusal table is rewritten to what is still refused.
   - Without GAMG, every run is bitwise unchanged.
 - **Closes:** D:325 (the ofgpu-par half).
-- **Files:** `rust/src/bin/par.rs`, possibly `rust/src/amg/distcycle.rs` (no numerics change in the cycle), tests,
-  SPEC-LIT 139.
+- **Files:** `rust/src/bin/par.rs`, `rust/src/distflow.rs` (`refuse_gamg` and its two callers), possibly
+  `rust/src/amg/distcycle.rs` (no numerics change in the cycle), tests, SPEC-LIT 139 and 141.11.
 - **Tests:**
   - a ThreadComm P = 2 decomposed cavity (`BITWISE_CAVITY_N`) with p GAMG meets the same residualControl as the
     P = 1 serial GAMG (class P);
@@ -1059,9 +1100,9 @@ The RIGID row D:385 waits until the rigid-body branch is reopened.
 
   | class | rows |
   |---|---|
-  | CODE | 48 |
+  | CODE | 47 |
   | USER | 18 |
-  | DONE | 14 |
+  | DONE | 15 |
   | LONG | 3 |
   | DUP | 2 |
   | RIGID | 1 |
@@ -1084,10 +1125,11 @@ The RIGID row D:385 waits until the rigid-body branch is reopened.
   - MESH 1
   - CHEM 1
   - DUST 1
-- **Units by size:** 16 S and 17 M. No unit is L.
+- **Units by size:** 17 S and 16 M. No unit is L.
 - **Coders:** 32 units glm, 1 opus-only (T18-DOC-01).
 - **Rows marked 해결 by this plan's commit: 14.** These are D 321, 344, 361, 374, 380, 381, 384, 393, 398, 403,
-  405, 406, 418 and 419. D:340 also gets a dated note for its already-true NaN half.
+  405, 406, 418 and 419. D:340 also gets a dated note for its already-true NaN half. The plan's checker (Opus 5.5,
+  2026-10-25) found D:329's premise false and marked it 해결 in its own commit, so 15 DONE rows are marked in all.
 - **Baselines at 120eaff:**
   - gui shared: 156 / 156
   - gui server: 1008 passed, 1 failed (E:426), 1 skipped of 1010
