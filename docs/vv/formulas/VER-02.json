@@ -1,0 +1,75 @@
+{
+  "id": "VER-02",
+  "title": "VER-02: 비정상 제조해 스칼라 대류-확산 (2-D / 3-D)",
+  "intro": "VER-01의 제조해에 (1 + eps sin(omega t)) 인자를 곱해 비정상 소스를 만들고, 시간 차분 스킴(Euler, backward, Crank-Nicolson)의 시간 수렴 차수를 검증한다. 2-D/3-D 변형과 소스의 셀 평균 주입은 VER-01과 같다.",
+  "equations": [
+    {
+      "env": "equation",
+      "tex": "\\frac{\\partial \\phi}{\\partial t} + \\nabla \\cdot \\left( \\mathbf{U} \\phi \\right) - \\nabla \\cdot \\left( \\Gamma \\nabla \\phi \\right) = S"
+    },
+    {
+      "env": "equation",
+      "tex": "\\phi_{0} + \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)} + \\phi_{xy} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)} + \\phi_{y} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}"
+    },
+    {
+      "env": "equation",
+      "tex": "\\phi_{0} + \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)} + \\phi_{xy} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)} + \\phi_{y} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)} + \\phi_{yz} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)} + \\phi_{z} \\sin{\\left(\\frac{\\pi a_{z} z}{L} \\right)}"
+    },
+    {
+      "env": "equation",
+      "tex": "S = \\frac{\\partial \\phi}{\\partial t} + \\mathbf{U} \\cdot \\nabla \\phi - \\Gamma \\, \\nabla^{2} \\phi"
+    },
+    {
+      "env": "equation",
+      "tex": "\\frac{\\pi^{2} a_{x}^{2} \\varepsilon \\Gamma \\phi_{x} \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{x}^{2} \\Gamma \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L^{2}} + \\frac{\\pi a_{x} \\varepsilon \\phi_{x} U_{x} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L} + \\frac{\\pi a_{x} \\phi_{x} U_{x} \\cos{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L} + \\frac{\\pi^{2} a_{xy}^{2} \\varepsilon \\Gamma \\phi_{xy} x^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\varepsilon \\Gamma \\phi_{xy} y^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\Gamma \\phi_{xy} x^{2} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\Gamma \\phi_{xy} y^{2} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} - \\frac{\\pi a_{xy} \\varepsilon \\phi_{xy} U_{x} y \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\varepsilon \\phi_{xy} U_{y} x \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\phi_{xy} U_{x} y \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\phi_{xy} U_{y} x \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{y}^{2} \\varepsilon \\Gamma \\phi_{y} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{y}^{2} \\Gamma \\phi_{y} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L^{2}} - \\frac{\\pi a_{y} \\varepsilon \\phi_{y} U_{y} \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L} - \\frac{\\pi a_{y} \\phi_{y} U_{y} \\sin{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L} + \\varepsilon \\omega \\phi_{0} \\cos{\\left(\\omega t \\right)} + \\varepsilon \\omega \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)} \\cos{\\left(\\omega t \\right)} + \\varepsilon \\omega \\phi_{xy} \\cos{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)} + \\varepsilon \\omega \\phi_{y} \\cos{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}"
+    },
+    {
+      "env": "equation",
+      "tex": "\\frac{\\pi^{2} a_{x}^{2} \\varepsilon \\Gamma \\phi_{x} \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{x}^{2} \\Gamma \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L^{2}} + \\frac{\\pi a_{x} \\varepsilon \\phi_{x} U_{x} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L} + \\frac{\\pi a_{x} \\phi_{x} U_{x} \\cos{\\left(\\frac{\\pi a_{x} x}{L} \\right)}}{L} + \\frac{\\pi^{2} a_{xy}^{2} \\varepsilon \\Gamma \\phi_{xy} x^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\varepsilon \\Gamma \\phi_{xy} y^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\Gamma \\phi_{xy} x^{2} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{xy}^{2} \\Gamma \\phi_{xy} y^{2} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{4}} - \\frac{\\pi a_{xy} \\varepsilon \\phi_{xy} U_{x} y \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\varepsilon \\phi_{xy} U_{y} x \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\phi_{xy} U_{x} y \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{xy} \\phi_{xy} U_{y} x \\sin{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{y}^{2} \\varepsilon \\Gamma \\phi_{y} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{y}^{2} \\Gamma \\phi_{y} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L^{2}} - \\frac{\\pi a_{y} \\varepsilon \\phi_{y} U_{y} \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L} - \\frac{\\pi a_{y} \\phi_{y} U_{y} \\sin{\\left(\\frac{\\pi a_{y} y}{L} \\right)}}{L} + \\frac{\\pi^{2} a_{yz}^{2} \\varepsilon \\Gamma \\phi_{yz} y^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{yz}^{2} \\varepsilon \\Gamma \\phi_{yz} z^{2} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{yz}^{2} \\Gamma \\phi_{yz} y^{2} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{4}} + \\frac{\\pi^{2} a_{yz}^{2} \\Gamma \\phi_{yz} z^{2} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{4}} - \\frac{\\pi a_{yz} \\varepsilon \\phi_{yz} U_{y} z \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{yz} \\varepsilon \\phi_{yz} U_{z} y \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{yz} \\phi_{yz} U_{y} z \\sin{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{2}} - \\frac{\\pi a_{yz} \\phi_{yz} U_{z} y \\sin{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{z}^{2} \\varepsilon \\Gamma \\phi_{z} \\sin{\\left(\\omega t \\right)} \\sin{\\left(\\frac{\\pi a_{z} z}{L} \\right)}}{L^{2}} + \\frac{\\pi^{2} a_{z}^{2} \\Gamma \\phi_{z} \\sin{\\left(\\frac{\\pi a_{z} z}{L} \\right)}}{L^{2}} + \\frac{\\pi a_{z} \\varepsilon \\phi_{z} U_{z} \\sin{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{z} z}{L} \\right)}}{L} + \\frac{\\pi a_{z} \\phi_{z} U_{z} \\cos{\\left(\\frac{\\pi a_{z} z}{L} \\right)}}{L} + \\varepsilon \\omega \\phi_{0} \\cos{\\left(\\omega t \\right)} + \\varepsilon \\omega \\phi_{x} \\sin{\\left(\\frac{\\pi a_{x} x}{L} \\right)} \\cos{\\left(\\omega t \\right)} + \\varepsilon \\omega \\phi_{xy} \\cos{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{xy} x y}{L^{2}} \\right)} + \\varepsilon \\omega \\phi_{y} \\cos{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{y} y}{L} \\right)} + \\varepsilon \\omega \\phi_{yz} \\cos{\\left(\\omega t \\right)} \\cos{\\left(\\frac{\\pi a_{yz} y z}{L^{2}} \\right)} + \\varepsilon \\omega \\phi_{z} \\sin{\\left(\\frac{\\pi a_{z} z}{L} \\right)} \\cos{\\left(\\omega t \\right)}"
+    },
+    {
+      "env": "equation",
+      "tex": "\\bar{S}_{P} = \\frac{1}{\\left| V_{P} \\right|} \\int_{V_{P}} S \\, dV \\approx \\frac{1}{\\left| V_{P} \\right|} \\sum_{i=1}^{4} \\sum_{j=1}^{4} \\sum_{k=1}^{4} w_{i} w_{j} w_{k} \\, S \\! \\left( x_{i}, y_{j}, z_{k} \\right)"
+    }
+  ],
+  "parameters": {
+    "L": 1.0,
+    "phi0": 1.0,
+    "phi_x": 0.15,
+    "phi_y": -0.1,
+    "phi_z": 0.12,
+    "phi_xy": 0.08,
+    "phi_yz": 0.05,
+    "a_x": 0.75,
+    "a_y": 1.25,
+    "a_z": 0.6,
+    "a_xy": 0.9,
+    "a_yz": 0.7,
+    "eps": 0.5,
+    "omega": 6.283185307179586,
+    "Gamma0": 0.05,
+    "u_2d": 1.0,
+    "v_2d": 0.6,
+    "u_3d": 1.0,
+    "v_3d": 0.6,
+    "w_3d": 0.4
+  },
+  "sources": [
+    {
+      "cite": "P. J. Roache, \"Code Verification by the Method of Manufactured Solutions\", J. Fluids Eng. 124 (2002) 4-10",
+      "doi_or_url": "10.1115/1.1436090"
+    },
+    {
+      "cite": "K. Salari, P. Knupp, \"Code Verification by the Method of Manufactured Solutions\", Sandia report SAND2000-1444 (2000)",
+      "doi_or_url": "10.2172/759450"
+    },
+    {
+      "cite": "C. J. Roy, C. C. Nelson, T. M. Smith, C. C. Ober, \"Verification of Euler and Navier-Stokes Codes by the Method of Manufactured Solutions\", Int. J. Numer. Meth. Fluids 44 (2004) 599-620",
+      "doi_or_url": "10.1002/fld.660"
+    },
+    {
+      "cite": "A. Meurer et al., \"SymPy: symbolic computing in Python\", PeerJ Comput. Sci. 3 (2017) e103",
+      "doi_or_url": "10.7717/peerj-cs.103"
+    }
+  ]
+}
