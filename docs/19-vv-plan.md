@@ -208,3 +208,20 @@ fetched(D-VAL-2 선례).
 | VER-00 | SymPy 생성기 `tools/mms/` — 정확해 정의 → 소스항 기호 미분 → Rust 모듈(정확해·소스·구배, 호스트 전용 f64)과 §8 수식 매니페스트 생성, 셀 평균 구적 도우미 | `tools/mms/*.py`, `rust/src/vv/mms.rs`(생성물), `docs/vv/formulas/VER-01.json`, `VER-02.json` |
 | VER-01 | 정상 대류-확산 MMS, 스킴별 관측 차수, validate 섹션 + §8 결과 JSON | validate 섹션 `VER-01`, `docs/vv/results/VER-01.json` |
 | VER-02 | 비정상 스칼라 MMS, Euler/backward/CN 시간 차수 | 섹션 `VER-02`, 결과 JSON |
+
+## 10. VAL-R 조사 결과 반영 (2026-10-27)
+
+조사 전문: `docs/vv/val-survey.md`. 계획에 주는 변경:
+- NASA TMR 은 GitHub (TMBWG/turbmodels) 로 옮겨졌고 LICENSE 가 CC0 1.0 → TMR 키는 전부 `kind = file`.
+  NASA 밖 원출처(Delville 혼합층 = ERCOFTAC C.34/AGARD)는 provenance 칸에 원출처를 같이 적는다.
+- **선행 단위 VAL-R0**: TMR 격자는 Plot3D/CGNS 이고 트리에는 그 reader 가 없다 (validate.rs 의 TMR 평판
+  "NOT run" 노트와 같은 이유). Plot3D → 한 셀 두께 polyMesh/wedge 변환기 + Tecplot zone 파서를 먼저 만든다.
+- 실험 불확도가 수치로 있는 것은 NASA hump (Cf 불확도 열, 재부착 x/c = 1.11 ± 0.003) 뿐. 나머지 TMR 케이스의
+  허용오차는 사용자 결정 (그 단위에서 권장값과 함께 묻는다).
+- 비압축 SA 평판 코드 대 코드 기준: `FlatPlate_validation/cf_incomp_results_sa.dat` (FUN3D 2.729090e-3) → VER-14.
+- firemodels/exp: NIST 고지 조건부 재배포 → `file`. Heskestad 두 파일은 상관식 계산값이라 validation 에서 제외.
+- Windsor/DrivAer (CC BY-NC 4.0), SPHERIC T2 → `fetched`. Desert Tortoise / Jack Rabbit II 는 이메일 요청 자료
+  (요청 여부는 NH3 축 차례에 사용자 결정). Ampofo-Karayiannis 공개 파일 없음.
+
+V1 첫 다섯 게이트 (모두 TMR): VAL-R0 → (1) ASBL Driver 축대칭 (가장 작음, 변환기 검증) → (2) 2DWMH hump →
+(3) NACA 0012 Ladson → (4) 2DML Delville dδω/dx → (5) ASJ 제트 potential core.
